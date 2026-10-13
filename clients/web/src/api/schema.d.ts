@@ -104,6 +104,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/login/browser": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a browser sign-in for a homeserver that delegates authentication to
+         *     an OAuth 2.0 authorization server.
+         * @description The flow yields a link and a short code. The user opens the link in any
+         *     browser, on any device, signs in, and approves; meanwhile the client polls
+         *     this flow. No second Matrix client is needed. The account that results is
+         *     signed in but its device is **not** verified.
+         */
+        post: operations["create_matrix_oauth_browser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/login/browser/{flow_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the current replayable flow stage and only its stage-appropriate data.
+         * @description The link and user code are returned only in `waiting_for_authorization`.
+         */
+        get: operations["get_matrix_oauth_browser"];
+        put?: never;
+        post?: never;
+        /** Cancel a flow idempotently, including an unknown or already-expired id. */
+        delete: operations["cancel_matrix_oauth_browser"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/login/qr": {
         parameters: {
             query?: never;
@@ -2224,6 +2269,45 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_MatrixOAuthBrowserFlowDto: {
+            /**
+             * @description Replayable, presentation-safe state of one browser sign-in. Optional
+             *     fields are omitted unless they belong to the current stage.
+             */
+            data: {
+                /**
+                 * Format: uuid
+                 * @description The signed-in account, present only in `done`. It is active but its
+                 *     device is **not** verified: lead the user on to recovery-key import or
+                 *     interactive verification.
+                 */
+                account_id?: string | null;
+                /**
+                 * @description Why the flow failed, present only in `failed`. An open set: treat a
+                 *     code you do not recognize as a generic failure. Codes specific to this
+                 *     method are `authorization_denied` (the user refused) and
+                 *     `authorization_expired` (nobody approved in time).
+                 */
+                error_code?: string | null;
+                expected_user_id: string;
+                /** Format: uuid */
+                flow_id: string;
+                stage: components["schemas"]["MatrixOAuthBrowserStage"];
+                /**
+                 * @description The short code the authorization server asks the user to confirm.
+                 *     Present only in `waiting_for_authorization`.
+                 */
+                user_code?: string | null;
+                /**
+                 * @description The link to open in a browser, on any device. Present only in
+                 *     `waiting_for_authorization`. Anyone holding it can approve the
+                 *     sign-in, so present it as something to open, not to share, and show
+                 *     its host so the user can see where it leads.
+                 */
+                verification_uri?: string | null;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_MatrixOAuthQrFlowDto: {
             /**
              * @description Replayable, presentation-safe state of one QR login flow. Optional fields
@@ -3444,6 +3528,14 @@ export interface components {
             /** @description The other participant's Matrix id (`@user:server`). */
             user_id: string;
         };
+        /** @description Create one pre-account browser sign-in flow. */
+        CreateMatrixOAuthBrowserRequest: {
+            /**
+             * @description Canonical Matrix user ID the completed OAuth session must belong to.
+             *     Its server name is where the homeserver is discovered.
+             */
+            expected_user_id: string;
+        };
         /** @description Create one QR login-grant flow for an existing trusted account. */
         CreateMatrixOAuthQrGrantRequest: {
             presentation: components["schemas"]["MatrixOAuthQrPresentation"];
@@ -3953,6 +4045,47 @@ export interface components {
             /** @description When it was revoked, RFC 3339; null while it has not been. */
             revoked_at?: string | null;
         };
+        /**
+         * @description Replayable, presentation-safe state of one browser sign-in. Optional
+         *     fields are omitted unless they belong to the current stage.
+         */
+        MatrixOAuthBrowserFlowDto: {
+            /**
+             * Format: uuid
+             * @description The signed-in account, present only in `done`. It is active but its
+             *     device is **not** verified: lead the user on to recovery-key import or
+             *     interactive verification.
+             */
+            account_id?: string | null;
+            /**
+             * @description Why the flow failed, present only in `failed`. An open set: treat a
+             *     code you do not recognize as a generic failure. Codes specific to this
+             *     method are `authorization_denied` (the user refused) and
+             *     `authorization_expired` (nobody approved in time).
+             */
+            error_code?: string | null;
+            expected_user_id: string;
+            /** Format: uuid */
+            flow_id: string;
+            stage: components["schemas"]["MatrixOAuthBrowserStage"];
+            /**
+             * @description The short code the authorization server asks the user to confirm.
+             *     Present only in `waiting_for_authorization`.
+             */
+            user_code?: string | null;
+            /**
+             * @description The link to open in a browser, on any device. Present only in
+             *     `waiting_for_authorization`. Anyone holding it can approve the
+             *     sign-in, so present it as something to open, not to share, and show
+             *     its host so the user can see where it leads.
+             */
+            verification_uri?: string | null;
+        };
+        /**
+         * @description Stable browser sign-in stages exposed by `/v1/`.
+         * @enum {string}
+         */
+        MatrixOAuthBrowserStage: "starting" | "waiting_for_authorization" | "finalizing" | "done" | "failed" | "cancelled";
         /**
          * @description Replayable, presentation-safe state of one QR login flow. Optional fields
          *     are omitted unless they belong to the current stage.
@@ -5153,6 +5286,161 @@ export interface operations {
             };
         };
     };
+    create_matrix_oauth_browser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateMatrixOAuthBrowserRequest"];
+            };
+        };
+        responses: {
+            /** @description Browser sign-in flow created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_MatrixOAuthBrowserFlowDto"];
+                };
+            };
+            /** @description Invalid Matrix user ID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description A QR login, another browser sign-in, or an active lifecycle operation already owns this identity */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Request body exceeds the login-flow limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Global active or retained login-flow capacity reached */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_matrix_oauth_browser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Browser sign-in flow id */
+                flow_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current browser sign-in state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_MatrixOAuthBrowserFlowDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unknown or expired flow, or a QR login flow's id */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    cancel_matrix_oauth_browser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Browser sign-in flow id */
+                flow_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Flow cancelled or already absent/terminal */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The id belongs to a QR login flow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     create: {
         parameters: {
             query?: never;
@@ -5256,7 +5544,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Unknown or expired flow */
+            /** @description Unknown or expired flow, or a browser sign-in flow's id */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -5291,6 +5579,15 @@ export interface operations {
                 headers: {
                     /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
                     "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The id belongs to a browser sign-in flow */
+            404: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {

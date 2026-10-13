@@ -46,7 +46,7 @@ pub async fn create(
     params(("flow_id" = Uuid, Path, description = "QR login flow id")),
     responses(
         (status = 200, description = "Current QR login state", body = ApiResponse<MatrixOAuthQrFlowDto>),
-        (status = 404, description = "Unknown or expired flow", body = crate::response::ErrorResponse),
+        (status = 404, description = "Unknown or expired flow, or a browser sign-in flow's id", body = crate::response::ErrorResponse),
     ),
     tag = "matrix-oauth",
 )]
@@ -114,7 +114,10 @@ pub async fn submit_check_code(
     delete,
     path = "/v1/accounts/login/qr/{flow_id}",
     params(("flow_id" = Uuid, Path, description = "QR login flow id")),
-    responses((status = 204, description = "Flow cancelled or already absent/terminal")),
+    responses(
+        (status = 204, description = "Flow cancelled or already absent/terminal"),
+        (status = 404, description = "The id belongs to a browser sign-in flow", body = crate::response::ErrorResponse),
+    ),
     tag = "matrix-oauth",
 )]
 pub async fn cancel(

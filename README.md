@@ -310,7 +310,13 @@ The Matrix OAuth session foundation for Axon's own homeserver sessions is config
 It dynamically registers a public client when the discovered authorization server permits it; operators can configure a static public client ID for issuers that disable dynamic registration.
 Access and refresh tokens are encrypted with `sync.store_key`, and client secrets are not supported.
 The authenticated QR acquisition API is available at `POST /v1/accounts/login/qr` and its flow-specific polling/input routes; it supports either displaying QR data or submitting a decoded scan and activates the account only after Axon independently confirms that its new device is cross-signed.
-The web client exposes both presentations on its unified `/accounts` page, including camera or image scanning, check-code handling, authorization approval, cancellation, and reload resume.
+Browser sign-in (ADR 0117) is a third way to add an account on such a homeserver, for a user with no second Matrix client to scan with.
+`POST /v1/accounts/login/browser` starts a flow for a Matrix user ID; the flow yields a link and a short code, the user opens the link in any browser on any device and approves, and the client polls `GET /v1/accounts/login/browser/{flow_id}` until it is `done`.
+The link is valid for up to thirty minutes and is returned only while the flow waits for approval.
+It needs a homeserver whose authorization server offers the OAuth device authorization grant, and reports `unsupported` otherwise.
+An account added this way is signed in but its device is not verified; verify it afterwards with a recovery key or interactive verification.
+No client exposes browser sign-in yet.
+The web client exposes both QR presentations on its unified `/accounts` page, including camera or image scanning, check-code handling, authorization approval, cancellation, and reload resume.
 The TUI presentation remains a later client-specific slice.
 The existing password and token-import account routes remain available.
 

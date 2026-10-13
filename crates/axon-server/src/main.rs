@@ -15,6 +15,7 @@ mod gateway;
 mod init;
 mod lifecycle;
 mod matrix_oauth_acquire;
+mod matrix_oauth_browser;
 mod matrix_oauth_grant;
 mod media;
 mod member_profiles;
@@ -44,6 +45,7 @@ use crate::devices::DeviceAdapter;
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
 use crate::matrix_oauth_acquire::MatrixOAuthAcquireAdapter;
+use crate::matrix_oauth_browser::MatrixOAuthBrowserAdapter;
 use crate::matrix_oauth_grant::MatrixOAuthGrantAdapter;
 use crate::media::CachingMediaProxy;
 use crate::member_profiles::MemberProfileAdapter;
@@ -284,6 +286,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let matrix_oauth_acquire = Arc::new(MatrixOAuthAcquireAdapter(
         sync_engine.matrix_oauth_acquire(),
     ));
+    // Browser sign-in is a third method of the same acquisition engine (ADR 0117).
+    let matrix_oauth_browser = Arc::new(MatrixOAuthBrowserAdapter(
+        sync_engine.matrix_oauth_acquire(),
+    ));
     let matrix_oauth_grant = Arc::new(MatrixOAuthGrantAdapter(sync_engine.matrix_oauth_grant()));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
@@ -343,6 +349,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_sync_state(sync_state)
     .with_backup_state(backup_state)
     .with_matrix_oauth_acquire(matrix_oauth_acquire)
+    .with_matrix_oauth_browser(matrix_oauth_browser)
     .with_matrix_oauth_grant(matrix_oauth_grant)
     .with_build_info(axon_api::BuildInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),

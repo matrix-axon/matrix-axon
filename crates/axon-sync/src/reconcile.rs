@@ -20,7 +20,7 @@ use std::collections::HashSet;
 
 use axon_core::SyncConfig;
 use axon_media::MediaCacheHandle;
-use axon_store::{MatrixOAuthAcquireFinalization, Store};
+use axon_store::{FinalizeMatrixOAuthAcquire, MatrixOAuthAcquireFinalization, Store};
 use uuid::Uuid;
 
 use crate::lifecycle::AccountLifecycle;
@@ -45,7 +45,7 @@ pub(crate) async fn reconcile_matrix_oauth_acquires(
                 %flow_id,
                 ?account_id,
                 error = %err,
-                "reconcile: Matrix OAuth QR login finalization failed; will retry next boot"
+                "reconcile: Matrix OAuth login finalization failed; will retry next boot"
             );
         }
     }
@@ -75,7 +75,7 @@ async fn reconcile_matrix_oauth_acquire(
             tracing::info!(
                 flow_id = %breadcrumb.flow_id,
                 presentation = %breadcrumb.presentation,
-                "reconcile: removed abandoned Matrix OAuth QR login staging store"
+                "reconcile: removed abandoned Matrix OAuth login staging store"
             );
         }
         MatrixOAuthAcquireFinalization::SessionCommitted => {
@@ -90,20 +90,21 @@ async fn reconcile_matrix_oauth_acquire(
                 account_id,
             )
             .await?;
-            if !store
+            let FinalizeMatrixOAuthAcquire::Activated { verified } = store
                 .finalize_matrix_oauth_acquire(breadcrumb.flow_id, account_id)
                 .await?
-            {
+            else {
                 return Err(SyncError::Sdk(
                     "committed Matrix OAuth acquire breadcrumb changed during boot finalization"
                         .to_owned(),
                 ));
-            }
+            };
             tracing::info!(
                 flow_id = %breadcrumb.flow_id,
                 %account_id,
                 presentation = %breadcrumb.presentation,
-                "reconcile: completed Matrix OAuth QR login store adoption"
+                verified,
+                "reconcile: completed Matrix OAuth login store adoption"
             );
         }
     }
@@ -424,6 +425,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(active.state, AccountState::Active);
+        assert!(active.verified, "a QR login committed only once verified");
         assert!(permanent.join("new-store").exists());
         assert!(!permanent.join("old-store").exists());
         assert!(
@@ -433,6 +435,92 @@ mod tests {
                 .exists(),
             "boot adoption must retain the old store until the new one opens"
         );
+        assert!(!store
+            .has_matrix_oauth_acquire_for_user(&committed_user)
+            .await
+            .unwrap());
+
+        delete_row(&store, account.account_id).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0117: a browser sign-in that crashed after its session committed is
+    /// finished at boot like a QR one, but must not come up marked verified.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reconcile_finishes_a_committed_browser_sign_in_unverified() {
+        let store = connect_store().await;
+        let dir = temp_data_dir();
+        let config = config(dir.clone());
+
+        let abandoned_flow = Uuid::new_v4();
+        let abandoned_user = format!("@browser{}:localhost", Uuid::new_v4().simple());
+        let abandoned_name = abandoned_flow.to_string();
+        store
+            .create_matrix_oauth_acquire_breadcrumb(
+                abandoned_flow,
+                &abandoned_user,
+                "browser",
+                &abandoned_name,
+            )
+            .await
+            .unwrap();
+        let abandoned_dir = crate::client::matrix_oauth_acquire_root(&config).join(&abandoned_name);
+        std::fs::create_dir_all(&abandoned_dir).unwrap();
+
+        let committed_flow = Uuid::new_v4();
+        let committed_user = format!("@browser{}:localhost", Uuid::new_v4().simple());
+        let committed_name = committed_flow.to_string();
+        store
+            .create_matrix_oauth_acquire_breadcrumb(
+                committed_flow,
+                &committed_user,
+                "browser",
+                &committed_name,
+            )
+            .await
+            .unwrap();
+        let staging = crate::client::matrix_oauth_acquire_root(&config).join(&committed_name);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("new-store"), b"new").unwrap();
+        let account = match store
+            .commit_matrix_oauth_acquire(
+                committed_flow,
+                &committed_user,
+                "https://hs.example.org/",
+                "DEVICE",
+                "access",
+                "refresh",
+                "client",
+                "test-key",
+            )
+            .await
+            .unwrap()
+        {
+            CommitMatrixOAuthAcquire::Committed(account) => account,
+            other => panic!("unexpected commit outcome: {other:?}"),
+        };
+
+        reconcile_matrix_oauth_acquires(&config, &store)
+            .await
+            .unwrap();
+
+        assert!(!abandoned_dir.exists());
+        assert!(!store
+            .has_matrix_oauth_acquire_for_user(&abandoned_user)
+            .await
+            .unwrap());
+        let active = store
+            .get_account(account.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.state, AccountState::Active);
+        assert!(!active.verified, "browser sign-in makes no trust claim");
+        assert!(dir
+            .join(account.account_id.to_string())
+            .join("new-store")
+            .exists());
         assert!(!store
             .has_matrix_oauth_acquire_for_user(&committed_user)
             .await

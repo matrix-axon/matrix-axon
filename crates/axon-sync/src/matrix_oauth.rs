@@ -61,11 +61,31 @@ impl MatrixOAuthRegistrationManager {
     }
 
     /// Discover the issuer, restore a durable/static public client ID, or
-    /// dynamically register Axon and persist the result.
+    /// dynamically register Axon and persist the result, then install the
+    /// client ID on `client`.
     pub async fn prepare(&self, client: &Client) -> Result<ClientId, SyncError> {
         if client.oauth().client_id().is_some() {
             return Err(SyncError::MatrixOAuthLocalState);
         }
+        let homeserver = client.homeserver();
+        restore_after_resolving(client, async {
+            Ok(self.resolve(&homeserver).await?.client_id)
+        })
+        .await
+    }
+
+    /// Everything [`prepare`](Self::prepare) does except installing the client
+    /// ID, also returning the validated discovery metadata and the bounded
+    /// HTTP client it was fetched with.
+    ///
+    /// For a caller that talks to the authorization server itself and then
+    /// hands the SDK a complete session (ADR 0117). The SDK accepts
+    /// authentication data exactly once, so such a caller must not install the
+    /// client ID separately first.
+    pub(crate) async fn resolve(
+        &self,
+        homeserver: &Url,
+    ) -> Result<PreparedMatrixOAuthClient, SyncError> {
         validate_config(&self.config)?;
         let timeout = Duration::from_secs(self.config.request_timeout_secs);
         let http = reqwest::Client::builder()
@@ -74,10 +94,26 @@ impl MatrixOAuthRegistrationManager {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| SyncError::MatrixOAuthConfiguration)?;
-        let metadata = discover_metadata(&http, &client.homeserver(), timeout).await?;
-        let issuer = metadata.issuer;
+        let metadata = discover_metadata(&http, homeserver, timeout).await?;
+        let client_id = self.register(homeserver, &http, &metadata, timeout).await?;
+        Ok(PreparedMatrixOAuthClient {
+            client_id,
+            metadata,
+            http,
+        })
+    }
+
+    /// Find or create the durable registration for the discovered issuer.
+    /// Returns only once the client ID is persisted.
+    async fn register(
+        &self,
+        homeserver: &Url,
+        http: &reqwest::Client,
+        metadata: &AuthorizationServerMetadata,
+        timeout: Duration,
+    ) -> Result<ClientId, SyncError> {
+        let issuer = metadata.issuer.clone();
         let issuer_url = issuer.as_str();
-        let homeserver = client.homeserver();
         if issuer_url.len() > MAX_SERVER_URL_BYTES
             || homeserver.as_str().len() > MAX_SERVER_URL_BYTES
         {
@@ -93,23 +129,17 @@ impl MatrixOAuthRegistrationManager {
             validate_client_id(&registration.client_id)
                 .map_err(|_| SyncError::MatrixOAuthLocalState)?;
             let client_id = ClientId::new(registration.client_id);
-            client.oauth().restore_registered_client(client_id.clone());
             tracing::debug!("restored persisted Matrix OAuth client registration");
             return Ok(client_id);
         }
 
-        if let Some(client_id) = static_client_id(&self.config, &homeserver, &issuer)? {
-            persist_then_restore_registration(
-                client,
-                &client_id,
-                self.persist(&issuer, &homeserver, &client_id),
-            )
-            .await?;
+        if let Some(client_id) = static_client_id(&self.config, homeserver, &issuer)? {
+            self.persist(&issuer, homeserver, &client_id).await?;
             tracing::info!("restored operator-provided Matrix OAuth client registration");
             return Ok(client_id);
         }
 
-        let registration_endpoint = metadata.registration_endpoint.ok_or_else(|| {
+        let registration_endpoint = metadata.registration_endpoint.clone().ok_or_else(|| {
             SyncError::Sdk(
                 "Matrix OAuth server does not advertise dynamic client registration and no static client ID matches"
                     .to_owned(),
@@ -155,12 +185,8 @@ impl MatrixOAuthRegistrationManager {
                 "Matrix OAuth dynamic registration returned an invalid client ID"
             );
         })?;
-        persist_then_restore_registration(
-            client,
-            &response.client_id,
-            self.persist(&issuer, &homeserver, &response.client_id),
-        )
-        .await?;
+        self.persist(&issuer, homeserver, &response.client_id)
+            .await?;
         tracing::info!("dynamically registered Matrix OAuth client");
         Ok(response.client_id)
     }
@@ -183,14 +209,25 @@ impl MatrixOAuthRegistrationManager {
     }
 }
 
-async fn persist_then_restore_registration(
+/// A registered client together with what registration discovered.
+pub(crate) struct PreparedMatrixOAuthClient {
+    pub(crate) client_id: ClientId,
+    pub(crate) metadata: AuthorizationServerMetadata,
+    /// Bounded exactly as discovery and registration were: connect and total
+    /// timeouts, redirects disabled.
+    pub(crate) http: reqwest::Client,
+}
+
+/// Install a client ID on `client` only after it has been resolved, which
+/// includes persisting it. A failure leaves the client untouched, so the same
+/// client can retry; the SDK would panic on a second installation.
+async fn restore_after_resolving(
     client: &Client,
-    client_id: &ClientId,
-    persist: impl std::future::Future<Output = Result<(), SyncError>>,
-) -> Result<(), SyncError> {
-    persist.await?;
+    resolve: impl std::future::Future<Output = Result<ClientId, SyncError>>,
+) -> Result<ClientId, SyncError> {
+    let client_id = resolve.await?;
     client.oauth().restore_registered_client(client_id.clone());
-    Ok(())
+    Ok(client_id)
 }
 
 async fn discover_metadata(
@@ -781,7 +818,7 @@ mod tests {
             .unwrap();
         let client_id = ClientId::new("public-client".to_owned());
 
-        let error = persist_then_restore_registration(&client, &client_id, async {
+        let error = restore_after_resolving(&client, async {
             Err(SyncError::Store(StoreError::InvalidAccountSession(
                 "forced persistence failure".to_owned(),
             )))
@@ -794,7 +831,7 @@ mod tests {
         ));
         assert!(client.oauth().client_id().is_none());
 
-        persist_then_restore_registration(&client, &client_id, async { Ok(()) })
+        restore_after_resolving(&client, async { Ok(client_id.clone()) })
             .await
             .unwrap();
         assert_eq!(

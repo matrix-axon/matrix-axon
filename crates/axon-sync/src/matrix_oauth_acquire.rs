@@ -1,9 +1,16 @@
-//! Matrix OAuth QR account acquisition (ADR 0097).
+//! Matrix OAuth account acquisition: QR login (ADR 0097) and browser sign-in
+//! (ADR 0117).
 //!
 //! HTTP clients poll an in-memory flow resource while this engine owns the
-//! matrix-rust-sdk login future. Only a non-secret filesystem breadcrumb is
-//! durable; QR payloads, check codes, OAuth user codes, tokens, and rendezvous
-//! URLs never enter Postgres or logs.
+//! login future. Only a non-secret filesystem breadcrumb is durable; QR
+//! payloads, check codes, OAuth user and device codes, tokens, verification
+//! links, and rendezvous URLs never enter Postgres or logs.
+//!
+//! The two QR presentations and browser sign-in are three methods of one
+//! engine. They share the capacity and retention bounds, the one-flow-per-user
+//! reservation, single-owner terminal transitions, and crash-safe finalization,
+//! and differ only in the protocol driver and in what each promises about the
+//! new device's trust.
 
 use std::{
     collections::HashMap,
@@ -16,13 +23,17 @@ use axon_core::SyncConfig;
 use axon_store::Store;
 use futures_util::{Stream, StreamExt};
 use matrix_sdk::{
-    authentication::oauth::qrcode::{
-        CheckCodeSender, DeviceAuthorizationOAuthError, GeneratedQrProgress, LoginProgress,
-        Msc4108IntentData, QRCodeLoginError, QrCodeData, QrCodeIntent, QrCodeIntentData,
-        QrProgress, SecureChannelError,
+    authentication::oauth::{
+        qrcode::{
+            CheckCodeSender, DeviceAuthorizationOAuthError, GeneratedQrProgress, LoginProgress,
+            Msc4108IntentData, QRCodeLoginError, QrCodeData, QrCodeIntent, QrCodeIntentData,
+            QrProgress, SecureChannelError,
+        },
+        OAuthSession, UserSession,
     },
-    ruma::{OwnedServerName, OwnedUserId},
-    Client,
+    ruma::{DeviceId, OwnedDeviceId, OwnedServerName, OwnedUserId},
+    store::RoomLoadSettings,
+    Client, SessionMeta, SessionTokens,
 };
 use tokio::sync::{oneshot, Semaphore};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -35,9 +46,13 @@ use crate::{
         MatrixOAuthAcquireClientError,
     },
     error::SyncError,
-    lifecycle::{AccountLifecycle, LifecycleError},
+    lifecycle::{AccountLifecycle, LifecycleError, MatrixOAuthAcquireTrust},
+    matrix_oauth_device_grant::{
+        poll_for_tokens, request_device_authorization, request_tokens, revoke_token,
+        DeviceGrantEndpoints, DeviceGrantFailure,
+    },
     matrix_oauth_flow::{
-        run_reaper, FlowLease, FLOW_TTL, MAX_CONCURRENT_FLOWS, MAX_RETAINED_FLOWS,
+        run_reaper, FlowLease, BROWSER_FLOW_TTL, FLOW_TTL, MAX_CONCURRENT_FLOWS, MAX_RETAINED_FLOWS,
     },
     MatrixOAuthRegistrationManager,
 };
@@ -165,12 +180,118 @@ impl MatrixOAuthAcquireState {
     }
 }
 
+/// Stable stage names of a browser sign-in. A separate enum from the QR one,
+/// so `finalizing` never appears in the QR stage list that existing clients
+/// match exhaustively (ADR 0117).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatrixOAuthBrowserStage {
+    Starting,
+    WaitingForAuthorization,
+    /// Everything after the token response: session installation, identity
+    /// validation, the wait for the lifecycle lock, and adoption.
+    Finalizing,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+impl MatrixOAuthBrowserStage {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// A presentation-safe point-in-time view of one browser sign-in.
+///
+/// Deliberately not `Debug`: the link and user code are secrets in transit.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MatrixOAuthBrowserState {
+    pub flow_id: Uuid,
+    pub expected_user_id: String,
+    pub stage: MatrixOAuthBrowserStage,
+    /// The link to open, present only while waiting for authorization.
+    pub verification_uri: Option<String>,
+    /// The code to confirm there, present only while waiting for authorization.
+    pub user_code: Option<String>,
+    pub account_id: Option<Uuid>,
+    pub error_code: Option<String>,
+}
+
+impl MatrixOAuthBrowserState {
+    fn new(flow_id: Uuid, expected_user_id: String) -> Self {
+        Self {
+            flow_id,
+            expected_user_id,
+            stage: MatrixOAuthBrowserStage::Starting,
+            verification_uri: None,
+            user_code: None,
+            account_id: None,
+            error_code: None,
+        }
+    }
+
+    fn set_stage(&mut self, stage: MatrixOAuthBrowserStage) {
+        self.stage = stage;
+        self.verification_uri = None;
+        self.user_code = None;
+        self.account_id = None;
+        self.error_code = None;
+    }
+}
+
+/// How a flow acquires its session. Fixed at creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowMethod {
+    Qr(MatrixOAuthAcquirePresentation),
+    Browser,
+}
+
+impl FlowMethod {
+    /// The durable breadcrumb value and the `presentation` log field.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Qr(presentation) => presentation.as_str(),
+            Self::Browser => "browser",
+        }
+    }
+
+    /// Scanning a QR code is quick; a sign-in that may pass through an
+    /// upstream identity provider and a second factor is not.
+    fn ttl(self) -> Duration {
+        match self {
+            Self::Qr(_) => FLOW_TTL,
+            Self::Browser => BROWSER_FLOW_TTL,
+        }
+    }
+
+    /// What finalization must find before it commits the session.
+    fn trust(self) -> MatrixOAuthAcquireTrust {
+        match self {
+            Self::Qr(_) => MatrixOAuthAcquireTrust::CrossSigned,
+            Self::Browser => MatrixOAuthAcquireTrust::Unverified,
+        }
+    }
+}
+
+/// The view a flow publishes, in the shape of its own route family.
+enum FlowView {
+    Qr(MatrixOAuthAcquireState),
+    Browser(MatrixOAuthBrowserState),
+}
+
+/// How a flow ended.
+enum Terminal {
+    Done(Uuid),
+    Failed(&'static str),
+    Cancelled,
+}
+
 /// HTTP-neutral operation errors for the composition-root adapter.
 #[derive(Debug, thiserror::Error)]
 pub enum MatrixOAuthAcquireError {
     #[error("invalid Matrix user ID")]
     InvalidUserId,
-    #[error("too many Matrix OAuth QR login flows are active or retained")]
+    #[error("too many Matrix OAuth login flows are active or retained")]
     Capacity,
     #[error("the Matrix account is already active")]
     AccountAlreadyActive,
@@ -178,15 +299,15 @@ pub enum MatrixOAuthAcquireError {
     AccountBeingDeleted,
     #[error("the Matrix account's previous session is still shutting down")]
     AccountDraining,
-    #[error("a Matrix OAuth QR login is already in progress for this user")]
+    #[error("a Matrix OAuth login is already in progress for this user")]
     FlowAlreadyExists,
-    #[error("Matrix OAuth QR login flow not found: {0}")]
+    #[error("Matrix OAuth login flow not found: {0}")]
     NotFound(Uuid),
     #[error("input does not match the flow presentation or stage")]
     WrongStage,
     #[error("invalid QR login input: {0}")]
     InvalidInput(&'static str),
-    #[error("Matrix OAuth QR login storage failed")]
+    #[error("Matrix OAuth login storage failed")]
     Internal,
 }
 
@@ -200,7 +321,7 @@ fn create_lifecycle_error(error: LifecycleError) -> MatrixOAuthAcquireError {
         other => {
             tracing::error!(
                 error_class = lifecycle_failure_code(&other),
-                "reserving Matrix OAuth QR login identity failed"
+                "reserving Matrix OAuth login identity failed"
             );
             MatrixOAuthAcquireError::Internal
         }
@@ -208,25 +329,83 @@ fn create_lifecycle_error(error: LifecycleError) -> MatrixOAuthAcquireError {
 }
 
 struct FlowMutable {
-    state: MatrixOAuthAcquireState,
+    view: FlowView,
     scan_tx: Option<oneshot::Sender<QrCodeData>>,
     check_code_tx: Option<oneshot::Sender<u8>>,
     lease: FlowLease,
 }
 
 struct Flow {
+    flow_id: Uuid,
+    expected_user_id: String,
+    method: FlowMethod,
     mutable: Mutex<FlowMutable>,
     cancel: CancellationToken,
     staging_dir_name: String,
 }
 
 impl Flow {
-    fn snapshot(&self) -> MatrixOAuthAcquireState {
-        self.mutable
+    fn new(
+        flow_id: Uuid,
+        expected_user_id: String,
+        method: FlowMethod,
+        lease: FlowLease,
+        cancel: CancellationToken,
+    ) -> (Self, oneshot::Receiver<QrCodeData>, oneshot::Receiver<u8>) {
+        let (scan_tx, scan_rx) = oneshot::channel();
+        let (check_code_tx, check_code_rx) = oneshot::channel();
+        let view = match method {
+            FlowMethod::Qr(presentation) => FlowView::Qr(MatrixOAuthAcquireState::new(
+                flow_id,
+                expected_user_id.clone(),
+                presentation,
+            )),
+            FlowMethod::Browser => FlowView::Browser(MatrixOAuthBrowserState::new(
+                flow_id,
+                expected_user_id.clone(),
+            )),
+        };
+        let flow = Self {
+            flow_id,
+            expected_user_id,
+            method,
+            mutable: Mutex::new(FlowMutable {
+                view,
+                scan_tx: Some(scan_tx),
+                check_code_tx: Some(check_code_tx),
+                lease,
+            }),
+            cancel,
+            staging_dir_name: flow_id.to_string(),
+        };
+        (flow, scan_rx, check_code_rx)
+    }
+
+    /// The QR view, or `None` for a browser flow, which the QR routes must
+    /// not be able to see.
+    fn qr_snapshot(&self) -> Option<MatrixOAuthAcquireState> {
+        match &self
+            .mutable
             .lock()
             .expect("Matrix OAuth acquire flow poisoned")
-            .state
-            .clone()
+            .view
+        {
+            FlowView::Qr(state) => Some(state.clone()),
+            FlowView::Browser(_) => None,
+        }
+    }
+
+    /// The browser view, or `None` for a QR flow.
+    fn browser_snapshot(&self) -> Option<MatrixOAuthBrowserState> {
+        match &self
+            .mutable
+            .lock()
+            .expect("Matrix OAuth acquire flow poisoned")
+            .view
+        {
+            FlowView::Qr(_) => None,
+            FlowView::Browser(state) => Some(state.clone()),
+        }
     }
 
     fn update(&self, update: impl FnOnce(&mut MatrixOAuthAcquireState)) {
@@ -234,8 +413,22 @@ impl Flow {
             .mutable
             .lock()
             .expect("Matrix OAuth acquire flow poisoned");
-        if !mutable.state.stage.is_terminal() {
-            update(&mut mutable.state);
+        if let FlowView::Qr(state) = &mut mutable.view {
+            if !state.stage.is_terminal() {
+                update(state);
+            }
+        }
+    }
+
+    fn update_browser(&self, update: impl FnOnce(&mut MatrixOAuthBrowserState)) {
+        let mut mutable = self
+            .mutable
+            .lock()
+            .expect("Matrix OAuth acquire flow poisoned");
+        if let FlowView::Browser(state) = &mut mutable.view {
+            if !state.stage.is_terminal() {
+                update(state);
+            }
         }
     }
 
@@ -247,12 +440,7 @@ impl Flow {
         mutable.lease.claim_finalization()
     }
 
-    fn terminal(
-        &self,
-        stage: MatrixOAuthAcquireStage,
-        account_id: Option<Uuid>,
-        error_code: Option<&'static str>,
-    ) {
+    fn terminal(&self, terminal: Terminal) {
         let mut mutable = self
             .mutable
             .lock()
@@ -260,11 +448,7 @@ impl Flow {
         if !mutable.lease.finish(std::time::Instant::now()) {
             return;
         }
-        mutable.state.set_stage(stage);
-        mutable.state.account_id = account_id;
-        mutable.state.error_code = error_code.map(str::to_owned);
-        mutable.scan_tx.take();
-        mutable.check_code_tx.take();
+        mutable.set_terminal(terminal);
     }
 
     fn cancel(&self) -> bool {
@@ -275,12 +459,44 @@ impl Flow {
         if !mutable.lease.cancel(std::time::Instant::now()) {
             return false;
         }
-        mutable.state.set_stage(MatrixOAuthAcquireStage::Cancelled);
-        mutable.scan_tx.take();
-        mutable.check_code_tx.take();
+        mutable.set_terminal(Terminal::Cancelled);
         drop(mutable);
         self.cancel.cancel();
         true
+    }
+}
+
+impl FlowMutable {
+    /// Publish a terminal stage. `set_stage` clears every stage-scoped field
+    /// first, so no QR payload, check code, link, or user code outlives it.
+    fn set_terminal(&mut self, terminal: Terminal) {
+        let (account_id, error_code) = match terminal {
+            Terminal::Done(account_id) => (Some(account_id), None),
+            Terminal::Failed(code) => (None, Some(code.to_owned())),
+            Terminal::Cancelled => (None, None),
+        };
+        match &mut self.view {
+            FlowView::Qr(state) => {
+                state.set_stage(match terminal {
+                    Terminal::Done(_) => MatrixOAuthAcquireStage::Done,
+                    Terminal::Failed(_) => MatrixOAuthAcquireStage::Failed,
+                    Terminal::Cancelled => MatrixOAuthAcquireStage::Cancelled,
+                });
+                state.account_id = account_id;
+                state.error_code = error_code;
+            }
+            FlowView::Browser(state) => {
+                state.set_stage(match terminal {
+                    Terminal::Done(_) => MatrixOAuthBrowserStage::Done,
+                    Terminal::Failed(_) => MatrixOAuthBrowserStage::Failed,
+                    Terminal::Cancelled => MatrixOAuthBrowserStage::Cancelled,
+                });
+                state.account_id = account_id;
+                state.error_code = error_code;
+            }
+        }
+        self.scan_tx.take();
+        self.check_code_tx.take();
     }
 }
 
@@ -289,13 +505,15 @@ struct MatrixOAuthAcquireInner {
     config: SyncConfig,
     lifecycle: AccountLifecycle,
     registrations: MatrixOAuthRegistrationManager,
+    /// Resolves a browser sign-in's homeserver from the expected user ID.
+    discovery_http: reqwest::Client,
     flows: Mutex<HashMap<Uuid, Arc<Flow>>>,
     capacity: Arc<Semaphore>,
     tracker: TaskTracker,
     engine_cancel: CancellationToken,
 }
 
-/// Cloneable runtime owner for pre-account QR login flows.
+/// Cloneable runtime owner for pre-account QR login and browser sign-in flows.
 #[derive(Clone)]
 pub struct MatrixOAuthAcquireEngine {
     inner: Arc<MatrixOAuthAcquireInner>,
@@ -317,6 +535,7 @@ impl MatrixOAuthAcquireEngine {
                 config,
                 lifecycle,
                 registrations,
+                discovery_http: crate::discovery::http_client(),
                 flows: Mutex::new(HashMap::new()),
                 capacity: Arc::new(Semaphore::new(MAX_CONCURRENT_FLOWS)),
                 tracker,
@@ -325,11 +544,35 @@ impl MatrixOAuthAcquireEngine {
         }
     }
 
+    /// Start a QR login flow.
     pub async fn create(
         &self,
         expected_user_id: &str,
         presentation: MatrixOAuthAcquirePresentation,
     ) -> Result<MatrixOAuthAcquireState, MatrixOAuthAcquireError> {
+        let flow = self
+            .create_flow(expected_user_id, FlowMethod::Qr(presentation))
+            .await?;
+        flow.qr_snapshot().ok_or(MatrixOAuthAcquireError::Internal)
+    }
+
+    /// Start a browser sign-in flow (ADR 0117).
+    pub async fn create_browser(
+        &self,
+        expected_user_id: &str,
+    ) -> Result<MatrixOAuthBrowserState, MatrixOAuthAcquireError> {
+        let flow = self
+            .create_flow(expected_user_id, FlowMethod::Browser)
+            .await?;
+        flow.browser_snapshot()
+            .ok_or(MatrixOAuthAcquireError::Internal)
+    }
+
+    async fn create_flow(
+        &self,
+        expected_user_id: &str,
+        method: FlowMethod,
+    ) -> Result<Arc<Flow>, MatrixOAuthAcquireError> {
         self.reap_expired();
         if expected_user_id.len() > MAX_USER_ID_BYTES
             || OwnedUserId::try_from(expected_user_id).is_err()
@@ -353,35 +596,27 @@ impl MatrixOAuthAcquireEngine {
             return Err(MatrixOAuthAcquireError::Capacity);
         }
         let flow_id = Uuid::new_v4();
-        let staging_dir_name = flow_id.to_string();
+        let (flow, scan_rx, check_code_rx) = Flow::new(
+            flow_id,
+            expected_user_id.to_owned(),
+            method,
+            FlowLease::new(permit),
+            self.inner.engine_cancel.child_token(),
+        );
+        // The reservation is keyed by the expected user alone, so it bounds
+        // one flow per Matrix user across all three methods.
         self.inner
             .lifecycle
             .reserve_matrix_oauth_acquire(
                 flow_id,
                 expected_user_id,
-                presentation.as_str(),
-                &staging_dir_name,
+                method.as_str(),
+                &flow.staging_dir_name,
             )
             .await
             .map_err(create_lifecycle_error)?;
 
-        let (scan_tx, scan_rx) = oneshot::channel();
-        let (check_code_tx, check_code_rx) = oneshot::channel();
-        let cancel = self.inner.engine_cancel.child_token();
-        let flow = Arc::new(Flow {
-            mutable: Mutex::new(FlowMutable {
-                state: MatrixOAuthAcquireState::new(
-                    flow_id,
-                    expected_user_id.to_owned(),
-                    presentation,
-                ),
-                scan_tx: Some(scan_tx),
-                check_code_tx: Some(check_code_tx),
-                lease: FlowLease::new(permit),
-            }),
-            cancel,
-            staging_dir_name,
-        });
+        let flow = Arc::new(flow);
         let inserted = {
             let mut flows = self
                 .inner
@@ -421,12 +656,21 @@ impl MatrixOAuthAcquireEngine {
 
         let driver = self.clone();
         let task_flow = flow.clone();
-        let driver_span = tracing::info_span!(
-            "matrix_oauth_qr_login",
-            %flow_id,
-            role = "acquire",
-            presentation = presentation.as_str()
-        );
+        let presentation = method.as_str();
+        let driver_span = match method {
+            FlowMethod::Qr(_) => tracing::info_span!(
+                "matrix_oauth_qr_login",
+                %flow_id,
+                role = "acquire",
+                presentation
+            ),
+            FlowMethod::Browser => tracing::info_span!(
+                "matrix_oauth_browser_sign_in",
+                %flow_id,
+                role = "acquire",
+                presentation
+            ),
+        };
         self.inner.tracker.spawn(
             async move {
                 driver.drive(task_flow, scan_rx, check_code_rx).await;
@@ -436,20 +680,28 @@ impl MatrixOAuthAcquireEngine {
         tracing::info!(
             %flow_id,
             role = "acquire",
-            presentation = presentation.as_str(),
-            "Matrix OAuth QR login flow created"
+            presentation,
+            "Matrix OAuth login flow created"
         );
-        Ok(flow.snapshot())
+        Ok(flow)
     }
 
+    /// Read a QR flow. A browser flow's ID is not found here.
     pub fn get(&self, flow_id: Uuid) -> Result<MatrixOAuthAcquireState, MatrixOAuthAcquireError> {
         self.reap_expired();
-        self.inner
-            .flows
-            .lock()
-            .expect("Matrix OAuth acquire registry poisoned")
-            .get(&flow_id)
-            .map(|flow| flow.snapshot())
+        self.flow(flow_id)?
+            .qr_snapshot()
+            .ok_or(MatrixOAuthAcquireError::NotFound(flow_id))
+    }
+
+    /// Read a browser sign-in flow. A QR flow's ID is not found here.
+    pub fn get_browser(
+        &self,
+        flow_id: Uuid,
+    ) -> Result<MatrixOAuthBrowserState, MatrixOAuthAcquireError> {
+        self.reap_expired();
+        self.flow(flow_id)?
+            .browser_snapshot()
             .ok_or(MatrixOAuthAcquireError::NotFound(flow_id))
     }
 
@@ -460,12 +712,16 @@ impl MatrixOAuthAcquireEngine {
     ) -> Result<MatrixOAuthAcquireState, MatrixOAuthAcquireError> {
         let parsed = parse_qr_payload(qr_code_data)?;
         let flow = self.flow(flow_id)?;
-        let mut mutable = flow
+        let mut guard = flow
             .mutable
             .lock()
             .expect("Matrix OAuth acquire flow poisoned");
-        if mutable.state.presentation != MatrixOAuthAcquirePresentation::Scan
-            || mutable.state.stage != MatrixOAuthAcquireStage::Starting
+        let mutable = &mut *guard;
+        let FlowView::Qr(state) = &mutable.view else {
+            return Err(MatrixOAuthAcquireError::NotFound(flow_id));
+        };
+        if state.presentation != MatrixOAuthAcquirePresentation::Scan
+            || state.stage != MatrixOAuthAcquireStage::Starting
             || mutable.lease.is_finalizing()
         {
             return Err(MatrixOAuthAcquireError::WrongStage);
@@ -476,7 +732,7 @@ impl MatrixOAuthAcquireEngine {
             .ok_or(MatrixOAuthAcquireError::WrongStage)?;
         tx.send(parsed)
             .map_err(|_| MatrixOAuthAcquireError::WrongStage)?;
-        Ok(mutable.state.clone())
+        Ok(state.clone())
     }
 
     pub fn submit_check_code(
@@ -486,12 +742,16 @@ impl MatrixOAuthAcquireEngine {
     ) -> Result<MatrixOAuthAcquireState, MatrixOAuthAcquireError> {
         let value = parse_check_code(check_code)?;
         let flow = self.flow(flow_id)?;
-        let mut mutable = flow
+        let mut guard = flow
             .mutable
             .lock()
             .expect("Matrix OAuth acquire flow poisoned");
-        if mutable.state.presentation != MatrixOAuthAcquirePresentation::Display
-            || mutable.state.stage != MatrixOAuthAcquireStage::CheckCodeRequired
+        let mutable = &mut *guard;
+        let FlowView::Qr(state) = &mutable.view else {
+            return Err(MatrixOAuthAcquireError::NotFound(flow_id));
+        };
+        if state.presentation != MatrixOAuthAcquirePresentation::Display
+            || state.stage != MatrixOAuthAcquireStage::CheckCodeRequired
             || mutable.lease.is_finalizing()
         {
             return Err(MatrixOAuthAcquireError::WrongStage);
@@ -502,12 +762,28 @@ impl MatrixOAuthAcquireEngine {
             .ok_or(MatrixOAuthAcquireError::WrongStage)?;
         tx.send(value)
             .map_err(|_| MatrixOAuthAcquireError::WrongStage)?;
-        Ok(mutable.state.clone())
+        Ok(state.clone())
     }
 
-    /// Idempotent cancellation. Unknown/expired identifiers are deliberately a
-    /// no-op so repeated DELETE requests have the same result.
-    pub fn cancel(&self, flow_id: Uuid) {
+    /// Idempotent cancellation of a QR flow. Unknown/expired identifiers are
+    /// deliberately a no-op so repeated DELETE requests have the same result.
+    /// A browser flow's ID is not found: a client cannot cancel a flow through
+    /// the wrong route family.
+    pub fn cancel(&self, flow_id: Uuid) -> Result<(), MatrixOAuthAcquireError> {
+        self.cancel_if(flow_id, |method| matches!(method, FlowMethod::Qr(_)))
+    }
+
+    /// Idempotent cancellation of a browser sign-in. A QR flow's ID is not
+    /// found here.
+    pub fn cancel_browser(&self, flow_id: Uuid) -> Result<(), MatrixOAuthAcquireError> {
+        self.cancel_if(flow_id, |method| method == FlowMethod::Browser)
+    }
+
+    fn cancel_if(
+        &self,
+        flow_id: Uuid,
+        owns: impl FnOnce(FlowMethod) -> bool,
+    ) -> Result<(), MatrixOAuthAcquireError> {
         let flow = self
             .inner
             .flows
@@ -515,11 +791,19 @@ impl MatrixOAuthAcquireEngine {
             .expect("Matrix OAuth acquire registry poisoned")
             .get(&flow_id)
             .cloned();
-        let Some(flow) = flow else { return };
-        if flow.cancel() {
-            let presentation = flow.snapshot().presentation.as_str();
-            tracing::info!(%flow_id, role = "acquire", presentation, "Matrix OAuth QR login flow cancelled");
+        let Some(flow) = flow else { return Ok(()) };
+        if !owns(flow.method) {
+            return Err(MatrixOAuthAcquireError::NotFound(flow_id));
         }
+        if flow.cancel() {
+            tracing::info!(
+                %flow_id,
+                role = "acquire",
+                presentation = flow.method.as_str(),
+                "Matrix OAuth login flow cancelled"
+            );
+        }
+        Ok(())
     }
 
     pub(crate) async fn reap_loop(self, cancel: CancellationToken) {
@@ -557,17 +841,20 @@ impl MatrixOAuthAcquireEngine {
         scan_rx: oneshot::Receiver<QrCodeData>,
         check_code_rx: oneshot::Receiver<u8>,
     ) {
-        let snapshot = flow.snapshot();
-        let flow_id = snapshot.flow_id;
-        let presentation = snapshot.presentation.as_str();
-        let deadline = tokio::time::Instant::now() + FLOW_TTL;
+        let flow_id = flow.flow_id;
+        let presentation = flow.method.as_str();
+        let deadline = tokio::time::Instant::now() + flow.method.ttl();
         // The protocol driver owns the client all the way through timeout and
         // cancellation handling. Dropping that future from an outer timeout
         // would lose the only opportunity to revoke a session minted just
         // before the deadline.
-        let result = self
-            .drive_protocol(flow.clone(), scan_rx, check_code_rx, deadline)
-            .await;
+        let result = match flow.method {
+            FlowMethod::Qr(presentation) => {
+                self.drive_protocol(flow.clone(), presentation, scan_rx, check_code_rx, deadline)
+                    .await
+            }
+            FlowMethod::Browser => self.drive_browser(flow.clone(), deadline).await,
+        };
 
         match result {
             Ok((client, session)) => {
@@ -581,21 +868,22 @@ impl MatrixOAuthAcquireEngine {
                     .finalize_matrix_oauth_acquire(
                         flow_id,
                         &flow.staging_dir_name,
-                        &flow.snapshot().expected_user_id,
+                        &flow.expected_user_id,
                         client,
                         session,
+                        flow.method.trust(),
                     )
                     .await
                 {
                     Ok(account_id) => {
-                        flow.terminal(MatrixOAuthAcquireStage::Done, Some(account_id), None);
+                        flow.terminal(Terminal::Done(account_id));
                         tracing::info!(
                             %flow_id,
                             %account_id,
                             role = "acquire",
                             presentation,
                             stage = "done",
-                            "Matrix OAuth QR login flow completed"
+                            "Matrix OAuth login flow completed"
                         );
                     }
                     Err(failure) => {
@@ -606,33 +894,33 @@ impl MatrixOAuthAcquireEngine {
                         // that still-valid session instead.
                         self.cleanup_precommit(&flow, failure.acquisition_client.as_ref())
                             .await;
-                        flow.terminal(MatrixOAuthAcquireStage::Failed, None, Some(code));
+                        flow.terminal(Terminal::Failed(code));
                         tracing::warn!(
                             %flow_id,
                             role = "acquire",
                             presentation,
                             stage = "failed",
                             error_code = code,
-                            "Matrix OAuth QR login finalization failed"
+                            "Matrix OAuth login finalization failed"
                         );
                     }
                 }
             }
             Err(DriverFailure::Cancelled) => {
                 self.cleanup_precommit(&flow, None).await;
-                flow.terminal(MatrixOAuthAcquireStage::Cancelled, None, None);
+                flow.terminal(Terminal::Cancelled);
             }
             Err(failure) => {
                 let code = failure.code();
                 self.cleanup_precommit(&flow, None).await;
-                flow.terminal(MatrixOAuthAcquireStage::Failed, None, Some(code));
+                flow.terminal(Terminal::Failed(code));
                 tracing::warn!(
                     %flow_id,
                     role = "acquire",
                     presentation,
                     stage = "failed",
                     error_code = code,
-                    "Matrix OAuth QR login flow failed"
+                    "Matrix OAuth login flow failed"
                 );
             }
         }
@@ -641,14 +929,14 @@ impl MatrixOAuthAcquireEngine {
     async fn drive_protocol(
         &self,
         flow: Arc<Flow>,
+        presentation: MatrixOAuthAcquirePresentation,
         scan_rx: oneshot::Receiver<QrCodeData>,
         check_code_rx: oneshot::Receiver<u8>,
         deadline: tokio::time::Instant,
-    ) -> Result<(Client, matrix_sdk::authentication::oauth::OAuthSession), DriverFailure> {
-        let snapshot = flow.snapshot();
-        let client = match snapshot.presentation {
+    ) -> Result<(Client, OAuthSession), DriverFailure> {
+        let client = match presentation {
             MatrixOAuthAcquirePresentation::Display => {
-                let user_id = OwnedUserId::try_from(snapshot.expected_user_id.as_str())
+                let user_id = OwnedUserId::try_from(flow.expected_user_id.as_str())
                     .map_err(|_| DriverFailure::InvalidQr)?;
                 build_matrix_oauth_acquire_client(
                     &self.inner.config,
@@ -683,7 +971,7 @@ impl MatrixOAuthAcquireEngine {
                     }
                     return Err(failure);
                 }
-                return self.validate_completed_client(&flow, client).await;
+                return self.validate_completed_client(&flow, client, None).await;
             }
         };
 
@@ -701,7 +989,114 @@ impl MatrixOAuthAcquireEngine {
             }
             return Err(failure);
         }
-        self.validate_completed_client(&flow, client).await
+        self.validate_completed_client(&flow, client, None).await
+    }
+
+    /// Browser sign-in: the device authorization grant, driven directly
+    /// because the SDK keeps its own implementation private to QR login.
+    async fn drive_browser(
+        &self,
+        flow: Arc<Flow>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(Client, OAuthSession), DriverFailure> {
+        let user_id = OwnedUserId::try_from(flow.expected_user_id.as_str())
+            .map_err(|_| DriverFailure::Internal)?;
+        // The same resolution password login uses: the server name's
+        // well-known document, then the server name itself, each confirmed as
+        // a homeserver before anything is sent to it.
+        let homeserver =
+            crate::discovery::resolve_homeserver(&self.inner.discovery_http, user_id.server_name())
+                .await
+                .map_err(|_| {
+                    let failure = DriverFailure::Upstream;
+                    log_driver_failure("homeserver_discovery", &failure, None);
+                    failure
+                })?;
+        let client = build_matrix_oauth_acquire_client(
+            &self.inner.config,
+            &flow.staging_dir_name,
+            &homeserver,
+        )
+        .await
+        .map_err(classify_client_build_error)?;
+        // Resolve the registration without installing it: `restore_session`
+        // below supplies the client ID together with the tokens, and the SDK
+        // accepts authentication data only once.
+        let prepared = self
+            .inner
+            .registrations
+            .resolve(&client.homeserver())
+            .await
+            .map_err(classify_registration_error)?;
+        let endpoints =
+            DeviceGrantEndpoints::from_metadata(&client.homeserver(), &prepared.metadata)
+                .map_err(DriverFailure::from)?;
+        let client_id = prepared.client_id;
+        let http = prepared.http;
+        if flow.cancel.is_cancelled() {
+            return Err(DriverFailure::Cancelled);
+        }
+
+        // The one device ID of this sign-in: named in the requested scope
+        // here and handed to the SDK session below. The staging client is
+        // unauthenticated until then, so no other device ID exists.
+        let device_id: OwnedDeviceId = DeviceId::new();
+        let authorization =
+            request_device_authorization(&http, &endpoints, client_id.as_str(), &device_id)
+                .await
+                .map_err(DriverFailure::from)?;
+        // The server's own lifetime is counted from its response; the flow's
+        // from its creation. Whichever ends first ends the wait.
+        let poll_deadline = authorization
+            .expires_in
+            .and_then(|expires_in| tokio::time::Instant::now().checked_add(expires_in))
+            .map_or(deadline, |expires_at| expires_at.min(deadline));
+        flow.update_browser(|state| {
+            state.set_stage(MatrixOAuthBrowserStage::WaitingForAuthorization);
+            state.verification_uri = Some(authorization.verification_uri);
+            state.user_code = Some(authorization.user_code);
+        });
+
+        let device_code = authorization.device_code;
+        let tokens = poll_for_tokens(
+            || request_tokens(&http, &endpoints, client_id.as_str(), &device_code),
+            authorization.interval,
+            poll_deadline,
+            &flow.cancel,
+        )
+        .await
+        .map_err(DriverFailure::from)?;
+        // Leaving `waiting_for_authorization` clears the link and user code:
+        // neither is readable from here on.
+        flow.update_browser(|state| state.set_stage(MatrixOAuthBrowserStage::Finalizing));
+
+        let session = OAuthSession {
+            client_id: client_id.clone(),
+            user: UserSession {
+                meta: SessionMeta {
+                    user_id,
+                    device_id: device_id.clone(),
+                },
+                tokens: SessionTokens {
+                    access_token: tokens.access_token.clone(),
+                    refresh_token: tokens.refresh_token,
+                },
+            },
+        };
+        if client
+            .oauth()
+            .restore_session(session, RoomLoadSettings::default())
+            .await
+            .is_err()
+        {
+            let failure = DriverFailure::Internal;
+            log_driver_failure("session_activation", &failure, None);
+            // The SDK holds no session to log out, so revoke by hand.
+            revoke_token(&http, &endpoints, client_id.as_str(), &tokens.access_token).await;
+            return Err(failure);
+        }
+        self.validate_completed_client(&flow, client, Some(&device_id))
+            .await
     }
 
     async fn run_scan_login(
@@ -792,11 +1187,19 @@ impl MatrixOAuthAcquireEngine {
         }
     }
 
+    /// Confirm the completed session belongs to the expected Matrix user and
+    /// can be refreshed, revoking it otherwise.
+    ///
+    /// `requested_device_id` is set by browser sign-in, which chose the device
+    /// ID itself: a homeserver that reports the token bound to a different
+    /// device ignored the requested scope, and the staged crypto store would
+    /// belong to a device that does not exist.
     async fn validate_completed_client(
         &self,
         flow: &Arc<Flow>,
         client: Client,
-    ) -> Result<(Client, matrix_sdk::authentication::oauth::OAuthSession), DriverFailure> {
+        requested_device_id: Option<&DeviceId>,
+    ) -> Result<(Client, OAuthSession), DriverFailure> {
         let validation = async {
             let who = tokio::time::timeout(WHOAMI_TIMEOUT, client.whoami())
                 .await
@@ -813,10 +1216,17 @@ impl MatrixOAuthAcquireEngine {
                     log_driver_failure("identity_validation", &failure, http_status);
                     failure
                 })?;
-            if who.user_id.as_str() != flow.snapshot().expected_user_id {
+            if who.user_id.as_str() != flow.expected_user_id {
                 let failure = DriverFailure::UserMismatch;
                 log_driver_failure("identity_validation", &failure, None);
                 return Err(failure);
+            }
+            if let (Some(requested), Some(reported)) = (requested_device_id, &who.device_id) {
+                if requested != reported {
+                    let failure = DriverFailure::Upstream;
+                    log_driver_failure("device_validation", &failure, None);
+                    return Err(failure);
+                }
             }
             let session = client.oauth().full_session().ok_or_else(|| {
                 let failure = DriverFailure::Internal;
@@ -843,7 +1253,7 @@ impl MatrixOAuthAcquireEngine {
     }
 
     async fn cleanup_precommit(&self, flow: &Flow, client: Option<&Client>) {
-        let flow_id = flow.snapshot().flow_id;
+        let flow_id = flow.flow_id;
         let is_staging = match self
             .inner
             .store
@@ -894,8 +1304,25 @@ enum DriverFailure {
     InvalidCheckCode,
     RendezvousExpired,
     UserMismatch,
+    /// Browser sign-in only: the user refused at the authorization server.
+    AuthorizationDenied,
+    /// Browser sign-in only: the device code or the flow lapsed unapproved.
+    AuthorizationExpired,
     Upstream,
     Internal,
+}
+
+impl From<DeviceGrantFailure> for DriverFailure {
+    fn from(failure: DeviceGrantFailure) -> Self {
+        match failure {
+            DeviceGrantFailure::Unsupported => Self::Unsupported,
+            DeviceGrantFailure::Cancelled => Self::Cancelled,
+            DeviceGrantFailure::Timeout => Self::Timeout,
+            DeviceGrantFailure::Denied => Self::AuthorizationDenied,
+            DeviceGrantFailure::Expired => Self::AuthorizationExpired,
+            DeviceGrantFailure::Upstream => Self::Upstream,
+        }
+    }
 }
 
 impl DriverFailure {
@@ -908,6 +1335,8 @@ impl DriverFailure {
             Self::InvalidCheckCode => "invalid_check_code",
             Self::RendezvousExpired => "rendezvous_expired",
             Self::UserMismatch => "user_mismatch",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::AuthorizationExpired => "authorization_expired",
             Self::Upstream => "upstream",
             Self::Internal => "internal",
         }
@@ -1063,13 +1492,13 @@ fn log_driver_failure(phase: &'static str, failure: &DriverFailure, http_status:
             phase,
             error_class = failure.code(),
             http_status,
-            "Matrix OAuth QR protocol step failed"
+            "Matrix OAuth login protocol step failed"
         );
     } else {
         tracing::warn!(
             phase,
             error_class = failure.code(),
-            "Matrix OAuth QR protocol step failed"
+            "Matrix OAuth login protocol step failed"
         );
     }
 }
@@ -1132,12 +1561,12 @@ async fn best_effort_revoke(client: &Client) {
         Ok(Err(_)) => tracing::warn!(
             role = "acquire",
             error_class = "upstream",
-            "Matrix OAuth QR login session revocation failed"
+            "Matrix OAuth login session revocation failed"
         ),
         Err(_) => tracing::warn!(
             role = "acquire",
             error_class = "timeout",
-            "Matrix OAuth QR login session revocation timed out"
+            "Matrix OAuth login session revocation timed out"
         ),
     }
 }
@@ -1238,6 +1667,8 @@ mod tests {
             (DriverFailure::InvalidCheckCode, "invalid_check_code"),
             (DriverFailure::RendezvousExpired, "rendezvous_expired"),
             (DriverFailure::UserMismatch, "user_mismatch"),
+            (DriverFailure::AuthorizationDenied, "authorization_denied"),
+            (DriverFailure::AuthorizationExpired, "authorization_expired"),
             (DriverFailure::Upstream, "upstream"),
             (DriverFailure::Internal, "internal"),
         ];
@@ -1356,28 +1787,165 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cancellation_and_finalization_have_one_atomic_owner() {
+    fn test_flow(method: FlowMethod) -> Flow {
         let semaphore = Arc::new(Semaphore::new(1));
         let permit = semaphore.try_acquire_owned().unwrap();
-        let (scan_tx, _scan_rx) = oneshot::channel();
-        let (check_code_tx, _check_code_rx) = oneshot::channel();
-        let flow = Flow {
-            mutable: Mutex::new(FlowMutable {
-                state: MatrixOAuthAcquireState::new(
-                    Uuid::new_v4(),
-                    "@alice:example.org".to_owned(),
-                    MatrixOAuthAcquirePresentation::Display,
-                ),
-                scan_tx: Some(scan_tx),
-                check_code_tx: Some(check_code_tx),
-                lease: FlowLease::new(permit),
-            }),
-            cancel: CancellationToken::new(),
-            staging_dir_name: Uuid::new_v4().to_string(),
-        };
+        Flow::new(
+            Uuid::new_v4(),
+            "@alice:example.org".to_owned(),
+            method,
+            FlowLease::new(permit),
+            CancellationToken::new(),
+        )
+        .0
+    }
+
+    #[test]
+    fn cancellation_and_finalization_have_one_atomic_owner() {
+        let flow = test_flow(FlowMethod::Qr(MatrixOAuthAcquirePresentation::Display));
         assert!(flow.claim_finalization());
         assert!(!flow.cancel());
-        assert_eq!(flow.snapshot().stage, MatrixOAuthAcquireStage::Starting);
+        assert_eq!(
+            flow.qr_snapshot().unwrap().stage,
+            MatrixOAuthAcquireStage::Starting
+        );
+    }
+
+    #[test]
+    fn each_method_keeps_its_own_ttl_trust_and_breadcrumb_name() {
+        for presentation in [
+            MatrixOAuthAcquirePresentation::Display,
+            MatrixOAuthAcquirePresentation::Scan,
+        ] {
+            let method = FlowMethod::Qr(presentation);
+            assert_eq!(method.as_str(), presentation.as_str());
+            assert_eq!(method.ttl(), Duration::from_secs(10 * 60));
+            // The QR presentations must keep failing closed on an unverified
+            // device; only browser sign-in may skip that gate.
+            assert_eq!(method.trust(), MatrixOAuthAcquireTrust::CrossSigned);
+        }
+        assert_eq!(FlowMethod::Browser.as_str(), "browser");
+        assert_eq!(FlowMethod::Browser.ttl(), Duration::from_secs(30 * 60));
+        assert_eq!(
+            FlowMethod::Browser.trust(),
+            MatrixOAuthAcquireTrust::Unverified
+        );
+    }
+
+    #[test]
+    fn each_flow_is_visible_only_through_its_own_view() {
+        let qr = test_flow(FlowMethod::Qr(MatrixOAuthAcquirePresentation::Scan));
+        assert!(qr.qr_snapshot().is_some());
+        assert!(qr.browser_snapshot().is_none());
+
+        let browser = test_flow(FlowMethod::Browser);
+        assert!(browser.qr_snapshot().is_none());
+        let state = browser.browser_snapshot().unwrap();
+        assert_eq!(state.stage, MatrixOAuthBrowserStage::Starting);
+        assert_eq!(state.expected_user_id, "@alice:example.org");
+    }
+
+    fn publish_link(flow: &Flow) {
+        flow.update_browser(|state| {
+            state.set_stage(MatrixOAuthBrowserStage::WaitingForAuthorization);
+            state.verification_uri = Some("https://auth.example.org/link?code=WDJB".to_owned());
+            state.user_code = Some("WDJB".to_owned());
+        });
+    }
+
+    #[test]
+    fn browser_link_and_code_exist_only_while_waiting_for_authorization() {
+        let flow = test_flow(FlowMethod::Browser);
+        let starting = flow.browser_snapshot().unwrap();
+        assert!(starting.verification_uri.is_none() && starting.user_code.is_none());
+
+        publish_link(&flow);
+        let waiting = flow.browser_snapshot().unwrap();
+        assert_eq!(
+            waiting.stage,
+            MatrixOAuthBrowserStage::WaitingForAuthorization
+        );
+        assert!(waiting.verification_uri.is_some() && waiting.user_code.is_some());
+
+        flow.update_browser(|state| state.set_stage(MatrixOAuthBrowserStage::Finalizing));
+        let finalizing = flow.browser_snapshot().unwrap();
+        assert_eq!(finalizing.stage, MatrixOAuthBrowserStage::Finalizing);
+        assert!(finalizing.verification_uri.is_none() && finalizing.user_code.is_none());
+    }
+
+    #[test]
+    fn every_browser_terminal_stage_clears_the_link_and_code() {
+        let account_id = Uuid::new_v4();
+        let cases = [
+            (
+                Terminal::Done(account_id),
+                MatrixOAuthBrowserStage::Done,
+                Some(account_id),
+                None,
+            ),
+            (
+                Terminal::Failed("authorization_denied"),
+                MatrixOAuthBrowserStage::Failed,
+                None,
+                Some("authorization_denied"),
+            ),
+            (
+                Terminal::Cancelled,
+                MatrixOAuthBrowserStage::Cancelled,
+                None,
+                None,
+            ),
+        ];
+        for (terminal, stage, account, error) in cases {
+            let flow = test_flow(FlowMethod::Browser);
+            publish_link(&flow);
+            flow.terminal(terminal);
+            let state = flow.browser_snapshot().unwrap();
+            assert_eq!(state.stage, stage);
+            assert!(state.verification_uri.is_none() && state.user_code.is_none());
+            assert_eq!(state.account_id, account);
+            assert_eq!(state.error_code.as_deref(), error);
+        }
+
+        // Cancelling from the waiting stage clears them too, and a late driver
+        // update cannot put them back on a terminal flow.
+        let flow = test_flow(FlowMethod::Browser);
+        publish_link(&flow);
+        assert!(flow.cancel());
+        publish_link(&flow);
+        let state = flow.browser_snapshot().unwrap();
+        assert_eq!(state.stage, MatrixOAuthBrowserStage::Cancelled);
+        assert!(state.verification_uri.is_none() && state.user_code.is_none());
+    }
+
+    #[test]
+    fn a_qr_flow_ignores_browser_updates_and_the_reverse() {
+        let qr = test_flow(FlowMethod::Qr(MatrixOAuthAcquirePresentation::Display));
+        publish_link(&qr);
+        let state = qr.qr_snapshot().unwrap();
+        assert_eq!(state.stage, MatrixOAuthAcquireStage::Starting);
+        assert!(state.verification_uri.is_none());
+
+        let browser = test_flow(FlowMethod::Browser);
+        browser.update(|state| state.set_stage(MatrixOAuthAcquireStage::QrReady));
+        assert_eq!(
+            browser.browser_snapshot().unwrap().stage,
+            MatrixOAuthBrowserStage::Starting
+        );
+    }
+
+    #[test]
+    fn device_grant_failures_map_onto_stable_flow_codes() {
+        let cases = [
+            (DeviceGrantFailure::Unsupported, "unsupported"),
+            (DeviceGrantFailure::Cancelled, "cancelled"),
+            (DeviceGrantFailure::Timeout, "timeout"),
+            (DeviceGrantFailure::Denied, "authorization_denied"),
+            (DeviceGrantFailure::Expired, "authorization_expired"),
+            (DeviceGrantFailure::Upstream, "upstream"),
+        ];
+        for (failure, expected) in cases {
+            assert_eq!(DriverFailure::from(failure).code(), expected);
+        }
     }
 }
