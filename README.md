@@ -39,7 +39,7 @@ curl -fLO "https://github.com/matrix-axon/matrix-axon/releases/latest/download/a
 sudo apt install "./axon-server_$(dpkg --print-architecture).deb"
 ```
 
-- Server with its web client on Fedora (x86_64 or aarch64):
+- Server with its web client on Fedora or RHEL 10 (x86_64 or aarch64):
 
 ```sh
 sudo dnf install postgresql-server postgresql-contrib gawk
@@ -49,10 +49,10 @@ curl -fLO "https://github.com/matrix-axon/matrix-axon/releases/latest/download/a
 sudo dnf install "./axon-server.$(uname -m).rpm"
 ```
 
-Fedora does not create or start a database when PostgreSQL is installed, so the second and third lines do that before the package goes on.
+Neither creates or starts a database when PostgreSQL is installed, so the second and third lines do that before the package goes on.
 Skip `postgresql-setup --initdb` on a machine that already runs PostgreSQL.
 
-On either system, the install sets up the database and the service, then prints a one-time sign-in URL for the web client at `http://127.0.0.1:8080/`.
+On any of these systems, the install sets up the database and the service, then prints a one-time sign-in URL for the web client at `http://127.0.0.1:8080/`.
 It listens on this machine only; the same output says how to reach it from other devices and how to turn the web client off.
 `/usr/share/doc/axon-server/README.Debian` has the details.
 
