@@ -20,6 +20,7 @@ mod dto;
 mod extract;
 mod lifecycle;
 mod matrix_oauth_acquire;
+mod matrix_oauth_browser;
 mod matrix_oauth_grant;
 mod media;
 mod member_profiles;
@@ -53,6 +54,10 @@ pub use lifecycle::{
 pub use matrix_oauth_acquire::{
     MatrixOAuthQrAcquireService, MatrixOAuthQrError, MatrixOAuthQrFlowDto,
     MatrixOAuthQrPresentation, MatrixOAuthQrStage,
+};
+pub use matrix_oauth_browser::{
+    MatrixOAuthBrowserError, MatrixOAuthBrowserFlowDto, MatrixOAuthBrowserService,
+    MatrixOAuthBrowserStage,
 };
 pub use matrix_oauth_grant::{
     MatrixOAuthQrGrantError, MatrixOAuthQrGrantFlowDto, MatrixOAuthQrGrantService,
@@ -138,6 +143,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/login/qr/{flow_id}/check-code",
             post(routes::matrix_oauth_acquire::submit_check_code),
+        )
+        .route(
+            "/v1/accounts/login/browser",
+            post(routes::matrix_oauth_browser::create),
+        )
+        .route(
+            "/v1/accounts/login/browser/{flow_id}",
+            get(routes::matrix_oauth_browser::get).delete(routes::matrix_oauth_browser::cancel),
         )
         .route(
             "/v1/accounts/{account_id}/login-grants/qr",

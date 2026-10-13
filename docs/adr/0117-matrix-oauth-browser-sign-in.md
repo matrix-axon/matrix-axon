@@ -37,7 +37,8 @@ Two facts constrain how the rest is built.
 Axon requests a device authorization from the homeserver's advertised authorization server, hands the client a verification link and a short user code, and polls the token endpoint until the user has signed in and approved in a browser of their choosing.
 That browser may be on any device; it never needs to reach Axon.
 
-The method is offered only when the validated discovery metadata contains a `device_authorization_endpoint` and, where the metadata lists `grant_types_supported`, that list includes `urn:ietf:params:oauth:grant-type:device_code`.
+The method is offered only when the validated discovery metadata contains a `device_authorization_endpoint` and its `grant_types_supported` list includes `urn:ietf:params:oauth:grant-type:device_code`.
+Matrix requires that list, so an endpoint advertised without the grant type is a server that does not offer it.
 Otherwise the flow terminates with the existing stable `unsupported` classification, exactly as QR acquisition does, and password login, QR login, token import, recovery, and SAS are unaffected.
 
 MAS remains the tested reference implementation and is not a server type in Axon's model.
@@ -50,7 +51,9 @@ The device authorization request and the token poll join them there, under the s
 
 The sequence is:
 
-1. Build the staging SDK client and run `MatrixOAuthRegistrationManager::prepare`, unchanged.
+1. Build the staging SDK client and resolve the client registration — discovery, then a stored, static, or dynamic client ID — without installing it on the client.
+   _(Amended during implementation: the SDK accepts authentication data exactly once and panics on a second attempt, so the client ID cannot be installed here and again in step 7.
+   The QR presentations still install it at this point, because the SDK's own login then adds the session.)_
 2. Generate a fresh Matrix device ID locally.
 3. `POST` the device authorization endpoint with the client ID and the same two scopes the pinned SDK requests for QR login: full client-server API access and the scope that binds the token to that device ID.
 4. Validate the returned verification link and user code (below), publish them on the flow, and enter `waiting_for_authorization`.
@@ -58,6 +61,7 @@ The sequence is:
 6. On a token response, enter `finalizing`, which clears the link and user code, and require a refresh token, as QR acquisition already does.
 7. Assemble an `OAuthSession` from the client ID, the expected user ID, the generated device ID, and the tokens, and install it with the public `client.oauth().restore_session(...)`.
 8. Continue into the existing `whoami` identity validation and finalization.
+   For this method `whoami` must also report the device ID generated in step 2; a server that binds the token to another device ignored the requested scope, and the flow fails as `upstream`.
 
 **One device ID.**
 The staging client built in step 1 is unauthenticated and has no crypto identity; the SDK creates the device's Olm machine only when `restore_session` activates the client in step 7.
@@ -142,7 +146,8 @@ The change is additive to `/v1/`.
 The breadcrumb table's `presentation` check constraint gains the new value through a new forward-only migration; no published migration is edited.
 The store is PostgreSQL, so the migration drops and re-adds the named check constraint in one transaction and does not rebuild the table.
 
-Homeserver resolution matches the QR display presentation: the server discovers it from the expected user ID's server name.
+Homeserver resolution matches the QR display presentation in what it takes: only the expected user ID, from whose server name the server discovers the homeserver.
+It uses the resolver password login already has rather than the SDK's — the well-known document, then the server name itself, each confirmed as a homeserver, with plain HTTP only for a loopback name — so the method behaves like password login and can be tested against a loopback server.
 
 ### 4. The account activates unverified, and says so
 

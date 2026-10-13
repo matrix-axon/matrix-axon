@@ -45,7 +45,8 @@ pub use events::{
 pub use instance_preferences::InstancePreference;
 pub use invites::{RoomInvite, RoomInviteSnapshot};
 pub use matrix_oauth_acquire::{
-    CommitMatrixOAuthAcquire, MatrixOAuthAcquireBreadcrumb, MatrixOAuthAcquireFinalization,
+    CommitMatrixOAuthAcquire, FinalizeMatrixOAuthAcquire, MatrixOAuthAcquireBreadcrumb,
+    MatrixOAuthAcquireFinalization,
 };
 pub use media_uploads::{MediaUpload, MediaUploadKind, MediaUploadState, NewMediaUpload};
 pub use member_counts::{MemberCountWrite, RoomMemberCounts};

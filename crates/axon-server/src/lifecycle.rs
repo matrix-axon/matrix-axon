@@ -34,7 +34,7 @@ fn map_login_err(err: LifecycleError) -> LoginError {
             LoginError::Conflict(format!("account is already active: {id}"))
         }
         LifecycleError::LoginFinalizing(user_id) => LoginError::Conflict(format!(
-            "a Matrix OAuth QR login is still finalizing for {user_id}"
+            "a Matrix OAuth login is in progress or still finalizing for {user_id}"
         )),
         LifecycleError::AuthFailed(msg) => LoginError::AuthFailed(msg),
         LifecycleError::Upstream(msg) => LoginError::Upstream(msg),

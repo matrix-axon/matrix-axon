@@ -295,6 +295,19 @@ impl From<crate::matrix_oauth_acquire::MatrixOAuthQrError> for ApiError {
     }
 }
 
+impl From<crate::matrix_oauth_browser::MatrixOAuthBrowserError> for ApiError {
+    fn from(err: crate::matrix_oauth_browser::MatrixOAuthBrowserError) -> Self {
+        use crate::matrix_oauth_browser::MatrixOAuthBrowserError;
+        match err {
+            MatrixOAuthBrowserError::InvalidRequest(msg) => ApiError::bad_request(msg),
+            MatrixOAuthBrowserError::Conflict(msg) => ApiError::conflict(msg),
+            MatrixOAuthBrowserError::NotFound(msg) => ApiError::not_found(msg),
+            MatrixOAuthBrowserError::TooMany(msg) => ApiError::too_many_requests(msg),
+            MatrixOAuthBrowserError::Internal => ApiError::internal(),
+        }
+    }
+}
+
 impl From<crate::matrix_oauth_grant::MatrixOAuthQrGrantError> for ApiError {
     fn from(err: crate::matrix_oauth_grant::MatrixOAuthQrGrantError) -> Self {
         use crate::matrix_oauth_grant::MatrixOAuthQrGrantError;

@@ -68,6 +68,25 @@ pub enum CommitMatrixOAuthAcquire {
     DeletingConflict(Uuid),
 }
 
+/// Result of activating an adopted account and consuming its breadcrumb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeMatrixOAuthAcquire {
+    /// The account is now `active`, with the trust its acquisition method
+    /// established.
+    Activated { verified: bool },
+    /// The breadcrumb no longer names that account; nothing changed.
+    BreadcrumbMissing,
+}
+
+/// Whether a completed acquisition leaves the account's device verified.
+///
+/// The two QR presentations finalize only after the device was found
+/// cross-signed (ADR 0097). Browser sign-in authenticates without verifying
+/// (ADR 0117). Any other value is treated as unverified, the safe default.
+fn presentation_verifies_device(presentation: &str) -> bool {
+    matches!(presentation, "display" | "scan")
+}
+
 impl Store {
     /// Create the breadcrumb before any staging directory or remote work.
     /// Returns `false` when another flow already owns the expected Matrix ID.
@@ -255,40 +274,47 @@ impl Store {
     }
 
     /// Mark the adopted account active and consume its breadcrumb atomically.
-    /// Returns `false` when the breadcrumb no longer names that account.
+    ///
+    /// `verified` is derived here from the breadcrumb's durable presentation
+    /// rather than passed in, so the live finalizer and boot reconciliation
+    /// cannot disagree and no caller can mark a browser sign-in verified.
     pub async fn finalize_matrix_oauth_acquire(
         &self,
         flow_id: Uuid,
         account_id: Uuid,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<FinalizeMatrixOAuthAcquire, StoreError> {
         let mut tx = self.pool.begin().await?;
         let breadcrumb = sqlx_core::query::query(
             "DELETE FROM matrix_oauth_acquire_flows \
              WHERE flow_id = $1 AND account_id = $2 \
-               AND finalization_state = 'session_committed'",
+               AND finalization_state = 'session_committed' \
+             RETURNING presentation",
         )
         .bind(flow_id)
         .bind(account_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if breadcrumb.rows_affected() != 1 {
+        let Some(breadcrumb) = breadcrumb else {
             tx.rollback().await?;
-            return Ok(false);
-        }
+            return Ok(FinalizeMatrixOAuthAcquire::BreadcrumbMissing);
+        };
+        let presentation: String = breadcrumb.try_get("presentation")?;
+        let verified = presentation_verifies_device(&presentation);
         let active = sqlx_core::query::query(
-            "UPDATE accounts SET state = 'active', verified = true \
+            "UPDATE accounts SET state = 'active', verified = $2 \
              WHERE account_id = $1 AND state = 'deactivated'",
         )
         .bind(account_id)
+        .bind(verified)
         .execute(&mut *tx)
         .await?;
         if active.rows_affected() != 1 {
             return Err(StoreError::InvalidAccountSession(
-                "account changed before Matrix OAuth QR activation".to_owned(),
+                "account changed before Matrix OAuth activation".to_owned(),
             ));
         }
         tx.commit().await?;
-        Ok(true)
+        Ok(FinalizeMatrixOAuthAcquire::Activated { verified })
     }
 }
 
@@ -382,10 +408,13 @@ mod tests {
             StoredAccountSession::Matrix { .. } => panic!("expected OAuth session"),
         }
 
-        assert!(store
-            .finalize_matrix_oauth_acquire(flow_id, account.account_id)
-            .await
-            .unwrap());
+        assert_eq!(
+            store
+                .finalize_matrix_oauth_acquire(flow_id, account.account_id)
+                .await
+                .unwrap(),
+            FinalizeMatrixOAuthAcquire::Activated { verified: true }
+        );
         assert_eq!(
             store
                 .get_account(account.account_id)
@@ -403,11 +432,12 @@ mod tests {
                 .unwrap()
                 .verified
         );
-        assert!(
-            !store
+        assert_eq!(
+            store
                 .finalize_matrix_oauth_acquire(flow_id, account.account_id)
                 .await
                 .unwrap(),
+            FinalizeMatrixOAuthAcquire::BreadcrumbMissing,
             "finalization is single-use"
         );
 
@@ -515,14 +545,112 @@ mod tests {
         assert_eq!(committed.account_id, account.account_id);
         assert_eq!(committed.homeserver_url, "https://new.example.org/");
 
-        assert!(store
-            .finalize_matrix_oauth_acquire(flow_id, account.account_id)
-            .await
-            .unwrap());
+        assert_eq!(
+            store
+                .finalize_matrix_oauth_acquire(flow_id, account.account_id)
+                .await
+                .unwrap(),
+            FinalizeMatrixOAuthAcquire::Activated { verified: true }
+        );
         sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
             .bind(account.account_id)
             .execute(store.pool())
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn only_the_qr_presentations_leave_the_device_verified() {
+        assert!(presentation_verifies_device("display"));
+        assert!(presentation_verifies_device("scan"));
+        assert!(!presentation_verifies_device("browser"));
+        assert!(!presentation_verifies_device("anything-else"));
+    }
+
+    /// ADR 0117: a browser sign-in shares the one-flow-per-user bound with the
+    /// QR presentations and activates an account that is not verified.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn browser_presentation_activates_an_unverified_account() {
+        let store = store().await;
+        let flow_id = Uuid::new_v4();
+        let user_id = user_id();
+        assert!(store
+            .create_matrix_oauth_acquire_breadcrumb(
+                flow_id,
+                &user_id,
+                "browser",
+                &flow_id.to_string()
+            )
+            .await
+            .unwrap());
+        for presentation in ["display", "scan", "browser"] {
+            assert!(
+                !store
+                    .create_matrix_oauth_acquire_breadcrumb(
+                        Uuid::new_v4(),
+                        &user_id,
+                        presentation,
+                        &Uuid::new_v4().to_string(),
+                    )
+                    .await
+                    .unwrap(),
+                "a {presentation} flow must not start beside a live browser flow"
+            );
+        }
+
+        let account = match store
+            .commit_matrix_oauth_acquire(
+                flow_id,
+                &user_id,
+                "https://example.org/",
+                "DEVICE",
+                "access-secret",
+                "refresh-secret",
+                "public-client",
+                "store-key",
+            )
+            .await
+            .unwrap()
+        {
+            CommitMatrixOAuthAcquire::Committed(account) => account,
+            other => panic!("unexpected commit outcome: {other:?}"),
+        };
+        assert_eq!(
+            store
+                .finalize_matrix_oauth_acquire(flow_id, account.account_id)
+                .await
+                .unwrap(),
+            FinalizeMatrixOAuthAcquire::Activated { verified: false }
+        );
+        let active = store
+            .get_account(account.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.state, AccountState::Active);
+        assert!(!active.verified, "browser sign-in makes no trust claim");
+
+        sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+            .bind(account.account_id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn an_unknown_presentation_is_still_refused_by_the_schema() {
+        let store = store().await;
+        let flow_id = Uuid::new_v4();
+        assert!(store
+            .create_matrix_oauth_acquire_breadcrumb(
+                flow_id,
+                &user_id(),
+                "password",
+                &flow_id.to_string()
+            )
+            .await
+            .is_err());
     }
 }
