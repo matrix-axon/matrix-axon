@@ -1427,6 +1427,31 @@ h2 {
   letter-spacing: 0.2em;
 }
 
+a.button-like {
+  color: inherit;
+  text-decoration: none;
+}
+
+.browser-sign-in-step {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.browser-sign-in-step p {
+  margin: 0;
+}
+
+/* The flow is a grid, which would stretch its lone buttons to full width. */
+.browser-sign-in > button {
+  justify-self: start;
+}
+
+.browser-sign-in-code {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: start;
+}
+
 .segmented-code-label {
   flex: none;
 }

@@ -18,9 +18,11 @@ import {
   type Account,
   type SyncState,
 } from '../stores/accounts'
+import { isTerminalMatrixOAuthBrowserFlow } from '../stores/matrix-oauth-browser'
 import { isTerminalMatrixOAuthQrFlow } from '../stores/matrix-oauth-qr'
 import { flowKey } from '../stores/verification'
 import { ServerStatus } from './ServerStatus'
+import { MatrixOAuthBrowserAcquisition } from './accounts/MatrixOAuthBrowserAcquisition'
 import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
 import { MatrixOAuthQrGrant } from './accounts/MatrixOAuthQrGrant'
 
@@ -31,11 +33,17 @@ import { MatrixOAuthQrGrant } from './accounts/MatrixOAuthQrGrant'
  * switch persisted in settings.
  */
 export function AccountsPage() {
-  const { accounts, matrixOAuthQr } = useServices()
+  const { accounts, matrixOAuthQr, matrixOAuthBrowser } = useServices()
   const [acquisition, setAcquisition] = useState<{
     reactivation: Account | null
-    method: 'password' | 'qr'
-  }>({ reactivation: null, method: 'password' })
+    method: AcquisitionMethod
+  }>(() => ({
+    reactivation: null,
+    // A reload in the middle of a browser sign-in comes back to it: the user
+    // is on their way back from the homeserver's page and the default tab
+    // would hide the sign-in they are waiting on.
+    method: matrixOAuthBrowser.hasStoredFlow() ? 'browser' : 'password',
+  }))
   const finishReactivation = useCallback(
     () =>
       setAcquisition((current) => ({
@@ -58,9 +66,18 @@ export function AccountsPage() {
     ) {
       return
     }
+    const browserFlow = matrixOAuthBrowser.flow.value
+    if (
+      browserFlow !== null &&
+      !isTerminalMatrixOAuthBrowserFlow(browserFlow) &&
+      !(await matrixOAuthBrowser.cancel())
+    ) {
+      return
+    }
     matrixOAuthQr.reset()
+    matrixOAuthBrowser.reset()
     finishReactivation()
-  }, [finishReactivation, matrixOAuthQr])
+  }, [finishReactivation, matrixOAuthBrowser, matrixOAuthQr])
 
   useEffect(() => {
     void accounts.refresh()
@@ -103,6 +120,8 @@ export function AccountsPage() {
     </div>
   )
 }
+
+type AcquisitionMethod = 'password' | 'qr' | 'browser'
 
 function Badge({
   className,
@@ -555,13 +574,16 @@ function AccountAcquisition({
   onSuccess,
 }: {
   reactivation: Account | null
-  method: 'password' | 'qr'
-  onMethodChange: (method: 'password' | 'qr') => void
+  method: AcquisitionMethod
+  onMethodChange: (method: AcquisitionMethod) => void
   onCancelReactivation: () => Promise<void>
   onSuccess: () => void
 }) {
-  const { matrixOAuthQr } = useServices()
+  const { matrixOAuthQr, matrixOAuthBrowser } = useServices()
   const section = useRef<HTMLElement>(null)
+  const cancelling =
+    matrixOAuthQr.operation.value === 'cancelling' ||
+    matrixOAuthBrowser.operation.value === 'cancelling'
 
   useEffect(() => {
     if (reactivation === null) {
@@ -584,18 +606,17 @@ function AccountAcquisition({
       {reactivation !== null && (
         <>
           <p class="muted">
-            Sign in again with this account&rsquo;s password or a trusted Matrix
-            device. Axon will reuse its stored homeserver.
+            Sign in again with this account&rsquo;s password, a trusted Matrix
+            device, or your homeserver&rsquo;s sign-in page. Axon will reuse its
+            stored homeserver.
           </p>
           <div class="card-actions">
             <button
               type="button"
-              disabled={matrixOAuthQr.operation.value === 'cancelling'}
+              disabled={cancelling}
               onClick={() => void onCancelReactivation()}
             >
-              {matrixOAuthQr.operation.value === 'cancelling'
-                ? 'Cancelling reactivation…'
-                : 'Cancel reactivation'}
+              {cancelling ? 'Cancelling reactivation…' : 'Cancel reactivation'}
             </button>
           </div>
         </>
@@ -621,6 +642,14 @@ function AccountAcquisition({
         >
           Sign in with QR code
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={method === 'browser'}
+          onClick={() => onMethodChange('browser')}
+        >
+          Sign in with browser
+        </button>
       </div>
       <div role="tabpanel">
         {method === 'password' ? (
@@ -631,8 +660,13 @@ function AccountAcquisition({
               onSuccess={onSuccess}
             />
           </>
-        ) : (
+        ) : method === 'qr' ? (
           <MatrixOAuthQrAcquisition
+            expectedUserId={reactivation?.user_id}
+            onSuccess={onSuccess}
+          />
+        ) : (
+          <MatrixOAuthBrowserAcquisition
             expectedUserId={reactivation?.user_id}
             onSuccess={onSuccess}
           />

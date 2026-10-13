@@ -215,6 +215,9 @@ The device code never crosses `/v1/` at all.
 
 Directly related documentation ships with each code PR.
 
+_Amended during implementation: the web step was built before the smoke lane, stacked on the server step, so that the server could be tried against a real client and a real authorization server before its API merged.
+The web end-to-end tests run against the mock server and do not depend on the smoke lane._
+
 ### 7. Verification required before calling the feature complete
 
 Unit and contract tests cover:

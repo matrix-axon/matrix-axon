@@ -27,7 +27,9 @@ const STAGE_SUMMARIES: Record<MatrixOAuthQrFlow['stage'], string> = {
   cancelled: 'QR sign-in cancelled.',
 }
 
-function safeVerificationUri(value: string | null | undefined): string | null {
+export function safeVerificationUri(
+  value: string | null | undefined,
+): string | null {
   if (value === null || value === undefined) {
     return null
   }
