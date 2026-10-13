@@ -79,6 +79,7 @@ It's slower than the lint/test lane because it pulls the Synapse and Postgres im
 The same manual integration workflow exposes four pinned Synapse + MAS lanes: `matrix-oauth-api`, `matrix-oauth-acquire`, `matrix-oauth-grant`, and `matrix-oauth-unsupported`.
 Choose `matrix-oauth-all` to run the complete set, or `all` to run both the re-decryption suite above and every Matrix OAuth lane.
 The smoke workflow also runs all four Matrix OAuth lanes in a separate job after every push to `main` and on its nightly schedule.
+It can be dispatched by hand with a `matrix-oauth-*` lane as well; the two entry points run the same job, but only the smoke workflow posts the result to the axon-developer room, so use the integration workflow for a quiet ad hoc run.
 
 Locally, run a single lane with:
 

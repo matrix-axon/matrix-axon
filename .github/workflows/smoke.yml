@@ -15,7 +15,9 @@ name: smoke
 # `matrix-oauth` independently runs the four ADR 0097 API and interoperability
 # lanes on the same post-merge and nightly events. It stays in its own job so
 # its secret-safe no-artifact policy and failure signal cannot be confused with
-# the ordinary smoke harness.
+# the ordinary smoke harness. A manual dispatch can run it on its own, whole
+# (`matrix-oauth-all`) or one lane at a time, to chase a flake without waiting
+# for the nightly run.
 #
 # Before this split the whole gate was workflow_dispatch-only, so nothing ran
 # it automatically and `scroll_pin_on_relation_refresh` sat broken on main long
@@ -42,6 +44,11 @@ on:
           - tui-true-local
           - server
           - all
+          - matrix-oauth-all
+          - matrix-oauth-api
+          - matrix-oauth-acquire
+          - matrix-oauth-grant
+          - matrix-oauth-unsupported
 
 permissions:
   contents: read
@@ -85,7 +92,9 @@ jobs:
 
   # Does not gate pull requests: needs Docker and a real Synapse.
   true-local:
-    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || (inputs.lane != 'tui' && inputs.lane != 'notify'))
+    # An allow-list, so a future dispatch-only lane cannot fall through to
+    # `smoke-gate.sh` with a mode it does not know.
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.lane == 'tui-true-local' || inputs.lane == 'server' || inputs.lane == 'all')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -154,10 +163,12 @@ jobs:
   # Does not gate pull requests: this pulls pinned Synapse and MAS images and
   # exercises an unstable Matrix protocol with real OAuth and E2EE secrets.
   matrix-oauth:
-    if: github.event_name == 'push' || github.event_name == 'schedule'
+    if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'matrix-oauth'))
     uses: ./.github/workflows/matrix-oauth.yml
     with:
-      suite: matrix-oauth-all
+      # A dispatch names the suite through its lane; push and schedule have no
+      # input and run all four lanes, as before.
+      suite: ${{ inputs.lane || 'matrix-oauth-all' }}
       notify: true
     secrets:
       NOTIFY_URL: ${{ secrets.NOTIFY_URL }}

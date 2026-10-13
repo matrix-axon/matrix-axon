@@ -22,6 +22,8 @@ scripts/matrix-oauth-test.sh unsupported
 
 Set `TMPDIR` to a filesystem with enough room for the throwaway configuration and SDK stores when `/tmp` is constrained.
 
+In CI the lanes run after every push to `main` and nightly from `smoke.yml`, and can be dispatched by hand from either `integration.yml` (no notification) or `smoke.yml` (posts the result to the axon-developer room).
+
 The lanes cover:
 
 - `api`: authenticated acquisition boundaries, invalid identity, idempotent cancellation and bounded identity-release recovery, explicit authorization rejection, account-scoped grant isolation, malformed QR redaction, grant cancellation, and real rendezvous expiry;
