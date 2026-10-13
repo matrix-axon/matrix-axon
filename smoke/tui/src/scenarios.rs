@@ -186,7 +186,7 @@ fn wait_for_room_and_input_until(
     driver.wait_for_screen_or_exit(
         "startup to finish",
         deadline.saturating_duration_since(Instant::now()),
-        |screen| !screen.contains("Rooms — connecting") && !screen.contains("Rooms — loading"),
+        rooms_title_settled,
     )?;
     Ok(())
 }
@@ -596,14 +596,14 @@ pub async fn true_local_status_commands(ctx: &Ctx) -> ScenarioOutcome {
             screen.contains("Room Info")
         })?;
         // The popup is modal: keys typed into it never reach the compose line.
-        driver.send_bytes(&[0x1b])?;
+        press_escape(&mut driver)?;
         driver.wait_for_screen("whereami popup to close", ctx.timeout, |screen| {
             !screen.contains("Room Info")
         })?;
 
         submit_command(&mut driver, "/whoami")?;
         driver.wait_for_screen("whoami output to render", ctx.timeout, |screen| {
-            screen.contains("Display Name:")
+            screen.contains("Matrix ID: @")
         })?;
 
         submit_command(&mut driver, "/status")?;
@@ -998,9 +998,15 @@ pub async fn true_local_room_filter(ctx: &Ctx) -> ScenarioOutcome {
         // `/pin` is an optimistic tag write: the TUI counts as mid-command, and
         // drops chords such as Alt-/, until the server round trip completes.
         // Its completion status is the only signal that it has.
-        let pinned = format!("pinned {general}");
+        // Matched on the status row, with a leading space: "pinned X" is also a
+        // substring of "unpinned X", and the room name may appear elsewhere.
+        let pinned = format!(" pinned {general}");
         driver.wait_for_screen("pin write to complete", ctx.timeout, |screen| {
-            screen.contains(&pinned)
+            screen
+                .lines()
+                .rev()
+                .take(5)
+                .any(|line| line.contains(&pinned))
         })?;
         submit_command(&mut driver, "/filter fav")?;
         wait_for_room_list_state(
@@ -1065,11 +1071,14 @@ fn press_alt(driver: &mut PtyDriver, ch: char) -> anyhow::Result<()> {
 
 fn switch_room(driver: &mut PtyDriver, room_name: &str, timeout: Duration) -> anyhow::Result<()> {
     submit_command(driver, &format!("/room {room_name}"))?;
-    // The room name is always in the sidebar, so waiting for it proves nothing.
-    // `showing <room>` is the status the TUI sets once the timeline is loaded.
-    let loaded = format!("showing {room_name}");
+    // The room name is always in the sidebar, so waiting for it proves nothing,
+    // and the `showing <room>` status can be left over from startup when the
+    // room was already selected. The message pane's title names the selected
+    // room and is drawn together with its timeline, so it is true both when
+    // the switch has landed and when there was nothing to switch.
+    let pane_title = format!("┌{room_name}");
     driver.wait_for_screen("room switch to render", timeout, |screen| {
-        screen.contains(&loaded)
+        screen.contains(&pane_title)
     })
 }
 
@@ -1085,6 +1094,21 @@ fn wait_for_room_list_state(
 ) -> anyhow::Result<()> {
     driver.wait_for_screen("room-list state to render", timeout, |screen| {
         screen.contains(title) && rooms.iter().all(|room| screen.contains(room))
+    })
+}
+
+/// True once the rooms title shows a sort label (`Rooms — Recent`,
+/// `Rooms — Groups · Recent`). The startup stage labels (`Rooms — connecting…`,
+/// `Rooms — loading read state…`) are lowercase and sort labels never are, so
+/// this asks for the settled title rather than for the absence of a stage
+/// label: a clipped or reworded title keeps the wait pending and fails loudly
+/// instead of passing vacuously.
+fn rooms_title_settled(screen: &str) -> bool {
+    screen.match_indices("Rooms — ").any(|(at, prefix)| {
+        screen[at + prefix.len()..]
+            .chars()
+            .next()
+            .is_some_and(char::is_uppercase)
     })
 }
 
