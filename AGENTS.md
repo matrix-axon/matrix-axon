@@ -19,7 +19,7 @@ See `docs/mvp/prd.md` for the full product description.
 | `scripts/demo-web.sh`          | One-shot pipeline for the ADR 0086 web recordings: `up`/`record`/`assemble`/`upload`/`down`, or `all` end-to-end. `assemble` stitches each platform's per-scene clips into the single ordered tour `demo.html` and `api-docs.yml` expect — see `clients/web/README.md` § Demo recording.                                                         |
 | `scripts/demo-all.sh`          | Orchestrates the two scripts above under one command: `tui`/`web` run either demo on demand, `all [--upload]` records (and optionally publishes) both in one pass. Reimplements neither — TUI capture still needs a real X11/XWayland desktop session, so `all` fails loudly rather than skipping it silently; `--web-only` opts out on purpose. |
 | `scripts/integration-test.sh`  | One-command end-to-end re-decryption test: seeds an encrypted room + key backup via `axon-itest`, runs axon as a fresh device, and asserts UTDs back-fill. Runnable in CI on demand via `.github/workflows/integration.yml` (manual `workflow_dispatch`).                                                                                        |
-| `scripts/matrix-oauth-test.sh` | ADR 0097 black-box and real interoperability lanes against pinned Synapse + MAS: API boundaries, acquisition, fresh SDK-device grant, and unsupported capability. Runnable on demand via `integration.yml` and after `main` pushes/nightly via `smoke.yml`; secret-bearing runs upload no artifacts.                                             |
+| `scripts/matrix-oauth-test.sh` | ADR 0097 black-box and real interoperability lanes against pinned Synapse + MAS: API boundaries, acquisition, fresh SDK-device grant, and unsupported capability. Runs on demand via `integration.yml` or `smoke.yml` (notifies the dev room), and after `main` pushes/nightly via `smoke.yml`; secret-bearing runs upload no artifacts.         |
 
 ## Directory layout
 
@@ -429,6 +429,8 @@ Use `scripts/smoke-gate.sh <mode>` before pushing component changes that cross p
 
 The pre-push hook does not run Docker-backed smoke by default.
 Opt in with `RUN_SMOKE=tui`, `RUN_SMOKE=server`, `RUN_SMOKE=tui-true-local`, or `RUN_SMOKE=all` — the `smoke-gate` hook is a no-op unless that variable names a lane, and works the same under `git push` and `jj push`.
+
+CI can also run the Docker-backed lanes by hand: dispatch `smoke.yml` with a `lane` of `tui-true-local`, `server` or `all`, or with `matrix-oauth-all` (or one of `matrix-oauth-api`, `-acquire`, `-grant`, `-unsupported`) to run the Matrix OAuth QR suite alone and notify the axon-developer room; `integration.yml` offers the same suites without the notification.
 
 ## Current state
 
