@@ -1,0 +1,43 @@
+name: Build the web bundle
+description: >-
+  Builds clients/web into clients/web/dist and exports AXON_WEB_DIST for the
+  steps that follow, so a `cargo build --features embed-web` after it compiles
+  that bundle into axon-server and fails if it is missing (ADR 0116).
+
+outputs:
+  dist:
+    description: "Absolute path of the built bundle"
+    value: ${{ steps.build.outputs.dist }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: pnpm/action-setup@v6
+      with:
+        package_json_file: clients/web/package.json
+
+    - uses: actions/setup-node@v6
+      with:
+        node-version: 24
+        cache: pnpm
+        cache-dependency-path: clients/web/pnpm-lock.yaml
+
+    - name: Install web dependencies
+      shell: bash
+      working-directory: clients/web
+      run: pnpm install --frozen-lockfile
+
+    # The build stamps version.json with the commit, or `<commit>-dirty` when
+    # clients/web has uncommitted changes. Nothing before this step may write
+    # into clients/web, or a release ships a bundle that calls itself dirty;
+    # scripts/assert-web-embedded.sh refuses that on a tag.
+    - name: Build the web bundle
+      id: build
+      shell: bash
+      working-directory: clients/web
+      run: |
+        pnpm build
+        dist="$GITHUB_WORKSPACE/clients/web/dist"
+        test -f "$dist/index.html"
+        echo "dist=$dist" >> "$GITHUB_OUTPUT"
+        echo "AXON_WEB_DIST=$dist" >> "$GITHUB_ENV"

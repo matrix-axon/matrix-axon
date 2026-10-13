@@ -63,10 +63,11 @@ matrix-axon/
   .github/workflows/         # public repo: GitHub-hosted runners have free minutes, so most workflows trigger on push or release (via new tag); a few stay manual-dispatch only for other reasons (expensive/manual runs)
     api-docs.yml             # build the Pages site: homepage + API reference at https://matrix-axon.github.io/matrix-axon/api.html
     check-environment.yml    # local-runner environment check
-    cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows; on tags, publishes the Homebrew formulas and cask
+    cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows; on tags, publishes the Homebrew formulas and cask; every server binary carries the web client (ADR 0116)
     lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
     lint-and-test.yml        # cargo fmt + clippy + test
-    package.yml              # nFPM .deb/.rpm (amd64 on ubuntu-22.04, arm64 on ubuntu-22.04-arm); tag uploads to GitHub Releases
+    package.yml              # nFPM .deb/.rpm (amd64 on ubuntu-22.04, arm64 on ubuntu-22.04-arm); tag uploads to GitHub Releases; the binary carries the web client (ADR 0116)
+    embed-web.yml            # builds the web client into axon-server, runs the Postgres-gated router tests, then boots the binary and fetches the bundle back (ADR 0116)
     release-plz.yml          # on main: opens the release PR that bumps the Cargo version, and tags its merge (ADR 0106, release-plz.toml)
     release-notes.yml        # draft release notes grouped by PR label while the release PR is open; publishes them on the tag and opens the CHANGELOG.md PR (ADR 0108, .github/release.yml)
     integration.yml          # selectable E2EE re-decryption and Matrix OAuth QR real-service suites
@@ -74,6 +75,7 @@ matrix-axon/
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)
   .github/actions/           # actions relied on by the workflows
     check-environment/       # check environment on local runners before proceeding
+    web-bundle/              # build clients/web and export AXON_WEB_DIST, for any job that builds axon-server with `embed-web`
 ```
 
 ## Crates
@@ -259,6 +261,9 @@ this table is the orientation copy.
   The `embed-web` cargo feature compiles `clients/web/dist` (or `AXON_WEB_DIST`) into `axon-server`, and the router's fallback serves it unless `[server] web_client` is off.
   The feature is off by default, and the gate's `--all-features` builds on a checkout with no bundle only warn and embed nothing, so cargo and the pre-push gate need no Node.
   `AXON_WEB_DIST` is the explicit form: it must be an absolute path, and a directory there with no `index.html` fails the build, which is what release pipelines rely on.
+  Every job that ships a server binary builds with `--features embed-web` and `AXON_WEB_DIST` set (the `web-bundle` action exports it), then runs `scripts/assert-web-embedded.sh` on the result; a new release lane must do the same.
+  The one exception is the Docker server image (the root `Dockerfile`, `publish-images.yml`), which stays without the web client because the stack's `web` container serves it; do not change that outside #687.
+  `scripts/embed-web-smoke.sh` boots such a binary against a throwaway database and checks the bundle over HTTP, in CI (`embed-web.yml`) or by hand.
   The cache rules in `crates/axon-api/src/web.rs` and in `deploy/web/Caddyfile` are the same rules (ADR 0087): change one, change the other.
 - **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours").
   Note that the Matrix spec itself uses some Britishisms (`m.tag` `favourite`), in which case the standard should be used in code.

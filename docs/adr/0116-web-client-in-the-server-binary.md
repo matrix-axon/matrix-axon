@@ -191,13 +191,15 @@ The one-silo rule separates the layers anyway.
    The `embed-web` feature, the fallback, the `web_client` switch, and the bootstrap default.
    No released artifact changes, because nothing turns the feature on yet.
 2. **Build.**
-   `package.yml`, `cross-build.yml` and the root `Dockerfile` build `clients/web` and pass `--features embed-web`.
-   A CI job builds and tests with the feature, so it cannot rot between releases.
-   This is the change that puts the web client in the `.deb`, the `.rpm` and the Homebrew formula.
+   `package.yml` and `cross-build.yml` build `clients/web` and pass `--features embed-web` with `AXON_WEB_DIST` set.
+   Each asserts that the binary it is about to ship carries that bundle (`scripts/assert-web-embedded.sh`).
+   A CI job (`embed-web.yml`) builds with the feature, runs the router tests that need Postgres, and boots the binary to fetch the bundle back over HTTP (`scripts/embed-web-smoke.sh`), so it cannot rot between releases.
+   This is the change that puts the web client in the `.deb`, the `.rpm`, the release zips and the Homebrew formula.
+   The root `Dockerfile` is not part of it and moves to step 4: while the `web` container exists, embedding in the server image too would mean two copies of the web build stage for a bundle the stack never serves from the server.
 3. **Packaging.**
    Install output, `README.Debian`, the man page, the Homebrew caveats (which today say Tailscale "exposes the API, not the web client"), `packaging/README.md`, and the proxy site files and detection above.
 4. **Docker, optional.**
-   The `web` Caddy container becomes redundant once the server image serves the bundle.
+   The root `Dockerfile` gains the web build stage and the feature, and the `web` Caddy container becomes redundant once the server image serves the bundle.
    Removing it changes the stack's topology and is worth its own decision.
    Until then the stack keeps working unchanged, because Caddy answers non-API paths before the server sees them.
 
