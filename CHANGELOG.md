@@ -3,6 +3,30 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.9 - 2026-10-13
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(web): open user information from timeline senders by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/680
+* feat(api): serve the web client from the server binary by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/681
+* feat(packaging): tell the operator about the web client and how to expose it by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/685
+#### Bug Fixes
+* fix(tui): derive room unread from the server's notification_count by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/676
+* fix: bound database operations and prevent status queries from starving the server by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/616
+* fix(api): keep the bootstrap token on screen until the operator continues by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/686
+#### Documentation
+* docs(adr): add ADR 0117 for Matrix OAuth browser sign-in by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/692
+#### Build and CI
+* fix(build): pin the bundle build id to the commit by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/675
+* build: put the web client in the released server binaries by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/682
+#### Other Changes
+* create embed-web workflow as placeholder for testing by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/683
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.8...v0.1.9
+
 ## v0.1.8 - 2026-10-10
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
