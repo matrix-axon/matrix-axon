@@ -1,11 +1,112 @@
 name: Embedded web client
 
+# The `embed-web` feature (ADR 0116) is off in every other Rust job, or on with
+# no bundle to embed, so nothing else builds the thing a release ships. This
+# builds the web client, compiles it into axon-server, runs the router tests
+# that need Postgres, and then boots the binary and fetches the bundle back
+# over HTTP.
+
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      # Every crate: the smoke boots the whole server, so a change to the
+      # store, sync, search or media crates can break it too.
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      # Not all of clients/web: a server build per web PR is too much, and
+      # web-lint-and-test.yml already proves the bundle builds. These are the
+      # places a new kind of file, or a new output layout, comes from.
+      - "clients/web/package.json"
+      - "clients/web/pnpm-lock.yaml"
+      - "clients/web/vite.config.ts"
+      - "clients/web/index.html"
+      - "clients/web/public/**"
+      - ".github/actions/web-bundle/**"
+      - ".github/workflows/embed-web.yml"
+      - "scripts/assert-web-embedded.sh"
+      - "scripts/embed-web-smoke.sh"
+      - "scripts/expect-tests.sh"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
 
 jobs:
-  noop:
+  embed-web:
+    name: Build, test, and serve the embedded web client
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: axon
+          POSTGRES_PASSWORD: axon
+          POSTGRES_DB: axon
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U axon -d axon"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+
     steps:
-      - name: No-Op Action
-        run: echo "No operation performed. This is a placeholder workflow."
+      - uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-embed-web-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-embed-web-
+
+      # Exports AXON_WEB_DIST, which makes a missing bundle a build error.
+      - name: Build the web bundle
+        uses: ./.github/actions/web-bundle
+
+      - name: Unit tests with the bundle embedded
+        run: scripts/expect-tests.sh 10 cargo test -p axon-api --features embed-web --lib 'web::'
+
+      # `#[ignore = "requires Postgres"]`, so no other job runs them. Each
+      # filter is its own invocation because cargo test takes one, and each
+      # states how many tests it must run: a filter that matches nothing exits 0.
+      - name: Router tests with the bundle embedded
+        env:
+          DATABASE_URL: postgres://axon:axon@localhost:5432/axon
+        run: |
+          scripts/expect-tests.sh 2 cargo test -p axon-api --features embed-web --test http web_client_ -- --ignored --test-threads=1
+          scripts/expect-tests.sh 1 cargo test -p axon-api --features embed-web --test http browser_fallback -- --ignored
+          scripts/expect-tests.sh 1 cargo test -p axon-api --features embed-web --test http unknown_v1_paths -- --ignored
+
+      - name: Build axon-server with the bundle embedded
+        run: cargo build -p axon-server --bin axon-server --features embed-web
+
+      - name: Assert the binary carries the web client
+        run: scripts/assert-web-embedded.sh target/debug/axon-server "$AXON_WEB_DIST"
+
+      # Its own database: the router tests above leave rows behind.
+      - name: Serve the bundle from the binary
+        env:
+          PGPASSWORD: axon
+        run: |
+          createdb -h localhost -U axon axon_smoke
+          DATABASE_URL=postgres://axon:axon@localhost:5432/axon_smoke \
+            scripts/embed-web-smoke.sh target/debug/axon-server "$AXON_WEB_DIST"

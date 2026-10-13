@@ -36,6 +36,7 @@ mod sync_status;
 mod trust;
 mod uploads;
 mod verification;
+mod web;
 mod ws;
 
 pub use auth::{AuthedToken, StoreTokenVerifier, TokenVerifier, RECENT_SIGN_IN_WINDOW};
@@ -77,7 +78,7 @@ pub use sender::{
     AccountActionsSender, EphemeralSender, LeaveOutcome, MembershipSender, MessageSender,
     PowerLevelsSender, RoomEntrySender, RoomSettingsSender, SendError,
 };
-pub use state::{AppState, BootstrapConfig, ManagementConfig};
+pub use state::{AppState, BootstrapConfig, ManagementConfig, WebClientConfig};
 pub use sync_state::SyncStateProvider;
 pub use sync_status::{AccountSyncSnapshot, SyncStatusProvider};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
@@ -86,12 +87,16 @@ pub use uploads::{
     UploadStream,
 };
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
+pub use web::web_client_embedded;
+#[doc(hidden)]
+pub use web::Bundle as WebBundle;
 
 use axum::{
     body::Body,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderMap, Method, Uri},
     middleware::from_fn_with_state,
-    response::Html,
+    response::{Html, IntoResponse, Response},
     routing::{any, get, post, put},
     Json, Router,
 };
@@ -590,9 +595,10 @@ pub fn router(state: AppState) -> Router {
         // upgrade time rather than riding the `require_bearer` layer.
         .route("/v1/ws", get(ws::ws_handler))
         .merge(oauth_router)
-        // Human-facing browser fallback for the server root / other non-API
-        // unmatched paths. This is intentionally outside the `/v1` subtree so
-        // unknown API routes keep auth + JSON semantics above.
+        // Everything that is not the API: the embedded web client when this
+        // build carries one and `[server] web_client` is on (ADR 0116), else a
+        // page saying there is none. This is intentionally outside the `/v1`
+        // subtree so unknown API routes keep auth + JSON semantics above.
         .fallback(browser_fallback)
         // Compress JSON/HTML when the client sends `Accept-Encoding` (issue
         // #86). Inner of the two layers so the access log sees the encoded
@@ -654,8 +660,21 @@ async fn v1_not_found() -> ApiError {
     ApiError::not_found("route not found")
 }
 
-/// Browser-facing informational page for unmatched non-API paths.
-async fn browser_fallback() -> Html<&'static str> {
+/// Unmatched non-API paths: the web client, or [`no_web_client`].
+async fn browser_fallback(
+    State(web): State<WebClientConfig>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    match web.bundle() {
+        Some(bundle) => bundle.respond(&method, uri.path(), &headers),
+        None => no_web_client().into_response(),
+    }
+}
+
+/// Browser-facing informational page for a server that serves no web client.
+fn no_web_client() -> Html<&'static str> {
     Html(
         r#"<!doctype html>
 <html lang="en">

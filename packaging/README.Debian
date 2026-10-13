@@ -7,6 +7,108 @@ Upstream project description: /usr/share/doc/axon-server/README.md
 The systemd unit runs as Unix user `axon` with
 `--config /etc/axon-server/config.toml`.
 
+Web client
+----------
+axon-server serves its web client itself, on the same address as the
+API. After install it is at:
+
+  http://127.0.0.1:8080/
+
+It is reachable from this machine only, because the server listens on
+127.0.0.1 ([server] host in config.toml). Nothing is exposed to your
+network until you do one of the things under "Access from other
+devices" below.
+
+Always open it as 127.0.0.1, not localhost. A browser treats the two
+as different sites and keeps a separate sign-in for each, so signing
+in at one and coming back at the other shows the sign-in screen again.
+
+To turn the web client off and serve the API alone, add this to
+/etc/axon-server/config.toml (under the existing [server] section if
+there is one):
+
+  [server]
+  web_client = false
+
+then `sudo systemctl restart axon-server`. Remove the line and restart
+to turn it back on.
+
+Signing in
+----------
+First sign-in: the install prints a one-time URL of the form
+http://127.0.0.1:8080/bootstrap/<code>. Open it in a browser on this
+machine and choose "Create bearer token". The next page shows the
+token, once. Copy it if you want it for another client as well, then
+choose "Open web client": the browser is signed in with nothing to
+paste. If you missed the URL:
+
+  journalctl -u axon-server -e --no-pager | grep -i bootstrap
+
+The URL works once, and only until the first credential exists.
+
+With no browser on this machine, forward the port from a machine that
+has one and open the same URL there:
+
+  ssh -L 8080:127.0.0.1:8080 <this machine>
+
+Every later sign-in (another browser, a phone, axon-tui) needs a
+token. Mint one and paste it into the client's sign-in screen:
+
+  sudo -u axon axon-server token issue --label laptop
+  sudo -u axon axon-server token list
+  sudo -u axon axon-server token revoke --label laptop
+
+The secret is printed once. Run these as user `axon`, not as root: see
+"Running commands" below.
+
+Access from other devices
+-------------------------
+The server speaks plain HTTP and refuses to listen on anything but
+127.0.0.1 unless told to. To use the web client from a phone or another
+computer, put something that terminates TLS in front of it.
+
+Do this AFTER the first sign-in. The one-time first-sign-in page is
+limited to requests from this machine, and behind a reverse proxy on
+this machine every request comes from this machine.
+
+Tailscale is the least work: no hostname, no certificate, and nothing
+exposed to the public internet.
+
+  sudo tailscale serve --bg http://127.0.0.1:8080
+
+For Caddy, nginx, or Apache there is a ready-made site file for each in
+/usr/share/doc/axon-server/examples/:
+
+  axon-server.caddy
+  axon-server.nginx.conf
+  axon-server.apache.conf
+
+Each file starts with the exact commands that enable it. In all three
+you replace axon.example.com with your hostname; for nginx and Apache
+you also point the two certificate lines at your certificate (Caddy
+obtains its own). The package does not install or change any of these
+servers: it cannot know your hostname, and enabling a proxy is what
+makes this server reachable from outside.
+
+All three files proxy every path to 127.0.0.1:8080, so the web client
+and the API stay on one address. That matters: the web client only
+talks to the address it was loaded from.
+
+The install output lists the commands for whichever of these it found
+on the machine, once. They are not printed again on an upgrade or a
+reconfigure; the same commands are at the top of each site file.
+
+Running commands
+----------------
+`axon-server <command>` finds /etc/axon-server/config.toml without
+--config. Run it as user `axon`:
+
+  sudo -u axon axon-server token list
+
+As root the config is found but the database refuses the connection,
+because the packaged database URL uses peer authentication for the
+`axon` role. Any other user cannot read the config file and is told so.
+
 Local Postgres (default)
 ------------------------
 If a cluster answers on the Unix socket, the first `configure` creates
@@ -31,8 +133,8 @@ A later `apt install` will not re-enable it (upgrades preserve the admin's
 enable/disable state). Start it with `sudo systemctl enable --now axon-server`.
 
 Data, search, cache, and upload paths are written into config.toml so
-`sudo -u axon axon-server --config /etc/axon-server/config.toml …`
-(for example `search reindex`) uses the same trees as the service.
+`sudo -u axon axon-server …` (for example `search reindex`) uses the same
+trees as the service.
 
 Bring your own Postgres
 -----------------------
@@ -60,16 +162,3 @@ init writes only url and store_key. Add these under the existing
   uploads_dir = "/var/lib/axon-server/uploads"
 
   systemctl enable --now axon-server
-
-First credential
-----------------
-The unit sets AXON_SERVER__BOOTSTRAP_WEB_AUTO=true. After a successful
-first install, dpkg prints the one-time bootstrap URL (loopback only).
-If you missed it:
-
-  journalctl -u axon-server -e --no-pager | grep -i bootstrap
-
-Alternatively:
-
-  sudo -u axon axon-server --config /etc/axon-server/config.toml \
-    token issue --label first
