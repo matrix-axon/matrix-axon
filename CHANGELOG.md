@@ -8,6 +8,9 @@ The same notes are on the [GitHub Releases](../../releases) page.
 <!-- Release notes generated using configuration in .github/release.yml at main -->
 
 ### What's Changed
+
+The biggest update is that the web client is now packaged with the Axon server, so you only need to install one package to have a complete, usable stack. This provides similar funtionality to the Docker stack we've been supporting for several months for users who want to run Axon natively rather than in Docker.
+
 #### Features
 * feat(web): open user information from timeline senders by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/680
 * feat(api): serve the web client from the server binary by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/681
