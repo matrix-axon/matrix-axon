@@ -427,13 +427,13 @@ the same way.
 
 ## What this does not decide
 
-**Push notifications stay out of scope**, as ADR 0031 § push and ADR 0053 have
-it: no device-token endpoint, no push router, no APNs or FCM integration. The
-consequence is concrete and should be stated in the store listings rather than
-discovered at review — a backgrounded mobile client receives nothing, because
-the WebSocket does not survive backgrounding. This is the largest known
-functional gap in the mobile builds and it needs its own ADR and a server
-silo; it is not a prerequisite for shipping M-W13.
+**Push notifications are decided in [ADR 0113](0113-remote-push-for-suspended-mobile-clients.md).**
+This packaging ADR still does not build them.
+M-W13 ships no device-token endpoint, no push router, and no APNs or FCM integration.
+A backgrounded mobile client receives nothing until that design is implemented (#604, then #605), because the WebSocket does not survive backgrounding.
+The store listings should say so until those land.
+ADR 0113 is the design this section was holding the place for: APNs for iOS and iPadOS, FCM for Android, and local notifications only on desktop.
+Push is not a prerequisite for shipping M-W13.
 
 ## Consequences
 

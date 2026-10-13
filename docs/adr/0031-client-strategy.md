@@ -161,3 +161,11 @@ and Swift stubs exist — was already wrong on both counts per ADR 0053.)*
 - The web-framework choice is the one unsettled decision. It must be resolved —
   and recorded as a follow-on ADR or amendment here — before `clients/web/`
   work begins. *(Resolved by ADR 0046: Preact.)*
+
+## Amendment — remote push (2026-10-09, ADR 0113)
+
+The push bullets above are the decision this ADR made.
+[ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) is the later design they deferred.
+It adds no code.
+#604 implements the server half, and #605 implements the client half after that.
+The client does not stub the registration route ahead of #604.
