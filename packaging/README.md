@@ -32,6 +32,8 @@ CI (`.github/workflows/package.yml`) builds amd64 on `ubuntu-22.04` and arm64 on
 `ubuntu-22.04-arm` so Bookworm/Jammy can run the glibc-2.35 binary.
 On `v*` / `beta-*` / `alpha-*` tags it attaches the `.deb` and `.rpm` files to
 the GitHub Release (alongside the zip archives from `cross-build.yml`).
+Each is attached twice: under its versioned name, and under a name with no version (`axon-server_amd64.deb`, `axon-server_arm64.deb`, `axon-server.x86_64.rpm`, `axon-server.aarch64.rpm`).
+The second set is what `releases/latest/download/<name>` resolves, and the install blocks in the top-level `README.md` depend on those four names.
 The `.deb` version is `Cargo.toml`'s `version` (`scripts/release-version.sh print`).
 On a `v*` tag, the job fails unless the tag equals `v` plus that version (ADR 0106).
 
@@ -39,12 +41,31 @@ On a `v*` tag, the job fails unless the tag equals `v` plus that version (ADR 01
 
 `apt install ./axon-server_*.deb` (or the rpm equivalent) with a reachable local cluster:
 
+The package asks nothing at install (ADR 0116).
+Everything the operator needs to decide is in what the install prints and in `README.Debian`, so keep the two in step when either changes.
+
 1. Creates Unix user `axon`.
 2. Creates role `axon`, database `axon`, and `pgcrypto` as the `postgres` superuser.
 3. Runs `axon-server init` as `axon` with a sqlx Unix-socket URL
    (`postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon`, peer, no password).
 4. Enables and starts `axon-server.service`.
 5. Arms web bootstrap (`AXON_SERVER__BOOTSTRAP_WEB_AUTO`). URL is in `journalctl -u axon-server`.
+6. Prints where the web client is (`http://127.0.0.1:8080/`, this machine only, and not `localhost`), the one-time sign-in URL, how to mint further tokens, how to turn the web client off, and how to reach it from other devices.
+
+An upgrade from a release whose server had no web client prints a shorter form of item 6 once.
+`/var/lib/axon-server/.web-client-notice` records that it was shown.
+
+### Reverse proxies
+
+`packaging/proxy/` holds a site file each for Caddy, nginx and Apache.
+The packages install them to `/usr/share/doc/axon-server/examples/`, and `cross-build.yml` adds them to the macOS and Linux server zips so the Homebrew formula can install them too.
+Each proxies every path to `127.0.0.1:8080`, so the web client and the API stay on one origin, and each starts with the commands that enable it.
+
+The postinstall script looks for `tailscale`, `caddy`, `nginx`, and `apache2` or `httpd`, and prints the commands for the ones it finds.
+It never writes another service's configuration and never reloads another service: the package cannot know the hostname or the certificate, and enabling a proxy is what exposes the server.
+
+When changing a site file, run it for real.
+The properties to hold are: the WebSocket at `/v1/ws` upgrades, a body over 1 MB is not refused by the proxy, and a path containing `%2F` reaches the server still encoded.
 
 Remote Postgres: the package still installs; see `README.Debian` in the doc directory of the built package.
 

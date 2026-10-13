@@ -31,6 +31,18 @@ brew install matrix-axon/tap/axon-tui
 brew install --cask matrix-axon/tap/axon
 ```
 
+- Server with its web client on Debian 12 or Ubuntu 22.04 and newer (amd64 or arm64):
+
+```sh
+sudo apt install postgresql
+curl -fLO "https://github.com/matrix-axon/matrix-axon/releases/latest/download/axon-server_$(dpkg --print-architecture).deb"
+sudo apt install "./axon-server_$(dpkg --print-architecture).deb"
+```
+
+The install sets up the database and the service, then prints a one-time sign-in URL for the web client at `http://127.0.0.1:8080/`.
+It listens on this machine only; the same output says how to reach it from other devices and how to turn the web client off.
+`/usr/share/doc/axon-server/README.Debian` has the details.
+
 ## See it
 
 [![axon-tui rendering a seeded demo world: a room list, a photo timeline with inline terminal graphics, and a search across rooms](docs/img/tui-demo-poster.png)](https://matrix-axon.github.io/matrix-axon/demo.html#tui)

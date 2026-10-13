@@ -179,6 +179,32 @@ jobs:
           path: packages
           merge-multiple: true
 
+      # The versioned names above cannot be linked to ahead of time. These
+      # copies can: releases/latest/download/axon-server_amd64.deb is always
+      # the current stable package, which is what the README's install block
+      # and packaging/README.md use. Exactly one package per name, or the copy
+      # would silently pick one.
+      - name: Add version-less names for the latest-release URLs
+        run: |
+          set -euo pipefail
+          alias_one() {
+            pattern=$1
+            target=$2
+            # The glob is the point: the version is whatever this tag built.
+            # shellcheck disable=SC2086
+            set -- packages/$pattern
+            if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+              echo "::error::expected exactly one package matching $pattern, found: $*" >&2
+              exit 1
+            fi
+            cp "$1" "packages/$target"
+          }
+          alias_one 'axon-server_*_amd64.deb' axon-server_amd64.deb
+          alias_one 'axon-server_*_arm64.deb' axon-server_arm64.deb
+          alias_one 'axon-server-*.x86_64.rpm' axon-server.x86_64.rpm
+          alias_one 'axon-server-*.aarch64.rpm' axon-server.aarch64.rpm
+          ls -l packages
+
       - name: Publish packages
         uses: softprops/action-gh-release@v3
         with:
