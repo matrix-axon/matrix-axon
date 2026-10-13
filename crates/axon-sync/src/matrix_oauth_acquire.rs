@@ -664,11 +664,14 @@ impl MatrixOAuthAcquireEngine {
                 role = "acquire",
                 presentation
             ),
+            // Every line a browser sign-in logs names the user it is for, so
+            // a user's report can be matched without knowing the flow ID.
             FlowMethod::Browser => tracing::info_span!(
                 "matrix_oauth_browser_sign_in",
                 %flow_id,
                 role = "acquire",
-                presentation
+                presentation,
+                expected_user_id
             ),
         };
         self.inner.tracker.spawn(
@@ -681,6 +684,7 @@ impl MatrixOAuthAcquireEngine {
             %flow_id,
             role = "acquire",
             presentation,
+            expected_user_id,
             "Matrix OAuth login flow created"
         );
         Ok(flow)
@@ -1007,10 +1011,17 @@ impl MatrixOAuthAcquireEngine {
         let homeserver =
             crate::discovery::resolve_homeserver(&self.inner.discovery_http, user_id.server_name())
                 .await
-                .map_err(|_| {
-                    let failure = DriverFailure::Upstream;
-                    log_driver_failure("homeserver_discovery", &failure, None);
-                    failure
+                .map_err(|error| {
+                    // Which host and which step refused is the whole
+                    // diagnosis here, and none of it is secret: it names only
+                    // the server the caller asked for.
+                    tracing::warn!(
+                        phase = "homeserver_discovery",
+                        error_class = "upstream",
+                        %error,
+                        "Matrix OAuth login could not find the homeserver"
+                    );
+                    DriverFailure::Upstream
                 })?;
         let client = build_matrix_oauth_acquire_client(
             &self.inner.config,
@@ -1029,6 +1040,11 @@ impl MatrixOAuthAcquireEngine {
         // The capability gate comes before registration: a server without the
         // device grant is unsupported whatever else it would have refused,
         // and Axon registers no client with a server it cannot use.
+        tracing::debug!(
+            homeserver = homeserver.host_str().unwrap_or_default(),
+            issuer = server.metadata.issuer.host_str().unwrap_or_default(),
+            "Matrix OAuth login discovered the authorization server"
+        );
         let endpoints = DeviceGrantEndpoints::from_metadata(&homeserver, &server.metadata)
             .map_err(DriverFailure::from)?;
         // The registration is found or created but not installed on the
@@ -1059,6 +1075,21 @@ impl MatrixOAuthAcquireEngine {
             .expires_in
             .and_then(|expires_in| tokio::time::Instant::now().checked_add(expires_in))
             .map_or(deadline, |expires_at| expires_at.min(deadline));
+        // Only the link's host is logged. The link and the code are secrets
+        // in transit, and the path or query may carry the code.
+        tracing::info!(
+            verification_host = url::Url::parse(&authorization.verification_uri)
+                .ok()
+                .and_then(|link| link.host_str().map(str::to_owned))
+                .unwrap_or_default(),
+            link_carries_code = authorization.has_complete_link,
+            interval_secs = authorization.interval.as_secs(),
+            server_expires_in_secs = authorization.expires_in.map(|ttl| ttl.as_secs()),
+            deadline_secs = poll_deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_secs(),
+            "Matrix OAuth browser sign-in is waiting for the user to approve"
+        );
         flow.update_browser(|state| {
             state.set_stage(MatrixOAuthBrowserStage::WaitingForAuthorization);
             state.verification_uri = Some(authorization.verification_uri);

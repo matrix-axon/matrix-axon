@@ -48,6 +48,8 @@ struct Behaviour {
     /// The device authorization response, with `{base}` replaced by the
     /// server's own origin.
     device_authorization: Value,
+    /// When set, the device authorization endpoint refuses with this answer.
+    device_authorization_refusal: Option<(StatusCode, Value)>,
     /// Token-endpoint answers in order; once exhausted, the approval.
     token_script: Vec<(StatusCode, Value)>,
     /// The token response that follows the script.
@@ -74,6 +76,7 @@ impl Default for Behaviour {
                 "expires_in": 600,
                 "interval": 1
             }),
+            device_authorization_refusal: None,
             token_script: vec![pending()],
             approval: (
                 StatusCode::OK,
@@ -170,14 +173,23 @@ async fn auth_metadata(State(server): State<Arc<Server>>) -> Json<Value> {
     Json(metadata)
 }
 
-async fn device_authorization(State(server): State<Arc<Server>>, body: String) -> Json<Value> {
+async fn device_authorization(
+    State(server): State<Arc<Server>>,
+    body: String,
+) -> (StatusCode, Json<Value>) {
     server.device_requests.lock().unwrap().push(body);
+    if let Some((status, refusal)) = &server.behaviour.device_authorization_refusal {
+        return (*status, Json(refusal.clone()));
+    }
     let response = server
         .behaviour
         .device_authorization
         .to_string()
         .replace("{base}", &server.base);
-    Json(serde_json::from_str(&response).unwrap())
+    (
+        StatusCode::OK,
+        Json(serde_json::from_str(&response).unwrap()),
+    )
 }
 
 async fn token(State(server): State<Arc<Server>>) -> (StatusCode, Json<Value>) {
@@ -403,12 +415,10 @@ impl<'a> MakeWriter<'a> for CapturedLogs {
     }
 }
 
-/// The whole path: link and code while waiting, then an active, unverified
-/// OAuth account on exactly the device ID the scope named, with nothing secret
-/// left on the flow or in the logs.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn approval_activates_an_unverified_account_on_the_requested_device() {
+/// Capture everything logged on this thread, down to `DEBUG`, until the
+/// guard drops. The tests run on a current-thread runtime, so that includes
+/// the flow driver.
+fn capture_logs() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
     let captured = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -416,7 +426,17 @@ async fn approval_activates_an_unverified_account_on_the_requested_device() {
         .with_max_level(tracing::Level::DEBUG)
         .with_writer(captured.clone())
         .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let guard = tracing::subscriber::set_default(subscriber);
+    (captured, guard)
+}
+
+/// The whole path: link and code while waiting, then an active, unverified
+/// OAuth account on exactly the device ID the scope named, with nothing secret
+/// left on the flow or in the logs.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn approval_activates_an_unverified_account_on_the_requested_device() {
+    let (captured, _guard) = capture_logs();
 
     let harness = Harness::start(Behaviour {
         whoami_delay: Duration::from_millis(750),
@@ -513,6 +533,27 @@ async fn approval_activates_an_unverified_account_on_the_requested_device() {
     let logs = captured.text();
     assert!(logs.contains("Matrix OAuth login flow completed"));
     assert!(logs.contains("presentation=\"browser\""));
+    // A support report names a user, not a flow ID: the lines must carry it.
+    assert!(logs.contains(&format!("expected_user_id=\"{}\"", harness.user_id)));
+    // The wait is visible, with what the server asked for and where the link
+    // leads, but never the link itself.
+    let waiting = logs
+        .lines()
+        .find(|line| line.contains("is waiting for the user to approve"))
+        .expect("the wait for approval is logged");
+    let link_host = harness.server.base.trim_start_matches("http://");
+    let link_host = link_host.split(':').next().unwrap();
+    assert!(waiting.contains(&format!("verification_host=\"{link_host}\"")));
+    assert!(waiting.contains("link_carries_code=true"));
+    assert!(waiting.contains("interval_secs=1"));
+    assert!(waiting.contains("server_expires_in_secs=600"));
+    // And so is the approval, with how long the user took.
+    let approved = logs
+        .lines()
+        .find(|line| line.contains("Matrix OAuth device authorization approved"))
+        .expect("the approval is logged");
+    assert!(approved.contains("polls=2"));
+    assert!(logs.contains("discovered the authorization server"));
     for secret in [
         USER_CODE,
         DEVICE_CODE,
@@ -861,5 +902,74 @@ async fn an_invalid_expected_user_id_is_refused_before_any_work() {
         harness.engine.create_browser("not-a-matrix-id").await,
         Err(MatrixOAuthAcquireError::InvalidUserId)
     ));
+    harness.finish().await;
+}
+
+/// A refusal names the authorization server's standard error code, which is
+/// what distinguishes scope drift from a registration that may not use the
+/// grant, and never the server's own description.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_refused_device_authorization_logs_the_standard_error_code() {
+    let (captured, _guard) = capture_logs();
+    let harness = Harness::start(Behaviour {
+        device_authorization_refusal: Some(oauth_error("invalid_scope")),
+        ..Behaviour::default()
+    })
+    .await;
+    assert_eq!(harness.fail().await, "upstream");
+
+    let logs = captured.text();
+    let refused = logs
+        .lines()
+        .find(|line| line.contains("Matrix OAuth device authorization was refused"))
+        .expect("the refusal is logged");
+    assert!(refused.contains("oauth_error=\"invalid_scope\""));
+    assert!(refused.contains("http_status=400"));
+    assert!(refused.contains(&format!("expected_user_id=\"{}\"", harness.user_id)));
+    assert!(!logs.contains("description-secret"));
+    harness.finish().await;
+
+    // The token endpoint's refusals are named the same way.
+    let (captured, _guard) = capture_logs();
+    let harness = Harness::start(Behaviour {
+        token_script: vec![oauth_error("invalid_grant")],
+        ..Behaviour::default()
+    })
+    .await;
+    assert_eq!(harness.fail().await, "upstream");
+    let logs = captured.text();
+    assert!(logs.contains("oauth_error=\"invalid_grant\""));
+    assert!(!logs.contains("description-secret"));
+    assert!(!logs.contains(USER_CODE) && !logs.contains(DEVICE_CODE));
+    harness.finish().await;
+}
+
+/// A homeserver that cannot be found says which server and why, the detail
+/// whose absence made the original report of this problem hard to read.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_homeserver_that_cannot_be_found_logs_which_and_why() {
+    let (captured, _guard) = capture_logs();
+    let harness = Harness::start(Behaviour::default()).await;
+    // Bound, then dropped: a loopback server name nothing answers on.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead = listener.local_addr().unwrap();
+    drop(listener);
+    let user_id = format!("@nobody:{dead}");
+
+    let flow = harness.engine.create_browser(&user_id).await.unwrap();
+    let failed = harness
+        .wait_for(flow.flow_id, MatrixOAuthBrowserStage::Failed)
+        .await;
+    assert_eq!(failed.error_code.as_deref(), Some("upstream"));
+
+    let logs = captured.text();
+    let line = logs
+        .lines()
+        .find(|line| line.contains("could not find the homeserver"))
+        .expect("the discovery failure is logged");
+    assert!(line.contains("phase=\"homeserver_discovery\""));
+    assert!(line.contains(&dead.to_string()), "names the server: {line}");
     harness.finish().await;
 }

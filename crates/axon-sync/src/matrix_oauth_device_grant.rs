@@ -40,6 +40,43 @@ const SLOW_DOWN_STEP: Duration = Duration::from_secs(5);
 /// Consecutive transient token-endpoint failures tolerated before giving up.
 const MAX_CONSECUTIVE_POLL_FAILURES: u32 = 5;
 
+/// The OAuth error codes worth naming in a log (RFC 6749 §5.2, RFC 8628 §3.5).
+const KNOWN_OAUTH_ERRORS: [&str; 12] = [
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+    "access_denied",
+    "expired_token",
+    "authorization_pending",
+    "slow_down",
+    "server_error",
+    "temporarily_unavailable",
+];
+
+/// The `error` code of an OAuth error body, for the log.
+///
+/// The code is what tells an operator *why* a server refused: `invalid_scope`
+/// means the scope names have drifted from what it accepts, `unauthorized_client`
+/// that the registration may not use this grant. It is still text the remote
+/// server chose, so only a code from the fixed list is ever returned. Anything
+/// else is `other`, and a body with no readable code is `none`.
+fn known_oauth_error(body: &[u8]) -> &'static str {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return "none";
+    };
+    match json.get("error").and_then(serde_json::Value::as_str) {
+        None => "none",
+        Some(code) => KNOWN_OAUTH_ERRORS
+            .iter()
+            .find(|known| **known == code)
+            .copied()
+            .unwrap_or("other"),
+    }
+}
+
 /// Why the grant ended without tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeviceGrantFailure {
@@ -116,6 +153,9 @@ pub(crate) struct DeviceAuthorization {
     /// The link to present: `verification_uri_complete` when the server
     /// supplied one, the bare `verification_uri` otherwise.
     pub(crate) verification_uri: String,
+    /// Whether that link already carries the user code, so the user need not
+    /// type it. Logged, because "I was asked for a code" is a support question.
+    pub(crate) has_complete_link: bool,
     pub(crate) interval: Duration,
     /// How long the device code lives, when the server said.
     pub(crate) expires_in: Option<Duration>,
@@ -176,10 +216,14 @@ pub(crate) async fn request_device_authorization(
     };
     let status = response.status();
     if !status.is_success() {
+        let body = read_bounded(response, MAX_DEVICE_AUTHORIZATION_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         tracing::warn!(
             phase = PHASE,
             error_class = "upstream",
             http_status = status.as_u16(),
+            oauth_error = known_oauth_error(&body),
             "Matrix OAuth device authorization was refused"
         );
         return Err(DeviceGrantFailure::Upstream);
@@ -241,6 +285,7 @@ fn parse_device_authorization(
     Ok(DeviceAuthorization {
         device_code: device_code.to_owned(),
         user_code: user_code.to_owned(),
+        has_complete_link: verification_uri_complete.is_some(),
         verification_uri: verification_uri_complete
             .unwrap_or(verification_uri)
             .to_string(),
@@ -368,6 +413,12 @@ pub(crate) async fn request_tokens(
             phase = PHASE,
             error_class = "upstream",
             http_status = status.as_u16(),
+            // A success status with an unusable body is not an OAuth error.
+            oauth_error = if status.is_success() {
+                "none"
+            } else {
+                known_oauth_error(&body)
+            },
             "Matrix OAuth token endpoint refused the device code"
         );
     }
@@ -419,6 +470,11 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = PollOutcome>,
 {
+    // How many polls were sent and how long the user took are what separate
+    // "never approved" from "approved, then something else failed", so every
+    // way out of this loop reports them.
+    let started = tokio::time::Instant::now();
+    let mut polls: u32 = 0;
     let mut consecutive_failures = 0;
     loop {
         tokio::select! {
@@ -428,25 +484,44 @@ where
                 tracing::warn!(
                     phase = "device_token",
                     error_class = "authorization_expired",
+                    polls,
+                    waited_secs = started.elapsed().as_secs(),
                     "Matrix OAuth device authorization was not approved in time"
                 );
                 return Err(DeviceGrantFailure::Expired);
             }
             _ = tokio::time::sleep(interval) => {}
         }
+        polls = polls.saturating_add(1);
         match poll().await {
-            PollOutcome::Tokens(tokens) => return Ok(tokens),
+            PollOutcome::Tokens(tokens) => {
+                tracing::info!(
+                    phase = "device_token",
+                    polls,
+                    waited_secs = started.elapsed().as_secs(),
+                    "Matrix OAuth device authorization approved"
+                );
+                return Ok(tokens);
+            }
             PollOutcome::Pending => consecutive_failures = 0,
             PollOutcome::SlowDown => {
                 consecutive_failures = 0;
                 // Every `slow_down` adds five seconds, with no ceiling
                 // (RFC 8628 §3.5); the deadline bounds the total.
                 interval = interval.saturating_add(SLOW_DOWN_STEP);
+                tracing::debug!(
+                    phase = "device_token",
+                    polls,
+                    interval_secs = interval.as_secs(),
+                    "Matrix OAuth token endpoint asked for slower polling"
+                );
             }
             PollOutcome::Denied => {
                 tracing::warn!(
                     phase = "device_token",
                     error_class = "authorization_denied",
+                    polls,
+                    waited_secs = started.elapsed().as_secs(),
                     "Matrix OAuth device authorization was refused by the user"
                 );
                 return Err(DeviceGrantFailure::Denied);
@@ -455,6 +530,8 @@ where
                 tracing::warn!(
                     phase = "device_token",
                     error_class = "authorization_expired",
+                    polls,
+                    waited_secs = started.elapsed().as_secs(),
                     "Matrix OAuth device code expired before approval"
                 );
                 return Err(DeviceGrantFailure::Expired);
@@ -466,6 +543,7 @@ where
                         phase = "device_token",
                         error_class = "upstream",
                         consecutive_failures,
+                        polls,
                         "Matrix OAuth token endpoint kept failing; giving up"
                     );
                     return Err(DeviceGrantFailure::Upstream);
@@ -698,6 +776,7 @@ mod tests {
         );
         assert_eq!(parsed.interval, Duration::from_secs(5));
         assert_eq!(parsed.expires_in, Some(Duration::from_secs(1200)));
+        assert!(parsed.has_complete_link);
 
         let mut bare = valid_authorization();
         bare.as_object_mut()
@@ -813,6 +892,24 @@ mod tests {
         let parsed = authorization(absent).ok().unwrap();
         assert_eq!(parsed.interval, Duration::from_secs(5));
         assert_eq!(parsed.expires_in, None);
+    }
+
+    #[test]
+    fn only_standard_oauth_error_codes_reach_the_log() {
+        let code = |body: &str| known_oauth_error(body.as_bytes());
+        for known in KNOWN_OAUTH_ERRORS {
+            assert_eq!(code(&format!(r#"{{"error":"{known}"}}"#)), known);
+        }
+        // Text the server made up is never echoed, however harmless it looks.
+        assert_eq!(code(r#"{"error":"made_up_code"}"#), "other");
+        assert_eq!(
+            code(r#"{"error":"invalid_scope\nERROR forged log line"}"#),
+            "other"
+        );
+        assert_eq!(code(r#"{"error":42}"#), "none");
+        assert_eq!(code(r#"{"error_description":"secret detail"}"#), "none");
+        assert_eq!(code("<html>Bad Request</html>"), "none");
+        assert_eq!(code(""), "none");
     }
 
     fn classify(success: bool, json: serde_json::Value) -> PollOutcome {
