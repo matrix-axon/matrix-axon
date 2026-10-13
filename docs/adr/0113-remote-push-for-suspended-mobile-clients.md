@@ -133,8 +133,10 @@ Two limits are deliberate, so a later change does not have to break the route:
   This ADR does not add the column.
 - v1 only wakes for an eligible `m.room.message`.
   Push rules can also notify for an invite or a call.
-  A count rise for an event class this list does not name is a no-wake until a later change adds that class.
-  Adding it is an extension of the eligibility list, not a new policy engine.
+  A rise whose only new event is a class this list does not name does not send an alert for that event.
+  It can still release a slot that already holds a notifying message.
+  The wake is for that message.
+  Adding a class is an extension of the eligibility list, not a new policy engine.
 
 The count can be held back while the SDK has unmatched receipts (ADR 0070).
 Both `notification_count` and `highlight_count` live in `room_unread_counts`.
@@ -149,19 +151,29 @@ In the cases below, `after` rose when either count is greater than its `before`.
 `after` fell when neither rose and at least one count is lower.
 `after` equals `before` when both counts are unchanged.
 
-On startup the router seeds its observed pair from `room_unread_counts`, before it handles a live response.
-That seed is not a rise.
-A restart does not push unreads already stored, and it does not treat them as a `before` of zero.
+On startup the router reads `room_unread_counts`.
+A room with no row has no seed.
+The first observation of a room after process start is not a rise, whether or not a row was there.
+It stores that observation's `after` as the seed.
+A missing row is not treated as zero, and a row that went stale while the process was down is not compared as a rise.
+A notifying message in that first observation takes the equals path: it fills the slot and records the seeded pair.
+It does not send.
+A later observation uses the cases below.
 The slot does not survive the restart.
-The next notifying message after startup wakes the device.
 
-For one sliding-sync response, #604 reads `room_unread_counts` before the unread path writes this response's count, and reads it again after that write.
-The router receives that pair as `before` and `after`, together with the messages ingested from the same response.
-The unread path publishing first cannot change `before`, because `before` was already the row.
+For one sliding-sync response, #604 reads `room_unread_counts` before that response is handed to the SDK.
+That read is `before`.
+A missing row uses the rule above, not zero.
+After the SDK applies the response, #604 recomputes that room's counts and upserts `room_unread_counts` on the same task, then uses the value it just wrote as `after`.
+It does not wait for the unread task, and it does not read the row back.
+A resweep that writes the row between those two steps is not `after`.
+`after` is only the value #604 just upserted for this response.
+The router stores that pair.
+The unread task persisting the same numbers later is not a second observation.
 
 A resweep, or a room-info update that is not part of a response the router is applying, is its own observation.
 Its `before` is the pair the router last stored.
-Its `after` is the pair the unread path just persisted.
+Its `after` is the pair that pass just wrote.
 It carries no message.
 That observation can release a slot.
 The release does not have to be a later sync response.
@@ -186,11 +198,13 @@ The router keeps one slot per account and room.
 The slot may hold only an eligible message whose actions are `Some` and include notify.
 A newer message of that kind replaces the one already slotted.
 A non-notifying eligible message does not fill the slot and does not clear it.
-An event that is not an eligible message, including an invite, a call, a receipt, and a UTD, neither fills the slot, nor clears it, nor releases it.
+An event that is not an eligible message, including an invite, a call, a receipt, and a UTD, neither fills the slot nor clears it.
+A rise those events cause can still release an occupied slot.
+The case list is the rule.
 
 The router decides, and only then stores `after`.
 The first matching case wins.
-A case that sends, releases, or re-bases also drops any unpaired rise.
+A case that sends or releases also drops any unpaired rise.
 
 - `after` rose and the observation has a notifying message.
   The router sends the latest one immediately and clears the slot for that account and room.
@@ -212,21 +226,26 @@ A case that sends, releases, or re-bases also drops any unpaired rise.
   A `None` message does not claim an unpaired rise, and a message does not otherwise inherit an earlier rise.
 - `after` equals `before`, there is a notifying message, and no unpaired rise matches.
   The message fills the slot, or replaces the message already there, and the slot records `before`.
-- `after` fell and the observation contains a notifying message.
-  A read on another client can land in the same observation as the new message, so the net count is below `before` even though the message should wake.
+- `after` fell and `notification_count` is zero.
+  The room was caught up, including any notifying message in this observation.
+  The router does not send.
+  It clears the slot, drops any unpaired rise, and stores `after`.
+- `after` fell, `notification_count` is still above zero, and the observation contains a notifying message.
+  A read on another client can land in the same observation as a new message, so the net count is below `before` while some unread remains.
   The router sends that message immediately, clears the slot, and stores `after`.
   It does not wait for a later count above the old `before`.
   A `None` message does not take this path.
-- `after` fell and there is no notifying message.
-  The room was read elsewhere.
-  The router clears the slot without sending, drops any unpaired rise, and stores `after`.
+- `after` fell, `notification_count` is still above zero, and there is no notifying message.
+  A partial read must not drop a slotted message that is still unread.
+  The router stores `after` and leaves the slot and any unpaired rise.
 
 Anything else leaves an occupied slot as it is.
 A rise with an empty slot and no message sends nothing beyond the unpaired memory above.
 The sent or released payload is that one message.
 The slot is dropped, unsent, at the unread resweep interval (five minutes).
 The slot is not durable.
-A crash loses at most the wakes in flight, and the next notifying message wakes the device.
+A crash loses at most the wakes in flight.
+The first observation after startup seeds and does not send.
 
 The router does not consult WebSocket presence.
 A suspended phone can leave a socket the server still considers open, and that is the case this push exists to cover.
@@ -394,9 +413,26 @@ The client also re-PUTs after a successful refresh, so `token_id` and `disclosur
 A missed re-PUT does not make `DELETE` a no-op, because the refreshed access token carries the same session id.
 
 Revoking a session deletes its registrations in the same transaction.
-For a non-expiring credential, that is the transaction that sets `revoked_at`.
-For an OAuth session, that is the transaction that revokes the refresh token and the access tokens of that session.
-Boot deletes a registration whose session has no unrevoked unexpired access token and no unrevoked unexpired refresh token.
+Rotation is not that revoke.
+`redeem_refresh_token` sets `revoked_at` and `replaced_by` on the presented refresh token on every successful refresh.
+A row with `replaced_by` set was rotated.
+#604 does not delete registrations for that.
+The new refresh token and the new access token carry the same session id.
+Registrations are deleted only when the session is actually ended: an explicit revoke, reuse detection, or unbinding the identity.
+Reuse detection calls `revoke_refresh_tokens_for_identity_client`, which revokes every active refresh token for that identity and client.
+That ends the person's other sessions on that client as well, and their registrations are deleted with those sessions.
+For a non-expiring credential, the deleting transaction is the one that sets `revoked_at` on that token.
+
+A credential row is live when `revoked_at` is null and (`expires_at` is null or `expires_at` is still in the future).
+A null `expires_at` is a CLI or management token.
+It stays live until that row is revoked.
+The session is live when any access token with its `session_id` is live, or any refresh token with its `session_id` is live.
+`delete_stale_refresh_tokens` removes rows that were revoked or expired longer ago than its sweep window.
+It does not remove a row that is still live.
+The check looks only at rows that remain.
+A swept predecessor does not make the session dead while a later refresh token for that session is still live.
+A session with no remaining live row is not live.
+Boot and the send-time check delete a registration whose session is not live.
 An expired access token with a live refresh token does not reap the row.
 The same check runs before each provider send.
 A session that fails it drops that wake, deletes the registration, and does not call the provider.
@@ -469,12 +505,16 @@ A wrong server key must not wipe every device.
 The sync loop hands the router a wake with `try_send` on a bounded channel of 64.
 A full channel drops the new wake and logs the registration id, the account, the room, and the event.
 It does not wait.
-One router task owns the channel.
+One router task owns the channel and makes the slot decision.
+It does not await Postgres or a provider.
 Provider calls take a permit from a semaphore of four, and each call times out at 10 seconds.
 A hung peer then returns the permit.
-The send-time liveness check runs in that router task, on the same permit and under the same 10-second timeout as the provider call.
-It does not run on the sync loop.
-A failed check, whether the query errors or the timeout fires, is fail-open: the router sends, logs, and does not delete the registration.
+The liveness check and the provider send run together in a spawned task that holds one of those permits.
+The router keeps deciding while those tasks run.
+The FCM service-account access-token fetch runs inside that spawned send, under the same permit and the same 10-second timeout.
+It does not run on the sync loop or on the router task.
+A slow fetch occupies one of the four permits and cannot stall decisions for other rooms.
+A failed check, whether the query errors or the timeout fires, is fail-open: that task sends, logs, and does not delete the registration.
 The next send checks again.
 Only a successful answer that the session has no live credential drops the wake and deletes the row.
 A transient database error must not wipe a registration, just as a failed name read still sends.
@@ -506,12 +546,20 @@ The registrations stay.
 - The client does not keep a foreground service so the socket can survive Doze.
 - macOS, Windows, Linux, and the browser do not request a remote token.
 - On sign-out of the Axon session, and when message notifications are turned off, the client deletes the registration.
-- Before the first `PUT`, the client refreshes an OAuth session once, and it refreshes again when the server answers `push_session_refresh_required`.
-  The `PUT` uses the access token from that refresh.
+- Before the first `PUT`, the client refreshes an OAuth session once.
+  If that `PUT` returns `push_session_refresh_required`, the client refreshes one more time and retries the `PUT` once.
+  A second `push_session_refresh_required` stops the attempt.
+  The client does not refresh again and does not loop.
+  The local setting stays off, and the failure is surfaced.
   A non-expiring credential is registered as it is.
 - A tap uses the listener #606 registered and opens the room.
 - While the process is in the foreground, the client does not present the remote alert.
   The local notifier owns that toast.
+- A backgrounded app whose socket is still open can post a local toast and also receive the remote alert, because the router does not consult presence.
+  The local notification uses the same collapse value as the remote alert, the first 32 hex characters of the SHA-256 of the room id.
+  On Apple that value is the local notification's identifier, matching `apns-collapse-id`.
+  On Android it is the notification `tag`, matching `android.notification.tag`.
+  The system replaces one with the other instead of showing both.
 - No app code runs when an alert is delivered to a suspended process.
   v1 does not enable the `remote-notification` background mode, and it does not add a notification service extension, in order to record that delivery.
 - On becoming active, before the reconnect slack posts, the client reads the notifications the system is still showing.
