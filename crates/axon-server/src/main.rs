@@ -511,8 +511,8 @@ fn web_client_served(config: &Config) -> bool {
 
 /// Where the bootstrap success page hands the new credential. An explicit
 /// `server.web_client_url` wins. Without one, a process that serves the web
-/// client itself is its own answer: `/` is same-origin, so the page can sign
-/// the browser in and redirect with nothing to copy.
+/// client itself is its own answer: `/` is same-origin, so the page's "Open
+/// web client" button can sign the browser in with nothing to paste.
 fn bootstrap_web_client_url(config: &Config) -> Option<String> {
     config
         .server

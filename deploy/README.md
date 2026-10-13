@@ -71,8 +71,9 @@ docker compose logs axon-server | grep "web bootstrap is armed"
 
 Open that path on your front door (`http://<host>:8080/bootstrap/<code>`) in a browser.
 The setup page mints your first credential and — because the front door serves the SPA
-and the bootstrap page on one origin — drops the token straight into the web client and
-redirects you in, **signed in with nothing to paste**. The `<code>` is unguessable and
+and the bootstrap page on one origin — shows the token once, and its **Open web client** button drops the token into the web
+client and takes you in, **signed in with nothing to paste**. Copy the token from that
+page first if you also want it for another client. The `<code>` is unguessable and
 the bootstrap is consumed by first use (and then permanently closed).
 
 Because every request reaches axon _through_ the `web` proxy, axon can't tell your

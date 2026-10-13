@@ -470,6 +470,9 @@ print_first_run_help() {
 		echo
 		echo "  $url"
 		echo
+		echo "The next page shows the token, once. If it offers \"Open web client\","
+		echo "that button signs this browser in with nothing to paste."
+		echo
 	else
 		echo "To sign in for the first time, open the one-time bootstrap URL from"
 		echo "the journal in a browser on this machine:"
