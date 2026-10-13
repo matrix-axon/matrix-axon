@@ -18,6 +18,10 @@ on:
       - "crates/axon-crypto/**"
       - "crates/axon-search/**"
       - "crates/axon-media/**"
+      - ".github/actions/web-bundle/**"
+      - "scripts/assert-web-embedded.sh"
+      - "scripts/embed-web-smoke.sh"
+      - "scripts/expect-tests.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - "clients/web/package.json"
@@ -74,6 +78,9 @@ jobs:
           shellcheck scripts/release-notes.sh scripts/release-notes-test.sh
           scripts/release-notes-test.sh
 
+      - name: Embedded web client scripts
+        run: shellcheck scripts/assert-web-embedded.sh scripts/embed-web-smoke.sh scripts/expect-tests.sh
+
   packages:
     name: .deb and .rpm (${{ matrix.arch }})
     needs: shellcheck
@@ -119,8 +126,16 @@ jobs:
           sudo mv /tmp/nfpm /usr/local/bin/nfpm
           nfpm --version
 
+      # The packages carry the web client (ADR 0116). The action exports
+      # AXON_WEB_DIST, which turns a missing bundle into a build error.
+      - name: Build the web bundle
+        uses: ./.github/actions/web-bundle
+
       - name: Build axon-server
-        run: cargo build --release -p axon-server --bin axon-server
+        run: cargo build --release -p axon-server --bin axon-server --features embed-web
+
+      - name: Assert the binary carries the web client
+        run: scripts/assert-web-embedded.sh target/release/axon-server "$AXON_WEB_DIST"
 
       - name: Package
         env:
@@ -163,6 +178,32 @@ jobs:
           pattern: axon-server-linux-*-packages
           path: packages
           merge-multiple: true
+
+      # The versioned names above cannot be linked to ahead of time. These
+      # copies can: releases/latest/download/axon-server_amd64.deb is always
+      # the current stable package, which is what the README's install block
+      # and packaging/README.md use. Exactly one package per name, or the copy
+      # would silently pick one.
+      - name: Add version-less names for the latest-release URLs
+        run: |
+          set -euo pipefail
+          alias_one() {
+            pattern=$1
+            target=$2
+            # The glob is the point: the version is whatever this tag built.
+            # shellcheck disable=SC2086
+            set -- packages/$pattern
+            if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+              echo "::error::expected exactly one package matching $pattern, found: $*" >&2
+              exit 1
+            fi
+            cp "$1" "packages/$target"
+          }
+          alias_one 'axon-server_*_amd64.deb' axon-server_amd64.deb
+          alias_one 'axon-server_*_arm64.deb' axon-server_arm64.deb
+          alias_one 'axon-server-*.x86_64.rpm' axon-server.x86_64.rpm
+          alias_one 'axon-server-*.aarch64.rpm' axon-server.aarch64.rpm
+          ls -l packages
 
       - name: Publish packages
         uses: softprops/action-gh-release@v3

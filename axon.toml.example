@@ -31,7 +31,9 @@ port = 8080
 bootstrap_web_allow_remote = false
 # Optional human-facing web-client URL. When set, the one-time bootstrap success
 # page links here after showing the freshly minted credential. Tokens are never
-# placed in this URL.
+# placed in this URL. Unset, a server that serves the web client itself (see
+# web_client below) uses "/"; set it when the web client is somewhere else, for
+# example behind a reverse proxy that publishes this server under a path prefix.
 # web_client_url = "https://axon.example.com/app"
 # The management API (/v1/management/*, ADR 0109) lets a signed-in client
 # administer this server without a shell on it: today, list the sign-in
@@ -40,6 +42,14 @@ bootstrap_web_allow_remote = false
 # 403 management_disabled and clients hide the UI. The axon-server
 # subcommands work either way. Also AXON_SERVER__MANAGEMENT_API.
 management_api = true
+# Serve the web client from this process, at every path that is not the API
+# (ADR 0116). Default true. It only has an effect in a binary built with the
+# web client inside it (the `embed-web` cargo feature and a built bundle, which
+# release builds have); any other build has nothing to serve. The web client shares the
+# API's listener, so it is reachable exactly where `host` above says the API
+# is: this machine only, by default. Set false to serve the API alone.
+# Also AXON_SERVER__WEB_CLIENT.
+web_client = true
 
 [database]
 # Required. Also accepted via the bare DATABASE_URL env var.

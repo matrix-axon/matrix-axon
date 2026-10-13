@@ -147,6 +147,16 @@ pub struct ServerConfig {
     /// subcommands are unaffected either way.
     #[serde(default = "default_management_api")]
     pub management_api: bool,
+    /// Serve the web client from this process (ADR 0116), at every path that
+    /// is not the API. Defaults to `true`.
+    ///
+    /// It only has an effect in a binary built with the web client inside it
+    /// (the `embed-web` feature and a built bundle, which release builds have); any other
+    /// build has nothing to serve. The web client shares the API's listener,
+    /// so it is reachable exactly where the API is: loopback only, unless
+    /// `host` says otherwise. Set `false` to serve the API alone.
+    #[serde(default = "default_web_client")]
+    pub web_client: bool,
 }
 
 /// Postgres connection settings.
@@ -739,6 +749,10 @@ fn default_management_api() -> bool {
     true
 }
 
+fn default_web_client() -> bool {
+    true
+}
+
 fn default_host() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
@@ -774,6 +788,11 @@ const LEGACY_PROJECT_APPLICATION: &str = "axon";
 const PLATFORM_CONFIG_FILE: &str = "config.toml";
 /// Filename inside the pre-rename platform config directory, and the CWD override.
 const LEGACY_CONFIG_FILE: &str = "axon.toml";
+/// Where the `.deb` and `.rpm` put the service's config (ADR 0116). The last
+/// discovery tier on Unix, so a bare `axon-server <command>` on a packaged
+/// install finds the configuration the service runs with.
+#[cfg(unix)]
+const SYSTEM_CONFIG_FILE: &str = "/etc/axon-server/config.toml";
 
 /// The platform's Axon directory set — data / config / cache roots following OS
 /// conventions (XDG on Linux, `~/Library` on macOS, Known Folders on Windows).
@@ -1061,6 +1080,7 @@ impl Default for ServerConfig {
             web_client_url: None,
             bootstrap_web_auto: false,
             management_api: default_management_api(),
+            web_client: default_web_client(),
         }
     }
 }
@@ -1131,6 +1151,35 @@ impl Default for MediaConfig {
             max_concurrent_uploads: default_media_max_concurrent_uploads(),
             staged_upload_ttl_secs: default_media_staged_upload_ttl_secs(),
         }
+    }
+}
+
+/// What discovery found at the system-wide config path.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum SystemConfig {
+    /// A file this user can read.
+    Found,
+    /// The file, or the directory it is in, is there and closed to this user.
+    Unreadable,
+    /// Nothing there, or something that is not a file.
+    Absent,
+}
+
+/// Probe the system-wide config file at `path`.
+///
+/// "Permission denied" is kept apart from "absent": the packages make the file
+/// `0600` in a `0750` directory, so to any other user a working install looks
+/// like this, and the caller must not mistake it for a machine with no
+/// configuration.
+#[cfg(unix)]
+fn system_config(path: &Path) -> SystemConfig {
+    match std::fs::File::open(path).and_then(|file| file.metadata()) {
+        // `open` succeeds on a directory too.
+        Ok(metadata) if metadata.is_file() => SystemConfig::Found,
+        Ok(_) => SystemConfig::Absent,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => SystemConfig::Unreadable,
+        Err(_) => SystemConfig::Absent,
     }
 }
 
@@ -1209,10 +1258,19 @@ impl Config {
     /// Discover the config file path when none is passed explicitly:
     /// `AXON_CONFIG` if set, else `./axon.toml` if it exists, else
     /// `<platform config dir>/config.toml` if it exists, else the pre-rename
-    /// `<legacy platform config dir>/axon.toml` if it exists, else `None`.
+    /// `<legacy platform config dir>/axon.toml` if it exists, else on Unix the
+    /// system-wide `/etc/axon-server/config.toml` if this user can read it,
+    /// else `None`.
     ///
-    /// A `None` here is what tells the binary "no configuration is in place" — the
-    /// signal `axon init` (ADR 0051) keys its first-run offer on.
+    /// The system-wide file is last because a user's own file should win over
+    /// the machine's. It is the one tier that can exist and be unreadable; that
+    /// is a `None` here, so a process configured from the environment still
+    /// starts, and [`unreadable_system_config`](Config::unreadable_system_config)
+    /// tells the two apart for a caller about to report "no configuration".
+    ///
+    /// A `None` here is what tells the binary "no configuration file is in
+    /// place" — the signal `axon init` (ADR 0051) keys its first-run offer on,
+    /// together with `unreadable_system_config`.
     pub fn discover_config_path() -> Result<Option<PathBuf>, ConfigError> {
         if let Ok(explicit) = std::env::var("AXON_CONFIG") {
             let path = PathBuf::from(explicit);
@@ -1228,7 +1286,31 @@ impl Config {
         if let Some(path) = Self::platform_config_path().filter(|p| p.exists()) {
             return Ok(Some(path));
         }
-        Ok(Self::legacy_platform_config_path().filter(|p| p.exists()))
+        if let Some(path) = Self::legacy_platform_config_path().filter(|p| p.exists()) {
+            return Ok(Some(path));
+        }
+        #[cfg(unix)]
+        if system_config(Path::new(SYSTEM_CONFIG_FILE)) == SystemConfig::Found {
+            return Ok(Some(PathBuf::from(SYSTEM_CONFIG_FILE)));
+        }
+        Ok(None)
+    }
+
+    /// The system-wide config file, when it exists and this user cannot read it
+    /// (a packaged install, seen by anyone but the service's user and root).
+    ///
+    /// Only meaningful after [`discover_config_path`](Config::discover_config_path)
+    /// returned `None`. A caller that would otherwise say "no configuration
+    /// found" or offer first-time setup reports
+    /// [`ConfigError::UnreadableSystemConfig`] instead, so an operator on a
+    /// working install is not led into generating a second config with a second
+    /// `store_key`. Always `None` off Unix.
+    pub fn unreadable_system_config() -> Option<PathBuf> {
+        #[cfg(unix)]
+        if system_config(Path::new(SYSTEM_CONFIG_FILE)) == SystemConfig::Unreadable {
+            return Some(PathBuf::from(SYSTEM_CONFIG_FILE));
+        }
+        None
     }
 
     /// The platform config-dir target for a generated config
@@ -1547,6 +1629,67 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn system_config_is_found_absent_or_refused() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        figment::Jail::expect_with(|jail| {
+            let dir = jail.directory().join("etc");
+            let file = dir.join("config.toml");
+            assert_eq!(system_config(&file), SystemConfig::Absent, "absent dir");
+
+            jail.create_dir("etc")?;
+            assert_eq!(system_config(&file), SystemConfig::Absent, "absent file");
+
+            // `File::open` succeeds on a directory; it is still not a config.
+            jail.create_dir("etc/config.toml")?;
+            assert_eq!(system_config(&file), SystemConfig::Absent, "directory");
+            std::fs::remove_dir(&file).expect("rmdir");
+
+            jail.create_file("etc/config.toml", "")?;
+            assert_eq!(system_config(&file), SystemConfig::Found, "readable");
+
+            // The packaged layout as another user sees it: a directory that
+            // cannot be searched. Root ignores the mode bits, so there is
+            // nothing to assert when the suite runs as root, which the owner
+            // of the file just created tells us.
+            let running_as_root = std::fs::metadata(&file).expect("metadata").uid() == 0;
+            let closed = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(&dir, closed).expect("chmod");
+            let refused = system_config(&file);
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            if !running_as_root {
+                assert_eq!(refused, SystemConfig::Unreadable);
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn web_client_defaults_on_and_can_be_switched_off() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://env@localhost/db");
+            assert!(Config::load(None).expect("load").server.web_client);
+
+            jail.create_file(
+                "axon.toml",
+                r#"
+                    [server]
+                    web_client = false
+                "#,
+            )?;
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert!(!config.server.web_client);
+
+            jail.set_env("AXON_SERVER__WEB_CLIENT", "true");
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert!(config.server.web_client, "env beats file");
+            Ok(())
+        });
+    }
+
+    #[test]
     fn socket_addr_combines_host_and_port() {
         let config = Config {
             server: ServerConfig {
@@ -1557,6 +1700,7 @@ mod tests {
                 web_client_url: None,
                 bootstrap_web_auto: false,
                 management_api: true,
+                web_client: true,
             },
             database: DatabaseConfig {
                 url: "x".into(),
