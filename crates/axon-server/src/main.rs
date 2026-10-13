@@ -87,17 +87,27 @@ async fn main() -> anyhow::Result<()> {
                 Ok(path) => path,
                 Err(_) => return Err(err).context("loading configuration"),
             };
-            let first_run = cli.command.is_none()
-                && cli.config.is_none()
-                && discovered.is_none()
-                && !config_env_present()
-                && std::io::stdin().is_terminal();
+            let unconfigured =
+                discovered.is_none() && cli.config.is_none() && !config_env_present();
+            // A packaged install seen by a user who cannot read its config is not
+            // an unconfigured machine: say whose config it is instead of offering
+            // to generate a second one, with a second `store_key`. The test is
+            // "no database URL from anywhere", not `unconfigured`, because an
+            // unrelated `AXON_*` variable (a client's `AXON_BASE_URL`, say) does
+            // not make up for the file this user cannot read.
+            if discovered.is_none() && cli.config.is_none() && !database_url_env_present() {
+                if let Some(path) = Config::unreadable_system_config() {
+                    return Err(axon_core::ConfigError::UnreadableSystemConfig(path))
+                        .context("loading configuration");
+                }
+            }
+            let first_run = cli.command.is_none() && unconfigured && std::io::stdin().is_terminal();
             if first_run {
                 match init::offer_on_first_run(cli.config.as_deref()).await? {
                     Some(config) => config,
                     None => return Err(err).context("loading configuration"),
                 }
-            } else if discovered.is_none() && cli.config.is_none() && !config_env_present() {
+            } else if unconfigured {
                 return Err(err).context(
                     "no configuration found. Run `axon init` to create one, or set the database \
                      URL via DATABASE_URL / AXON_DATABASE__URL. See axon.toml.example for the \
@@ -349,12 +359,26 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_room_settings(room_settings)
     .with_power_levels(power_levels)
     .with_account_actions(account_actions)
-    .with_management(config.server.management_api);
+    .with_management(config.server.management_api)
+    .with_web_client(config.server.web_client);
     if !config.server.management_api {
         tracing::info!(
             "management API disabled (server.management_api = false); \
              /v1/management/* answers 403"
         );
+    }
+    if web_client_served(&config) {
+        tracing::info!("web client served at {}", browsable_url(addr));
+        if !addr.ip().is_loopback() {
+            tracing::warn!(
+                "the web client shares the API's listener ({addr}), so it is reachable from \
+                 other machines; set server.web_client = false to serve the API only"
+            );
+        }
+    } else if axon_api::web_client_embedded() {
+        tracing::info!("web client disabled (server.web_client = false); serving the API only");
+    } else {
+        tracing::info!("web client not built into this binary; serving the API only");
     }
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);
@@ -371,7 +395,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!(%addr, "axon listening");
     if let Some(bootstrap) = &bootstrap {
         println!(
-            "First-credential web bootstrap is armed: open http://{addr}{}",
+            "First-credential web bootstrap is armed: open {}{}",
+            browsable_origin(addr),
             bootstrap.url_path()
         );
         if bootstrap.allow_remote {
@@ -450,13 +475,50 @@ async fn maybe_offer_web_bootstrap(
     tracing::info!(
         allow_remote = config.server.bootstrap_web_allow_remote,
         web_client_url_configured = config.server.web_client_url.is_some(),
+        web_client_served = web_client_served(config),
         "first-credential web bootstrap armed"
     );
     Ok(Some(axon_api::BootstrapConfig::new(
         config.server.bootstrap_web_allow_remote,
         generate_bootstrap_access_code(),
-        config.server.web_client_url.clone(),
+        bootstrap_web_client_url(config),
     )))
+}
+
+/// An address a browser on this machine can open for a listener on `addr`.
+/// `0.0.0.0` and `::` mean "every address" and are not ones to visit, so they
+/// become the loopback address of the same family.
+fn browsable_url(addr: std::net::SocketAddr) -> String {
+    format!("{}/", browsable_origin(addr))
+}
+
+/// [`browsable_url`] without the trailing slash, for a path to follow.
+fn browsable_origin(addr: std::net::SocketAddr) -> String {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    format!("http://{}", SocketAddr::new(ip, addr.port()))
+}
+
+/// Whether this process answers non-API paths with the embedded web client
+/// (ADR 0116): built in, and not switched off.
+fn web_client_served(config: &Config) -> bool {
+    axon_api::WebClientConfig::new(config.server.web_client).served()
+}
+
+/// Where the bootstrap success page hands the new credential. An explicit
+/// `server.web_client_url` wins. Without one, a process that serves the web
+/// client itself is its own answer: `/` is same-origin, so the page can sign
+/// the browser in and redirect with nothing to copy.
+fn bootstrap_web_client_url(config: &Config) -> Option<String> {
+    config
+        .server
+        .web_client_url
+        .clone()
+        .or_else(|| web_client_served(config).then(|| "/".to_owned()))
 }
 
 fn generate_bootstrap_access_code() -> String {
@@ -710,6 +772,19 @@ fn config_env_present() -> bool {
         })
 }
 
+/// Whether the environment supplies the one setting with no default, the
+/// database URL (`DATABASE_URL` or `AXON_DATABASE__URL`, in any case, as the
+/// config loader reads them).
+fn database_url_env_present() -> bool {
+    database_url_among(std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()))
+}
+
+fn database_url_among(keys: impl IntoIterator<Item = String>) -> bool {
+    keys.into_iter().any(|key| {
+        key.eq_ignore_ascii_case("DATABASE_URL") || key.eq_ignore_ascii_case("AXON_DATABASE__URL")
+    })
+}
+
 /// Resolve when the process receives Ctrl-C or (on Unix) SIGTERM, so the server
 /// drains in-flight requests before exiting — important under a container
 /// orchestrator.
@@ -737,6 +812,52 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod browsable_url_tests {
+    use super::{browsable_origin, browsable_url};
+
+    #[test]
+    fn an_unspecified_bind_is_reported_as_loopback() {
+        for (bound, url) in [
+            ("127.0.0.1:8080", "http://127.0.0.1:8080/"),
+            ("0.0.0.0:8080", "http://127.0.0.1:8080/"),
+            ("[::]:8473", "http://[::1]:8473/"),
+            ("192.0.2.7:8080", "http://192.0.2.7:8080/"),
+        ] {
+            assert_eq!(browsable_url(bound.parse().expect("address")), url);
+        }
+    }
+
+    #[test]
+    fn the_origin_takes_a_path_without_a_doubled_slash() {
+        let origin = browsable_origin("0.0.0.0:8473".parse().expect("address"));
+        assert_eq!(
+            format!("{origin}/bootstrap/abc"),
+            "http://127.0.0.1:8473/bootstrap/abc"
+        );
+    }
+}
+
+#[cfg(test)]
+mod database_url_env_tests {
+    use super::database_url_among;
+
+    fn among(keys: &[&str]) -> bool {
+        database_url_among(keys.iter().map(|key| (*key).to_owned()))
+    }
+
+    #[test]
+    fn only_a_database_url_counts() {
+        assert!(among(&["DATABASE_URL"]));
+        assert!(among(&["AXON_DATABASE__URL"]));
+        assert!(among(&["axon_database__url"]));
+        // A client's variable, or a server setting that is not the database,
+        // leaves the process without one.
+        assert!(!among(&["AXON_BASE_URL", "AXON_SERVER__PORT", "HOME"]));
+        assert!(!among(&[]));
+    }
 }
 
 #[cfg(test)]
