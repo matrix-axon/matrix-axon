@@ -178,6 +178,16 @@ fn wait_for_room_and_input_until(
         deadline.saturating_duration_since(Instant::now()),
         |screen| screen.lines().rev().take(5).any(|l| l.contains('>')),
     )?;
+    // The room list and the input line both render while startup is still
+    // fetching (`Rooms — loading read state…`). The first timeline load lands
+    // at the end of startup and resets the view, so a command sent before then
+    // is overwritten: a `/jump` is undone, a selection reverts to the launch
+    // room. Wait for the stage label to leave the rooms title.
+    driver.wait_for_screen_or_exit(
+        "startup to finish",
+        deadline.saturating_duration_since(Instant::now()),
+        rooms_title_settled,
+    )?;
     Ok(())
 }
 
@@ -579,19 +589,26 @@ pub async fn true_local_status_commands(ctx: &Ctx) -> ScenarioOutcome {
     let result = (|| {
         wait_for_room_and_input(&mut driver, &stack.rooms.general.name, ctx.timeout)?;
         switch_room(&mut driver, &stack.rooms.general.name, ctx.timeout)?;
+        // The room name and the account's user id are on screen before any of
+        // these commands run, so each wait names text only that output has.
         submit_command(&mut driver, "/whereami")?;
-        driver.wait_for_screen("whereami output to render", ctx.timeout, |screen| {
-            screen.contains("Smoke General")
+        driver.wait_for_screen("whereami popup to render", ctx.timeout, |screen| {
+            screen.contains("Room Info")
+        })?;
+        // The popup is modal: keys typed into it never reach the compose line.
+        press_escape(&mut driver)?;
+        driver.wait_for_screen("whereami popup to close", ctx.timeout, |screen| {
+            !screen.contains("Room Info")
         })?;
 
         submit_command(&mut driver, "/whoami")?;
         driver.wait_for_screen("whoami output to render", ctx.timeout, |screen| {
-            screen.contains("@axon-") || screen.contains("axon-")
+            screen.contains("Matrix ID: @")
         })?;
 
         submit_command(&mut driver, "/status")?;
         driver.wait_for_screen("status popup to render", ctx.timeout, |screen| {
-            screen.contains("Status") || screen.contains("account") || screen.contains("server")
+            screen.contains("Status  (Esc to close)")
         })?;
         driver.terminate();
         Ok(())
@@ -978,6 +995,19 @@ pub async fn true_local_room_filter(ctx: &Ctx) -> ScenarioOutcome {
 
         // Favourites: pin the selected General, then only pinned rooms remain.
         submit_command(&mut driver, "/pin")?;
+        // `/pin` is an optimistic tag write: the TUI counts as mid-command, and
+        // drops chords such as Alt-/, until the server round trip completes.
+        // Its completion status is the only signal that it has.
+        // Matched on the status row, with a leading space: "pinned X" is also a
+        // substring of "unpinned X", and the room name may appear elsewhere.
+        let pinned = format!(" pinned {general}");
+        driver.wait_for_screen("pin write to complete", ctx.timeout, |screen| {
+            screen
+                .lines()
+                .rev()
+                .take(5)
+                .any(|line| line.contains(&pinned))
+        })?;
         submit_command(&mut driver, "/filter fav")?;
         wait_for_room_list_state(
             &driver,
@@ -1041,8 +1071,14 @@ fn press_alt(driver: &mut PtyDriver, ch: char) -> anyhow::Result<()> {
 
 fn switch_room(driver: &mut PtyDriver, room_name: &str, timeout: Duration) -> anyhow::Result<()> {
     submit_command(driver, &format!("/room {room_name}"))?;
+    // The room name is always in the sidebar, so waiting for it proves nothing,
+    // and the `showing <room>` status can be left over from startup when the
+    // room was already selected. The message pane's title names the selected
+    // room and is drawn together with its timeline, so it is true both when
+    // the switch has landed and when there was nothing to switch.
+    let pane_title = format!("┌{room_name}");
     driver.wait_for_screen("room switch to render", timeout, |screen| {
-        screen.contains(room_name)
+        screen.contains(&pane_title)
     })
 }
 
@@ -1058,6 +1094,21 @@ fn wait_for_room_list_state(
 ) -> anyhow::Result<()> {
     driver.wait_for_screen("room-list state to render", timeout, |screen| {
         screen.contains(title) && rooms.iter().all(|room| screen.contains(room))
+    })
+}
+
+/// True once the rooms title shows a sort label (`Rooms — Recent`,
+/// `Rooms — Groups · Recent`). The startup stage labels (`Rooms — connecting…`,
+/// `Rooms — loading read state…`) are lowercase and sort labels never are, so
+/// this asks for the settled title rather than for the absence of a stage
+/// label: a clipped or reworded title keeps the wait pending and fails loudly
+/// instead of passing vacuously.
+fn rooms_title_settled(screen: &str) -> bool {
+    screen.match_indices("Rooms — ").any(|(at, prefix)| {
+        screen[at + prefix.len()..]
+            .chars()
+            .next()
+            .is_some_and(char::is_uppercase)
     })
 }
 
