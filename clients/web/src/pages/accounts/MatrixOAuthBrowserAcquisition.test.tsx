@@ -1,0 +1,304 @@
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
+import { HttpResponse, http } from 'msw'
+import { setupServer } from 'msw/node'
+import { LocationProvider } from 'preact-iso'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { ServicesContext, type AppServices } from '../../services'
+import { memoryStorage } from '../../test/memory-storage'
+import {
+  TEST_BASE_URL,
+  UNKNOWN_BACKUP,
+  testServices,
+} from '../../test/services'
+import { AccountsPage } from '../AccountsPage'
+
+const FLOW_ID = '10000000-0000-4000-8000-000000000001'
+const FLOW_URL = `${TEST_BASE_URL}/v1/accounts/login/browser/${FLOW_ID}`
+const CREATE_URL = `${TEST_BASE_URL}/v1/accounts/login/browser`
+const STORAGE_KEY = 'axon.matrix-oauth-browser.flow-id'
+const LINK = 'https://auth.example.org/link?code=ABCD-EFGH'
+
+const ALICE = {
+  account_id: '6b53f7f0-0000-4000-8000-000000000001',
+  user_id: '@alice:example.org',
+  homeserver_url: 'https://matrix.example.org',
+  device_id: 'AXONDEV',
+  state: 'active',
+  verified: false,
+  backup: UNKNOWN_BACKUP,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+}
+const BOB = {
+  ...ALICE,
+  account_id: '6b53f7f0-0000-4000-8000-000000000002',
+  user_id: '@bob:example.org',
+  device_id: null,
+  state: 'deactivated',
+  verified: null,
+}
+
+function flow(stage: string, extra: Record<string, unknown> = {}) {
+  return {
+    data: {
+      flow_id: FLOW_ID,
+      expected_user_id: ALICE.user_id,
+      stage,
+      ...extra,
+    },
+  }
+}
+
+const WAITING = flow('waiting_for_authorization', {
+  verification_uri: LINK,
+  user_code: 'ABCD-EFGH',
+})
+
+const server = setupServer()
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+afterEach(() => {
+  cleanup()
+  server.resetHandlers()
+  window.history.replaceState(null, '', '/')
+})
+afterAll(() => server.close())
+
+function renderPage(
+  accounts: unknown[] | (() => unknown[]) = [],
+  pendingStorage?: Storage,
+) {
+  window.history.replaceState(null, '', '/accounts')
+  server.use(
+    http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+      HttpResponse.json({
+        data: typeof accounts === 'function' ? accounts() : accounts,
+      }),
+    ),
+    http.get(`${TEST_BASE_URL}/v1/status`, () =>
+      HttpResponse.json({
+        data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
+      }),
+    ),
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/users/:userId/profile`,
+      ({ params }) =>
+        HttpResponse.json({
+          data: {
+            user_id: String(params.userId),
+            display_name: null,
+            avatar_url: null,
+          },
+        }),
+    ),
+    http.get(`${TEST_BASE_URL}/v1/accounts/:accountId/devices`, () =>
+      HttpResponse.json({ data: { user_id: ALICE.user_id, devices: [] } }),
+    ),
+  )
+  const services: AppServices = testServices({ pendingStorage })
+  const utils = render(
+    <ServicesContext.Provider value={services}>
+      <LocationProvider>
+        <AccountsPage />
+      </LocationProvider>
+    </ServicesContext.Provider>,
+  )
+  return { services, ...utils }
+}
+
+async function start(
+  page: ReturnType<typeof renderPage>,
+  userId = ALICE.user_id,
+) {
+  await page.findByRole('tab', { name: 'Sign in with browser' })
+  fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+  fireEvent.input(page.getByLabelText('Matrix user ID'), {
+    target: { value: userId },
+  })
+  fireEvent.click(page.getByRole('button', { name: 'Start browser sign-in' }))
+}
+
+describe('browser sign-in on the Accounts page', () => {
+  it('shows a link the user opens in a new tab, its host, and the code', async () => {
+    let created: unknown = null
+    server.use(
+      http.post(CREATE_URL, async ({ request }) => {
+        created = await request.json()
+        return HttpResponse.json(WAITING, { status: 201 })
+      }),
+    )
+    const page = renderPage()
+    await start(page)
+
+    const link = await page.findByRole('link', { name: 'Open sign-in page' })
+    expect(created).toEqual({ expected_user_id: ALICE.user_id })
+    expect(link.getAttribute('href')).toBe(LINK)
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(page.getByText('auth.example.org')).toBeTruthy()
+    // Shown even though this link carries it: a bare link needs it typed.
+    expect(page.getByText('ABCD-EFGH')).toBeTruthy()
+    expect(page.getByRole('button', { name: 'Cancel sign-in' })).toBeTruthy()
+  })
+
+  it('refuses to render a link that is not HTTPS', async () => {
+    server.use(
+      http.post(CREATE_URL, () =>
+        HttpResponse.json(
+          flow('waiting_for_authorization', {
+            verification_uri: 'javascript:alert(1)',
+            user_code: 'ABCD-EFGH',
+          }),
+          { status: 201 },
+        ),
+      ),
+    )
+    const page = renderPage()
+    await start(page)
+
+    await page.findByText(/unsafe sign-in link/)
+    expect(page.queryByRole('link', { name: 'Open sign-in page' })).toBeNull()
+  })
+
+  it('stays on Accounts after a first sign-in and leads on to verification', async () => {
+    let signedIn = false
+    server.use(
+      http.post(CREATE_URL, () => {
+        signedIn = true
+        return HttpResponse.json(
+          flow('done', { account_id: ALICE.account_id }),
+          { status: 201 },
+        )
+      }),
+    )
+    const page = renderPage(() => (signedIn ? [ALICE] : []))
+    await page.findByText('No accounts yet — add one below.')
+    await start(page)
+
+    await page.findByText(/not verified yet/)
+    // QR sign-in leaves for the room list here; this must not, or the user
+    // lands in rooms that cannot decrypt with no hint why.
+    expect(window.location.pathname).toBe('/accounts')
+
+    fireEvent.click(
+      page.getByRole('button', { name: 'Verify with another device' }),
+    )
+    expect(page.services.verification.picker.value).toEqual({
+      accountId: ALICE.account_id,
+      ownDeviceId: 'AXONDEV',
+    })
+
+    fireEvent.click(page.getByRole('button', { name: 'Go to rooms' }))
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+  })
+
+  it('offers no shortcut to rooms when another account was already active', async () => {
+    const carol = {
+      ...ALICE,
+      account_id: '6b53f7f0-0000-4000-8000-000000000003',
+      user_id: '@carol:example.org',
+    }
+    server.use(
+      http.post(CREATE_URL, () =>
+        HttpResponse.json(flow('done', { account_id: ALICE.account_id }), {
+          status: 201,
+        }),
+      ),
+    )
+    const page = renderPage([carol, ALICE])
+    await page.findByText('@carol:example.org')
+    await start(page)
+
+    await page.findByText(/not verified yet/)
+    expect(page.queryByRole('button', { name: 'Go to rooms' })).toBeNull()
+    fireEvent.click(page.getByRole('button', { name: 'Add another account' }))
+    await page.findByRole('button', { name: 'Start browser sign-in' })
+  })
+
+  it('explains a refusal and lets the user start again', async () => {
+    server.use(
+      http.post(CREATE_URL, () =>
+        HttpResponse.json(
+          flow('failed', { error_code: 'authorization_denied' }),
+          { status: 201 },
+        ),
+      ),
+    )
+    const page = renderPage()
+    await start(page)
+
+    await page.findByText(/declined in the browser/)
+    fireEvent.click(page.getByRole('button', { name: 'Start again' }))
+    await page.findByRole('button', { name: 'Start browser sign-in' })
+  })
+
+  it('returns to a sign-in that a reload interrupted', async () => {
+    server.use(http.get(FLOW_URL, () => HttpResponse.json(WAITING)))
+    const page = renderPage([], memoryStorage({ [STORAGE_KEY]: FLOW_ID }))
+
+    // No tab was clicked: the stored flow selects it.
+    await page.findByRole('link', { name: 'Open sign-in page' })
+    expect(
+      page
+        .getByRole('tab', { name: 'Sign in with browser' })
+        .getAttribute('aria-selected'),
+    ).toBe('true')
+  })
+
+  it('asks again as soon as the user comes back to the page', async () => {
+    let polls = 0
+    server.use(
+      http.post(CREATE_URL, () => HttpResponse.json(WAITING, { status: 201 })),
+      http.get(FLOW_URL, () => {
+        polls += 1
+        return HttpResponse.json(flow('finalizing'))
+      }),
+    )
+    const page = renderPage()
+    await start(page)
+    await page.findByRole('link', { name: 'Open sign-in page' })
+    expect(polls).toBe(0)
+
+    document.dispatchEvent(new Event('visibilitychange'))
+
+    await page.findByText('Approved. Finishing sign-in…')
+    expect(polls).toBe(1)
+    // The link and code are gone with the stage that carried them.
+    expect(page.queryByRole('link', { name: 'Open sign-in page' })).toBeNull()
+    expect(page.queryByText('ABCD-EFGH')).toBeNull()
+  })
+
+  it('reactivates with the stored user ID and cancels the flow on leaving', async () => {
+    let cancelled = false
+    let created: unknown = null
+    server.use(
+      http.post(CREATE_URL, async ({ request }) => {
+        created = await request.json()
+        return HttpResponse.json(
+          {
+            data: { ...WAITING.data, expected_user_id: BOB.user_id },
+          },
+          { status: 201 },
+        )
+      }),
+      http.delete(FLOW_URL, () => {
+        cancelled = true
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const page = renderPage([BOB])
+    fireEvent.click(await page.findByRole('button', { name: 'Sign in again' }))
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+    const input = page.getByLabelText('Matrix user ID') as HTMLInputElement
+    expect(input.value).toBe(BOB.user_id)
+    expect(input.readOnly).toBe(true)
+    fireEvent.click(page.getByRole('button', { name: 'Start browser sign-in' }))
+    await page.findByRole('link', { name: 'Open sign-in page' })
+    expect(created).toEqual({ expected_user_id: BOB.user_id })
+
+    fireEvent.click(page.getByRole('button', { name: 'Cancel reactivation' }))
+
+    await page.findByRole('heading', { name: 'Add account' })
+    expect(cancelled).toBe(true)
+    expect(page.services.matrixOAuthBrowser.flow.value).toBeNull()
+  })
+})

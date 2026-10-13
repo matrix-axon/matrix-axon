@@ -35,6 +35,8 @@ const QR_BINARY_BASE64 = Buffer.from([0, 1, 2, 3, 127, 128, 254, 255])
   .toString('base64')
   .replace(/=+$/, '')
 let qrFlow = null
+const BROWSER_FLOW_ID = '44444444-4444-4444-8444-444444444444'
+let browserFlow = null
 let submittedQrBase64 = null
 
 function account(id, userId) {
@@ -806,6 +808,44 @@ async function handleApi(req, res, url) {
     res.writeHead(204).end()
     return
   }
+  if (method === 'POST' && pathname === '/v1/accounts/login/browser') {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const request = parseJsonBody(raw)
+      // A bare link, as some authorization servers return: the page has to
+      // show the code because the link does not carry it.
+      browserFlow = {
+        flow_id: BROWSER_FLOW_ID,
+        expected_user_id: request.expected_user_id,
+        stage: 'waiting_for_authorization',
+        verification_uri: 'https://auth.example/link',
+        user_code: 'WXYZ-1234',
+      }
+      json(res, { data: browserFlow }, 201)
+    })
+    return
+  }
+  if (
+    method === 'GET' &&
+    pathname === `/v1/accounts/login/browser/${BROWSER_FLOW_ID}`
+  ) {
+    return browserFlow === null
+      ? json(
+          res,
+          { error: { code: 'not_found', message: 'unknown flow' } },
+          404,
+        )
+      : json(res, { data: browserFlow })
+  }
+  if (
+    method === 'DELETE' &&
+    pathname === `/v1/accounts/login/browser/${BROWSER_FLOW_ID}`
+  ) {
+    browserFlow = null
+    res.writeHead(204).end()
+    return
+  }
   if (method === 'GET' && pathname === '/v1/status') {
     return json(res, {
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
@@ -1489,6 +1529,25 @@ const server = createServer((req, res) => {
         submitted: submittedQrBase64,
       },
     })
+  }
+  // Stands in for the user approving at the authorization server, which no
+  // spec can reach: moves the open browser sign-in to the stage named.
+  if (req.method === 'POST' && url.pathname === '/__e2e/browser-sign-in') {
+    const stage = url.searchParams.get('stage')
+    if (stage === null) {
+      browserFlow = null
+    } else if (browserFlow !== null) {
+      browserFlow = {
+        flow_id: browserFlow.flow_id,
+        expected_user_id: browserFlow.expected_user_id,
+        stage,
+        ...(stage === 'done' ? { account_id: ACCOUNT_ID } : {}),
+        ...(stage === 'failed'
+          ? { error_code: url.searchParams.get('error_code') }
+          : {}),
+      }
+    }
+    return json(res, { data: browserFlow })
   }
   if (req.method === 'POST' && url.pathname === '/__e2e/search-503') {
     searchDisabled = url.searchParams.get('disabled') === 'true'
