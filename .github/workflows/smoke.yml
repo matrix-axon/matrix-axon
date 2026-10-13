@@ -92,7 +92,9 @@ jobs:
 
   # Does not gate pull requests: needs Docker and a real Synapse.
   true-local:
-    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || (inputs.lane != 'tui' && inputs.lane != 'notify' && !startsWith(inputs.lane, 'matrix-oauth')))
+    # An allow-list, so a future dispatch-only lane cannot fall through to
+    # `smoke-gate.sh` with a mode it does not know.
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.lane == 'tui-true-local' || inputs.lane == 'server' || inputs.lane == 'all')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
