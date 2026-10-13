@@ -197,6 +197,47 @@ pub struct AppState {
     /// config key is; the binary passes `[server] management_api` through
     /// [`with_management`](Self::with_management).
     pub management: ManagementConfig,
+    /// The web client's operator switch (ADR 0116). On by default, as the
+    /// config key is; the binary passes `[server] web_client` through
+    /// [`with_web_client`](Self::with_web_client).
+    pub web_client: WebClientConfig,
+}
+
+/// Whether the embedded web client is served (`[server] web_client`, ADR 0116).
+/// On in a build without the `embed-web` feature too, where there is nothing
+/// to serve and the fallback page says so.
+#[derive(Clone, Copy)]
+pub struct WebClientConfig {
+    pub enabled: bool,
+    /// What there is to serve: the bundle compiled into this binary, unless a
+    /// test supplied its own.
+    bundle: Option<&'static crate::web::Bundle>,
+}
+
+impl Default for WebClientConfig {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
+impl WebClientConfig {
+    /// The switch, over whatever this binary carries.
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            bundle: crate::web::embedded(),
+        }
+    }
+
+    /// The bundle to serve, when switched on and there is one.
+    pub(crate) fn bundle(self) -> Option<&'static crate::web::Bundle> {
+        self.bundle.filter(|_| self.enabled)
+    }
+
+    /// Whether this process answers non-API paths with the web client.
+    pub fn served(self) -> bool {
+        self.bundle().is_some()
+    }
 }
 
 /// Whether `/v1/management/*` is served (`[server] management_api`, ADR 0109).
@@ -359,6 +400,7 @@ impl AppState {
             oauth: None,
             bootstrap: None,
             management: ManagementConfig::default(),
+            web_client: WebClientConfig::default(),
         }
     }
 
@@ -513,6 +555,25 @@ impl AppState {
     /// `[server] management_api`; tests that don't care keep it enabled.
     pub fn with_management(mut self, enabled: bool) -> Self {
         self.management = ManagementConfig { enabled };
+        self
+    }
+
+    /// Set whether the embedded web client is served. The binary calls this
+    /// with `[server] web_client`.
+    pub fn with_web_client(mut self, enabled: bool) -> Self {
+        self.web_client.enabled = enabled;
+        self
+    }
+
+    /// Serve `bundle` as the web client instead of whatever this binary
+    /// carries. A test seam: the router's behavior with a bundle should not
+    /// depend on the `embed-web` feature or on a built `clients/web/dist`.
+    /// The caller owns the bundle, so nothing is allocated or leaked here, and
+    /// [`with_web_client`](Self::with_web_client) still decides whether it is
+    /// served.
+    #[doc(hidden)]
+    pub fn with_web_client_bundle(mut self, bundle: &'static crate::web::Bundle) -> Self {
+        self.web_client.bundle = Some(bundle);
         self
     }
 
@@ -900,6 +961,12 @@ impl StagedUploadService for DisabledStagedUploads {
         Err(StageUploadError::Internal(
             "staged upload service is not configured".to_owned(),
         ))
+    }
+}
+
+impl FromRef<AppState> for WebClientConfig {
+    fn from_ref(state: &AppState) -> WebClientConfig {
+        state.web_client
     }
 }
 

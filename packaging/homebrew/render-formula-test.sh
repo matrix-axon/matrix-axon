@@ -156,6 +156,12 @@ class Formula
   end
 end
 
+class Formula
+  # Where the formula installed its documentation. The caveats look here to
+  # tell a release that carries the web client from one that predates it.
+  def doc = Pathname.new(ENV.fetch("AXON_FORMULA_DOC"))
+end
+
 def write_caveats(formula, mac_path, linux_path)
   ENV["AXON_FORMULA_OS"] = "mac"
   File.write(mac_path, formula.new.caveats)
@@ -170,12 +176,41 @@ load ARGV[1]
 tui = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonTui" }
 raise "AxonTui formula did not load" unless tui
 
+require "pathname"
+require "fileutils"
+work = File.dirname(ARGV[2])
+ENV["AXON_FORMULA_DOC"] = File.join(work, "doc")
+FileUtils.mkdir_p(File.join(work, "doc", "examples"))
 write_caveats(server, ARGV[2], ARGV[3])
 write_caveats(tui, ARGV[4], ARGV[5])
+# An older release zip: no site files were installed.
+ENV["AXON_FORMULA_DOC"] = File.join(work, "doc-old")
+write_caveats(server, File.join(work, "caveats-old-mac.txt"), File.join(work, "caveats-old-linux.txt"))
 RUBY
 
 grep -Fq 'macOS: ~/Library/Application Support/axon-server/config.toml' "$work/caveats-mac.txt"
 grep -Fq 'Linux: ~/.config/axon-server/config.toml' "$work/caveats-mac.txt"
+# The web client ships on by default with no install prompt, so the caveats are
+# the only place the operator is told (ADR 0116): where it is, that 127.0.0.1
+# and localhost are separate sign-ins, how to turn it off, where the proxy
+# site files are.
+for os in mac linux; do
+	grep -Fq 'http://127.0.0.1:8080/' "$work/caveats-$os.txt"
+	grep -Fq 'not localhost' "$work/caveats-$os.txt"
+	grep -Fq 'web_client = false' "$work/caveats-$os.txt"
+	grep -Fq 'share/doc/axon-server/examples' "$work/caveats-$os.txt"
+done
+grep -Fq '(doc/"examples").install' "$out"
+# A formula published for a tag from before the web client has no site files,
+# and its caveats must not send the operator to a web client or a directory
+# that release does not have.
+for os in mac linux; do
+	grep -Fq 'axon-server init' "$work/caveats-old-$os.txt"
+	if grep -Eq '127\.0\.0\.1:8080/|web client|share/doc/axon-server/examples' "$work/caveats-old-$os.txt"; then
+		echo "caveats for a release without site files mention the web client" >&2
+		exit 1
+	fi
+done
 grep -Fq 'GLIBC' "$work/caveats-linux.txt"
 if grep -Fq 'GLIBC' "$work/caveats-mac.txt"; then
 	echo "macOS caveats mention the Linux glibc floor" >&2

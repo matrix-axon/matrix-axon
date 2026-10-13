@@ -42,6 +42,16 @@ pub enum ConfigError {
     #[error("configuration file does not exist: {0}")]
     MissingConfigFile(PathBuf),
 
+    /// The system-wide config file is there, this user may not read it, and
+    /// nothing else gives the process a database URL. Reported instead of "no
+    /// configuration", which would offer first-time setup on a machine that is
+    /// already set up.
+    #[error(
+        "{0} exists but this user cannot read it. Run the command as the service's \
+         user (for a packaged install: `sudo -u axon axon-server …`), or pass --config"
+    )]
+    UnreadableSystemConfig(PathBuf),
+
     /// Configuration parsed but failed a semantic check (e.g. an account
     /// supplied neither or both of `password` / `access_token`). Validated
     /// outside figment so the message is human-readable.

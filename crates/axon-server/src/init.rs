@@ -61,6 +61,7 @@ pub async fn run(args: &InitArgs, cli_config: Option<&Path>) -> anyhow::Result<(
     } else {
         Config::discover_config_path()?
     };
+    let discovered_is_none = discovered.is_none();
     let target = choose_write_target(
         explicit_target,
         discovered.clone(),
@@ -99,6 +100,22 @@ pub async fn run(args: &InitArgs, cli_config: Option<&Path>) -> anyhow::Result<(
                 "a configuration already exists at {}. Use --force to overwrite \
                  (this regenerates store_key, which orphans any existing encrypted data).",
                 path.display()
+            );
+        }
+    }
+
+    // A packaged install keeps its config where only the service's user can read
+    // it. That must not stop a user creating their own, but they should know the
+    // new file is a separate server with its own `store_key`, not a way into the
+    // one already running.
+    if !explicit && discovered_is_none {
+        if let Some(system) = Config::unreadable_system_config() {
+            eprintln!(
+                "note: {} exists but this user cannot read it, so it is left alone. \
+                 The config written here is separate, with its own store_key. To manage \
+                 the packaged server instead, run its commands as the service's user \
+                 (`sudo -u axon axon-server …`).",
+                system.display()
             );
         }
     }
