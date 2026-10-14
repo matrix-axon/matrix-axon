@@ -68,6 +68,8 @@ struct Behaviour {
     /// Give the user a server name nothing answers on, so only a stored
     /// homeserver URL can reach the stand-in.
     unresolvable_server_name: bool,
+    /// Let a new browser sign-in replace an open one however young it is.
+    replace_immediately: bool,
 }
 
 impl Default for Behaviour {
@@ -99,6 +101,7 @@ impl Default for Behaviour {
             whoami_delay: Duration::ZERO,
             background_delay: Duration::ZERO,
             unresolvable_server_name: false,
+            replace_immediately: false,
         }
     }
 }
@@ -279,6 +282,7 @@ impl Harness {
             address.to_string()
         };
         let user_id = format!("@browser-{}:{server_name}", Uuid::new_v4().simple());
+        let replace_immediately = behaviour.replace_immediately;
         let server = Arc::new(Server {
             base: format!("http://{address}"),
             user_id: user_id.clone(),
@@ -326,13 +330,16 @@ impl Harness {
             .await
             .expect("connect + migrate");
         let lifecycle = crate::lifecycle::tests::lifecycle_with(config.clone()).await;
-        let engine = MatrixOAuthAcquireEngine::new(
+        let mut engine = MatrixOAuthAcquireEngine::new(
             store.clone(),
             config,
             lifecycle,
             TaskTracker::new(),
             CancellationToken::new(),
         );
+        if replace_immediately {
+            engine = engine.with_immediate_browser_replacement();
+        }
         Self {
             engine,
             store,
@@ -628,7 +635,8 @@ async fn flows_conflict_across_methods_but_are_isolated_by_route_family() {
         )
         .await;
 
-    // A live browser flow refuses every other flow for the same user.
+    // A live browser flow refuses every other flow for the same user. A new
+    // browser flow could replace it, but not one this young.
     assert!(matches!(
         harness.engine.create_browser(&harness.user_id).await,
         Err(MatrixOAuthAcquireError::FlowAlreadyExists)
@@ -892,6 +900,94 @@ async fn a_session_for_the_wrong_identity_or_without_refresh_is_refused() {
         );
         harness.finish().await;
     }
+}
+
+/// A closed tab or a lost create response leaves a flow nobody can name. A new
+/// browser sign-in for the same user takes over from it instead of waiting
+/// out its thirty minutes, and the old one says why it ended.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_new_browser_sign_in_replaces_an_unapproved_one() {
+    let harness = Harness::start(Behaviour {
+        replace_immediately: true,
+        ..never_approved()
+    })
+    .await;
+    let (logs, _guard) = capture_logs();
+    let old = harness.create().await;
+    harness
+        .wait_for(
+            old.flow_id,
+            MatrixOAuthBrowserStage::WaitingForAuthorization,
+        )
+        .await;
+
+    let new = harness.create().await;
+    assert_ne!(new.flow_id, old.flow_id);
+    let replaced = harness.engine.get_browser(old.flow_id).unwrap();
+    assert_eq!(replaced.stage, MatrixOAuthBrowserStage::Cancelled);
+    assert_eq!(replaced.cancel_reason, Some("replaced"));
+    assert!(replaced.verification_uri.is_none() && replaced.user_code.is_none());
+    harness
+        .wait_for(
+            new.flow_id,
+            MatrixOAuthBrowserStage::WaitingForAuthorization,
+        )
+        .await;
+    assert_eq!(harness.server.device_requests.lock().unwrap().len(), 2);
+    assert_eq!(harness.staging_dirs(), 1, "the replaced store is removed");
+    assert!(logs
+        .text()
+        .contains("Matrix OAuth login flow replaced by a new one for the same user"));
+
+    // An ordinary cancellation carries no reason.
+    harness.engine.cancel_browser(new.flow_id).unwrap();
+    let cancelled = harness.engine.get_browser(new.flow_id).unwrap();
+    assert_eq!(cancelled.stage, MatrixOAuthBrowserStage::Cancelled);
+    assert_eq!(cancelled.cancel_reason, None);
+    harness.wait_until_released().await;
+
+    // A QR flow is never replaced by a browser one.
+    let qr = harness
+        .engine
+        .create(&harness.user_id, MatrixOAuthAcquirePresentation::Scan)
+        .await
+        .expect("the user is free again");
+    assert!(matches!(
+        harness.engine.create_browser(&harness.user_id).await,
+        Err(MatrixOAuthAcquireError::FlowAlreadyExists)
+    ));
+    assert!(harness.engine.get(qr.flow_id).is_ok());
+    harness.engine.cancel(qr.flow_id).unwrap();
+    harness.wait_until_released().await;
+    harness.finish().await;
+}
+
+/// Once the user has approved, the tokens are on their way to becoming an
+/// account; a new sign-in must not throw that approval away.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_approved_browser_sign_in_is_not_replaced() {
+    let harness = Harness::start(Behaviour {
+        replace_immediately: true,
+        whoami_delay: Duration::from_secs(2),
+        ..Behaviour::default()
+    })
+    .await;
+    let flow = harness.create().await;
+    harness
+        .wait_for(flow.flow_id, MatrixOAuthBrowserStage::Finalizing)
+        .await;
+
+    assert!(matches!(
+        harness.engine.create_browser(&harness.user_id).await,
+        Err(MatrixOAuthAcquireError::FlowAlreadyExists)
+    ));
+    let done = harness
+        .wait_for(flow.flow_id, MatrixOAuthBrowserStage::Done)
+        .await;
+    assert!(done.account_id.is_some());
+    harness.finish().await;
 }
 
 /// A login that makes the identity active while the user is still approving

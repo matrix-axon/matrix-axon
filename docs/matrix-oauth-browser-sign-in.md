@@ -40,6 +40,9 @@ Only one sign-in flow of any kind, browser or QR, can be open for a Matrix user 
   Lead the user straight on to recovery-key import or interactive verification, or encrypted history will not decrypt.
 - **Treat an unknown `error_code` as a generic failure.**
   The set may grow.
+- **A cancelled flow may have been replaced.**
+  `cancel_reason` `replaced` means a newer browser sign-in for the same user took over; say so rather than "cancelled".
+  Treat any other `cancel_reason` like an ordinary cancellation.
 
 ## Failure codes
 
@@ -63,6 +66,12 @@ Creating a flow can also be refused outright:
 | `400`  | The user ID is not a valid Matrix user ID.                                                                            |
 | `409`  | The account is already signed in, is being deleted or is still shutting down, or another sign-in flow is open for it. |
 | `429`  | Too many sign-in flows are open or recently finished. Retry shortly.                                                  |
+
+A new browser sign-in replaces an open browser sign-in for the same user when that one is at least ten seconds old and has not been approved.
+That is how a user gets past a flow whose tab was closed or whose create response was lost.
+The replaced flow ends `cancelled` with `cancel_reason` `replaced`, and its link and code stop working; tell its user that a newer sign-in took over.
+A flow that is younger, already approved and finishing, or a QR login still answers `409`.
+The server logs `Matrix OAuth login flow replaced by a new one for the same user` with the old `flow_id`.
 
 A flow ID from QR login is `404` on these routes, and a browser flow ID is `404` on the QR routes.
 

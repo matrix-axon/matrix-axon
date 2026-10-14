@@ -432,6 +432,7 @@ impl StubMatrixOAuthBrowser {
             user_code: waiting.then(|| "WDJB-MJHT".to_owned()),
             account_id: None,
             error_code: None,
+            cancel_reason: None,
         }
     }
 
