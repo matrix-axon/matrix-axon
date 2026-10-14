@@ -90,11 +90,15 @@ Token-endpoint responses map as follows:
 | `slow_down`                                                      | add five seconds to the interval, every time, with no ceiling       |
 | `access_denied`                                                  | fail as `authorization_denied`                                      |
 | `expired_token`                                                  | fail as `authorization_expired`                                     |
-| transport error, timeout, `429`, or `5xx`                        | retry at the current interval; five consecutive fail as `upstream`  |
+| transport error, timeout, `429`, or `5xx`                        | retry with back-off; two minutes of failures fail as `upstream`     |
 | any other OAuth error (`invalid_grant`, `server_error`, unknown) | fail as `upstream`                                                  |
 | success without a refresh token                                  | fail as `upstream`, after best-effort revocation                    |
 
 Only the stable classification and HTTP status are logged, never the error description.
+
+A retry after a transient failure waits for the server's `Retry-After` when it gives one in seconds, otherwise for double the previous wait, starting from the interval and capped at thirty seconds; it never waits less than the interval, and the deadline bounds every wait.
+The flow fails as `upstream` when a transient failure arrives two minutes or more after the first failure in an unbroken run, and any other answer ends the run and restores the interval.
+_(Amended before the server PR opened: the original decision retried at the current interval and failed after five consecutive failures, which ended a flow after about twenty-five seconds of outage at the default interval, discarding an approval the user might be giving at that moment, and kept polling at full rate into a `429`.)_
 
 **Deadline.**
 The ten-minute flow TTL of ADR 0097 was sized for scanning a QR code and is too short for a sign-in that may pass through an upstream identity provider and a second factor on another device.
@@ -213,7 +217,7 @@ Unit and contract tests cover:
 - the device authorization request shape and scopes, and that the staged store's device ID equals the one in the requested scope;
 - the capability gate, including an endpoint advertised without the grant type, and that it is applied before any client is registered;
 - rejection of an unsafe verification link in either field (`javascript:`, `data:`, plain HTTP on an HTTPS homeserver, userinfo, over-long) and of an over-long or non-printable user code, with nothing published;
-- every row of the polling table, the wait before the first poll, a missing, zero, and long `interval`, repeated `slow_down` growing without a ceiling, a wait longer than the deadline, and the consecutive-failure budget;
+- every row of the polling table, the wait before the first poll, a missing, zero, and long `interval`, repeated `slow_down` growing without a ceiling, a wait longer than the deadline, and the transient-failure back-off, `Retry-After`, and two-minute budget;
 - the thirty-minute TTL and a shorter `expires_in`, both ending as `authorization_expired`, and that the QR TTL is unchanged;
 - oversized, non-JSON, and redirecting responses, and non-HTTPS endpoints on an HTTPS homeserver;
 - cancellation during the poll, a Matrix user mismatch, a concurrent login, logout, or deletion, and crash reconciliation;
