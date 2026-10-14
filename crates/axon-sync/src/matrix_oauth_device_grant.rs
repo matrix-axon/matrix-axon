@@ -39,8 +39,13 @@ const MAX_DEVICE_CODE_BYTES: usize = 4_096;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SLOW_DOWN_STEP: Duration = Duration::from_secs(5);
-/// Consecutive transient token-endpoint failures tolerated before giving up.
-const MAX_CONSECUTIVE_POLL_FAILURES: u32 = 5;
+/// How long the token endpoint may keep failing, counted from the first
+/// failure in a row, before the flow gives up as `upstream`. Long enough to
+/// ride out a homeserver or proxy restart while the user is approving.
+const TRANSIENT_FAILURE_BUDGET: Duration = Duration::from_secs(120);
+/// The longest back-off between retries after a failure, unless the server's
+/// own interval is longer.
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 /// The OAuth error codes worth naming in a log (RFC 6749 §5.2, RFC 8628 §3.5).
 const KNOWN_OAUTH_ERRORS: [&str; 12] = [
@@ -176,8 +181,11 @@ pub(crate) enum PollOutcome {
     SlowDown,
     Denied,
     Expired,
-    /// Transport error, timeout, `429`, or `5xx`: retry at the same interval.
-    Transient,
+    /// Transport error, timeout, `429`, or `5xx`: retry with back-off, after
+    /// the server's `Retry-After` when it sent one in seconds.
+    Transient {
+        retry_after: Option<Duration>,
+    },
     /// Any other answer: the flow fails as `upstream`.
     Fatal,
 }
@@ -374,18 +382,20 @@ pub(crate) async fn request_tokens(
                 },
                 "Matrix OAuth token poll did not complete; will retry"
             );
-            return PollOutcome::Transient;
+            return PollOutcome::Transient { retry_after: None };
         }
     };
     let status = response.status();
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        let retry_after = retry_after(response.headers());
         tracing::warn!(
             phase = PHASE,
             error_class = "upstream",
             http_status = status.as_u16(),
+            retry_after_secs = retry_after.map(|wait| wait.as_secs()),
             "Matrix OAuth token endpoint is unavailable; will retry"
         );
-        return PollOutcome::Transient;
+        return PollOutcome::Transient { retry_after };
     }
     let body = match read_bounded_body(response, MAX_TOKEN_RESPONSE_BYTES).await {
         Ok(body) => body,
@@ -396,7 +406,7 @@ pub(crate) async fn request_tokens(
                 http_status = status.as_u16(),
                 "Matrix OAuth token poll did not complete; will retry"
             );
-            return PollOutcome::Transient;
+            return PollOutcome::Transient { retry_after: None };
         }
         Err(BoundedBodyError::TooLarge) => {
             tracing::warn!(
@@ -425,6 +435,28 @@ pub(crate) async fn request_tokens(
         );
     }
     outcome
+}
+
+/// A `Retry-After` given in seconds. The HTTP-date form is ignored and the
+/// ordinary back-off applies instead.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
+/// The wait before the next poll after a transient failure: the server's
+/// `Retry-After` when it sent one, otherwise double the last wait up to
+/// [`MAX_RETRY_BACKOFF`]. Never shorter than the poll interval, which RFC 8628
+/// §3.5 makes the minimum; the flow deadline bounds any wait.
+fn retry_wait(last_wait: Duration, interval: Duration, retry_after: Option<Duration>) -> Duration {
+    let wait = retry_after.unwrap_or_else(|| last_wait.saturating_mul(2).min(MAX_RETRY_BACKOFF));
+    wait.max(interval)
 }
 
 /// Map one fully-read token-endpoint answer onto the polling table. `429` and
@@ -477,7 +509,10 @@ where
     // way out of this loop reports them.
     let started = tokio::time::Instant::now();
     let mut polls: u32 = 0;
-    let mut consecutive_failures = 0;
+    // The next wait: the interval, or a back-off while the endpoint fails.
+    let mut wait = interval;
+    // When the current run of transient failures began.
+    let mut failing_since: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             biased;
@@ -492,10 +527,16 @@ where
                 );
                 return Err(DeviceGrantFailure::Expired);
             }
-            _ = tokio::time::sleep(interval) => {}
+            _ = tokio::time::sleep(wait) => {}
         }
         polls = polls.saturating_add(1);
-        match poll().await {
+        let outcome = poll().await;
+        if !matches!(outcome, PollOutcome::Transient { .. }) {
+            // Any real answer ends an outage and restores the normal pace.
+            failing_since = None;
+            wait = interval;
+        }
+        match outcome {
             PollOutcome::Tokens(tokens) => {
                 tracing::info!(
                     phase = "device_token",
@@ -505,12 +546,12 @@ where
                 );
                 return Ok(tokens);
             }
-            PollOutcome::Pending => consecutive_failures = 0,
+            PollOutcome::Pending => {}
             PollOutcome::SlowDown => {
-                consecutive_failures = 0;
                 // Every `slow_down` adds five seconds, with no ceiling
                 // (RFC 8628 §3.5); the deadline bounds the total.
                 interval = interval.saturating_add(SLOW_DOWN_STEP);
+                wait = interval;
                 tracing::debug!(
                     phase = "device_token",
                     polls,
@@ -538,18 +579,28 @@ where
                 );
                 return Err(DeviceGrantFailure::Expired);
             }
-            PollOutcome::Transient => {
-                consecutive_failures += 1;
-                if consecutive_failures >= MAX_CONSECUTIVE_POLL_FAILURES {
+            PollOutcome::Transient { retry_after } => {
+                let now = tokio::time::Instant::now();
+                let unreachable = now - *failing_since.get_or_insert(now);
+                if unreachable >= TRANSIENT_FAILURE_BUDGET {
                     tracing::warn!(
                         phase = "device_token",
                         error_class = "upstream",
-                        consecutive_failures,
+                        unreachable_secs = unreachable.as_secs(),
                         polls,
+                        waited_secs = started.elapsed().as_secs(),
                         "Matrix OAuth token endpoint kept failing; giving up"
                     );
                     return Err(DeviceGrantFailure::Upstream);
                 }
+                wait = retry_wait(wait, interval, retry_after);
+                tracing::debug!(
+                    phase = "device_token",
+                    polls,
+                    unreachable_secs = unreachable.as_secs(),
+                    retry_in_secs = wait.as_secs(),
+                    "Matrix OAuth token endpoint failed; backing off"
+                );
             }
             PollOutcome::Fatal => return Err(DeviceGrantFailure::Upstream),
         }
@@ -1111,9 +1162,21 @@ mod tests {
         }
     }
 
+    fn transient() -> PollOutcome {
+        PollOutcome::Transient { retry_after: None }
+    }
+
+    fn busy_for(secs: u64) -> PollOutcome {
+        PollOutcome::Transient {
+            retry_after: Some(Duration::from_secs(secs)),
+        }
+    }
+
+    /// Failures back off by doubling up to 30 s, and the flow gives up once
+    /// the endpoint has failed for two minutes in a row.
     #[tokio::test(start_paused = true)]
-    async fn five_consecutive_transient_failures_give_up() {
-        let script = Script::new((0..5).map(|_| PollOutcome::Transient).collect());
+    async fn transient_failures_back_off_and_give_up_after_two_minutes() {
+        let script = Script::new((0..20).map(|_| transient()).collect());
         let result = poll_for_tokens(
             || script.poll(),
             Duration::from_secs(5),
@@ -1122,17 +1185,16 @@ mod tests {
         )
         .await;
         assert_eq!(result.err(), Some(DeviceGrantFailure::Upstream));
-        // Retries keep the current interval; they do not back off or speed up.
-        assert_eq!(script.polled_at_secs(), [5, 10, 15, 20, 25]);
+        // First failure at 5 s; the sixth, at 125 s, is 120 s into the outage.
+        assert_eq!(script.polled_at_secs(), [5, 15, 35, 65, 95, 125]);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_answer_resets_the_transient_failure_budget() {
-        let mut outcomes = Vec::new();
-        for _ in 0..3 {
-            outcomes.extend((0..4).map(|_| PollOutcome::Transient));
-            outcomes.push(PollOutcome::Pending);
-        }
+    async fn an_answer_resets_the_failure_budget_and_the_pace() {
+        let mut outcomes: Vec<PollOutcome> = (0..5).map(|_| transient()).collect();
+        // 120 s after the first failure, but an answer ends the outage.
+        outcomes.push(PollOutcome::Pending);
+        outcomes.push(transient());
         outcomes.push(tokens());
         let script = Script::new(outcomes);
         let result = poll_for_tokens(
@@ -1143,7 +1205,50 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(script.polled_at_secs().len(), 16);
+        assert_eq!(script.polled_at_secs(), [5, 15, 35, 65, 95, 125, 130, 140]);
+    }
+
+    /// `Retry-After` sets the next wait, but never below the poll interval,
+    /// and back-off resumes from it.
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_is_honoured_but_never_below_the_interval() {
+        let script = Script::new(vec![busy_for(60), busy_for(1), transient(), tokens()]);
+        let result = poll_for_tokens(
+            || script.poll(),
+            Duration::from_secs(5),
+            far_deadline(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(script.polled_at_secs(), [5, 65, 70, 80]);
+
+        // A `Retry-After` past the deadline cannot stall the flow.
+        let script = Script::new(vec![busy_for(u64::MAX), tokens()]);
+        let result = poll_for_tokens(
+            || script.poll(),
+            Duration::from_secs(5),
+            tokio::time::Instant::now() + Duration::from_secs(100),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result.err(), Some(DeviceGrantFailure::Expired));
+        assert_eq!(script.polled_at_secs(), [5]);
+    }
+
+    /// Back-off never polls sooner than a server interval above its cap.
+    #[tokio::test(start_paused = true)]
+    async fn back_off_keeps_a_long_server_interval() {
+        let script = Script::new((0..5).map(|_| transient()).collect());
+        let result = poll_for_tokens(
+            || script.poll(),
+            Duration::from_secs(120),
+            far_deadline(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result.err(), Some(DeviceGrantFailure::Upstream));
+        assert_eq!(script.polled_at_secs(), [120, 240]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1365,7 +1470,18 @@ mod tests {
                     // Transient whatever the body claims.
                     (
                         StatusCode::TOO_MANY_REQUESTS,
+                        [(header::RETRY_AFTER, " 7 ")],
                         axum::Json(serde_json::json!({ "error": "access_denied" })),
+                    )
+                }),
+            )
+            .route(
+                "/unavailable/token",
+                post(|| async {
+                    // The HTTP-date form falls back to the ordinary back-off.
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [(header::RETRY_AFTER, "Wed, 21 Oct 2015 07:28:00 GMT")],
                     )
                 }),
             )
@@ -1404,8 +1520,18 @@ mod tests {
 
         assert!(matches!(poll("ok/").await, PollOutcome::Tokens(_)));
         assert!(matches!(poll("pending/").await, PollOutcome::Pending));
-        assert!(matches!(poll("busy/").await, PollOutcome::Transient));
-        assert!(matches!(poll("down/").await, PollOutcome::Transient));
+        assert!(matches!(
+            poll("busy/").await,
+            PollOutcome::Transient { retry_after: Some(wait) } if wait == Duration::from_secs(7)
+        ));
+        assert!(matches!(
+            poll("unavailable/").await,
+            PollOutcome::Transient { retry_after: None }
+        ));
+        assert!(matches!(
+            poll("down/").await,
+            PollOutcome::Transient { retry_after: None }
+        ));
         assert!(matches!(poll("redirect/").await, PollOutcome::Fatal));
         assert!(matches!(poll("oversized/").await, PollOutcome::Fatal));
         assert!(matches!(poll("html/").await, PollOutcome::Fatal));
@@ -1437,7 +1563,7 @@ mod tests {
         drop(listener);
         assert!(matches!(
             request_tokens(&http(), &endpoints(&base), "axon-client", "device-secret").await,
-            PollOutcome::Transient
+            PollOutcome::Transient { retry_after: None }
         ));
     }
 }
