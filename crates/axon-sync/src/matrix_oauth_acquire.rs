@@ -64,6 +64,13 @@ const WHOAMI_TIMEOUT: Duration = Duration::from_secs(15);
 /// (a few homeserver round trips) before it gives the session up.
 const E2EE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(60);
 const REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
+/// A browser sign-in younger than this is not replaced by a new one for the
+/// same user, so a client retrying in a loop cannot make Axon hammer the
+/// authorization server (ADR 0117).
+const BROWSER_REPLACE_MIN_AGE: Duration = Duration::from_secs(10);
+/// How long a replacing request waits for the replaced flow's driver to
+/// release the user's reservation before it gives up with a conflict.
+const BROWSER_REPLACE_WAIT: Duration = Duration::from_secs(15);
 
 /// A progress stream that becomes permanently pending after its first close.
 ///
@@ -218,6 +225,9 @@ pub struct MatrixOAuthBrowserState {
     pub user_code: Option<String>,
     pub account_id: Option<Uuid>,
     pub error_code: Option<String>,
+    /// Why a cancelled flow was cancelled, when not by its own client:
+    /// `replaced` means a newer browser sign-in for the same user took over.
+    pub cancel_reason: Option<&'static str>,
 }
 
 impl MatrixOAuthBrowserState {
@@ -230,6 +240,7 @@ impl MatrixOAuthBrowserState {
             user_code: None,
             account_id: None,
             error_code: None,
+            cancel_reason: None,
         }
     }
 
@@ -239,6 +250,7 @@ impl MatrixOAuthBrowserState {
         self.user_code = None;
         self.account_id = None;
         self.error_code = None;
+        self.cancel_reason = None;
     }
 }
 
@@ -287,6 +299,8 @@ enum Terminal {
     Done(Uuid),
     Failed(&'static str),
     Cancelled,
+    /// Cancelled because a newer browser sign-in for the same user took over.
+    Replaced,
 }
 
 /// HTTP-neutral operation errors for the composition-root adapter.
@@ -344,6 +358,10 @@ struct Flow {
     method: FlowMethod,
     mutable: Mutex<FlowMutable>,
     cancel: CancellationToken,
+    /// Fired once the driver has returned, so the user's reservation is
+    /// released (or kept for boot reconciliation) and nothing else will run.
+    driver_finished: CancellationToken,
+    created_at: std::time::Instant,
     staging_dir_name: String,
 }
 
@@ -379,6 +397,8 @@ impl Flow {
                 lease,
             }),
             cancel,
+            driver_finished: CancellationToken::new(),
+            created_at: std::time::Instant::now(),
             staging_dir_name: flow_id.to_string(),
         };
         (flow, scan_rx, check_code_rx)
@@ -467,6 +487,30 @@ impl Flow {
         self.cancel.cancel();
         true
     }
+
+    /// Cancel a browser flow for a newer one, but only while nobody has
+    /// approved it: once tokens have arrived the user's approval is not
+    /// thrown away. The stage check and the cancellation share one lock.
+    fn replace_if_unapproved(&self) -> bool {
+        let mut mutable = self
+            .mutable
+            .lock()
+            .expect("Matrix OAuth acquire flow poisoned");
+        let FlowView::Browser(state) = &mutable.view else {
+            return false;
+        };
+        if !matches!(
+            state.stage,
+            MatrixOAuthBrowserStage::Starting | MatrixOAuthBrowserStage::WaitingForAuthorization
+        ) || !mutable.lease.cancel(std::time::Instant::now())
+        {
+            return false;
+        }
+        mutable.set_terminal(Terminal::Replaced);
+        drop(mutable);
+        self.cancel.cancel();
+        true
+    }
 }
 
 impl FlowMutable {
@@ -476,14 +520,14 @@ impl FlowMutable {
         let (account_id, error_code) = match terminal {
             Terminal::Done(account_id) => (Some(account_id), None),
             Terminal::Failed(code) => (None, Some(code.to_owned())),
-            Terminal::Cancelled => (None, None),
+            Terminal::Cancelled | Terminal::Replaced => (None, None),
         };
         match &mut self.view {
             FlowView::Qr(state) => {
                 state.set_stage(match terminal {
                     Terminal::Done(_) => MatrixOAuthAcquireStage::Done,
                     Terminal::Failed(_) => MatrixOAuthAcquireStage::Failed,
-                    Terminal::Cancelled => MatrixOAuthAcquireStage::Cancelled,
+                    Terminal::Cancelled | Terminal::Replaced => MatrixOAuthAcquireStage::Cancelled,
                 });
                 state.account_id = account_id;
                 state.error_code = error_code;
@@ -492,10 +536,13 @@ impl FlowMutable {
                 state.set_stage(match terminal {
                     Terminal::Done(_) => MatrixOAuthBrowserStage::Done,
                     Terminal::Failed(_) => MatrixOAuthBrowserStage::Failed,
-                    Terminal::Cancelled => MatrixOAuthBrowserStage::Cancelled,
+                    Terminal::Cancelled | Terminal::Replaced => MatrixOAuthBrowserStage::Cancelled,
                 });
                 state.account_id = account_id;
                 state.error_code = error_code;
+                if matches!(terminal, Terminal::Replaced) {
+                    state.cancel_reason = Some("replaced");
+                }
             }
         }
         self.scan_tx.take();
@@ -514,6 +561,7 @@ struct MatrixOAuthAcquireInner {
     capacity: Arc<Semaphore>,
     tracker: TaskTracker,
     engine_cancel: CancellationToken,
+    browser_replace_min_age: Duration,
 }
 
 /// Cloneable runtime owner for pre-account QR login and browser sign-in flows.
@@ -543,8 +591,19 @@ impl MatrixOAuthAcquireEngine {
                 capacity: Arc::new(Semaphore::new(MAX_CONCURRENT_FLOWS)),
                 tracker,
                 engine_cancel,
+                browser_replace_min_age: BROWSER_REPLACE_MIN_AGE,
             }),
         }
+    }
+
+    /// Let a browser sign-in be replaced as soon as it exists, so tests need
+    /// not wait out the minimum age.
+    #[cfg(test)]
+    pub(crate) fn with_immediate_browser_replacement(mut self) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("engine not yet shared")
+            .browser_replace_min_age = Duration::ZERO;
+        self
     }
 
     /// Start a QR login flow.
@@ -581,6 +640,10 @@ impl MatrixOAuthAcquireEngine {
             || OwnedUserId::try_from(expected_user_id).is_err()
         {
             return Err(MatrixOAuthAcquireError::InvalidUserId);
+        }
+        // Before taking capacity: the replaced flow gives its permit back.
+        if method == FlowMethod::Browser {
+            self.replace_open_browser_flow(expected_user_id).await;
         }
         let permit = self
             .inner
@@ -679,7 +742,9 @@ impl MatrixOAuthAcquireEngine {
         };
         self.inner.tracker.spawn(
             async move {
+                let finished = task_flow.driver_finished.clone();
                 driver.drive(task_flow, scan_rx, check_code_rx).await;
+                finished.cancel();
             }
             .instrument(driver_span),
         );
@@ -811,6 +876,60 @@ impl MatrixOAuthAcquireEngine {
             );
         }
         Ok(())
+    }
+
+    /// Cancel this user's open browser sign-in so a new one can take its
+    /// reservation, and wait for its driver to release it (ADR 0117).
+    ///
+    /// Only a browser flow that is still starting or waiting for approval is
+    /// replaced, and only once it is `browser_replace_min_age` old. A QR flow,
+    /// a finalizing flow, or a young one is left alone, and reserving the new
+    /// flow then fails with the usual conflict.
+    async fn replace_open_browser_flow(&self, expected_user_id: &str) {
+        let open = self
+            .inner
+            .flows
+            .lock()
+            .expect("Matrix OAuth acquire registry poisoned")
+            .values()
+            .find(|flow| {
+                flow.method == FlowMethod::Browser
+                    && flow.expected_user_id == expected_user_id
+                    && !flow.driver_finished.is_cancelled()
+            })
+            .cloned();
+        let Some(open) = open else { return };
+        if open.created_at.elapsed() < self.inner.browser_replace_min_age {
+            return;
+        }
+        if open.replace_if_unapproved() {
+            tracing::info!(
+                flow_id = %open.flow_id,
+                role = "acquire",
+                presentation = open.method.as_str(),
+                expected_user_id,
+                "Matrix OAuth login flow replaced by a new one for the same user"
+            );
+        } else if open
+            .browser_snapshot()
+            .is_some_and(|state| !state.stage.is_terminal())
+        {
+            // Approved and finalizing: the new flow gets the conflict.
+            return;
+        }
+        // Replaced just now, or already over and releasing its reservation:
+        // wait for that release.
+        if tokio::time::timeout(BROWSER_REPLACE_WAIT, open.driver_finished.cancelled())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                flow_id = %open.flow_id,
+                role = "acquire",
+                expected_user_id,
+                "replaced Matrix OAuth login flow did not stop in time"
+            );
+        }
     }
 
     pub(crate) async fn reap_loop(self, cancel: CancellationToken) {

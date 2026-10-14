@@ -9640,6 +9640,13 @@
                 "format": "uuid",
                 "description": "The signed-in account, present only in `done`. It is active but its\ndevice is **not** verified: lead the user on to recovery-key import or\ninteractive verification."
               },
+              "cancel_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why the flow was cancelled when its own client did not cancel it,\npresent only in `cancelled`. An open set: `replaced` means a newer\nbrowser sign-in for the same Matrix user took over, so this flow's\nlink and code no longer work. Absent after an ordinary cancellation."
+              },
               "error_code": {
                 "type": [
                   "string",
@@ -13294,6 +13301,13 @@
             ],
             "format": "uuid",
             "description": "The signed-in account, present only in `done`. It is active but its\ndevice is **not** verified: lead the user on to recovery-key import or\ninteractive verification."
+          },
+          "cancel_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the flow was cancelled when its own client did not cancel it,\npresent only in `cancelled`. An open set: `replaced` means a newer\nbrowser sign-in for the same Matrix user took over, so this flow's\nlink and code no longer work. Absent after an ordinary cancellation."
           },
           "error_code": {
             "type": [

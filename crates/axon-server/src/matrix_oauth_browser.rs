@@ -38,6 +38,7 @@ fn state_to_api(value: MatrixOAuthBrowserState) -> MatrixOAuthBrowserFlowDto {
         user_code: value.user_code,
         account_id: value.account_id,
         error_code: value.error_code,
+        cancel_reason: value.cancel_reason.map(str::to_owned),
     }
 }
 
@@ -115,6 +116,7 @@ mod tests {
             user_code: Some("WDJB-MJHT".to_owned()),
             account_id: None,
             error_code: None,
+            cancel_reason: None,
         });
         assert_eq!(dto.flow_id, flow_id);
         assert_eq!(dto.expected_user_id, "@alice:example.org");
@@ -124,6 +126,19 @@ mod tests {
             Some("https://auth.example.org/link")
         );
         assert_eq!(dto.user_code.as_deref(), Some("WDJB-MJHT"));
+        assert_eq!(dto.cancel_reason, None);
+
+        let replaced = state_to_api(MatrixOAuthBrowserState {
+            flow_id,
+            expected_user_id: "@alice:example.org".to_owned(),
+            stage: SyncBrowserStage::Cancelled,
+            verification_uri: None,
+            user_code: None,
+            account_id: None,
+            error_code: None,
+            cancel_reason: Some("replaced"),
+        });
+        assert_eq!(replaced.cancel_reason.as_deref(), Some("replaced"));
     }
 
     #[test]

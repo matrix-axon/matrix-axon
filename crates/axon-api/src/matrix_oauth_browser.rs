@@ -66,6 +66,12 @@ pub struct MatrixOAuthBrowserFlowDto {
     /// `authorization_expired` (nobody approved in time).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// Why the flow was cancelled when its own client did not cancel it,
+    /// present only in `cancelled`. An open set: `replaced` means a newer
+    /// browser sign-in for the same Matrix user took over, so this flow's
+    /// link and code no longer work. Absent after an ordinary cancellation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
 }
 
 /// The browser routes' name for the errors both sign-in methods share.
@@ -124,6 +130,7 @@ mod tests {
             user_code: None,
             account_id: None,
             error_code: None,
+            cancel_reason: None,
         }
     }
 
@@ -169,9 +176,20 @@ mod tests {
         }
 
         let json = serde_json::to_value(flow(MatrixOAuthBrowserStage::Finalizing)).unwrap();
-        for absent in ["verification_uri", "user_code", "account_id", "error_code"] {
+        for absent in [
+            "verification_uri",
+            "user_code",
+            "account_id",
+            "error_code",
+            "cancel_reason",
+        ] {
             assert!(json.get(absent).is_none(), "{absent} must be omitted");
         }
+
+        let mut replaced = flow(MatrixOAuthBrowserStage::Cancelled);
+        replaced.cancel_reason = Some("replaced".to_owned());
+        let json = serde_json::to_value(replaced).unwrap();
+        assert_eq!(json["cancel_reason"], "replaced");
     }
 
     #[test]

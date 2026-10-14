@@ -115,6 +115,13 @@ It therefore inherits, without re-deciding them: the global concurrency and rete
 The bound of one flow per expected Matrix user ID spans all three presentations.
 Creating a browser flow while a QR flow for the same user is live, or the reverse, returns the existing `409` conflict, so two flows can never finalize against each other.
 
+_(Amended after code review: a new browser flow replaces an open browser flow for the same user instead of being refused.
+There is no list route, so a client that lost the flow ID — a closed tab, or a create response that never arrived — could otherwise neither resume nor cancel the flow, and the user was locked out for the thirty-minute TTL.
+Replacement applies only while the old flow is `starting` or `waiting_for_authorization`: an approved flow is finishing and is never thrown away, so it still answers `409`.
+It also waits until the old flow is ten seconds old, so a client retrying in a loop cannot make Axon request device codes from the authorization server as fast as it asks.
+The old flow ends `cancelled` with `cancel_reason` `replaced`, and its link and code stop working; the new request waits, up to fifteen seconds, for the old flow to release the user's reservation, and answers `409` if it does not.
+A QR flow is never replaced by a browser flow, nor the reverse.)_
+
 The existing routes say `qr` in their path, so the method gets sibling routes:
 
 - `POST /v1/accounts/login/browser` — create a flow for an expected Matrix user ID.
@@ -146,6 +153,7 @@ Two failure codes are added for the browser presentation: `authorization_denied`
 The remaining codes are reused as they are.
 The QR presentations do not start emitting the new codes; their responses are unchanged by this decision.
 `error_code` is an open string in the API, not an enum, and clients must present a code they do not recognize as a generic failure rather than reject the response.
+A `cancelled` flow may carry `cancel_reason`, another open string; its one value is `replaced` (see section 3's amendment).
 
 The change is additive to `/v1/`.
 The breadcrumb table's `presentation` check constraint gains the new value through a new forward-only migration; no published migration is edited.
@@ -211,7 +219,7 @@ Unit and contract tests cover:
 - cancellation during the poll, a Matrix user mismatch, a concurrent login, logout, or deletion, and crash reconciliation;
 - that the link and user code are present in `waiting_for_authorization` and absent in `finalizing`, in every terminal stage, and from captured logs;
 - that a browser flow is `404` on the QR routes and a QR flow is `404` on the browser routes, for reads and for cancellation; and
-- that a second flow for the same expected user is a `409` across presentations.
+- that a second flow for the same expected user is a `409` across presentations, except that a browser flow replaces an unapproved browser flow at least ten seconds old, and never one that is finalizing.
 
 A regression test pins that the QR presentations still fail closed on an unverified device.
 

@@ -2277,6 +2277,13 @@ export interface components {
                  */
                 account_id?: string | null;
                 /**
+                 * @description Why the flow was cancelled when its own client did not cancel it,
+                 *     present only in `cancelled`. An open set: `replaced` means a newer
+                 *     browser sign-in for the same Matrix user took over, so this flow's
+                 *     link and code no longer work. Absent after an ordinary cancellation.
+                 */
+                cancel_reason?: string | null;
+                /**
                  * @description Why the flow failed, present only in `failed`. An open set: treat a
                  *     code you do not recognize as a generic failure. Codes specific to this
                  *     method are `authorization_denied` (the user refused) and
@@ -4051,6 +4058,13 @@ export interface components {
              *     interactive verification.
              */
             account_id?: string | null;
+            /**
+             * @description Why the flow was cancelled when its own client did not cancel it,
+             *     present only in `cancelled`. An open set: `replaced` means a newer
+             *     browser sign-in for the same Matrix user took over, so this flow's
+             *     link and code no longer work. Absent after an ordinary cancellation.
+             */
+            cancel_reason?: string | null;
             /**
              * @description Why the flow failed, present only in `failed`. An open set: treat a
              *     code you do not recognize as a generic failure. Codes specific to this
