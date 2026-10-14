@@ -586,11 +586,14 @@ function AccountAcquisition({
 }) {
   const { matrixOAuthQr, matrixOAuthBrowser } = useServices()
   const section = useRef<HTMLElement>(null)
+  // Shared by the three methods so switching tabs keeps what was typed.
+  const [userId, setUserId] = useState('')
   const cancelling =
     matrixOAuthQr.operation.value === 'cancelling' ||
     matrixOAuthBrowser.operation.value === 'cancelling'
 
   useEffect(() => {
+    setUserId('')
     if (reactivation === null) {
       return
     }
@@ -662,17 +665,23 @@ function AccountAcquisition({
             <ErrorBanner error={matrixOAuthQr.error} />
             <PasswordAccountAcquisition
               reactivation={reactivation}
+              username={userId}
+              onUsernameChange={setUserId}
               onSuccess={onSuccess}
             />
           </>
         ) : method === 'qr' ? (
           <MatrixOAuthQrAcquisition
             expectedUserId={reactivation?.user_id}
+            userId={userId}
+            onUserIdChange={setUserId}
             onSuccess={onSuccess}
           />
         ) : (
           <MatrixOAuthBrowserAcquisition
             expectedUserId={reactivation?.user_id}
+            userId={userId}
+            onUserIdChange={setUserId}
             onSuccess={onSuccess}
           />
         )}
@@ -683,15 +692,18 @@ function AccountAcquisition({
 
 function PasswordAccountAcquisition({
   reactivation,
+  username,
+  onUsernameChange,
   onSuccess,
 }: {
   reactivation: Account | null
+  username: string
+  onUsernameChange: (username: string) => void
   onSuccess: () => void
 }) {
   const { accounts } = useServices()
   const location = useLocation()
   const passwordInput = useRef<HTMLInputElement>(null)
-  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [recoveryKey, setRecoveryKey] = useState('')
   const [homeserver, setHomeserver] = useState('')
@@ -703,7 +715,6 @@ function PasswordAccountAcquisition({
   const keyOk = recoveryKey.trim() === '' || isValidRecoveryKey(recoveryKey)
 
   useEffect(() => {
-    setUsername('')
     setPassword('')
     setRecoveryKey('')
     setHomeserver('')
@@ -734,7 +745,7 @@ function PasswordAccountAcquisition({
               setPassword('')
               setRecoveryKey('')
               if (result.ok) {
-                setUsername('')
+                onUsernameChange('')
                 setHomeserver('')
                 onSuccess()
                 if (firstActiveLogin) {
@@ -758,7 +769,7 @@ function PasswordAccountAcquisition({
             placeholder="@alice:example.org"
             readOnly={reactivation !== null}
             disabled={busy}
-            onInput={(event) => setUsername(event.currentTarget.value)}
+            onInput={(event) => onUsernameChange(event.currentTarget.value)}
           />
         </label>
         <label>

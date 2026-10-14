@@ -191,13 +191,16 @@ function MismatchedBrowserFlow({
  */
 export function MatrixOAuthBrowserAcquisition({
   expectedUserId,
+  userId,
+  onUserIdChange,
   onSuccess,
 }: {
   expectedUserId?: string
+  userId: string
+  onUserIdChange: (userId: string) => void
   onSuccess?: () => void
 }) {
   const { accounts, matrixOAuthBrowser } = useServices()
-  const [userId, setUserId] = useState('')
   const completionHandled = useRef<string | null>(null)
   // Whether the sign-in began with no active account, decided before the new
   // account can appear in the list. Null until the list has loaded.
@@ -400,7 +403,7 @@ export function MatrixOAuthBrowserAcquisition({
           placeholder="@alice:example.org"
           readOnly={expectedUserId !== undefined}
           disabled={starting || resuming}
-          onInput={(event) => setUserId(event.currentTarget.value)}
+          onInput={(event) => onUserIdChange(event.currentTarget.value)}
         />
       </label>
       <button
