@@ -42,34 +42,7 @@ fn state_to_api(value: MatrixOAuthBrowserState) -> MatrixOAuthBrowserFlowDto {
 }
 
 fn map_error(value: MatrixOAuthAcquireError) -> MatrixOAuthBrowserError {
-    match value {
-        MatrixOAuthAcquireError::InvalidUserId => MatrixOAuthBrowserError::InvalidRequest(
-            "expected_user_id is not a valid Matrix user ID".to_owned(),
-        ),
-        MatrixOAuthAcquireError::Capacity => MatrixOAuthBrowserError::TooMany(
-            "too many Matrix OAuth login flows are active or retained; retry later".to_owned(),
-        ),
-        MatrixOAuthAcquireError::AccountAlreadyActive => {
-            MatrixOAuthBrowserError::Conflict("this Matrix account is already logged in".to_owned())
-        }
-        MatrixOAuthAcquireError::AccountBeingDeleted => MatrixOAuthBrowserError::Conflict(
-            "this Matrix account is currently being deleted".to_owned(),
-        ),
-        MatrixOAuthAcquireError::AccountDraining => MatrixOAuthBrowserError::Conflict(
-            "this Matrix account is still shutting down; retry shortly".to_owned(),
-        ),
-        MatrixOAuthAcquireError::FlowAlreadyExists => MatrixOAuthBrowserError::Conflict(
-            "a Matrix OAuth login is already in progress for this Matrix user".to_owned(),
-        ),
-        MatrixOAuthAcquireError::NotFound(flow_id) => MatrixOAuthBrowserError::NotFound(format!(
-            "Matrix OAuth browser sign-in flow {flow_id} not found"
-        )),
-        // Browser sign-in takes no QR or check-code input, so the engine has
-        // no path that returns these for it.
-        MatrixOAuthAcquireError::InvalidInput(_)
-        | MatrixOAuthAcquireError::WrongStage
-        | MatrixOAuthAcquireError::Internal => MatrixOAuthBrowserError::Internal,
-    }
+    crate::matrix_oauth_acquire::map_login_error(value, "browser sign-in")
 }
 
 #[async_trait]

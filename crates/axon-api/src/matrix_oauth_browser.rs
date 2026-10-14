@@ -68,15 +68,8 @@ pub struct MatrixOAuthBrowserFlowDto {
     pub error_code: Option<String>,
 }
 
-/// HTTP-shaped errors returned by the server adapter.
-#[derive(Debug)]
-pub enum MatrixOAuthBrowserError {
-    InvalidRequest(String),
-    Conflict(String),
-    NotFound(String),
-    TooMany(String),
-    Internal,
-}
+/// The browser routes' name for the errors both sign-in methods share.
+pub type MatrixOAuthBrowserError = crate::matrix_oauth_acquire::MatrixOAuthLoginError;
 
 /// Drives browser sign-in without exposing matrix-rust-sdk to `axon-api`.
 #[async_trait]

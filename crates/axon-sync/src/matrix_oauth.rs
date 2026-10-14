@@ -335,17 +335,23 @@ fn validate_metadata_urls(
     Ok(())
 }
 
-async fn bounded_body(
+/// Why a bounded read stopped short.
+pub(crate) enum BoundedBodyError {
+    TooLarge,
+    Transport(reqwest::Error),
+}
+
+/// Read a response body, refusing one larger than `max_bytes` before it is
+/// buffered or parsed. The one bounded reader for every Matrix OAuth response.
+pub(crate) async fn read_bounded_body(
     mut response: reqwest::Response,
     max_bytes: usize,
-) -> Result<Vec<u8>, SyncError> {
+) -> Result<Vec<u8>, BoundedBodyError> {
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)
     {
-        return Err(SyncError::Sdk(format!(
-            "Matrix OAuth response exceeds the {max_bytes}-byte limit"
-        )));
+        return Err(BoundedBodyError::TooLarge);
     }
     let mut body = Vec::with_capacity(
         response
@@ -356,16 +362,27 @@ async fn bounded_body(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|err| SyncError::Sdk(format!("reading Matrix OAuth response: {err}")))?
+        .map_err(BoundedBodyError::Transport)?
     {
         if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(SyncError::Sdk(format!(
-                "Matrix OAuth response exceeds the {max_bytes}-byte limit"
-            )));
+            return Err(BoundedBodyError::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+async fn bounded_body(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, SyncError> {
+    read_bounded_body(response, max_bytes)
+        .await
+        .map_err(|error| match error {
+            BoundedBodyError::TooLarge => SyncError::Sdk(format!(
+                "Matrix OAuth response exceeds the {max_bytes}-byte limit"
+            )),
+            BoundedBodyError::Transport(err) => {
+                SyncError::Sdk(format!("reading Matrix OAuth response: {err}"))
+            }
+        })
 }
 
 fn oauth_http_error(

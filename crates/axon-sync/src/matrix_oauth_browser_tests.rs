@@ -62,6 +62,12 @@ struct Behaviour {
     whoami_omits_device: bool,
     /// How long `whoami` takes, to hold a flow in `finalizing`.
     whoami_delay: Duration,
+    /// How long every other homeserver request takes: the ones the SDK's
+    /// background encryption setup sends once a session is restored.
+    background_delay: Duration,
+    /// Give the user a server name nothing answers on, so only a stored
+    /// homeserver URL can reach the stand-in.
+    unresolvable_server_name: bool,
 }
 
 impl Default for Behaviour {
@@ -91,6 +97,8 @@ impl Default for Behaviour {
             whoami_device: None,
             whoami_omits_device: false,
             whoami_delay: Duration::ZERO,
+            background_delay: Duration::ZERO,
+            unresolvable_server_name: false,
         }
     }
 }
@@ -122,6 +130,10 @@ struct Server {
     device_requests: Mutex<Vec<String>>,
     token_requests: AtomicUsize,
     registrations: AtomicUsize,
+    background_started: AtomicUsize,
+    background_finished: AtomicUsize,
+    /// `(started, finished)` background requests when `whoami` arrived.
+    background_at_whoami: Mutex<Option<(usize, usize)>>,
 }
 
 impl Server {
@@ -203,7 +215,28 @@ async fn token(State(server): State<Arc<Server>>) -> (StatusCode, Json<Value>) {
     (status, Json(body))
 }
 
+fn not_found() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "errcode": "M_NOT_FOUND", "error": "not found" })),
+    )
+}
+
+/// Everything the stand-in has no route for: what the SDK asks a homeserver
+/// once it holds a session. One with no backup and no secret storage answers
+/// all of it the same way.
+async fn background(State(server): State<Arc<Server>>) -> (StatusCode, Json<Value>) {
+    server.background_started.fetch_add(1, Ordering::SeqCst);
+    tokio::time::sleep(server.behaviour.background_delay).await;
+    server.background_finished.fetch_add(1, Ordering::SeqCst);
+    not_found()
+}
+
 async fn whoami(State(server): State<Arc<Server>>) -> Json<Value> {
+    server.background_at_whoami.lock().unwrap().get_or_insert((
+        server.background_started.load(Ordering::SeqCst),
+        server.background_finished.load(Ordering::SeqCst),
+    ));
     tokio::time::sleep(server.behaviour.whoami_delay).await;
     let mut response = json!({
         "user_id": server
@@ -238,7 +271,14 @@ impl Harness {
         let address = listener.local_addr().unwrap();
         // A loopback server name, so discovery reaches the stand-in over plain
         // HTTP exactly as it reaches a local development homeserver.
-        let user_id = format!("@browser-{}:{address}", Uuid::new_v4().simple());
+        let server_name = if behaviour.unresolvable_server_name {
+            // A port that was just free: nothing listens on it.
+            let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            closed.local_addr().unwrap().to_string()
+        } else {
+            address.to_string()
+        };
+        let user_id = format!("@browser-{}:{server_name}", Uuid::new_v4().simple());
         let server = Arc::new(Server {
             base: format!("http://{address}"),
             user_id: user_id.clone(),
@@ -247,8 +287,14 @@ impl Harness {
             device_requests: Mutex::new(Vec::new()),
             token_requests: AtomicUsize::new(0),
             registrations: AtomicUsize::new(0),
+            background_started: AtomicUsize::new(0),
+            background_finished: AtomicUsize::new(0),
+            background_at_whoami: Mutex::new(None),
         });
         let app = Router::new()
+            // Discovery asks for this before any session exists; keep it out
+            // of the background count.
+            .route("/.well-known/matrix/client", get(|| async { not_found() }))
             .route("/_matrix/client/versions", get(versions))
             .route("/_matrix/client/v1/auth_metadata", get(auth_metadata))
             .route(
@@ -261,6 +307,7 @@ impl Harness {
             .route("/device", post(device_authorization))
             .route("/token", post(token))
             .route("/_matrix/client/v3/account/whoami", get(whoami))
+            .fallback(background)
             .with_state(server.clone());
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -890,6 +937,81 @@ async fn a_concurrent_login_wins_over_a_browser_sign_in() {
         account.device_id.as_deref(),
         Some(harness.server.requested_device_id().as_str()),
         "the live account must not be moved onto the discarded device"
+    );
+    harness.finish().await;
+}
+
+/// Restoring the session starts the SDK's encryption setup on a detached
+/// task that keeps the staging client and its store open. Finalization moves
+/// that store and opens a second client on it, so the task must be over
+/// before the session is even validated.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn finalization_waits_for_the_sdks_background_encryption_setup() {
+    let harness = Harness::start(Behaviour {
+        background_delay: Duration::from_millis(300),
+        ..Behaviour::default()
+    })
+    .await;
+    let flow = harness.create().await;
+    harness
+        .wait_for(flow.flow_id, MatrixOAuthBrowserStage::Done)
+        .await;
+
+    let (started, finished) = harness
+        .server
+        .background_at_whoami
+        .lock()
+        .unwrap()
+        .expect("the session was validated");
+    assert!(started > 0, "the SDK sent its setup requests first");
+    assert_eq!(
+        started, finished,
+        "no setup request was still in flight when validation began"
+    );
+    harness.finish().await;
+}
+
+/// Reactivation reuses the homeserver the account was stored with, as
+/// password login does, instead of discovering one from the user ID.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_retained_account_signs_in_through_its_stored_homeserver() {
+    let harness = Harness::start(Behaviour {
+        unresolvable_server_name: true,
+        ..Behaviour::default()
+    })
+    .await;
+    // Nothing answers for the server name, so a new identity cannot start.
+    assert_eq!(harness.fail().await, "upstream");
+    harness.wait_until_released().await;
+
+    let retained = harness
+        .store
+        .upsert_account(&harness.user_id, &harness.server.base)
+        .await
+        .unwrap();
+    harness
+        .store
+        .set_account_state(retained.account_id, AccountState::Deactivated)
+        .await
+        .unwrap();
+
+    let flow = harness.create().await;
+    let done = harness
+        .wait_for(flow.flow_id, MatrixOAuthBrowserStage::Done)
+        .await;
+    assert_eq!(done.account_id, Some(retained.account_id));
+    let account = harness
+        .store
+        .get_account(retained.account_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(account.state, AccountState::Active);
+    assert_eq!(
+        account.homeserver_url.trim_end_matches('/'),
+        harness.server.base
     );
     harness.finish().await;
 }

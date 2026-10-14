@@ -282,28 +282,15 @@ impl From<crate::lifecycle::LoginError> for ApiError {
     }
 }
 
-impl From<crate::matrix_oauth_acquire::MatrixOAuthQrError> for ApiError {
-    fn from(err: crate::matrix_oauth_acquire::MatrixOAuthQrError) -> Self {
-        use crate::matrix_oauth_acquire::MatrixOAuthQrError;
+impl From<crate::matrix_oauth_acquire::MatrixOAuthLoginError> for ApiError {
+    fn from(err: crate::matrix_oauth_acquire::MatrixOAuthLoginError) -> Self {
+        use crate::matrix_oauth_acquire::MatrixOAuthLoginError;
         match err {
-            MatrixOAuthQrError::InvalidRequest(msg) => ApiError::bad_request(msg),
-            MatrixOAuthQrError::Conflict(msg) => ApiError::conflict(msg),
-            MatrixOAuthQrError::NotFound(msg) => ApiError::not_found(msg),
-            MatrixOAuthQrError::TooMany(msg) => ApiError::too_many_requests(msg),
-            MatrixOAuthQrError::Internal => ApiError::internal(),
-        }
-    }
-}
-
-impl From<crate::matrix_oauth_browser::MatrixOAuthBrowserError> for ApiError {
-    fn from(err: crate::matrix_oauth_browser::MatrixOAuthBrowserError) -> Self {
-        use crate::matrix_oauth_browser::MatrixOAuthBrowserError;
-        match err {
-            MatrixOAuthBrowserError::InvalidRequest(msg) => ApiError::bad_request(msg),
-            MatrixOAuthBrowserError::Conflict(msg) => ApiError::conflict(msg),
-            MatrixOAuthBrowserError::NotFound(msg) => ApiError::not_found(msg),
-            MatrixOAuthBrowserError::TooMany(msg) => ApiError::too_many_requests(msg),
-            MatrixOAuthBrowserError::Internal => ApiError::internal(),
+            MatrixOAuthLoginError::InvalidRequest(msg) => ApiError::bad_request(msg),
+            MatrixOAuthLoginError::Conflict(msg) => ApiError::conflict(msg),
+            MatrixOAuthLoginError::NotFound(msg) => ApiError::not_found(msg),
+            MatrixOAuthLoginError::TooMany(msg) => ApiError::too_many_requests(msg),
+            MatrixOAuthLoginError::Internal => ApiError::internal(),
         }
     }
 }
