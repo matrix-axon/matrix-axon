@@ -153,6 +153,7 @@ The store is PostgreSQL, so the migration drops and re-adds the named check cons
 
 Homeserver resolution matches the QR display presentation in what it takes: only the expected user ID, from whose server name the server discovers the homeserver.
 It uses the resolver password login already has rather than the SDK's — the well-known document, then the server name itself, each confirmed as a homeserver, with plain HTTP only for a loopback name — so the method behaves like password login and can be tested against a loopback server.
+_(Amended after code review: an account being reactivated uses the homeserver URL stored on its row instead, as password login does. Discovering it again would make an account reached only through an explicit URL unreachable by this method, or replace its stored URL at commit.)_
 
 ### 4. The account activates unverified, and says so
 

@@ -17,6 +17,8 @@ use matrix_sdk::ruma::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::matrix_oauth::{read_bounded_body, BoundedBodyError};
+
 /// Scope granting full client-server API access.
 ///
 /// These two strings must stay identical to the private `login_scopes` builder
@@ -216,7 +218,7 @@ pub(crate) async fn request_device_authorization(
     };
     let status = response.status();
     if !status.is_success() {
-        let body = read_bounded(response, MAX_DEVICE_AUTHORIZATION_RESPONSE_BYTES)
+        let body = read_bounded_body(response, MAX_DEVICE_AUTHORIZATION_RESPONSE_BYTES)
             .await
             .unwrap_or_default();
         tracing::warn!(
@@ -238,9 +240,9 @@ pub(crate) async fn request_device_authorization(
         );
         DeviceGrantFailure::Upstream
     };
-    let body = read_bounded(response, MAX_DEVICE_AUTHORIZATION_RESPONSE_BYTES)
+    let body = read_bounded_body(response, MAX_DEVICE_AUTHORIZATION_RESPONSE_BYTES)
         .await
-        .map_err(|error| invalid(error.reason()))?;
+        .map_err(|error| invalid(body_error_reason(&error)))?;
     parse_device_authorization(&body, endpoints.allow_loopback_http).map_err(invalid)
 }
 
@@ -385,9 +387,9 @@ pub(crate) async fn request_tokens(
         );
         return PollOutcome::Transient;
     }
-    let body = match read_bounded(response, MAX_TOKEN_RESPONSE_BYTES).await {
+    let body = match read_bounded_body(response, MAX_TOKEN_RESPONSE_BYTES).await {
         Ok(body) => body,
-        Err(BodyError::Transport) => {
+        Err(BoundedBodyError::Transport(_)) => {
             tracing::warn!(
                 phase = PHASE,
                 error_class = "network",
@@ -396,7 +398,7 @@ pub(crate) async fn request_tokens(
             );
             return PollOutcome::Transient;
         }
-        Err(BodyError::TooLarge) => {
+        Err(BoundedBodyError::TooLarge) => {
             tracing::warn!(
                 phase = PHASE,
                 error_class = "invalid_response",
@@ -607,39 +609,11 @@ async fn post_form(
         .await
 }
 
-enum BodyError {
-    TooLarge,
-    Transport,
-}
-
-impl BodyError {
-    fn reason(&self) -> &'static str {
-        match self {
-            Self::TooLarge => "too_large",
-            Self::Transport => "truncated",
-        }
+fn body_error_reason(error: &BoundedBodyError) -> &'static str {
+    match error {
+        BoundedBodyError::TooLarge => "too_large",
+        BoundedBodyError::Transport(_) => "truncated",
     }
-}
-
-/// Read a response body, refusing one larger than `max_bytes` before parsing.
-async fn read_bounded(
-    mut response: reqwest::Response,
-    max_bytes: usize,
-) -> Result<Vec<u8>, BodyError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(BodyError::TooLarge);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| BodyError::Transport)? {
-        if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(BodyError::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 #[cfg(test)]

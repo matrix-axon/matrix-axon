@@ -60,6 +60,9 @@ use crate::{
 pub(crate) const MAX_QR_BASE64_BYTES: usize = 8 * 1024;
 const MAX_USER_ID_BYTES: usize = 1024;
 const WHOAMI_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long browser sign-in waits for the SDK's background encryption setup
+/// (a few homeserver round trips) before it gives the session up.
+const E2EE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(60);
 const REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A progress stream that becomes permanently pending after its first close.
@@ -1005,24 +1008,45 @@ impl MatrixOAuthAcquireEngine {
     ) -> Result<(Client, OAuthSession), DriverFailure> {
         let user_id = OwnedUserId::try_from(flow.expected_user_id.as_str())
             .map_err(|_| DriverFailure::Internal)?;
-        // The same resolution password login uses: the server name's
-        // well-known document, then the server name itself, each confirmed as
-        // a homeserver before anything is sent to it.
-        let homeserver =
-            crate::discovery::resolve_homeserver(&self.inner.discovery_http, user_id.server_name())
-                .await
-                .map_err(|error| {
-                    // Which host and which step refused is the whole
-                    // diagnosis here, and none of it is secret: it names only
-                    // the server the caller asked for.
-                    tracing::warn!(
-                        phase = "homeserver_discovery",
-                        error_class = "upstream",
-                        %error,
-                        "Matrix OAuth login could not find the homeserver"
-                    );
-                    DriverFailure::Upstream
-                })?;
+        // A retained account keeps its stored endpoint, as it does for
+        // password login: one reached only through an explicit URL would
+        // otherwise be unreachable here, or have its URL replaced at commit.
+        let retained = self
+            .inner
+            .store
+            .find_account_by_user_id(&flow.expected_user_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    phase = "homeserver_discovery",
+                    error_class = %store_error_class(&err),
+                    "Matrix OAuth login could not read the retained account"
+                );
+                DriverFailure::Internal
+            })?;
+        let homeserver = match retained {
+            Some(account) => account.homeserver_url,
+            // The same resolution password login uses: the server name's
+            // well-known document, then the server name itself, each confirmed
+            // as a homeserver before anything is sent to it.
+            None => crate::discovery::resolve_homeserver(
+                &self.inner.discovery_http,
+                user_id.server_name(),
+            )
+            .await
+            .map_err(|error| {
+                // Which host and which step refused is the whole diagnosis
+                // here, and none of it is secret: it names only the server
+                // the caller asked for.
+                tracing::warn!(
+                    phase = "homeserver_discovery",
+                    error_class = "upstream",
+                    %error,
+                    "Matrix OAuth login could not find the homeserver"
+                );
+                DriverFailure::Upstream
+            })?,
+        };
         let client = build_matrix_oauth_acquire_client(
             &self.inner.config,
             &flow.staging_dir_name,
@@ -1132,6 +1156,22 @@ impl MatrixOAuthAcquireEngine {
             log_driver_failure("session_activation", &failure, None);
             // The SDK holds no session to log out, so revoke by hand.
             revoke_token(&http, &endpoints, client_id.as_str(), &tokens.access_token).await;
+            return Err(failure);
+        }
+        // `restore_session` leaves a detached task setting up backups and
+        // recovery on this client. Finalization drops the client, moves its
+        // store, and opens a second client on the same files, so the task has
+        // to be over first; the SDK's own QR login waits the same way.
+        if tokio::time::timeout(
+            E2EE_INITIALIZATION_TIMEOUT,
+            client.encryption().wait_for_e2ee_initialization_tasks(),
+        )
+        .await
+        .is_err()
+        {
+            let failure = DriverFailure::Timeout;
+            log_driver_failure("e2ee_initialization", &failure, None);
+            best_effort_revoke(&client).await;
             return Err(failure);
         }
         self.validate_completed_client(&flow, client, Some(&device_id))
