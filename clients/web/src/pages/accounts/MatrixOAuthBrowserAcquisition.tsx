@@ -202,6 +202,16 @@ export function MatrixOAuthBrowserAcquisition({
   // Whether the sign-in began with no active account, decided before the new
   // account can appear in the list. Null until the list has loaded.
   const [firstAccount, setFirstAccount] = useState<boolean | null>(null)
+  // The store keeps a finished flow until it is reset, and outlives this
+  // panel. One that was already over when the panel mounted ended while
+  // nobody was looking, possibly long ago, so it is checked against the
+  // account list before it is believed.
+  const [inheritedFlowId, setInheritedFlowId] = useState(() => {
+    const current = matrixOAuthBrowser.flow.peek()
+    return current !== null && isTerminalMatrixOAuthBrowserFlow(current)
+      ? current.flow_id
+      : null
+  })
   const flow = matrixOAuthBrowser.flow.value
   const operation = matrixOAuthBrowser.operation.value
   const effectiveUserId = expectedUserId ?? userId
@@ -212,7 +222,66 @@ export function MatrixOAuthBrowserAcquisition({
 
   useEffect(() => {
     void matrixOAuthBrowser.resume()
+    // Leaving the panel is the end of a finished flow's message: coming back
+    // must not replay "Signed in" or a failure for a sign-in long over.
+    return () => {
+      const current = matrixOAuthBrowser.flow.peek()
+      if (current !== null && isTerminalMatrixOAuthBrowserFlow(current)) {
+        matrixOAuthBrowser.reset()
+      }
+    }
   }, [matrixOAuthBrowser])
+
+  const flowAccountState =
+    flow?.stage === 'done'
+      ? accounts.accounts.value.find(
+          (candidate) => candidate.account_id === flow.account_id,
+        )?.state
+      : undefined
+  const inherited = flow !== null && flow.flow_id === inheritedFlowId
+  useEffect(() => {
+    if (
+      flow === null ||
+      !isTerminalMatrixOAuthBrowserFlow(flow) ||
+      operation !== 'idle'
+    ) {
+      return
+    }
+    // A finished flow for someone else has nothing to say here, and is not
+    // "still open" to be cancelled.
+    if (!flowMatchesExpectedUser) {
+      matrixOAuthBrowser.reset()
+      return
+    }
+    if (flow.stage !== 'done' || accounts.loading.value) {
+      if (inherited && !accounts.loading.value) {
+        setInheritedFlowId(null)
+      }
+      return
+    }
+    // Signed in, then signed out again from the account's card: an inherited
+    // flow needs its account active to count, and any flow stops counting
+    // once its account is listed as anything else.
+    if (
+      inherited
+        ? flowAccountState !== 'active'
+        : flowAccountState !== undefined && flowAccountState !== 'active'
+    ) {
+      matrixOAuthBrowser.reset()
+      return
+    }
+    if (inherited) {
+      setInheritedFlowId(null)
+    }
+  }, [
+    accounts.loading.value,
+    flow,
+    flowAccountState,
+    flowMatchesExpectedUser,
+    inherited,
+    matrixOAuthBrowser,
+    operation,
+  ])
 
   // The user approves in another tab or app. Timers in a hidden page are
   // throttled or frozen, so ask as soon as they come back.
@@ -243,6 +312,7 @@ export function MatrixOAuthBrowserAcquisition({
     if (
       flow.stage === 'done' &&
       flowMatchesExpectedUser &&
+      !inherited &&
       completionHandled.current !== flow.flow_id
     ) {
       completionHandled.current = flow.flow_id
@@ -254,10 +324,19 @@ export function MatrixOAuthBrowserAcquisition({
     firstAccount,
     flow,
     flowMatchesExpectedUser,
+    inherited,
     onSuccess,
     operation,
   ])
 
+  if (inherited) {
+    // Nothing of an inherited flow shows until the check above has kept it.
+    return (
+      <p class="muted" role="status">
+        Checking an earlier browser sign-in…
+      </p>
+    )
+  }
   if (flow !== null) {
     if (!flowMatchesExpectedUser && expectedUserId !== undefined) {
       return (

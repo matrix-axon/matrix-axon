@@ -14,7 +14,10 @@ status, recovery, megolm backup snapshot and enable, logout, reactivation,
 deletion, and password acquisition),
 Matrix OAuth QR account acquisition (display or selectable-camera/image scan,
 check codes, authorization, reload resume, and cancellation) plus trusted-account
-QR authorization of new clients such as Element X, theme +
+QR authorization of new clients such as Element X, browser sign-in for
+homeservers that only sign in on a web page (ADR 0117: a link to the
+homeserver's own page and a code, reload resume, cancellation, and a prompt to
+verify the new device), theme +
 schema-versioned settings, history routing with the permanent deep-link
 shape `/:accountId/rooms/:roomId?thread=&event=` (signed off), the
 cross-account room list with TUI semantics (pinning ADR 0038, sort/filters

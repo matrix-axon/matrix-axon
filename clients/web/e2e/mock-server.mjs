@@ -842,7 +842,19 @@ async function handleApi(req, res, url) {
     method === 'DELETE' &&
     pathname === `/v1/accounts/login/browser/${BROWSER_FLOW_ID}`
   ) {
-    browserFlow = null
+    // As Axon does: the request always succeeds, but it only cancels a flow
+    // that is not already being finished, and the flow stays readable.
+    if (
+      browserFlow !== null &&
+      (browserFlow.stage === 'starting' ||
+        browserFlow.stage === 'waiting_for_authorization')
+    ) {
+      browserFlow = {
+        flow_id: browserFlow.flow_id,
+        expected_user_id: browserFlow.expected_user_id,
+        stage: 'cancelled',
+      }
+    }
     res.writeHead(204).end()
     return
   }
