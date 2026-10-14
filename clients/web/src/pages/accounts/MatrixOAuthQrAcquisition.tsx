@@ -567,13 +567,16 @@ function MismatchedQrFlow({
 
 export function MatrixOAuthQrAcquisition({
   expectedUserId,
+  userId,
+  onUserIdChange,
   onSuccess,
 }: {
   expectedUserId?: string
+  userId: string
+  onUserIdChange: (userId: string) => void
   onSuccess?: () => void
 }) {
   const { accounts, matrixOAuthQr } = useServices()
-  const [userId, setUserId] = useState('')
   const [presentation, setPresentation] = useState<'display' | 'scan'>(
     'display',
   )
@@ -671,7 +674,7 @@ export function MatrixOAuthQrAcquisition({
           value={effectiveUserId}
           placeholder="@alice:example.org"
           readOnly={expectedUserId !== undefined}
-          onInput={(event) => setUserId(event.currentTarget.value)}
+          onInput={(event) => onUserIdChange(event.currentTarget.value)}
         />
       </label>
       <fieldset>
