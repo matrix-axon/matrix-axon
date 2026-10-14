@@ -90,3 +90,20 @@ test('a refusal in the browser is explained and can be retried', async ({
     page.getByRole('button', { name: 'Start browser sign-in' }),
   ).toBeVisible()
 })
+
+test('cancelling after approval says it is too late and still finishes', async ({
+  page,
+}) => {
+  await startBrowserSignIn(page)
+  await expect(page.getByText('WXYZ-1234')).toBeVisible()
+
+  // Approved in the other tab a moment before the click here.
+  await moveFlow(page, '?stage=finalizing')
+  await page.getByRole('button', { name: 'Cancel sign-in' }).click()
+
+  await expect(page.getByText(/Too late to cancel/)).toBeVisible()
+  await expect(page.getByText('Browser sign-in cancelled.')).toHaveCount(0)
+
+  await moveFlow(page, '?stage=done')
+  await expect(page.getByText('Signed in.')).toBeVisible()
+})

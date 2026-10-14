@@ -31,6 +31,10 @@ export interface MatrixOAuthBrowserStore {
   hasStoredFlow(): boolean
   /** Ask now instead of waiting for the next poll. */
   checkNow(): void
+  /**
+   * Resolves true when the sign-in is over and added no account. False when
+   * it could not be cancelled, including when it had already finished.
+   */
   cancel(): Promise<boolean>
   reset(): void
 }
@@ -117,6 +121,25 @@ export function createMatrixOAuthBrowserStore(
   let request: AbortController | null = null
   let pollTimer: ReturnType<typeof setTimeout> | null = null
   const completed = new Set<string>()
+  // An error about the flow as it stands, which the next unchanged poll must
+  // not wipe: it lasts until the flow moves to another stage.
+  let retainedErrorAt: Pick<
+    MatrixOAuthBrowserFlow,
+    'flow_id' | 'stage'
+  > | null = null
+
+  function clearRetainedError(): void {
+    retainedErrorAt = null
+  }
+
+  function retainError(message: string): void {
+    const current = flow.value
+    error.value = message
+    retainedErrorAt =
+      current === null
+        ? null
+        : { flow_id: current.flow_id, stage: current.stage }
+  }
 
   function clearPoll(): void {
     if (pollTimer !== null) {
@@ -179,13 +202,20 @@ export function createMatrixOAuthBrowserStore(
       completed.add(next.flow_id)
       operation.value = 'refreshing_accounts'
     }
+    const retainCurrentError =
+      retainedErrorAt?.flow_id === next.flow_id &&
+      retainedErrorAt.stage === next.stage
     flow.value = next
-    error.value =
-      next.stage === 'failed'
-        ? ((next.error_code === null || next.error_code === undefined
-            ? undefined
-            : FAILURE_MESSAGES[next.error_code]) ?? FAILURE_FALLBACK)
-        : null
+    if (next.stage === 'failed') {
+      clearRetainedError()
+      error.value =
+        (next.error_code === null || next.error_code === undefined
+          ? undefined
+          : FAILURE_MESSAGES[next.error_code]) ?? FAILURE_FALLBACK
+    } else if (!retainCurrentError) {
+      clearRetainedError()
+      error.value = null
+    }
     if (isTerminalMatrixOAuthBrowserFlow(next)) {
       clearPoll()
       storage.removeItem(ACTIVE_FLOW_KEY)
@@ -205,17 +235,62 @@ export function createMatrixOAuthBrowserStore(
     schedulePoll(owner)
   }
 
-  async function fetchCurrent(
-    owner: number,
-    kind: 'polling' | 'resuming',
-  ): Promise<boolean> {
+  /**
+   * Axon no longer knows the flow. It forgets one two minutes after it ends,
+   * and this method sends the user away to another tab, app or device, so a
+   * page that was frozen in the meantime can come back to a sign-in that
+   * finished without it. The account list is what tells the two apart.
+   */
+  async function settleMissing(owner: number): Promise<void> {
+    const known = flow.value
+    storage.removeItem(ACTIVE_FLOW_KEY)
+    operation.value = 'refreshing_accounts'
+    await accounts.refresh()
     if (owner !== generation) {
-      return false
+      return
+    }
+    clearRetainedError()
+    const account =
+      known === null
+        ? undefined
+        : accounts.accounts.value.find(
+            (candidate) =>
+              candidate.user_id === known.expected_user_id &&
+              candidate.state === 'active',
+          )
+    if (known !== null && account !== undefined) {
+      // Axon refuses to start a sign-in for an account that is already
+      // active, so an active one now is this sign-in's.
+      completed.add(known.flow_id)
+      flow.value = {
+        flow_id: known.flow_id,
+        expected_user_id: known.expected_user_id,
+        stage: 'done',
+        account_id: account.account_id,
+      }
+      error.value = null
+    } else {
+      flow.value = null
+      error.value =
+        known === null
+          ? 'An earlier browser sign-in is no longer open. If its account is listed above, it finished; otherwise start again.'
+          : 'This browser sign-in is no longer open. Start again to continue.'
+    }
+    operation.value = 'idle'
+  }
+
+  /** One read of the flow: applied, gone from Axon, failed, or superseded. */
+  async function fetchOnce(
+    owner: number,
+    kind: 'polling' | 'resuming' | 'cancelling',
+  ): Promise<'applied' | 'missing' | 'failed' | 'superseded'> {
+    if (owner !== generation) {
+      return 'superseded'
     }
     const flowId = flow.value?.flow_id ?? storage.getItem(ACTIVE_FLOW_KEY)
     if (flowId === null || flowId === '') {
       operation.value = 'idle'
-      return false
+      return 'superseded'
     }
     clearPoll()
     operation.value = kind
@@ -226,40 +301,46 @@ export function createMatrixOAuthBrowserStore(
         signal: active.controller.signal,
       })
       if (owner !== generation || active.controller.signal.aborted) {
-        return false
+        return 'superseded'
       }
       if (result.error === undefined && result.data !== undefined) {
         await applyFlow(result.data.data, owner)
-        return true
+        return 'applied'
       }
       if (result.response.status === 404) {
-        // Axon forgets a flow some time after it ends, and at once on a
-        // restart; either way there is nothing left to wait for.
-        storage.removeItem(ACTIVE_FLOW_KEY)
-        flow.value = null
-        error.value =
-          'This browser sign-in is no longer open. Start again to continue.'
-        operation.value = 'idle'
-        return false
+        return 'missing'
       }
+      clearRetainedError()
       error.value = apiErrorMessage(result.error)
       operation.value = 'idle'
       schedulePoll(owner, transportBackoffMs)
-      return false
+      return 'failed'
     } catch (cause) {
       if (
         owner !== generation ||
         (!active.timedOut() && active.controller.signal.aborted)
       ) {
-        return false
+        return 'superseded'
       }
+      clearRetainedError()
       error.value = transportMessage(cause, 'Still checking the sign-in.')
       operation.value = 'idle'
       schedulePoll(owner, transportBackoffMs)
-      return false
+      return 'failed'
     } finally {
       active.finish()
     }
+  }
+
+  async function fetchCurrent(
+    owner: number,
+    kind: 'polling' | 'resuming',
+  ): Promise<boolean> {
+    const outcome = await fetchOnce(owner, kind)
+    if (outcome === 'missing') {
+      await settleMissing(owner)
+    }
+    return outcome === 'applied'
   }
 
   return {
@@ -269,24 +350,41 @@ export function createMatrixOAuthBrowserStore(
 
     start: async (userId) => {
       const previous = flow.value
+      // The flow this start replaces: the one on screen, or one a reload left
+      // behind that could not be read back. Forgetting its id without
+      // cancelling it would leave Axon holding the user's one sign-in slot
+      // with nothing here able to release it.
+      const abandoned =
+        previous === null
+          ? storage.getItem(ACTIVE_FLOW_KEY)
+          : isTerminalMatrixOAuthBrowserFlow(previous)
+            ? null
+            : previous.flow_id
       generation += 1
       const owner = generation
       clearPoll()
       request?.abort()
       flow.value = null
+      clearRetainedError()
       error.value = null
       operation.value = 'starting'
       storage.removeItem(ACTIVE_FLOW_KEY)
-      if (previous !== null && !isTerminalMatrixOAuthBrowserFlow(previous)) {
+      if (abandoned !== null && abandoned !== '') {
+        // Awaited, so the new request does not race the cancellation it
+        // depends on; bounded and best-effort, so a failure only means the
+        // create below reports the conflict.
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), requestTimeoutMs)
-        void api
+        await api
           .DELETE('/v1/accounts/login/browser/{flow_id}', {
-            params: { path: { flow_id: previous.flow_id } },
+            params: { path: { flow_id: abandoned } },
             signal: controller.signal,
           })
           .catch(() => {})
           .finally(() => clearTimeout(timer))
+        if (owner !== generation) {
+          return false
+        }
       }
       const active = beginRequest()
       try {
@@ -348,6 +446,7 @@ export function createMatrixOAuthBrowserStore(
       const owner = generation
       clearPoll()
       operation.value = 'cancelling'
+      clearRetainedError()
       error.value = null
       const active = beginRequest()
       try {
@@ -362,11 +461,39 @@ export function createMatrixOAuthBrowserStore(
           return false
         }
         if (result.error !== undefined) {
-          error.value = apiErrorMessage(result.error)
+          retainError(apiErrorMessage(result.error))
           operation.value = 'idle'
           schedulePoll(owner)
           return false
         }
+      } catch (cause) {
+        if (
+          owner !== generation ||
+          (!active.timedOut() && active.controller.signal.aborted)
+        ) {
+          return false
+        }
+        retainError(
+          transportMessage(
+            cause,
+            'Cancellation was not confirmed; you can retry it.',
+          ),
+        )
+        operation.value = 'idle'
+        schedulePoll(owner)
+        return false
+      } finally {
+        active.finish()
+      }
+      // Axon accepts a cancellation it can no longer honour: once the
+      // sign-in is approved and being finished, the request succeeds and
+      // changes nothing. Only the flow itself says how it ended.
+      const outcome = await fetchOnce(owner, 'cancelling')
+      if (outcome === 'superseded') {
+        return false
+      }
+      if (outcome === 'missing') {
+        // Nothing left to cancel or to finish.
         generation += 1
         // The link and code go with the flow; nothing may show them again.
         flow.value = {
@@ -377,23 +504,26 @@ export function createMatrixOAuthBrowserStore(
         storage.removeItem(ACTIVE_FLOW_KEY)
         operation.value = 'idle'
         return true
-      } catch (cause) {
-        if (
-          owner !== generation ||
-          (!active.timedOut() && active.controller.signal.aborted)
-        ) {
-          return false
-        }
-        error.value = transportMessage(
-          cause,
-          'Cancellation was not confirmed; you can retry it.',
-        )
-        operation.value = 'idle'
-        schedulePoll(owner)
-        return false
-      } finally {
-        active.finish()
       }
+      if (outcome === 'failed') {
+        retainError(
+          'Cancellation was sent, but Axon has not confirmed it. Still checking the sign-in.',
+        )
+        return false
+      }
+      const settled = flow.value
+      if (settled === null) {
+        return true
+      }
+      if (!isTerminalMatrixOAuthBrowserFlow(settled)) {
+        retainError(
+          settled.stage === 'finalizing'
+            ? 'Too late to cancel: the sign-in was already approved and is finishing.'
+            : 'Cancellation was not confirmed; you can retry it.',
+        )
+        return false
+      }
+      return settled.stage !== 'done'
     },
 
     reset: () => {
@@ -403,6 +533,7 @@ export function createMatrixOAuthBrowserStore(
       request = null
       flow.value = null
       operation.value = 'idle'
+      clearRetainedError()
       error.value = null
       storage.removeItem(ACTIVE_FLOW_KEY)
     },

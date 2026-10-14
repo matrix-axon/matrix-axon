@@ -284,6 +284,15 @@ describe('browser sign-in on the Accounts page', () => {
         cancelled = true
         return new HttpResponse(null, { status: 204 })
       }),
+      http.get(FLOW_URL, () =>
+        HttpResponse.json({
+          data: {
+            flow_id: FLOW_ID,
+            expected_user_id: BOB.user_id,
+            stage: cancelled ? 'cancelled' : 'waiting_for_authorization',
+          },
+        }),
+      ),
     )
     const page = renderPage([BOB])
     fireEvent.click(await page.findByRole('button', { name: 'Sign in again' }))
@@ -301,4 +310,144 @@ describe('browser sign-in on the Accounts page', () => {
     expect(cancelled).toBe(true)
     expect(page.services.matrixOAuthBrowser.flow.value).toBeNull()
   })
+  it('finishes the reactivation when the sign-in beat the cancellation', async () => {
+    let state = 'deactivated'
+    const bob = () => [{ ...BOB, state, device_id: 'AXONDEV', verified: false }]
+    server.use(
+      http.post(CREATE_URL, () =>
+        HttpResponse.json(
+          { data: { ...WAITING.data, expected_user_id: BOB.user_id } },
+          { status: 201 },
+        ),
+      ),
+      // As Axon does once a sign-in is being finished: accept, change nothing.
+      http.delete(FLOW_URL, () => {
+        state = 'active'
+        return new HttpResponse(null, { status: 204 })
+      }),
+      http.get(FLOW_URL, () =>
+        HttpResponse.json({
+          data: {
+            flow_id: FLOW_ID,
+            expected_user_id: BOB.user_id,
+            stage: 'done',
+            account_id: BOB.account_id,
+          },
+        }),
+      ),
+    )
+    const page = renderPage(bob)
+    fireEvent.click(await page.findByRole('button', { name: 'Sign in again' }))
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+    fireEvent.click(page.getByRole('button', { name: 'Start browser sign-in' }))
+    await page.findByRole('link', { name: 'Open sign-in page' })
+    // From another tab, so nothing but the cancellation itself can notice
+    // how the sign-in ended.
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with password' }))
+
+    fireEvent.click(page.getByRole('button', { name: 'Cancel reactivation' }))
+
+    // Not cancelled: the account is signed in, so there is nothing left to
+    // reactivate.
+    await page.findByRole('heading', { name: 'Add account' })
+    expect(page.services.matrixOAuthBrowser.flow.value?.stage).toBe('done')
+    await page.findByRole('button', { name: 'Log out' })
+  })
+
+  it('does not replay a finished sign-in when the panel is opened again', async () => {
+    server.use(
+      http.post(CREATE_URL, () =>
+        HttpResponse.json(flow('done', { account_id: ALICE.account_id }), {
+          status: 201,
+        }),
+      ),
+    )
+    const page = renderPage([ALICE])
+    await page.findByText(ALICE.user_id)
+    await start(page)
+    await page.findByText(/not verified yet/)
+
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with password' }))
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+
+    await page.findByRole('button', { name: 'Start browser sign-in' })
+    expect(page.queryByText('Signed in.')).toBeNull()
+    expect(page.services.matrixOAuthBrowser.flow.value).toBeNull()
+  })
+
+  it('forgets a finished sign-in once its account is signed out', async () => {
+    let state = 'active'
+    server.use(
+      http.post(CREATE_URL, () =>
+        HttpResponse.json(flow('done', { account_id: ALICE.account_id }), {
+          status: 201,
+        }),
+      ),
+    )
+    const page = renderPage(() => [{ ...ALICE, state }])
+    await page.findByText(ALICE.user_id)
+    await start(page)
+    await page.findByText(/not verified yet/)
+
+    state = 'deactivated'
+    await page.services.accounts.refresh()
+
+    await page.findByRole('button', { name: 'Start browser sign-in' })
+    expect(page.queryByText(/not verified yet/)).toBeNull()
+  })
+
+  // The store outlives the panel and keeps polling. A sign-in that ended
+  // while another tab was showing is believed only if its account is active.
+  it.each([
+    ['active', true],
+    ['deactivated', false],
+  ])(
+    'treats a sign-in that finished out of sight, account now %s, by the account list',
+    async (state, shown) => {
+      let stage = 'waiting_for_authorization'
+      server.use(
+        http.post(CREATE_URL, () =>
+          HttpResponse.json(WAITING, { status: 201 }),
+        ),
+        http.get(FLOW_URL, () =>
+          HttpResponse.json(
+            stage === 'done'
+              ? flow('done', { account_id: ALICE.account_id })
+              : WAITING,
+          ),
+        ),
+      )
+      const page = renderPage(() => [
+        { ...ALICE, state: stage === 'done' ? state : 'deactivated' },
+      ])
+      await page.findByText(ALICE.user_id)
+      await start(page)
+      await page.findByRole('link', { name: 'Open sign-in page' })
+
+      fireEvent.click(page.getByRole('tab', { name: 'Sign in with password' }))
+      stage = 'done'
+      page.services.matrixOAuthBrowser.checkNow()
+      await waitFor(() =>
+        expect(page.services.matrixOAuthBrowser.flow.value?.stage).toBe('done'),
+      )
+      await waitFor(() =>
+        expect(page.services.matrixOAuthBrowser.operation.value).toBe('idle'),
+      )
+
+      if (shown) {
+        fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+        await page.findByText(/not verified yet/)
+        return
+      }
+      // Signed out again since: reactivating must start a new sign-in, not
+      // be ended at once by the old one.
+      fireEvent.click(
+        await page.findByRole('button', { name: 'Sign in again' }),
+      )
+      fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+      await page.findByRole('button', { name: 'Start browser sign-in' })
+      expect(page.queryByText('Signed in.')).toBeNull()
+      page.getByRole('heading', { name: `Reactivate ${ALICE.user_id}` })
+    },
+  )
 })

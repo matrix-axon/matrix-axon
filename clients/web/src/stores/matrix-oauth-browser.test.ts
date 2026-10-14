@@ -1,8 +1,8 @@
-import { computed, signal } from '@preact/signals'
+import { computed, signal, type Signal } from '@preact/signals'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
-import type { AccountsStore } from './accounts'
+import type { Account, AccountsStore } from './accounts'
 import {
   createMatrixOAuthBrowserStore,
   type MatrixOAuthBrowserFlow,
@@ -57,9 +57,9 @@ function apiMock() {
   }
 }
 
-function accountsMock(): AccountsStore {
+function accountsMock(listed: Signal<Account[]>): AccountsStore {
   return {
-    accounts: computed(() => []),
+    accounts: computed(() => listed.value),
     loading: computed(() => false),
     error: signal(null),
     pending: computed(() => null),
@@ -90,14 +90,15 @@ function create(
     transportBackoffMs?: number
   } = {},
 ) {
-  const accounts = accountsMock()
+  const listed = signal<Account[]>([])
+  const accounts = accountsMock(listed)
   const store = createMatrixOAuthBrowserStore(
     api as unknown as ApiClient,
     accounts,
     options,
   )
   stores.push(store)
-  return { accounts, store }
+  return { accounts, listed, store }
 }
 
 describe('MatrixOAuthBrowserStore', () => {
@@ -198,12 +199,77 @@ describe('MatrixOAuthBrowserStore', () => {
     const storage = memoryStorage({ [STORAGE_KEY]: FLOW_ID })
     const api = apiMock()
     api.GET.mockReturnValue(refusal(404, 'not_found', 'unknown flow'))
-    const { store } = create(api, { storage })
+    const { accounts, store } = create(api, { storage })
 
     await expect(store.resume()).resolves.toBe(false)
     expect(store.flow.value).toBeNull()
     expect(store.hasStoredFlow()).toBe(false)
-    expect(store.error.value).toMatch(/no longer open/)
+    // Whose sign-in it was is unknown after a reload, so the page cannot say
+    // whether it finished; it can only point at the list it just refreshed.
+    expect(store.error.value).toMatch(/If its account is listed above/)
+    expect(accounts.refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('recognises a sign-in that finished while the page was away', async () => {
+    vi.useFakeTimers()
+    const api = apiMock()
+    api.POST.mockReturnValue(success(waiting(), 201))
+    // Axon forgets a finished flow after two minutes.
+    api.GET.mockReturnValue(refusal(404, 'not_found', 'unknown flow'))
+    const { accounts, listed, store } = create(api, { pollDelayMs: 1 })
+    vi.mocked(accounts.refresh).mockImplementation(() => {
+      listed.value = [
+        {
+          account_id: 'account-1',
+          user_id: '@alice:example.org',
+          state: 'active',
+        } as Account,
+      ]
+      return Promise.resolve()
+    })
+
+    await store.start('@alice:example.org')
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(store.flow.value).toEqual({
+      flow_id: FLOW_ID,
+      expected_user_id: '@alice:example.org',
+      stage: 'done',
+      account_id: 'account-1',
+    })
+    expect(store.error.value).toBeNull()
+    expect(store.hasStoredFlow()).toBe(false)
+    expect(store.operation.value).toBe('idle')
+  })
+
+  it('reports a flow that vanished without signing the account in', async () => {
+    vi.useFakeTimers()
+    const api = apiMock()
+    api.POST.mockReturnValue(success(waiting(), 201))
+    api.GET.mockReturnValue(refusal(404, 'not_found', 'unknown flow'))
+    const { accounts, listed, store } = create(api, { pollDelayMs: 1 })
+    // Another account being active proves nothing about this one.
+    listed.value = [
+      {
+        account_id: 'account-2',
+        user_id: '@bob:example.org',
+        state: 'active',
+      } as Account,
+      {
+        account_id: 'account-1',
+        user_id: '@alice:example.org',
+        state: 'deactivated',
+      } as Account,
+    ]
+
+    await store.start('@alice:example.org')
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(store.flow.value).toBeNull()
+    expect(store.error.value).toBe(
+      'This browser sign-in is no longer open. Start again to continue.',
+    )
+    expect(accounts.refresh).toHaveBeenCalledTimes(1)
   })
 
   it('keeps waiting through a failed poll and retries after the backoff', async () => {
@@ -232,6 +298,7 @@ describe('MatrixOAuthBrowserStore', () => {
     const api = apiMock()
     api.POST.mockReturnValue(success(waiting(), 201))
     api.DELETE.mockResolvedValue({ response: response(204) })
+    api.GET.mockReturnValue(success(flow('cancelled')))
     const { store } = create(api, { storage, pollDelayMs: 60_000 })
 
     await store.start('@alice:example.org')
@@ -249,6 +316,90 @@ describe('MatrixOAuthBrowserStore', () => {
       stage: 'cancelled',
     })
     expect(store.hasStoredFlow()).toBe(false)
+  })
+
+  it('takes a flow Axon forgot after the cancellation as cancelled', async () => {
+    const api = apiMock()
+    api.POST.mockReturnValue(success(waiting(), 201))
+    api.DELETE.mockResolvedValue({ response: response(204) })
+    api.GET.mockReturnValue(refusal(404, 'not_found', 'unknown flow'))
+    const { accounts, store } = create(api, { pollDelayMs: 60_000 })
+
+    await store.start('@alice:example.org')
+    await expect(store.cancel()).resolves.toBe(true)
+    expect(store.flow.value).toEqual({
+      flow_id: FLOW_ID,
+      expected_user_id: '@alice:example.org',
+      stage: 'cancelled',
+    })
+    expect(store.error.value).toBeNull()
+    expect(accounts.refresh).not.toHaveBeenCalled()
+  })
+
+  // Axon answers 204 to a cancellation it can no longer honour, so the
+  // request succeeding says nothing about how the sign-in ended.
+  it('shows the account when the sign-in finished before the cancellation', async () => {
+    const storage = memoryStorage()
+    const api = apiMock()
+    api.POST.mockReturnValue(success(waiting(), 201))
+    api.DELETE.mockResolvedValue({ response: response(204) })
+    api.GET.mockReturnValue(success(flow('done', { account_id: 'account-1' })))
+    const { accounts, store } = create(api, { storage, pollDelayMs: 60_000 })
+
+    await store.start('@alice:example.org')
+    await expect(store.cancel()).resolves.toBe(false)
+    expect(store.flow.value?.stage).toBe('done')
+    expect(store.flow.value?.account_id).toBe('account-1')
+    expect(accounts.refresh).toHaveBeenCalledTimes(1)
+    expect(store.hasStoredFlow()).toBe(false)
+  })
+
+  it('says it is too late to cancel, and keeps saying so until the flow moves on', async () => {
+    vi.useFakeTimers()
+    const api = apiMock()
+    api.POST.mockReturnValue(success(flow('finalizing'), 201))
+    api.DELETE.mockResolvedValue({ response: response(204) })
+    api.GET.mockReturnValueOnce(success(flow('finalizing')))
+    api.GET.mockReturnValueOnce(success(flow('finalizing')))
+    api.GET.mockReturnValue(success(flow('done', { account_id: 'account-1' })))
+    const { accounts, store } = create(api, { pollDelayMs: 10 })
+
+    await store.start('@alice:example.org')
+    await expect(store.cancel()).resolves.toBe(false)
+    expect(store.flow.value?.stage).toBe('finalizing')
+    expect(store.error.value).toMatch(/Too late to cancel/)
+
+    // An unchanged poll must not wipe the explanation two seconds later.
+    await vi.advanceTimersByTimeAsync(10)
+    expect(api.GET).toHaveBeenCalledTimes(2)
+    expect(store.error.value).toMatch(/Too late to cancel/)
+
+    await vi.advanceTimersByTimeAsync(10)
+    expect(store.flow.value?.stage).toBe('done')
+    expect(store.error.value).toBeNull()
+    expect(accounts.refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps checking when the outcome of a cancellation cannot be read', async () => {
+    vi.useFakeTimers()
+    const api = apiMock()
+    api.POST.mockReturnValue(success(waiting(), 201))
+    api.DELETE.mockResolvedValue({ response: response(204) })
+    api.GET.mockRejectedValueOnce(new TypeError('network down'))
+    api.GET.mockReturnValue(success(flow('cancelled')))
+    const { store } = create(api, {
+      pollDelayMs: 60_000,
+      transportBackoffMs: 50,
+    })
+
+    await store.start('@alice:example.org')
+    await expect(store.cancel()).resolves.toBe(false)
+    expect(store.error.value).toMatch(/has not confirmed it/)
+    expect(store.flow.value?.stage).toBe('waiting_for_authorization')
+
+    await vi.advanceTimersByTimeAsync(50)
+    expect(store.flow.value?.stage).toBe('cancelled')
+    expect(store.error.value).toBeNull()
   })
 
   it('keeps the flow when cancellation is refused', async () => {
@@ -301,6 +452,40 @@ describe('MatrixOAuthBrowserStore', () => {
         signal: expect.any(AbortSignal),
       },
     )
+    expect(store.flow.value?.flow_id).toBe(FLOW_ID_2)
+  })
+
+  // After a reload the flow exists only as a stored id. If it cannot be read
+  // back, starting again must still release it: Axon allows one sign-in per
+  // user, and a forgotten id would hold that slot for half an hour.
+  it('cancels a stored flow it could not resume before starting another', async () => {
+    const storage = memoryStorage({ [STORAGE_KEY]: FLOW_ID })
+    const api = apiMock()
+    const order: string[] = []
+    api.GET.mockRejectedValue(new TypeError('network down'))
+    api.DELETE.mockImplementation(() => {
+      order.push('cancel')
+      return Promise.resolve({ response: response(204) })
+    })
+    api.POST.mockImplementation(() => {
+      order.push('create')
+      return success(flow('starting', { flow_id: FLOW_ID_2 }), 201)
+    })
+    const { store } = create(api, { storage, pollDelayMs: 60_000 })
+
+    await expect(store.resume()).resolves.toBe(false)
+    expect(store.flow.value).toBeNull()
+    expect(store.hasStoredFlow()).toBe(true)
+
+    await expect(store.start('@alice:example.org')).resolves.toBe(true)
+    expect(api.DELETE).toHaveBeenCalledWith(
+      '/v1/accounts/login/browser/{flow_id}',
+      {
+        params: { path: { flow_id: FLOW_ID } },
+        signal: expect.any(AbortSignal),
+      },
+    )
+    expect(order).toEqual(['cancel', 'create'])
     expect(store.flow.value?.flow_id).toBe(FLOW_ID_2)
   })
 

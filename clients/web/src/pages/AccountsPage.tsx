@@ -72,6 +72,11 @@ export function AccountsPage() {
       !isTerminalMatrixOAuthBrowserFlow(browserFlow) &&
       !(await matrixOAuthBrowser.cancel())
     ) {
+      // Too late to cancel: the sign-in finished instead, and with it the
+      // reactivation.
+      if (matrixOAuthBrowser.flow.value?.stage === 'done') {
+        finishReactivation()
+      }
       return
     }
     matrixOAuthQr.reset()
