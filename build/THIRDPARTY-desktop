@@ -3238,7 +3238,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 LICENSE: MIT License (SPDX ID: MIT)
 USED BY:
   - hyper-rustls 0.27.9
-  - rustls 0.23.45
+  - rustls 0.23.46
 ================================================================================
 Copyright (c) 2016 Joseph Birr-Pixton &lt;jpixton@gmail.com&gt;
 
