@@ -56,6 +56,9 @@ pub struct AuthedToken {
     pub authenticated_at: Option<DateTime<Utc>>,
     /// The bound identity it was minted for, if any.
     pub oauth_identity_id: Option<Uuid>,
+    /// The credential session. Shared with the refresh token of an OAuth
+    /// sign-in, and equal to [`Self::id`] for a non-expiring credential.
+    pub session_id: Uuid,
 }
 
 impl AuthedToken {
@@ -82,6 +85,7 @@ impl From<VerifiedToken> for AuthedToken {
             expires_at: token.expires_at,
             authenticated_at: token.authenticated_at,
             oauth_identity_id: token.oauth_identity_id,
+            session_id: token.session_id,
         }
     }
 }
@@ -309,11 +313,15 @@ mod tests {
         signed_in_ago: Option<chrono::Duration>,
         now: DateTime<Utc>,
     ) -> AuthedToken {
+        // A non-expiring credential's session is its row id. Bind the two
+        // together so a later reader does not treat a second nil as a match.
+        let id = Uuid::nil();
         AuthedToken {
-            id: Uuid::nil(),
+            id,
             expires_at: expires_in.map(|d| now + d),
             authenticated_at: signed_in_ago.map(|d| now - d),
             oauth_identity_id: None,
+            session_id: id,
         }
     }
 

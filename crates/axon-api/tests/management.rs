@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use axon_api::{AppState, OAuthRuntime, OidcProvider, StoreTokenVerifier, RECENT_SIGN_IN_WINDOW};
 use axon_core::{OauthClientConfig, OauthConfig};
-use axon_store::Store;
+use axon_store::{OAuthSession, Store};
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
@@ -247,7 +247,10 @@ async fn session(
             provider,
             identity,
             CLIENT_ID,
-            signed_in,
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: signed_in,
+            },
         )
         .await
         .unwrap()
@@ -533,7 +536,10 @@ async fn refreshing_a_stale_session_does_not_make_it_recent() {
             google,
             CLIENT_ID,
             Utc::now() + Duration::days(30),
-            long_ago(),
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: long_ago(),
+            },
         )
         .await
         .unwrap();
@@ -1366,7 +1372,10 @@ async fn revoking_a_session_token_stops_the_session_refreshing() {
             google,
             CLIENT_ID,
             Utc::now() + Duration::days(30),
-            just_now(),
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: just_now(),
+            },
         )
         .await
         .unwrap();

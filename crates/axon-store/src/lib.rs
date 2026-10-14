@@ -65,7 +65,9 @@ pub use state::{
     AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRedaction, RoomStateRow,
     RoomStateUpsert,
 };
-pub use tokens::{IssuedOAuthTokenPair, IssuedToken, Token, TokenRevocation, VerifiedToken};
+pub use tokens::{
+    IssuedOAuthTokenPair, IssuedToken, OAuthSession, Token, TokenRevocation, VerifiedToken,
+};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

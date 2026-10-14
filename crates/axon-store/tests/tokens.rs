@@ -66,6 +66,7 @@ async fn issue_then_verify_round_trips_and_touches_last_used() {
         .expect("verify")
         .expect("token is accepted");
     assert_eq!(id.id, issued.id);
+    assert_eq!(id.session_id, issued.id);
 
     // Verification stamped last_used_at.
     let listed = store.list_tokens().await.expect("list");
@@ -74,6 +75,7 @@ async fn issue_then_verify_round_trips_and_touches_last_used() {
         .find(|t| t.id == issued.id)
         .expect("issued token listed");
     assert_eq!(row.label, "laptop");
+    assert_eq!(row.session_id, issued.id);
     assert!(row.last_used_at.is_some(), "verify touched last_used_at");
     assert!(!row.is_revoked());
 
@@ -143,6 +145,15 @@ async fn first_credential_bootstrap_mints_only_once() {
         .expect("issue first")
         .expect("first token should mint");
     assert!(issued.token.starts_with("axon_"));
+    let verified = store
+        .verify_token(&issued.token)
+        .await
+        .expect("verify")
+        .expect("bootstrap token verifies");
+    assert_eq!(
+        verified.session_id, issued.id,
+        "a non-expiring bootstrap token's session is its row"
+    );
     assert!(
         !store
             .first_credential_bootstrap_available()

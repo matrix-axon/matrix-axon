@@ -12,7 +12,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use axon_store::{RedeemRefreshTokenError, Store, StoreError};
+use axon_store::{OAuthSession, RedeemRefreshTokenError, Store, StoreError};
 
 use crate::oauth::provider::OidcError;
 use crate::oauth::OAuthRuntime;
@@ -102,6 +102,12 @@ pub async fn mint_token_pair(
 ) -> Result<TokenPair, TokenError> {
     let now = Utc::now();
     let access_expires_at = now + runtime.access_token_ttl;
+    // One id for both rows. The two inserts stay separate pool calls: if the
+    // refresh insert fails, this access token's session has no refresh token.
+    let session = OAuthSession {
+        session_id: Uuid::new_v4(),
+        authenticated_at,
+    };
     let issued = store
         .issue_oauth_token(
             &format!("oauth:{provider}:{client_id}"),
@@ -109,7 +115,7 @@ pub async fn mint_token_pair(
             provider,
             oauth_identity_id,
             client_id,
-            authenticated_at,
+            session,
         )
         .await?;
 
@@ -122,7 +128,7 @@ pub async fn mint_token_pair(
             oauth_identity_id,
             client_id,
             refresh_expires_at,
-            authenticated_at,
+            session,
         )
         .await?;
 
@@ -224,8 +230,12 @@ pub async fn redeem_refresh_token(
             identity.id,
             &rotated.client_id,
             // A refresh proves possession of the refresh token, not a fresh
-            // sign-in: the session keeps the time it started with.
-            rotated.authenticated_at,
+            // sign-in: the session keeps the time it started with, and the
+            // id the refresh row carried.
+            OAuthSession {
+                session_id: rotated.session_id,
+                authenticated_at: rotated.authenticated_at,
+            },
         )
         .await?;
 

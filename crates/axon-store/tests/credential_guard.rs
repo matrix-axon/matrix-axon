@@ -5,7 +5,7 @@
 //! tables to control what it sees.
 mod common;
 
-use axon_store::{IdentityRemoval, Store, TokenRevocation};
+use axon_store::{IdentityRemoval, OAuthSession, Store, TokenRevocation};
 use chrono::{Duration, Utc};
 use common::{migrated_store, raw_pool};
 use sqlx_postgres::PgPool;
@@ -49,7 +49,10 @@ async fn the_last_credential_is_not_removed_and_a_refusal_changes_nothing() {
             "apple",
             apple,
             "web",
-            Some(Utc::now()),
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: Some(Utc::now()),
+            },
         )
         .await
         .unwrap();
@@ -286,7 +289,10 @@ async fn revoking_an_expiring_session_token_is_never_the_last_credential() {
             "apple",
             apple,
             "web",
-            Some(Utc::now()),
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: Some(Utc::now()),
+            },
         )
         .await
         .unwrap();
@@ -350,7 +356,10 @@ async fn the_capped_list_keeps_working_tokens_ahead_of_dead_ones() {
                 "apple",
                 apple,
                 "web",
-                None,
+                OAuthSession {
+                    session_id: Uuid::new_v4(),
+                    authenticated_at: None,
+                },
             )
             .await
             .unwrap();
@@ -392,7 +401,16 @@ async fn revoking_a_session_token_revokes_that_clients_refresh_tokens_only() {
         async move {
             let hash = format!("hash-{}", Uuid::new_v4());
             store
-                .issue_refresh_token(&hash, identity, client, later, None)
+                .issue_refresh_token(
+                    &hash,
+                    identity,
+                    client,
+                    later,
+                    OAuthSession {
+                        session_id: Uuid::new_v4(),
+                        authenticated_at: None,
+                    },
+                )
                 .await
                 .unwrap();
             hash
@@ -409,7 +427,10 @@ async fn revoking_a_session_token_revokes_that_clients_refresh_tokens_only() {
             "apple",
             apple,
             "web",
-            None,
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: None,
+            },
         )
         .await
         .unwrap();
@@ -471,7 +492,10 @@ async fn unbinding_revokes_what_that_identitys_sessions_minted() {
                     provider,
                     identity,
                     "web",
-                    Some(Utc::now()),
+                    OAuthSession {
+                        session_id: Uuid::new_v4(),
+                        authenticated_at: Some(Utc::now()),
+                    },
                 )
                 .await
                 .unwrap()
@@ -558,7 +582,16 @@ async fn revoking_an_already_revoked_session_token_still_ends_the_session() {
     let later = Utc::now() + Duration::days(30);
     let refresh = format!("hash-{}", Uuid::new_v4());
     store
-        .issue_refresh_token(&refresh, apple, "web", later, None)
+        .issue_refresh_token(
+            &refresh,
+            apple,
+            "web",
+            later,
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: None,
+            },
+        )
         .await
         .unwrap();
     let session = store
@@ -568,7 +601,10 @@ async fn revoking_an_already_revoked_session_token_still_ends_the_session() {
             "apple",
             apple,
             "web",
-            None,
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: None,
+            },
         )
         .await
         .unwrap();
@@ -664,18 +700,22 @@ async fn the_sign_in_time_survives_refresh_rotation_unchanged() {
     let identity = bind(&store, "google").await;
     let signed_in = Utc::now() - Duration::days(3);
     let first = format!("hash-{}", Uuid::new_v4());
+    let session = OAuthSession {
+        session_id: Uuid::new_v4(),
+        authenticated_at: Some(signed_in),
+    };
     store
         .issue_refresh_token(
             &first,
             identity,
             "web",
             Utc::now() + Duration::days(30),
-            Some(signed_in),
+            session,
         )
         .await
         .unwrap();
 
-    // Rotate twice: a refresh must never move the time forward.
+    // Rotate twice: a refresh must never move the time or the session.
     let mut presented = first;
     for _ in 0..2 {
         let next = format!("hash-{}", Uuid::new_v4());
@@ -694,6 +734,7 @@ async fn the_sign_in_time_survives_refresh_rotation_unchanged() {
             rotated.authenticated_at.map(|at| at.timestamp_micros()),
             Some(signed_in.timestamp_micros())
         );
+        assert_eq!(rotated.session_id, session.session_id);
         presented = next;
     }
 
@@ -704,12 +745,13 @@ async fn the_sign_in_time_survives_refresh_rotation_unchanged() {
             "google",
             identity,
             "web",
-            Some(signed_in),
+            session,
         )
         .await
         .unwrap();
     let verified = store.verify_token(&access.token).await.unwrap().unwrap();
     assert_eq!(verified.id, access.id);
+    assert_eq!(verified.session_id, session.session_id);
     assert_eq!(verified.oauth_identity_id, Some(identity));
     assert!(verified.expires_at.is_some());
     assert_eq!(
@@ -731,7 +773,10 @@ async fn a_chain_with_no_recorded_sign_in_stays_without_one() {
             identity,
             "web",
             Utc::now() + Duration::days(30),
-            None,
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: None,
+            },
         )
         .await
         .unwrap();
