@@ -20,6 +20,16 @@ const STAGE_SUMMARIES: Record<MatrixOAuthBrowserFlow['stage'], string> = {
   cancelled: 'Browser sign-in cancelled.',
 }
 
+/** What a flow that ended on `cancelled` says, given why it was cancelled. */
+function stageSummary(flow: MatrixOAuthBrowserFlow): string {
+  // Axon cancels an unapproved sign-in when another one starts for the same
+  // user, here or in another tab or client; its link and code stop working.
+  if (flow.stage === 'cancelled' && flow.cancel_reason === 'replaced') {
+    return 'A newer browser sign-in for this account replaced this one. Use the link and code from the newer sign-in, or start again here.'
+  }
+  return STAGE_SUMMARIES[flow.stage]
+}
+
 function CopyLinkButton({ link }: { link: string }) {
   const { status, copy } = useCopyFeedback()
   return (
@@ -349,7 +359,7 @@ export function MatrixOAuthBrowserAcquisition({
     return (
       <div class="qr-flow browser-sign-in">
         <p class="qr-stage-summary" aria-live="polite" aria-atomic="true">
-          {STAGE_SUMMARIES[flow.stage]}
+          {stageSummary(flow)}
         </p>
         {flow.stage === 'waiting_for_authorization' && (
           <AuthorizationStep flow={flow} />

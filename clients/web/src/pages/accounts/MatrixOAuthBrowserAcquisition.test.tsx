@@ -244,6 +244,26 @@ describe('browser sign-in on the Accounts page', () => {
     ).toBe('true')
   })
 
+  it('says when a newer sign-in for the same user replaced this one', async () => {
+    server.use(
+      http.post(CREATE_URL, () => HttpResponse.json(WAITING, { status: 201 })),
+      http.get(FLOW_URL, () =>
+        HttpResponse.json(flow('cancelled', { cancel_reason: 'replaced' })),
+      ),
+    )
+    const page = renderPage()
+    await start(page)
+    await page.findByRole('link', { name: 'Open sign-in page' })
+
+    document.dispatchEvent(new Event('visibilitychange'))
+
+    await page.findByText(/A newer browser sign-in for this account replaced/)
+    expect(page.queryByText('Browser sign-in cancelled.')).toBeNull()
+    expect(page.queryByRole('link', { name: 'Open sign-in page' })).toBeNull()
+    fireEvent.click(page.getByRole('button', { name: 'Start again' }))
+    await page.findByRole('button', { name: 'Start browser sign-in' })
+  })
+
   it('asks again as soon as the user comes back to the page', async () => {
     let polls = 0
     server.use(

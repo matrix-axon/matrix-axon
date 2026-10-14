@@ -107,3 +107,31 @@ test('cancelling after approval says it is too late and still finishes', async (
   await moveFlow(page, '?stage=done')
   await expect(page.getByText('Signed in.')).toBeVisible()
 })
+
+test('starting again in another tab replaces the open sign-in and says so', async ({
+  page,
+  context,
+}) => {
+  await startBrowserSignIn(page)
+  await expect(page.getByText('WXYZ-1234')).toBeVisible()
+
+  // A second tab knows nothing of the first one's flow: its own start
+  // replaces it, as after a closed tab or a lost response.
+  const other = await context.newPage()
+  await other.goto('/accounts')
+  await other.getByRole('tab', { name: 'Sign in with browser' }).click()
+  await other.getByLabel('Matrix user ID').fill('@me:hs')
+  await other.getByRole('button', { name: 'Start browser sign-in' }).click()
+  await expect(other.getByText('WXYZ-1234')).toBeVisible()
+
+  // Back in the first tab, which reads its flow again on returning.
+  await page.bringToFront()
+  await expect(
+    page.getByText(/A newer browser sign-in for this account replaced/),
+  ).toBeVisible()
+  await expect(page.getByText('WXYZ-1234')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Start again' })).toBeVisible()
+  await other.getByRole('button', { name: 'Cancel sign-in' }).click()
+  await expect(other.getByText('Browser sign-in cancelled.')).toBeVisible()
+  await other.close()
+})
