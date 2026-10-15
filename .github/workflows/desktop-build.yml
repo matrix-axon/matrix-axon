@@ -16,6 +16,10 @@
 #
 # Unsigned artifacts are installable but hostile: Gatekeeper and SmartScreen
 # both interpose. They are for testers, not for users.
+#
+# Windows is signed through Azure Artifact Signing, not a certificate secret:
+# the `ARTIFACT_SIGNING_*` and `AZURE_*` repository *variables* switch it on
+# and the job authenticates by OIDC (ADR 0119).
 
 name: Desktop build
 
@@ -309,6 +313,12 @@ jobs:
     if: >-
       ${{ github.event_name != 'pull_request'
       && github.event.inputs.windows != 'false' }}
+    # See cross-build.yml's windows job: OIDC to Azure Artifact Signing,
+    # bound to this environment (ADR 0119).
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -340,19 +350,46 @@ jobs:
         run: pnpm install --frozen-lockfile
         working-directory: clients/web
 
-      # Authenticode signing is NOT wired here yet, and pretending otherwise
-      # would be worse than saying so. Tauri signs the Windows bundles from
-      # `bundle.windows.certificateThumbprint` in tauri.conf.json, which wants a
-      # certificate already installed in the runner's store — so switching it on
-      # needs an import step plus a config field, not just a secret. The
-      # reserved names are WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD.
-      # Empty credentials are unset inside the action, which is what keeps
-      # "signing by presence" true — see `.github/actions/tauri-build`.
+      - name: Set up Windows signing
+        uses: ./.github/actions/windows-signing
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          account: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          profile: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Tauri signs the shell executable, the uninstaller and the NSIS
+      # installer by calling `bundle.windows.signCommand` once per file, so the
+      # binary inside the installer is signed before it is packed. The command
+      # is injected as a `--config` overlay rather than committed to
+      # tauri.conf.json: it needs this runner's absolute script path, and a
+      # committed command would break every unsigned local build. `setup` having
+      # run (SIGN_SIGNTOOL set) is the "configured" test; otherwise the overlay
+      # is not written and Tauri builds unsigned.
+      - name: Write the signing overlay
+        if: env.SIGN_SIGNTOOL != ''
+        shell: pwsh
+        run: |
+          $overlay = scripts/sign-windows.ps1 overlay
+          "TAURI_SIGNING_OVERLAY=--config $overlay" |
+            Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+
       - name: Build bundles
         uses: ./.github/actions/tauri-build
+        with:
+          args: ${{ env.TAURI_SIGNING_OVERLAY }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # Fails the job if signing is configured and the installer is not
+      # validly signed and timestamped.
+      - name: Verify the installer signature
+        shell: pwsh
+        run: |
+          scripts/sign-windows.ps1 verify (Get-ChildItem clients/web/src-tauri/target/release/bundle/nsis/*.exe).FullName
 
       - name: Collect artifacts
         shell: bash

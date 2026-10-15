@@ -188,6 +188,16 @@ jobs:
 
     runs-on: windows-latest
     if: ${{ github.event.inputs.windows != 'false' }}
+    # Authenticode signing (ADR 0119). `id-token` is what lets azure/login
+    # trade the job's OIDC token for an Azure session; there is no stored
+    # credential. The federated credential in Entra is bound to this
+    # environment's subject, because Azure federation does not take wildcards
+    # and a tag name is not known in advance. Signing stays off until the
+    # `ARTIFACT_SIGNING_*` repository variables exist.
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: checkout source code
         uses: actions/checkout@v7
@@ -230,6 +240,27 @@ jobs:
       - name: Assert the server carries the web client
         shell: bash
         run: scripts/assert-web-embedded.sh "target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-server.exe" web-dist
+
+      # Sign the executables, not the zips: a zip cannot carry a signature, so
+      # what SmartScreen and Defender judge is the .exe inside it. Signing
+      # comes after the web-embed assertion (the assertion reads the unsigned
+      # file) and before packaging. Both steps are no-ops when signing is not
+      # configured; `sign` verifies each signature before returning.
+      - name: Set up Windows signing
+        uses: ./.github/actions/windows-signing
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          account: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          profile: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the binaries
+        shell: pwsh
+        run: |
+          $BIN = "target/${{ matrix.target }}/${{ env.PROFILE_DIR }}"
+          scripts/sign-windows.ps1 sign "$BIN/axon-server.exe" "$BIN/axon-tui.exe"
 
       # Windows runners have no `zip` (Git Bash doesn't ship one), so use
       # PowerShell's Compress-Archive. Like `zip -j` on the other platforms, it

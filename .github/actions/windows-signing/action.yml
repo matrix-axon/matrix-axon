@@ -1,0 +1,57 @@
+name: Set up Windows signing
+description: >-
+  Logs in to Azure with the job's OIDC token and installs signtool and the
+  Artifact Signing dlib (scripts/sign-windows.ps1 setup). Does nothing when the
+  endpoint input is empty, so a repository with no signing configured builds
+  unsigned artifacts exactly as before (ADR 0119).
+
+inputs:
+  endpoint:
+    description: "Artifact Signing endpoint, e.g. https://eus.codesigning.azure.net"
+    required: false
+    default: ""
+  account:
+    description: "Artifact Signing account name"
+    required: false
+    default: ""
+  profile:
+    description: "Certificate profile name"
+    required: false
+    default: ""
+  client-id:
+    description: "Client id of the Entra app registration trusted by OIDC"
+    required: false
+    default: ""
+  tenant-id:
+    description: "Entra tenant id"
+    required: false
+    default: ""
+  subscription-id:
+    description: "Azure subscription id"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # `vars` is not available inside a composite action, which is why the
+    # caller passes every value in. A missing repository variable arrives as
+    # an empty string, and an empty endpoint is the whole "not configured"
+    # signal. The three Azure ids are not secrets (they identify the app, not
+    # authenticate it); the OIDC federation is what grants access.
+    - name: Log in to Azure
+      if: inputs.endpoint != ''
+      uses: azure/login@v3
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}
+
+    - name: Install signing tools
+      if: inputs.endpoint != ''
+      shell: pwsh
+      env:
+        ARTIFACT_SIGNING_ENDPOINT: ${{ inputs.endpoint }}
+        ARTIFACT_SIGNING_ACCOUNT: ${{ inputs.account }}
+        ARTIFACT_SIGNING_PROFILE: ${{ inputs.profile }}
+      run: scripts/sign-windows.ps1 setup

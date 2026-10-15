@@ -63,7 +63,7 @@ matrix-axon/
   .github/workflows/         # public repo: GitHub-hosted runners have free minutes, so most workflows trigger on push or release (via new tag); a few stay manual-dispatch only for other reasons (expensive/manual runs)
     api-docs.yml             # build the Pages site: homepage + API reference at https://matrix-axon.github.io/matrix-axon/api.html
     check-environment.yml    # local-runner environment check
-    cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows; on tags, publishes the Homebrew formulas and cask; every server binary carries the web client (ADR 0116)
+    cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows; on tags, publishes the Homebrew formulas and cask; every server binary carries the web client (ADR 0116); Windows executables are Authenticode-signed when the `ARTIFACT_SIGNING_*` repo variables exist (ADR 0119)
     lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
     lint-and-test.yml        # cargo fmt + clippy + test
     package.yml              # nFPM .deb/.rpm (amd64 on ubuntu-22.04, arm64 on ubuntu-22.04-arm); tag uploads to GitHub Releases; the binary carries the web client (ADR 0116)

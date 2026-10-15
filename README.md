@@ -138,7 +138,8 @@ Each release also carries `THIRDPARTY-axon-desktop.txt`, the full license disclo
 
 The macOS build is a universal binary, so Apple Silicon and Intel both run natively; the Windows and Linux builds are x64 only, so on ARM use the browser client or build the shell yourself ([#455](https://github.com/matrix-axon/matrix-axon/issues/455)).
 The macOS build is signed with a Developer ID certificate and notarized by Apple, so it opens without a Gatekeeper warning.
-The Windows and Linux builds are not signed yet, so SmartScreen and some Linux desktops will warn the first time you run them.
+The Windows executables and installer are signed through Azure Artifact Signing (ADR 0119), so they show a verified publisher; SmartScreen may still warn on the first downloads of a new release while its reputation builds.
+The Linux builds are not signed, so some Linux desktops will warn the first time you run them.
 Building the shell yourself is documented in [`clients/web/src-tauri/README.md`](clients/web/src-tauri/README.md).
 
 ## Architecture overview
