@@ -9,6 +9,7 @@ import preact from '@preact/preset-vite'
 import {
   collectDisclosure,
   pickLicenseFile,
+  pnpmCommand,
   type ThirdPartyLicense,
 } from './src/thirdparty-disclosure.ts'
 
@@ -235,14 +236,22 @@ function collectThirdPartyLicenses(): ThirdPartyLicense[] {
     return thirdPartyCache
   }
 
+  const pnpm = pnpmCommand(process.env.npm_execpath, process.execPath)
   thirdPartyCache = collectDisclosure(
     () =>
-      execFileSync('pnpm', ['licenses', 'list', '--prod', '--json'], {
-        cwd: webClientDir,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        maxBuffer: 64 * 1024 * 1024,
-      }),
+      execFileSync(
+        pnpm.command,
+        [...pnpm.args, 'licenses', 'list', '--prod', '--json'],
+        {
+          cwd: webClientDir,
+          encoding: 'utf8',
+          // The bare-`pnpm` fallback is a `.cmd` shim on Windows, which only a
+          // shell resolves. The arguments are fixed strings.
+          shell: pnpm.command === 'pnpm' && process.platform === 'win32',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      ),
     readLicenseText,
     (message, error) =>
       console.warn(message, error instanceof Error ? error.message : error),

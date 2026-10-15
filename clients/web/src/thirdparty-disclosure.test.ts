@@ -3,6 +3,7 @@ import {
   buildDisclosure,
   collectDisclosure,
   pickLicenseFile,
+  pnpmCommand,
 } from './thirdparty-disclosure'
 
 describe('pickLicenseFile', () => {
@@ -139,5 +140,53 @@ describe('collectDisclosure', () => {
     expect(result).toHaveLength(1)
     expect(result[0].name).toBe('alpha')
     expect(warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('pnpmCommand', () => {
+  it('runs a JS entry point with the current node, so no shim is needed', () => {
+    expect(
+      pnpmCommand('C:\\Users\\x\\setup-pnpm\\pnpm.cjs', 'C:\\node\\node.exe'),
+    ).toEqual({
+      command: 'C:\\node\\node.exe',
+      args: ['C:\\Users\\x\\setup-pnpm\\pnpm.cjs'],
+    })
+  })
+
+  it('runs a .mjs entry point with the current node', () => {
+    expect(pnpmCommand('/opt/pnpm/bin/pnpm.mjs', '/usr/bin/node')).toEqual({
+      command: '/usr/bin/node',
+      args: ['/opt/pnpm/bin/pnpm.mjs'],
+    })
+  })
+
+  it('runs pnpm.exe directly', () => {
+    expect(pnpmCommand('C:\\pnpm\\pnpm.exe', 'C:\\node\\node.exe')).toEqual({
+      command: 'C:\\pnpm\\pnpm.exe',
+      args: [],
+    })
+  })
+
+  it('does not trust a wrapper that merely starts with pnpm', () => {
+    expect(pnpmCommand('/opt/bin/pnpm-wrapper.sh', '/usr/bin/node')).toEqual({
+      command: 'pnpm',
+      args: [],
+    })
+  })
+
+  it('runs a native pnpm binary directly', () => {
+    expect(pnpmCommand('/usr/local/bin/pnpm', '/usr/bin/node')).toEqual({
+      command: '/usr/local/bin/pnpm',
+      args: [],
+    })
+  })
+
+  it('falls back to pnpm when not run by pnpm', () => {
+    const fallback = { command: 'pnpm', args: [] }
+    expect(pnpmCommand(undefined, '/usr/bin/node')).toEqual(fallback)
+    expect(pnpmCommand('C:\\\\p\\\\pnpm.cmd', 'node')).toEqual(fallback)
+    expect(
+      pnpmCommand('/usr/lib/node_modules/npm/bin/npm-cli.js', '/usr/bin/node'),
+    ).toEqual(fallback)
   })
 })
