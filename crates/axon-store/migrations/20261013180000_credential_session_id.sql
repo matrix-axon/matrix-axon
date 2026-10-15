@@ -7,16 +7,29 @@
 --
 -- A non-expiring credential has no pair to share with, so its session id is
 -- its own row id. Rows already in these tables are backfilled the same way.
+-- A pair written before this migration therefore has two session ids: the
+-- access token's row id, and the refresh row's row id. Nothing here reads
+-- session_id. A later consumer has to treat those pre-migration rows as unlinked.
 --
 -- The insert trigger is the backstop for a writer that omits the column,
 -- including an older binary. PostgreSQL applies `id`'s default before a
 -- BEFORE INSERT trigger runs, so NEW.id is the row id either way. A writer
 -- that supplies a session id keeps it. NULL is not a session: the trigger
 -- fills it rather than leaving the column null.
+-- An older binary's refresh rotation omits the column too, so the trigger
+-- gives that new refresh row its own id and the chain splits. The split is
+-- harmless until a consumer exists, and the consumer lands after those
+-- binaries are gone.
 --
 -- Indexed for a lookup by session. There is no foreign key. A session has to
 -- outlive any one of its rows, and a cascade from a swept or rotated row
 -- would drop that session's other state.
+--
+-- The backfill, NOT NULL change, and index build run in this migration's
+-- transaction, so the locks they take are held until it commits. SET NOT NULL
+-- is ACCESS EXCLUSIVE. CREATE INDEX takes SHARE, which blocks writes. The
+-- backfill UPDATE keeps its row locks until the same commit. CREATE INDEX
+-- CONCURRENTLY cannot run inside that transaction.
 
 ALTER TABLE tokens ADD COLUMN session_id UUID;
 UPDATE tokens SET session_id = id WHERE session_id IS NULL;
