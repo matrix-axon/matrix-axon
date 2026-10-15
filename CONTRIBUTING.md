@@ -90,6 +90,21 @@ allow them for your account once:
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
+##### Building signed Windows packages
+
+`scripts/package-windows.ps1` builds the server (with the web client), the TUI and the desktop installer, signs them, and writes the same zips and installer a release attaches to `dist-windows/`:
+
+```powershell
+.\scripts\package-windows.ps1                 # all three
+.\scripts\package-windows.ps1 -SkipDesktop    # -SkipServer, -SkipTui likewise
+.\scripts\package-windows.ps1 -NoSign         # unsigned, whatever the environment holds
+```
+
+It signs when `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT` and `ARTIFACT_SIGNING_PROFILE` are all set (the same values CI takes from repository variables; ADR 0119), after you have signed in with `az login` as an identity holding the _Artifact Signing Certificate Profile Signer_ role.
+With them unset it builds unsigned packages and says so.
+It also needs `pnpm`, and Git for Windows' `bash` (with `grep`) for the embedded-web check, which is skipped with a warning without it.
+`scripts/sign-windows.ps1 sign <file>...` signs individual files the same way.
+
 ## First-time setup
 
 ### 1. Install the pre-push gate
