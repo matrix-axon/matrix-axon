@@ -3980,7 +3980,7 @@ DEALINGS IN THE SOFTWARE.
   - hyper-rustls 0.27.9
   - rustls-native-certs 0.8.4
   - rustls-pemfile 2.2.0
-  - rustls 0.23.45
+  - rustls 0.23.46
 ================================================================================
 Copyright (c) 2016 Joseph Birr-Pixton &lt;jpixton@gmail.com&gt;
 
