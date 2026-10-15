@@ -778,6 +778,14 @@ async fn rebuild_room_summaries_repairs_drift() {
     .execute(&pool)
     .await
     .expect("drift");
+    store
+        .set_room_display_name(account_id, &room_a, "Alice, Bob")
+        .await
+        .expect("display name");
+    store
+        .set_room_display_name(other, &other_room, "Other")
+        .await
+        .expect("other display name");
 
     let n = store
         .rebuild_room_summaries(account_id)
@@ -788,6 +796,12 @@ async fn rebuild_room_summaries_repairs_drift() {
     let rooms = store.list_rooms(Some(account_id)).await.expect("list");
     assert_eq!(rooms.len(), 2);
     assert_eq!(rooms[0].room_id, room_b);
+    assert_eq!(rooms[0].display_name, None);
+    assert_eq!(
+        rooms[1].display_name.as_deref(),
+        Some("Alice, Bob"),
+        "the SDK display name survives a rebuild"
+    );
     assert_eq!(
         rooms[0].last_activity_ts, 2_000,
         "rebuild must prefer content over the later redaction"
@@ -799,6 +813,12 @@ async fn rebuild_room_summaries_repairs_drift() {
         .await
         .expect("other account untouched");
     assert_eq!(other_row.1, other_msg);
+    assert_eq!(
+        store.list_rooms(Some(other)).await.expect("other list")[0]
+            .display_name
+            .as_deref(),
+        Some("Other")
+    );
 
     common::cleanup_account(&pool, account_id).await;
     common::cleanup_account(&pool, other).await;

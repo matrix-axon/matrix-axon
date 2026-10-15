@@ -160,13 +160,15 @@ The workers currently share traversal code but keep independent cursors and dead
 `GET /v1/rooms` adds nullable `display_name` to each room ([ADR 0118](adr/0118-room-display-names-from-the-sdk.md)).
 It is the name the Matrix spec's naming algorithm gives the room: `m.room.name`, else the canonical alias, else a name built from up to five other members ("Alice, Bob", "Alice, Bob, and 3 others", "Empty Room (was Alice)", "Empty Room").
 matrix-rust-sdk computes it on each sync response that touches the room, excluding service members listed in `io.element.functional_members`; Axon copies the SDK's cached value and never derives it from the lazily loaded member list.
-The member-count worker above writes it in the same per-room step, so it shares that worker's hints, retry queue, paced sweep, and deadlines.
+The member-count worker above writes it in the same per-room step, so it shares that worker's hints, retry queue and paced sweep.
+The counts run first and the display name second, each under its own two-second deadline, and the retry queue records which of the two failed and reruns only that one.
 Only joined rooms are written, values are cut to 512 characters, and an unchanged value is not rewritten.
 A room whose summary row does not exist yet takes a bounded retry and is picked up by a later sweep.
 Existing rows start `null` after the upgrade and fill as the first sweep reaches them.
-A summary rebuild clears the column, as it clears member counts, and the next sweep refills it.
+A summary rebuild, including the per-room rebuild a purge runs, keeps the column: the value cannot be re-derived from stored events, and no SDK update follows a rebuild to rewrite it.
 
 Each applied change publishes a `room_display_name.changed` WebSocket frame with `room_id` and `display_name`.
+That includes the first fill after the upgrade, one frame per room at the sweep's pace of a few rooms per second, so a client that loaded the list while the column was `null` picks up names without reloading.
 Clients should title a room `name`, then `canonical_alias`, then `display_name`, then its room ID: the state fields change as soon as their events arrive, while the calculated name follows the reconciler.
 Warnings carry `source = "sdk_display_name"`; set `RUST_LOG=warn,axon_sync::display_names=trace` to see each stored value's account and room, never the name itself.
 

@@ -12,7 +12,7 @@ use axon_core::LiveFrame;
 use axon_store::{MemberCountWrite, RoomMemberCounts, Store};
 use matrix_sdk::{
     ruma::{OwnedRoomId, RoomId},
-    Client, RoomInfo, RoomState,
+    Client, Room, RoomInfo, RoomState,
 };
 use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
@@ -36,20 +36,86 @@ fn snapshot(info: &RoomInfo, observed_at: i64) -> Option<RoomMemberCounts> {
     })
 }
 
-/// Unknown/cold SDK state leaves the last timestamped observation intact.
+/// The two halves of a room's reconcile step: the ADR 0111 counts and the
+/// ADR 0118 display name. Each can fail on its own, so each retries on its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Steps {
+    counts: bool,
+    display_name: bool,
+}
+
+impl Steps {
+    const ALL: Self = Self {
+        counts: true,
+        display_name: true,
+    };
+
+    fn is_empty(self) -> bool {
+        !self.counts && !self.display_name
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            counts: self.counts || other.counts,
+            display_name: self.display_name || other.display_name,
+        }
+    }
+}
+
+/// Run the requested halves, counts first, each under its own deadline so a
+/// slow display-name read cannot drop the count write. Returns the halves to
+/// retry.
 async fn reconcile(
     client: &Client,
     store: &Store,
     account_id: Uuid,
     room_id: &RoomId,
+    steps: Steps,
     live_tx: &broadcast::Sender<LiveFrame>,
-) -> bool {
+) -> Steps {
     let Some(room) = client.get_room(room_id) else {
-        return false;
+        return Steps::default();
     };
-    // Before the counts: their clock failure below returns early.
-    let display_name_retry =
-        crate::display_names::reconcile(&room, store, account_id, live_tx).await;
+    let counts = steps.counts
+        && deadline(
+            account_id,
+            room_id,
+            "sdk_summary",
+            reconcile_counts(&room, store, account_id, room_id),
+        )
+        .await;
+    let display_name = steps.display_name
+        && deadline(
+            account_id,
+            room_id,
+            "sdk_display_name",
+            crate::display_names::reconcile(&room, store, account_id, live_tx),
+        )
+        .await;
+    Steps {
+        counts,
+        display_name,
+    }
+}
+
+/// `work` reports whether to retry; running out of time is a retry too.
+async fn deadline(
+    account_id: Uuid,
+    room_id: &RoomId,
+    source: &'static str,
+    work: impl std::future::Future<Output = bool>,
+) -> bool {
+    match tokio::time::timeout(Duration::from_secs(2), work).await {
+        Ok(retry) => retry,
+        Err(_) => {
+            tracing::warn!(%account_id, %room_id, source, reason = "deadline", "room reconcile step timed out; will retry");
+            true
+        }
+    }
+}
+
+/// Unknown/cold SDK state leaves the last timestamped observation intact.
+async fn reconcile_counts(room: &Room, store: &Store, account_id: Uuid, room_id: &RoomId) -> bool {
     // Capture ordering before the SDK read, so a leave between this read and
     // persistence fences this snapshot using the same PostgreSQL clock.
     let observed_at = match store.member_count_observation_time().await {
@@ -60,7 +126,6 @@ async fn reconcile(
         }
     };
     persist_snapshot(&room.clone_info(), store, account_id, room_id, observed_at).await
-        || display_name_retry
 }
 
 async fn persist_snapshot(
@@ -98,14 +163,20 @@ async fn persist_snapshot(
 
 /// A fixed queue closes SDK-before-projection races without retaining a map
 /// proportional to account size. Overflow and exhausted retries fall back to
-/// the progressive sweep; each retry recaptures current SDK state.
+/// the progressive sweep; each retry recaptures current SDK state and reruns
+/// only the halves that failed.
 #[derive(Default)]
-struct Pending(VecDeque<(OwnedRoomId, u8)>);
+struct Pending(VecDeque<(OwnedRoomId, Steps, u8)>);
 
 impl Pending {
-    fn push(&mut self, room: OwnedRoomId, attempts: u8) {
-        if attempts < 4 && self.0.len() < 32 && !self.0.iter().any(|(id, _)| id == &room) {
-            self.0.push_back((room, attempts));
+    fn push(&mut self, room: OwnedRoomId, steps: Steps, attempts: u8) {
+        if steps.is_empty() {
+            return;
+        }
+        if let Some((_, queued, _)) = self.0.iter_mut().find(|(id, _, _)| id == &room) {
+            *queued = queued.union(steps);
+        } else if attempts < 4 && self.0.len() < 32 {
+            self.0.push_back((room, steps, attempts));
         }
     }
 }
@@ -141,7 +212,7 @@ impl Worker {
             return false;
         };
         for room in hinted {
-            self.pending.push(room, 0);
+            self.pending.push(room, Steps::ALL, 0);
         }
         let mut rooms = self
             .pending
@@ -156,27 +227,18 @@ impl Worker {
             return false;
         };
         for room in page {
-            if !rooms.iter().any(|(id, _)| id == &room) {
-                rooms.push((room, 0));
+            match rooms.iter_mut().find(|(id, _, _)| id == &room) {
+                Some((_, steps, _)) => *steps = Steps::ALL,
+                None => rooms.push((room, Steps::ALL, 0)),
             }
         }
-        for (room_id, attempts) in rooms {
+        for (room_id, steps, attempts) in rooms {
             let retry = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return false,
-                result = tokio::time::timeout(Duration::from_secs(2), reconcile(client, store, account_id, &room_id, &self.live_tx)) => {
-                    match result {
-                        Ok(retry) => retry,
-                        Err(_) => {
-                            tracing::warn!(%account_id, %room_id, source = "sdk_summary", reason = "deadline", "member count observation timed out; will retry");
-                            true
-                        }
-                    }
-                }
+                retry = reconcile(client, store, account_id, &room_id, steps, &self.live_tx) => retry,
             };
-            if retry {
-                self.pending.push(room_id, attempts + 1);
-            }
+            self.pending.push(room_id, retry, attempts + 1);
         }
         true
     }
@@ -288,15 +350,39 @@ mod tests {
     fn retries_are_coalesced_and_bounded() {
         let mut pending = Pending::default();
         for i in 0..100 {
-            pending.push(format!("!retry-{i}:localhost").parse().unwrap(), 0);
+            pending.push(
+                format!("!retry-{i}:localhost").parse().unwrap(),
+                Steps::ALL,
+                0,
+            );
         }
         assert_eq!(pending.0.len(), 32);
         let id = pending.0.front().unwrap().0.clone();
-        pending.push(id, 0);
+        pending.push(id, Steps::ALL, 0);
         assert_eq!(pending.0.len(), 32);
         pending.0.clear();
-        pending.push(room_id!("!exhausted:localhost").to_owned(), 4);
+        pending.push(room_id!("!exhausted:localhost").to_owned(), Steps::ALL, 4);
         assert!(pending.0.is_empty());
+        pending.push(room_id!("!done:localhost").to_owned(), Steps::default(), 0);
+        assert!(pending.0.is_empty(), "nothing failed, nothing to retry");
+    }
+
+    #[test]
+    fn retries_keep_each_half_separate_and_merge_duplicates() {
+        let counts = Steps {
+            counts: true,
+            display_name: false,
+        };
+        let display_name = Steps {
+            counts: false,
+            display_name: true,
+        };
+        let mut pending = Pending::default();
+        pending.push(room_id!("!a:localhost").to_owned(), display_name, 1);
+        assert_eq!(pending.0[0].1, display_name);
+        pending.push(room_id!("!a:localhost").to_owned(), counts, 1);
+        assert_eq!(pending.0.len(), 1);
+        assert_eq!(pending.0[0].1, Steps::ALL);
     }
 
     fn info(joined: u32, invited: u32) -> RoomInfo {
@@ -670,6 +756,11 @@ mod tests {
                 .await
         );
         assert_eq!(worker.pending.0.len(), 1);
+        assert_eq!(
+            worker.pending.0[0].1,
+            Steps::ALL,
+            "no summary row fails both"
+        );
         sqlx_core::query::query("INSERT INTO room_summaries (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content) VALUES ($1, '!counts:localhost', 1, '$fixture', 1, false)")
             .bind(account.account_id).execute(store.pool()).await.unwrap();
         // Both a cold SDK summary and a missing SDK room preserve cached counts.
@@ -726,6 +817,14 @@ mod tests {
                 .await
         );
         assert_eq!(worker.pending.0.len(), 1);
+        assert_eq!(
+            worker.pending.0[0].1,
+            Steps {
+                counts: true,
+                display_name: false
+            },
+            "the stored display name is not retried with the counts"
+        );
         let (watermark,): (i64,) = sqlx_core::query_as::query_as("SELECT member_counts_observed_at FROM room_summaries WHERE account_id = $1 AND room_id = '!counts:localhost'")
             .bind(account.account_id).fetch_one(store.pool()).await.unwrap();
         sqlx_core::query::query("UPDATE room_summaries SET hidden_left = false WHERE account_id = $1 AND room_id = '!counts:localhost'")
@@ -786,6 +885,7 @@ mod tests {
             &store,
             account.account_id,
             room_id!("!counts:localhost"),
+            Steps::ALL,
             &live_tx,
         )
         .await;

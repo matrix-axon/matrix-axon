@@ -315,6 +315,19 @@ impl Store {
         room_id: Option<&str>,
     ) -> Result<u64, StoreError> {
         let mut tx: Transaction<'_, Postgres> = self.maintenance_pool.begin().await?;
+        // The SDK display name (ADR 0118) is not derivable from `events`, and
+        // a purge's per-room rebuild raises no SDK hint to rewrite it, so
+        // carry it across the rebuild instead of leaving NULL until the sweep.
+        sqlx_core::query::query(
+            "CREATE TEMP TABLE rebuilt_display_names ON COMMIT DROP AS \
+             SELECT room_id, display_name FROM room_summaries \
+             WHERE account_id = $1 AND ($2::text IS NULL OR room_id = $2) \
+               AND display_name IS NOT NULL",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx_core::query::query(
             "DELETE FROM room_summaries WHERE account_id = $1 \
              AND ($2::text IS NULL OR room_id = $2)",
@@ -368,6 +381,14 @@ impl Store {
         )
         .bind(account_id)
         .bind(room_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx_core::query::query(
+            "UPDATE room_summaries s SET display_name = r.display_name \
+             FROM rebuilt_display_names r \
+             WHERE s.account_id = $1 AND s.room_id = r.room_id",
+        )
+        .bind(account_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
