@@ -9,6 +9,7 @@
 
 mod common;
 
+use axon_store::OAuthSession;
 use chrono::{Duration, Utc};
 use common::migrated_store;
 use sqlx_postgres::PgPool;
@@ -140,7 +141,10 @@ async fn issuing_a_token_sweeps_long_dead_rows_but_spares_fresh_ones() {
             identity.id,
             "client-a",
             now + Duration::days(30),
-            None,
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: None,
+            },
         )
         .await
         .expect("issue");
@@ -258,7 +262,10 @@ async fn blocked_background_sweep_does_not_block_auth_and_respects_shared_cooldo
             identity.id,
             "fixture",
             Utc::now() + Duration::days(1),
-            None,
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: None,
+            },
         ),
     )
     .await
@@ -350,7 +357,10 @@ async fn blocked_background_sweep_does_not_block_auth_and_respects_shared_cooldo
             identity.id,
             "fixture",
             Utc::now() + Duration::days(1),
-            None,
+            OAuthSession {
+                session_id: Uuid::new_v4(),
+                authenticated_at: None,
+            },
         )
         .await
         .unwrap();

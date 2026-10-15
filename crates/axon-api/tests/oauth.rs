@@ -28,6 +28,7 @@ use common::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use sqlx_core::row::Row;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -1061,6 +1062,16 @@ async fn reserved_bootstrap_client_cannot_be_used_for_login_even_if_configured()
     assert_callback_headers(&response);
 }
 
+async fn refresh_session_id(store: &Store, raw_refresh_token: &str) -> Uuid {
+    sqlx_core::query::query("SELECT session_id FROM oauth_refresh_tokens WHERE hash = $1")
+        .bind(axon_core::hash_secret(raw_refresh_token))
+        .fetch_one(store.pool())
+        .await
+        .expect("refresh row")
+        .try_get("session_id")
+        .expect("session_id")
+}
+
 fn query_param(url: &url::Url, name: &str) -> String {
     url.query_pairs()
         .find(|(k, _)| k == name)
@@ -1354,6 +1365,17 @@ async fn bootstrap_sso_binds_identity_and_returns_token_pair() {
     let listed = store.list_tokens().await.expect("list tokens");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].provider.as_deref(), Some(TEST_PROVIDER));
+    let refresh_session: Uuid = sqlx_core::query::query(
+        "SELECT session_id FROM oauth_refresh_tokens WHERE oauth_identity_id = $1",
+    )
+    .bind(identity.id)
+    .fetch_one(store.pool())
+    .await
+    .expect("bootstrap refresh row")
+    .try_get("session_id")
+    .expect("session_id");
+    assert_eq!(listed[0].session_id, refresh_session);
+    assert_ne!(listed[0].session_id, listed[0].id);
 
     let resp = get_no_body(&app, "/bootstrap/ABC234/oauth/test").await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -1507,6 +1529,14 @@ async fn path_a_authorize_callback_token_refresh_chain() {
         .as_str()
         .expect("refresh_token")
         .to_owned();
+    let access = store
+        .verify_token(&access_token)
+        .await
+        .expect("verify minted access token")
+        .expect("minted access token verifies");
+    let minted_session = refresh_session_id(&store, &refresh_token).await;
+    assert_eq!(access.session_id, minted_session);
+    assert_ne!(access.session_id, access.id);
 
     // The minted access token verifies on a real authed route — proves
     // `verify_token`'s new `expires_at` clause accepts a live OAuth token.
@@ -1528,9 +1558,23 @@ async fn path_a_authorize_callback_token_refresh_chain() {
         .as_str()
         .expect("access_token")
         .to_owned();
+    let new_refresh_token = body["refresh_token"]
+        .as_str()
+        .expect("refresh_token")
+        .to_owned();
     assert_ne!(
         new_access_token, access_token,
         "refresh must mint a fresh access token"
+    );
+    let refreshed = store
+        .verify_token(&new_access_token)
+        .await
+        .expect("verify refreshed access token")
+        .expect("refreshed access token verifies");
+    assert_eq!(refreshed.session_id, minted_session);
+    assert_eq!(
+        refresh_session_id(&store, &new_refresh_token).await,
+        minted_session
     );
 
     // Reusing the now-rotated refresh token is rejected (reuse detection).

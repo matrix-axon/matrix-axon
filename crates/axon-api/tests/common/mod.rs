@@ -61,11 +61,16 @@ impl StubTokenVerifier {
         Self {
             accepted: TEST_TOKEN.to_owned(),
             active: Arc::new(AtomicBool::new(true)),
-            token: AuthedToken {
-                id: Uuid::nil(),
-                expires_at: None,
-                authenticated_at: None,
-                oauth_identity_id: None,
+            token: {
+                // A non-expiring credential's session is its row id.
+                let id = Uuid::nil();
+                AuthedToken {
+                    id,
+                    expires_at: None,
+                    authenticated_at: None,
+                    oauth_identity_id: None,
+                    session_id: id,
+                }
             },
         }
     }

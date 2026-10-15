@@ -54,6 +54,12 @@ pub struct Token {
     /// The token that minted this one through the management API, or `None`
     /// for a token minted any other way (ADR 0109).
     pub created_by_token_id: Option<Uuid>,
+    /// The credential session this token belongs to.
+    ///
+    /// An OAuth access token shares it with that sign-in's refresh token,
+    /// including every rotation of the refresh token. A non-expiring
+    /// credential's session id is its own row id.
+    pub session_id: Uuid,
 }
 
 impl Token {
@@ -93,6 +99,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Token {
             oauth_identity_id: row.try_get("oauth_identity_id")?,
             client_id: row.try_get("client_id")?,
             created_by_token_id: row.try_get("created_by_token_id")?,
+            session_id: row.try_get("session_id")?,
         })
     }
 }
@@ -112,6 +119,24 @@ pub struct VerifiedToken {
     pub authenticated_at: Option<DateTime<Utc>>,
     /// The bound identity this token was minted for, if any.
     pub oauth_identity_id: Option<Uuid>,
+    /// The credential session. Shared with the refresh token of an OAuth
+    /// sign-in, and equal to [`Self::id`] for a non-expiring credential.
+    pub session_id: Uuid,
+}
+
+/// The sign-in an OAuth credential is minted for.
+///
+/// `session_id` is shared by the access token and the refresh token of this
+/// sign-in. `authenticated_at` is when the upstream provider says the owner
+/// authenticated: the verified identity token's time for a fresh sign-in, the
+/// refresh token's recorded time for a rotation. Never the caller's clock.
+#[derive(Debug, Clone, Copy)]
+pub struct OAuthSession {
+    /// Shared by the access token and the refresh token, including every
+    /// later rotation of that refresh token.
+    pub session_id: Uuid,
+    /// When the upstream sign-in completed, if that time is known.
+    pub authenticated_at: Option<DateTime<Utc>>,
 }
 
 /// A freshly minted token: the row id plus the **raw** secret, returned exactly
@@ -137,7 +162,7 @@ pub struct IssuedOAuthTokenPair {
 
 /// Columns selected for a [`Token`] (never the `hash`).
 const TOKEN_COLUMNS: &str = "id, label, created_at, last_used_at, revoked_at, expires_at, \
-     provider, oauth_identity_id, client_id, created_by_token_id";
+     provider, oauth_identity_id, client_id, created_by_token_id, session_id";
 
 const BOOTSTRAP_LOCK_KEY: i64 = 0x4158_4f4e_424f_4f54;
 
@@ -188,6 +213,8 @@ impl Store {
     ) -> Result<IssuedToken, StoreError> {
         let token = generate_token();
         let hash = hash_token(&token);
+        // `session_id` is omitted. The insert trigger sets it to this row's id,
+        // which is what a non-expiring credential's session is.
         let row = sqlx_core::query::query(
             "INSERT INTO tokens (label, hash, created_by_token_id) VALUES ($1, $2, $3) \
              RETURNING id",
@@ -221,6 +248,8 @@ impl Store {
 
         let token = generate_token();
         let hash = hash_token(&token);
+        // Same omission as [`insert_token`](Self::insert_token): the trigger
+        // assigns `session_id = id`.
         let row = sqlx_core::query::query(
             "INSERT INTO tokens (label, hash) VALUES ($1, $2) RETURNING id",
         )
@@ -251,7 +280,7 @@ impl Store {
             "UPDATE tokens SET last_used_at = now() \
              WHERE hash = $1 AND revoked_at IS NULL \
                AND (expires_at IS NULL OR expires_at > now()) \
-             RETURNING id, expires_at, authenticated_at, oauth_identity_id",
+             RETURNING id, expires_at, authenticated_at, oauth_identity_id, session_id",
         )
         .bind(&hash)
         .fetch_optional(&self.pool)
@@ -262,6 +291,7 @@ impl Store {
                 expires_at: row.try_get("expires_at")?,
                 authenticated_at: row.try_get("authenticated_at")?,
                 oauth_identity_id: row.try_get("oauth_identity_id")?,
+                session_id: row.try_get("session_id")?,
             })),
             None => Ok(None),
         }
@@ -271,10 +301,9 @@ impl Store {
     /// but carrying an expiry and the OAuth provenance columns. Used by the
     /// `oauth` module's token orchestration, never by the CLI.
     ///
-    /// `authenticated_at` is when the upstream provider says the owner behind
-    /// this session authenticated: the verified identity token's time for a
-    /// token minted from a sign-in, the refresh token's recorded time for one
-    /// minted by a refresh. Never the caller's clock.
+    /// `session.session_id` is the sign-in's session. The refresh token minted
+    /// with this access token, and every later rotation of it, carries the same
+    /// id.
     pub async fn issue_oauth_token(
         &self,
         label: &str,
@@ -282,14 +311,15 @@ impl Store {
         provider: &str,
         oauth_identity_id: Uuid,
         client_id: &str,
-        authenticated_at: Option<DateTime<Utc>>,
+        session: OAuthSession,
     ) -> Result<IssuedToken, StoreError> {
         let token = generate_token();
         let hash = hash_token(&token);
         let row = sqlx_core::query::query(
             "INSERT INTO tokens \
-                 (label, hash, expires_at, provider, oauth_identity_id, client_id, authenticated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+                 (label, hash, expires_at, provider, oauth_identity_id, client_id, \
+                  authenticated_at, session_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
         )
         .bind(label)
         .bind(&hash)
@@ -297,7 +327,8 @@ impl Store {
         .bind(provider)
         .bind(oauth_identity_id)
         .bind(client_id)
-        .bind(authenticated_at)
+        .bind(session.authenticated_at)
+        .bind(session.session_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(IssuedToken {
@@ -592,12 +623,16 @@ impl Store {
         // shows.
         authenticated_at: Option<DateTime<Utc>>,
     ) -> Result<IssuedOAuthTokenPair, StoreError> {
+        // One id for both rows. The trigger would otherwise give each row its
+        // own id, and the two credentials would not be one session.
+        let session_id = Uuid::new_v4();
         let access_token = generate_token();
         let access_hash = hash_token(&access_token);
         sqlx_core::query::query(
             "INSERT INTO tokens \
-                 (label, hash, expires_at, provider, oauth_identity_id, client_id, authenticated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                 (label, hash, expires_at, provider, oauth_identity_id, client_id, \
+                  authenticated_at, session_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(format!("oauth:{provider}:{client_id}"))
         .bind(&access_hash)
@@ -606,6 +641,7 @@ impl Store {
         .bind(identity_id)
         .bind(client_id)
         .bind(authenticated_at)
+        .bind(session_id)
         .execute(&mut **tx)
         .await?;
 
@@ -613,14 +649,15 @@ impl Store {
         let refresh_hash = hash_token(&refresh_token);
         sqlx_core::query::query(
             "INSERT INTO oauth_refresh_tokens \
-                 (hash, oauth_identity_id, client_id, expires_at, authenticated_at) \
-             VALUES ($1, $2, $3, $4, $5)",
+                 (hash, oauth_identity_id, client_id, expires_at, authenticated_at, session_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&refresh_hash)
         .bind(identity_id)
         .bind(client_id)
         .bind(refresh_expires_at)
         .bind(authenticated_at)
+        .bind(session_id)
         .execute(&mut **tx)
         .await?;
 
