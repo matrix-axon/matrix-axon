@@ -228,6 +228,19 @@ const DM_AVATAR_FETCH_CONCURRENCY = 4
 const PREVIEW_PAGE_LIMIT = 50
 const PREVIEW_MAX_PAGES = 3
 const ROOM_TITLE_CACHE_KEY = 'axon.room_titles.v1'
+/**
+ * How long a live patch waits before the room-list cache is rewritten with it.
+ * The first fill after a server upgrade sends about four
+ * `room_display_name.changed` frames a second for the whole sweep (ADR 0118),
+ * and each write serializes the entire list, so writes are coalesced. A restart
+ * inside the window loses nothing the next refresh does not put back.
+ */
+const LIVE_PATCH_CACHE_WRITE_DELAY_MS = 5_000
+
+export interface RoomsStoreOptions {
+  /** Overrides `LIVE_PATCH_CACHE_WRITE_DELAY_MS`; tests pass 0. */
+  cacheWriteDelayMs?: number
+}
 
 /**
  * The cross-account room list (ADR 0046, M-W4). Rooms are titled from their
@@ -241,7 +254,10 @@ export function createRoomsStore(
   api: ApiClient,
   storage: Storage = window.localStorage,
   cache: RoomListCache | null = null,
+  options: RoomsStoreOptions = {},
 ): RoomsStore {
+  const cacheWriteDelayMs =
+    options.cacheWriteDelayMs ?? LIVE_PATCH_CACHE_WRITE_DELAY_MS
   const rooms = signal<RoomDto[]>([])
   const unreadKeys = signal<ReadonlySet<string>>(new Set())
   /** Sum of every room's `notificationCount` (ADR 0080's app-icon badge). */
@@ -284,6 +300,19 @@ export function createRoomsStore(
     string,
     Partial<Record<LiveRoomField, number>>
   >()
+  /**
+   * `room_display_name.changed` values for rooms the list did not hold when
+   * they arrived, keyed by `roomKey` with the metadata sequence they arrived
+   * at. The frame most likely to land this way is the one that matters most:
+   * a first fill racing the first `/v1/rooms` response, which read the row
+   * before the server wrote it. The server publishes only after its write
+   * commits, so a response requested after `seq` already has the value; one
+   * requested before it is completed from here (`withPendingDisplayNames`).
+   * Bounded by the number of rooms, and emptied by every applied refresh.
+   */
+  const pendingDisplayNames = new Map<string, { value: string; seq: number }>()
+  /** The scheduled write-back of live patches to `cache`, if any. */
+  let cacheWriteTimer: ReturnType<typeof setTimeout> | null = null
   /** `roomKey` -> generation returned by the latest `assignRoomTags`. */
   const tagGenByKey = new Map<string, number>()
   /** `roomKey` -> metadata sequence of the latest tag write or live frame. */
@@ -725,12 +754,19 @@ export function createRoomsStore(
         error.value = apiErrorMessage(apiError)
         return
       }
-      const visibleRooms = keepFresherMetadata(
-        applyLocalRoomMetadata(
-          data.data.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+      const visibleRooms = withPendingDisplayNames(
+        keepFresherMetadata(
+          applyLocalRoomMetadata(
+            data.data.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+          ),
+          metadataSeqAtStart,
         ),
         metadataSeqAtStart,
       )
+      // Every pending value is settled now: one that predates the request is
+      // in the response, a newer one was applied above, and one for a room the
+      // response omits will be in whichever response first lists that room.
+      pendingDisplayNames.clear()
       // Wholesale replacement, not a merge into the cached set: a room left or
       // forgotten on another client has to disappear (guardrail 5's
       // prune-on-reconcile), and a restored list is exactly the case where
@@ -745,6 +781,8 @@ export function createRoomsStore(
       if (!confirmed.peek()) {
         confirmed.value = true
       }
+      // This write carries every live patch so far, so a scheduled one is moot.
+      cancelCacheWrite()
       cache?.write(visibleRooms)
       // Fire-and-forget: avatars arrive incrementally; the list re-renders as
       // the dmAvatars signal updates.
@@ -792,6 +830,11 @@ export function createRoomsStore(
     tagGenByKey.clear()
     tagsPatchedAt.clear()
     directPatchedAt.clear()
+    pendingDisplayNames.clear()
+    // A second guard: the timer also skips a write once the generation moves
+    // or the rows are cleared, so the previous reader's rows never land under
+    // the next one's key.
+    cancelCacheWrite()
     // Above the pristine-store guard on purpose. A sign-out during the very
     // first refresh is exactly the shared-browser case: the store is empty,
     // but `titles` was populated from `ROOM_TITLE_CACHE_KEY` at construction
@@ -868,8 +911,10 @@ export function createRoomsStore(
     if (generation !== sessionGeneration || settled || rooms.value.length > 0) {
       return
     }
-    const visible = cached.filter(
-      (room) => !locallyHiddenRooms.has(roomKey(room)),
+    // Any pending live name is newer than a row cached by an earlier session.
+    const visible = withPendingDisplayNames(
+      cached.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+      -1,
     )
     rooms.value = visible
     syncUnreadCounts(visible)
@@ -1261,8 +1306,14 @@ export function createRoomsStore(
 
   /**
    * Write one live value into the row at `index`, stamped so a refresh that
-   * was already in flight keeps it (`keepFresherMetadata`). Returns the
-   * patched row, or `null` when the value was already there.
+   * was already in flight keeps it (`keepFresherMetadata`), and schedule the
+   * room-list cache to persist it. Returns the patched row, or `null` when the
+   * value was already there.
+   *
+   * The stamp is recorded even then. A value the row already shows can still
+   * be newer than a response in flight: a restored row reads `Alice`, the
+   * response read `Bob` before a rename back, and the frame says `Alice`.
+   * Skipping the stamp would let that response put `Bob` back.
    */
   function patchRoomField(
     index: number,
@@ -1271,25 +1322,80 @@ export function createRoomsStore(
   ): RoomDto | null {
     const current = rooms.value
     const room = current[index]
-    if (room[field] === value) {
-      return null
-    }
     metadataPatchSeq += 1
     const key = roomKey(room)
     metadataPatchedAt.set(key, {
       ...metadataPatchedAt.get(key),
       [field]: metadataPatchSeq,
     })
+    if (room[field] === value) {
+      return null
+    }
     const patched = { ...room, [field]: value }
     rooms.value = current.map((entry, i) => (i === index ? patched : entry))
+    scheduleCacheWrite()
     return patched
   }
 
   /**
-   * A room whose list row is not loaded is skipped rather than refreshed for,
-   * unlike `noteUnreadCounts`: the first fill after a server upgrade sends one
-   * of these per room (ADR 0118), and the next refresh returns the stored
-   * value anyway.
+   * `rows` with each pending live display name that arrived after `seqAtStart`
+   * filled in. Pass the sequence the response's request started at, or `-1`
+   * for rows that predate this session.
+   */
+  function withPendingDisplayNames(
+    rows: RoomDto[],
+    seqAtStart: number,
+  ): RoomDto[] {
+    if (pendingDisplayNames.size === 0) {
+      return rows
+    }
+    let changed = false
+    const next = rows.map((room) => {
+      const pending = pendingDisplayNames.get(roomKey(room))
+      if (
+        pending === undefined ||
+        pending.seq <= seqAtStart ||
+        room.display_name === pending.value
+      ) {
+        return room
+      }
+      changed = true
+      return { ...room, display_name: pending.value }
+    })
+    return changed ? next : rows
+  }
+
+  /**
+   * Persist live patches to the room-list cache, coalesced. Without this a
+   * rename seen live is lost on an offline restart: the restored row's old
+   * `display_name` outranks the newer title cache.
+   */
+  function scheduleCacheWrite(): void {
+    if (cache === null || cacheWriteTimer !== null) {
+      return
+    }
+    const generation = sessionGeneration
+    cacheWriteTimer = setTimeout(() => {
+      cacheWriteTimer = null
+      if (generation !== sessionGeneration || rooms.value.length === 0) {
+        return
+      }
+      cache.write(rooms.value)
+    }, cacheWriteDelayMs)
+  }
+
+  function cancelCacheWrite(): void {
+    if (cacheWriteTimer !== null) {
+      clearTimeout(cacheWriteTimer)
+      cacheWriteTimer = null
+    }
+  }
+
+  /**
+   * A room whose list row is not loaded is held in `pendingDisplayNames`
+   * rather than refreshed for, unlike `noteUnreadCounts`: the first fill after
+   * a server upgrade sends one of these per room (ADR 0118), so a re-read per
+   * frame would fetch the whole list thousands of times.
    */
   function noteDisplayName(
     accountId: string,
@@ -1298,6 +1404,14 @@ export function createRoomsStore(
   ): void {
     const index = findRoomIndex(accountId, roomId)
     if (index === -1) {
+      metadataPatchSeq += 1
+      pendingDisplayNames.set(
+        roomKey({ account_id: accountId, room_id: roomId }),
+        {
+          value: displayName,
+          seq: metadataPatchSeq,
+        },
+      )
       return
     }
     const patched = patchRoomField(index, 'display_name', displayName)

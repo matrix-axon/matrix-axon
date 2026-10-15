@@ -1382,6 +1382,100 @@ it('does not let a slow refresh overwrite a live metadata patch', async () => {
   ).toBe('mxc://hs/fresh')
 })
 
+it('applies a display name that lands before the first list response', async () => {
+  // The first fill racing the first load: `/v1/rooms` read the row before the
+  // server wrote it, and the frame overtook the response. No later frame comes
+  // for an unchanged name, so dropping this one leaves the room id up for the
+  // whole session.
+  let release: (() => void) | undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  server.use(
+    http.get(`${BASE_URL}/v1/rooms`, async () => {
+      await held
+      return HttpResponse.json({ data: [{ ...UNNAMED, display_name: null }] })
+    }),
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+  )
+  const store = makeStore()
+  const first = store.refresh()
+  store.noteDisplayName(ACCOUNT, UNNAMED.room_id, 'Bob')
+  release?.()
+  await first
+
+  expect(store.rooms.value[0].display_name).toBe('Bob')
+  expect(roomTitle(store.rooms.value[0], store.titles.value)).toBe('Bob')
+})
+
+it('lets a response requested after a held display name win over it', async () => {
+  // The server publishes after its write commits, so a request issued after
+  // the frame already has that value or a newer one.
+  let listed = 'Bobby'
+  server.use(
+    http.get(`${BASE_URL}/v1/rooms`, () =>
+      HttpResponse.json({ data: [{ ...UNNAMED, display_name: listed }] }),
+    ),
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+  )
+  const store = makeStore()
+  store.noteDisplayName(ACCOUNT, UNNAMED.room_id, 'Bob')
+  await store.refresh()
+  expect(store.rooms.value[0].display_name).toBe('Bobby')
+
+  // The held value is older than every later request, so it cannot resurface.
+  listed = 'Robert'
+  await store.refresh()
+  expect(store.rooms.value[0].display_name).toBe('Robert')
+})
+
+it('keeps an equal display name frame over an older in-flight response', async () => {
+  // The row already reads `Alice`, a refresh in flight read `Bob` before the
+  // member renamed back, and the frame for the rename back says `Alice`.
+  let release: (() => void) | undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let call = 0
+  server.use(
+    http.get(`${BASE_URL}/v1/rooms`, async () => {
+      call += 1
+      if (call === 2) {
+        await held
+        return HttpResponse.json({
+          data: [{ ...UNNAMED, display_name: 'Bob' }],
+        })
+      }
+      return HttpResponse.json({
+        data: [{ ...UNNAMED, display_name: 'Alice' }],
+      })
+    }),
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+  )
+  const store = makeStore()
+  await store.refresh()
+
+  const slow = store.refresh()
+  await vi.waitFor(() => expect(call).toBe(2))
+  const before = store.rooms.value
+  store.noteDisplayName(ACCOUNT, UNNAMED.room_id, 'Alice')
+  // Still no signal write for a value the row already shows.
+  expect(store.rooms.value).toBe(before)
+  release?.()
+  await slow
+
+  expect(store.rooms.value[0].display_name).toBe('Alice')
+})
+
 it('keeps a display name that lands during a refresh', async () => {
   // The first fill after an upgrade: the list loaded with `display_name: null`,
   // and the frame for a room overtakes a refresh that read the row before the
