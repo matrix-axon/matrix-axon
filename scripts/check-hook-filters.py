@@ -179,6 +179,10 @@ CASES: list[tuple[str, set[str]]] = [
     # local hook needs to.
     ("build/THIRDPARTY-desktop", set()),
     ("LICENSE.md", set()),
+    # Prepended verbatim by scripts/release-notes.sh from GitHub's generated
+    # notes, which prettier would rewrite; checking it failed every rebase
+    # across a release on a file the branch never touched.
+    ("CHANGELOG.md", set()),
     ("scripts/check-hook-filters.py", {"hook-filters"}),
     # The notification escaping: the module, its test, and every caller that
     # interpolates through it. Deliberately narrow -- it must not claim the
