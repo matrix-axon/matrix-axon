@@ -3,6 +3,28 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.10 - 2026-10-15
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* fix: update rustls to the patched 0.23 release by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/714
+#### Features
+* feat(api): expose the SDK's calculated room display name by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/718
+#### Bug Fixes
+* fix(web): run the license listing through the pnpm that is running the build by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/722
+#### Documentation
+* docs: record remote push for suspended mobile clients by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/652
+* docs: add a Fedora and RHEL install block to the README by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/712
+* docs(adr): add ADR 0118 for room display names from the SDK by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/717
+#### Build and CI
+* ci(smoke): allow matrix-oauth suites to be dispatched by hand by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/707
+* build(windows): sign executables and the installer with Azure Artifact Signing by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/719
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.9...v0.1.10
+
 ## v0.1.9 - 2026-10-13
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
