@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axon_core::LiveFrame;
+use axon_core::{LiveFrame, PushMaterial};
 use axon_store::Store;
 use axum::extract::FromRef;
 use tokio::sync::broadcast;
@@ -204,6 +204,10 @@ pub struct AppState {
     /// config key is; the binary passes `[server] web_client` through
     /// [`with_web_client`](Self::with_web_client).
     pub web_client: WebClientConfig,
+    /// Push provider keys loaded at startup (ADR 0113). Unconfigured when the
+    /// operator left `[push]` empty. `GET /v1/status` reads the flags; the
+    /// bytes stay here for the process that will send.
+    pub push: Arc<PushMaterial>,
 }
 
 /// Whether the embedded web client is served (`[server] web_client`, ADR 0116).
@@ -405,6 +409,7 @@ impl AppState {
             bootstrap: None,
             management: ManagementConfig::default(),
             web_client: WebClientConfig::default(),
+            push: Arc::new(PushMaterial::unconfigured()),
         }
     }
 
@@ -575,6 +580,13 @@ impl AppState {
     /// with `[server] web_client`.
     pub fn with_web_client(mut self, enabled: bool) -> Self {
         self.web_client.enabled = enabled;
+        self
+    }
+
+    /// Install the push keys loaded at startup. The binary calls this after
+    /// reading `[push]`. Tests that don't care leave both providers off.
+    pub fn with_push(mut self, push: PushMaterial) -> Self {
+        self.push = Arc::new(push);
         self
     }
 
@@ -986,6 +998,12 @@ impl FromRef<AppState> for WebClientConfig {
 impl FromRef<AppState> for ManagementConfig {
     fn from_ref(state: &AppState) -> ManagementConfig {
         state.management
+    }
+}
+
+impl FromRef<AppState> for Arc<PushMaterial> {
+    fn from_ref(state: &AppState) -> Arc<PushMaterial> {
+        Arc::clone(&state.push)
     }
 }
 
