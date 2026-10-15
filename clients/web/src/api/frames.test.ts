@@ -12,6 +12,8 @@ import {
   ACCOUNT_DATA_CHANGED,
   preferenceChange,
   PREFERENCES_CHANGED,
+  roomDisplayNameChange,
+  ROOM_DISPLAY_NAME_CHANGED,
   timelineEvent,
   TIMELINE_EVENT,
   unreadCountsChange,
@@ -296,6 +298,38 @@ describe('unreadCountsChange', () => {
       unreadCountsChange(
         unreadFrame({ room_id: 1, notification_count: 1, highlight_count: 0 }),
       ),
+    ).toBeNull()
+  })
+})
+
+describe('roomDisplayNameChange', () => {
+  const nameFrame = (payload: unknown) =>
+    decodeFrame(envelope(ROOM_DISPLAY_NAME_CHANGED, 'acct-1', payload))!
+
+  it('extracts the room and its calculated name (ADR 0118)', () => {
+    // The wire shape pinned by `room_display_name_changed_frame_wire_shape`
+    // in `crates/axon-api/src/ws.rs`.
+    const frame = nameFrame({ room_id: '!r:hs', display_name: 'Alice, Bob' })
+    expect(frame.accountId).toBe('acct-1')
+    expect(roomDisplayNameChange(frame)).toEqual({
+      roomId: '!r:hs',
+      displayName: 'Alice, Bob',
+    })
+  })
+
+  it('returns null for other tags and malformed payloads', () => {
+    expect(
+      roomDisplayNameChange(decodeFrame(envelope(TIMELINE_EVENT, 'a', {}))!),
+    ).toBeNull()
+    expect(roomDisplayNameChange(nameFrame(null))).toBeNull()
+    expect(roomDisplayNameChange(nameFrame({ room_id: '!r:hs' }))).toBeNull()
+    expect(
+      roomDisplayNameChange(
+        nameFrame({ room_id: '!r:hs', display_name: null }),
+      ),
+    ).toBeNull()
+    expect(
+      roomDisplayNameChange(nameFrame({ room_id: 1, display_name: 'x' })),
     ).toBeNull()
   })
 })

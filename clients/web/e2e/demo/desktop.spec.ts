@@ -94,8 +94,8 @@ test('rooms — the room list sorts, filters, and derives a DM title', async ({
   await dwell(page, BEAT)
 
   await point(page, chip(page, 'DMs'))
-  // A DM has no name of its own; both clients derive its title from the other
-  // member (web ported this from clients/tui/src/app/rooms.rs).
+  // A DM has no name of its own; the web client titles it with the name the
+  // server's SDK calculates from its other member (ADR 0118).
   await expect(list).toContainText(personaName('maya'))
   await expect(list).not.toContainText('gear-swap')
   await dwell(page, LONG)
