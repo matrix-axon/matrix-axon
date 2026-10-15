@@ -245,6 +245,9 @@ function collectThirdPartyLicenses(): ThirdPartyLicense[] {
         {
           cwd: webClientDir,
           encoding: 'utf8',
+          // The bare-`pnpm` fallback is a `.cmd` shim on Windows, which only a
+          // shell resolves. The arguments are fixed strings.
+          shell: pnpm.command === 'pnpm' && process.platform === 'win32',
           stdio: ['ignore', 'pipe', 'ignore'],
           maxBuffer: 64 * 1024 * 1024,
         },

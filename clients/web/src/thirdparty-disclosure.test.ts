@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  pnpmCommand,
   buildDisclosure,
   collectDisclosure,
   pickLicenseFile,
+  pnpmCommand,
 } from './thirdparty-disclosure'
 
 describe('pickLicenseFile', () => {
@@ -150,6 +150,27 @@ describe('pnpmCommand', () => {
     ).toEqual({
       command: 'C:\\node\\node.exe',
       args: ['C:\\Users\\x\\setup-pnpm\\pnpm.cjs'],
+    })
+  })
+
+  it('runs a .mjs entry point with the current node', () => {
+    expect(pnpmCommand('/opt/pnpm/bin/pnpm.mjs', '/usr/bin/node')).toEqual({
+      command: '/usr/bin/node',
+      args: ['/opt/pnpm/bin/pnpm.mjs'],
+    })
+  })
+
+  it('runs pnpm.exe directly', () => {
+    expect(pnpmCommand('C:\\pnpm\\pnpm.exe', 'C:\\node\\node.exe')).toEqual({
+      command: 'C:\\pnpm\\pnpm.exe',
+      args: [],
+    })
+  })
+
+  it('does not trust a wrapper that merely starts with pnpm', () => {
+    expect(pnpmCommand('/opt/bin/pnpm-wrapper.sh', '/usr/bin/node')).toEqual({
+      command: 'pnpm',
+      args: [],
     })
   })
 

@@ -155,20 +155,24 @@ export function collectDisclosure(
  * empty. pnpm sets `npm_execpath` for the scripts it runs, naming the exact
  * entry point that is running this build; a JS entry point is run with the
  * current Node, which needs no shell and no PATH lookup. Outside pnpm
- * (`execPath` unset, or naming npm or yarn) it falls back to `pnpm`.
+ * (`execPath` unset, or naming anything but pnpm) it falls back to `pnpm`.
+ * That fallback has to be spawned through a shell on Windows to find the
+ * `pnpm.cmd` shim, which the caller does.
  */
 export function pnpmCommand(
   execPath: string | undefined,
   nodePath: string,
 ): { command: string; args: string[] } {
   const name = (execPath?.split(/[\\/]/).pop() ?? '').toLowerCase()
-  if (execPath && name.startsWith('pnpm')) {
-    if (/\.[cm]?js$/.test(name)) {
+  if (execPath) {
+    // JS entry points (`pnpm.cjs`, as `pnpm/action-setup` installs it) run
+    // under the current Node. A native `pnpm`/`pnpm.exe` runs directly.
+    // Anything else, including `.cmd`/`.bat`/`.ps1` shims (the thing that
+    // fails to spawn) and wrappers that merely start with "pnpm", falls back.
+    if (/^pnpm\.(c|m)?js$/.test(name)) {
       return { command: nodePath, args: [execPath] }
     }
-    // A `.cmd`/`.bat`/`.ps1` shim is what fails to spawn; only a binary (or
-    // an extensionless executable) can be run directly.
-    if (!/\.(cmd|bat|ps1)$/.test(name)) {
+    if (/^pnpm(\.exe)?$/.test(name)) {
       return { command: execPath, args: [] }
     }
   }
