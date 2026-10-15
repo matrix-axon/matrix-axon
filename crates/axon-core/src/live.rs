@@ -46,6 +46,8 @@ pub enum LiveFrame {
     /// it is not built on the ADR 0056 ephemeral path at all, since unread
     /// counts are room state, not an ephemeral event.
     UnreadCountsChanged(UnreadCountsFrame),
+    /// A room's SDK-calculated display name changed (ADR 0118).
+    RoomDisplayNameChanged(RoomDisplayNameFrame),
     /// An account's sync-engine readiness transitioned (ADR 0030, issue
     /// #241) — `"connecting"` / `"syncing"` / `"ready"` / `"offline"`. Lets a
     /// connected client update its per-account status without polling
@@ -99,6 +101,12 @@ impl From<EphemeralFrame> for LiveFrame {
 impl From<UnreadCountsFrame> for LiveFrame {
     fn from(frame: UnreadCountsFrame) -> Self {
         LiveFrame::UnreadCountsChanged(frame)
+    }
+}
+
+impl From<RoomDisplayNameFrame> for LiveFrame {
+    fn from(frame: RoomDisplayNameFrame) -> Self {
+        LiveFrame::RoomDisplayNameChanged(frame)
     }
 }
 
@@ -194,6 +202,20 @@ pub struct UnreadCountsFrame {
     pub notification_count: u64,
     /// The subset of `notification_count` that is an unread mention.
     pub highlight_count: u64,
+}
+
+/// A room's display name as matrix-rust-sdk calculates it (ADR 0118), ready
+/// to fan out over the live-event bus after Axon has persisted a changed
+/// value. It follows the Matrix spec's naming algorithm: the room's name, else
+/// its canonical alias, else a name built from its heroes.
+#[derive(Debug, Clone)]
+pub struct RoomDisplayNameFrame {
+    /// Axon account this room belongs to.
+    pub account_id: Uuid,
+    /// Matrix room ID.
+    pub room_id: String,
+    /// The newly persisted display name.
+    pub display_name: String,
 }
 
 /// An account's sync-engine readiness transition (ADR 0030, issue #241), ready

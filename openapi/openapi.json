@@ -10911,6 +10911,13 @@
                   ],
                   "description": "Canonical alias (`m.room.canonical_alias`), if set."
                 },
+                "display_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The room's display name as Matrix clients calculate it (ADR 0118):\n`m.room.name`, else the canonical alias, else a name built from the\nroom's other members, such as `Alice, Bob` or `Empty Room (was Alice)`.\nComputed by matrix-rust-sdk and cached by Axon; `null` until the sync\nengine has stored a value. `name` and `canonical_alias` update first\nwhen state changes, so titles should prefer them, then this."
+                },
                 "highlight_count": {
                   "type": "integer",
                   "format": "int64",
@@ -13879,6 +13886,13 @@
               "null"
             ],
             "description": "Canonical alias (`m.room.canonical_alias`), if set."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The room's display name as Matrix clients calculate it (ADR 0118):\n`m.room.name`, else the canonical alias, else a name built from the\nroom's other members, such as `Alice, Bob` or `Empty Room (was Alice)`.\nComputed by matrix-rust-sdk and cached by Axon; `null` until the sync\nengine has stored a value. `name` and `canonical_alias` update first\nwhen state changes, so titles should prefer them, then this."
           },
           "highlight_count": {
             "type": "integer",

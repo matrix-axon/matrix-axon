@@ -90,6 +90,9 @@ pub struct RoomSummary {
     pub canonical_alias: Option<String>,
     /// `m.room.create` → `content.type`, if set (for example `m.space`).
     pub room_type: Option<String>,
+    /// The room's display name as matrix-rust-sdk calculates it (ADR 0118),
+    /// or `None` until the SDK reconciler has written one.
+    pub display_name: Option<String>,
     /// `origin_ts` of the room's latest content-bearing event (a non-null
     /// `decrypted_body_text` — see [`Store::list_rooms`]), in milliseconds —
     /// the sort key. Falls back to the latest event of any type when the room
@@ -126,6 +129,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
             avatar_url: row.try_get("avatar_url")?,
             canonical_alias: row.try_get("canonical_alias")?,
             room_type: row.try_get("room_type")?,
+            display_name: row.try_get("display_name")?,
             last_activity_ts: row.try_get("last_activity_ts")?,
             last_event_id: row.try_get("last_event_id")?,
             notification_count: row.try_get("notification_count")?,
@@ -220,6 +224,7 @@ impl Store {
             "SELECT a.account_id, ac.user_id AS account_user_id, a.room_id, \
                     a.last_activity_ts, a.last_event_id, \
                     a.name, a.topic, a.avatar_url, a.canonical_alias, a.room_type, \
+                    a.display_name, \
                     COALESCE(ruc.notification_count, 0) AS notification_count, \
                     COALESCE(ruc.highlight_count, 0) AS highlight_count, \
                     ad_tag.content AS tag_content \
@@ -310,6 +315,19 @@ impl Store {
         room_id: Option<&str>,
     ) -> Result<u64, StoreError> {
         let mut tx: Transaction<'_, Postgres> = self.maintenance_pool.begin().await?;
+        // The SDK display name (ADR 0118) is not derivable from `events`, and
+        // a purge's per-room rebuild raises no SDK hint to rewrite it, so
+        // carry it across the rebuild instead of leaving NULL until the sweep.
+        sqlx_core::query::query(
+            "CREATE TEMP TABLE rebuilt_display_names ON COMMIT DROP AS \
+             SELECT room_id, display_name FROM room_summaries \
+             WHERE account_id = $1 AND ($2::text IS NULL OR room_id = $2) \
+               AND display_name IS NOT NULL",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx_core::query::query(
             "DELETE FROM room_summaries WHERE account_id = $1 \
              AND ($2::text IS NULL OR room_id = $2)",
@@ -363,6 +381,14 @@ impl Store {
         )
         .bind(account_id)
         .bind(room_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx_core::query::query(
+            "UPDATE room_summaries s SET display_name = r.display_name \
+             FROM rebuilt_display_names r \
+             WHERE s.account_id = $1 AND s.room_id = r.room_id",
+        )
+        .bind(account_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
