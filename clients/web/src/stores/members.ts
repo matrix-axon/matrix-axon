@@ -32,8 +32,8 @@ export interface MembersStore {
 /**
  * One room's members (ADR 0046), fetched once per room and used to resolve
  * senders in the timeline and thread panel to their displayname (falling
- * back to `@localpart`, then the full user id) instead of the raw Matrix id —
- * the same resolution `dmTitleFromMembers` already does for room titles.
+ * back to `@localpart`, then the full user id) instead of the raw Matrix id,
+ * through `memberDisplay`.
  */
 export function createMembersStore(
   api: ApiClient,

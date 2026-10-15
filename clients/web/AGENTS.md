@@ -718,7 +718,8 @@ not set` — it archives for `iphoneos` while you asked for a simulator. The
   repo's issues.
 - `is_direct` is on `RoomDto` (ADR 0103).
   `isLikelyDm` reads that flag.
-  A refresh fetches `/members` only for an unnamed direct room (`needsDerivedTitle` and `isLikelyDm`).
+  Titles never need `/members`: an unnamed room, direct or not, is titled by the server's calculated `display_name` (ADR 0118), kept live by `room_display_name.changed`.
+  A refresh fetches `/members` only for an unnamed direct room (`needsDerivedTitle` and `isLikelyDm`), and only for the 1:1 DM peer avatar.
   `createDm` still checks the roster of an unnamed room that is not marked direct, so an existing DM missing from `m.direct` is reused.
   Favourites are the Matrix tag `m.favourite` (`stores/favourites.ts`).
   Space-rail order is the instance preference `space_order` (`stores/space-order.ts`).

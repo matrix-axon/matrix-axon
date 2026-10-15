@@ -7,7 +7,7 @@ export type MemberDto = components['schemas']['MemberDto']
 /**
  * Pure room-list semantics (ADR 0046, M-W4), ported from the TUI
  * (`clients/tui/src/app/rooms.rs`) so the two clients slice the list the same
- * way: the `is_direct` flag, member-derived titles, favourite-aware sorting
+ * way: the `is_direct` flag, room titles, favourite-aware sorting
  * (ADR 0038 / ADR 0103), and the filter modes (ADR 0042).
  */
 
@@ -48,9 +48,9 @@ export function isLikelyDm(room: RoomDto): boolean {
 }
 
 /**
- * Whether the list should ask `/members` for a title. Blank name and blank
- * canonical alias, including unnamed rooms that are not direct messages.
- * Matches the TUI's `needs_derived_title`.
+ * Whether the room has no title of its own: blank name and blank canonical
+ * alias, direct or not. Such a room is titled by the server's calculated
+ * `display_name` (ADR 0118). Matches the TUI's `needs_derived_title`.
  */
 export function needsDerivedTitle(room: RoomDto): boolean {
   return blank(room.name) && blank(room.canonical_alias)
@@ -94,32 +94,6 @@ export function memberDisplay(member: MemberDto): string {
 }
 
 /**
- * Derive a display title for an unnamed room (e.g. a DM) from its member
- * list, excluding the account's own user. Lists up to three names and appends
- * `, +N` for the rest; `null` when there is no other member (a note-to-self
- * room), so the caller keeps its fallback.
- */
-export function dmTitleFromMembers(
-  selfUserId: string | null,
-  members: MemberDto[],
-): string | null {
-  const others = members
-    .filter((member) => member.user_id !== selfUserId)
-    // Stable ordering so the title doesn't reshuffle between fetches.
-    .sort((a, b) =>
-      a.user_id < b.user_id ? -1 : a.user_id > b.user_id ? 1 : 0,
-    )
-  if (others.length === 0) {
-    return null
-  }
-  let title = others.slice(0, 3).map(memberDisplay).join(', ')
-  if (others.length > 3) {
-    title += `, +${others.length - 3}`
-  }
-  return title
-}
-
-/**
  * The other person's avatar in a 1:1 DM, or `null` when there isn't exactly
  * one other joined/invited member with an `mxc://` avatar. Unnamed rooms with
  * several people keep the letter fallback unless the room itself has an
@@ -159,21 +133,34 @@ export function roomListAvatarUrl(
 }
 
 /**
- * The rendered room-list title: name, else canonical alias, else the cached
- * member-derived title for unnamed rooms, else the room id. Matches the TUI's
- * `room_list_title_from_cache`.
+ * The rendered room title (ADR 0118): name, else canonical alias, else the
+ * server's calculated `display_name`, else the room id.
+ *
+ * The state fields come first so a rename or a new alias shows the moment its
+ * event arrives, rather than when the server's reconciler rewrites
+ * `display_name`. `titleCache` is consulted only when the row has none of the
+ * three: it holds the last title this browser saw for the room, which covers a
+ * server that has not filled `display_name` yet and a cached row written before
+ * the field existed.
  */
 export function roomTitle(
   room: RoomDto,
   titleCache: ReadonlyMap<string, string>,
 ): string {
-  if (!blank(room.name)) {
-    return room.name!
+  return ownRoomTitle(room) ?? titleCache.get(roomKey(room)) ?? room.room_id
+}
+
+/**
+ * The title the row itself carries — name, canonical alias, or calculated
+ * display name — or `null` when it has none of them.
+ */
+export function ownRoomTitle(room: RoomDto): string | null {
+  for (const value of [room.name, room.canonical_alias, room.display_name]) {
+    if (!blank(value)) {
+      return value!
+    }
   }
-  if (!blank(room.canonical_alias)) {
-    return room.canonical_alias!
-  }
-  return titleCache.get(roomKey(room)) ?? room.room_id
+  return null
 }
 
 /** `@adam:bostoncoop.net` → `@adam`. A user id with no server part is itself. */
