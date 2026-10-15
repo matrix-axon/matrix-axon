@@ -35,6 +35,7 @@ Before deciding, the SDK state stores on production were read offline from copie
 
 Only 6 of those 444 unnamed rooms had SDK member counts from the current membership epoch, so the cached name does not depend on a fresh summary.
 Compared against the member rows Axon itself stores, with service members excluded, 439 of the 444 cached names named exactly Axon's other joined or invited members, and the remaining 5 named a hero Axon has no active member row for.
+That measures agreement with Axon's own data, not with what a client syncing fresh from the homeserver would show; the decision below accepts the SDK's value as Element X does, so parity with Axon's member rows is evidence of coverage, not a requirement.
 The 23 "Empty Room" variants were all rooms where only the user and service members remain.
 
 ## Decision
@@ -56,13 +57,16 @@ The ADR 0111 member-count reconciler (`crates/axon-sync/src/member_counts.rs`) a
 It subscribes to `room_info_notable_update_receiver()`, reconciles the hinted rooms, and runs a bounded, paced sweep of every summary row to catch rooms whose hints were lost.
 Each per-room step now also reads `Room::display_name()` and writes it if it changed.
 A second worker would walk the same 5,600 rooms on the same schedule to read the same `RoomInfo`.
+The two halves stay independent inside that step: the counts run first and the display name second, each under its own deadline, so a slow display-name read cannot drop the count write.
+Each half reports its own outcome, and the retry queue records which half failed and reruns only that one.
 
 The write is a compare-and-set (`display_name IS DISTINCT FROM $new`) and reports applied, unchanged, or missing.
 A missing summary row (a room with no stored event yet) uses the reconciler's existing bounded retry queue, and the sweep picks it up later if the retries run out.
 One worker runs per account and handles rooms sequentially, so two writes for one room never race; each write reads the SDK's current value at the moment it runs.
 The value is capped at 512 characters on a character boundary before it is stored, since hero display names are user-controlled.
 
-`rebuild_room_summaries` deletes and reinserts rows and so drops the column, as it already drops member counts; the next sweep refills it.
+`rebuild_room_summaries` deletes and reinserts rows, and so does the per-room rebuild a purge runs.
+Both carry `display_name` across the delete and reinsert rather than dropping it as they drop member counts: the value cannot be re-derived from stored events, and no SDK update follows a rebuild to rewrite it, so a dropped value would stay null until the sweep came round again.
 No migration backfill is attempted, because the value lives only in the SDK store; the first sweep after upgrade fills every room.
 
 ### 3. Expose it additively
@@ -70,6 +74,7 @@ No migration backfill is attempted, because the value lives only in the SDK stor
 - `RoomDto.display_name: string | null` — null until the reconciler has written a value for the room.
   `name` and `canonical_alias` keep their meaning: the raw state values, which room settings read and write.
 - A `room_display_name.changed` WebSocket frame carries `{room_id, display_name}` whenever a write applies, so a member renaming themselves updates open clients the way `unread_counts.changed` does.
+  The first fill after the upgrade is not exempt: it sends one frame per room, at the sweep's pace of four rooms per tick rather than as a burst, and those frames are how a client that loaded the list while the column was null gets its titles without reloading.
 
 Both are additions under `/v1/`, so older clients keep working (ADR 0099).
 
@@ -77,6 +82,8 @@ Both are additions under `/v1/`, so older clients keep working (ADR 0099).
 
 Clients title a room `name`, then `canonical_alias`, then `display_name`, then the room ID.
 Reading the state fields first means a rename or a new alias shows the moment its state event arrives, rather than waiting for the reconciler.
+The reverse case lags: when `m.room.name` is cleared, `name` goes null at once but `display_name` still holds the old name until the reconciler rewrites it, so the title briefly falls back to the stale name.
+That window is the same one-sync lag described under Consequences.
 With `display_name` in hand both clients drop the `/members` title fetch, and the web client drops the `is_direct` gate on titles.
 The web client keeps its `/members` fetch only for 1:1 DM avatars, which this ADR does not change.
 
