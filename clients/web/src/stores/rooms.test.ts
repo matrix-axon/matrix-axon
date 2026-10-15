@@ -57,58 +57,57 @@ function makeStore(storage = memoryStorage()) {
 /** Mirrors `ROOM_TITLE_CACHE_KEY`, which the store keeps private. */
 const TITLE_CACHE_KEY = 'axon.room_titles.v1'
 
-/** One named room plus a DM whose title resolves to `Bob` from its members. */
+/**
+ * The unnamed DM as a server that has filled `display_name` (ADR 0118) returns
+ * it. `Bob` is the SDK's calculated name for it.
+ */
+const UNNAMED_NAMED_BY_SERVER = { ...UNNAMED, display_name: 'Bob' }
+
+/** The `/members` roster of the DM: Bob, whose avatar the row borrows. */
+const DM_MEMBERS = [
+  { user_id: '@me:example.org', membership: 'join', display_name: 'Me' },
+  {
+    user_id: '@bob:example.org',
+    membership: 'join',
+    // Deliberately not `Bob`: a title read from here would show `Robert`.
+    display_name: 'Robert',
+    avatar_url: 'mxc://hs/bob',
+  },
+]
+
+/** One named room plus a DM the server titles `Bob`. */
 function useTitleHandlers(): void {
   server.use(
     http.get(`${BASE_URL}/v1/rooms`, () =>
-      HttpResponse.json({ data: [NAMED, UNNAMED] }),
+      HttpResponse.json({ data: [NAMED, UNNAMED_NAMED_BY_SERVER] }),
     ),
     http.get(
       `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
-      () =>
-        HttpResponse.json({
-          data: [
-            {
-              user_id: '@me:example.org',
-              membership: 'join',
-              display_name: 'Me',
-            },
-            {
-              user_id: '@bob:example.org',
-              membership: 'join',
-              display_name: 'Bob',
-            },
-          ],
-        }),
+      () => HttpResponse.json({ data: DM_MEMBERS }),
     ),
   )
 }
 
 describe('createRoomsStore', () => {
-  it('loads rooms and resolves member-derived titles for unnamed rooms', async () => {
-    let memberCalls = 0
+  it('titles unnamed rooms from display_name, direct or not, without a members title fetch', async () => {
+    // The ADR 0118 bug: an unnamed room missing from `m.direct` rendered as its
+    // room id, because the title fetch was gated on `is_direct`.
+    const group = {
+      ...UNNAMED,
+      room_id: '!group:hs',
+      is_direct: false,
+      display_name: 'Alice, Carol',
+    }
+    const memberCalls: string[] = []
     server.use(
       http.get(`${BASE_URL}/v1/rooms`, () =>
-        HttpResponse.json({ data: [NAMED, UNNAMED] }),
+        HttpResponse.json({ data: [NAMED, UNNAMED_NAMED_BY_SERVER, group] }),
       ),
       http.get(
-        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
-        () => {
-          memberCalls += 1
-          return HttpResponse.json({
-            data: [
-              {
-                user_id: '@me:example.org',
-                membership: 'join',
-                display_name: 'Me',
-              },
-              {
-                user_id: '@bob:example.org',
-                membership: 'join',
-                display_name: 'Bob',
-              },
-            ],
-          })
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+        ({ params }) => {
+          memberCalls.push(String(params.roomId))
+          return HttpResponse.json({ data: DM_MEMBERS })
         },
       ),
     )
@@ -117,18 +116,57 @@ describe('createRoomsStore', () => {
     await store.refresh()
 
     expect(store.loading.value).toBe(false)
-    expect(store.rooms.value).toHaveLength(2)
-    await vi.waitFor(() =>
-      expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
-    )
-    expect(store.dmAvatars.value.get(roomKey(UNNAMED))).toBeUndefined()
-    // Named rooms never trigger a members fetch.
-    expect(memberCalls).toBe(1)
+    expect(store.rooms.value).toHaveLength(3)
+    const title = (key: string) =>
+      roomTitle(
+        store.rooms.value.find((room) => roomKey(room) === key)!,
+        store.titles.value,
+      )
+    expect(title(roomKey(UNNAMED))).toBe('Bob')
+    expect(title(roomKey(group))).toBe('Alice, Carol')
+    // The titles are cached as soon as the list lands, not after a fetch.
+    expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob')
+    expect(store.titles.value.get(roomKey(group))).toBe('Alice, Carol')
 
-    // A second refresh does not re-fetch settled titles.
+    // The one `/members` request is the DM's, for its avatar; the title above
+    // still reads `Bob`, not the roster's `Robert`.
+    await vi.waitFor(() =>
+      expect(store.dmAvatars.value.get(roomKey(UNNAMED))).toBe('mxc://hs/bob'),
+    )
+    expect(memberCalls).toEqual(['!dm:hs'])
+    expect(title(roomKey(UNNAMED))).toBe('Bob')
+
+    // A second refresh does not re-fetch a settled avatar.
     await store.refresh()
     await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(memberCalls).toBe(1)
+    expect(memberCalls).toHaveLength(1)
+  })
+
+  it('keeps the room-id fallback for an unnamed room the server has not titled yet', async () => {
+    let memberCalls = 0
+    const plain = { ...UNNAMED, room_id: '!plain:hs', is_direct: false }
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [plain] }),
+      ),
+      http.get(
+        `${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/members`,
+        () => {
+          memberCalls += 1
+          return HttpResponse.json({ data: DM_MEMBERS })
+        },
+      ),
+    )
+
+    const store = makeStore()
+    await store.refresh()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect(roomTitle(store.rooms.value[0], store.titles.value)).toBe(
+      '!plain:hs',
+    )
+    expect(store.titles.value.has(roomKey(plain))).toBe(false)
+    expect(memberCalls).toBe(0)
   })
 
   it('caches the other user’s avatar for a 1:1 DM with no room avatar', async () => {
@@ -168,35 +206,11 @@ describe('createRoomsStore', () => {
   })
 
   it('persists room titles and starts the next store from the cache', async () => {
-    server.use(
-      http.get(`${BASE_URL}/v1/rooms`, () =>
-        HttpResponse.json({ data: [NAMED, UNNAMED] }),
-      ),
-      http.get(
-        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
-        () =>
-          HttpResponse.json({
-            data: [
-              {
-                user_id: '@me:example.org',
-                membership: 'join',
-                display_name: 'Me',
-              },
-              {
-                user_id: '@bob:example.org',
-                membership: 'join',
-                display_name: 'Bob',
-              },
-            ],
-          }),
-      ),
-    )
+    useTitleHandlers()
     const storage = memoryStorage()
     const first = makeStore(storage)
     await first.refresh()
-    await vi.waitFor(() =>
-      expect(first.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
-    )
+    expect(first.titles.value.get(roomKey(UNNAMED))).toBe('Bob')
 
     const second = makeStore(storage)
     expect(second.titles.value.get(roomKey(NAMED))).toBe('Ops')
@@ -208,9 +222,7 @@ describe('createRoomsStore', () => {
     const storage = memoryStorage()
     const store = makeStore(storage)
     await store.refresh()
-    await vi.waitFor(() =>
-      expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
-    )
+    expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob')
     expect(storage.getItem(TITLE_CACHE_KEY)).not.toBeNull()
 
     store.resetSession()
@@ -221,17 +233,15 @@ describe('createRoomsStore', () => {
     expect(storage.getItem(TITLE_CACHE_KEY)).toBeNull()
     expect(store.titles.value.size).toBe(0)
 
-    // The cache is only an optimization: a new session re-resolves from
-    // `/members` without it (WCR-02).
+    // The cache is only an optimization: a new session titles the room from
+    // the list again without it (WCR-02).
     const next = makeStore(storage)
     expect(next.titles.value.size).toBe(0)
     await next.refresh()
-    await vi.waitFor(() =>
-      expect(next.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
-    )
+    expect(next.titles.value.get(roomKey(UNNAMED))).toBe('Bob')
   })
 
-  it('does not re-persist a title from a members fetch that lands after sign-out', async () => {
+  it('does not apply a DM avatar from a members fetch that lands after sign-out', async () => {
     let release: (() => void) | undefined
     const inFlight = new Promise<void>((resolve) => {
       release = resolve
@@ -244,38 +254,22 @@ describe('createRoomsStore', () => {
         `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
         async () => {
           await inFlight
-          return HttpResponse.json({
-            data: [
-              {
-                user_id: '@me:example.org',
-                membership: 'join',
-                display_name: 'Me',
-              },
-              {
-                user_id: '@bob:example.org',
-                membership: 'join',
-                display_name: 'Bob',
-              },
-            ],
-          })
+          return HttpResponse.json({ data: DM_MEMBERS })
         },
       ),
     )
-    const storage = memoryStorage()
-    const store = makeStore(storage)
+    const store = makeStore()
     await store.refresh()
 
     // Sign out with the `/members` burst still in flight.
     store.resetSession()
-    expect(storage.getItem(TITLE_CACHE_KEY)).toBeNull()
 
     release?.()
     await new Promise((resolve) => setTimeout(resolve, 20))
 
-    // `setCachedTitle` persists, so an unguarded completion here re-creates the
-    // record sign-out just removed — with the previous reader's DM name in it.
-    expect(storage.getItem(TITLE_CACHE_KEY)).toBeNull()
-    expect(store.titles.value.size).toBe(0)
+    // An unguarded completion would show the previous reader's correspondent
+    // in the next reader's list (#115).
+    expect(store.dmAvatars.value.size).toBe(0)
   })
 
   it('drops the persisted title cache even before the first refresh lands', () => {
@@ -297,10 +291,10 @@ describe('createRoomsStore', () => {
     expect(store.titles.value.size).toBe(0)
   })
 
-  it('keeps the room-id fallback when the members fetch fails', async () => {
+  it('keeps the title and the error banner when the avatar fetch fails', async () => {
     server.use(
       http.get(`${BASE_URL}/v1/rooms`, () =>
-        HttpResponse.json({ data: [UNNAMED] }),
+        HttpResponse.json({ data: [UNNAMED_NAMED_BY_SERVER] }),
       ),
       http.get(
         `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
@@ -316,8 +310,58 @@ describe('createRoomsStore', () => {
     await store.refresh()
     await new Promise((resolve) => setTimeout(resolve, 10))
 
-    expect(store.titles.value.has(roomKey(UNNAMED))).toBe(false)
+    expect(roomTitle(store.rooms.value[0], store.titles.value)).toBe('Bob')
+    expect(store.dmAvatars.value.has(roomKey(UNNAMED))).toBe(false)
     expect(store.error.value).toBeNull()
+  })
+
+  it('applies a live display name to the row and the title cache (ADR 0118)', async () => {
+    let listCalls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () => {
+        listCalls += 1
+        return HttpResponse.json({ data: [NAMED, UNNAMED] })
+      }),
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+        () => HttpResponse.json({ data: [] }),
+      ),
+    )
+    const storage = memoryStorage()
+    const store = makeStore(storage)
+    await store.refresh()
+    const dm = () =>
+      store.rooms.value.find((room) => roomKey(room) === roomKey(UNNAMED))!
+    expect(roomTitle(dm(), store.titles.value)).toBe('!dm:hs')
+
+    store.noteDisplayName(ACCOUNT, UNNAMED.room_id, 'Bob')
+    expect(dm().display_name).toBe('Bob')
+    expect(roomTitle(dm(), store.titles.value)).toBe('Bob')
+    expect(makeStore(storage).titles.value.get(roomKey(UNNAMED))).toBe('Bob')
+
+    // A member renaming themselves reaches the title the same way.
+    store.noteDisplayName(ACCOUNT, UNNAMED.room_id, 'Bobby')
+    expect(roomTitle(dm(), store.titles.value)).toBe('Bobby')
+
+    // A repeat is not a write.
+    const before = store.rooms.value
+    store.noteDisplayName(ACCOUNT, UNNAMED.room_id, 'Bobby')
+    expect(store.rooms.value).toBe(before)
+
+    // A named room keeps its name: state comes first.
+    store.noteDisplayName(ACCOUNT, NAMED.room_id, 'Alice, Bob')
+    expect(
+      roomTitle(
+        store.rooms.value.find((room) => roomKey(room) === roomKey(NAMED))!,
+        store.titles.value,
+      ),
+    ).toBe('Ops')
+
+    // The first fill sends one frame per room (ADR 0118); a room this list
+    // does not hold must not cost a `/v1/rooms` re-read apiece.
+    store.noteDisplayName(ACCOUNT, '!elsewhere:hs', 'Carol')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(listCalls).toBe(1)
   })
 
   it('noteActivity advances last_activity_ts and ignores older stamps (WCR-08)', async () => {
@@ -918,6 +962,7 @@ describe('createRoomsStore', () => {
       ...UNNAMED,
       room_id: '!plain:hs',
       is_direct: false,
+      display_name: 'Alice, Carol',
     }
     let memberCalls = 0
     server.use(
@@ -928,20 +973,7 @@ describe('createRoomsStore', () => {
         `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
         () => {
           memberCalls += 1
-          return HttpResponse.json({
-            data: [
-              {
-                user_id: '@me:example.org',
-                membership: 'join',
-                display_name: 'Me',
-              },
-              {
-                user_id: '@bob:example.org',
-                membership: 'join',
-                display_name: 'Bob',
-              },
-            ],
-          })
+          return HttpResponse.json({ data: DM_MEMBERS })
         },
       ),
     )
@@ -949,10 +981,11 @@ describe('createRoomsStore', () => {
     await store.refresh()
 
     await vi.waitFor(() =>
-      expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
+      expect(store.dmAvatars.value.get(roomKey(UNNAMED))).toBe('mxc://hs/bob'),
     )
     expect(memberCalls).toBe(1)
-    expect(store.titles.value.has(roomKey(unnamedPlain))).toBe(false)
+    expect(store.titles.value.get(roomKey(unnamedPlain))).toBe('Alice, Carol')
+    expect(store.dmAvatars.value.has(roomKey(unnamedPlain))).toBe(false)
     expect(store.dmAvatars.value.has(roomKey(namedDirect))).toBe(false)
   })
 
@@ -1347,6 +1380,41 @@ it('does not let a slow refresh overwrite a live metadata patch', async () => {
   expect(
     store.rooms.value.find((r) => r.room_id === NAMED.room_id)?.avatar_url,
   ).toBe('mxc://hs/fresh')
+})
+
+it('keeps a display name that lands during a refresh', async () => {
+  // The first fill after an upgrade: the list loaded with `display_name: null`,
+  // and the frame for a room overtakes a refresh that read the row before the
+  // server wrote it.
+  let release: (() => void) | undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let call = 0
+  server.use(
+    http.get(`${BASE_URL}/v1/rooms`, async () => {
+      call += 1
+      if (call === 2) {
+        await held
+      }
+      return HttpResponse.json({ data: [{ ...UNNAMED, display_name: null }] })
+    }),
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+  )
+  const store = makeStore()
+  await store.refresh()
+
+  const slow = store.refresh()
+  await vi.waitFor(() => expect(call).toBe(2))
+  store.noteDisplayName(ACCOUNT, UNNAMED.room_id, 'Bob')
+  release?.()
+  await slow
+
+  expect(store.rooms.value[0].display_name).toBe('Bob')
+  expect(roomTitle(store.rooms.value[0], store.titles.value)).toBe('Bob')
 })
 
 it('keeps tag and is_direct patches that land during a refresh', async () => {

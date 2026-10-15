@@ -52,6 +52,7 @@ function persistable(room: RoomDto): RoomDto {
     name: room.name ?? null,
     topic: room.topic ?? null,
     canonical_alias: room.canonical_alias ?? null,
+    display_name: room.display_name ?? null,
     avatar_url: room.avatar_url ?? null,
     room_type: room.room_type ?? null,
     last_event_id: room.last_event_id ?? null,

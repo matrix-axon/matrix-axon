@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   accountLabels,
   dmPeerAvatarFromMembers,
-  dmTitleFromMembers,
   filterRooms,
   isFavourite,
   isLikelyDm,
@@ -79,32 +78,6 @@ describe('needsDerivedTitle', () => {
   })
 })
 
-describe('dmTitleFromMembers (TUI parity)', () => {
-  it('excludes self, prefers display names, falls back to @localpart', () => {
-    const title = dmTitleFromMembers('@me:example.org', [
-      member('@me:example.org', 'Me'),
-      member('@bob:example.org', 'Bob'),
-      member('@carol:example.org'),
-    ])
-    expect(title).toBe('Bob, @carol')
-  })
-
-  it('sorts by user id for stability and caps at three plus +N', () => {
-    const title = dmTitleFromMembers('@me:x', [
-      member('@d:x', 'Dan'),
-      member('@b:x', 'Beth'),
-      member('@a:x', 'Ann'),
-      member('@c:x', 'Cid'),
-      member('@e:x', 'Eve'),
-    ])
-    expect(title).toBe('Ann, Beth, Cid, +2')
-  })
-
-  it('returns null for a note-to-self room', () => {
-    expect(dmTitleFromMembers('@me:x', [member('@me:x')])).toBeNull()
-  })
-})
-
 describe('dmPeerAvatarFromMembers', () => {
   it('returns the other member’s avatar in a 1:1 DM', () => {
     expect(
@@ -165,18 +138,47 @@ describe('roomListAvatarUrl', () => {
 describe('roomTitle', () => {
   const cache = new Map([[`${ACCOUNT}/!dm:hs`, 'Bob']])
 
-  it('prefers name, then alias, then cached member title, then room id', () => {
+  it('prefers name, then alias, then display name, then room id (ADR 0118)', () => {
+    const all = {
+      name: 'Ops',
+      canonical_alias: '#o:hs',
+      display_name: 'Alice, Bob',
+    }
+    expect(roomTitle(room({ room_id: '!r:hs', ...all }), cache)).toBe('Ops')
+    expect(
+      roomTitle(room({ room_id: '!r:hs', ...all, name: null }), cache),
+    ).toBe('#o:hs')
     expect(
       roomTitle(
-        room({ room_id: '!r:hs', name: 'Ops', canonical_alias: '#o:hs' }),
+        room({ room_id: '!r:hs', ...all, name: ' ', canonical_alias: null }),
         cache,
       ),
-    ).toBe('Ops')
-    expect(
-      roomTitle(room({ room_id: '!r:hs', canonical_alias: '#o:hs' }), cache),
-    ).toBe('#o:hs')
-    expect(roomTitle(room({ room_id: '!dm:hs' }), cache)).toBe('Bob')
+    ).toBe('Alice, Bob')
     expect(roomTitle(room({ room_id: '!new:hs' }), cache)).toBe('!new:hs')
+  })
+
+  it('titles any unnamed room by display name, not only a direct one', () => {
+    expect(
+      roomTitle(
+        room({ room_id: '!grp:hs', is_direct: false, display_name: 'A, B' }),
+        new Map(),
+      ),
+    ).toBe('A, B')
+  })
+
+  it('prefers the row’s display name to a cached title', () => {
+    expect(
+      roomTitle(room({ room_id: '!dm:hs', display_name: 'Robert' }), cache),
+    ).toBe('Robert')
+  })
+
+  it('falls back to a cached title while display name is not filled', () => {
+    expect(
+      roomTitle(room({ room_id: '!dm:hs', display_name: null }), cache),
+    ).toBe('Bob')
+    expect(
+      roomTitle(room({ room_id: '!dm:hs', display_name: '' }), cache),
+    ).toBe('Bob')
   })
 })
 

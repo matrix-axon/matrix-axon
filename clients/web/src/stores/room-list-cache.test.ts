@@ -495,6 +495,22 @@ describe('room-list cache', () => {
     expect(raw).toContain('Ops')
   })
 
+  it('restores the calculated display name, so an unnamed row paints titled', async () => {
+    const cache = createMemoryCacheStore()
+    const unnamed = {
+      ...LOUNGE,
+      room_id: '!dm:hs',
+      name: null,
+      display_name: 'Alice, Bob',
+    } as RoomDto
+    harness({ cache }).roomList.write([unnamed, OPS])
+    await settle()
+    const rows = await harness({ cache }).roomList.read()
+    expect(rows?.[0].display_name).toBe('Alice, Bob')
+    // A row the server has not titled yet stays explicitly untitled.
+    expect(rows?.[1].display_name).toBeNull()
+  })
+
   it('keeps a row whose unread counts are missing or nonsense', async () => {
     const cache = createMemoryCacheStore()
     const uncounted = {

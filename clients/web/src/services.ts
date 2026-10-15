@@ -7,6 +7,7 @@ import {
   ephemeralPassthrough,
   inviteAdded,
   inviteRemoved,
+  roomDisplayNameChange,
   timelineEvent,
   unreadCountsChange,
   verificationFrame,
@@ -965,9 +966,10 @@ export function connectThreadReadMarkers(
  * frame advances its room's `last_activity_ts` and latest-message preview (so
  * the default "recent" sort and optional preview stay recent through a
  * session; an unknown room triggers a list re-read — how a newly joined room
- * appears), and a reconnect re-reads the list outright — the bus is lossy, and
- * joins/renames missed while disconnected have no other repair path. Returns
- * the unsubscribe; the app graph keeps the subscription for its life.
+ * appears), every `room_display_name.changed` frame retitles its unnamed room
+ * (ADR 0118), and a reconnect re-reads the list outright — the bus is lossy,
+ * and joins/renames missed while disconnected have no other repair path.
+ * Returns the unsubscribe; the app graph keeps the subscription for its life.
  */
 export function connectLiveRooms(
   live: LiveConnection,
@@ -975,10 +977,14 @@ export function connectLiveRooms(
 ): () => void {
   const unsubscribe = live.subscribe((frame) => {
     const event = timelineEvent(frame)
-    if (event === null) {
+    if (event !== null) {
+      rooms.noteTimelineEvent(event)
       return
     }
-    rooms.noteTimelineEvent(event)
+    const name = roomDisplayNameChange(frame)
+    if (name !== null) {
+      rooms.noteDisplayName(frame.accountId, name.roomId, name.displayName)
+    }
   })
   const dispose = effect(() => {
     if (live.reconnects.value === 0) {
