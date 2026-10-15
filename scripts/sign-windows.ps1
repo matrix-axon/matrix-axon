@@ -19,12 +19,10 @@
 # so and exit 0, so a build with no signing configured produces the same
 # unsigned artifacts it always did.
 #
-# Local runs authenticate as whoever DefaultAzureCredential finds: `az login`,
-# Visual Studio, or AZURE_CLIENT_ID/_TENANT_ID/_CLIENT_SECRET.
-#
-# Authentication is not handled here: the dlib uses DefaultAzureCredential, which
-# finds the `azure/login` session the composite action opened (OIDC, so no
-# secret is stored anywhere).
+# Authentication is not handled here: the dlib uses DefaultAzureCredential. In
+# CI that finds the `azure/login` session the composite action opened (OIDC, so
+# no secret is stored anywhere); locally it finds `az login`, Visual Studio, or
+# AZURE_CLIENT_ID/_TENANT_ID/_CLIENT_SECRET.
 #
 # Used two ways: directly on the server/TUI binaries (cross-build.yml), and as
 # Tauri's `bundle.windows.signCommand` (desktop-build.yml), where Tauri calls
@@ -171,6 +169,9 @@ function Invoke-Sign([string]$File) {
 
     # The service is remote and occasionally returns a transient 5xx or a
     # timestamp-server timeout; three tries before failing a release build.
+    # Permanent failures (auth, role, bad file) are retried too, costing about
+    # 30s before they fail: signtool's output has no stable transient marker
+    # worth matching on, and a release build is not time-critical.
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         & $env:SIGN_SIGNTOOL sign /v /fd SHA256 /tr $TimestampUrl /td SHA256 `
             /dlib $env:SIGN_DLIB /dmdf $env:SIGN_METADATA $File
