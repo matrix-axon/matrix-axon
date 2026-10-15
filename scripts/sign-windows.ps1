@@ -203,3 +203,8 @@ switch ($Command) {
         foreach ($file in $Files) { Assert-Signed $file }
     }
 }
+
+# A defined result for callers that read $LASTEXITCODE: without it, a run that
+# launched no native command (tools already cached, nothing to sign) leaves the
+# caller's value unset or stale. Failures throw before reaching this line.
+exit 0

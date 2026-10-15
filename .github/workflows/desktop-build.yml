@@ -313,9 +313,10 @@ jobs:
     if: >-
       ${{ github.event_name != 'pull_request'
       && github.event.inputs.windows != 'false' }}
-    # See cross-build.yml's windows job: OIDC to Azure Artifact Signing,
-    # bound to this environment (ADR 0119).
-    environment: release-signing
+    # See cross-build.yml's windows job: OIDC to Azure Artifact Signing, bound
+    # to the `release-signing` environment, which only a `v*` tag enters; any
+    # other ref builds unsigned (ADR 0119).
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release-signing' || '' }}
     permissions:
       contents: read
       id-token: write
@@ -353,6 +354,7 @@ jobs:
       - name: Set up Windows signing
         uses: ./.github/actions/windows-signing
         with:
+          enabled: ${{ startsWith(github.ref, 'refs/tags/v') }}
           endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
           account: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
           profile: ${{ vars.ARTIFACT_SIGNING_PROFILE }}

@@ -47,12 +47,19 @@ The desktop job verifies the finished installer too.
 A signing outage therefore fails a tag build, rather than silently shipping unsigned binaries on a release that users expect to be signed.
 Signing is retried three times first, because the service and timestamp server are remote.
 
-### OIDC is bound to an environment
+### OIDC is bound to an environment, and only release tags enter it
 
 Entra federated credentials match a subject exactly and take no wildcards, so a tag pattern cannot be expressed.
-Both Windows jobs run in the `release-signing` GitHub environment, whose subject is `repo:<owner>/<repo>:environment:release-signing`.
-Those jobs only run on tag pushes and manual dispatch, so an environment adds no friction to pull requests.
-Restricting the environment to tag refs, or adding required reviewers, is how a compromised branch is kept from signing code.
+The Windows jobs therefore run in the `release-signing` GitHub environment, whose subject is `repo:<owner>/<repo>:environment:release-signing`.
+
+The environment's deployment policy admits `v*` tags only, and that is the access control: a branch, a pull request or a stray tag cannot obtain a signing token.
+Both workflows also support `alpha-*` and `beta-*` tags and manual dispatch from a branch, and an environment the ref may not use rejects the job before any step runs.
+So the environment is named only for a `v*` tag (`environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release-signing' || '' }}`), and the `enabled` input of `.github/actions/windows-signing` is set from the same test.
+The second part matters because the `ARTIFACT_SIGNING_*` variables are repository-level, so an unguarded run on a branch would see them, attempt a login and fail on a subject Entra has no credential for.
+Every other ref builds exactly as it did before signing existed.
+
+A consequence: signing can no longer be exercised from a branch.
+Trying a change to the signing path means a tag, or temporarily admitting the branch in the environment's deployment policy.
 
 ### Local builds sign the same way
 

@@ -190,11 +190,16 @@ jobs:
     if: ${{ github.event.inputs.windows != 'false' }}
     # Authenticode signing (ADR 0119). `id-token` is what lets azure/login
     # trade the job's OIDC token for an Azure session; there is no stored
-    # credential. The federated credential in Entra is bound to this
-    # environment's subject, because Azure federation does not take wildcards
-    # and a tag name is not known in advance. Signing stays off until the
-    # `ARTIFACT_SIGNING_*` repository variables exist.
-    environment: release-signing
+    # credential. The federated credential in Entra is bound to the
+    # `release-signing` environment's subject, because Azure federation does
+    # not take wildcards and a tag name is not known in advance.
+    #
+    # Only a `v*` tag enters that environment, whose deployment policy admits
+    # nothing else, and only that ref signs. Every other ref this workflow
+    # supports (alpha-*/beta-* tags, branch dispatches) runs with no
+    # environment and builds unsigned: the `enabled` input below is what keeps
+    # it from attempting a login its federated credential would refuse.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release-signing' || '' }}
     permissions:
       contents: read
       id-token: write
@@ -249,6 +254,7 @@ jobs:
       - name: Set up Windows signing
         uses: ./.github/actions/windows-signing
         with:
+          enabled: ${{ startsWith(github.ref, 'refs/tags/v') }}
           endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
           account: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
           profile: ${{ vars.ARTIFACT_SIGNING_PROFILE }}

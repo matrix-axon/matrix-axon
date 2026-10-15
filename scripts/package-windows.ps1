@@ -53,6 +53,19 @@ function Require-Command([string]$Name, [string]$Hint) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) { throw "$Name not found. $Hint" }
 }
 
+# Runs sign-windows.ps1 and fails unless it succeeded. $LASTEXITCODE is only
+# set by a native executable or an explicit `exit`: a run that launched none
+# (cached tools, nothing to sign) leaves it unset or stale from an earlier
+# command, so it is cleared first and the script is made to leave a reliable
+# value (it ends in `exit 0`; a failure throws).
+function Invoke-Signer {
+    $global:LASTEXITCODE = 0
+    $output = & $signer @args
+    if (-not $?) { throw "sign-windows.ps1 $($args -join ' ') failed" }
+    if ($LASTEXITCODE -ne 0) { throw "sign-windows.ps1 $($args -join ' ') failed (exit $LASTEXITCODE)" }
+    $output
+}
+
 $buildServer = -not $SkipServer
 $buildTui = -not $SkipTui
 $buildDesktop = -not $SkipDesktop
@@ -97,8 +110,7 @@ if ($NoSign) {
     }
 } elseif ($signing) {
     Step 'Preparing Windows signing'
-    & $signer setup
-    if ($LASTEXITCODE -ne 0) { throw 'signing setup failed' }
+    Invoke-Signer setup | Out-Host
     if ((Get-Command az -ErrorAction SilentlyContinue)) {
         az account show --output none 2>$null
         if ($LASTEXITCODE -ne 0) {
@@ -182,8 +194,7 @@ if ($buildServer -or $buildTui) {
     # it is what SmartScreen and Defender judge.
     if ($signing) {
         Step 'Signing the executables'
-        & $signer sign @exes
-        if ($LASTEXITCODE -ne 0) { throw 'signing failed' }
+        Invoke-Signer sign @exes | Out-Host
     }
 
     Step 'Packaging the zips'
@@ -210,8 +221,7 @@ if ($buildDesktop) {
         # Tauri signs the shell executable, the uninstaller and the installer
         # by calling the signer once per file, so the binary inside the
         # installer is signed before it is packed.
-        $overlay = & $signer overlay
-        if ($LASTEXITCODE -ne 0) { throw 'could not write the signing overlay' }
+        $overlay = Invoke-Signer overlay
         $tauriArgs += @('--config', ($overlay | Select-Object -Last 1))
     }
     # An empty updater key selects Tauri's signing path and fails partway
@@ -239,8 +249,7 @@ if ($signing) {
     if ($buildServer) { $verify += Join-Path $bin 'axon-server.exe' }
     if ($buildTui) { $verify += Join-Path $bin 'axon-tui.exe' }
     $verify += @($artifacts | Where-Object { $_.Extension -eq '.exe' } | ForEach-Object FullName)
-    & $signer verify @verify
-    if ($LASTEXITCODE -ne 0) { throw 'signature verification failed' }
+    Invoke-Signer verify @verify | Out-Host
 }
 
 Step "Done: $out"
