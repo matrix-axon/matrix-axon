@@ -211,6 +211,7 @@ pub fn drain_pending_input() {
 pub fn drain_pending_input() {}
 
 /// `CSI 6 ; height ; width t` → `(width, height)` in pixels.
+#[cfg(unix)]
 fn parse_cell_size_response(response: &[u8]) -> Option<(u16, u16)> {
     let text = String::from_utf8_lossy(response);
     let start = text.find("[6;")?;
