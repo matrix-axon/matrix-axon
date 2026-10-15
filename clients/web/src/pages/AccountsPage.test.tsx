@@ -321,6 +321,43 @@ describe('AccountsPage', () => {
     ).toBe(false)
   })
 
+  it('keeps the typed Matrix user ID across sign-in methods', async () => {
+    const { findByRole, getByLabelText, getByRole } = renderPage([BOB])
+    await findByRole('button', { name: 'Sign in again' })
+
+    fireEvent.input(getByLabelText(/Matrix user ID/), {
+      target: { value: '@carol:example.org' },
+    })
+    fireEvent.click(getByRole('tab', { name: 'Sign in with browser' }))
+    expect((getByLabelText('Matrix user ID') as HTMLInputElement).value).toBe(
+      '@carol:example.org',
+    )
+
+    fireEvent.input(getByLabelText('Matrix user ID'), {
+      target: { value: '@dave:example.org' },
+    })
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    expect(
+      (getByLabelText('Expected Matrix user ID') as HTMLInputElement).value,
+    ).toBe('@dave:example.org')
+
+    fireEvent.click(getByRole('tab', { name: 'Sign in with password' }))
+    expect((getByLabelText(/Matrix user ID/) as HTMLInputElement).value).toBe(
+      '@dave:example.org',
+    )
+
+    // Reactivation replaces the typed ID, and leaving it does not bring the
+    // typed ID back.
+    fireEvent.click(getByRole('button', { name: 'Sign in again' }))
+    expect((getByLabelText(/Matrix user ID/) as HTMLInputElement).value).toBe(
+      '@bob:example.org',
+    )
+    fireEvent.click(getByRole('button', { name: 'Cancel reactivation' }))
+    expect((getByLabelText(/Matrix user ID/) as HTMLInputElement).value).toBe(
+      '',
+    )
+  })
+
   it('cancels an active QR flow before leaving reactivation', async () => {
     let cancellations = 0
     server.use(
