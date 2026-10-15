@@ -4942,7 +4942,7 @@ async fn status_degrades_when_progress_pool_is_unavailable() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["data"]["backfill"]["progress_available"], false);
     assert_eq!(json["data"]["backfill"]["accounts"], json!([]));
-    for field in ["build", "sync", "management"] {
+    for field in ["build", "sync", "management", "push"] {
         assert!(json["data"].get(field).is_some(), "missing {field}");
     }
     drop(held);

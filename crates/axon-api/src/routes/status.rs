@@ -6,19 +6,23 @@
 
 use std::sync::Arc;
 
+use axon_core::PushMaterial;
 use axon_store::Store;
 use axum::extract::State;
 
 use crate::backfill::BackfillStatusProvider;
 use crate::build_info::BuildInfo;
-use crate::dto::{AccountSyncStatusDto, BackfillStatusDto, ManagementStatusDto, StatusDto};
+use crate::dto::{
+    AccountSyncStatusDto, BackfillStatusDto, ManagementStatusDto, PushStatusDto, StatusDto,
+};
 use crate::response::{ApiError, ApiResponse};
 use crate::state::ManagementConfig;
 use crate::sync_status::SyncStatusProvider;
 
 /// Report backfill status: the disk-space valve state (live free space, whether
 /// paused) plus per-account backfill progress; per-account sync-service status;
-/// the running build's identity; and whether the management API is served.
+/// the running build's identity; whether the management API is served; and
+/// which push providers loaded a key.
 #[utoipa::path(
     get,
     path = "/v1/status",
@@ -33,6 +37,7 @@ pub async fn get_status(
     State(sync_provider): State<Arc<dyn SyncStatusProvider>>,
     State(build_info): State<BuildInfo>,
     State(management): State<ManagementConfig>,
+    State(push): State<Arc<PushMaterial>>,
 ) -> Result<ApiResponse<StatusDto>, ApiError> {
     let backfill = match store.backfill_progress().await {
         Ok(progress) => BackfillStatusDto::new(backfill_provider.snapshot(), progress),
@@ -56,6 +61,10 @@ pub async fn get_status(
         build: build_info.into(),
         management: ManagementStatusDto {
             enabled: management.enabled,
+        },
+        push: PushStatusDto {
+            apns: push.apns_configured(),
+            fcm: push.fcm_configured(),
         },
     }))
 }

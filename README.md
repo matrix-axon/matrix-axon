@@ -306,6 +306,19 @@ The [native server contract](docs/apple-oauth-native.md) provides single-use cha
 See [ADR 0054's implementation addendum](docs/adr/0054-oauth-authorization-server.md#implementation-addendum-apple-rollout) for the remaining server and mobile work.
 The [Apple browser verification guide](docs/apple-oauth-browser.md) covers configuration, automated checks, and the required registered-deployment acceptance pass.
 
+**Remote push.**
+A suspended iOS, iPadOS, or Android client registers a device token with `PUT /v1/push/registrations` and removes it with `DELETE /v1/push/registrations/{id}`.
+`GET /v1/status` reports `push.apns` and `push.fcm`, true when this process loaded that provider's key.
+Registration succeeds when the key is not configured.
+Waking a device is a separate step from storing the registration.
+Set `[push.apns]` with `team_id`, `key_id`, `bundle_id`, and exactly one of `private_key` or `private_key_path`.
+Set `[push.fcm]` with `project_id`, `client_email`, `package_name`, and exactly one of those key sources.
+A provider whose every field is empty stays off.
+A provider that is only partly set fails while the configuration is loading, before Axon contacts the database.
+A key file that cannot be read, or a private key that is not that provider's key type, also stops startup.
+Key files are regular files of at most 16 KiB, owner-only on Unix, same as the Apple sign-in key, and that sign-in key stays under `[oauth.providers.apple]`.
+The environment names are `AXON_PUSH__APNS__PRIVATE_KEY`, `AXON_PUSH__APNS__PRIVATE_KEY_PATH`, `AXON_PUSH__FCM__PRIVATE_KEY`, and the same shape for the other fields.
+
 The Matrix OAuth session foundation for Axon's own homeserver sessions is configured separately under `sync.matrix_oauth` (ADR 0097).
 It dynamically registers a public client when the discovered authorization server permits it; operators can configure a static public client ID for issuers that disable dynamic registration.
 Access and refresh tokens are encrypted with `sync.store_key`, and client secrets are not supported.

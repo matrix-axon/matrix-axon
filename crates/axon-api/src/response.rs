@@ -85,6 +85,37 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
+    /// `400 Bad Request` — `PUT /v1/push/registrations` named a provider this
+    /// server does not register. Web Push is that case.
+    pub fn push_provider_unsupported() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "push_provider_unsupported",
+            "provider must be apns or fcm",
+        )
+    }
+
+    /// `400 Bad Request` — APNs needs `sandbox` or `production`, and FCM must
+    /// omit `environment`.
+    pub fn push_environment_invalid() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "push_environment_invalid",
+            "apns environment must be sandbox or production, and fcm must omit it",
+        )
+    }
+
+    /// `400 Bad Request` — an expiring access token whose session has no live
+    /// refresh token. The client refreshes and repeats the PUT with the new
+    /// access token, which carries the refresh token's session id.
+    pub fn push_session_refresh_required() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "push_session_refresh_required",
+            "Refresh this session, then register again with the new access token.",
+        )
+    }
+
     /// `401 Unauthorized` — the supplied credentials were rejected.
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)

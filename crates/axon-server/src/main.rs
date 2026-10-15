@@ -19,6 +19,8 @@ mod matrix_oauth_grant;
 mod media;
 mod member_profiles;
 mod oauth;
+mod pem;
+mod push;
 mod search;
 mod status;
 mod token;
@@ -184,6 +186,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let store = Store::connect_with_config(&config.database)
         .await
         .context("connecting to database")?;
+    let push = crate::push::load_push_material(&config.push)
+        .await
+        .context("loading push provider keys")?;
+    let reaped = store
+        .reap_push_registrations()
+        .await
+        .context("reaping push registrations")?;
+    if reaped > 0 {
+        tracing::info!(
+            reaped,
+            "removed push registrations whose sessions are not live"
+        );
+    }
     let bootstrap = maybe_offer_web_bootstrap(&store, &config).await?;
 
     // Open the search index and spawn its background indexing actor (M9), when
@@ -360,7 +375,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_power_levels(power_levels)
     .with_account_actions(account_actions)
     .with_management(config.server.management_api)
-    .with_web_client(config.server.web_client);
+    .with_web_client(config.server.web_client)
+    .with_push(push);
     if !config.server.management_api {
         tracing::info!(
             "management API disabled (server.management_api = false); \

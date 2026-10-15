@@ -445,6 +445,7 @@ dependencies = [
  "crossterm",
  "dotenvy",
  "futures-util",
+ "jsonwebtoken",
  "libc",
  "percent-encoding",
  "rand 0.9.4",

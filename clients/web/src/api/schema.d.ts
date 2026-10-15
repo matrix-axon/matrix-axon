@@ -1760,6 +1760,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/push/registrations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Register or re-home a device token.
+         * @description Upsert on `(provider, token)`. The same session updates disclosure,
+         *     environment, and the access token that last wrote the row. A different
+         *     session becomes the owner and keeps the same id. The response does not
+         *     include the token.
+         */
+        put: operations["put_registration"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/push/registrations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete the registration when this session owns it.
+         * @description An unknown id, or another session's id, is also `204`. The route is
+         *     idempotent and does not reveal whether some other device has that id.
+         */
+        delete: operations["delete_registration"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/rooms": {
         parameters: {
             query?: never;
@@ -1814,7 +1858,8 @@ export interface paths {
         /**
          * Report backfill status: the disk-space valve state (live free space, whether
          *     paused) plus per-account backfill progress; per-account sync-service status;
-         *     the running build's identity; and whether the management API is served.
+         *     the running build's identity; whether the management API is served; and
+         *     which push providers loaded a key.
          */
         get: operations["get_status"];
         put?: never;
@@ -2348,6 +2393,29 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_PushRegistrationDto: {
+            /**
+             * @description A device push registration (`PUT /v1/push/registrations`).
+             *     The device token is not in the response.
+             */
+            data: {
+                /**
+                 * @description What a later send may put in the banner: `activity`,
+                 *     `sender_and_room`, or `preview`.
+                 */
+                disclosure: string;
+                /** @description `sandbox` or `production` for APNs. Null for FCM. */
+                environment?: string | null;
+                /**
+                 * Format: uuid
+                 * @description Stable id, used to delete the registration.
+                 */
+                id: string;
+                /** @description `apns` or `fcm`. */
+                provider: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_PutDeviceStateResponse: {
             /** @description Response of `PUT /v1/devices/{device_id}/state/{namespace}` (M12). */
             data: {
@@ -2560,6 +2628,8 @@ export interface components {
                 build: components["schemas"]["BuildInfoDto"];
                 /** @description The management API's availability (ADR 0109). */
                 management: components["schemas"]["ManagementStatusDto"];
+                /** @description Which push providers loaded key material (ADR 0113). */
+                push: components["schemas"]["PushStatusDto"];
                 /** @description Per-account sync-service status. */
                 sync: components["schemas"]["AccountSyncStatusDto"][];
             };
@@ -4242,6 +4312,37 @@ export interface components {
             total_room_count_estimate?: number | null;
         };
         /**
+         * @description A device push registration (`PUT /v1/push/registrations`).
+         *     The device token is not in the response.
+         */
+        PushRegistrationDto: {
+            /**
+             * @description What a later send may put in the banner: `activity`,
+             *     `sender_and_room`, or `preview`.
+             */
+            disclosure: string;
+            /** @description `sandbox` or `production` for APNs. Null for FCM. */
+            environment?: string | null;
+            /**
+             * Format: uuid
+             * @description Stable id, used to delete the registration.
+             */
+            id: string;
+            /** @description `apns` or `fcm`. */
+            provider: string;
+        };
+        /**
+         * @description Whether this process loaded a provider key (`GET /v1/status`, ADR 0113).
+         *     True is key material, not "a device is registered". Registration still
+         *     succeeds when the flag is false.
+         */
+        PushStatusDto: {
+            /** @description An APNs auth key was loaded at startup. */
+            apns: boolean;
+            /** @description An FCM service-account key was loaded at startup. */
+            fcm: boolean;
+        };
+        /**
          * @description Body of `PUT /v1/devices/{device_id}/state/{namespace}` (M12): a merge-upsert.
          *     Only the keys present are touched — other keys in the namespace are left
          *     alone — and a `null` value deletes the key (stored as a tombstone so the
@@ -4278,6 +4379,26 @@ export interface components {
         PutPreferenceResponse: {
             /** @description When the write landed (server clock), RFC 3339. */
             updated_at: string;
+        };
+        /** @description Body of `PUT /v1/push/registrations`. */
+        PutPushRegistrationRequest: {
+            /**
+             * @description `activity`, `sender_and_room`, or `preview`. Required, so an omitted
+             *     field cannot land on `preview`.
+             */
+            disclosure: string;
+            /** @description `sandbox` or `production` for APNs. Omit for FCM. */
+            environment?: string | null;
+            /**
+             * @description `apns` or `fcm`. Any other value, including `webpush`, is
+             *     `push_provider_unsupported`.
+             */
+            provider: string;
+            /**
+             * @description The APNs device token or the FCM registration token.
+             *     Empty, or longer than 4096 bytes, is rejected before a write.
+             */
+            token: string;
         };
         /** @description Request body for reacting to an event (`POST …/events/{event_id}/reactions`). */
         ReactRequest: {
@@ -4864,6 +4985,8 @@ export interface components {
             build: components["schemas"]["BuildInfoDto"];
             /** @description The management API's availability (ADR 0109). */
             management: components["schemas"]["ManagementStatusDto"];
+            /** @description Which push providers loaded key material (ADR 0113). */
+            push: components["schemas"]["PushStatusDto"];
             /** @description Per-account sync-service status. */
             sync: components["schemas"]["AccountSyncStatusDto"][];
         };
@@ -11055,6 +11178,82 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    put_registration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutPushRegistrationRequest"];
+            };
+        };
+        responses: {
+            /** @description The registration, without the device token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_PushRegistrationDto"];
+                };
+            };
+            /** @description The provider, token, disclosure, environment, or session cannot be registered */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_registration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registration id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The registration is gone, or this session did not own it */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Missing, malformed, or revoked bearer token */
             401: {
