@@ -38,6 +38,13 @@ pub struct RoomDto {
     pub canonical_alias: Option<String>,
     /// The room's `m.room.create` `type`, if any (for example `m.space`).
     pub room_type: Option<String>,
+    /// The room's display name as Matrix clients calculate it (ADR 0118):
+    /// `m.room.name`, else the canonical alias, else a name built from the
+    /// room's other members, such as `Alice, Bob` or `Empty Room (was Alice)`.
+    /// Computed by matrix-rust-sdk and cached by Axon; `null` until the sync
+    /// engine has stored a value. `name` and `canonical_alias` update first
+    /// when state changes, so titles should prefer them, then this.
+    pub display_name: Option<String>,
     /// `origin_server_ts` of the most recent content-bearing event (a real
     /// message, not a membership/state/redaction/reaction event), in
     /// milliseconds — the sort key. Falls back to the room's most recent
@@ -98,6 +105,7 @@ impl From<RoomSummary> for RoomDto {
             avatar_url: r.avatar_url,
             canonical_alias: r.canonical_alias,
             room_type: r.room_type,
+            display_name: r.display_name,
             last_activity_ts: r.last_activity_ts,
             last_event_id: r.last_event_id,
             notification_count: r.notification_count,

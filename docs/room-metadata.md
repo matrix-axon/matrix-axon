@@ -155,6 +155,21 @@ Server counts complete [issue 620](https://github.com/matrix-axon/matrix-axon/is
 Two maintenance improvements remain deferred: sharing each account's traversal between the count and redaction workers to reduce database round trips, and automatically checking that the documented SDK patch reproduces the vendored source from the pinned release archive.
 The workers currently share traversal code but keep independent cursors and deadlines.
 
+## Calculated room display names
+
+`GET /v1/rooms` adds nullable `display_name` to each room ([ADR 0118](adr/0118-room-display-names-from-the-sdk.md)).
+It is the name the Matrix spec's naming algorithm gives the room: `m.room.name`, else the canonical alias, else a name built from up to five other members ("Alice, Bob", "Alice, Bob, and 3 others", "Empty Room (was Alice)", "Empty Room").
+matrix-rust-sdk computes it on each sync response that touches the room, excluding service members listed in `io.element.functional_members`; Axon copies the SDK's cached value and never derives it from the lazily loaded member list.
+The member-count worker above writes it in the same per-room step, so it shares that worker's hints, retry queue, paced sweep, and deadlines.
+Only joined rooms are written, values are cut to 512 characters, and an unchanged value is not rewritten.
+A room whose summary row does not exist yet takes a bounded retry and is picked up by a later sweep.
+Existing rows start `null` after the upgrade and fill as the first sweep reaches them.
+A summary rebuild clears the column, as it clears member counts, and the next sweep refills it.
+
+Each applied change publishes a `room_display_name.changed` WebSocket frame with `room_id` and `display_name`.
+Clients should title a room `name`, then `canonical_alias`, then `display_name`, then its room ID: the state fields change as soon as their events arrive, while the calculated name follows the reconciler.
+Warnings carry `source = "sdk_display_name"`; set `RUST_LOG=warn,axon_sync::display_names=trace` to see each stored value's account and room, never the name itself.
+
 ## Alias scope
 
 Advertised aliases are the canonical `alias` and `alt_aliases` in `m.room.canonical_alias`.
@@ -191,6 +206,7 @@ DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-st
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib state_redaction -- --include-ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test member_counts -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib member_counts -- --include-ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib display_names -- --include-ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_state_read_endpoints -- --ignored
 cargo test -p axon-sync --lib room_sweep
 cargo test -p axon-api --test openapi

@@ -1,10 +1,14 @@
 //! Paced reconciliation of SDK summary counts (ADR 0111, issue #620).
+//!
+//! Each per-room step also persists the SDK's calculated display name
+//! (ADR 0118, [`crate::display_names`]), so one traversal covers both.
 use std::{
     collections::{HashSet, VecDeque},
     sync::Arc,
     time::Duration,
 };
 
+use axon_core::LiveFrame;
 use axon_store::{MemberCountWrite, RoomMemberCounts, Store};
 use matrix_sdk::{
     ruma::{OwnedRoomId, RoomId},
@@ -33,10 +37,19 @@ fn snapshot(info: &RoomInfo, observed_at: i64) -> Option<RoomMemberCounts> {
 }
 
 /// Unknown/cold SDK state leaves the last timestamped observation intact.
-async fn reconcile(client: &Client, store: &Store, account_id: Uuid, room_id: &RoomId) -> bool {
+async fn reconcile(
+    client: &Client,
+    store: &Store,
+    account_id: Uuid,
+    room_id: &RoomId,
+    live_tx: &broadcast::Sender<LiveFrame>,
+) -> bool {
     let Some(room) = client.get_room(room_id) else {
         return false;
     };
+    // Before the counts: their clock failure below returns early.
+    let display_name_retry =
+        crate::display_names::reconcile(&room, store, account_id, live_tx).await;
     // Capture ordering before the SDK read, so a leave between this read and
     // persistence fences this snapshot using the same PostgreSQL clock.
     let observed_at = match store.member_count_observation_time().await {
@@ -47,6 +60,7 @@ async fn reconcile(client: &Client, store: &Store, account_id: Uuid, room_id: &R
         }
     };
     persist_snapshot(&room.clone_info(), store, account_id, room_id, observed_at).await
+        || display_name_retry
 }
 
 async fn persist_snapshot(
@@ -99,13 +113,15 @@ impl Pending {
 struct Worker {
     sweep: crate::room_sweep::RoomSweep,
     pending: Pending,
+    live_tx: broadcast::Sender<LiveFrame>,
 }
 
 impl Worker {
-    fn new() -> Self {
+    fn new(live_tx: broadcast::Sender<LiveFrame>) -> Self {
         Self {
             sweep: crate::room_sweep::RoomSweep::new(),
             pending: Pending::default(),
+            live_tx,
         }
     }
 
@@ -148,7 +164,7 @@ impl Worker {
             let retry = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return false,
-                result = tokio::time::timeout(Duration::from_secs(2), reconcile(client, store, account_id, &room_id)) => {
+                result = tokio::time::timeout(Duration::from_secs(2), reconcile(client, store, account_id, &room_id, &self.live_tx)) => {
                     match result {
                         Ok(retry) => retry,
                         Err(_) => {
@@ -172,12 +188,13 @@ pub(crate) async fn watch(
     account_id: Uuid,
     cancel: CancellationToken,
     refresh: Arc<Notify>,
+    live_tx: broadcast::Sender<LiveFrame>,
 ) {
     // Subscribe before the first page; receiver capacity is SDK-owned. Never
     // drain an unbounded update burst or retain an account-sized dedup map.
     let mut updates = client.room_info_notable_update_receiver();
     let mut tick = crate::room_sweep::interval();
-    let mut worker = Worker::new();
+    let mut worker = Worker::new(live_tx);
     loop {
         tokio::select! {
             biased;
@@ -640,7 +657,8 @@ mod tests {
                 .bind(account.account_id).bind(format!("!counts-{i}:localhost")).execute(store.pool()).await.unwrap();
         }
         let cancel = CancellationToken::new();
-        let mut worker = Worker::new();
+        let (live_tx, mut live_rx) = broadcast::channel(64);
+        let mut worker = Worker::new(live_tx.clone());
         let empty = || Err(broadcast::error::TryRecvError::Empty);
         // SDK update before Axon's projection: retain a bounded retry.
         let mut hint = Some(room_id!("!counts:localhost").to_owned());
@@ -750,12 +768,25 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+        // The same traversal stored the SDK's calculated display name
+        // (ADR 0118): no heroes, 503 joined + invited.
+        let (display_name,): (Option<String>,) = sqlx_core::query_as::query_as("SELECT display_name FROM room_summaries WHERE account_id = $1 AND room_id = '!counts:localhost'")
+            .bind(account.account_id).fetch_one(store.pool()).await.unwrap();
+        assert_eq!(display_name.as_deref(), Some("503 people"));
+        let mut announced = Vec::new();
+        while let Ok(frame) = live_rx.try_recv() {
+            if let LiveFrame::RoomDisplayNameChanged(frame) = frame {
+                announced.push((frame.room_id, frame.display_name));
+            }
+        }
+        assert!(announced.contains(&("!counts:localhost".to_owned(), "503 people".to_owned())));
         store.delete_account_row(account.account_id).await.unwrap();
         reconcile(
             &client,
             &store,
             account.account_id,
             room_id!("!counts:localhost"),
+            &live_tx,
         )
         .await;
         assert!(store

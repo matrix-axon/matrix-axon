@@ -14,6 +14,8 @@
 //! `unread_counts.changed` carries a room's SDK-derived unread counts
 //! (issue #313, ADR 0070) — *not* built on the ADR 0056 ephemeral path, since
 //! notification counts are per-room counters, not an ephemeral event.
+//! `room_display_name.changed` carries a room's newly stored SDK-calculated
+//! display name (ADR 0118).
 //! `invite.added` / `invite.removed` carry the pending-invite inbox (ADR 0091).
 //! `account_data.changed` carries persisted Matrix account data (`m.tag`,
 //! `m.direct`, …; ADR 0103). `preferences.changed` carries instance-wide
@@ -57,8 +59,8 @@ use std::time::Duration;
 
 use axon_core::{
     AccountDataFrame, DeviceStateFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame,
-    LiveFrame, PreferencesFrame, SenderTrustFrame, SyncStateFrame, UnreadCountsFrame,
-    VerificationFrame, VerificationFrameKind,
+    LiveFrame, PreferencesFrame, RoomDisplayNameFrame, SenderTrustFrame, SyncStateFrame,
+    UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -237,6 +239,27 @@ impl From<UnreadCountsFrame> for UnreadCountsFramePayload {
             room_id: frame.room_id,
             notification_count: frame.notification_count,
             highlight_count: frame.highlight_count,
+        }
+    }
+}
+
+/// The `type` tag for a room display-name change frame (ADR 0118).
+const ROOM_DISPLAY_NAME_CHANGED: &str = "room_display_name.changed";
+
+/// The wire payload for a `room_display_name.changed` frame: the room's newly
+/// stored SDK-calculated display name, the same value `RoomDto.display_name`
+/// returns. See [`RoomDisplayNameFrame`].
+#[derive(Debug, Serialize)]
+struct RoomDisplayNameFramePayload {
+    room_id: String,
+    display_name: String,
+}
+
+impl From<RoomDisplayNameFrame> for RoomDisplayNameFramePayload {
+    fn from(frame: RoomDisplayNameFrame) -> Self {
+        Self {
+            room_id: frame.room_id,
+            display_name: frame.display_name,
         }
     }
 }
@@ -480,6 +503,11 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             kind: UNREAD_COUNTS_CHANGED,
             account_id: frame.account_id,
             payload: UnreadCountsFramePayload::from(frame),
+        }),
+        LiveFrame::RoomDisplayNameChanged(frame) => serde_json::to_string(&WsEnvelope {
+            kind: ROOM_DISPLAY_NAME_CHANGED,
+            account_id: frame.account_id,
+            payload: RoomDisplayNameFramePayload::from(frame),
         }),
         LiveFrame::SyncStateChanged(frame) => serde_json::to_string(&WsEnvelope {
             kind: ACCOUNT_SYNC_STATE,
@@ -877,6 +905,20 @@ mod tests {
         assert_eq!(v["payload"]["room_id"], "!r:localhost");
         assert_eq!(v["payload"]["notification_count"], 3);
         assert_eq!(v["payload"]["highlight_count"], 1);
+    }
+
+    #[test]
+    fn room_display_name_changed_frame_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::RoomDisplayNameChanged(RoomDisplayNameFrame {
+            account_id,
+            room_id: "!r:localhost".to_owned(),
+            display_name: "Alice, Bob".to_owned(),
+        }));
+        assert_eq!(v["type"], "room_display_name.changed");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["room_id"], "!r:localhost");
+        assert_eq!(v["payload"]["display_name"], "Alice, Bob");
     }
 
     #[test]

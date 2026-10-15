@@ -2914,6 +2914,15 @@ export interface components {
                 /** @description Canonical alias (`m.room.canonical_alias`), if set. */
                 canonical_alias?: string | null;
                 /**
+                 * @description The room's display name as Matrix clients calculate it (ADR 0118):
+                 *     `m.room.name`, else the canonical alias, else a name built from the
+                 *     room's other members, such as `Alice, Bob` or `Empty Room (was Alice)`.
+                 *     Computed by matrix-rust-sdk and cached by Axon; `null` until the sync
+                 *     engine has stored a value. `name` and `canonical_alias` update first
+                 *     when state changes, so titles should prefer them, then this.
+                 */
+                display_name?: string | null;
+                /**
                  * Format: int64
                  * @description SDK-derived highlight count (issue #313, ADR 0070), from
                  *     `Room::num_unread_mentions()`.
@@ -4382,6 +4391,15 @@ export interface components {
             avatar_url?: string | null;
             /** @description Canonical alias (`m.room.canonical_alias`), if set. */
             canonical_alias?: string | null;
+            /**
+             * @description The room's display name as Matrix clients calculate it (ADR 0118):
+             *     `m.room.name`, else the canonical alias, else a name built from the
+             *     room's other members, such as `Alice, Bob` or `Empty Room (was Alice)`.
+             *     Computed by matrix-rust-sdk and cached by Axon; `null` until the sync
+             *     engine has stored a value. `name` and `canonical_alias` update first
+             *     when state changes, so titles should prefer them, then this.
+             */
+            display_name?: string | null;
             /**
              * Format: int64
              * @description SDK-derived highlight count (issue #313, ADR 0070), from

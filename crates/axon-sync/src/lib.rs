@@ -18,6 +18,7 @@ mod backup;
 mod client;
 mod devices;
 mod discovery;
+mod display_names;
 mod engine;
 mod error;
 mod gateway;

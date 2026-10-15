@@ -9,6 +9,7 @@
 mod accounts;
 mod backfill;
 mod device_state;
+mod display_names;
 mod error;
 mod events;
 mod instance_preferences;
@@ -35,6 +36,7 @@ pub use accounts::{
 };
 pub use backfill::{AccountBackfillProgress, RoomBackfillState};
 pub use device_state::{DeviceStateRow, DeviceStateUpsert};
+pub use display_names::DisplayNameWrite;
 pub use error::StoreError;
 pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,

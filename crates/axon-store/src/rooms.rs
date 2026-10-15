@@ -90,6 +90,9 @@ pub struct RoomSummary {
     pub canonical_alias: Option<String>,
     /// `m.room.create` → `content.type`, if set (for example `m.space`).
     pub room_type: Option<String>,
+    /// The room's display name as matrix-rust-sdk calculates it (ADR 0118),
+    /// or `None` until the SDK reconciler has written one.
+    pub display_name: Option<String>,
     /// `origin_ts` of the room's latest content-bearing event (a non-null
     /// `decrypted_body_text` — see [`Store::list_rooms`]), in milliseconds —
     /// the sort key. Falls back to the latest event of any type when the room
@@ -126,6 +129,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
             avatar_url: row.try_get("avatar_url")?,
             canonical_alias: row.try_get("canonical_alias")?,
             room_type: row.try_get("room_type")?,
+            display_name: row.try_get("display_name")?,
             last_activity_ts: row.try_get("last_activity_ts")?,
             last_event_id: row.try_get("last_event_id")?,
             notification_count: row.try_get("notification_count")?,
@@ -220,6 +224,7 @@ impl Store {
             "SELECT a.account_id, ac.user_id AS account_user_id, a.room_id, \
                     a.last_activity_ts, a.last_event_id, \
                     a.name, a.topic, a.avatar_url, a.canonical_alias, a.room_type, \
+                    a.display_name, \
                     COALESCE(ruc.notification_count, 0) AS notification_count, \
                     COALESCE(ruc.highlight_count, 0) AS highlight_count, \
                     ad_tag.content AS tag_content \
