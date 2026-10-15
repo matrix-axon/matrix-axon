@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  pnpmCommand,
   buildDisclosure,
   collectDisclosure,
   pickLicenseFile,
@@ -139,5 +140,32 @@ describe('collectDisclosure', () => {
     expect(result).toHaveLength(1)
     expect(result[0].name).toBe('alpha')
     expect(warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('pnpmCommand', () => {
+  it('runs a JS entry point with the current node, so no shim is needed', () => {
+    expect(
+      pnpmCommand('C:\\Users\\x\\setup-pnpm\\pnpm.cjs', 'C:\\node\\node.exe'),
+    ).toEqual({
+      command: 'C:\\node\\node.exe',
+      args: ['C:\\Users\\x\\setup-pnpm\\pnpm.cjs'],
+    })
+  })
+
+  it('runs a native pnpm binary directly', () => {
+    expect(pnpmCommand('/usr/local/bin/pnpm', '/usr/bin/node')).toEqual({
+      command: '/usr/local/bin/pnpm',
+      args: [],
+    })
+  })
+
+  it('falls back to pnpm when not run by pnpm', () => {
+    const fallback = { command: 'pnpm', args: [] }
+    expect(pnpmCommand(undefined, '/usr/bin/node')).toEqual(fallback)
+    expect(pnpmCommand('C:\\\\p\\\\pnpm.cmd', 'node')).toEqual(fallback)
+    expect(
+      pnpmCommand('/usr/lib/node_modules/npm/bin/npm-cli.js', '/usr/bin/node'),
+    ).toEqual(fallback)
   })
 })

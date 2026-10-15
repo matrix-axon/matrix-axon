@@ -145,3 +145,32 @@ export function collectDisclosure(
     return []
   }
 }
+
+/**
+ * The command that runs this build's own pnpm.
+ *
+ * A bare `execFileSync('pnpm')` cannot work on Windows: `CreateProcess` finds
+ * only `.exe` files, and a pnpm installed by `pnpm/action-setup` or npm is a
+ * `pnpm.cmd` shim, so the spawn failed with ENOENT and the disclosure shipped
+ * empty. pnpm sets `npm_execpath` for the scripts it runs, naming the exact
+ * entry point that is running this build; a JS entry point is run with the
+ * current Node, which needs no shell and no PATH lookup. Outside pnpm
+ * (`execPath` unset, or naming npm or yarn) it falls back to `pnpm`.
+ */
+export function pnpmCommand(
+  execPath: string | undefined,
+  nodePath: string,
+): { command: string; args: string[] } {
+  const name = (execPath?.split(/[\\/]/).pop() ?? '').toLowerCase()
+  if (execPath && name.startsWith('pnpm')) {
+    if (/\.[cm]?js$/.test(name)) {
+      return { command: nodePath, args: [execPath] }
+    }
+    // A `.cmd`/`.bat`/`.ps1` shim is what fails to spawn; only a binary (or
+    // an extensionless executable) can be run directly.
+    if (!/\.(cmd|bat|ps1)$/.test(name)) {
+      return { command: execPath, args: [] }
+    }
+  }
+  return { command: 'pnpm', args: [] }
+}
