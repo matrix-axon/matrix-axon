@@ -58,7 +58,12 @@ fn state_to_api(value: MatrixOAuthAcquireState) -> MatrixOAuthQrFlowDto {
     }
 }
 
-fn map_error(value: MatrixOAuthAcquireError) -> MatrixOAuthQrError {
+/// Map an engine error for either sign-in method. `flow_noun` names the
+/// method in the one message that points at a specific flow.
+pub(crate) fn map_login_error(
+    value: MatrixOAuthAcquireError,
+    flow_noun: &str,
+) -> MatrixOAuthQrError {
     match value {
         MatrixOAuthAcquireError::InvalidUserId => MatrixOAuthQrError::InvalidRequest(
             "expected_user_id is not a valid Matrix user ID".to_owned(),
@@ -66,8 +71,9 @@ fn map_error(value: MatrixOAuthAcquireError) -> MatrixOAuthQrError {
         MatrixOAuthAcquireError::InvalidInput(message) => {
             MatrixOAuthQrError::InvalidRequest(message.to_owned())
         }
+        // The cap is shared by every method, so the message names none.
         MatrixOAuthAcquireError::Capacity => MatrixOAuthQrError::TooMany(
-            "too many Matrix OAuth QR login flows are active or retained; retry later".to_owned(),
+            "too many Matrix OAuth login flows are active or retained; retry later".to_owned(),
         ),
         MatrixOAuthAcquireError::AccountAlreadyActive => {
             MatrixOAuthQrError::Conflict("this Matrix account is already logged in".to_owned())
@@ -79,16 +85,20 @@ fn map_error(value: MatrixOAuthAcquireError) -> MatrixOAuthQrError {
             "this Matrix account is still shutting down; retry shortly".to_owned(),
         ),
         MatrixOAuthAcquireError::FlowAlreadyExists => MatrixOAuthQrError::Conflict(
-            "a Matrix OAuth QR login is already in progress for this Matrix user".to_owned(),
+            "a Matrix OAuth login is already in progress for this Matrix user".to_owned(),
         ),
         MatrixOAuthAcquireError::WrongStage => MatrixOAuthQrError::Conflict(
             "input does not match the flow presentation or current stage".to_owned(),
         ),
-        MatrixOAuthAcquireError::NotFound(flow_id) => {
-            MatrixOAuthQrError::NotFound(format!("Matrix OAuth QR login flow {flow_id} not found"))
-        }
+        MatrixOAuthAcquireError::NotFound(flow_id) => MatrixOAuthQrError::NotFound(format!(
+            "Matrix OAuth {flow_noun} flow {flow_id} not found"
+        )),
         MatrixOAuthAcquireError::Internal => MatrixOAuthQrError::Internal,
     }
+}
+
+fn map_error(value: MatrixOAuthAcquireError) -> MatrixOAuthQrError {
+    map_login_error(value, "QR login")
 }
 
 #[async_trait]
@@ -132,8 +142,7 @@ impl MatrixOAuthQrAcquireService for MatrixOAuthAcquireAdapter {
     }
 
     async fn cancel(&self, flow_id: Uuid) -> Result<(), MatrixOAuthQrError> {
-        self.0.cancel(flow_id);
-        Ok(())
+        self.0.cancel(flow_id).map_err(map_error)
     }
 }
 
@@ -207,7 +216,7 @@ mod tests {
             ),
             (
                 MatrixOAuthAcquireError::FlowAlreadyExists,
-                "a Matrix OAuth QR login is already in progress for this Matrix user",
+                "a Matrix OAuth login is already in progress for this Matrix user",
             ),
         ];
 

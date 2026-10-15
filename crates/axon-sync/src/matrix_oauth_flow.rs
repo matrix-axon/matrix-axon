@@ -1,4 +1,4 @@
-//! Shared bounded-lifetime machinery for Matrix OAuth QR flows.
+//! Shared bounded-lifetime machinery for Matrix OAuth login flows.
 //!
 //! Acquisition and grant flows have different wire state and protocol drivers,
 //! but their capacity lease, finalization fence, terminal retention, and reaper
@@ -13,6 +13,9 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const MAX_CONCURRENT_FLOWS: usize = 8;
 pub(crate) const MAX_RETAINED_FLOWS: usize = 256;
 pub(crate) const FLOW_TTL: Duration = Duration::from_secs(10 * 60);
+/// Browser sign-in may pass through an upstream identity provider and a second
+/// factor on another device, so it gets longer than a QR scan (ADR 0117).
+pub(crate) const BROWSER_FLOW_TTL: Duration = Duration::from_secs(30 * 60);
 pub(crate) const TERMINAL_RETENTION: Duration = Duration::from_secs(2 * 60);
 const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 

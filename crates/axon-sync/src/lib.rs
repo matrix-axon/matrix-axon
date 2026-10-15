@@ -26,6 +26,9 @@ mod lifecycle;
 mod manager;
 mod matrix_oauth;
 mod matrix_oauth_acquire;
+#[cfg(test)]
+mod matrix_oauth_browser_tests;
+mod matrix_oauth_device_grant;
 mod matrix_oauth_flow;
 mod matrix_oauth_grant;
 mod media;
@@ -50,7 +53,8 @@ pub use lifecycle::{AccountLifecycle, LifecycleError};
 pub use matrix_oauth::MatrixOAuthRegistrationManager;
 pub use matrix_oauth_acquire::{
     MatrixOAuthAcquireEngine, MatrixOAuthAcquireError, MatrixOAuthAcquirePresentation,
-    MatrixOAuthAcquireStage, MatrixOAuthAcquireState,
+    MatrixOAuthAcquireStage, MatrixOAuthAcquireState, MatrixOAuthBrowserStage,
+    MatrixOAuthBrowserState,
 };
 pub use matrix_oauth_grant::{
     MatrixOAuthGrantEngine, MatrixOAuthGrantError, MatrixOAuthGrantPresentation,
