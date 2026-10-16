@@ -163,6 +163,60 @@ test('wide content scrolls inside its own box instead of the pane', async ({
   expect(boxes.table).toEqual({ scrollsItself: true, withinPane: true })
 })
 
+test('reply avatars leave room for long quoted text on mobile', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route('**/timeline*', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          events: [
+            message(
+              '$target',
+              100,
+              'A long quoted message. '.repeat(20),
+              `<p>${'A long quoted message. '.repeat(20)}</p>`,
+            ),
+            {
+              ...message('$reply', 200, 'reply body'),
+              relates_to: { 'm.in_reply_to': { event_id: '$target' } },
+            },
+          ],
+          next_cursor: null,
+        },
+      },
+    }),
+  )
+  await page.goto(`/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}`)
+  const quote = page.locator('.reply-context')
+  await expect(quote).toBeVisible()
+
+  const boxes = await quote.evaluate((element) => {
+    const avatar = element
+      .querySelector('.user-avatar')!
+      .getBoundingClientRect()
+    const button = element
+      .querySelector('.event-person')!
+      .getBoundingClientRect()
+    const copy = element
+      .querySelector('.reply-context-copy')!
+      .getBoundingClientRect()
+    return {
+      avatarRight: avatar.right,
+      buttonWidth: button.width,
+      avatarWidth: avatar.width,
+      copyLeft: copy.left,
+      copyRight: copy.right,
+      quoteRight: element.getBoundingClientRect().right,
+    }
+  })
+  expect(boxes.buttonWidth).toBeGreaterThanOrEqual(boxes.avatarWidth)
+  expect(boxes.copyLeft).toBeGreaterThan(boxes.avatarRight)
+  expect(boxes.copyRight).toBeLessThanOrEqual(boxes.quoteRight)
+})
+
 test('formatted reply anchors stay compact on tablet width', async ({
   page,
 }) => {
