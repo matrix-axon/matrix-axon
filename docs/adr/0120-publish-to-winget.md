@@ -44,7 +44,7 @@ A native installer for the server is a separate decision.
 
 ### Manifests are templates in the repository
 
-`packaging/winget/<app>/*.yaml.tmpl` hold the version, installer and `en-US` locale manifests with `@@VERSION@@`, `@@TAG@@`, `@@SHA256@@`, `@@RELEASE_DATE@@` and `@@PUBLISHER@@` placeholders, in the style of `packaging/homebrew/*.tmpl`.
+`packaging/winget/<app>/*.yaml.tmpl` hold the version, installer and `en-US` locale manifests with `@@VERSION@@`, `@@TAG@@`, `@@SHA256@@` and `@@RELEASE_DATE@@` placeholders, in the style of `packaging/homebrew/*.tmpl`.
 They are reviewed with the code, used for the one-time first submission, and give CI something to run `winget validate` against.
 
 Steady-state releases do not render them.
@@ -59,13 +59,16 @@ A job runs once per stable `v*` tag on `windows-latest`, after the three assets 
 - `alpha-*` and `beta-*` tags and a tag older than the version already in `winget-pkgs` are skipped, as in `publish-tap.sh`.
 - It runs in a concurrency group of its own so two tags pushed together do not race, and takes a `workflow_dispatch` tag input to re-run a missed release.
 
-Whether it lives in `cross-build.yml` beside the Homebrew job or in its own `winget.yml` is left to the implementing PR; it must not run before ADR 0119's signed installer is attached.
+It is a job in `cross-build.yml`, beside `homebrew-tap`, with the same tag and manual-run conditions.
+The installer is attached by `desktop-build.yml`, so like the Homebrew job's disk-image wait, the asset wait is what orders it after ADR 0119's signed installer, not `needs:`.
+It runs on `windows-latest` because `wingetcreate` is a Windows tool.
 
 ### Authentication
 
 `wingetcreate --submit` opens a pull request from a fork of `microsoft/winget-pkgs`.
-It needs a token that can push to that fork and open pull requests on `microsoft/winget-pkgs`, stored as a repository secret (`WINGET_TOKEN`).
-Fine-grained tokens cannot target another organization's repository for pull requests, so this is a classic personal access token with `public_repo`, owned by whoever holds the fork.
+The fork is `matrix-axon/winget-pkgs`.
+The token must be able to push to that fork and open pull requests on `microsoft/winget-pkgs`, and is stored as a repository secret (`WINGET_TOKEN`).
+A fine-grained token is limited to resources of one owner and so cannot open pull requests against `microsoft`'s repository, so this is a classic personal access token with `public_repo`, belonging to a member of the `matrix-axon` organization who can push to the fork.
 That is a long-lived credential; it is scoped as narrowly as GitHub allows and rotated with the other release secrets.
 
 ### What this does not change
@@ -73,13 +76,19 @@ That is a long-lived credential; it is scoped as narrowly as GitHub allows and r
 Signing, the release tag and the asset names are untouched.
 Submitting to winget does not make a build "released": the GitHub Release remains the source of truth and winget follows it.
 
-## Open decisions
+## Decided
 
-1. **Publisher identity.** The certificate profile signs as `CN=Adam Kessel`, and winget shows `Publisher` to users.
-   A winget package identifier is `Publisher.Package`; `MatrixAxon.*` is proposed, and `Publisher:` in the locale manifest must be chosen deliberately (`Matrix-Axon` or the signer's name), because it is user-visible and, for the installer, differs from the signing identity on the certificate.
-2. **Fork owner.** Under `ajkessel` or under the `matrix-axon` organization.
-3. **Server as portable only.** Confirmed by implication unless a service installer is wanted.
-4. **First submissions.** Done by hand from a Windows machine after the first signed release, using the templates here.
+1. **Publisher.** `Publisher:` is a free-form string in the manifest, and it is `matrix-axon`.
+   The identifier prefix is `MatrixAxon`.
+   The certificate signs as `CN=Adam Kessel`, so the signer and the winget publisher differ; the first submission checks that this does not fail validation.
+2. **Fork owner.** The `matrix-axon` organization.
+3. **Server is portable only.** A service installer is a separate decision.
+4. **Job location.** `cross-build.yml`.
+
+## Open
+
+1. **Installer publisher string.** `tauri.conf.json` sets no publisher, so the installer's uninstall entry may show none or one derived from the identifier; the first submission reads it from a real install and sets `bundle.publisher` if it is wrong.
+2. **First submissions.** Done by hand from a Windows machine after the first signed release (v0.1.11), using the templates here.
 
 ## Consequences
 
