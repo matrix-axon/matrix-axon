@@ -92,7 +92,8 @@ Submitting to winget does not make a build "released": the GitHub Release remain
 
 1. **Installer publisher string.** Tauri defaults `bundle.publisher` to the second element of the identifier, which would be `matrixaxon`.
    This change sets it to `matrix-axon` so the installer's uninstall entry matches the manifest's `Publisher:`.
-   The installer in 454185 was built by hand from v0.1.10, so what it registers is unconfirmed; v0.1.11 is the first tag build with the setting.
+   The installer in 454185 was built by hand from v0.1.10 and registers `Publisher` = `matrixaxon` under the uninstall key `Axon` (read from a Windows install), not `matrix-axon`; v0.1.11 is the first tag build with the setting.
+   Until then, the manifest's `Publisher:` and the installed app's differ for 0.1.10, which the winget-pkgs pipeline accepted but which may affect how `winget list` and `winget upgrade` match an installed Axon to the package.
    Tauri's NSIS template also keys the stored install directory on the publisher, so installing over an older build should be checked to land in the same folder.
 2. **Merge, then the update job.** The three pull requests are in moderator review.
    The `cross-build.yml` job that submits later versions with `wingetcreate update` is not written yet, and needs the `WINGET_TOKEN` secret.
