@@ -1011,3 +1011,110 @@ fn inactive_account_title_updates_are_pruned_and_ignored() {
     );
     assert!(app.room_title_updates.is_empty());
 }
+
+fn app_with_full_title_backlog() -> App {
+    let mut app = app_with_rooms(Vec::new());
+    // Keep tests within startup so revealing a room does not fetch its timeline.
+    app.bootstrap = BootstrapStage::DeviceState;
+    for i in 0..8192 {
+        let listed = room(&format!("!pending{i}:x"), None, None);
+        assert_eq!(
+            app.handle_live_frame(display_name_frame(&listed, "Pending")),
+            LiveFrameAction::None
+        );
+    }
+    app
+}
+
+#[tokio::test]
+async fn title_overflow_after_recovery_start_queues_a_covering_read() {
+    let mut app = app_with_full_title_backlog();
+    let mut dropped = room("!dropped:x", None, None);
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&dropped, "First drop")),
+        LiveFrameAction::RefreshRooms
+    );
+    app.request_rooms_refresh();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&dropped, "Latest drop")),
+        LiveFrameAction::None
+    );
+    // The pending map is still full, so neither value could be retained.
+    assert_eq!(app.room_title_updates.len(), 8192);
+    dropped.display_name = Some("First drop".to_owned());
+    app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(crate::api::RoomListSnapshot {
+        rooms: vec![dropped.clone()],
+        started,
+    })))
+    .await;
+    assert_eq!(app.rooms.rooms[0].title(), "First drop");
+    assert!(
+        app.rooms_fetch_inflight,
+        "a read covering the later drop must follow the first recovery"
+    );
+    assert!(
+        !app.rooms_fetch_again,
+        "only one follow-up should be dispatched"
+    );
+    dropped.display_name = Some("Latest drop".to_owned());
+    app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(vec![dropped].into())))
+        .await;
+    assert_eq!(app.rooms.rooms[0].title(), "Latest drop");
+    assert!(!app.rooms_fetch_inflight);
+    assert!(!app.rooms_fetch_again);
+    assert!(app.title_update_overflow.is_none());
+}
+
+#[tokio::test]
+async fn stale_title_overflow_response_queues_recovery_and_rearms_overflow() {
+    let stale_started = std::time::Instant::now();
+    let mut app = app_with_full_title_backlog();
+    // A different room-list read has already applied a later snapshot.
+    app.room_snapshot_started = Some(std::time::Instant::now());
+    let dropped = room("!dropped:x", None, None);
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&dropped, "Dropped")),
+        LiveFrameAction::RefreshRooms
+    );
+    app.request_rooms_refresh();
+    app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(crate::api::RoomListSnapshot {
+        rooms: Vec::new(),
+        started: stale_started,
+    })))
+    .await;
+    assert!(
+        app.rooms_fetch_inflight,
+        "skipping a stale response must not strand overflow recovery"
+    );
+    assert!(!app.rooms_fetch_again);
+    assert!(app.title_update_overflow.is_none());
+    // Skipping did not free the backlog. A further drop can request recovery
+    // again and is coalesced behind the newly dispatched read.
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&dropped, "Later drop")),
+        LiveFrameAction::RefreshRooms
+    );
+    app.request_rooms_refresh();
+    assert!(app.rooms_fetch_again);
+}
+
+#[tokio::test]
+async fn failed_title_overflow_recovery_allows_a_later_frame_to_retry() {
+    let mut app = app_with_full_title_backlog();
+    let dropped = room("!dropped:x", None, None);
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&dropped, "Dropped")),
+        LiveFrameAction::RefreshRooms
+    );
+    app.request_rooms_refresh();
+    app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Err(crate::api::ApiError::Request(
+        "offline".to_owned(),
+    ))))
+    .await;
+    assert!(!app.rooms_fetch_inflight);
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&dropped, "Retry")),
+        LiveFrameAction::RefreshRooms
+    );
+}

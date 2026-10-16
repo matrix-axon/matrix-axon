@@ -77,10 +77,17 @@ impl App {
                     value,
                 },
             );
-        } else if !self.title_update_overflow {
-            // One coalesced follow-up read recovers overflow; never fetch per frame.
-            self.title_update_overflow = true;
-            return LiveFrameAction::RefreshRooms;
+        } else {
+            // Keep the latest drop: more frames can arrive after recovery starts.
+            // Only the first asks for a read; snapshot application queues another
+            // if that read started too early to cover all dropped frames.
+            if self
+                .title_update_overflow
+                .replace(std::time::Instant::now())
+                .is_none()
+            {
+                return LiveFrameAction::RefreshRooms;
+            }
         }
         if changed {
             if matches!(self.room_sort, RoomSort::AlphaAsc | RoomSort::AlphaDesc) {
@@ -97,6 +104,7 @@ impl App {
             .room_snapshot_started
             .is_some_and(|last| started < last)
         {
+            self.recover_title_overflow();
             return;
         }
         self.room_snapshot_started = Some(started);
@@ -112,7 +120,6 @@ impl App {
         }
         self.room_title_updates
             .retain(|_, update| update.received > started);
-        self.title_update_overflow = false;
         // A logged-out (deactivated) account keeps its rows in Axon's `events`
         // table, and `GET /v1/rooms` joins accounts without a state filter, so it
         // still lists that account's rooms. Drop rooms for any account we know is
@@ -172,6 +179,20 @@ impl App {
             self.rooms.selected = None;
         }
         self.maybe_start_pin_migration();
+        self.recover_title_overflow();
+    }
+
+    /// A skipped snapshot cannot discharge overflow newer than the last applied
+    /// snapshot. A queued read starts after the drops it is recovering.
+    fn recover_title_overflow(&mut self) {
+        if let Some(dropped) = self.title_update_overflow.take() {
+            if self
+                .room_snapshot_started
+                .is_none_or(|started| started < dropped)
+            {
+                self.request_rooms_refresh();
+            }
+        }
     }
 
     /// Set every listed room's unread badge from the server's

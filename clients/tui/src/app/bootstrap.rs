@@ -237,15 +237,19 @@ impl App {
                 self.request_rooms_refresh();
             }
             BootstrapOutcome::Rooms(result) => {
-                self.rooms_fetch_inflight = false;
+                // Keep this read marked in flight while applying it so overflow
+                // recovery queues behind it without replacing its selection flag.
                 match result {
                     Ok(rooms) => self.apply_room_refresh(rooms),
                     Err(err) => {
+                        // Permit the next overflow frame to retry after failure.
+                        self.title_update_overflow = None;
                         if !self.is_mid_command() {
                             self.status = Status::from(format!("room refresh failed: {err}"));
                         }
                     }
                 }
+                self.rooms_fetch_inflight = false;
                 // Decide this before any coalesced re-request goes out:
                 // `request_rooms_refresh` re-reads the selection into
                 // `rooms_fetch_had_selection` for the fetch it dispatches, and

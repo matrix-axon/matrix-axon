@@ -24,7 +24,9 @@
 - Room titles follow ADR 0118: nonblank `name`, then `canonical_alias`, then the server's `display_name`, then room ID.
   Never derive room titles from `/members`; those reads still hydrate timeline sender names.
   Apply `room_display_name.changed` and title state events by account and room, retaining newer live fields across older room-list responses.
-  Unknown-room frames are held with bounded storage rather than fetching the room list per frame; reconnect and `/refresh` recover missed updates.
+  Unknown-room frames are held with bounded storage rather than fetching the room list per frame.
+  Overflow recovery coalesces reads until a snapshot requested after the latest dropped frame can cover it; failed reads allow the next overflow frame to retry.
+  Reconnect and `/refresh` recover other missed updates.
 - Room switching should remain forgiving within the active account filter: visible-list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
 
 ## Spaces (ADR 0103)

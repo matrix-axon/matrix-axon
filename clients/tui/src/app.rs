@@ -848,7 +848,8 @@ pub(crate) struct App {
     /// Live title fields retained until a newer room-list request covers them.
     pub(crate) room_title_updates: HashMap<(RoomKey, rooms::TitleField), rooms::TitleUpdate>,
     pub(crate) room_snapshot_started: Option<std::time::Instant>,
-    pub(crate) title_update_overflow: bool,
+    /// Latest dropped title frame, awaiting a snapshot requested after it.
+    pub(crate) title_update_overflow: Option<std::time::Instant>,
     /// In-flight and decoded images, account-scoped and bounded by LRU order.
     pub(crate) image_cache: HashMap<MediaKey, ImageState>,
     image_cache_order: VecDeque<MediaKey>,
@@ -1271,7 +1272,7 @@ impl App {
             server_favourite_accounts: None,
             room_title_updates: HashMap::new(),
             room_snapshot_started: None,
-            title_update_overflow: false,
+            title_update_overflow: None,
             device_id: Uuid::nil(),
             drafts: HashMap::new(),
             pending_draft_put: None,
