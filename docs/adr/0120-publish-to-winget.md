@@ -80,21 +80,27 @@ Submitting to winget does not make a build "released": the GitHub Release remain
 
 1. **Publisher.** `Publisher:` is a free-form string in the manifest, and it is `matrix-axon`.
    The identifier prefix is `MatrixAxon`.
-   The certificate signs as `CN=Adam Kessel`, so the signer and the winget publisher differ; the first submission checks that this does not fail validation.
+   The certificate signs as `CN=Adam Kessel`, so the signer and the winget publisher differ; the winget-pkgs validation pipeline accepted that difference in all three first submissions.
 2. **Fork owner.** The `matrix-axon` organization.
 3. **Server is portable only.** A service installer is a separate decision.
 4. **Job location.** `cross-build.yml`.
+5. **First submissions.** Made by hand at version 0.1.10 from the `matrix-axon/winget-pkgs` fork, using `packaging/winget/render.sh` and its README: [454178](https://github.com/microsoft/winget-pkgs/pull/454178) (`MatrixAxon.AxonServer`), [454182](https://github.com/microsoft/winget-pkgs/pull/454182) (`MatrixAxon.AxonTui`) and [454185](https://github.com/microsoft/winget-pkgs/pull/454185) (`MatrixAxon.Axon`).
+   Each passed `winget validate`, a local `winget install --manifest`, and the winget-pkgs pipeline, and is awaiting moderator review.
+   The tag build for v0.1.10 attached no installer (the verify step failed, fixed by the CI change that follows it), so the installer in 454185 is a signed build uploaded to that release by hand.
 
 ## Open
 
 1. **Installer publisher string.** Tauri defaults `bundle.publisher` to the second element of the identifier, which would be `matrixaxon`.
    This change sets it to `matrix-axon` so the installer's uninstall entry matches the manifest's `Publisher:`.
-   Tauri's NSIS template also keys the stored install directory on it, so the first submission checks that an install over an older build lands in the same folder.
-2. **First submissions.** Done by hand from a Windows machine after the first signed release (v0.1.11), using the templates here.
+   The installer in 454185 was built by hand from v0.1.10, so what it registers is unconfirmed; v0.1.11 is the first tag build with the setting.
+   Tauri's NSIS template also keys the stored install directory on the publisher, so installing over an older build should be checked to land in the same folder.
+2. **Merge, then the update job.** The three pull requests are in moderator review.
+   The `cross-build.yml` job that submits later versions with `wingetcreate update` is not written yet, and needs the `WINGET_TOKEN` secret.
 
 ## Consequences
 
 - Winget users get `winget install MatrixAxon.Axon`, `MatrixAxon.AxonServer` and `MatrixAxon.AxonTui`, with SmartScreen reputation bootstrapped by the signature.
 - Each stable release opens up to three pull requests on `microsoft/winget-pkgs`, merged after Microsoft's validation, so a version appears in winget hours to days after the GitHub Release.
 - A failed validation (a flagged installer, a hash mismatch caused by re-uploading an asset) is a manual fix on the `winget-pkgs` side; replacing a release asset after the submission invalidates it, so assets are not replaced once a tag has published.
-- The installer's `ProductCode` and the exact uninstall behavior are not in the templates: they must be read from a real install on Windows during the first submission.
+- The installer template carries no `ProductCode` or `AppsAndFeaturesEntries`, and the submitted manifest passed without them.
+  If `winget upgrade` does not recognize an installed Axon as the winget package, add them from the install's registry entry (the README shows how).
