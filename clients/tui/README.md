@@ -152,6 +152,12 @@ An account filter limits Alt-Up/Down moves while preserving other accounts' orde
 A failed save keeps the pending order visible and retries with backoff; the pane heading indicates an unsaved/unavailable order.
 An unset order uses space titles until the first explicit move.
 
+Room titles use the room name, canonical alias, server-calculated display name, then room ID (ADR 0118).
+Unnamed groups and DMs use the same server naming rules, including service-member exclusion and empty-room wording.
+Calculated names update live and work with `/room`, Tab completion, name filters, and alphabetical sorting.
+The TUI does not fetch member lists to calculate titles.
+Older servers and rooms awaiting the server's first reconciliation sweep fall back to room ID when no name or alias is available.
+
 Space membership loads in the background for visible roots and a small lookahead.
 Previously loaded membership invalidated by live updates is refreshed through the same bounded pool, even off screen.
 Startup waits for saved root order and the first group's membership before opening the top room, after loading its read markers and drafts.

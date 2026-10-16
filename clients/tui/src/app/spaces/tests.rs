@@ -80,7 +80,7 @@ async fn launch_waits_for_order_membership_and_device_state_before_opening_top_r
     app.apply_room_refresh(rooms.clone());
     assert_eq!(app.selected_room().unwrap().room_id, "!c:srv");
     app.bootstrap = BootstrapStage::Rooms;
-    app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(rooms)))
+    app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(rooms.into())))
         .await;
     assert!(app.selected_room().is_none());
     assert!(app.space_launch_pending());
@@ -1451,4 +1451,24 @@ fn flapping_reconnects_coalesce_refresh_and_preserve_failed_read_backoff() {
     assert!(app.spaces.order_read_again);
     app.sweep_space_reconnect_refresh(now + Duration::from_secs(2));
     assert!(!app.rooms_fetch_again);
+}
+
+#[test]
+fn live_calculated_space_title_preserves_header_focus_and_timeline_selection() {
+    let mut app = app();
+    let key = RoomKey::from(&app.rooms.rooms[0]);
+    app.rooms.rooms[0].name = None;
+    app.rooms.selected = Some(2);
+    let selected = RoomKey::from(app.selected_room().unwrap());
+    app.spaces.focus = Some(key.clone());
+    app.handle_live_frame(LiveFrame::RoomDisplayName {
+        account_id: key.account_id,
+        payload: crate::api::RoomDisplayNameChangedDto {
+            room_id: key.room_id.clone(),
+            display_name: "Calculated space".to_owned(),
+        },
+    });
+    assert_eq!(app.spaces.focus, Some(key));
+    assert_eq!(RoomKey::from(app.selected_room().unwrap()), selected);
+    assert!(app.sidebar_rows(None).iter().any(|row| matches!(row, SidebarRow::Space { index, .. } if app.rooms.rooms[*index].title() == "Calculated space")));
 }
