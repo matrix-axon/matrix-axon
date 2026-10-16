@@ -103,5 +103,6 @@ Submitting to winget does not make a build "released": the GitHub Release remain
 - Winget users get `winget install MatrixAxon.Axon`, `MatrixAxon.AxonServer` and `MatrixAxon.AxonTui`, with SmartScreen reputation bootstrapped by the signature.
 - Each stable release opens up to three pull requests on `microsoft/winget-pkgs`, merged after Microsoft's validation, so a version appears in winget hours to days after the GitHub Release.
 - A failed validation (a flagged installer, a hash mismatch caused by re-uploading an asset) is a manual fix on the `winget-pkgs` side; replacing a release asset after the submission invalidates it, so assets are not replaced once a tag has published.
-- The installer template carries no `ProductCode` or `AppsAndFeaturesEntries`, and the submitted manifest passed without them.
-  If `winget upgrade` does not recognize an installed Axon as the winget package, add them from the install's registry entry (the README shows how).
+- The installer template carries `ProductCode: Axon`, the name of the installer's uninstall key, so winget can match an installed Axon to the package whatever its publisher string is.
+  The submitted 0.1.10 manifest has no `ProductCode`; it takes effect from the next version.
+  If `winget upgrade` still does not recognize an installed Axon, add `AppsAndFeaturesEntries` from the install's registry entry.

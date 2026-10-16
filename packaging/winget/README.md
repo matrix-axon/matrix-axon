@@ -54,7 +54,8 @@ winget uninstall ARP\User\X64\MatrixAxon.Axon__DefaultSource
 ```
 
 For the desktop installer (`MatrixAxon.Axon`), the install is per user and silent (`/S`).
-After it installs, read the uninstall entry once, because the manifest does not yet carry a `ProductCode` or `AppsAndFeaturesEntries`:
+Its uninstall entry is keyed `Axon`, which the installer template carries as `ProductCode`, so winget recognizes an installed Axon whatever publisher string the entry shows.
+To read the entry:
 
 ```powershell
 Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall |
@@ -62,8 +63,9 @@ Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall |
   Select-Object PSChildName, DisplayName, Publisher, DisplayVersion
 ```
 
-Compare `Publisher` with the manifest's `matrix-axon`. An installer built before `bundle.publisher` was set shows Tauri's default (`matrixaxon`).
-Add `AppsAndFeaturesEntries` (with `DisplayName`, `Publisher`, `DisplayVersion` and `ProductCode` as shown) to the installer template if they differ, or wait for a release built with the setting.
+`PSChildName` should be `Axon`.
+`Publisher` is `matrixaxon` for the hand-built 0.1.10 installer, whose build predates `bundle.publisher`, and should be `matrix-axon` from v0.1.11.
+After installing the rendered manifest, check that `winget list --id MatrixAxon.Axon` shows the package, and that an installed 0.1.10 reports an upgrade once a newer version is available.
 Also install over an older build, if one is around, and confirm it lands in the same folder (ADR 0120).
 
 ### 3. Open the pull request from the fork
