@@ -87,7 +87,9 @@ Submitting to winget does not make a build "released": the GitHub Release remain
 
 ## Open
 
-1. **Installer publisher string.** `tauri.conf.json` sets no publisher, so the installer's uninstall entry may show none or one derived from the identifier; the first submission reads it from a real install and sets `bundle.publisher` if it is wrong.
+1. **Installer publisher string.** Tauri defaults `bundle.publisher` to the second element of the identifier, which would be `matrixaxon`.
+   This change sets it to `matrix-axon` so the installer's uninstall entry matches the manifest's `Publisher:`.
+   Tauri's NSIS template also keys the stored install directory on it, so the first submission checks that an install over an older build lands in the same folder.
 2. **First submissions.** Done by hand from a Windows machine after the first signed release (v0.1.11), using the templates here.
 
 ## Consequences
