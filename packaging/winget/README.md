@@ -29,6 +29,9 @@ This downloads each release asset, hashes it, and writes `manifests/m/MatrixAxon
 The SHA-256 is of the bytes the script downloaded, and it should equal the digest GitHub shows for the asset (`gh release view TAG --json assets`).
 Name `axon` as well to render the desktop installer.
 
+Each rendered file is also parsed as YAML, with `ruby` or `python3` with PyYAML if either is installed, so a template that is not valid YAML fails here rather than in `winget validate`.
+With neither installed (typical for Git Bash on Windows) the script warns and skips the check.
+
 ### 2. Validate and test each package
 
 ```powershell

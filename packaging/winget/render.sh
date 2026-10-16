@@ -39,6 +39,26 @@ sha256_file() {
 	fi
 }
 
+# A manifest that is not valid YAML only fails later, inside `winget validate`
+# or the submission pipeline. Parse it here with whatever is installed: ruby
+# or python3 with PyYAML. With neither, say so and carry on.
+yaml_parser=
+if command -v ruby >/dev/null 2>&1; then
+	yaml_parser=ruby
+elif python3 -c 'import yaml' >/dev/null 2>&1; then
+	yaml_parser=python3
+else
+	echo "warning: neither ruby nor python3 with PyYAML found; not parsing the manifests as YAML" >&2
+fi
+
+check_yaml() {
+	case "$yaml_parser" in
+	ruby) ruby -rdate -ryaml -e 'YAML.safe_load(File.read(ARGV[0]), permitted_classes: [Date])' "$1" ;;
+	python3) python3 -I -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' "$1" ;;
+	*) return 0 ;;
+	esac
+}
+
 for app in "${apps[@]}"; do
 	case "$app" in
 	axon-server) id=MatrixAxon.AxonServer pkg=AxonServer asset=axon-server-windows.zip ;;
@@ -71,5 +91,12 @@ for app in "${apps[@]}"; do
 		echo "unfilled placeholder in $dest" >&2
 		exit 1
 	fi
+	for manifest in "$dest"/*.yaml; do
+		if ! check_yaml "$manifest" 2>"$work/yaml.err"; then
+			echo "$manifest is not valid YAML:" >&2
+			head -n 1 "$work/yaml.err" >&2
+			exit 1
+		fi
+	done
 	echo "$id $version  $asset  sha256=$sha  -> $dest"
 done
