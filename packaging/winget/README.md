@@ -39,19 +39,19 @@ $dir = "$HOME\winget-out\manifests\m\MatrixAxon\AxonServer\0.1.10"
 winget validate --manifest $dir
 winget install --manifest $dir
 axon-server --version     # resolved through the portable alias; open a new shell first
-winget list MatrixAxon     # a local-manifest install is listed under an ID that is not MatrixAxon.AxonServer
-winget uninstall <the Id column from winget list>
+winget uninstall ARP\User\X64\MatrixAxon.AxonServer__DefaultSource
 ```
 
 Repeat for `AxonTui` (`axon-tui --version`).
 
-A package installed from a local manifest is not known to winget by its package identifier, so `winget uninstall MatrixAxon.Axon` finds nothing.
-For the desktop installer, uninstall it by its ARP identifier:
+A package installed from a local manifest is not known to winget by its package identifier, so `winget uninstall MatrixAxon.AxonServer` finds nothing.
+All three are listed (`winget list MatrixAxon`) and uninstalled by an ARP identifier:
 
 ```powershell
+winget uninstall ARP\User\X64\MatrixAxon.AxonServer__DefaultSource
+winget uninstall ARP\User\X64\MatrixAxon.AxonTui__DefaultSource
 winget uninstall ARP\User\X64\MatrixAxon.Axon__DefaultSource
 ```
-Fix anything `validate` reports in the **templates**, not in the rendered copy, and commit it, so the automated job inherits the fix.
 
 For the desktop installer (`MatrixAxon.Axon`), the install is per user and silent (`/S`).
 After it installs, read the uninstall entry once, because the manifest does not yet carry a `ProductCode` or `AppsAndFeaturesEntries`:
