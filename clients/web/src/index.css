@@ -2984,6 +2984,11 @@ a.utd-recover:hover {
   min-width: 0;
 }
 
+/* Keep the button as wide as its fixed-size avatar when the quote wraps. */
+.reply-context > .event-person {
+  flex: none;
+}
+
 .reply-context-body .body-html {
   display: inline;
 }
