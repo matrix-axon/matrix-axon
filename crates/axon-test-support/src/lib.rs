@@ -32,3 +32,18 @@ pub fn ec_key() -> &'static EcTestKey {
         }
     })
 }
+
+/// An in-memory RSA PKCS#8 PEM, for tests that must reject a non-EC key.
+/// Generated once per process and never written to disk.
+pub fn rsa_key_pem() -> &'static str {
+    use aws_lc_rs::encoding::AsDer;
+    use aws_lc_rs::rsa::{KeyPair, KeySize};
+    use base64::Engine;
+    static PEM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PEM.get_or_init(|| {
+        let key = KeyPair::generate(KeySize::Rsa2048).expect("generate rsa");
+        let der = key.as_der().expect("pkcs8");
+        let body = base64::engine::general_purpose::STANDARD.encode(der.as_ref());
+        format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n")
+    })
+}

@@ -442,7 +442,7 @@ impl Store {
         Self::lock_credentials(&mut tx).await?;
         let Some(row) = sqlx_core::query::query(
             "SELECT revoked_at IS NOT NULL AS revoked, expires_at IS NULL AS non_expiring, \
-                    oauth_identity_id, client_id \
+                    oauth_identity_id, client_id, session_id \
                FROM tokens WHERE id = $1 FOR UPDATE",
         )
         .bind(id)
@@ -462,12 +462,19 @@ impl Store {
             (Some(identity), Some(client)) => Some((identity, client)),
             _ => None,
         };
+        // The access token's own session, plus every refresh session this
+        // revoke ends. A non-expiring credential has only the first. The
+        // delete is in this transaction, so a lockout refusal rolls it back.
+        let mut ended_sessions = vec![row.try_get::<Uuid, _>("session_id")?];
         if row.try_get::<bool, _>("revoked")? {
             // Revoked earlier, perhaps by a build that did not end sessions:
-            // asking again must still leave the session unable to renew.
+            // asking again must still leave the session unable to renew, and
+            // must still drop registrations that revoke left behind.
             if let Some((identity, client)) = &session {
-                Self::end_sessions_in_tx(&mut tx, *identity, client).await?;
+                ended_sessions
+                    .extend(Self::end_sessions_in_tx(&mut tx, *identity, Some(client)).await?);
             }
+            crate::push::delete_push_registrations_in_tx(&mut tx, &ended_sessions).await?;
             tx.commit().await?;
             return Ok(TokenRevocation::AlreadyRevoked);
         }
@@ -476,8 +483,10 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         if let Some((identity, client)) = &session {
-            Self::end_sessions_in_tx(&mut tx, *identity, client).await?;
+            ended_sessions
+                .extend(Self::end_sessions_in_tx(&mut tx, *identity, Some(client)).await?);
         }
+        crate::push::delete_push_registrations_in_tx(&mut tx, &ended_sessions).await?;
         // Counted on the state this transaction would commit, and only when
         // this token was a survivor to begin with.
         if let Some(usable_providers) = guard {
@@ -507,43 +516,93 @@ impl Store {
     /// would wait for and then not see. Locking the rows first does the
     /// waiting; the `UPDATE` then runs on a snapshot that includes whatever
     /// that rotation committed.
-    async fn end_sessions_in_tx(
+    pub(crate) async fn end_sessions_in_tx(
         tx: &mut Transaction<'_, Postgres>,
         oauth_identity_id: Uuid,
-        client_id: &str,
-    ) -> Result<(), StoreError> {
-        for sql in [
+        client_id: Option<&str>,
+    ) -> Result<Vec<Uuid>, StoreError> {
+        // `$2 IS NULL` revokes every client. A single UPDATE would miss a
+        // rotation that inserted its replacement after this statement's
+        // snapshot, so the rows are locked first.
+        sqlx_core::query::query(
             "SELECT id FROM oauth_refresh_tokens \
-              WHERE oauth_identity_id = $1 AND client_id = $2 AND revoked_at IS NULL \
+              WHERE oauth_identity_id = $1 \
+                AND ($2::text IS NULL OR client_id = $2) \
+                AND revoked_at IS NULL \
                 FOR UPDATE",
+        )
+        .bind(oauth_identity_id)
+        .bind(client_id)
+        .execute(&mut **tx)
+        .await?;
+        let rows = sqlx_core::query::query(
             "UPDATE oauth_refresh_tokens SET revoked_at = now() \
-              WHERE oauth_identity_id = $1 AND client_id = $2 AND revoked_at IS NULL",
-        ] {
-            sqlx_core::query::query(sql)
-                .bind(oauth_identity_id)
-                .bind(client_id)
-                .execute(&mut **tx)
-                .await?;
+              WHERE oauth_identity_id = $1 \
+                AND ($2::text IS NULL OR client_id = $2) \
+                AND revoked_at IS NULL \
+              RETURNING session_id",
+        )
+        .bind(oauth_identity_id)
+        .bind(client_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        let mut session_ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            session_ids.push(row.try_get("session_id")?);
         }
-        Ok(())
+        Ok(session_ids)
     }
 
-    /// Revoke every still-active token minted for `oauth_identity_id`.
+    /// Revoke every still-active access token minted for `oauth_identity_id`.
     /// Returns the number of tokens revoked without removing the identity.
-    /// Unbinding uses [`delete_identity`](Self::delete_identity) instead,
-    /// which invalidates all credentials and removes the identity atomically.
+    ///
+    /// This does not revoke refresh tokens, so a session with a live refresh
+    /// token stays live and keeps its push registration. A session this call
+    /// leaves with no live credential loses its registrations in the same
+    /// transaction. Signing out is [`delete_identity`](Self::delete_identity)
+    /// or [`revoke_token`](Self::revoke_token), not this method.
     pub async fn revoke_tokens_for_identity(
         &self,
         oauth_identity_id: Uuid,
     ) -> Result<u64, StoreError> {
-        let result = sqlx_core::query::query(
+        let mut tx = self.pool.begin().await?;
+        Self::lock_credentials(&mut tx).await?;
+        let rows = sqlx_core::query::query(
             "UPDATE tokens SET revoked_at = now() \
-              WHERE oauth_identity_id = $1 AND revoked_at IS NULL",
+              WHERE oauth_identity_id = $1 AND revoked_at IS NULL \
+              RETURNING session_id",
         )
         .bind(oauth_identity_id)
-        .execute(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
-        Ok(result.rows_affected())
+        let mut session_ids: Vec<Uuid> = Vec::with_capacity(rows.len());
+        for row in &rows {
+            session_ids.push(row.try_get("session_id")?);
+        }
+        if !session_ids.is_empty() {
+            sqlx_core::query::query(
+                "DELETE FROM push_registrations AS registration \
+                  WHERE registration.session_id = ANY($1) \
+                    AND NOT EXISTS ( \
+                        SELECT 1 FROM tokens \
+                         WHERE tokens.session_id = registration.session_id \
+                           AND tokens.revoked_at IS NULL \
+                           AND (tokens.expires_at IS NULL OR tokens.expires_at > now()) \
+                    ) \
+                    AND NOT EXISTS ( \
+                        SELECT 1 FROM oauth_refresh_tokens \
+                         WHERE oauth_refresh_tokens.session_id = registration.session_id \
+                           AND oauth_refresh_tokens.revoked_at IS NULL \
+                           AND (oauth_refresh_tokens.expires_at IS NULL \
+                                OR oauth_refresh_tokens.expires_at > now()) \
+                    )",
+            )
+            .bind(&session_ids)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(u64::try_from(rows.len()).unwrap_or(0))
     }
 
     /// Bind the first OAuth identity and mint its access/refresh pair through
