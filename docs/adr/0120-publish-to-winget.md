@@ -105,4 +105,5 @@ Submitting to winget does not make a build "released": the GitHub Release remain
 - A failed validation (a flagged installer, a hash mismatch caused by re-uploading an asset) is a manual fix on the `winget-pkgs` side; replacing a release asset after the submission invalidates it, so assets are not replaced once a tag has published.
 - The installer template carries `ProductCode: Axon`, the name of the installer's uninstall key, so winget can match an installed Axon to the package whatever its publisher string is.
   The submitted 0.1.10 manifest has no `ProductCode`; it takes effect from the next version.
+  `winget validate` accepts the field, but a local-manifest install is not matched to the community package whatever the manifest holds, so its effect can only be confirmed with a merged version installed from the community source.
   If `winget upgrade` still does not recognize an installed Axon, add `AppsAndFeaturesEntries` from the install's registry entry.

@@ -65,7 +65,8 @@ Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall |
 
 `PSChildName` should be `Axon`.
 `Publisher` is `matrixaxon` for the hand-built 0.1.10 installer, whose build predates `bundle.publisher`, and should be `matrix-axon` from v0.1.11.
-After installing the rendered manifest, check that `winget list --id MatrixAxon.Axon` shows the package, and that an installed 0.1.10 reports an upgrade once a newer version is available.
+A local-manifest install is not matched to the community-source package, so `winget list Axon` shows `ARP\User\X64\Axon` whether or not the manifest carries `ProductCode`; that listing does not test it.
+The field can only be checked once a version that carries it is in `winget-pkgs`: install it with `winget install MatrixAxon.Axon`, then `winget list --id MatrixAxon.Axon` should show the package and `winget upgrade` should offer later versions.
 Also install over an older build, if one is around, and confirm it lands in the same folder (ADR 0120).
 
 ### 3. Open the pull request from the fork
