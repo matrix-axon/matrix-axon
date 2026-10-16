@@ -1,5 +1,5 @@
 //! The room list: visibility filters, refresh reconciliation, cache pruning, and
-//! the titles derived from a room summary or its members.
+//! the titles supplied by room summaries.
 
 use super::support::*;
 use crate::app::*;
@@ -50,13 +50,12 @@ fn room_filter_name_cycles_to_all() {
 }
 
 #[test]
-fn name_filter_matches_member_derived_room_title() {
+fn name_filter_matches_calculated_room_title() {
     let dm = room("!dm:example.com", None, None);
     let group = room("!g:example.com", None, Some("Team"));
     let mut app = app_with_rooms(vec![dm.clone(), group]);
     app.rooms.selected = None;
-    app.room_titles
-        .insert(RoomKey::from(&dm), "Alice Example".to_owned());
+    app.rooms.rooms[0].display_name = Some("Alice Example".to_owned());
 
     app.room_filter = RoomFilter::Name("alice".to_owned());
 
@@ -470,86 +469,17 @@ fn filtered_room_refresh_does_not_select_a_hidden_room() {
 }
 
 #[test]
-fn whereami_adds_dm_name_line_for_unnamed_room() {
-    // An unnamed room (no name/alias) behaves as a DM.
-    let dm = room("!dm:example.com", None, None);
-    let mut app = app_with_rooms(vec![dm.clone()]);
+fn whereami_shows_calculated_name_for_unnamed_group() {
+    let mut group = room("!group:example.com", None, None);
+    group.display_name = Some("Alice, Bob".to_owned());
+    let mut app = app_with_rooms(vec![group]);
     app.rooms.selected = Some(0);
-
-    // No derived title yet → no DM name line.
-    let before = crate::ui::popup_room_info_lines(&app);
-    assert!(!before.iter().any(|line| line.starts_with("DM name:")));
-
-    // Once a /members fetch resolves the partner, the line appears right after
-    // "Name:" without removing any existing information.
-    app.room_titles
-        .insert(RoomKey::from(&dm), "jamie".to_owned());
-    let after = crate::ui::popup_room_info_lines(&app);
-    assert!(
-        after.iter().any(|line| line == "DM name: jamie"),
-        "lines: {after:?}"
-    );
-    assert!(after.iter().any(|line| line.starts_with("Matrix ID:")));
-}
-
-#[test]
-fn dm_title_prefers_other_members_name() {
-    let members = vec![
-        MemberDto {
-            user_id: "@me:example.com".to_owned(),
-            display_name: Some("Me".to_owned()),
-        },
-        MemberDto {
-            user_id: "@jamie:bostoncoop.net".to_owned(),
-            display_name: Some("jamie".to_owned()),
-        },
-    ];
-    assert_eq!(
-        dm_title_from_members(Some("@me:example.com"), &members).as_deref(),
-        Some("jamie")
-    );
-}
-
-#[test]
-fn dm_title_falls_back_to_localpart_without_display_name() {
-    let members = vec![
-        MemberDto {
-            user_id: "@me:example.com".to_owned(),
-            display_name: None,
-        },
-        MemberDto {
-            user_id: "@jamie:bostoncoop.net".to_owned(),
-            display_name: None,
-        },
-    ];
-    assert_eq!(
-        dm_title_from_members(Some("@me:example.com"), &members).as_deref(),
-        Some("@jamie")
-    );
-}
-
-#[test]
-fn dm_title_summarizes_large_rooms_and_skips_note_to_self() {
-    let mk = |uid: &str, name: &str| MemberDto {
-        user_id: uid.to_owned(),
-        display_name: Some(name.to_owned()),
-    };
-    // Only self → None, so the caller keeps the room id fallback.
-    let solo = vec![mk("@me:example.com", "Me")];
-    assert_eq!(dm_title_from_members(Some("@me:example.com"), &solo), None);
-
-    // Four others → first three (sorted by user id) plus "+1".
-    let many = vec![
-        mk("@me:example.com", "Me"),
-        mk("@a:x", "Al"),
-        mk("@b:x", "Bo"),
-        mk("@c:x", "Ci"),
-        mk("@d:x", "Di"),
-    ];
-    assert_eq!(
-        dm_title_from_members(Some("@me:example.com"), &many).as_deref(),
-        Some("Al, Bo, Ci, +1")
-    );
+    let lines = crate::ui::popup_room_info_lines(&app);
+    assert!(lines.iter().any(|line| line == "Name: Alice, Bob"));
+    assert!(lines
+        .iter()
+        .any(|line| line == "Matrix ID: !group:example.com"));
+    assert!(!lines.iter().any(|line| line.starts_with("DM name:")));
 }
 
 #[test]
@@ -864,4 +794,220 @@ fn opening_a_room_with_older_history_names_the_ways_to_reach_it() {
         .messages
         .history_cursors
         .contains_key(&RoomKey::from(&room)));
+}
+
+fn display_name_frame(room: &RoomDto, title: &str) -> crate::api::LiveFrame {
+    crate::api::LiveFrame::RoomDisplayName {
+        account_id: room.account_id,
+        payload: crate::api::RoomDisplayNameChangedDto {
+            room_id: room.room_id.clone(),
+            display_name: title.to_owned(),
+        },
+    }
+}
+
+#[test]
+fn live_calculated_title_updates_sort_filter_and_preserves_selection() {
+    let mut first = room("!a:x", None, None);
+    first.display_name = Some("Alpha".to_owned());
+    let mut second = room("!b:x", None, None);
+    second.display_name = Some("Bravo".to_owned());
+    let mut app = app_with_rooms(vec![first.clone(), second]);
+    app.rooms.selected = Some(0);
+    app.room_sort = RoomSort::AlphaAsc;
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&first, "Zulu")),
+        LiveFrameAction::None
+    );
+    assert_eq!(app.rooms.rooms[0].title(), "Bravo");
+    assert_eq!(app.selected_room().unwrap().room_id, first.room_id);
+    app.rooms.selected = None;
+    app.room_filter = RoomFilter::Name("zul".to_owned());
+    assert_eq!(app.visible_room_indices(), vec![1]);
+}
+
+#[test]
+fn live_calculated_titles_are_account_scoped_and_do_not_override_state() {
+    let mut first = room("!same:x", None, Some("Named"));
+    first.account_id = Uuid::from_u128(1);
+    let mut second = first.clone();
+    second.account_id = Uuid::from_u128(2);
+    second.name = None;
+    second.canonical_alias = Some("#alias:x".to_owned());
+    let mut app = app_with_rooms(vec![first.clone(), second]);
+    app.handle_live_frame(display_name_frame(&first, "Calculated"));
+    assert_eq!(app.rooms.rooms[0].title(), "Named");
+    assert_eq!(
+        app.rooms.rooms[0].display_name.as_deref(),
+        Some("Calculated")
+    );
+    assert_eq!(app.rooms.rooms[1].display_name, None);
+    assert_eq!(app.rooms.rooms[1].title(), "#alias:x");
+}
+
+#[test]
+fn equal_live_title_survives_an_older_room_response() {
+    let mut listed = room("!room:x", None, None);
+    listed.display_name = Some("Current".to_owned());
+    let mut app = app_with_rooms(vec![listed.clone()]);
+    let started = std::time::Instant::now();
+    app.handle_live_frame(display_name_frame(&listed, "Current"));
+    listed.display_name = Some("Stale".to_owned());
+    app.apply_room_refresh(crate::api::RoomListSnapshot {
+        rooms: vec![listed],
+        started,
+    });
+    assert_eq!(app.rooms.rooms[0].title(), "Current");
+    assert_eq!(app.room_title_updates.len(), 1);
+}
+
+#[test]
+fn unknown_title_frame_survives_initial_load_without_triggering_a_fetch() {
+    let listed = room("!new:x", None, None);
+    let mut app = app_with_rooms(Vec::new());
+    let started = std::time::Instant::now();
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&listed, "Alice, Bob")),
+        LiveFrameAction::None
+    );
+    app.apply_room_refresh(crate::api::RoomListSnapshot {
+        rooms: vec![listed],
+        started,
+    });
+    assert_eq!(app.rooms.rooms[0].title(), "Alice, Bob");
+}
+
+#[test]
+fn response_requested_after_a_frame_wins_and_releases_pending_values() {
+    let mut listed = room("!room:x", None, None);
+    let mut app = app_with_rooms(Vec::new());
+    app.handle_live_frame(display_name_frame(&listed, "Earlier"));
+    listed.display_name = Some("Later".to_owned());
+    app.apply_room_refresh(vec![listed]);
+    assert_eq!(app.rooms.rooms[0].title(), "Later");
+    assert!(app.room_title_updates.is_empty());
+}
+
+#[test]
+fn an_older_concurrent_response_cannot_regress_a_newer_snapshot() {
+    let mut listed = room("!room:x", None, None);
+    let mut app = app_with_rooms(Vec::new());
+    let started = std::time::Instant::now();
+    listed.display_name = Some("Latest".to_owned());
+    app.apply_room_refresh(vec![listed.clone()]);
+    listed.display_name = Some("Old".to_owned());
+    app.apply_room_refresh(crate::api::RoomListSnapshot {
+        rooms: vec![listed],
+        started,
+    });
+    assert_eq!(app.rooms.rooms[0].title(), "Latest");
+}
+
+#[test]
+fn unknown_title_backlog_is_bounded_and_requests_one_overflow_refresh() {
+    let mut app = app_with_rooms(Vec::new());
+    let mut refreshes = 0;
+    for i in 0..8300 {
+        let listed = room(&format!("!{i}:x"), None, None);
+        if app.handle_live_frame(display_name_frame(&listed, "Title"))
+            == LiveFrameAction::RefreshRooms
+        {
+            refreshes += 1;
+        }
+    }
+    assert_eq!(refreshes, 1);
+    assert_eq!(app.room_title_updates.len(), 8192);
+    app.apply_room_refresh(Vec::new());
+    assert!(app.room_title_updates.is_empty());
+}
+
+#[test]
+fn state_title_updates_are_immediate_and_survive_stale_responses() {
+    let mut listed = room("!room:x", None, None);
+    listed.display_name = Some("Alice, Bob".to_owned());
+    let mut app = app_with_rooms(vec![listed.clone()]);
+    let started = std::time::Instant::now();
+    for (kind, content, expected) in [
+        (
+            "m.room.name",
+            serde_json::json!({"name": "New name"}),
+            "New name",
+        ),
+        (
+            "m.room.canonical_alias",
+            serde_json::json!({"alias": "#new:x"}),
+            "New name",
+        ),
+        ("m.room.name", serde_json::json!({}), "#new:x"),
+        (
+            "m.room.canonical_alias",
+            serde_json::json!({}),
+            "Alice, Bob",
+        ),
+    ] {
+        let mut event = event_with_state_key("$state:x", kind, Some(""), None, content);
+        event.room_id = listed.room_id.clone();
+        event.account_id = listed.account_id;
+        app.handle_live_frame(crate::api::LiveFrame::Timeline(Box::new(event)));
+        assert_eq!(app.rooms.rooms[0].title(), expected);
+    }
+    listed.name = Some("Old state".to_owned());
+    listed.canonical_alias = Some("#old:x".to_owned());
+    app.apply_room_refresh(crate::api::RoomListSnapshot {
+        rooms: vec![listed],
+        started,
+    });
+    assert_eq!(app.rooms.rooms[0].title(), "Alice, Bob");
+}
+
+#[tokio::test]
+async fn loading_and_scrolling_unnamed_rooms_do_not_schedule_title_member_reads() {
+    let mut app = app_with_rooms(Vec::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.set_members_sender(tx);
+    app.apply_room_refresh(
+        (0..500)
+            .map(|i| room(&format!("!{i}:x"), None, None))
+            .collect::<Vec<_>>(),
+    );
+    for scroll in [0, 100, 250, 499] {
+        app.rooms.scroll = scroll;
+        crate::ui::prepare(&mut app, ratatui::layout::Rect::new(0, 0, 100, 30));
+        let _ = app.visible_room_indices();
+    }
+    assert!(app.members_refresh_after.is_empty());
+    assert!(rx.try_recv().is_err());
+    // Legitimate roster hydration still resolves timeline senders but cannot change a title.
+    let listed = app.rooms.rooms[0].clone();
+    app.apply_members_outcome(timeline::MembersOutcome {
+        room_key: RoomKey::from(&listed),
+        members: Some(vec![MemberDto {
+            user_id: "@alice:x".to_owned(),
+            display_name: Some("Alice".to_owned()),
+        }]),
+    });
+    assert_eq!(app.rooms.rooms[0].title(), listed.room_id);
+    assert_eq!(
+        app.rooms.display_names[&RoomKey::from(&listed)]["@alice:x"],
+        "Alice"
+    );
+}
+
+#[test]
+fn inactive_account_title_updates_are_pruned_and_ignored() {
+    let listed = room("!room:x", None, None);
+    let mut app = app_with_rooms(Vec::new());
+    app.handle_live_frame(display_name_frame(&listed, "Pending"));
+    assert_eq!(app.room_title_updates.len(), 1);
+    app.set_accounts(vec![account_with_id(
+        listed.account_id,
+        "@me:x",
+        AccountState::Deactivated,
+    )]);
+    assert!(app.room_title_updates.is_empty());
+    assert_eq!(
+        app.handle_live_frame(display_name_frame(&listed, "Ignored")),
+        LiveFrameAction::None
+    );
+    assert!(app.room_title_updates.is_empty());
 }
