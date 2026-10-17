@@ -6,6 +6,7 @@ import type { TimelineEvent } from '../stores/timeline'
 import { FormattedBody } from './FormattedBody'
 import { MediaAttachment } from './MediaAttachment'
 import { MediaImage } from './MediaImage'
+import { LinkPreviews } from './LinkPreviews'
 
 function MediaBody({
   event,
@@ -139,21 +140,34 @@ export function EventBody({
     return <UtdPlaceholder />
   }
 
+  const previews =
+    event.type === 'm.room.message' ? (
+      <LinkPreviews content={event.content} body={event.body} />
+    ) : null
+
   if (resolved !== null) {
-    return <MediaBody event={event} resolved={resolved} />
+    return (
+      <>
+        <MediaBody event={event} resolved={resolved} />
+        {previews}
+      </>
+    )
   }
 
   const msgtype = contentMsgtype(event.content)
   if (msgtype === 'm.emote') {
     return (
-      <em>
-        * {senderDisplay ?? event.sender}{' '}
-        <FormattedBody
-          accountId={event.account_id}
-          body={event.body}
-          content={event.content}
-        />
-      </em>
+      <>
+        <em>
+          * {senderDisplay ?? event.sender}{' '}
+          <FormattedBody
+            accountId={event.account_id}
+            body={event.body}
+            content={event.content}
+          />
+        </em>
+        {previews}
+      </>
     )
   }
   const bodyClassName = isEmojiOnlyMessageBody(event.body)
@@ -170,5 +184,10 @@ export function EventBody({
   if (!hasVisibleText(event.body)) {
     return <span class="muted placeholder">{unsupportedEventLabel(event)}</span>
   }
-  return msgtype === 'm.notice' ? <span class="muted">{body}</span> : body
+  return (
+    <>
+      {msgtype === 'm.notice' ? <span class="muted">{body}</span> : body}
+      {previews}
+    </>
+  )
 }

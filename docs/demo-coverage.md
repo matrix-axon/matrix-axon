@@ -44,6 +44,7 @@ shows it.
 | DM title derived from the other member                  | `rooms`               | `rooms`                                                                                                   | `rooms`         |
 | Timeline text, sender names, day separators             | `timeline`            | `timeline`                                                                                                | `timeline`      |
 | Formatted (HTML) messages with links                    | `timeline`            | `timeline`                                                                                                | `timeline`      |
+| Bundled URL preview text cards (MSC4095)                | **n/a**               | **not covered** — demo corpus has no bundled preview metadata                                             | **not covered** |
 | Reactions (seeded badges render)                        | `timeline`            | `timeline`                                                                                                | `send`          |
 | React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
 | Reaction badge updating live from another user's react  | **not covered**       | **not covered**                                                                                           | **not covered** |
