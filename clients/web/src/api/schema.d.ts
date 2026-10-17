@@ -1850,6 +1850,12 @@ export interface components {
             rooms_backfilled: number;
             /**
              * Format: int64
+             * @description Of those, how many backfill has parked after repeated failures: they are
+             *     retried only about once a day (ADR 0121).
+             */
+            rooms_parked: number;
+            /**
+             * Format: int64
              * @description Currently-joined rooms with any stored events.
              */
             rooms_total: number;

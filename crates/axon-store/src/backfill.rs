@@ -3,15 +3,18 @@
 //! Two concerns:
 //!
 //! * The `room_backfill` cursor ([`Store::get_room_backfill`],
-//!   [`Store::save_room_backfill`], [`Store::delete_room_backfill`]) — per-room
-//!   progress so the backfill engine resumes where it left off across restarts.
-//!   See ADR 0043.
+//!   [`Store::save_room_backfill`], [`Store::record_room_backfill_failure`],
+//!   [`Store::delete_room_backfill`]) — per-room progress so the backfill engine
+//!   resumes where it left off across restarts, plus the failure backoff and
+//!   parking that keep a failing room from hammering the homeserver. See ADR 0043
+//!   and ADR 0121.
 //! * [`Store::purge_room`] — the destructive "forget this room" path used by the
 //!   optional purge-on-leave behavior (ADR 0044): delete every stored trace of a
 //!   room for one account (events, state, room account-data, backfill cursor,
 //!   and the ADR 0095 `room_summaries` row) and enqueue the room's search
 //!   documents for removal.
 
+use sqlx_core::from_row::FromRow;
 use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
@@ -29,7 +32,20 @@ pub struct RoomBackfillState {
     pub complete: bool,
     /// Running count of events backfilled, for the optional bounded target depth.
     pub events_backfilled: i64,
+    /// Failed pages since the last successful one (ADR 0121).
+    pub consecutive_failures: i32,
+    /// Whether the room may be paged now: its backoff or park interval, if any,
+    /// has passed. Computed against the database clock.
+    pub retry_due: bool,
+    /// The room has failed too often, or the homeserver refused it, and is only
+    /// retried once per park interval (ADR 0121).
+    pub parked: bool,
 }
+
+/// The columns [`RoomBackfillState`] reads, shared by the single-room and
+/// per-account cursor queries so the two cannot drift.
+const CURSOR_COLUMNS: &str = "oldest_seen_token, complete, events_backfilled, \
+     consecutive_failures, parked, (retry_at IS NULL OR retry_at <= now()) AS retry_due";
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomBackfillState {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
@@ -37,8 +53,27 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomBackfillState {
             oldest_seen_token: row.try_get("oldest_seen_token")?,
             complete: row.try_get("complete")?,
             events_backfilled: row.try_get("events_backfilled")?,
+            consecutive_failures: row.try_get("consecutive_failures")?,
+            retry_due: row.try_get("retry_due")?,
+            parked: row.try_get("parked")?,
         })
     }
+}
+
+/// One failed backfill page, as [`Store::record_room_backfill_failure`] stores
+/// it. The engine decides the class, delay and parking (ADR 0121); the store
+/// only records them.
+#[derive(Debug, Clone, Copy)]
+pub struct RoomBackfillFailure<'a> {
+    /// The failure class, kept in `last_failure` for diagnosis.
+    pub kind: &'a str,
+    /// How long until the room may be paged again. Zero means the next sweep.
+    pub retry_after: std::time::Duration,
+    /// Whether the room is now parked.
+    pub parked: bool,
+    /// Drop the saved resume token, so the next page starts from the room's live
+    /// timeline end. Set only when the homeserver rejected the token.
+    pub clear_token: bool,
 }
 
 /// Account-level backfill progress for `GET /v1/status` — how far the deep-history
@@ -54,6 +89,8 @@ pub struct AccountBackfillProgress {
     pub rooms_total: i64,
     /// Of those, how many have been backfilled to the room's start (`complete`).
     pub rooms_backfilled: i64,
+    /// Of those, how many are parked after repeated failures (ADR 0121).
+    pub rooms_parked: i64,
 }
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for AccountBackfillProgress {
@@ -63,6 +100,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for AccountBackfillProgress {
             events_total: row.try_get("events_total")?,
             rooms_total: row.try_get("rooms_total")?,
             rooms_backfilled: row.try_get("rooms_backfilled")?,
+            rooms_parked: row.try_get("rooms_parked")?,
         })
     }
 }
@@ -75,14 +113,14 @@ impl Store {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<Option<RoomBackfillState>, StoreError> {
-        let row = sqlx_core::query_as::query_as::<Postgres, RoomBackfillState>(
-            "SELECT oldest_seen_token, complete, events_backfilled \
-             FROM room_backfill WHERE account_id = $1 AND room_id = $2",
-        )
-        .bind(account_id)
-        .bind(room_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let sql = format!(
+            "SELECT {CURSOR_COLUMNS} FROM room_backfill WHERE account_id = $1 AND room_id = $2"
+        );
+        let row = sqlx_core::query_as::query_as::<Postgres, RoomBackfillState>(&sql)
+            .bind(account_id)
+            .bind(room_id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row)
     }
 
@@ -93,24 +131,16 @@ impl Store {
         &self,
         account_id: Uuid,
     ) -> Result<std::collections::HashMap<String, RoomBackfillState>, StoreError> {
-        let rows = sqlx_core::query::query(
-            "SELECT room_id, oldest_seen_token, complete, events_backfilled \
-             FROM room_backfill WHERE account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let sql =
+            format!("SELECT room_id, {CURSOR_COLUMNS} FROM room_backfill WHERE account_id = $1");
+        let rows = sqlx_core::query::query(&sql)
+            .bind(account_id)
+            .fetch_all(&self.pool)
+            .await?;
         let mut map = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
             let room_id: String = row.try_get("room_id")?;
-            map.insert(
-                room_id,
-                RoomBackfillState {
-                    oldest_seen_token: row.try_get("oldest_seen_token")?,
-                    complete: row.try_get("complete")?,
-                    events_backfilled: row.try_get("events_backfilled")?,
-                },
-            );
+            map.insert(room_id, RoomBackfillState::from_row(&row)?);
         }
         Ok(map)
     }
@@ -141,6 +171,7 @@ impl Store {
              SELECT j.account_id, \
                     count(*) AS rooms_total, \
                     count(*) FILTER (WHERE bf.complete) AS rooms_backfilled, \
+                    count(*) FILTER (WHERE bf.parked AND NOT bf.complete) AS rooms_parked, \
                     max(j.events_total) AS events_total \
              FROM joined j \
              LEFT JOIN room_backfill bf \
@@ -154,7 +185,8 @@ impl Store {
 
     /// Record progress after a backfill page: set the resume token and `complete`
     /// flag, and add `added` to the running `events_backfilled` count. Upsert, so
-    /// the first page for a room inserts the row and later pages update it.
+    /// the first page for a room inserts the row and later pages update it. A
+    /// successful page also clears any failure backoff or parking (ADR 0121).
     ///
     /// Progress is saved only *after* a page's events are fully persisted, so a
     /// crash mid-page simply re-pages from the previously saved token — idempotent,
@@ -174,13 +206,52 @@ impl Store {
              ON CONFLICT (account_id, room_id) DO UPDATE SET \
                  oldest_seen_token = EXCLUDED.oldest_seen_token, \
                  complete = EXCLUDED.complete, \
-                 events_backfilled = room_backfill.events_backfilled + EXCLUDED.events_backfilled",
+                 events_backfilled = room_backfill.events_backfilled + EXCLUDED.events_backfilled, \
+                 consecutive_failures = 0, \
+                 last_failure = NULL, \
+                 retry_at = NULL, \
+                 parked = false",
         )
         .bind(account_id)
         .bind(room_id)
         .bind(oldest_seen_token)
         .bind(complete)
         .bind(added)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record a failed backfill page (ADR 0121): count it, note its class, and set
+    /// when the room may be paged again. Upsert, so a room whose very first page
+    /// fails still gets a row to carry its backoff. The saved token is kept unless
+    /// [`clear_token`](RoomBackfillFailure::clear_token) is set, so a retry resumes
+    /// from the same position. A later successful page
+    /// ([`save_room_backfill`](Self::save_room_backfill)) clears all of it.
+    pub async fn record_room_backfill_failure(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        failure: RoomBackfillFailure<'_>,
+    ) -> Result<(), StoreError> {
+        sqlx_core::query::query(
+            "INSERT INTO room_backfill \
+                 (account_id, room_id, consecutive_failures, last_failure, retry_at, parked) \
+             VALUES ($1, $2, 1, $3, now() + make_interval(secs => $4), $5) \
+             ON CONFLICT (account_id, room_id) DO UPDATE SET \
+                 consecutive_failures = room_backfill.consecutive_failures + 1, \
+                 last_failure = EXCLUDED.last_failure, \
+                 retry_at = EXCLUDED.retry_at, \
+                 parked = EXCLUDED.parked, \
+                 oldest_seen_token = CASE WHEN $6 THEN NULL \
+                                          ELSE room_backfill.oldest_seen_token END",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(failure.kind)
+        .bind(failure.retry_after.as_secs_f64())
+        .bind(failure.parked)
+        .bind(failure.clear_token)
         .execute(&self.pool)
         .await?;
         Ok(())
