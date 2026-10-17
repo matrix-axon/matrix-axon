@@ -8812,6 +8812,7 @@
           "events",
           "rooms_total",
           "rooms_backfilled",
+          "rooms_parked",
           "complete"
         ],
         "properties": {
@@ -8833,6 +8834,11 @@
             "type": "integer",
             "format": "int64",
             "description": "Of those, how many are backfilled to the room's start."
+          },
+          "rooms_parked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, how many backfill has parked after repeated failures: they are\nretried only about once a day (ADR 0121)."
           },
           "rooms_total": {
             "type": "integer",

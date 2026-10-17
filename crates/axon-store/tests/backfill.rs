@@ -9,6 +9,9 @@
 
 mod common;
 
+use std::time::Duration;
+
+use axon_store::RoomBackfillFailure;
 use common::{insert_message, migrated_store, raw_pool, test_account};
 use sqlx_postgres::PgPool;
 use uuid::Uuid;
@@ -139,6 +142,201 @@ async fn save_room_backfill_roundtrips_and_accumulates() {
     assert!(done.complete, "room marked complete");
     assert!(done.oldest_seen_token.is_none());
     assert_eq!(done.events_backfilled, 80);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+fn retryable(retry_after: Duration, parked: bool) -> RoomBackfillFailure<'static> {
+    RoomBackfillFailure {
+        kind: "retryable",
+        retry_after,
+        parked,
+        clear_token: false,
+    }
+}
+
+async fn last_failure(pool: &PgPool, account_id: Uuid, room_id: &str) -> Option<String> {
+    let (kind,): (Option<String>,) = sqlx_core::query_as::query_as(
+        "SELECT last_failure FROM room_backfill WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account_id)
+    .bind(room_id)
+    .fetch_one(pool)
+    .await
+    .expect("last_failure");
+    kind
+}
+
+/// ADR 0121: a retryable failure counts against the room, defers its next
+/// attempt and keeps the saved token, so a retry resumes from the same position
+/// rather than from the live end.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_retryable_failure_defers_the_room_and_keeps_its_token() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "bf-fail").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    store
+        .save_room_backfill(account_id, &room_id, Some("deep-token"), false, 100)
+        .await
+        .expect("save");
+    let fresh = store
+        .get_room_backfill(account_id, &room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fresh.consecutive_failures, 0);
+    assert!(fresh.retry_due && !fresh.parked);
+
+    for expected in 1..=2 {
+        store
+            .record_room_backfill_failure(
+                account_id,
+                &room_id,
+                retryable(Duration::from_secs(60), false),
+            )
+            .await
+            .expect("record failure");
+        let state = store
+            .get_room_backfill(account_id, &room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.consecutive_failures, expected);
+        assert!(!state.retry_due, "the room waits out its backoff");
+        assert!(!state.parked);
+        assert_eq!(state.oldest_seen_token.as_deref(), Some("deep-token"));
+        assert_eq!(state.events_backfilled, 100, "a failure adds no events");
+    }
+    assert_eq!(
+        last_failure(&pool, account_id, &room_id).await.as_deref(),
+        Some("retryable")
+    );
+
+    // The list query the sweep uses sees the same state.
+    let listed = store.list_room_backfill(account_id).await.expect("list");
+    let state = &listed[&room_id];
+    assert_eq!(state.consecutive_failures, 2);
+    assert!(!state.retry_due);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A zero delay leaves the room due at once — the rejected-token path, which
+/// also drops the token so the next page starts from the live end.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_rejected_token_is_cleared_and_the_room_stays_due() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "bf-reject").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    store
+        .save_room_backfill(account_id, &room_id, Some("stale-token"), false, 10)
+        .await
+        .expect("save");
+    store
+        .record_room_backfill_failure(
+            account_id,
+            &room_id,
+            RoomBackfillFailure {
+                kind: "rejected",
+                retry_after: Duration::ZERO,
+                parked: false,
+                clear_token: true,
+            },
+        )
+        .await
+        .expect("record rejection");
+    let state = store
+        .get_room_backfill(account_id, &room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        state.oldest_seen_token.is_none(),
+        "the rejected token is dropped"
+    );
+    assert!(state.retry_due, "a rejection is retried next sweep");
+    assert!(!state.complete);
+    assert_eq!(state.events_backfilled, 10);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A room whose very first page fails has no cursor yet; the failure must still
+/// be recorded, or the room would be retried every sweep.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_failed_first_page_creates_the_cursor() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "bf-first").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    store
+        .record_room_backfill_failure(
+            account_id,
+            &room_id,
+            retryable(Duration::from_secs(60), false),
+        )
+        .await
+        .expect("record failure");
+    let state = store
+        .get_room_backfill(account_id, &room_id)
+        .await
+        .unwrap()
+        .expect("a row now carries the backoff");
+    assert_eq!(state.consecutive_failures, 1);
+    assert!(!state.retry_due);
+    assert!(state.oldest_seen_token.is_none());
+    assert!(!state.complete);
+    assert_eq!(state.events_backfilled, 0);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A successful page clears the count, the class, the delay and the park.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_successful_page_clears_failure_state() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "bf-clear").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    store
+        .record_room_backfill_failure(
+            account_id,
+            &room_id,
+            retryable(Duration::from_secs(86_400), true),
+        )
+        .await
+        .expect("park");
+    let parked = store
+        .get_room_backfill(account_id, &room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(parked.parked && !parked.retry_due);
+
+    store
+        .save_room_backfill(account_id, &room_id, Some("tok"), false, 50)
+        .await
+        .expect("save after the park expired");
+    let state = store
+        .get_room_backfill(account_id, &room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.consecutive_failures, 0);
+    assert!(state.retry_due);
+    assert!(!state.parked);
+    assert_eq!(last_failure(&pool, account_id, &room_id).await, None);
+    assert_eq!(state.oldest_seen_token.as_deref(), Some("tok"));
 
     common::cleanup_account(&pool, account_id).await;
 }
@@ -558,6 +756,30 @@ async fn backfill_progress_counts_joined_rooms_and_completion() {
     assert_eq!(row.events_total, 5, "all events counted, incl. left/ban");
     assert_eq!(row.rooms_total, 2, "left, banned, and empty rooms excluded");
     assert_eq!(row.rooms_backfilled, 1, "only room A is complete");
+    assert_eq!(row.rooms_parked, 0, "nothing parked yet");
+
+    // Parking room B shows up in status; a parked room that later completed would
+    // count as backfilled, not parked.
+    store
+        .record_room_backfill_failure(
+            account_id,
+            &room_b,
+            RoomBackfillFailure {
+                kind: "retryable",
+                retry_after: Duration::from_secs(86_400),
+                parked: true,
+                clear_token: false,
+            },
+        )
+        .await
+        .expect("park b");
+    let progress = store.backfill_progress().await.expect("progress");
+    let row = progress
+        .into_iter()
+        .find(|p| p.account_id == account_id)
+        .expect("account present");
+    assert_eq!(row.rooms_parked, 1, "room B is parked");
+    assert_eq!(row.rooms_backfilled, 1, "a parked room is not complete");
 
     common::cleanup_account(&pool, empty_account).await;
     common::cleanup_account(&pool, account_id).await;

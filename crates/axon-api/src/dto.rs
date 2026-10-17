@@ -1969,6 +1969,9 @@ pub struct AccountBackfillDto {
     pub rooms_total: i64,
     /// Of those, how many are backfilled to the room's start.
     pub rooms_backfilled: i64,
+    /// Of those, how many backfill has parked after repeated failures: they are
+    /// retried only about once a day (ADR 0121).
+    pub rooms_parked: i64,
     /// Whether every joined room is fully backfilled (nothing left to fetch).
     pub complete: bool,
 }
@@ -1980,6 +1983,7 @@ impl From<axon_store::AccountBackfillProgress> for AccountBackfillDto {
             events: p.events_total,
             rooms_total: p.rooms_total,
             rooms_backfilled: p.rooms_backfilled,
+            rooms_parked: p.rooms_parked,
             complete: p.rooms_total > 0 && p.rooms_backfilled == p.rooms_total,
         }
     }
