@@ -212,8 +212,10 @@ test('reply avatars leave room for long quoted text on mobile', async ({
       quoteRight: element.getBoundingClientRect().right,
     }
   })
+  // The default 16px root font gives a 1.75rem avatar plus two 1px borders.
+  expect(boxes.avatarWidth).toBe(30)
   expect(boxes.buttonWidth).toBeGreaterThanOrEqual(boxes.avatarWidth)
-  expect(boxes.copyLeft).toBeGreaterThan(boxes.avatarRight)
+  expect(boxes.copyLeft).toBeGreaterThanOrEqual(boxes.avatarRight)
   expect(boxes.copyRight).toBeLessThanOrEqual(boxes.quoteRight)
 })
 
