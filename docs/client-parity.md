@@ -49,6 +49,7 @@ worker) is web-only.
 | Capability | Server (`/v1/`) | axon-tui | axon-web | Notes |
 |---|---|---|---|---|
 | Text send / edit / redact / react | Done (M6, ADR 0021) | Done | Done | |
+| Bundled URL preview text cards (MSC4095) | Done — metadata passed through in event content | **Gap** — no preview cards | Done — room/thread messages and media captions | Accepts `m.url_previews` and `com.beeper.linkpreviews`; images and automatic generation deferred; formatted spoilers suppress cards |
 | Media send (`m.image`/`m.file`) | Done (M15, ADR 0059) | Done | Done | |
 | Media read proxy + LRU cache | Done (M11, ADR 0045) | Done | Done | |
 | Inline media preview (audio/video/pdf/text) | n/a — client-side rendering over the existing proxy | **Gap** — download only (a terminal cannot play media) | Done (ADR 0072) — click-to-expand player below the attachment card | Blob-backed with per-kind size ceilings; `Range` streaming deferred to a media service worker |
