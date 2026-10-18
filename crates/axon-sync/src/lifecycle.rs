@@ -993,6 +993,22 @@ impl AccountLifecycle {
     /// password login, token import, deletion, and finalization. The lock covers
     /// only the local conflict decision and durable breadcrumb insertion; the
     /// multi-minute remote protocol starts after this method returns.
+    /// The account-state half of [`Self::reserve_matrix_oauth_acquire`],
+    /// without the lock or the breadcrumb: an advisory check, so a browser
+    /// sign-in that would be refused anyway does not first replace the
+    /// user's open one (ADR 0117). The reservation still decides.
+    pub(crate) async fn check_matrix_oauth_acquire_target(
+        &self,
+        expected_user_id: &str,
+    ) -> Result<(), LifecycleError> {
+        match self.resolve_login_target(expected_user_id).await? {
+            ResolvedTarget::AlreadyActive(account_id) => {
+                Err(LifecycleError::AlreadyActive(account_id))
+            }
+            ResolvedTarget::Retained(_) | ResolvedTarget::New => Ok(()),
+        }
+    }
+
     pub(crate) async fn reserve_matrix_oauth_acquire(
         &self,
         flow_id: Uuid,

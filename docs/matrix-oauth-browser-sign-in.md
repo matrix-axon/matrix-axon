@@ -71,6 +71,8 @@ A new browser sign-in replaces an open browser sign-in for the same user when th
 That is how a user gets past a flow whose tab was closed or whose create response was lost.
 The replaced flow ends `cancelled` with `cancel_reason` `replaced`, and its link and code stop working; tell its user that a newer sign-in took over.
 A flow that is younger, already approved and finishing, or a QR login still answers `409`.
+If the old flow's token request is out when the new one arrives, Axon waits for that answer first (up to 15 s); if it carries the approval, the old flow finishes and the new request gets `409`.
+A request that would be refused anyway (the account is already signed in, for example) is refused without touching the open flow.
 The server logs `Matrix OAuth login flow replaced by a new one for the same user` with the old `flow_id`.
 
 A flow ID from QR login is `404` on these routes, and a browser flow ID is `404` on the QR routes.
@@ -101,6 +103,7 @@ The last line reached tells you where it stopped:
 | "Approved" is logged, then the flow fails                       | `phase="e2ee_initialization"` with `timeout`: the homeserver did not answer the encryption setup requests that follow a new session within a minute. `phase="identity_validation"` for a wrong user, `phase="device_validation"` for a homeserver that did not bind the token to the requested device, `phase="session_validation"` for a missing refresh token.          |
 | User was asked to type a code they could not find               | `link_carries_code=false` on the "waiting" line: the server sent a bare link, and the client must show the code.                                                                                                                                                                                                                                                          |
 | Flow stays in `waiting_for_authorization` with repeated retries | `Matrix OAuth token poll did not complete; will retry` or `token endpoint is unavailable`: the authorization server is unreachable. Axon backs off (up to 30 s between polls, longer if the server sends `Retry-After`) and ends the flow as `upstream` after two minutes of failures in a row, logging `token endpoint kept failing; giving up` with `unreachable_secs`. |
+| A new sign-in gets `409` though the open one was not approved   | `Matrix OAuth login flow kept a token request open; not replaced`: the old flow's token request was still unanswered after 15 s. `replaced Matrix OAuth login flow did not stop in time`: the old flow was replaced but had not let go of the user yet. Retry shortly.                                                                                                    |
 
 The log never contains the link, the user code, the device code, or any token.
 `oauth_error` is only ever one of the standard OAuth error codes, `other`, or `none`; text chosen by the remote server is not logged.

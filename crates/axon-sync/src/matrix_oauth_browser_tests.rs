@@ -70,6 +70,12 @@ struct Behaviour {
     unresolvable_server_name: bool,
     /// Let a new browser sign-in replace an open one however young it is.
     replace_immediately: bool,
+    /// How long the approving token response takes, to hold an approval in
+    /// flight.
+    approval_delay: Duration,
+    /// How long the device authorization endpoint takes, to hold a flow in
+    /// its setup.
+    device_authorization_delay: Duration,
 }
 
 impl Default for Behaviour {
@@ -102,6 +108,8 @@ impl Default for Behaviour {
             background_delay: Duration::ZERO,
             unresolvable_server_name: false,
             replace_immediately: false,
+            approval_delay: Duration::ZERO,
+            device_authorization_delay: Duration::ZERO,
         }
     }
 }
@@ -193,6 +201,7 @@ async fn device_authorization(
     body: String,
 ) -> (StatusCode, Json<Value>) {
     server.device_requests.lock().unwrap().push(body);
+    tokio::time::sleep(server.behaviour.device_authorization_delay).await;
     if let Some((status, refusal)) = &server.behaviour.device_authorization_refusal {
         return (*status, Json(refusal.clone()));
     }
@@ -209,12 +218,14 @@ async fn device_authorization(
 
 async fn token(State(server): State<Arc<Server>>) -> (StatusCode, Json<Value>) {
     server.token_requests.fetch_add(1, Ordering::SeqCst);
-    let (status, body) = server
-        .token_script
-        .lock()
-        .unwrap()
-        .pop_front()
-        .unwrap_or_else(|| server.behaviour.approval.clone());
+    let scripted = server.token_script.lock().unwrap().pop_front();
+    let (status, body) = match scripted {
+        Some(answer) => answer,
+        None => {
+            tokio::time::sleep(server.behaviour.approval_delay).await;
+            server.behaviour.approval.clone()
+        }
+    };
     (status, Json(body))
 }
 
@@ -958,6 +969,17 @@ async fn a_new_browser_sign_in_replaces_an_unapproved_one() {
         Err(MatrixOAuthAcquireError::FlowAlreadyExists)
     ));
     assert!(harness.engine.get(qr.flow_id).is_ok());
+    // Only browser sign-in names the user in its logs (ADR 0117); a QR flow's
+    // lines keep ADR 0097's identifier-free shape.
+    let text = logs.text();
+    let created = |id: Uuid| {
+        text.lines()
+            .find(|line| line.contains("login flow created") && line.contains(&id.to_string()))
+            .unwrap_or_else(|| panic!("flow {id} logged its creation"))
+            .to_owned()
+    };
+    assert!(created(new.flow_id).contains(&harness.user_id));
+    assert!(!created(qr.flow_id).contains(&harness.user_id));
     harness.engine.cancel(qr.flow_id).unwrap();
     harness.wait_until_released().await;
     harness.finish().await;
@@ -987,6 +1009,113 @@ async fn an_approved_browser_sign_in_is_not_replaced() {
         .wait_for(flow.flow_id, MatrixOAuthBrowserStage::Done)
         .await;
     assert!(done.account_id.is_some());
+    harness.finish().await;
+}
+
+/// The approval can be on the wire when a new sign-in starts: the token
+/// request is out and its answer carries the tokens. Replacement waits for
+/// that answer instead of cancelling under it, and the approval wins.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_approval_in_flight_is_not_replaced() {
+    let harness = Harness::start(Behaviour {
+        replace_immediately: true,
+        token_script: Vec::new(),
+        approval_delay: Duration::from_secs(2),
+        ..Behaviour::default()
+    })
+    .await;
+    let flow = harness.create().await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while harness.server.token_requests.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the approving token request went out");
+    assert_eq!(
+        harness.engine.get_browser(flow.flow_id).unwrap().stage,
+        MatrixOAuthBrowserStage::WaitingForAuthorization,
+        "the approval is still in flight"
+    );
+
+    assert!(matches!(
+        harness.engine.create_browser(&harness.user_id).await,
+        Err(MatrixOAuthAcquireError::FlowAlreadyExists)
+    ));
+    let done = harness
+        .wait_for(flow.flow_id, MatrixOAuthBrowserStage::Done)
+        .await;
+    assert!(done.account_id.is_some());
+    assert_eq!(done.cancel_reason, None);
+    harness.finish().await;
+}
+
+/// A slow authorization server cannot hold a replacement past its wait: the
+/// old flow's setup gives up as soon as it is cancelled, and the new sign-in
+/// starts instead of getting a conflict.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_flow_stuck_in_setup_is_replaced_promptly() {
+    let harness = Harness::start(Behaviour {
+        replace_immediately: true,
+        device_authorization_delay: Duration::from_secs(60),
+        ..never_approved()
+    })
+    .await;
+    let old = harness.create().await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while harness.server.device_requests.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the device authorization request went out");
+
+    let started = std::time::Instant::now();
+    let new = harness.create().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "replacement waited {:?} for a cancelled setup",
+        started.elapsed()
+    );
+    let replaced = harness.engine.get_browser(old.flow_id).unwrap();
+    assert_eq!(replaced.cancel_reason, Some("replaced"));
+    harness.engine.cancel_browser(new.flow_id).unwrap();
+    harness.wait_until_released().await;
+    harness.finish().await;
+}
+
+/// A new sign-in that would be refused anyway does not first cancel the
+/// user's open one for nothing.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_refused_sign_in_replaces_nothing() {
+    let harness = Harness::start(Behaviour {
+        replace_immediately: true,
+        ..never_approved()
+    })
+    .await;
+    let open = harness.create().await;
+    harness
+        .wait_for(
+            open.flow_id,
+            MatrixOAuthBrowserStage::WaitingForAuthorization,
+        )
+        .await;
+    // Another login makes the identity active meanwhile.
+    harness
+        .store
+        .upsert_account(&harness.user_id, &harness.server.base)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        harness.engine.create_browser(&harness.user_id).await,
+        Err(MatrixOAuthAcquireError::AccountAlreadyActive)
+    ));
+    let untouched = harness.engine.get_browser(open.flow_id).unwrap();
+    assert_ne!(untouched.cancel_reason, Some("replaced"));
     harness.finish().await;
 }
 

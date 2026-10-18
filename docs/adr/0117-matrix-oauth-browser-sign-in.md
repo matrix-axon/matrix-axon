@@ -126,6 +126,11 @@ It also waits until the old flow is ten seconds old, so a client retrying in a l
 The old flow ends `cancelled` with `cancel_reason` `replaced`, and its link and code stop working; the new request waits, up to fifteen seconds, for the old flow to release the user's reservation, and answers `409` if it does not.
 A QR flow is never replaced by a browser flow, nor the reverse.)_
 
+_(Amended again after the server PR's review: approval is decided under the flow's lock, not read from the published stage.
+A token request that is out may be carrying the approval, so replacement waits for its answer, within the same fifteen seconds, instead of cancelling under it; an answer with tokens moves the flow to `finalizing` under the lock replacement checks, so there is no moment at which the tokens have arrived and the flow still looks unapproved.
+A request that would be refused anyway — the account already signed in, being deleted or draining, or the retained-flow cap reached — is refused before the open flow is touched.
+The setup steps before the first poll (homeserver discovery, OAuth discovery, client registration, the device authorization request) give up as soon as the flow is cancelled, so a slow authorization server cannot hold a cancellation or a replacement past the wait.)_
+
 The existing routes say `qr` in their path, so the method gets sibling routes:
 
 - `POST /v1/accounts/login/browser` — create a flow for an expected Matrix user ID.
@@ -223,7 +228,7 @@ Unit and contract tests cover:
 - cancellation during the poll, a Matrix user mismatch, a concurrent login, logout, or deletion, and crash reconciliation;
 - that the link and user code are present in `waiting_for_authorization` and absent in `finalizing`, in every terminal stage, and from captured logs;
 - that a browser flow is `404` on the QR routes and a QR flow is `404` on the browser routes, for reads and for cancellation; and
-- that a second flow for the same expected user is a `409` across presentations, except that a browser flow replaces an unapproved browser flow at least ten seconds old, and never one that is finalizing.
+- that a second flow for the same expected user is a `409` across presentations, except that a browser flow replaces an unapproved browser flow at least ten seconds old, and never one that is finalizing or whose token request is carrying the approval; that a request refused for another reason replaces nothing; and that a flow stuck in setup is replaced without waiting out its request.
 
 A regression test pins that the QR presentations still fail closed on an unverified device.
 

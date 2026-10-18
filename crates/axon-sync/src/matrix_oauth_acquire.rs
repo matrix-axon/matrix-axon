@@ -49,7 +49,7 @@ use crate::{
     lifecycle::{AccountLifecycle, LifecycleError, MatrixOAuthAcquireTrust},
     matrix_oauth_device_grant::{
         poll_for_tokens, request_device_authorization, request_tokens, revoke_token,
-        DeviceGrantEndpoints, DeviceGrantFailure,
+        DeviceGrantEndpoints, DeviceGrantFailure, PollOutcome,
     },
     matrix_oauth_flow::{
         run_reaper, FlowLease, BROWSER_FLOW_TTL, FLOW_TTL, MAX_CONCURRENT_FLOWS, MAX_RETAINED_FLOWS,
@@ -328,6 +328,21 @@ pub enum MatrixOAuthAcquireError {
     Internal,
 }
 
+/// Run one browser sign-in setup step, giving up as soon as the flow is
+/// cancelled, so a slow authorization server cannot hold a cancellation or a
+/// replacement. Nothing before the token poll holds tokens, so nothing is
+/// lost by dropping a step midway.
+async fn unless_cancelled<T>(
+    cancel: &CancellationToken,
+    step: impl std::future::Future<Output = Result<T, DriverFailure>>,
+) -> Result<T, DriverFailure> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(DriverFailure::Cancelled),
+        result = step => result,
+    }
+}
+
 fn create_lifecycle_error(error: LifecycleError) -> MatrixOAuthAcquireError {
     match error {
         LifecycleError::AlreadyActive(_) => MatrixOAuthAcquireError::AccountAlreadyActive,
@@ -350,6 +365,18 @@ struct FlowMutable {
     scan_tx: Option<oneshot::Sender<QrCodeData>>,
     check_code_tx: Option<oneshot::Sender<u8>>,
     lease: FlowLease,
+    /// A browser sign-in's token request is out. Its answer may carry the
+    /// user's approval, so replacement waits for it instead of cancelling.
+    token_poll_in_flight: bool,
+}
+
+/// What [`Flow::replace_if_unapproved`] found.
+enum Replacement {
+    Replaced,
+    /// A token request is out; retry once it is answered.
+    PollInFlight,
+    /// Approved, finalizing, already over, or not a browser flow.
+    Refused,
 }
 
 struct Flow {
@@ -361,6 +388,8 @@ struct Flow {
     /// Fired once the driver has returned, so the user's reservation is
     /// released (or kept for boot reconciliation) and nothing else will run.
     driver_finished: CancellationToken,
+    /// Woken whenever a browser sign-in's token request is answered.
+    token_poll_settled: tokio::sync::Notify,
     created_at: std::time::Instant,
     staging_dir_name: String,
 }
@@ -395,9 +424,11 @@ impl Flow {
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
                 lease,
+                token_poll_in_flight: false,
             }),
             cancel,
             driver_finished: CancellationToken::new(),
+            token_poll_settled: tokio::sync::Notify::new(),
             created_at: std::time::Instant::now(),
             staging_dir_name: flow_id.to_string(),
         };
@@ -488,28 +519,71 @@ impl Flow {
         true
     }
 
+    /// Mark a browser sign-in's token request as sent, unless the flow has
+    /// already ended, in which case no request should go out.
+    fn begin_token_poll(&self) -> bool {
+        let mut mutable = self
+            .mutable
+            .lock()
+            .expect("Matrix OAuth acquire flow poisoned");
+        if !mutable.lease.is_live() {
+            return false;
+        }
+        mutable.token_poll_in_flight = true;
+        true
+    }
+
+    /// Record a token request's answer. An approval moves the flow to
+    /// `finalizing` under the same lock replacement checks, so there is no
+    /// moment at which the tokens have arrived and the flow still looks
+    /// unapproved.
+    fn settle_token_poll(&self, approved: bool) {
+        {
+            let mut mutable = self
+                .mutable
+                .lock()
+                .expect("Matrix OAuth acquire flow poisoned");
+            mutable.token_poll_in_flight = false;
+            if let FlowView::Browser(state) = &mut mutable.view {
+                if approved && !state.stage.is_terminal() {
+                    // Leaving `waiting_for_authorization` clears the link and
+                    // user code: neither is readable from here on.
+                    state.set_stage(MatrixOAuthBrowserStage::Finalizing);
+                }
+            }
+        }
+        self.token_poll_settled.notify_waiters();
+    }
+
     /// Cancel a browser flow for a newer one, but only while nobody has
     /// approved it: once tokens have arrived the user's approval is not
-    /// thrown away. The stage check and the cancellation share one lock.
-    fn replace_if_unapproved(&self) -> bool {
+    /// thrown away. The stage check and the cancellation share one lock, and
+    /// a token request that is out is waited for, since its answer may be
+    /// the approval.
+    fn replace_if_unapproved(&self) -> Replacement {
         let mut mutable = self
             .mutable
             .lock()
             .expect("Matrix OAuth acquire flow poisoned");
         let FlowView::Browser(state) = &mutable.view else {
-            return false;
+            return Replacement::Refused;
         };
         if !matches!(
             state.stage,
             MatrixOAuthBrowserStage::Starting | MatrixOAuthBrowserStage::WaitingForAuthorization
-        ) || !mutable.lease.cancel(std::time::Instant::now())
-        {
-            return false;
+        ) {
+            return Replacement::Refused;
+        }
+        if mutable.token_poll_in_flight {
+            return Replacement::PollInFlight;
+        }
+        if !mutable.lease.cancel(std::time::Instant::now()) {
+            return Replacement::Refused;
         }
         mutable.set_terminal(Terminal::Replaced);
         drop(mutable);
         self.cancel.cancel();
-        true
+        Replacement::Replaced
     }
 }
 
@@ -642,7 +716,25 @@ impl MatrixOAuthAcquireEngine {
             return Err(MatrixOAuthAcquireError::InvalidUserId);
         }
         // Before taking capacity: the replaced flow gives its permit back.
+        // What would refuse the new flow whatever happens to the old one is
+        // checked first, so the user's open sign-in is not cancelled for a
+        // request that then fails.
         if method == FlowMethod::Browser {
+            if self
+                .inner
+                .flows
+                .lock()
+                .expect("Matrix OAuth acquire registry poisoned")
+                .len()
+                >= MAX_RETAINED_FLOWS
+            {
+                return Err(MatrixOAuthAcquireError::Capacity);
+            }
+            self.inner
+                .lifecycle
+                .check_matrix_oauth_acquire_target(expected_user_id)
+                .await
+                .map_err(create_lifecycle_error)?;
             self.replace_open_browser_flow(expected_user_id).await;
         }
         let permit = self
@@ -748,13 +840,23 @@ impl MatrixOAuthAcquireEngine {
             }
             .instrument(driver_span),
         );
-        tracing::info!(
-            %flow_id,
-            role = "acquire",
-            presentation,
-            expected_user_id,
-            "Matrix OAuth login flow created"
-        );
+        // The user is named only for browser sign-in (ADR 0117); QR lines
+        // keep ADR 0097's identifier-free shape.
+        match method {
+            FlowMethod::Qr(_) => tracing::info!(
+                %flow_id,
+                role = "acquire",
+                presentation,
+                "Matrix OAuth login flow created"
+            ),
+            FlowMethod::Browser => tracing::info!(
+                %flow_id,
+                role = "acquire",
+                presentation,
+                expected_user_id,
+                "Matrix OAuth login flow created"
+            ),
+        }
         Ok(flow)
     }
 
@@ -902,20 +1004,46 @@ impl MatrixOAuthAcquireEngine {
         if open.created_at.elapsed() < self.inner.browser_replace_min_age {
             return;
         }
-        if open.replace_if_unapproved() {
-            tracing::info!(
-                flow_id = %open.flow_id,
-                role = "acquire",
-                presentation = open.method.as_str(),
-                expected_user_id,
-                "Matrix OAuth login flow replaced by a new one for the same user"
-            );
-        } else if open
-            .browser_snapshot()
-            .is_some_and(|state| !state.stage.is_terminal())
-        {
-            // Approved and finalizing: the new flow gets the conflict.
-            return;
+        let deadline = tokio::time::Instant::now() + BROWSER_REPLACE_WAIT;
+        loop {
+            // Registered before the check, so an answer that lands between
+            // the two still wakes this wait.
+            let settled = open.token_poll_settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            match open.replace_if_unapproved() {
+                Replacement::Replaced => {
+                    tracing::info!(
+                        flow_id = %open.flow_id,
+                        role = "acquire",
+                        presentation = open.method.as_str(),
+                        expected_user_id,
+                        "Matrix OAuth login flow replaced by a new one for the same user"
+                    );
+                    break;
+                }
+                Replacement::PollInFlight => {
+                    if tokio::time::timeout_at(deadline, settled).await.is_err() {
+                        tracing::warn!(
+                            flow_id = %open.flow_id,
+                            role = "acquire",
+                            expected_user_id,
+                            "Matrix OAuth login flow kept a token request open; not replaced"
+                        );
+                        return;
+                    }
+                }
+                Replacement::Refused => {
+                    if open
+                        .browser_snapshot()
+                        .is_some_and(|state| !state.stage.is_terminal())
+                    {
+                        // Approved and finalizing: the new flow gets the conflict.
+                        return;
+                    }
+                    break;
+                }
+            }
         }
         // Replaced just now, or already over and releasing its reservation:
         // wait for that release.
@@ -1148,23 +1276,28 @@ impl MatrixOAuthAcquireEngine {
             // The same resolution password login uses: the server name's
             // well-known document, then the server name itself, each confirmed
             // as a homeserver before anything is sent to it.
-            None => crate::discovery::resolve_homeserver(
-                &self.inner.discovery_http,
-                user_id.server_name(),
-            )
-            .await
-            .map_err(|error| {
-                // Which host and which step refused is the whole diagnosis
-                // here, and none of it is secret: it names only the server
-                // the caller asked for.
-                tracing::warn!(
-                    phase = "homeserver_discovery",
-                    error_class = "upstream",
-                    %error,
-                    "Matrix OAuth login could not find the homeserver"
-                );
-                DriverFailure::Upstream
-            })?,
+            None => {
+                unless_cancelled(&flow.cancel, async {
+                    crate::discovery::resolve_homeserver(
+                        &self.inner.discovery_http,
+                        user_id.server_name(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        // Which host and which step refused is the whole
+                        // diagnosis here, and none of it is secret: it names
+                        // only the server the caller asked for.
+                        tracing::warn!(
+                            phase = "homeserver_discovery",
+                            error_class = "upstream",
+                            %error,
+                            "Matrix OAuth login could not find the homeserver"
+                        );
+                        DriverFailure::Upstream
+                    })
+                })
+                .await?
+            }
         };
         let client = build_matrix_oauth_acquire_client(
             &self.inner.config,
@@ -1174,12 +1307,14 @@ impl MatrixOAuthAcquireEngine {
         .await
         .map_err(classify_client_build_error)?;
         let homeserver = client.homeserver();
-        let server = self
-            .inner
-            .registrations
-            .discover(&homeserver)
-            .await
-            .map_err(classify_registration_error)?;
+        let server = unless_cancelled(&flow.cancel, async {
+            self.inner
+                .registrations
+                .discover(&homeserver)
+                .await
+                .map_err(classify_registration_error)
+        })
+        .await?;
         // The capability gate comes before registration: a server without the
         // device grant is unsupported whatever else it would have refused,
         // and Axon registers no client with a server it cannot use.
@@ -1193,25 +1328,26 @@ impl MatrixOAuthAcquireEngine {
         // The registration is found or created but not installed on the
         // client: `restore_session` below supplies the client ID together
         // with the tokens, and the SDK accepts authentication data only once.
-        let client_id = self
-            .inner
-            .registrations
-            .register(&homeserver, &server)
-            .await
-            .map_err(classify_registration_error)?;
+        let client_id = unless_cancelled(&flow.cancel, async {
+            self.inner
+                .registrations
+                .register(&homeserver, &server)
+                .await
+                .map_err(classify_registration_error)
+        })
+        .await?;
         let http = server.http;
-        if flow.cancel.is_cancelled() {
-            return Err(DriverFailure::Cancelled);
-        }
 
         // The one device ID of this sign-in: named in the requested scope
         // here and handed to the SDK session below. The staging client is
         // unauthenticated until then, so no other device ID exists.
         let device_id: OwnedDeviceId = DeviceId::new();
-        let authorization =
+        let authorization = unless_cancelled(&flow.cancel, async {
             request_device_authorization(&http, &endpoints, client_id.as_str(), &device_id)
                 .await
-                .map_err(DriverFailure::from)?;
+                .map_err(DriverFailure::from)
+        })
+        .await?;
         // The server's own lifetime is counted from its response; the flow's
         // from its creation. Whichever ends first ends the wait.
         let poll_deadline = authorization
@@ -1241,16 +1377,23 @@ impl MatrixOAuthAcquireEngine {
 
         let device_code = authorization.device_code;
         let tokens = poll_for_tokens(
-            || request_tokens(&http, &endpoints, client_id.as_str(), &device_code),
+            || async {
+                // An ended flow sends nothing; the loop's cancellation check
+                // then ends the wait.
+                if !flow.begin_token_poll() {
+                    return PollOutcome::Pending;
+                }
+                let outcome =
+                    request_tokens(&http, &endpoints, client_id.as_str(), &device_code).await;
+                flow.settle_token_poll(matches!(outcome, PollOutcome::Tokens(_)));
+                outcome
+            },
             authorization.interval,
             poll_deadline,
             &flow.cancel,
         )
         .await
         .map_err(DriverFailure::from)?;
-        // Leaving `waiting_for_authorization` clears the link and user code:
-        // neither is readable from here on.
-        flow.update_browser(|state| state.set_stage(MatrixOAuthBrowserStage::Finalizing));
 
         let session = OAuthSession {
             client_id: client_id.clone(),
