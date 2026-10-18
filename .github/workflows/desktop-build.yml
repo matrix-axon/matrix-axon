@@ -399,9 +399,16 @@ jobs:
       - name: Verify the installer and shell signatures
         shell: pwsh
         run: |
-          $installer = (Get-ChildItem clients/web/src-tauri/target/release/bundle/nsis/*.exe).FullName
+          $installers = @(Get-ChildItem clients/web/src-tauri/target/release/bundle/nsis/*.exe)
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one NSIS installer, found $($installers.Count): $($installers.Name -join ', ')"
+          }
+          $installer = $installers[0].FullName
           $packed = Join-Path $env:RUNNER_TEMP 'installer-contents'
-          7z x -y "-o$packed" $installer | Out-Null
+          7z x -y "-o$packed" $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "7z could not unpack $installer (exit code $LASTEXITCODE)"
+          }
           $shell = Join-Path $packed 'axon.exe'
           if (-not (Test-Path -LiteralPath $shell -PathType Leaf)) {
             throw "axon.exe is not at the root of $installer"
