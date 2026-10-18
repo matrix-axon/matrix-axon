@@ -1453,6 +1453,7 @@ fn redact_stall_log_line(line: &str, secrets: &[String]) -> Option<String> {
     // Message words come only before the first `key=value` token. After it,
     // everything (including the words of a quoted value) is field content.
     let mut in_fields = false;
+    let mut message_done = false;
     for token in &tokens[target_at + 1..] {
         if let Some((key, value)) = token.split_once('=') {
             in_fields = true;
@@ -1462,8 +1463,12 @@ fn redact_stall_log_line(line: &str, secrets: &[String]) -> Option<String> {
             {
                 counters.push(format!("{key}={value}"));
             }
-        } else if !in_fields && message.len() < 24 {
-            message.push(*token);
+        } else if !in_fields && !message_done && message.len() < 12 {
+            if is_plain_message_word(token) {
+                message.push(*token);
+            }
+            // A word ending in `:` introduces interpolated error text.
+            message_done = token.ends_with(':');
         }
     }
     if message.is_empty() {
@@ -1482,9 +1487,28 @@ fn redact_stall_log_line(line: &str, secrets: &[String]) -> Option<String> {
         out.push(' ');
         out.push_str(&counters.join(" "));
     }
-    out.truncate(200);
-    Some(out)
+    // Cut on a char boundary: `String::truncate` panics inside a multi-byte char.
+    Some(out.chars().take(200).collect())
 }
+
+/// A message word that cannot be an id or interpolated SDK text: ASCII
+/// letters, `_` and `-`, with optional trailing punctuation. Anything
+/// with a sigil (`!`, `$`, `@`, `#`), digits, a path or a quote is dropped.
+fn is_plain_message_word(token: &str) -> bool {
+    let word = token.trim_end_matches([',', '.', ':', ';']);
+    !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphabetic() || b == b'_' || b == b'-')
+}
+
+/// Upper bound on the explicit re-decryption probe, so a hung key-backup
+/// download cannot hold the report (and the original error) until the job
+/// timeout.
+const STALL_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Most of the Axon log the report will scan, taken from its end.
+const STALL_LOG_TAIL_BYTES: usize = 1 << 20;
 
 /// Print what is safe to say about why Axon never decrypted the pre-login
 /// history. The run directory holding Axon's log is deleted when the lane
@@ -1501,7 +1525,13 @@ async fn report_decrypt_stall(
     log_path: &Path,
     secrets: &SecretTracker,
 ) {
-    match api.redecrypt(account_id).await {
+    // The probe repairs a stall it can fix, so everything observed after it
+    // (the history read, the log tail) describes the post-probe state, not the
+    // state at timeout; the output labels it accordingly.
+    let probe = tokio::time::timeout(STALL_PROBE_TIMEOUT, api.redecrypt(account_id))
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("timed out after {STALL_PROBE_TIMEOUT:?}")));
+    match probe {
         Ok(probe) => eprintln!(
             "matrix-oauth: diag: explicit re-decryption selected={} attempted={} decrypted={} still_pending={} timed_out={}",
             probe.selected, probe.attempted, probe.decrypted, probe.still_pending, probe.timed_out
@@ -1511,7 +1541,7 @@ async fn report_decrypt_stall(
     // The back-fill is written before the sweep returns, but allow the timeline
     // read a moment to settle rather than reporting a stale read.
     let mut after = HistoryObservation::RequestFailed;
-    for _ in 0..5 {
+    for attempt in 0..5 {
         after = observe_history(
             api.timeline(account_id, peer.room_id.as_str()).await,
             peer.history_event_id.as_str(),
@@ -1520,15 +1550,21 @@ async fn report_decrypt_stall(
         if after == HistoryObservation::Decrypted {
             break;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        if attempt < 4 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
     eprintln!("matrix-oauth: diag: history after explicit re-decryption {after}");
 
     let tracked = secrets.0.lock().expect("secret tracker lock").clone();
-    let Ok(log) = std::fs::read_to_string(log_path) else {
+    let Ok(bytes) = tokio::fs::read(log_path).await else {
         eprintln!("matrix-oauth: diag: Axon log unreadable");
         return;
     };
+    // Lossy, so one invalid byte costs a line rather than the whole tail; a
+    // partial first line after the cut fails the allowlist and is dropped.
+    let tail = &bytes[bytes.len().saturating_sub(STALL_LOG_TAIL_BYTES)..];
+    let log = String::from_utf8_lossy(tail);
     let mut kept: Vec<String> = log
         .lines()
         .filter_map(|line| redact_stall_log_line(line, &tracked))
@@ -2030,6 +2066,31 @@ mod tests {
             redact_stall_log_line(tracked, &["hunter2-runtime-value".to_owned()]),
             None
         );
+    }
+
+    #[test]
+    fn stall_log_messages_drop_ids_and_interpolated_error_text() {
+        let line = "2026-10-16T00:00:00Z WARN axon_sync::backup: failed to fetch keys for !room:server event $abc123: M_UNKNOWN secret sdk text";
+        assert_eq!(
+            redact_stall_log_line(line, &[]).as_deref(),
+            Some("00:00:00 WARN axon_sync::backup failed to fetch keys for event")
+        );
+        let handle = "2026-10-16T00:00:00Z WARN axon_sync::backup: lookup for @alice:server done";
+        assert_eq!(
+            redact_stall_log_line(handle, &[]).as_deref(),
+            Some("00:00:00 WARN axon_sync::backup lookup for done")
+        );
+    }
+
+    #[test]
+    fn stall_log_lines_truncate_on_a_char_boundary() {
+        let word = "é".repeat(60);
+        let line = format!("2026-10-16T00:00:00Z WARN axon_sync::backup: {word}");
+        // Non-ASCII words are dropped outright, and a long line must not panic.
+        assert_eq!(redact_stall_log_line(&line, &[]), None);
+        let many = "ok ".repeat(100);
+        let long = format!("2026-10-16T00:00:00Z WARN axon_sync::backup: {many}");
+        assert!(redact_stall_log_line(&long, &[]).expect("kept").len() <= 200);
     }
 
     #[tokio::test]
