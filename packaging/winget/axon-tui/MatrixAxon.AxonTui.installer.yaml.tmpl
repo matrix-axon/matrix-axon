@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+PackageIdentifier: MatrixAxon.AxonTui
+PackageVersion: "@@VERSION@@"
+MinimumOSVersion: 10.0.17763.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: axon-tui.exe
+    PortableCommandAlias: axon-tui
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/matrix-axon/matrix-axon/releases/download/@@TAG@@/axon-tui-windows.zip
+    InstallerSha256: @@SHA256@@
+ReleaseDate: @@RELEASE_DATE@@
+ManifestType: installer
+ManifestVersion: 1.12.0
