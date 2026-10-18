@@ -1158,6 +1158,24 @@ export function connectInvitesSessionReset(
   })
 }
 
+/**
+ * Cancel queued and retrying read receipts and typing notices when the Axon
+ * session ends. The sender outlives a sign-out; without this, a receipt retry
+ * that fires afterwards goes out with whatever credentials exist then — none,
+ * so its 401 reaches `onAuthFailure()`, which discards the *next* session's
+ * token if the user has already signed in again (review on #751).
+ */
+export function connectEphemeralSenderSessionReset(
+  auth: CompositeAuthProvider,
+  ephemeralSender: EphemeralSender,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) {
+      ephemeralSender.resetSession()
+    }
+  })
+}
+
 /** Wipe SAS flows when the Axon session ends. */
 export function connectVerificationSessionReset(
   auth: CompositeAuthProvider,
@@ -1542,6 +1560,7 @@ export function createServices(
   connectLiveRooms(live, rooms)
   connectLiveInvites(live, invites)
   connectInvitesSessionReset(auth, invites)
+  connectEphemeralSenderSessionReset(auth, ephemeralSender)
   connectLiveVerification(live, verification, accounts)
   connectVerificationSessionReset(auth, verification)
   connectMessageGestureSession(auth, messageGestures)

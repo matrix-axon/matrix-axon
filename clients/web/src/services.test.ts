@@ -11,6 +11,7 @@ import {
 import {
   connectCacheReset,
   connectCacheSetting,
+  connectEphemeralSenderSessionReset,
   connectRoomListCacheFlush,
   connectRoomsSessionReset,
   connectAttachmentReset,
@@ -32,6 +33,11 @@ import type { RoomsStore } from './stores/rooms'
 import { setPerfEnabled } from './perf'
 import { createMemoryCacheStore } from './stores/cache-store'
 import { createDeviceStateStore } from './stores/device-state'
+import {
+  createEphemeralSender,
+  RECEIPT_DEBOUNCE_MS,
+  RECEIPT_RETRY_DELAYS_MS,
+} from './stores/ephemeral-sender'
 import {
   createLiveConnection,
   INITIAL_BACKOFF_MS,
@@ -1065,6 +1071,90 @@ describe('instrumentation at graph construction (ADR 0085 boot summary)', () => 
 
     const names = performance.getEntriesByType('mark').map((mark) => mark.name)
     expect(names).not.toContain('axon:rooms:cache:read:start')
+  })
+})
+
+describe('connectEphemeralSenderSessionReset', () => {
+  it('resets the sender when the session ends, and not before', () => {
+    const flag = signal(true)
+    let resets = 0
+    const dispose = connectEphemeralSenderSessionReset(
+      { signedIn: computed(() => flag.value) } as Parameters<
+        typeof connectEphemeralSenderSessionReset
+      >[0],
+      {
+        noteRead: () => {},
+        noteTyping: () => {},
+        stopTyping: () => {},
+        resetSession: () => (resets += 1),
+      },
+    )
+    expect(resets).toBe(0)
+
+    flag.value = false
+    expect(resets).toBe(1)
+    dispose()
+  })
+
+  // The review's reproduction, end to end: a receipt fails transiently, the
+  // user signs out during its backoff and signs straight back in. Without the
+  // reset, the retry fires while signed out, goes out with no credentials, and
+  // its 401 — arriving after the new sign-in — discards the new token.
+  it('keeps a stale retry from discarding the token of the next session', async () => {
+    vi.useFakeTimers()
+    const token = signal<string | null>('tok-old')
+    const sent: (string | null)[] = []
+    // A holder, not a `let`: TypeScript narrows a closure-assigned `let` to `null`.
+    const held: { answerUnauthorized: (() => void) | null } = {
+      answerUnauthorized: null,
+    }
+    const api = createApiClient(
+      {
+        getToken: () => token.value,
+        onAuthFailure: () => {
+          token.value = null
+        },
+        LoginBootstrap: () => null,
+      },
+      'http://axon.test',
+      {
+        fetch: (input) => {
+          const auth = (input as Request).headers.get('authorization')
+          sent.push(auth)
+          if (auth === null) {
+            // Held, so the 401 lands after the user has signed in again.
+            return new Promise<Response>((resolve) => {
+              held.answerUnauthorized = () =>
+                resolve(new Response('{}', { status: 401 }))
+            })
+          }
+          return Promise.resolve(new Response('{}', { status: 502 }))
+        },
+      },
+      0,
+    )
+    const sender = createEphemeralSender(api)
+    const dispose = connectEphemeralSenderSessionReset(
+      { signedIn: computed(() => token.value !== null) } as Parameters<
+        typeof connectEphemeralSenderSessionReset
+      >[0],
+      sender,
+    )
+
+    sender.noteRead('acct', '!room:hs', '$a', 100)
+    await vi.advanceTimersByTimeAsync(RECEIPT_DEBOUNCE_MS)
+    expect(sent).toEqual(['Bearer tok-old'])
+
+    token.value = null // sign out, mid-backoff
+    await vi.advanceTimersByTimeAsync(RECEIPT_RETRY_DELAYS_MS[0])
+    token.value = 'tok-new' // sign in again
+    held.answerUnauthorized?.()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(sent).toEqual(['Bearer tok-old'])
+    expect(token.value).toBe('tok-new')
+    dispose()
+    vi.useRealTimers()
   })
 })
 
