@@ -50,7 +50,7 @@ export function isLikelyDm(room: RoomDto): boolean {
 /**
  * Whether the room has no title of its own: blank name and blank canonical
  * alias, direct or not. Such a room is titled by the server's calculated
- * `display_name` (ADR 0118). Matches the TUI's `needs_derived_title`.
+ * `display_name` (ADR 0118).
  */
 export function needsDerivedTitle(room: RoomDto): boolean {
   return blank(room.name) && blank(room.canonical_alias)
