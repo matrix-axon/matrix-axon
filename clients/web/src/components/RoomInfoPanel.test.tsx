@@ -113,7 +113,11 @@ function powerLevels(myLevel: number) {
   }
 }
 
-function renderPanel(roomId: string, extra: Partial<RoomDto> = {}) {
+function renderPanel(
+  roomId: string,
+  extra: Partial<RoomDto> = {},
+  roomTitles: ReadonlyMap<string, string> = new Map(),
+) {
   const services = testServices()
   const members = createMembersStore(services.api, ACCOUNT, roomId)
   const view = render(
@@ -123,7 +127,7 @@ function renderPanel(roomId: string, extra: Partial<RoomDto> = {}) {
           accountId={ACCOUNT}
           roomId={roomId}
           room={room(roomId, roomId === FIRST ? 'First' : 'Second', extra)}
-          roomTitles={new Map()}
+          roomTitles={roomTitles}
           members={members}
           onClose={() => {}}
         />
@@ -169,6 +173,27 @@ it('copies a populated detail on click and skips placeholders', async () => {
 
   expect(queryByRole('button', { name: 'Copy Topic' })).toBeNull()
   expect(queryByRole('button', { name: 'Copy Full alias list' })).toBeNull()
+})
+
+it('shows only the rendered title, never a stale cached one (ADR 0118)', () => {
+  // The title cache holds whatever this browser last saw for the room, for
+  // every room. An unnamed group renamed live keeps its old calculated name
+  // there until the next refresh, and a "DM name" row would present it as
+  // the correspondent's name.
+  server.use(...handlers())
+  renderPanel(
+    FIRST,
+    { is_direct: false, display_name: 'Alice, Bob' },
+    new Map([[`${ACCOUNT}/${FIRST}`, 'Alice, Bob']]),
+  )
+  expect(detail('Name')).toBe('First')
+  const labels = [...document.querySelectorAll('.detail-list dt')].map(
+    (node) => node.textContent,
+  )
+  expect(labels).not.toContain('DM name')
+  expect(document.querySelector('.detail-list')?.textContent).not.toContain(
+    'Alice, Bob',
+  )
 })
 
 it('shows a colored letter in the identity header when the room has no avatar', () => {

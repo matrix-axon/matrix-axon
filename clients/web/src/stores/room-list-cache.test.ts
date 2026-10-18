@@ -576,6 +576,42 @@ describe('room-list cache', () => {
     expect(writes).toHaveLength(1)
   })
 
+  it('writes a scheduled live patch at once when flushed, and nothing otherwise', async () => {
+    // A tab closed inside the coalescing window: the page-hide flush must
+    // persist the rename rather than leave it to a timer that never fires.
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [{ ...OPS, display_name: 'Ops' }] }),
+      ),
+    )
+    const { roomList } = harness()
+    const writes: (readonly RoomDto[])[] = []
+    const spy: RoomListCache = {
+      read: () => roomList.read(),
+      write: (rows) => {
+        writes.push(rows)
+        roomList.write(rows)
+      },
+    }
+    const store = createRoomsStore(api(), memoryStorage(), spy, {
+      cacheWriteDelayMs: 60_000,
+    })
+    await store.refresh()
+    expect(writes).toHaveLength(1)
+
+    store.flushCacheWrite()
+    expect(writes).toHaveLength(1)
+
+    store.noteDisplayName(ACCOUNT, OPS.room_id, 'Operations')
+    store.flushCacheWrite()
+    expect(writes).toHaveLength(2)
+    expect(writes[1][0].display_name).toBe('Operations')
+
+    // The timer it replaced is gone, and a second flush has nothing to send.
+    store.flushCacheWrite()
+    expect(writes).toHaveLength(2)
+  })
+
   it('keeps a row whose unread counts are missing or nonsense', async () => {
     const cache = createMemoryCacheStore()
     const uncounted = {

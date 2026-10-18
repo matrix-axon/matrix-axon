@@ -933,6 +933,31 @@ export function connectDeviceStateFlush(
   }
 }
 
+/**
+ * Persist coalesced room-list cache writes before the page goes away, on the
+ * same two signals as `connectDeviceStateFlush`. Live patches wait up to
+ * `LIVE_PATCH_CACHE_WRITE_DELAY_MS` before they reach IndexedDB, and a tab
+ * closed inside that window would otherwise restart offline with the old
+ * `display_name`, which outranks the newer title cache. Whether the
+ * IndexedDB transaction commits before the page is discarded is up to the
+ * browser; the next successful refresh corrects the record either way.
+ */
+export function connectRoomListCacheFlush(
+  rooms: Pick<RoomsStore, 'flushCacheWrite'>,
+  doc: Document = document,
+  win: Window = window,
+): () => void {
+  const flush = () => {
+    rooms.flushCacheWrite()
+  }
+  doc.addEventListener('visibilitychange', flush)
+  win.addEventListener('pagehide', flush)
+  return () => {
+    doc.removeEventListener('visibilitychange', flush)
+    win.removeEventListener('pagehide', flush)
+  }
+}
+
 /** Apply sibling devices' thread-read markers to local unread-thread state. */
 export function connectThreadReadMarkers(
   live: LiveConnection,
@@ -1536,6 +1561,7 @@ export function createServices(
   connectThreadReadMarkers(live, threadUnread, deviceState)
   connectThreadReceipts(api, live, rooms, accounts, deviceState, threadUnread)
   connectDeviceStateFlush(deviceState)
+  connectRoomListCacheFlush(rooms)
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)

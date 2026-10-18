@@ -11,6 +11,7 @@ import {
 import {
   connectCacheReset,
   connectCacheSetting,
+  connectRoomListCacheFlush,
   connectRoomsSessionReset,
   connectAttachmentReset,
   connectLiveRooms,
@@ -188,6 +189,7 @@ function roomsStub() {
     noteDisplayName: (accountId: string, roomId: string, name: string) => {
       displayNames.push([accountId, roomId, name])
     },
+    flushCacheWrite: () => {},
     peekRooms: () => empty.value,
     assignRoomTags: () => 0,
     restoreRoomTags: () => false,
@@ -989,6 +991,22 @@ describe('connectCacheReset', () => {
 
     expect(await cache.keys('rooms')).toEqual([])
     dispose()
+  })
+})
+
+describe('connectRoomListCacheFlush', () => {
+  it('flushes the coalesced room-list write when the page is hidden or unloads', () => {
+    const flushCacheWrite = vi.fn()
+    const disconnect = connectRoomListCacheFlush({ flushCacheWrite })
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(flushCacheWrite).toHaveBeenCalledTimes(1)
+    window.dispatchEvent(new Event('pagehide'))
+    expect(flushCacheWrite).toHaveBeenCalledTimes(2)
+
+    disconnect()
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('pagehide'))
+    expect(flushCacheWrite).toHaveBeenCalledTimes(2)
   })
 })
 

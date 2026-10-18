@@ -224,10 +224,6 @@ export function RoomInfoPanel({
    * where DELETE clears nothing and the peer's picture stays on screen.
    */
   const roomAvatarMxc = room?.avatar_url ?? null
-  const dmTitle =
-    room !== undefined && roomTitles.has(roomKey(room))
-      ? (roomTitles.get(roomKey(room)) ?? null)
-      : null
   const roster = useMemo(
     () => filteredMembers([...members.members.value.values()], filter),
     [members.members.value, filter],
@@ -613,9 +609,6 @@ export function RoomInfoPanel({
               the read-only rows up would show stale values beside the inputs
               and duplicate their labels. */}
           {!editing && <DetailRow label="Name" value={displayTitle} />}
-          {dmTitle !== null && dmTitle !== displayTitle && (
-            <DetailRow label="DM name" value={dmTitle} />
-          )}
           <DetailRow label="Room ID" value={room?.room_id ?? roomId} code />
           <DetailRow
             label="Account ID"

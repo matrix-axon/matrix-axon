@@ -221,6 +221,8 @@ export interface RoomsStore {
   ): void
   /** Apply a live `room_display_name.changed` value for one room (ADR 0118). */
   noteDisplayName(accountId: string, roomId: string, displayName: string): void
+  /** Persist live patches still waiting on the cache-write delay, now. */
+  flushCacheWrite(): void
 }
 
 /** How many member-list fetches run at once when resolving DM avatars. */
@@ -308,7 +310,11 @@ export function createRoomsStore(
    * before the server wrote it. The server publishes only after its write
    * commits, so a response requested after `seq` already has the value; one
    * requested before it is completed from here (`withPendingDisplayNames`).
-   * Bounded by the number of rooms, and emptied by every applied refresh.
+   * An entry is dropped by the first applied refresh that lists its room, not
+   * by any refresh: a response that omits the room says nothing about it, and
+   * keeping the entry means a later response that raced the server's write
+   * can still be completed. Bounded by the number of rooms; emptied on
+   * sign-out.
    */
   const pendingDisplayNames = new Map<string, { value: string; seq: number }>()
   /** The scheduled write-back of live patches to `cache`, if any. */
@@ -763,10 +769,11 @@ export function createRoomsStore(
         ),
         metadataSeqAtStart,
       )
-      // Every pending value is settled now: one that predates the request is
-      // in the response, a newer one was applied above, and one for a room the
-      // response omits will be in whichever response first lists that room.
-      pendingDisplayNames.clear()
+      // A pending value for a room this response lists is settled now: one
+      // that predates the request is in the response, and a newer one was
+      // applied above. One for a room it omits waits for a response that lists
+      // the room.
+      settlePendingDisplayNames(data.data)
       // Wholesale replacement, not a merge into the cached set: a room left or
       // forgotten on another client has to disappear (guardrail 5's
       // prune-on-reconcile), and a restored list is exactly the case where
@@ -1365,6 +1372,16 @@ export function createRoomsStore(
     return changed ? next : rows
   }
 
+  /** Drop the pending display names of the rooms a response listed. */
+  function settlePendingDisplayNames(listed: readonly RoomDto[]): void {
+    if (pendingDisplayNames.size === 0) {
+      return
+    }
+    for (const room of listed) {
+      pendingDisplayNames.delete(roomKey(room))
+    }
+  }
+
   /**
    * Persist live patches to the room-list cache, coalesced. Without this a
    * rename seen live is lost on an offline restart: the restored row's old
@@ -1392,10 +1409,30 @@ export function createRoomsStore(
   }
 
   /**
+   * Write a scheduled cache update now rather than when its timer fires, so a
+   * tab closed inside the coalescing window still persists the live patches.
+   * The write is skipped when nothing is scheduled; the rows are the current
+   * session's, since `resetSession` cancels the timer.
+   */
+  function flushCacheWrite(): void {
+    if (cacheWriteTimer === null) {
+      return
+    }
+    cancelCacheWrite()
+    if (rooms.value.length > 0) {
+      cache?.write(rooms.value)
+    }
+  }
+
+  /**
    * A room whose list row is not loaded is held in `pendingDisplayNames`
    * rather than refreshed for, unlike `noteUnreadCounts`: the first fill after
    * a server upgrade sends one of these per room (ADR 0118), so a re-read per
-   * frame would fetch the whole list thousands of times.
+   * frame would fetch the whole list thousands of times. The held value is
+   * applied by whatever refresh next lists the room: the first load, a
+   * reconnect, or the refresh a timeline event for an unknown room starts
+   * (`noteTimelineEvent`), which is how a newly joined room arrives. Until
+   * then the room is not on screen, so nothing shows the missing name.
    */
   function noteDisplayName(
     accountId: string,
@@ -1585,6 +1622,7 @@ export function createRoomsStore(
     noteTimelineEvent,
     noteUnreadCounts,
     noteDisplayName,
+    flushCacheWrite,
     peekRooms,
     assignRoomTags,
     restoreRoomTags,
