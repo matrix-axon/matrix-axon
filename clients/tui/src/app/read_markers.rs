@@ -46,6 +46,16 @@
 //! The receipt target is **session-local** and deliberately not hydrated: it is
 //! not device state. An empty map after a restart is what lets a room already
 //! broken by this bug repair itself on its next open.
+//!
+//! It is also recorded *before* the receipt is sent, so a receipt the server
+//! did not accept (a homeserver timeout, #625) would otherwise count as sent:
+//! every later read of the room names the same target, `note_room_read` sees no
+//! advance, and the homeserver keeps counting the messages for the life of the
+//! process. A failed send therefore comes back to the main loop, which forgets
+//! the target ([`App::forget_failed_receipt`]) unless a newer one replaced it,
+//! and the next read of the room sends it again. There is no timer-driven
+//! retry: a re-send waits for the room to be read again (opened, or a shown
+//! live event), which also bounds an outage to one request per read.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -293,6 +303,15 @@ impl App {
         });
     }
 
+    /// A receipt for `target` was not accepted. Forget it if it is still the
+    /// room's newest, so the next [`Self::note_room_read`] counts as an advance
+    /// and sends it again; a newer target noted meanwhile covers it and stays.
+    pub(crate) fn forget_failed_receipt(&mut self, room: RoomKey, target: ReceiptTarget) {
+        if self.receipt_targets.get(&room) == Some(&target) {
+            self.receipt_targets.remove(&room);
+        }
+    }
+
     /// Advance a room's receipt target, monotonically on `arrival_order`.
     /// Returns whether it moved.
     fn apply_receipt_target(&mut self, room: RoomKey, target: ReceiptTarget) -> bool {
@@ -362,11 +381,12 @@ impl App {
         };
         let client = self.client.clone();
         let device_id = self.device_id;
-        // Second, fire-and-forget action alongside the internal device-state PUT
-        // (ADR 0067): tell the homeserver too, so third-party Matrix clients see
-        // the room as read. Same debounced choke point, best-effort — a failed
-        // receipt is never surfaced (the local read UX must not depend on it,
-        // and the TUI has no in-session log surface to write to).
+        // Second action alongside the internal device-state PUT (ADR 0067):
+        // tell the homeserver too, so third-party Matrix clients see the room as
+        // read. Same debounced choke point, best-effort — a failed receipt is
+        // never surfaced (the local read UX must not depend on it, and the TUI
+        // has no in-session log surface to write to), but it is reported back
+        // so the target can be forgotten and re-sent (#625).
         //
         // It names the receipt *target*, not the marker: a receipt is
         // interpreted in arrival order and the marker is display order (ADR
@@ -374,10 +394,15 @@ impl App {
         if let Some(target) = receipt {
             let client = client.clone();
             let room = room.clone();
+            let tx = tx.clone();
             tokio::spawn(async move {
-                let _ = client
+                if client
                     .send_read_receipt(room.account_id, &room.room_id, &target.event_id)
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    let _ = tx.send(super::DraftOutcome::ReceiptFailed { room, target });
+                }
             });
         }
         tokio::spawn(async move {
@@ -631,6 +656,79 @@ mod tests {
             }),
         );
         assert!(app.pending_marker_put.is_none());
+    }
+
+    /// #625: a receipt the server did not accept is forgotten, so reading the
+    /// room again re-arms and re-sends the same target.
+    #[test]
+    fn a_failed_receipt_is_sent_again_on_the_next_read() {
+        let mut app = app_with(vec![test_room("!r:x", 0)]);
+        let k = key("!r:x");
+
+        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
+        app.pending_marker_put = None;
+        app.handle_draft_outcome(super::super::DraftOutcome::ReceiptFailed {
+            room: k.clone(),
+            target: in_step("$a", 100).unwrap(),
+        });
+        assert!(!app.receipt_targets.contains_key(&k));
+
+        // Same marker, same target: before the fix, neither was an advance.
+        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
+        assert_eq!(app.receipt_targets.get(&k).unwrap().event_id, "$a");
+        assert!(app.pending_marker_put.is_some());
+    }
+
+    /// A failure that arrives after a newer target was noted must not drop the
+    /// newer one: it covers the failed receipt, and has its own outcome coming.
+    #[test]
+    fn a_superseded_failed_receipt_keeps_the_newer_target() {
+        let mut app = app_with(vec![test_room("!r:x", 0)]);
+        let k = key("!r:x");
+
+        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
+        app.note_room_read(k.clone(), marker("$b", 200), in_step("$b", 200));
+        app.forget_failed_receipt(k.clone(), in_step("$a", 100).unwrap());
+        assert_eq!(app.receipt_targets.get(&k).unwrap().event_id, "$b");
+    }
+
+    /// The spawn path end to end: a receipt POST that gets no answer reports
+    /// back, and handling that report forgets the target.
+    #[tokio::test]
+    async fn a_receipt_send_failure_is_reported_back() {
+        // A port nothing listens on: bound, then closed.
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let mut app = App::new(
+            AxonClient::new(base_url, None),
+            None,
+            TuiConfig::test_default(),
+            Picker::halfblocks(),
+        );
+        app.set_device_id(Uuid::new_v4());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.set_drafts_sender(tx);
+        let k = key("!r:x");
+
+        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
+        app.flush_due_marker_put(Instant::now() + DRAFT_DEBOUNCE);
+
+        let mut receipt_failed = false;
+        for _ in 0..2 {
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+                .await
+                .expect("a background outcome")
+                .expect("channel open");
+            if let super::super::DraftOutcome::ReceiptFailed { room, target } = &outcome {
+                assert_eq!(room, &k);
+                assert_eq!(target.event_id, "$a");
+                receipt_failed = true;
+            }
+            app.handle_draft_outcome(outcome);
+        }
+        assert!(receipt_failed);
+        assert!(!app.receipt_targets.contains_key(&k));
     }
 
     /// Guards the `||` from the other side: a marker-only advance still arms,
