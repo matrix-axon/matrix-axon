@@ -87,6 +87,7 @@ hiding them.
 "Moves on" turned out to need a qualifier.
 The web client used to record a receipt as sent before the POST settled, so one that failed (a homeserver timeout, 2026-10-06 and 2026-10-18) was never sent again, and the room's badge came back after every local clear for the life of the page.
 The web sender now advances its forward-only floor only when the server accepts the receipt, and retries a transient failure (no answer, a 5xx, a 429) a bounded number of times with backoff, one request in flight per room, naming the newest position each time.
+A read noted during a backoff waits for that retry rather than cutting it short, so while the homeserver is failing, other clients can see the newest position up to the longest delay (30 s) late.
 All of that is cancelled when the Axon session ends (`connectEphemeralSenderSessionReset`), because the sender outlives a sign-out: a retry left armed would run under whatever credentials exist when it fires, and a 401 from it can discard the token of a session signed in since.
 A failure is still never surfaced to the user.
 

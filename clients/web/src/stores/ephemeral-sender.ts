@@ -30,7 +30,12 @@ import { inBackground, isTransientStatus } from '../api/client'
  *   life of the page, which on a resumed app is indefinitely. A transient
  *   failure (no answer, a 5xx, a 429) is retried on `RECEIPT_RETRY_DELAYS_MS`,
  *   one request in flight per room, and each retry sends the room's newest
- *   noted position rather than the one that failed. Once the retries run out,
+ *   noted position rather than the one that failed. A newer read waits for that
+ *   retry too, so while the homeserver is failing the newest position can reach
+ *   it up to the longest delay late. That is deliberate: letting each new read
+ *   cut the backoff short would send a request per read to a homeserver already
+ *   failing them. The room is read locally either way, so what lags is only
+ *   the badge other clients show. Once the retries run out,
  *   or the server gives a verdict (another 4xx), that position is left alone
  *   for `RECEIPT_GIVE_UP_COOLDOWN_MS`; after that, reading the room again sends
  *   it again.
@@ -275,7 +280,8 @@ export function createEphemeralSender(
     const state = receiptState(key)
     state.debounce = null
     // The request on the wire, or the retry waiting out its backoff, picks up
-    // `pending` when it settles.
+    // `pending` when it settles. A newer read does not cut a backoff short
+    // (see the module docs), so it can wait up to the longest delay.
     if (state.inFlight !== null || state.retry !== null) {
       return
     }
