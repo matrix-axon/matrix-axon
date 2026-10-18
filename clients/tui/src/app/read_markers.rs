@@ -51,11 +51,15 @@
 //! did not accept (a homeserver timeout, #625) would otherwise count as sent:
 //! every later read of the room names the same target, `note_room_read` sees no
 //! advance, and the homeserver keeps counting the messages for the life of the
-//! process. A failed send therefore comes back to the main loop, which forgets
-//! the target ([`App::forget_failed_receipt`]) unless a newer one replaced it,
-//! and the next read of the room sends it again. There is no timer-driven
-//! retry: a re-send waits for the room to be read again (opened, or a shown
-//! live event), which also bounds an outage to one request per read.
+//! process. A failed send therefore comes back to the main loop, which marks
+//! the target failed ([`App::forget_failed_receipt`]) unless a newer one
+//! replaced it, and the next read naming that target sends it again. The target
+//! itself stays, so a later read naming an *older* event is still no advance
+//! and cannot move the receipt backward. Only a transient failure comes back
+//! (no answer, 5xx, 429): a receipt the server refused outright would be
+//! refused again. There is no timer-driven retry: a re-send waits for the room
+//! to be read again (opened, or a shown live event), which also bounds an
+//! outage to one request per read.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -303,25 +307,28 @@ impl App {
         });
     }
 
-    /// A receipt for `target` was not accepted. Forget it if it is still the
-    /// room's newest, so the next [`Self::note_room_read`] counts as an advance
-    /// and sends it again; a newer target noted meanwhile covers it and stays.
+    /// A receipt for `target` was not accepted. Mark it failed if it is still
+    /// the room's newest, so the next [`Self::note_room_read`] naming it counts
+    /// as an advance and sends it again; a newer target noted meanwhile covers
+    /// it and stays as it is.
     pub(crate) fn forget_failed_receipt(&mut self, room: RoomKey, target: ReceiptTarget) {
         if self.receipt_targets.get(&room) == Some(&target) {
-            self.receipt_targets.remove(&room);
+            self.failed_receipts.insert(room);
         }
     }
 
-    /// Advance a room's receipt target, monotonically on `arrival_order`.
-    /// Returns whether it moved.
+    /// Advance a room's receipt target, monotonically on `arrival_order`; a
+    /// failed target also gives way to one at the same position, which re-sends
+    /// it. Returns whether it moved.
     fn apply_receipt_target(&mut self, room: RoomKey, target: ReceiptTarget) -> bool {
-        if self
-            .receipt_targets
-            .get(&room)
-            .is_some_and(|current| current.arrival_order >= target.arrival_order)
-        {
+        let failed = self.failed_receipts.contains(&room);
+        if self.receipt_targets.get(&room).is_some_and(|current| {
+            current.arrival_order > target.arrival_order
+                || (current.arrival_order == target.arrival_order && !failed)
+        }) {
             return false;
         }
+        self.failed_receipts.remove(&room);
         self.receipt_targets.insert(room, target);
         true
     }
@@ -385,8 +392,8 @@ impl App {
         // tell the homeserver too, so third-party Matrix clients see the room as
         // read. Same debounced choke point, best-effort — a failed receipt is
         // never surfaced (the local read UX must not depend on it, and the TUI
-        // has no in-session log surface to write to), but it is reported back
-        // so the target can be forgotten and re-sent (#625).
+        // has no in-session log surface to write to), but a transient one is
+        // reported back so the target can be re-sent (#625).
         //
         // It names the receipt *target*, not the marker: a receipt is
         // interpreted in arrival order and the marker is display order (ADR
@@ -399,7 +406,7 @@ impl App {
                 if client
                     .send_read_receipt(room.account_id, &room.room_id, &target.event_id)
                     .await
-                    .is_err()
+                    .is_err_and(|err| err.is_transient())
                 {
                     let _ = tx.send(super::DraftOutcome::ReceiptFailed { room, target });
                 }
@@ -658,8 +665,8 @@ mod tests {
         assert!(app.pending_marker_put.is_none());
     }
 
-    /// #625: a receipt the server did not accept is forgotten, so reading the
-    /// room again re-arms and re-sends the same target.
+    /// #625: a receipt the server did not accept is marked failed, so reading
+    /// the room again re-arms and re-sends the same target.
     #[test]
     fn a_failed_receipt_is_sent_again_on_the_next_read() {
         let mut app = app_with(vec![test_room("!r:x", 0)]);
@@ -671,12 +678,35 @@ mod tests {
             room: k.clone(),
             target: in_step("$a", 100).unwrap(),
         });
-        assert!(!app.receipt_targets.contains_key(&k));
+        assert!(app.failed_receipts.contains(&k));
 
         // Same marker, same target: before the fix, neither was an advance.
         app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
         assert_eq!(app.receipt_targets.get(&k).unwrap().event_id, "$a");
+        assert!(!app.failed_receipts.contains(&k));
         assert!(app.pending_marker_put.is_some());
+
+        // Re-sent once; the next read of the same target is no advance again.
+        app.pending_marker_put = None;
+        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
+        assert!(app.pending_marker_put.is_none());
+    }
+
+    /// A failed target is kept, not dropped: a later read naming an older
+    /// event is still behind it, so the receipt cannot move backward.
+    #[test]
+    fn a_failed_receipt_does_not_let_an_older_target_through() {
+        let mut app = app_with(vec![test_room("!r:x", 0)]);
+        let k = key("!r:x");
+
+        app.note_room_read(k.clone(), marker("$b", 200), in_step("$b", 200));
+        app.forget_failed_receipt(k.clone(), in_step("$b", 200).unwrap());
+        app.pending_marker_put = None;
+
+        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
+        assert_eq!(app.receipt_targets.get(&k).unwrap().event_id, "$b");
+        assert!(app.failed_receipts.contains(&k));
+        assert!(app.pending_marker_put.is_none());
     }
 
     /// A failure that arrives after a newer target was noted must not drop the
@@ -690,16 +720,69 @@ mod tests {
         app.note_room_read(k.clone(), marker("$b", 200), in_step("$b", 200));
         app.forget_failed_receipt(k.clone(), in_step("$a", 100).unwrap());
         assert_eq!(app.receipt_targets.get(&k).unwrap().event_id, "$b");
+        assert!(!app.failed_receipts.contains(&k));
     }
 
-    /// The spawn path end to end: a receipt POST that gets no answer reports
-    /// back, and handling that report forgets the target.
-    #[tokio::test]
-    async fn a_receipt_send_failure_is_reported_back() {
-        // A port nothing listens on: bound, then closed.
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base_url = format!("http://{}", dead.local_addr().unwrap());
-        drop(dead);
+    /// An API stub that answers every request with `status` and an empty
+    /// body, and counts the requests it has answered.
+    async fn spawn_status_stub(
+        status: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test API stub");
+        let address = listener.local_addr().expect("test API stub address");
+        let answered = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = answered.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept API request");
+                // Read the whole request, body included, before answering.
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = socket.read(&mut buffer).await.expect("read API request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                let response =
+                    format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write API response");
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (format!("http://{address}"), answered)
+    }
+
+    /// An app wired to `base_url` with its background channel, after one read
+    /// of `room` has been flushed.
+    fn app_after_one_flushed_read(
+        base_url: String,
+        room: &RoomKey,
+    ) -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<super::super::DraftOutcome>,
+    ) {
         let mut app = App::new(
             AxonClient::new(base_url, None),
             None,
@@ -707,13 +790,22 @@ mod tests {
             Picker::halfblocks(),
         );
         app.set_device_id(Uuid::new_v4());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         app.set_drafts_sender(tx);
-        let k = key("!r:x");
-
-        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
+        app.note_room_read(room.clone(), marker("$a", 100), in_step("$a", 100));
         app.flush_due_marker_put(Instant::now() + DRAFT_DEBOUNCE);
+        (app, rx)
+    }
 
+    /// The spawn path end to end: a receipt POST the server answers with a
+    /// transient error reports back, and handling that report marks it failed.
+    #[tokio::test]
+    async fn a_transient_receipt_failure_is_reported_back() {
+        let (base_url, _) = spawn_status_stub("503 Service Unavailable").await;
+        let k = key("!r:x");
+        let (mut app, mut rx) = app_after_one_flushed_read(base_url, &k);
+
+        // Two outcomes: the receipt's and the device-state PUT's.
         let mut receipt_failed = false;
         for _ in 0..2 {
             let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
@@ -728,7 +820,32 @@ mod tests {
             app.handle_draft_outcome(outcome);
         }
         assert!(receipt_failed);
-        assert!(!app.receipt_targets.contains_key(&k));
+        assert!(app.failed_receipts.contains(&k));
+    }
+
+    /// A receipt the server refused outright would be refused again, so it is
+    /// not reported back for a re-send.
+    #[tokio::test]
+    async fn a_refused_receipt_is_not_reported_back() {
+        use std::sync::atomic::Ordering;
+
+        let (base_url, answered) = spawn_status_stub("404 Not Found").await;
+        let k = key("!r:x");
+        let (_app, mut rx) = app_after_one_flushed_read(base_url, &k);
+
+        // The device-state PUT's failure is the only outcome.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("a background outcome")
+            .expect("channel open");
+        assert!(matches!(outcome, super::super::DraftOutcome::PutFailed(_)));
+        // Once both requests are answered, give the receipt task the chance to
+        // report before checking that it did not.
+        while answered.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let late = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(late.is_err(), "a refused receipt was reported back");
     }
 
     /// Guards the `||` from the other side: a marker-only advance still arms,
