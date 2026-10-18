@@ -578,6 +578,19 @@ export function inBackground(task: Promise<unknown>): void {
   void task.catch(() => {})
 }
 
+/**
+ * Whether an HTTP error status is worth retrying unchanged. A 5xx or a 429 says
+ * nothing about the request itself (axon, or the homeserver behind it, was
+ * slow, down or busy); any other 4xx is a verdict, and resending the same
+ * request would only earn it again — including a 401 after sign-out.
+ *
+ * A request that never got an answer rejects instead of resolving, so callers
+ * treat a rejection as transient on their own.
+ */
+export function isTransientStatus(status: number): boolean {
+  return status >= 500 || status === 429
+}
+
 /** Whether an openapi-fetch `error` value is the server's error envelope. */
 export function isErrorEnvelope(error: unknown): error is ErrorEnvelope {
   if (typeof error !== 'object' || error === null || !('error' in error)) {
