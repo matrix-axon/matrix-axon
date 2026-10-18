@@ -87,6 +87,9 @@ shows it.
 
 ## Why the uncovered rows are uncovered
 
+- **Reply avatar spacing.**
+  The reply scenes show quoted messages, but do not assert that the quoted sender's avatar stays clear of long text on mobile.
+  That geometry is checked by `e2e/timeline-overflow.spec.ts`.
 - **Unread thread picker.** Needs a room the viewer has fallen behind in. The
   corpus makes the viewer a member of every room from before its first message,
   so nothing is unread and the picker is empty. Covering it means teaching the
