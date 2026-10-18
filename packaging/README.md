@@ -1,6 +1,7 @@
 # Native packages
 
 Debian and RPM packages via nFPM, Homebrew formulas for `axon-server` and `axon-tui`, and a Homebrew cask for the desktop app.
+`winget/` holds manifest templates for the three Windows packages and `render.sh`, which fills them from a GitHub Release (ADR 0120). CI does not render them yet.
 The server binary in the packages and the formula carries the web client and serves it on the API's own address (ADR 0116).
 Docker Compose remains the path that includes Postgres.
 `docs/self-hosting.md` is a separate docs change.
