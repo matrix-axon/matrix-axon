@@ -71,6 +71,7 @@ default and switchable off under Settings → Room list, which also erases what
 was stored).
 
 Messages with bundled URL previews (`m.url_previews` or Beeper's `com.beeper.linkpreviews`) show text cards beneath the body in room and thread timelines, including attachment captions.
+Compact pinned thread headers omit the cards; the full root message retains them.
 Cards show the destination hostname, site name, title, and description when supplied; the destination is the matched URL in the message body, rather than the preview's canonical URL.
 Two cards appear initially, with an expansion control for additional previews (up to eight).
 Preview images and automatic preview generation are not supported; rendering cards makes no additional network requests.

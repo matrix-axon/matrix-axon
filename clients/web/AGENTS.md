@@ -193,6 +193,7 @@ before starting a milestone.
   bare body; detected formatting sends `org.matrix.custom.html`. The server
   never interprets Markdown. Raw inline HTML in composer input is escaped.
 - **Bundled URL previews** (`src/link-previews.ts`, `components/LinkPreviews.tsx`): `EventBody` appends text cards for room and thread messages, including media captions.
+  Compact pinned thread-root headers disable the cards through `EventBody`'s `showLinkPreviews` prop; full message rows retain them.
   The standard `m.url_previews` field takes precedence over `com.beeper.linkpreviews`, including empty arrays and malformed values.
   Cards derive from current event content, so the existing edit/redaction/reconnect reconciliation updates them without a separate store.
   Parsing and output are bounded; matched HTTP(S) URLs must occur in the body, and credentials in destinations are rejected.

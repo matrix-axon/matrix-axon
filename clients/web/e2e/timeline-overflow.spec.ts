@@ -407,7 +407,21 @@ test('a long thread root pins without changing the reply scroll geometry', async
 }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  const root = message('$long-root', 50, 'Long root. '.repeat(80))
+  const previewUrl = 'https://example.org/thread-root'
+  const rootMessage = message(
+    '$long-root',
+    50,
+    'Long root. '.repeat(80) + ` ${previewUrl}`,
+  )
+  const root = {
+    ...rootMessage,
+    content: {
+      ...rootMessage.content,
+      'com.beeper.linkpreviews': [
+        { matched_url: previewUrl, 'og:title': 'Root preview' },
+      ],
+    },
+  }
   const replies = Array.from({ length: 12 }, (_, index) => ({
     ...message(`$reply-${index}`, 100 + index, `reply ${index} `.repeat(12)),
     relates_to: { rel_type: 'm.thread', event_id: '$long-root' },
@@ -436,6 +450,10 @@ test('a long thread root pins without changing the reply scroll geometry', async
     element.dispatchEvent(new Event('scroll'))
   })
   await expect(preview).toHaveCount(1)
+  await expect(
+    timeline.locator('.thread-root-event .link-preview-card'),
+  ).toHaveCount(1)
+  await expect(preview.locator('.link-previews')).toHaveCount(0)
   const [timelineBox, previewBox, fullRootBox] = await Promise.all([
     timeline.boundingBox(),
     preview.boundingBox(),

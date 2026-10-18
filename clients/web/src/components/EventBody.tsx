@@ -99,6 +99,7 @@ export function EventBody({
   event,
   senderDisplay,
   resolveName,
+  showLinkPreviews = true,
 }: {
   event: TimelineEvent
   /** Resolved sender name for the `m.emote` prefix; falls back to the raw
@@ -107,6 +108,8 @@ export function EventBody({
   /** Members-store lookup for state-event notices (ADR 0083); the notice
    *  names users the event itself may not, e.g. whoever kicked someone. */
   resolveName?: (userId: string) => string
+  /** Compact thread-root headers show only the existing message body. */
+  showLinkPreviews?: boolean
 }) {
   // Resolved up front, but rendered in two places: a still-uploading send
   // outranks the placeholders below (it can be neither redacted nor a UTD),
@@ -141,7 +144,7 @@ export function EventBody({
   }
 
   const previews =
-    event.type === 'm.room.message' ? (
+    showLinkPreviews && event.type === 'm.room.message' ? (
       <LinkPreviews content={event.content} body={event.body} />
     ) : null
 

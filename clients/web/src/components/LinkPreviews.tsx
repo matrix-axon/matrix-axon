@@ -39,7 +39,7 @@ export function LinkPreviews({
         <PreviewCard key={preview.url} preview={preview} />
       ))}
       {previews.length > 2 && (
-        <details key={previews.map((preview) => preview.url).join('\0')}>
+        <details>
           <summary>Show {previews.length - 2} more previews</summary>
           {previews.slice(2).map((preview) => (
             <PreviewCard key={preview.url} preview={preview} />

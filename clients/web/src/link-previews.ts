@@ -35,6 +35,9 @@ export function parseLinkPreviews(
 ): LinkPreview[] {
   const c = object(content)
   if (c === null || !body || body.length > MAX_BODY_LENGTH) return []
+  const standard = Object.hasOwn(c, 'm.url_previews')
+  const entries = standard ? c['m.url_previews'] : c['com.beeper.linkpreviews']
+  if (!Array.isArray(entries) || entries.length === 0) return []
   // Conservatively omit previews for the entire formatted message when it
   // contains spoilers, so metadata cannot expose text hidden by FormattedBody.
   if (
@@ -47,9 +50,6 @@ export function parseLinkPreviews(
     )
       return []
   }
-  const standard = Object.hasOwn(c, 'm.url_previews')
-  const entries = standard ? c['m.url_previews'] : c['com.beeper.linkpreviews']
-  if (!Array.isArray(entries) || entries.length === 0) return []
   const bodyUrls = new Set(matchUrls(body).map(({ url }) => url))
   const seen = new Set<string>()
   const previews: LinkPreview[] = []
