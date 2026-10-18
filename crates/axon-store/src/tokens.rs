@@ -580,23 +580,21 @@ impl Store {
             session_ids.push(row.try_get("session_id")?);
         }
         if !session_ids.is_empty() {
-            sqlx_core::query::query(
+            sqlx_core::query::query(&format!(
                 "DELETE FROM push_registrations AS registration \
                   WHERE registration.session_id = ANY($1) \
                     AND NOT EXISTS ( \
                         SELECT 1 FROM tokens \
                          WHERE tokens.session_id = registration.session_id \
-                           AND tokens.revoked_at IS NULL \
-                           AND (tokens.expires_at IS NULL OR tokens.expires_at > now()) \
+                           AND {live} \
                     ) \
                     AND NOT EXISTS ( \
                         SELECT 1 FROM oauth_refresh_tokens \
                          WHERE oauth_refresh_tokens.session_id = registration.session_id \
-                           AND oauth_refresh_tokens.revoked_at IS NULL \
-                           AND (oauth_refresh_tokens.expires_at IS NULL \
-                                OR oauth_refresh_tokens.expires_at > now()) \
+                           AND {live} \
                     )",
-            )
+                live = crate::push::LIVE_CREDENTIAL_SQL,
+            ))
             .bind(&session_ids)
             .execute(&mut *tx)
             .await?;

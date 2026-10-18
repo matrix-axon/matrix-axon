@@ -12,6 +12,15 @@ use uuid::Uuid;
 
 use crate::{Store, StoreError};
 
+/// A credential row that is still usable.
+///
+/// Not revoked, and not past `expires_at`. A null `expires_at` does not expire.
+/// `oauth_refresh_tokens.expires_at` is `NOT NULL`, so that arm only changes
+/// the meaning for access tokens. Reap, revoke, and registration all use this
+/// text so the three checks cannot drift.
+pub(crate) const LIVE_CREDENTIAL_SQL: &str =
+    "revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())";
+
 /// What an upsert did. The device token is never in this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushRegistrationOutcome {
@@ -73,67 +82,64 @@ impl Store {
     ) -> Result<PushRegistrationOutcome, StoreError> {
         let mut tx = self.pool.begin().await?;
         Self::lock_credentials(&mut tx).await?;
-        let row = sqlx_core::query::query(
-            "INSERT INTO push_registrations \
-                 (session_id, token_id, provider, token, environment, disclosure) \
-             SELECT $1, $2, $3, $4, $5, $6 \
-              WHERE EXISTS ( \
-                    SELECT 1 FROM tokens \
-                     WHERE id = $2 AND session_id = $1 \
-                       AND revoked_at IS NULL \
-                       AND (expires_at IS NULL OR expires_at > now()) \
-                  ) \
-                AND ( \
-                    EXISTS ( \
-                        SELECT 1 FROM tokens \
-                         WHERE id = $2 AND session_id = $1 AND expires_at IS NULL \
-                    ) \
-                    OR EXISTS ( \
-                        SELECT 1 FROM oauth_refresh_tokens \
-                         WHERE session_id = $1 \
-                           AND revoked_at IS NULL \
-                           AND expires_at > now() \
-                    ) \
-                  ) \
-             ON CONFLICT (provider, token) DO UPDATE \
-                 SET session_id = EXCLUDED.session_id, \
-                     token_id = EXCLUDED.token_id, \
-                     environment = EXCLUDED.environment, \
-                     disclosure = EXCLUDED.disclosure \
-             RETURNING id, provider, disclosure, environment",
-        )
-        .bind(registration.session_id)
-        .bind(registration.token_id)
-        .bind(registration.provider)
-        .bind(registration.token)
-        .bind(registration.environment)
-        .bind(registration.disclosure)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(row) = row {
+        // One statement. `gate` is the liveness of this call, and the insert
+        // runs only when that row says the write is allowed. A rejected insert
+        // still returns the booleans, so there is no second query.
+        let sql = format!(
+            "WITH gate AS ( \
+                 SELECT \
+                     EXISTS ( \
+                         SELECT 1 FROM tokens \
+                          WHERE id = $2 AND session_id = $1 AND {LIVE_CREDENTIAL_SQL} \
+                     ) AS token_live, \
+                     EXISTS ( \
+                         SELECT 1 FROM tokens \
+                          WHERE id = $2 AND session_id = $1 \
+                            AND revoked_at IS NULL AND expires_at IS NULL \
+                     ) AS non_expiring, \
+                     EXISTS ( \
+                         SELECT 1 FROM oauth_refresh_tokens \
+                          WHERE session_id = $1 AND {LIVE_CREDENTIAL_SQL} \
+                     ) AS refresh_live \
+             ), written AS ( \
+                 INSERT INTO push_registrations \
+                     (session_id, token_id, provider, token, environment, disclosure) \
+                 SELECT $1, $2, $3, $4, $5, $6 FROM gate \
+                  WHERE token_live AND (non_expiring OR refresh_live) \
+                 ON CONFLICT (provider, token) DO UPDATE \
+                     SET session_id = EXCLUDED.session_id, \
+                         token_id = EXCLUDED.token_id, \
+                         environment = EXCLUDED.environment, \
+                         disclosure = EXCLUDED.disclosure \
+                 RETURNING id, provider, disclosure, environment \
+             ) \
+             SELECT written.id, written.provider, written.disclosure, written.environment, \
+                    gate.token_live \
+               FROM gate \
+               LEFT JOIN written ON true"
+        );
+        let row = sqlx_core::query::query(&sql)
+            .bind(registration.session_id)
+            .bind(registration.token_id)
+            .bind(registration.provider)
+            .bind(registration.token)
+            .bind(registration.environment)
+            .bind(registration.disclosure)
+            .fetch_one(&mut *tx)
+            .await?;
+        let id: Option<Uuid> = row.try_get("id")?;
+        let token_live: bool = row.try_get("token_live")?;
+        if let Some(id) = id {
             tx.commit().await?;
             return Ok(PushRegistrationOutcome::Stored(PushRegistration {
-                id: row.try_get("id")?,
+                id,
                 provider: row.try_get("provider")?,
                 disclosure: row.try_get("disclosure")?,
                 environment: row.try_get("environment")?,
             }));
         }
-        let reason = sqlx_core::query::query(
-            "SELECT EXISTS ( \
-                 SELECT 1 FROM tokens \
-                  WHERE id = $2 AND session_id = $1 \
-                    AND revoked_at IS NULL \
-                    AND (expires_at IS NULL OR expires_at > now()) \
-             ) AS token_live",
-        )
-        .bind(registration.session_id)
-        .bind(registration.token_id)
-        .fetch_one(&mut *tx)
-        .await?
-        .try_get("token_live")?;
         tx.rollback().await?;
-        Ok(if reason {
+        Ok(if token_live {
             PushRegistrationOutcome::RefreshRequired
         } else {
             PushRegistrationOutcome::CredentialEnded
@@ -164,14 +170,12 @@ impl Store {
         &self,
         session_id: Uuid,
     ) -> Result<bool, StoreError> {
-        let live: bool = sqlx_core::query::query(
+        let live: bool = sqlx_core::query::query(&format!(
             "SELECT EXISTS ( \
                  SELECT 1 FROM oauth_refresh_tokens \
-                  WHERE session_id = $1 \
-                    AND revoked_at IS NULL \
-                    AND expires_at > now() \
-             ) AS live",
-        )
+                  WHERE session_id = $1 AND {LIVE_CREDENTIAL_SQL} \
+             ) AS live"
+        ))
         .bind(session_id)
         .fetch_one(&self.pool)
         .await?
@@ -187,24 +191,20 @@ impl Store {
     /// a later live refresh token. Called at server boot. Returns how many
     /// registrations were removed.
     pub async fn reap_push_registrations(&self) -> Result<u64, StoreError> {
-        let result = sqlx_core::query::query(
+        let sql = format!(
             "DELETE FROM push_registrations AS registration \
               WHERE NOT EXISTS ( \
                     SELECT 1 FROM tokens \
                      WHERE tokens.session_id = registration.session_id \
-                       AND tokens.revoked_at IS NULL \
-                       AND (tokens.expires_at IS NULL OR tokens.expires_at > now()) \
+                       AND {LIVE_CREDENTIAL_SQL} \
                   ) \
                 AND NOT EXISTS ( \
                     SELECT 1 FROM oauth_refresh_tokens \
                      WHERE oauth_refresh_tokens.session_id = registration.session_id \
-                       AND oauth_refresh_tokens.revoked_at IS NULL \
-                       AND (oauth_refresh_tokens.expires_at IS NULL \
-                            OR oauth_refresh_tokens.expires_at > now()) \
-                  )",
-        )
-        .execute(&self.pool)
-        .await?;
+                       AND {LIVE_CREDENTIAL_SQL} \
+                  )"
+        );
+        let result = sqlx_core::query::query(&sql).execute(&self.pool).await?;
         Ok(result.rows_affected())
     }
 }

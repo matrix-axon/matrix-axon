@@ -19,6 +19,21 @@ use crate::response::{ApiError, ApiResponse};
 /// check is the same bound, in bytes.
 const MAX_TOKEN_BYTES: usize = 4096;
 
+/// Why `token` must not be written. `None` means it is acceptable.
+///
+/// Postgres `TEXT` rejects a NUL and the request would otherwise become a 500.
+/// The other ASCII controls are rejected with it: a device token is hex or
+/// URL-safe text, and a control character is not a length problem.
+fn unacceptable_token(token: &str) -> Option<&'static str> {
+    if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
+        return Some("length");
+    }
+    if token.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return Some("control");
+    }
+    None
+}
+
 /// Body cap for `PUT /v1/push/registrations`. A 4096-byte token of escaped
 /// quotes is about twice that, plus the other fields.
 pub(crate) const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -54,13 +69,14 @@ pub async fn put_registration(
             return Err(ApiError::push_provider_unsupported());
         }
     };
-    if body.token.is_empty() || body.token.len() > MAX_TOKEN_BYTES {
+    if let Some(reason) = unacceptable_token(&body.token) {
         tracing::info!(
             token_bytes = body.token.len(),
-            "push registration rejected: token length"
+            reason,
+            "push registration rejected: token"
         );
         return Err(ApiError::bad_request(
-            "token must be between 1 and 4096 bytes",
+            "token must be 1 to 4096 bytes and must not contain control characters",
         ));
     }
     if !matches!(
@@ -156,4 +172,19 @@ pub async fn delete_registration(
         .await?;
     tracing::info!(registration_id = %id, "push registration delete");
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unacceptable_token;
+
+    #[test]
+    fn a_token_with_a_control_character_is_rejected_before_a_write() {
+        assert_eq!(unacceptable_token("device-token"), None);
+        assert_eq!(unacceptable_token(""), Some("length"));
+        assert_eq!(unacceptable_token(&"x".repeat(4097)), Some("length"));
+        assert_eq!(unacceptable_token("device\0token"), Some("control"));
+        assert_eq!(unacceptable_token("device\ntoken"), Some("control"));
+        assert_eq!(unacceptable_token("device\u{7f}token"), Some("control"));
+    }
 }

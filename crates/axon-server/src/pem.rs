@@ -7,25 +7,29 @@
 use std::path::Path;
 use std::time::Duration;
 
-use axon_core::PushKeySource;
-
 const MAX_KEY_BYTES: usize = 16 * 1024;
+
+/// One PEM source. An empty inline string is not a source: together with a
+/// path it is still "both", which is the Apple sign-in rule.
+pub(crate) enum PrivateKeySource<'a> {
+    Inline(&'a str),
+    Path(&'a Path),
+}
 
 /// Require exactly one of an inline PEM or a path.
 ///
 /// `label` is a short name such as `"Apple"` and is the only caller-controlled
-/// text that appears in an error. Push resolves this choice earlier, because
-/// an empty provider is allowed there; Apple always needs a key.
-pub(crate) fn one_private_key(
+/// text that appears in an error. An empty `private_key` plus a path is
+/// rejected: the field is set, it is just empty.
+pub(crate) fn one_private_key<'a>(
     label: &str,
-    inline: Option<&str>,
-    path: Option<&Path>,
-) -> anyhow::Result<PushKeySource> {
-    let inline = inline.filter(|pem| !pem.is_empty());
+    inline: Option<&'a str>,
+    path: Option<&'a Path>,
+) -> anyhow::Result<PrivateKeySource<'a>> {
     let path = path.filter(|path| !path.as_os_str().is_empty());
     match (inline, path) {
-        (Some(pem), None) => Ok(PushKeySource::Inline(pem.to_owned())),
-        (None, Some(path)) => Ok(PushKeySource::Path(path.to_path_buf())),
+        (Some(pem), None) if !pem.is_empty() => Ok(PrivateKeySource::Inline(pem)),
+        (None, Some(path)) => Ok(PrivateKeySource::Path(path)),
         _ => anyhow::bail!(
             "set exactly one of {label} private_key (at most 16 KiB) or private_key_path"
         ),
@@ -37,15 +41,15 @@ pub(crate) fn one_private_key(
 /// not include the key bytes or the path.
 pub(crate) async fn load_private_key(
     label: &str,
-    source: &PushKeySource,
+    source: &PrivateKeySource<'_>,
 ) -> anyhow::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     Ok(match source {
-        PushKeySource::Inline(pem) if pem.len() > MAX_KEY_BYTES => {
+        PrivateKeySource::Inline(pem) if pem.len() > MAX_KEY_BYTES => {
             anyhow::bail!("{label} private_key must be at most 16 KiB");
         }
-        PushKeySource::Inline(pem) if !pem.is_empty() => pem.as_bytes().to_vec(),
-        PushKeySource::Path(path) => tokio::time::timeout(Duration::from_secs(5), async {
+        PrivateKeySource::Inline(pem) if !pem.is_empty() => pem.as_bytes().to_vec(),
+        PrivateKeySource::Path(path) => tokio::time::timeout(Duration::from_secs(5), async {
             let metadata = tokio::fs::metadata(path).await.map_err(|error| {
                 key_file_error(label, "inspect", path.is_relative(), error.kind())
             })?;
@@ -88,7 +92,7 @@ pub(crate) async fn load_private_key(
         })
         .await
         .map_err(|_| anyhow::anyhow!("{label} key file read timed out"))??,
-        PushKeySource::Inline(_) => anyhow::bail!(
+        PrivateKeySource::Inline(_) => anyhow::bail!(
             "set exactly one of {label} private_key (at most 16 KiB) or private_key_path"
         ),
     })

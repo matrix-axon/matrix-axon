@@ -1189,13 +1189,6 @@ fn system_config(path: &Path) -> SystemConfig {
     }
 }
 
-fn validation_message(error: ConfigError) -> String {
-    match error {
-        ConfigError::Validation(message) => message,
-        other => other.to_string(),
-    }
-}
-
 impl Config {
     /// Load configuration from an optional TOML file plus environment overrides.
     ///
@@ -1230,10 +1223,10 @@ impl Config {
 
         let mut problems = Vec::new();
         if let Err(error) = config.database.validate() {
-            problems.push(validation_message(error));
+            problems.push(error.validation_detail());
         }
         if let Err(error) = config.push.validate() {
-            problems.push(validation_message(error));
+            problems.push(error.validation_detail());
         }
         if !problems.is_empty() {
             return Err(ConfigError::Validation(problems.join("; ")));

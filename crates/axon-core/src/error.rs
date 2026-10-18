@@ -59,5 +59,16 @@ pub enum ConfigError {
     Validation(String),
 }
 
+impl ConfigError {
+    /// The check's own text, without this error's `invalid configuration:` prefix.
+    /// Other variants keep their full message.
+    pub(crate) fn validation_detail(self) -> String {
+        match self {
+            Self::Validation(message) => message,
+            other => other.to_string(),
+        }
+    }
+}
+
 /// Convenience alias for fallible APIs returning the top-level [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;

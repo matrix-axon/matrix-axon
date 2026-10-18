@@ -9,14 +9,14 @@ use anyhow::Context;
 use axon_core::{LoadedApns, LoadedFcm, PushConfig, PushKeySource, PushMaterial};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
-use crate::pem::load_private_key;
+use crate::pem::{load_private_key, PrivateKeySource};
 
 /// Resolve `[push]` and read each configured PEM.
 pub(crate) async fn load_push_material(config: &PushConfig) -> anyhow::Result<PushMaterial> {
     let apns = match config.apns.resolve().context("reading push.apns")? {
         None => None,
         Some(resolved) => {
-            let private_key = load_key("APNs", &resolved.key).await?;
+            let private_key = load_private_key("APNs", &pem_source(&resolved.key)).await?;
             parse_signing_key("APNs", Algorithm::ES256, &private_key)?;
             tracing::info!(
                 team_id = %resolved.team_id,
@@ -36,7 +36,7 @@ pub(crate) async fn load_push_material(config: &PushConfig) -> anyhow::Result<Pu
     let fcm = match config.fcm.resolve().context("reading push.fcm")? {
         None => None,
         Some(resolved) => {
-            let private_key = load_key("FCM", &resolved.key).await?;
+            let private_key = load_private_key("FCM", &pem_source(&resolved.key)).await?;
             parse_signing_key("FCM", Algorithm::RS256, &private_key)?;
             tracing::info!(
                 project_id = %resolved.project_id,
@@ -61,8 +61,11 @@ pub(crate) async fn load_push_material(config: &PushConfig) -> anyhow::Result<Pu
     Ok(PushMaterial::new(apns, fcm))
 }
 
-async fn load_key(label: &str, source: &PushKeySource) -> anyhow::Result<Vec<u8>> {
-    load_private_key(label, source).await
+fn pem_source(source: &PushKeySource) -> PrivateKeySource<'_> {
+    match source {
+        PushKeySource::Inline(pem) => PrivateKeySource::Inline(pem),
+        PushKeySource::Path(path) => PrivateKeySource::Path(path),
+    }
 }
 
 /// Prove the PEM is a usable signing key of `algorithm` before status can say

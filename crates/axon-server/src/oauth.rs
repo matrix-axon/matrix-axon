@@ -319,6 +319,16 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("exactly one"));
+        config.providers.apple.private_key = Some(String::new());
+        assert!(
+            apple_provider(&config)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("exactly one"),
+            "an empty private_key plus a path is still both sources"
+        );
         config.providers.apple.private_key = None;
         let error = apple_provider(&config).await.err().unwrap().to_string();
         assert!(error.contains("NotFound"));

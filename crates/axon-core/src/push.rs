@@ -103,10 +103,10 @@ impl PushConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut problems = Vec::new();
         if let Err(error) = self.apns.resolve() {
-            problems.push(validation_text(error));
+            problems.push(error.validation_detail());
         }
         if let Err(error) = self.fcm.resolve() {
-            problems.push(validation_text(error));
+            problems.push(error.validation_detail());
         }
         match problems.len() {
             0 => Ok(()),
@@ -250,13 +250,6 @@ impl PushMaterial {
     /// The loaded FCM key, when this process has one.
     pub fn fcm(&self) -> Option<&LoadedFcm> {
         self.fcm.as_ref()
-    }
-}
-
-fn validation_text(error: ConfigError) -> String {
-    match error {
-        ConfigError::Validation(message) => message,
-        other => other.to_string(),
     }
 }
 
