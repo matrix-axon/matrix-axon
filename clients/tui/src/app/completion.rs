@@ -816,7 +816,8 @@ impl App {
         }
         let target_lower = target.to_lowercase();
         let exact = self.matching_room_indices_for_account(account_filter, |room| {
-            room.room_id == target
+            room.title().to_lowercase() == target_lower
+                || room.room_id == target
                 || room.canonical_alias.as_deref() == Some(target)
                 || room.name.as_deref().map(str::to_lowercase).as_deref()
                     == Some(target_lower.as_str())
@@ -1097,8 +1098,8 @@ fn longest_common_prefix(candidates: &[String]) -> Option<String> {
 fn room_completion_value(room: &RoomDto) -> String {
     room.canonical_alias
         .as_deref()
-        .or(room.name.as_deref())
-        .unwrap_or(&room.room_id)
+        .filter(|alias| !alias.trim().is_empty())
+        .unwrap_or_else(|| room.title())
         .to_owned()
 }
 
@@ -1109,6 +1110,7 @@ fn room_matching_prefix_value(room: &RoomDto, target: &str) -> Option<String> {
     }
     let target_lower = target.to_lowercase();
     for field in [
+        Some(room.title()),
         room.name.as_deref(),
         room.canonical_alias.as_deref(),
         Some(room.room_id.as_str()),

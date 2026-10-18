@@ -3,10 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApiClient } from './api/client'
 import { createAttachmentStaging } from './media/attachment-staging'
 import { createMediaService } from './media/media-service'
-import { TIMELINE_EVENT, UNREAD_COUNTS_CHANGED } from './api/frames'
+import {
+  ROOM_DISPLAY_NAME_CHANGED,
+  TIMELINE_EVENT,
+  UNREAD_COUNTS_CHANGED,
+} from './api/frames'
 import {
   connectCacheReset,
   connectCacheSetting,
+  connectRoomListCacheFlush,
   connectRoomsSessionReset,
   connectAttachmentReset,
   connectLiveRooms,
@@ -117,6 +122,7 @@ describe('connectReadMarkers', () => {
 function roomsStub() {
   const noted: [string, string, number][] = []
   const unreadCounts: [string, string, number, number][] = []
+  const displayNames: [string, string, string][] = []
   const liveEvents: unknown[] = []
   let refreshes = 0
   const empty = signal<never[]>([])
@@ -180,6 +186,10 @@ function roomsStub() {
     ) => {
       unreadCounts.push([accountId, roomId, notificationCount, highlightCount])
     },
+    noteDisplayName: (accountId: string, roomId: string, name: string) => {
+      displayNames.push([accountId, roomId, name])
+    },
+    flushCacheWrite: () => {},
     peekRooms: () => empty.value,
     assignRoomTags: () => 0,
     restoreRoomTags: () => false,
@@ -189,6 +199,7 @@ function roomsStub() {
     stub,
     noted,
     unreadCounts,
+    displayNames,
     liveEvents,
     refreshCount: () => refreshes,
   }
@@ -268,6 +279,45 @@ describe('connectLiveRooms', () => {
       }),
     )
     expect(noted).toHaveLength(1)
+  })
+
+  it('feeds display-name frames into noteDisplayName (ADR 0118)', () => {
+    let socket: FakeWebSocket | undefined
+    const live = createLiveConnection({
+      socketFactory: () => {
+        socket = new FakeWebSocket()
+        return socket.asWebSocket()
+      },
+    })
+    const { stub, displayNames, liveEvents } = roomsStub()
+    connectLiveRooms(live, stub)
+    live.start()
+
+    socket!.emitMessage(
+      JSON.stringify({
+        type: ROOM_DISPLAY_NAME_CHANGED,
+        account_id: ACCT,
+        payload: { room_id: ROOM, display_name: 'Alice, Bob' },
+      }),
+    )
+    expect(displayNames).toEqual([[ACCT, ROOM, 'Alice, Bob']])
+    expect(liveEvents).toHaveLength(0)
+
+    // Malformed payloads are dropped, never applied as a blank title.
+    for (const payload of [
+      { room_id: ROOM, display_name: null },
+      { room_id: ROOM },
+      { display_name: 'x' },
+    ]) {
+      socket!.emitMessage(
+        JSON.stringify({
+          type: ROOM_DISPLAY_NAME_CHANGED,
+          account_id: ACCT,
+          payload,
+        }),
+      )
+    }
+    expect(displayNames).toHaveLength(1)
   })
 
   it('re-reads the list on reconnect, not on the first connect (WCR-08)', () => {
@@ -941,6 +991,22 @@ describe('connectCacheReset', () => {
 
     expect(await cache.keys('rooms')).toEqual([])
     dispose()
+  })
+})
+
+describe('connectRoomListCacheFlush', () => {
+  it('flushes the coalesced room-list write when the page is hidden or unloads', () => {
+    const flushCacheWrite = vi.fn()
+    const disconnect = connectRoomListCacheFlush({ flushCacheWrite })
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(flushCacheWrite).toHaveBeenCalledTimes(1)
+    window.dispatchEvent(new Event('pagehide'))
+    expect(flushCacheWrite).toHaveBeenCalledTimes(2)
+
+    disconnect()
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('pagehide'))
+    expect(flushCacheWrite).toHaveBeenCalledTimes(2)
   })
 })
 

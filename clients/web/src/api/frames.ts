@@ -11,8 +11,9 @@ export type EventDto = components['schemas']['EventDto']
  * server frame type reaches no handler until one is added, rather than
  * breaking decode. Known tags today: `timeline.event`, `verification.*`,
  * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`,
- * `unread_counts.changed`, `invite.added`, `invite.removed`,
- * `account_data.changed`, `preferences.changed`, `heartbeat`.
+ * `unread_counts.changed`, `room_display_name.changed`, `invite.added`,
+ * `invite.removed`, `account_data.changed`, `preferences.changed`,
+ * `heartbeat`.
  */
 export interface LiveFrame {
   /** Namespaced tag, e.g. `timeline.event`. */
@@ -34,6 +35,9 @@ export const EPHEMERAL_PASSTHROUGH = 'ephemeral.passthrough'
 
 /** The `type` tag for server-derived per-room unread counts (ADR 0070). */
 export const UNREAD_COUNTS_CHANGED = 'unread_counts.changed'
+
+/** The `type` tag for a room's newly stored calculated name (ADR 0118). */
+export const ROOM_DISPLAY_NAME_CHANGED = 'room_display_name.changed'
 
 /** The `type` tag for a newly persisted pending invite (ADR 0091). */
 export const INVITE_ADDED = 'invite.added'
@@ -104,6 +108,15 @@ export interface UnreadCountsChange {
   roomId: string
   notificationCount: number
   highlightCount: number
+}
+
+/**
+ * The payload of a `room_display_name.changed` frame (ADR 0118): the same
+ * value `RoomDto.display_name` now returns for the room.
+ */
+export interface RoomDisplayNameChange {
+  roomId: string
+  displayName: string
 }
 
 /**
@@ -279,6 +292,27 @@ export function unreadCountsChange(
     return null
   }
   return { roomId, notificationCount, highlightCount }
+}
+
+/**
+ * A room's new calculated display name, or `null` for any other tag or a
+ * malformed payload. The frame's account is on the envelope.
+ */
+export function roomDisplayNameChange(
+  frame: LiveFrame,
+): RoomDisplayNameChange | null {
+  if (frame.type !== ROOM_DISPLAY_NAME_CHANGED) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const { room_id: roomId, display_name: displayName } =
+    frame.payload as Record<string, unknown>
+  if (typeof roomId !== 'string' || typeof displayName !== 'string') {
+    return null
+  }
+  return { roomId, displayName }
 }
 
 function isCount(value: unknown): value is number {

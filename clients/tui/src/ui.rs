@@ -169,8 +169,7 @@ fn command_response_needs_popup(app: &App, input_area: Rect) -> bool {
 ///
 /// Runs once per main-loop iteration, immediately before `terminal.draw`.
 /// Every value it writes is one a key handler also reads — `PageDown` pages by
-/// `rooms.page_size`, `sweep_visible_room_titles` fetches titles around
-/// `rooms.scroll`, the popup scroll keys move `popup_scroll` — which is why it
+/// `rooms.page_size`, the popup scroll keys move `popup_scroll` — which is why it
 /// cannot stay inside the renderer (#70). While it did, those numbers were
 /// whatever the *previous* repaint had measured, every guard against a first
 /// keystroke arriving before the first paint had to be written by hand, and
@@ -2700,12 +2699,6 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
     lines.push("".to_owned());
     lines.push("Members from loaded timeline:".to_owned());
 
-    // For an unnamed room (e.g. a DM), the `Name:` line above is the raw room id.
-    // Surface the member-derived display name too, once one has been resolved.
-    if let Some(dm_name) = app.room_titles.get(&RoomKey::from(room)) {
-        lines.insert(1, format!("DM name: {dm_name}"));
-    }
-
     let members = known_room_members(app);
     if members.is_empty() {
         lines.push("  none in the loaded timeline".to_owned());
@@ -2945,11 +2938,6 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
                 .collect();
             format!("Startup: {}", stages.join(" · "))
         };
-        let room_titles_line = format!(
-            "Room titles: {} cached, {} with none derivable",
-            app.room_titles.len(),
-            app.rooms_without_derived_title.len()
-        );
         // A cache that never hits looks identical on screen: same pixels, just
         // slower. Without these counts a broken digest and a working one are
         // indistinguishable from the UI, so the overlay reports the hit rate
@@ -2972,7 +2960,15 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         lines.push("Diagnostics (display.debug):".to_owned());
         lines.push(media_drops_line);
         lines.push(startup_line);
-        lines.push(room_titles_line);
+        lines.push(format!(
+            "Room titles: {} calculated, {} pending live fields",
+            app.rooms
+                .rooms
+                .iter()
+                .filter(|room| room.display_name.is_some())
+                .count(),
+            app.room_title_updates.len(),
+        ));
         lines.push(layout_line);
     }
 
@@ -3426,6 +3422,7 @@ mod tests {
                 name: Some(format!("Room {i}")),
                 topic: None,
                 avatar_url: None,
+                display_name: None,
                 canonical_alias: None,
                 room_type: None,
                 last_activity_ts: 0,
@@ -3444,9 +3441,8 @@ mod tests {
     /// with nothing painted.
     ///
     /// This is the shape of #70. `PageDown` in the room list moves
-    /// `rooms.page_size` rooms and `sweep_visible_room_titles` fetches titles
-    /// for the window at `rooms.scroll`; while the renderer owned those
-    /// numbers, both read whatever the previous repaint had left behind, and
+    /// `rooms.page_size` rooms; while the renderer owned that number,
+    /// paging read whatever the previous repaint had left behind, and
     /// on the first keystroke of a session that was nothing at all.
     #[test]
     fn the_update_step_measures_every_pane_before_anything_paints() {
@@ -3500,8 +3496,8 @@ mod tests {
     /// Painting settles none of the state a keystroke reads.
     ///
     /// The guard for #70: `draw` may still consume the one-shot render flags
-    /// and record where images landed, but every number a key handler,
-    /// `sweep_visible_room_titles`, or the search paging math reads must be
+    /// and record where images landed, but every number a key handler
+    /// or the search paging math reads must be
     /// exactly what `prepare` left.
     #[test]
     fn painting_settles_no_state_the_key_handlers_read() {
@@ -3645,6 +3641,7 @@ mod tests {
             name: Some("Room".to_owned()),
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: Some("#room:example.com".to_owned()),
             room_type: None,
             last_activity_ts: 0,
@@ -3711,6 +3708,7 @@ mod tests {
             name: Some("Room".to_owned()),
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: Some("#room:example.com".to_owned()),
             room_type: None,
             last_activity_ts: 0,
@@ -3796,6 +3794,7 @@ mod tests {
             name: Some("Ops".to_owned()),
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: None,
             room_type: None,
             last_activity_ts: 0,
@@ -4166,6 +4165,7 @@ mod tests {
             name: Some("Room".to_owned()),
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: None,
             room_type: None,
             last_activity_ts: 0,
@@ -4491,6 +4491,7 @@ mod tests {
             name: Some("Ops".to_owned()),
             topic: Some("Daily operations".to_owned()),
             avatar_url: Some("mxc://example/avatar".to_owned()),
+            display_name: None,
             canonical_alias: Some("#ops:example.com".to_owned()),
             room_type: None,
             last_activity_ts: 0,

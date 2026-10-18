@@ -534,7 +534,6 @@ async fn run_app(
                 // Pull in list titles for rooms scrolling or filtering has just
                 // brought on screen. Bounded and idempotent — already-titled
                 // rooms are skipped (#189).
-                app.sweep_visible_room_titles();
                 app.sweep_spaces(now);
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel

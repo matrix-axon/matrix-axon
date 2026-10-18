@@ -916,6 +916,7 @@ mod tests {
             name: Some("Ops".to_owned()),
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: Some("#summary:example.com".to_owned()),
             room_type: None,
             last_activity_ts: 0,

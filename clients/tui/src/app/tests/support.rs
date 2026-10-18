@@ -25,6 +25,7 @@ pub(super) fn room(room_id: &str, alias: Option<&str>, name: Option<&str>) -> Ro
         name: name.map(str::to_owned),
         topic: None,
         avatar_url: None,
+        display_name: None,
         canonical_alias: alias.map(str::to_owned),
         room_type: None,
         last_activity_ts: 0,
@@ -137,8 +138,13 @@ pub(super) fn app_with_rooms(rooms: Vec<RoomDto>) -> App {
 pub(super) fn seed_room_caches(app: &mut App, key: &RoomKey) {
     app.rooms.unread.insert(key.clone(), 2);
     app.rooms.display_names.insert(key.clone(), HashMap::new());
-    app.room_titles
-        .insert(key.clone(), "Cached title".to_owned());
+    app.room_title_updates.insert(
+        (key.clone(), crate::app::rooms::TitleField::DisplayName),
+        crate::app::rooms::TitleUpdate {
+            received: std::time::Instant::now(),
+            value: Some("Cached title".to_owned()),
+        },
+    );
     app.messages.events.insert(
         key.clone(),
         vec![event_with_id(
@@ -161,7 +167,7 @@ pub(super) fn seed_room_caches(app: &mut App, key: &RoomKey) {
 pub(super) fn assert_room_caches_pruned(app: &App, key: &RoomKey) {
     assert!(!app.rooms.unread.contains_key(key));
     assert!(!app.rooms.display_names.contains_key(key));
-    assert!(!app.room_titles.contains_key(key));
+    assert!(!app.room_title_updates.keys().any(|(room, _)| room == key));
     assert!(!app.messages.events.contains_key(key));
     assert!(!app.messages.history_cursors.contains_key(key));
     assert!(!app.thread_summaries.contains_key(key));
@@ -218,6 +224,7 @@ pub(super) fn rooms_response_body(rooms: &[RoomDto]) -> String {
                 "topic": room.topic,
                 "avatar_url": room.avatar_url,
                 "canonical_alias": room.canonical_alias,
+                "display_name": room.display_name,
                 "last_activity_ts": room.last_activity_ts,
                 "last_event_id": room.last_event_id,
             })

@@ -12,12 +12,11 @@ import { markdownToPlainText } from '../markdown/markdown'
 import { parseRoomTags, roomIdsInDirectMap, type RoomTag } from './favourites'
 import {
   dmPeerAvatarFromMembers,
-  dmTitleFromMembers,
   isLikelyDm,
   memberDisplay,
   needsDerivedTitle,
+  ownRoomTitle,
   roomKey,
-  roomTitle,
   userIdDisplay,
   type MemberDto,
   type RoomDto,
@@ -82,13 +81,15 @@ export interface RoomsStore {
   confirmed: ReadonlySignal<boolean>
   error: Signal<string | null>
   /**
-   * Member-derived titles for unnamed rooms, keyed by room key. Read through
-   * `roomTitle(room, titles.value)`.
+   * The last title each room was seen with, keyed by room key and persisted
+   * across reloads, so a route can title a room before the list has loaded.
+   * Read through `roomTitle(room, titles.value)`, which prefers the row's own
+   * fields.
    */
   titles: ReadonlySignal<ReadonlyMap<string, string>>
   /**
    * Other-user avatars for 1:1 DMs that have no room avatar, keyed by room
-   * key. Populated from the same `/members` fetch that resolves DM titles.
+   * key. Populated from a `/members` fetch per unnamed direct room.
    */
   dmAvatars: ReadonlySignal<ReadonlyMap<string, string>>
 
@@ -218,26 +219,47 @@ export interface RoomsStore {
     notificationCount: number,
     highlightCount: number,
   ): void
+  /** Apply a live `room_display_name.changed` value for one room (ADR 0118). */
+  noteDisplayName(accountId: string, roomId: string, displayName: string): void
+  /** Persist live patches still waiting on the cache-write delay, now. */
+  flushCacheWrite(): void
 }
 
-/** How many member-list fetches run at once when resolving DM titles. */
-const TITLE_FETCH_CONCURRENCY = 4
+/** How many member-list fetches run at once when resolving DM avatars. */
+const DM_AVATAR_FETCH_CONCURRENCY = 4
 const PREVIEW_PAGE_LIMIT = 50
 const PREVIEW_MAX_PAGES = 3
 const ROOM_TITLE_CACHE_KEY = 'axon.room_titles.v1'
+/**
+ * How long a live patch waits before the room-list cache is rewritten with it.
+ * The first fill after a server upgrade sends about four
+ * `room_display_name.changed` frames a second for the whole sweep (ADR 0118),
+ * and each write serializes the entire list, so writes are coalesced. A restart
+ * inside the window loses nothing the next refresh does not put back.
+ */
+const LIVE_PATCH_CACHE_WRITE_DELAY_MS = 5_000
+
+export interface RoomsStoreOptions {
+  /** Overrides `LIVE_PATCH_CACHE_WRITE_DELAY_MS`; tests pass 0. */
+  cacheWriteDelayMs?: number
+}
 
 /**
- * The cross-account room list (ADR 0046, M-W4). After each refresh, rooms
- * with no name/alias (likely DMs, ADR 0042 heuristic) get their titles
- * resolved from their member lists in the background — the TUI's
- * `request_unnamed_room_titles` behavior. Once cached, a title is not
- * re-fetched; the cache lives for the store's lifetime.
+ * The cross-account room list (ADR 0046, M-W4). Rooms are titled from their
+ * own fields, including the server's calculated `display_name` (ADR 0118), so
+ * titles need no request of their own. After each refresh, unnamed direct
+ * rooms get the other member's avatar resolved from their member lists in the
+ * background. Once settled, an avatar is not re-fetched; the cache lives for
+ * the store's lifetime.
  */
 export function createRoomsStore(
   api: ApiClient,
   storage: Storage = window.localStorage,
   cache: RoomListCache | null = null,
+  options: RoomsStoreOptions = {},
 ): RoomsStore {
+  const cacheWriteDelayMs =
+    options.cacheWriteDelayMs ?? LIVE_PATCH_CACHE_WRITE_DELAY_MS
   const rooms = signal<RoomDto[]>([])
   const unreadKeys = signal<ReadonlySet<string>>(new Set())
   /** Sum of every room's `notificationCount` (ADR 0080's app-icon badge). */
@@ -248,7 +270,7 @@ export function createRoomsStore(
   const error = signal<string | null>(null)
   const titles = signal<ReadonlyMap<string, string>>(loadTitleCache(storage))
   const dmAvatars = signal<ReadonlyMap<string, string>>(new Map())
-  /** Keys with a fetch in flight or already settled (including "no title"). */
+  /** Keys with a DM-avatar fetch in flight or already settled. */
   const requested = new Set<string>()
   /** Preview cache keys: `${roomKey}\0${last_event_id}`. */
   const requestedPreviews = new Set<string>()
@@ -278,8 +300,25 @@ export function createRoomsStore(
   /** `roomKey` -> per-field sequence number of the last live patch. */
   const metadataPatchedAt = new Map<
     string,
-    Partial<Record<RoomMetadataPatch['field'], number>>
+    Partial<Record<LiveRoomField, number>>
   >()
+  /**
+   * `room_display_name.changed` values for rooms the list did not hold when
+   * they arrived, keyed by `roomKey` with the metadata sequence they arrived
+   * at. The frame most likely to land this way is the one that matters most:
+   * a first fill racing the first `/v1/rooms` response, which read the row
+   * before the server wrote it. The server publishes only after its write
+   * commits, so a response requested after `seq` already has the value; one
+   * requested before it is completed from here (`withPendingDisplayNames`).
+   * An entry is dropped by the first applied refresh that lists its room, not
+   * by any refresh: a response that omits the room says nothing about it, and
+   * keeping the entry means a later response that raced the server's write
+   * can still be completed. Bounded by the number of rooms; emptied on
+   * sign-out.
+   */
+  const pendingDisplayNames = new Map<string, { value: string; seq: number }>()
+  /** The scheduled write-back of live patches to `cache`, if any. */
+  let cacheWriteTimer: ReturnType<typeof setTimeout> | null = null
   /** `roomKey` -> generation returned by the latest `assignRoomTags`. */
   const tagGenByKey = new Map<string, number>()
   /** `roomKey` -> metadata sequence of the latest tag write or live frame. */
@@ -297,7 +336,10 @@ export function createRoomsStore(
     { name: string | null; topic: string | null }
   >()
 
-  async function fetchTitle(room: RoomDto, generation: number): Promise<void> {
+  async function fetchDmAvatar(
+    room: RoomDto,
+    generation: number,
+  ): Promise<void> {
     let data
     try {
       ;({ data } = await api.GET(
@@ -310,28 +352,21 @@ export function createRoomsStore(
       ))
     } catch {
       // Network-level failure: a rejection here would otherwise fall out of
-      // `resolveUnnamedTitles`'s fire-and-forget `Promise.all` unhandled
+      // `resolveDmAvatars`'s fire-and-forget `Promise.all` unhandled
       // (WCR-02). Same policy as the envelope-error path below.
       return
     }
     if (data === undefined) {
       // Error envelope. Leave `requested` set: a failing room is not retried
       // this session (matching the TUI's per-room rate limiting in spirit);
-      // the room id remains the fallback title.
+      // the row keeps its letter avatar.
       return
     }
-    // Same identity guard as `doRefresh`, and here it is the whole point of
-    // the wipe in `resetSession`: this is a `/members` response for a room the
-    // previous reader was in, and `setCachedTitle` *persists*. Without the
-    // check a burst of these landing just after sign-out re-creates
-    // `ROOM_TITLE_CACHE_KEY` on disk with that reader's DM correspondents in
-    // it (#115), which is exactly the record sign-out just removed.
+    // Same identity guard as `doRefresh`: this is a `/members` response for a
+    // room the previous reader was in, and their DM correspondent's avatar
+    // must not reappear in the next reader's list (#115).
     if (generation !== sessionGeneration) {
       return
-    }
-    const title = dmTitleFromMembers(room.account_user_id, data.data)
-    if (title !== null) {
-      setCachedTitle(roomKey(room), title)
     }
     setCachedDmAvatar(
       roomKey(room),
@@ -356,26 +391,18 @@ export function createRoomsStore(
     dmAvatars.value = new Map(dmAvatars.value).set(key, avatar)
   }
 
-  function setCachedTitle(key: string, title: string): void {
-    const trimmed = title.trim()
-    if (trimmed === '') {
-      return
-    }
-    const next = new Map(titles.value).set(key, trimmed)
-    titles.value = next
-    saveTitleCache(storage, next)
-  }
-
-  function cacheRoomListTitles(current: RoomDto[]): void {
+  function cacheRoomListTitles(current: readonly RoomDto[]): void {
     const next = new Map(titles.value)
     let changed = false
     for (const room of current) {
-      if (!needsDerivedTitle(room)) {
-        const title = roomTitle(room, next)
-        if (title !== room.room_id && next.get(roomKey(room)) !== title) {
-          next.set(roomKey(room), title)
-          changed = true
-        }
+      const title = ownRoomTitle(room)?.trim()
+      if (
+        title !== undefined &&
+        title !== '' &&
+        next.get(roomKey(room)) !== title
+      ) {
+        next.set(roomKey(room), title)
+        changed = true
       }
     }
     if (changed) {
@@ -404,9 +431,10 @@ export function createRoomsStore(
   }
 
   /**
-   * Keep name/topic/avatar, tags, and `is_direct` from a patch that arrived
-   * after this refresh was issued. Activity, unread counts, and membership
-   * stay the server's: a stale value there self-corrects on the next refresh.
+   * Keep name/topic/avatar/display name, tags, and `is_direct` from a patch
+   * that arrived after this refresh was issued. Activity, unread counts, and
+   * membership stay the server's: a stale value there self-corrects on the
+   * next refresh.
    */
   function keepFresherMetadata(
     incoming: RoomDto[],
@@ -444,7 +472,7 @@ export function createRoomsStore(
     })
   }
 
-  async function resolveUnnamedTitles(
+  async function resolveDmAvatars(
     current: RoomDto[],
     generation: number,
   ): Promise<void> {
@@ -452,10 +480,11 @@ export function createRoomsStore(
       if (requested.has(roomKey(room))) {
         return false
       }
-      // Only an unnamed direct room. A named room keeps its name (the peer
-      // avatar falls back to a letter), and an unnamed room that is not a
-      // direct message keeps the room id. Fetching every unnamed room, or
-      // every named DM missing an avatar, fans `/members` out across the list.
+      // Only an unnamed direct room: `roomListAvatarUrl` shows a peer avatar
+      // for direct rooms alone, and a named DM falls back to a letter.
+      // Fetching every unnamed room, or every named DM missing an avatar,
+      // fans `/members` out across the list. Titles never need this fetch:
+      // they come from `display_name` (ADR 0118).
       return needsDerivedTitle(room) && isLikelyDm(room)
     })
     for (const room of queue) {
@@ -467,11 +496,11 @@ export function createRoomsStore(
       while (next < queue.length) {
         const room = queue[next]
         next += 1
-        await fetchTitle(room, generation)
+        await fetchDmAvatar(room, generation)
       }
     }
     await Promise.all(
-      Array.from({ length: TITLE_FETCH_CONCURRENCY }, () => worker()),
+      Array.from({ length: DM_AVATAR_FETCH_CONCURRENCY }, () => worker()),
     )
   }
 
@@ -731,12 +760,20 @@ export function createRoomsStore(
         error.value = apiErrorMessage(apiError)
         return
       }
-      const visibleRooms = keepFresherMetadata(
-        applyLocalRoomMetadata(
-          data.data.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+      const visibleRooms = withPendingDisplayNames(
+        keepFresherMetadata(
+          applyLocalRoomMetadata(
+            data.data.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+          ),
+          metadataSeqAtStart,
         ),
         metadataSeqAtStart,
       )
+      // A pending value for a room this response lists is settled now: one
+      // that predates the request is in the response, and a newer one was
+      // applied above. One for a room it omits waits for a response that lists
+      // the room.
+      settlePendingDisplayNames(data.data)
       // Wholesale replacement, not a merge into the cached set: a room left or
       // forgotten on another client has to disappear (guardrail 5's
       // prune-on-reconcile), and a restored list is exactly the case where
@@ -751,10 +788,12 @@ export function createRoomsStore(
       if (!confirmed.peek()) {
         confirmed.value = true
       }
+      // This write carries every live patch so far, so a scheduled one is moot.
+      cancelCacheWrite()
       cache?.write(visibleRooms)
-      // Fire-and-forget: titles arrive incrementally; the list re-renders as
-      // the titles signal updates.
-      void resolveUnnamedTitles(visibleRooms, generation)
+      // Fire-and-forget: avatars arrive incrementally; the list re-renders as
+      // the dmAvatars signal updates.
+      void resolveDmAvatars(visibleRooms, generation)
     } catch (cause) {
       if (generation === sessionGeneration) {
         error.value = cause instanceof Error ? cause.message : String(cause)
@@ -798,6 +837,11 @@ export function createRoomsStore(
     tagGenByKey.clear()
     tagsPatchedAt.clear()
     directPatchedAt.clear()
+    pendingDisplayNames.clear()
+    // A second guard: the timer also skips a write once the generation moves
+    // or the rows are cleared, so the previous reader's rows never land under
+    // the next one's key.
+    cancelCacheWrite()
     // Above the pristine-store guard on purpose. A sign-out during the very
     // first refresh is exactly the shared-browser case: the store is empty,
     // but `titles` was populated from `ROOM_TITLE_CACHE_KEY` at construction
@@ -874,17 +918,19 @@ export function createRoomsStore(
     if (generation !== sessionGeneration || settled || rooms.value.length > 0) {
       return
     }
-    const visible = cached.filter(
-      (room) => !locallyHiddenRooms.has(roomKey(room)),
+    // Any pending live name is newer than a row cached by an earlier session.
+    const visible = withPendingDisplayNames(
+      cached.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+      -1,
     )
     rooms.value = visible
     syncUnreadCounts(visible)
     recomputeNewest(visible)
-    // Deliberately *not* `resolveUnnamedTitles`: that is a `/members` fetch per
+    // Deliberately *not* `resolveDmAvatars`: that is a `/members` fetch per
     // unnamed direct room, and firing a burst of them at boot would spend
-    // exactly the network the cache exists to avoid waiting on. DM titles
-    // paint from the `axon.room_titles.v1` cache meanwhile, and the refresh
-    // resolves the rest.
+    // exactly the network the cache exists to avoid waiting on. The refresh
+    // resolves them. Titles need nothing: the cached rows carry
+    // `display_name`, and `axon.room_titles.v1` covers rows cached before it.
     stale.value = true
     loading.value = false
     perfMark('rooms:hydrate', { rooms: visible.length })
@@ -1262,20 +1308,153 @@ export function createRoomsStore(
     if (patch === null) {
       return
     }
+    patchRoomField(index, patch.field, patch.value)
+  }
+
+  /**
+   * Write one live value into the row at `index`, stamped so a refresh that
+   * was already in flight keeps it (`keepFresherMetadata`), and schedule the
+   * room-list cache to persist it. Returns the patched row, or `null` when the
+   * value was already there.
+   *
+   * The stamp is recorded even then. A value the row already shows can still
+   * be newer than a response in flight: a restored row reads `Alice`, the
+   * response read `Bob` before a rename back, and the frame says `Alice`.
+   * Skipping the stamp would let that response put `Bob` back.
+   */
+  function patchRoomField(
+    index: number,
+    field: LiveRoomField,
+    value: string | null,
+  ): RoomDto | null {
     const current = rooms.value
     const room = current[index]
-    if (room[patch.field] === patch.value) {
-      return
-    }
     metadataPatchSeq += 1
     const key = roomKey(room)
     metadataPatchedAt.set(key, {
       ...metadataPatchedAt.get(key),
-      [patch.field]: metadataPatchSeq,
+      [field]: metadataPatchSeq,
     })
-    rooms.value = current.map((entry, i) =>
-      i === index ? { ...entry, [patch.field]: patch.value } : entry,
-    )
+    if (room[field] === value) {
+      return null
+    }
+    const patched = { ...room, [field]: value }
+    rooms.value = current.map((entry, i) => (i === index ? patched : entry))
+    scheduleCacheWrite()
+    return patched
+  }
+
+  /**
+   * `rows` with each pending live display name that arrived after `seqAtStart`
+   * filled in. Pass the sequence the response's request started at, or `-1`
+   * for rows that predate this session.
+   */
+  function withPendingDisplayNames(
+    rows: RoomDto[],
+    seqAtStart: number,
+  ): RoomDto[] {
+    if (pendingDisplayNames.size === 0) {
+      return rows
+    }
+    let changed = false
+    const next = rows.map((room) => {
+      const pending = pendingDisplayNames.get(roomKey(room))
+      if (
+        pending === undefined ||
+        pending.seq <= seqAtStart ||
+        room.display_name === pending.value
+      ) {
+        return room
+      }
+      changed = true
+      return { ...room, display_name: pending.value }
+    })
+    return changed ? next : rows
+  }
+
+  /** Drop the pending display names of the rooms a response listed. */
+  function settlePendingDisplayNames(listed: readonly RoomDto[]): void {
+    if (pendingDisplayNames.size === 0) {
+      return
+    }
+    for (const room of listed) {
+      pendingDisplayNames.delete(roomKey(room))
+    }
+  }
+
+  /**
+   * Persist live patches to the room-list cache, coalesced. Without this a
+   * rename seen live is lost on an offline restart: the restored row's old
+   * `display_name` outranks the newer title cache.
+   */
+  function scheduleCacheWrite(): void {
+    if (cache === null || cacheWriteTimer !== null) {
+      return
+    }
+    const generation = sessionGeneration
+    cacheWriteTimer = setTimeout(() => {
+      cacheWriteTimer = null
+      if (generation !== sessionGeneration || rooms.value.length === 0) {
+        return
+      }
+      cache.write(rooms.value)
+    }, cacheWriteDelayMs)
+  }
+
+  function cancelCacheWrite(): void {
+    if (cacheWriteTimer !== null) {
+      clearTimeout(cacheWriteTimer)
+      cacheWriteTimer = null
+    }
+  }
+
+  /**
+   * Write a scheduled cache update now rather than when its timer fires, so a
+   * tab closed inside the coalescing window still persists the live patches.
+   * The write is skipped when nothing is scheduled; the rows are the current
+   * session's, since `resetSession` cancels the timer.
+   */
+  function flushCacheWrite(): void {
+    if (cacheWriteTimer === null) {
+      return
+    }
+    cancelCacheWrite()
+    if (rooms.value.length > 0) {
+      cache?.write(rooms.value)
+    }
+  }
+
+  /**
+   * A room whose list row is not loaded is held in `pendingDisplayNames`
+   * rather than refreshed for, unlike `noteUnreadCounts`: the first fill after
+   * a server upgrade sends one of these per room (ADR 0118), so a re-read per
+   * frame would fetch the whole list thousands of times. The held value is
+   * applied by whatever refresh next lists the room: the first load, a
+   * reconnect, or the refresh a timeline event for an unknown room starts
+   * (`noteTimelineEvent`), which is how a newly joined room arrives. Until
+   * then the room is not on screen, so nothing shows the missing name.
+   */
+  function noteDisplayName(
+    accountId: string,
+    roomId: string,
+    displayName: string,
+  ): void {
+    const index = findRoomIndex(accountId, roomId)
+    if (index === -1) {
+      metadataPatchSeq += 1
+      pendingDisplayNames.set(
+        roomKey({ account_id: accountId, room_id: roomId }),
+        {
+          value: displayName,
+          seq: metadataPatchSeq,
+        },
+      )
+      return
+    }
+    const patched = patchRoomField(index, 'display_name', displayName)
+    if (patched !== null) {
+      cacheRoomListTitles([patched])
+    }
   }
 
   function noteTimelineEvent(event: EventDto): void {
@@ -1442,6 +1621,8 @@ export function createRoomsStore(
     noteActivity,
     noteTimelineEvent,
     noteUnreadCounts,
+    noteDisplayName,
+    flushCacheWrite,
     peekRooms,
     assignRoomTags,
     restoreRoomTags,
@@ -1541,8 +1722,19 @@ function clearTitleCache(storage: Storage): void {
   }
 }
 
-/** The `RoomDto` fields a live `m.room.*` state event can set. */
-const ROOM_METADATA_FIELDS = ['name', 'topic', 'avatar_url'] as const
+/**
+ * The `RoomDto` fields a live frame can set ahead of a refresh: the three a
+ * `m.room.*` state event carries (`roomMetadataPatch`), and the calculated
+ * `display_name` from `room_display_name.changed` (ADR 0118).
+ */
+const ROOM_METADATA_FIELDS = [
+  'name',
+  'topic',
+  'avatar_url',
+  'display_name',
+] as const
+
+type LiveRoomField = (typeof ROOM_METADATA_FIELDS)[number]
 
 /** One room-metadata field a live `m.room.*` state event sets. */
 export type RoomMetadataPatch =
