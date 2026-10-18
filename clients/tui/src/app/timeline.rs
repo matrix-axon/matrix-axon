@@ -15,7 +15,7 @@ use super::relations::thread_visible;
 use super::{
     collect_reactions, match_status, message_index_at_line, next_match_index,
     selected_message_target_index, App, ConnectionState, ImageState, ImageThumbRows,
-    LiveFrameAction, MediaKey, RoomKey, RoomSort, Status, UnreadThread, UnreadThreadPreview,
+    LiveFrameAction, MediaKey, RoomKey, Status, UnreadThread, UnreadThreadPreview,
     IMAGE_THUMB_ROWS,
 };
 
@@ -119,6 +119,17 @@ impl App {
                 self.apply_account_data_changed(account_id, payload);
                 LiveFrameAction::None
             }
+            LiveFrame::RoomDisplayName {
+                account_id,
+                payload,
+            } => self.apply_title_update(
+                RoomKey {
+                    account_id,
+                    room_id: payload.room_id,
+                },
+                super::rooms::TitleField::DisplayName,
+                Some(payload.display_name),
+            ),
             LiveFrame::UnreadCounts {
                 account_id,
                 payload,
@@ -216,6 +227,25 @@ impl App {
             account_id: event.account_id,
             room_id: event.room_id.clone(),
         };
+        // Apply title state before timeline dedup/history guards: it also affects
+        // off-screen rooms and must not wait for the SDK reconciler.
+        if event.state_key() == Some("") {
+            let title_field = match event.event_type.as_str() {
+                "m.room.name" => Some((super::rooms::TitleField::Name, "name")),
+                "m.room.canonical_alias" => Some((super::rooms::TitleField::Alias, "alias")),
+                _ => None,
+            };
+            if let Some((field, property)) = title_field {
+                if let Some(content) = event.content.as_ref().filter(|content| content.is_object())
+                {
+                    let value = content
+                        .get(property)
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned);
+                    self.apply_title_update(key.clone(), field, value);
+                }
+            }
+        }
         if event.event_type == "m.space.child" {
             self.invalidate_space(&key);
         }
@@ -580,8 +610,7 @@ impl App {
         let room_id = key.room_id.clone();
         let workers = self.members_workers.clone();
         tokio::spawn(async move {
-            // Hold a permit for the request: without this the room-list title
-            // sweep fans out one concurrent request per unnamed room.
+            // Bound sender-roster work during bursts of unknown senders.
             let Ok(_permit) = workers.acquire().await else {
                 return;
             };
@@ -603,41 +632,7 @@ impl App {
         let Some(members) = members else {
             return;
         };
-        self.seed_display_names_for_key(room_key.clone(), &members);
-        // For an unnamed room (e.g. a DM) derive a list title from its members so
-        // it shows the other participant's name rather than the raw room id.
-        let unnamed = self
-            .rooms
-            .rooms
-            .iter()
-            .find(|room| RoomKey::from(*room) == room_key)
-            .filter(|room| {
-                room.name.as_deref().is_none_or(|n| n.trim().is_empty())
-                    && room
-                        .canonical_alias
-                        .as_deref()
-                        .is_none_or(|a| a.trim().is_empty())
-            });
-        let derived = unnamed.and_then(|room| {
-            super::dm_title_from_members(room.account_user_id.as_deref(), &members)
-        });
-        match derived {
-            Some(title) => {
-                self.rooms_without_derived_title.remove(&room_key);
-                self.room_titles.insert(room_key, title);
-                if matches!(self.room_sort, RoomSort::AlphaAsc | RoomSort::AlphaDesc) {
-                    self.resort_rooms();
-                }
-            }
-            // The read landed and there is nobody to name the room after, so
-            // asking again changes nothing until its membership does. Record
-            // that explicitly; the sweep used to re-request every cooldown for
-            // the life of the process (#189).
-            None if unnamed.is_some() => {
-                self.rooms_without_derived_title.insert(room_key);
-            }
-            None => {}
-        }
+        self.seed_display_names_for_key(room_key, &members);
     }
 
     fn remember_display_name_from_event(&mut self, key: &RoomKey, event: &EventDto) {
@@ -1107,6 +1102,7 @@ pub(crate) fn room_matches_search(room: &RoomDto, query: &str) -> bool {
         Some(room.room_id.as_str()),
         room.canonical_alias.as_deref(),
         room.name.as_deref(),
+        room.display_name.as_deref(),
         room.topic.as_deref(),
     ]
     .into_iter()

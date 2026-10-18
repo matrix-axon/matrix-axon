@@ -454,6 +454,7 @@ mod tests {
             name: Some("Room".to_owned()),
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: None,
             room_type: None,
             last_activity_ts: 0,

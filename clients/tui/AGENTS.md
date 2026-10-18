@@ -21,6 +21,12 @@
 - Login credentials are transient. Normalize `user:domain` and `user@domain` to canonical `@user:domain`, validate with `ruma`, mask prompted and inline passwords, and clear password state on submission, failure, cancellation, or focus changes. Use the same normalization for logout targeting. Never send the password anywhere except Axon's login endpoint, and never talk to a homeserver directly: homeserver discovery is Axon's job (ADR 0023) — login forwards the Matrix ID and password, and `homeserver_url` only when the user supplies the optional `/login` third argument to override resolution (a bare host is given `https://`; an explicit scheme is preserved for loopback). A space-bearing password can't be given inline (the inline password is a single token); such users reach the hidden prompt via `/login` or `/login <user> [homeserver]`, where the username step also accepts an optional homeserver. Axon rejects an MXID written with the homeserver's hostname (`@user:matrix.domain`) with a 400 whose message suggests the canonical Matrix ID; the TUI shows API error messages verbatim, so no client-side handling is needed.
 - `/whereami` paints the room summary immediately, then fills in Axon's cached `/metadata`, `/info` member counts, and `/upgrade` reads off the event loop (ADR 0114, `app/room_info.rs`). Keep the wording honest: an `unknown` snapshot is never rendered as unset or unencrypted, null counts are never zero, power levels are labelled as configured values (not permissions), and aliases are "advertised", never a "full alias list". The member list is still derived from loaded timeline events; do not present it as complete (#655, #659).
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.
+- Room titles follow ADR 0118: nonblank `name`, then `canonical_alias`, then the server's `display_name`, then room ID.
+  Never derive room titles from `/members`; those reads still hydrate timeline sender names.
+  Apply `room_display_name.changed` and title state events by account and room, retaining newer live fields across older room-list responses.
+  Unknown-room frames are held with bounded storage rather than fetching the room list per frame.
+  Overflow recovery coalesces reads until a snapshot requested after the latest dropped frame can cover it; failed reads allow the next overflow frame to retry.
+  Reconnect and `/refresh` recover other missed updates.
 - Room switching should remain forgiving within the active account filter: visible-list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
 
 ## Spaces (ADR 0103)
@@ -58,8 +64,8 @@
   the flat-list launch room's timeline, which is bounded and must follow read-marker
   hydration (ADR 0048/0089).
 - **Per-room background work is demand-driven and semaphore-bounded (ADR
-  0093).** Anything that costs one request per room — member reads for list
-  titles, and any future per-room fetch — must ask only for what is on screen
+  0093).** Anything that costs one request per room — space membership reads
+  and any future per-room fetch — must ask only for what is on screen
   plus a small lookahead, hold a permit from a bounded pool, and record a
   negative answer so it stops asking. A per-room cooldown bounds repeats of one
   room; it does not bound how many rooms are in flight, which is the property
@@ -73,7 +79,7 @@
 - **The renderer is read-only over the model (#70).**
   One main-loop iteration is `ui::prepare` then `ui::draw`, both inside the `terminal.draw` callback and both measuring the one `frame.area()` — `Terminal::draw` autoresizes before it yields the frame, so measuring off `terminal.size()` beforehand would let a resize land between the two halves.
   `prepare` settles everything the frame's geometry decides — the three panes' `page_size` and scroll offsets, the message layout cache, a command response that has outgrown the entry box, the open popup's body and clamped scroll — and `draw` paints that and recomputes none of it.
-  Anything a key handler, `sweep_visible_room_titles`, or the search paging math reads must be written in `prepare`, never in `draw`: a value the renderer decides is a value the next keystroke reads one frame late, and it only ever worked because the loop happened to paint before it polled for input.
+  Anything a key handler or the search paging math reads must be written in `prepare`, never in `draw`: a value the renderer decides is a value the next keystroke reads one frame late, and it only ever worked because the loop happened to paint before it polled for input.
   `draw` still takes `&mut App` for exactly three things, all documented on it — the one-shot render flags it consumes (`clear_media_preview`, `force_terminal_clear`), `prev_image_rects`, and demand-driven media fetch for the thumbnails actually on screen.
   Adding a fourth is a design change, not a convenience.
   Pane geometry is measured once, by `ui::pane_areas` inside `prepare`, and stored in `app.frame.areas` for `draw` to paint into — so the rect that decides a page size is the same object as the rect its rows land in, not a second evaluation that happens to agree.

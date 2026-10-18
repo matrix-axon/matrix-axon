@@ -35,7 +35,7 @@ use std::future::Future;
 
 use uuid::Uuid;
 
-use crate::api::{AccountDto, ApiError, AxonClient, DeviceStateDto, RoomDto};
+use crate::api::{AccountDto, ApiError, AxonClient, DeviceStateDto, RoomListSnapshot};
 
 use super::drafts::DRAFTS_NAMESPACE;
 use super::read_markers::READ_MARKERS_NAMESPACE;
@@ -48,7 +48,7 @@ pub(crate) type DeviceStateReads = Vec<(Uuid, Result<DeviceStateDto, ApiError>)>
 pub(crate) enum BootstrapOutcome {
     Accounts(Result<Vec<AccountDto>, ApiError>),
     /// Also delivers post-startup refreshes; see the module docs.
-    Rooms(Result<Vec<RoomDto>, ApiError>),
+    Rooms(Result<RoomListSnapshot, ApiError>),
     DeviceState {
         markers: DeviceStateReads,
         drafts: DeviceStateReads,
@@ -237,15 +237,19 @@ impl App {
                 self.request_rooms_refresh();
             }
             BootstrapOutcome::Rooms(result) => {
-                self.rooms_fetch_inflight = false;
+                // Keep this read marked in flight while applying it so overflow
+                // recovery queues behind it without replacing its selection flag.
                 match result {
                     Ok(rooms) => self.apply_room_refresh(rooms),
                     Err(err) => {
+                        // Permit the next overflow frame to retry after failure.
+                        self.title_update_overflow = None;
                         if !self.is_mid_command() {
                             self.status = Status::from(format!("room refresh failed: {err}"));
                         }
                     }
                 }
+                self.rooms_fetch_inflight = false;
                 // Decide this before any coalesced re-request goes out:
                 // `request_rooms_refresh` re-reads the selection into
                 // `rooms_fetch_had_selection` for the fetch it dispatches, and
@@ -330,7 +334,7 @@ mod tests {
             "the accounts stage should start the room fetch"
         );
 
-        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(Vec::new())))
+        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(Vec::new().into())))
             .await;
         assert_eq!(app.bootstrap, BootstrapStage::DeviceState);
 
@@ -380,26 +384,27 @@ mod tests {
         );
 
         // The in-flight fetch lands: exactly one more goes out.
-        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(Vec::new())))
+        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(Vec::new().into())))
             .await;
         assert!(app.rooms_fetch_inflight);
         assert!(!app.rooms_fetch_again);
 
         // And that one settles with nothing queued behind it.
-        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(Vec::new())))
+        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(Vec::new().into())))
             .await;
         assert!(!app.rooms_fetch_inflight);
         assert!(!app.rooms_fetch_again);
     }
 
-    fn test_room(room_id: &str) -> RoomDto {
-        RoomDto {
+    fn test_room(room_id: &str) -> crate::api::RoomDto {
+        crate::api::RoomDto {
             account_id: Uuid::new_v4(),
             account_user_id: Some("@alice:example.com".to_owned()),
             room_id: room_id.to_owned(),
             name: Some("Room".to_owned()),
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: None,
             room_type: None,
             last_activity_ts: 0,
@@ -437,10 +442,9 @@ mod tests {
         // `load_selected_timeline` sets this before it awaits, and nothing else
         // on this path does, so it witnesses the call without a live server.
         app.force_terminal_clear = false;
-        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(vec![test_room(
-            "!revealed:example.com",
-        )])))
-        .await;
+        let rooms = vec![test_room("!revealed:example.com")];
+        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(rooms.into())))
+            .await;
 
         assert!(
             app.selected_room().is_some(),

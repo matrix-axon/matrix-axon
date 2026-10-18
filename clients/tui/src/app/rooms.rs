@@ -11,12 +11,115 @@ use super::{
     TIMELINE_LIMIT,
 };
 
-/// Rows either side of the visible room-list window that still get their titles
-/// fetched, so a short scroll does not stall waiting on a request.
-const ROOM_TITLE_LOOKAHEAD: usize = 8;
+/// State titles take precedence over the reconciler's calculated title.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum TitleField {
+    Name,
+    Alias,
+    DisplayName,
+}
+
+impl TitleField {
+    fn value(self, room: &mut RoomDto) -> &mut Option<String> {
+        match self {
+            Self::Name => &mut room.name,
+            Self::Alias => &mut room.canonical_alias,
+            Self::DisplayName => &mut room.display_name,
+        }
+    }
+}
+
+pub(crate) struct TitleUpdate {
+    pub(crate) received: std::time::Instant,
+    pub(crate) value: Option<String>,
+}
+
+// The first server sweep can deliver frames before the initial room list.
+// Known rooms cost at most three entries each; unknown rooms have a fixed cap.
+const UNKNOWN_TITLE_UPDATE_LIMIT: usize = 8192;
 
 impl App {
-    pub(crate) fn apply_room_refresh(&mut self, mut rooms: Vec<RoomDto>) {
+    /// Record even equal values: an older HTTP response may still differ.
+    /// Requests begun after a frame win, since the server commits before publishing.
+    pub(crate) fn apply_title_update(
+        &mut self,
+        key: RoomKey,
+        field: TitleField,
+        value: Option<String>,
+    ) -> LiveFrameAction {
+        if self.is_known_inactive_account(key.account_id) {
+            return LiveFrameAction::None;
+        }
+        let room = self
+            .rooms
+            .rooms
+            .iter_mut()
+            .find(|room| room.account_id == key.account_id && room.room_id == key.room_id);
+        let known = room.is_some();
+        let changed = if let Some(room) = room {
+            let slot = field.value(room);
+            let changed = *slot != value;
+            *slot = value.clone();
+            changed
+        } else {
+            false
+        };
+        let update_key = (key, field);
+        if known
+            || self.room_title_updates.contains_key(&update_key)
+            || self.room_title_updates.len()
+                < self.rooms.rooms.len().saturating_mul(3) + UNKNOWN_TITLE_UPDATE_LIMIT
+        {
+            self.room_title_updates.insert(
+                update_key,
+                TitleUpdate {
+                    received: std::time::Instant::now(),
+                    value,
+                },
+            );
+        } else {
+            // Keep the latest drop: more frames can arrive after recovery starts.
+            // Only the first asks for a read; snapshot application queues another
+            // if that read started too early to cover all dropped frames.
+            if self
+                .title_update_overflow
+                .replace(std::time::Instant::now())
+                .is_none()
+            {
+                return LiveFrameAction::RefreshRooms;
+            }
+        }
+        if changed {
+            if matches!(self.room_sort, RoomSort::AlphaAsc | RoomSort::AlphaDesc) {
+                self.resort_rooms();
+            }
+            self.reconcile_spaces();
+        }
+        LiveFrameAction::None
+    }
+
+    pub(crate) fn apply_room_refresh(&mut self, snapshot: impl Into<crate::api::RoomListSnapshot>) {
+        let crate::api::RoomListSnapshot { mut rooms, started } = snapshot.into();
+        if self
+            .room_snapshot_started
+            .is_some_and(|last| started < last)
+        {
+            self.recover_title_overflow();
+            return;
+        }
+        self.room_snapshot_started = Some(started);
+        for room in &mut rooms {
+            let key = RoomKey::from(&*room);
+            for field in [TitleField::Name, TitleField::Alias, TitleField::DisplayName] {
+                if let Some(update) = self.room_title_updates.get(&(key.clone(), field)) {
+                    if update.received > started {
+                        *field.value(room) = update.value.clone();
+                    }
+                }
+            }
+        }
+        self.room_title_updates
+            .retain(|_, update| update.received > started);
         // A logged-out (deactivated) account keeps its rows in Axon's `events`
         // table, and `GET /v1/rooms` joins accounts without a state filter, so it
         // still lists that account's rooms. Drop rooms for any account we know is
@@ -25,7 +128,7 @@ impl App {
         // whole list.
         rooms.retain(|room| !self.is_known_inactive_account(room.account_id));
         sort_rooms_by_pin_with_title(&mut rooms, &self.pinned_rooms, self.room_sort, |room| {
-            room_list_title_from_cache(&self.room_titles, room)
+            room.title().to_owned()
         });
         let selected_key = self.selected_room().map(RoomKey::from);
         let previous_keys: Vec<RoomKey> = self.rooms.rooms.iter().map(RoomKey::from).collect();
@@ -75,8 +178,21 @@ impl App {
         if self.space_launch_pending() {
             self.rooms.selected = None;
         }
-        self.sweep_visible_room_titles();
         self.maybe_start_pin_migration();
+        self.recover_title_overflow();
+    }
+
+    /// A skipped snapshot cannot discharge overflow newer than the last applied
+    /// snapshot. A queued read starts after the drops it is recovering.
+    fn recover_title_overflow(&mut self) {
+        if let Some(dropped) = self.title_update_overflow.take() {
+            if self
+                .room_snapshot_started
+                .is_none_or(|started| started < dropped)
+            {
+                self.request_rooms_refresh();
+            }
+        }
     }
 
     /// Set every listed room's unread badge from the server's
@@ -148,75 +264,17 @@ impl App {
         self.rooms.display_names.remove(key);
         self.rooms.unread.remove(key);
         self.rooms.unread_touched.remove(key);
-        self.room_titles.remove(key);
+        for field in [TitleField::Name, TitleField::Alias, TitleField::DisplayName] {
+            self.room_title_updates.remove(&(key.clone(), field));
+        }
         self.messages.events.remove(key);
         self.messages.history_cursors.remove(key);
         self.thread_summaries.remove(key);
         self.relation_refresh_latest.remove(key);
         self.members_refresh_after.remove(key);
-        self.rooms_without_derived_title.remove(key);
         self.drafts_written_since_fetch.remove(key);
         self.unread_threads.remove(key);
         self.prune_room_info(key);
-    }
-
-    /// Kick off background `/members` reads for the rooms **on screen** that have
-    /// no `m.room.name`/alias and no cached member-derived title yet (typically
-    /// DMs), so the room list can show the other participant's name.
-    ///
-    /// Demand-driven, matching the rule media already follows: request what the
-    /// user can see plus a small lookahead, and let scrolling pull in the rest.
-    /// This used to sweep the *entire* list on every refresh, which on a server
-    /// with thousands of unnamed rooms fanned out thousands of concurrent
-    /// requests, each of whose results ran an O(n) scan and (under alpha sort) a
-    /// full re-sort — the room-count-squared behaviour behind #189.
-    ///
-    /// Called after every room refresh and from the main loop's tick, so a
-    /// scroll or a filter change pulls in the newly visible rooms.
-    pub(crate) fn sweep_visible_room_titles(&mut self) {
-        // Tree scroll offsets include headers/dividers; the flat view counts
-        // only rooms, retaining its established divider geometry.
-        let row_indices: Vec<Option<usize>> = if self.space_tree_enabled() {
-            self.sidebar_rows(self.active_account_filter())
-                .iter()
-                .map(|row| {
-                    if let super::spaces::SidebarRow::Room { index, .. } = row {
-                        Some(*index)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            self.visible_room_indices().into_iter().map(Some).collect()
-        };
-        if row_indices.is_empty() {
-            return;
-        }
-        let start = self.rooms.scroll.saturating_sub(ROOM_TITLE_LOOKAHEAD);
-        let end = self
-            .rooms
-            .scroll
-            .saturating_add(self.rooms.page_size.max(1))
-            .saturating_add(ROOM_TITLE_LOOKAHEAD)
-            .min(row_indices.len());
-        let window_indices: Vec<usize> = row_indices[start.min(end)..end]
-            .iter()
-            .filter_map(|index| *index)
-            .collect();
-        let keys: Vec<RoomKey> = window_indices
-            .iter()
-            .filter_map(|index| self.rooms.rooms.get(*index))
-            .filter(|room| needs_derived_title(room))
-            .map(RoomKey::from)
-            .filter(|key| {
-                !self.room_titles.contains_key(key)
-                    && !self.rooms_without_derived_title.contains(key)
-            })
-            .collect();
-        for key in keys {
-            self.spawn_members_refresh(key);
-        }
     }
 
     /// Whether `room` is currently a favourite (`m.favourite`) or a not-yet
@@ -238,7 +296,7 @@ impl App {
             &mut self.rooms.rooms,
             &self.pinned_rooms,
             self.room_sort,
-            |room| room_list_title_from_cache(&self.room_titles, room),
+            |room| room.title().to_owned(),
         );
         if let Some(key) = selected_key {
             self.rooms.selected = self
@@ -1178,15 +1236,6 @@ pub(crate) fn is_likely_dm(room: &RoomDto) -> bool {
     room.is_direct
 }
 
-/// Rooms without a name or alias get a member-derived title in the list.
-fn needs_derived_title(room: &RoomDto) -> bool {
-    room.name.as_deref().is_none_or(|n| n.trim().is_empty())
-        && room
-            .canonical_alias
-            .as_deref()
-            .is_none_or(|a| a.trim().is_empty())
-}
-
 /// Order rooms with favourites first (by `m.favourite` `order`, then leftover
 /// local pins), then unpinned rooms by the active [`RoomSort`] (ADR 0103 / 0042).
 pub(crate) fn sort_rooms_by_pin_with_title<F>(
@@ -1257,21 +1306,6 @@ fn keep_adjacent_older_tail<T>(events: &mut Vec<T>, spare: usize) {
     }
 }
 
-fn room_list_title_from_cache(room_titles: &HashMap<RoomKey, String>, room: &RoomDto) -> String {
-    let named = room.name.as_deref().is_some_and(|n| !n.trim().is_empty())
-        || room
-            .canonical_alias
-            .as_deref()
-            .is_some_and(|a| !a.trim().is_empty());
-    if named {
-        return room.title().to_owned();
-    }
-    room_titles
-        .get(&RoomKey::from(room))
-        .cloned()
-        .unwrap_or_else(|| room.title().to_owned())
-}
-
 fn single_match(indices: Vec<usize>) -> Option<usize> {
     match indices.as_slice() {
         [idx] => Some(*idx),
@@ -1340,47 +1374,6 @@ pub(crate) fn account_localpart(user_id: &str) -> Option<&str> {
         .map(|(local, _)| local)
 }
 
-/// Derive a display title for an unnamed room (e.g. a DM) from its member list,
-/// excluding the account's own user (`self_user`). Uses each other member's
-/// display name, falling back to their `@localpart`. Lists up to three names and
-/// appends `, +N` for the rest. Returns `None` when there is no other member
-/// (e.g. a note-to-self room), so the caller keeps the existing fallback.
-pub(crate) fn dm_title_from_members(
-    self_user: Option<&str>,
-    members: &[MemberDto],
-) -> Option<String> {
-    let mut others: Vec<&MemberDto> = members
-        .iter()
-        .filter(|member| Some(member.user_id.as_str()) != self_user)
-        .collect();
-    if others.is_empty() {
-        return None;
-    }
-    // Stable ordering so the title doesn't reshuffle between fetches.
-    others.sort_by(|a, b| a.user_id.cmp(&b.user_id));
-    let names: Vec<String> = others.iter().take(3).map(|m| member_display(m)).collect();
-    let mut title = names.join(", ");
-    if others.len() > 3 {
-        title.push_str(&format!(", +{}", others.len() - 3));
-    }
-    Some(title)
-}
-
-/// A member's display name, falling back to `@localpart`, then the raw user id.
-fn member_display(member: &MemberDto) -> String {
-    member
-        .display_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            account_localpart(&member.user_id)
-                .map(|local| format!("@{local}"))
-                .unwrap_or_else(|| member.user_id.clone())
-        })
-}
-
 pub(crate) fn apply_edits(events: &mut Vec<EventDto>) {
     // Collect all edit relations, tracking whether each target is present on
     // this page. An edit whose target lives on an older (not-yet-loaded) page
@@ -1423,75 +1416,6 @@ mod tests {
         sort_rooms_by_pin_with_title,
     };
 
-    /// The title sweep asks only for the rooms on screen (plus a lookahead),
-    /// not the whole list.
-    ///
-    /// The old sweep walked every unnamed room on every refresh, so a
-    /// thousand-room list fanned out a thousand concurrent `/members` reads
-    /// whose results each ran an O(n) scan and, under alpha sort, a full
-    /// re-sort (#189).
-    #[tokio::test]
-    async fn title_sweep_is_limited_to_the_visible_window() {
-        // The sender must be wired or the sweep bails before arming anything.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let rooms: Vec<RoomDto> = (0..500)
-            .map(|i| room_with_activity(Uuid::nil(), &format!("!r{i}:x"), i as i64))
-            .collect();
-        let mut app = crate::app::App::new(
-            crate::api::AxonClient::new("http://127.0.0.1:1".to_owned(), None),
-            None,
-            crate::config::TuiConfig::test_default(),
-            ratatui_image::picker::Picker::halfblocks(),
-        );
-        app.set_members_sender(tx);
-        app.rooms.rooms = rooms;
-        app.rooms.page_size = 20;
-        app.rooms.scroll = 0;
-
-        app.sweep_visible_room_titles();
-
-        // The reads are spawned, so count the rooms the sweep armed a per-room
-        // cooldown for — one per request it decided to make.
-        let armed = app.members_refresh_after.len();
-        assert!(
-            armed <= 20 + super::ROOM_TITLE_LOOKAHEAD * 2,
-            "swept {armed} rooms for a 20-row window; it should track the viewport"
-        );
-        assert!(armed > 0, "the visible rooms should still be requested");
-    }
-
-    /// A room whose members yield no title is recorded, so the sweep stops
-    /// asking. Without this it re-requests every cooldown, forever.
-    #[test]
-    fn a_room_with_no_derivable_title_is_not_asked_again() {
-        let mut app = crate::app::App::new(
-            crate::api::AxonClient::new("http://127.0.0.1:1".to_owned(), None),
-            None,
-            crate::config::TuiConfig::test_default(),
-            ratatui_image::picker::Picker::halfblocks(),
-        );
-        let room = room_with_activity(Uuid::nil(), "!lonely:x", 0);
-        let key = RoomKey::from(&room);
-        app.rooms.rooms = vec![room];
-
-        // The read landed and named nobody: the account is its only member.
-        app.apply_members_outcome(crate::app::timeline::MembersOutcome {
-            room_key: key.clone(),
-            members: Some(Vec::new()),
-        });
-        assert!(app.rooms_without_derived_title.contains(&key));
-
-        // A *failed* read says nothing, so it must not be recorded.
-        let other = room_with_activity(Uuid::nil(), "!unknown:x", 0);
-        let other_key = RoomKey::from(&other);
-        app.rooms.rooms.push(other);
-        app.apply_members_outcome(crate::app::timeline::MembersOutcome {
-            room_key: other_key.clone(),
-            members: None,
-        });
-        assert!(!app.rooms_without_derived_title.contains(&other_key));
-    }
-
     fn room_with_activity(account_id: Uuid, room_id: &str, last_activity_ts: i64) -> RoomDto {
         RoomDto {
             account_id,
@@ -1500,6 +1424,7 @@ mod tests {
             name: None,
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: None,
             room_type: None,
             last_activity_ts,

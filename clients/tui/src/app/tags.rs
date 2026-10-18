@@ -556,6 +556,7 @@ mod tests {
             name: None,
             topic: None,
             avatar_url: None,
+            display_name: None,
             canonical_alias: None,
             room_type: None,
             last_activity_ts: ts,

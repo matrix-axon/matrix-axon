@@ -60,7 +60,7 @@ pub(crate) use render::{
 pub(crate) use room_actions::{PendingRoomAction, RoomActionOutcome};
 #[cfg(test)]
 pub(crate) use rooms::is_likely_dm;
-pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
+pub(crate) use rooms::{account_localpart, apply_edits};
 #[cfg(test)]
 pub(crate) use tags::PinMigration;
 pub(crate) use tags::TagWriteOutcome;
@@ -845,10 +845,11 @@ pub(crate) struct App {
     /// once so a pin we write this session is not mistaken for "homeserver
     /// wins" (ADR 0103). `None` until the first non-empty list lands.
     pub(crate) server_favourite_accounts: Option<HashSet<Uuid>>,
-    /// Display titles derived from members for rooms with no `m.room.name`/alias
-    /// (e.g. DMs), so the room list shows the other participant's name instead of
-    /// the raw room id. Filled lazily by background `/members` fetches.
-    pub(crate) room_titles: HashMap<RoomKey, String>,
+    /// Live title fields retained until a newer room-list request covers them.
+    pub(crate) room_title_updates: HashMap<(RoomKey, rooms::TitleField), rooms::TitleUpdate>,
+    pub(crate) room_snapshot_started: Option<std::time::Instant>,
+    /// Latest dropped title frame, awaiting a snapshot requested after it.
+    pub(crate) title_update_overflow: Option<std::time::Instant>,
     /// In-flight and decoded images, account-scoped and bounded by LRU order.
     pub(crate) image_cache: HashMap<MediaKey, ImageState>,
     image_cache_order: VecDeque<MediaKey>,
@@ -973,15 +974,6 @@ pub(crate) struct App {
     /// Earliest instant a room may trigger another background `/members` refresh,
     /// rate-limiting the live unknown-sender path (see `spawn_members_refresh`).
     members_refresh_after: HashMap<RoomKey, std::time::Instant>,
-    /// Rooms whose `/members` read produced no derivable list title (no other
-    /// member to name them after). Without an explicit record the title sweep
-    /// asks again every cooldown, forever, on every refresh (#189).
-    ///
-    /// Deliberately separate from `members_refresh_after`: that map also rate
-    /// limits the live unknown-sender path, and suppressing *display name*
-    /// refreshes for an hour because a room has no derivable title would be a
-    /// different behaviour change entirely.
-    pub(crate) rooms_without_derived_title: HashSet<RoomKey>,
     /// Bounds concurrent `/members` reads, as `media_workers` bounds image
     /// work. A room list with thousands of unnamed rooms used to fan out one
     /// unthrottled request per room (#189).
@@ -1261,7 +1253,6 @@ impl App {
             members_tx: None,
             room_info: room_info::RoomInfoCache::default(),
             members_refresh_after: HashMap::new(),
-            rooms_without_derived_title: HashSet::new(),
             members_workers: Arc::new(Semaphore::new(MEMBERS_WORKERS)),
             pending_reply: None,
             pending_thread: None,
@@ -1279,7 +1270,9 @@ impl App {
             pinned_rooms,
             pin_migration: tags::PinMigration::Pending,
             server_favourite_accounts: None,
-            room_titles: HashMap::new(),
+            room_title_updates: HashMap::new(),
+            room_snapshot_started: None,
+            title_update_overflow: None,
             device_id: Uuid::nil(),
             drafts: HashMap::new(),
             pending_draft_put: None,
@@ -1341,23 +1334,9 @@ impl App {
         self.members_tx = Some(tx);
     }
 
-    /// The title to show for `room` in the room list. Named rooms use their
-    /// `m.room.name`/canonical alias (via [`RoomDto::title`]); unnamed rooms (DMs)
-    /// use a member-derived title once one has been fetched, falling back to the
-    /// raw room id until then.
+    /// Shared state/SDK title used throughout the client.
     pub(crate) fn room_list_title(&self, room: &crate::api::RoomDto) -> String {
-        let named = room.name.as_deref().is_some_and(|n| !n.trim().is_empty())
-            || room
-                .canonical_alias
-                .as_deref()
-                .is_some_and(|a| !a.trim().is_empty());
-        if named {
-            return room.title().to_owned();
-        }
-        self.room_titles
-            .get(&RoomKey::from(room))
-            .cloned()
-            .unwrap_or_else(|| room.title().to_owned())
+        room.title().to_owned()
     }
 
     /// Request a background download of `mxc_url` if it is not already cached
@@ -1551,6 +1530,8 @@ impl App {
             .filter(|a| a.state != AccountState::Active)
             .map(|a| a.account_id)
             .collect();
+        self.room_title_updates
+            .retain(|(key, _), _| !self.accounts.inactive_ids.contains(&key.account_id));
         let active: Vec<AccountDto> = accounts
             .iter()
             .filter(|a| {
