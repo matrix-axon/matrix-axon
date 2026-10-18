@@ -87,7 +87,11 @@ function ThreadRoot({
               displayName={senderDisplay}
               onOpenUser={onOpenUser}
             />{' '}
-            <EventBody event={root} senderDisplay={senderDisplay} />
+            <EventBody
+              event={root}
+              senderDisplay={senderDisplay}
+              showLinkPreviews={!compact}
+            />
           </span>
         </>
       ) : (
