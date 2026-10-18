@@ -30,7 +30,7 @@ ignore = [
   # The zbus family was folded into `zbus` 6.0.0. Every Tauri plugin that
   # reaches it (notification, opener, single-instance) still requires
   # `zbus ^5`, so there is no upgrade to take until they move (#747).
-  { id = "RUSTSEC-2026-0371", reason = "zbus_names, via zbus 5 <- tauri plugins (see #747)" },
   { id = "RUSTSEC-2026-0370", reason = "zvariant, via zbus 5 <- tauri plugins (see #747)" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names, via zbus 5 <- tauri plugins (see #747)" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, via zbus 5 <- tauri plugins (see #747)" },
 ]
