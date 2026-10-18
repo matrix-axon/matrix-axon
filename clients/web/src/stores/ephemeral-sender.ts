@@ -34,6 +34,12 @@ import { inBackground, isTransientStatus } from '../api/client'
  *   or the server gives a verdict (another 4xx), that position is left alone
  *   for `RECEIPT_GIVE_UP_COOLDOWN_MS`; after that, reading the room again sends
  *   it again.
+ *
+ *   The sender is app-wide and outlives a sign-out, so `resetSession` ends all
+ *   of that when the Axon session does (`connectEphemeralSenderSessionReset`).
+ *   A retry that fired after sign-out would pick up whatever credentials exist
+ *   *then*: none, so its 401 reaches `onAuthFailure()`, and if the user has
+ *   already signed in again, that discards the new token (review on #751).
  * - **Typing** is driven by composer activity: `noteTyping` on each keystroke
  *   (throttled `typing:true` + an idle timer), `stopTyping` on send, idle, or
  *   room switch (`typing:false`).
@@ -62,6 +68,14 @@ export interface EphemeralSender {
   /** The user stopped composing (send, idle, blur, or room switch). Sends
    * `typing:false` if a notice is currently active. Idempotent. */
   stopTyping(accountId: string, roomId: string): void
+  /**
+   * The Axon session ended. Cancels every pending debounce, retry and typing
+   * timer, aborts requests on the wire, and forgets every room's state, so
+   * nothing from this session is sent — or retried — under the next one.
+   * Sends nothing itself. Idempotent, and writes no signals, so it is safe to
+   * call from an effect.
+   */
+  resetSession(): void
 }
 
 /** How long a burst of newly-read events settles before its receipt is sent. */
@@ -132,6 +146,13 @@ export function createEphemeralSender(
 ): EphemeralSender {
   const receipts = new Map<string, ReceiptState>()
   const typing = new Map<string, TypingState>()
+  /**
+   * The current Axon session. Every request carries its signal, so a reset
+   * aborts what is on the wire; and a completion checks that the session it
+   * started under is still this one, so one that settles after a reset writes
+   * nothing and schedules nothing.
+   */
+  let session = new AbortController()
 
   function receiptState(key: string): ReceiptState {
     let state = receipts.get(key)
@@ -153,6 +174,7 @@ export function createEphemeralSender(
     accountId: string,
     roomId: string,
     eventId: string,
+    signal: AbortSignal,
   ): Promise<ReceiptOutcome> {
     let response: Response
     try {
@@ -160,6 +182,7 @@ export function createEphemeralSender(
         await api.POST('/v1/accounts/{account_id}/rooms/{room_id}/read', {
           params: { path: { account_id: accountId, room_id: roomId } },
           body: { event_id: eventId },
+          signal,
         })
       ).response
     } catch {
@@ -183,34 +206,55 @@ export function createEphemeralSender(
     attempt: number,
   ): void {
     const state = receiptState(key)
+    const owner = session
     state.inFlight = receipt
-    void postReceipt(accountId, roomId, receipt.eventId).then((outcome) => {
-      state.inFlight = null
-      if (outcome === 'accepted') {
-        state.acked = Math.max(state.acked, receipt.arrivalOrder)
-        state.gaveUp = null
-      } else if (
-        outcome === 'transient' &&
-        attempt < RECEIPT_RETRY_DELAYS_MS.length
-      ) {
-        state.retry = {
-          receipt,
-          attempt,
-          timer: setTimeout(
-            () => retryReceipt(key, accountId, roomId),
-            RECEIPT_RETRY_DELAYS_MS[attempt],
-          ),
-        }
-        return
-      } else {
-        state.gaveUp = { arrivalOrder: receipt.arrivalOrder, at: now() }
+    void postReceipt(accountId, roomId, receipt.eventId, owner.signal).then(
+      (outcome) => {
+        settleReceipt(key, accountId, roomId, receipt, attempt, outcome, owner)
+      },
+    )
+  }
+
+  function settleReceipt(
+    key: string,
+    accountId: string,
+    roomId: string,
+    receipt: PendingReceipt,
+    attempt: number,
+    outcome: ReceiptOutcome,
+    owner: AbortController,
+  ): void {
+    // Sent under a session that has since ended: its room state is gone, and
+    // a retry from here would run under the next session's credentials.
+    if (owner !== session) {
+      return
+    }
+    const state = receiptState(key)
+    state.inFlight = null
+    if (outcome === 'accepted') {
+      state.acked = Math.max(state.acked, receipt.arrivalOrder)
+      state.gaveUp = null
+    } else if (
+      outcome === 'transient' &&
+      attempt < RECEIPT_RETRY_DELAYS_MS.length
+    ) {
+      state.retry = {
+        receipt,
+        attempt,
+        timer: setTimeout(
+          () => retryReceipt(key, accountId, roomId),
+          RECEIPT_RETRY_DELAYS_MS[attempt],
+        ),
       }
-      // A newer position noted while this one was on the wire, whose debounce
-      // already fired into the in-flight guard.
-      if (state.pending !== null && state.debounce === null) {
-        flushReceipt(key, accountId, roomId)
-      }
-    })
+      return
+    } else {
+      state.gaveUp = { arrivalOrder: receipt.arrivalOrder, at: now() }
+    }
+    // A newer position noted while this one was on the wire, whose debounce
+    // already fired into the in-flight guard.
+    if (state.pending !== null && state.debounce === null) {
+      flushReceipt(key, accountId, roomId)
+    }
   }
 
   function retryReceipt(key: string, accountId: string, roomId: string): void {
@@ -252,6 +296,7 @@ export function createEphemeralSender(
       api.PUT('/v1/accounts/{account_id}/rooms/{room_id}/typing', {
         params: { path: { account_id: accountId, room_id: roomId } },
         body: { typing: isTyping },
+        signal: session.signal,
       }),
     )
   }
@@ -328,9 +373,30 @@ export function createEphemeralSender(
     }
   }
 
+  function resetSession(): void {
+    for (const state of receipts.values()) {
+      if (state.debounce !== null) {
+        clearTimeout(state.debounce)
+      }
+      if (state.retry !== null) {
+        clearTimeout(state.retry.timer)
+      }
+    }
+    receipts.clear()
+    for (const state of typing.values()) {
+      if (state.idleTimer !== null) {
+        clearTimeout(state.idleTimer)
+      }
+    }
+    typing.clear()
+    session.abort()
+    session = new AbortController()
+  }
+
   return {
     noteRead,
     noteTyping,
     stopTyping,
+    resetSession,
   }
 }
