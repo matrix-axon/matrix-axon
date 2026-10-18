@@ -963,8 +963,8 @@ async function handleApi(req, res, url) {
       ].map(attachTags),
     })
   }
-  // Unnamed rooms ask for members to derive a DM title; none here, so the
-  // room-id fallback stands.
+  // The unnamed room above has no `display_name` (ADR 0118), so the room-id
+  // fallback stands.
   if (method === 'GET' && /\/space\/children$/.test(pathname)) {
     const spaceId = decodeURIComponent(pathname.split('/').at(-3))
     return json(res, {

@@ -5,7 +5,7 @@ import { createApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
 import { cacheNamespace, createMemoryCacheStore } from './cache-store'
 import { createRoomListCache, type RoomListCache } from './room-list-cache'
-import type { RoomDto } from './room-list'
+import { roomTitle, type RoomDto } from './room-list'
 import { createRoomsStore } from './rooms'
 
 const BASE_URL = 'http://axon.test'
@@ -493,6 +493,123 @@ describe('room-list cache', () => {
     )
     expect(raw).not.toContain('the secret plans')
     expect(raw).toContain('Ops')
+  })
+
+  it('restores the calculated display name, so an unnamed row paints titled', async () => {
+    const cache = createMemoryCacheStore()
+    const unnamed = {
+      ...LOUNGE,
+      room_id: '!dm:hs',
+      name: null,
+      display_name: 'Alice, Bob',
+    } as RoomDto
+    harness({ cache }).roomList.write([unnamed, OPS])
+    await settle()
+    const rows = await harness({ cache }).roomList.read()
+    expect(rows?.[0].display_name).toBe('Alice, Bob')
+    // A row the server has not titled yet stays explicitly untitled.
+    expect(rows?.[1].display_name).toBeNull()
+  })
+
+  it('persists a live display name, so an offline restart keeps the rename', async () => {
+    // Alice -> Alicia live, then a restart whose network never answers: the
+    // restored row must read Alicia, since its `display_name` outranks the
+    // title cache.
+    const dm = {
+      ...LOUNGE,
+      room_id: '!dm:hs',
+      name: null,
+      display_name: 'Alice',
+    }
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () => HttpResponse.json({ data: [dm] })),
+    )
+    const { cache, roomList } = harness()
+    const storage = memoryStorage()
+    const store = createRoomsStore(api(), storage, roomList, {
+      cacheWriteDelayMs: 0,
+    })
+    await store.refresh()
+    store.noteDisplayName(ACCOUNT, dm.room_id, 'Alicia')
+    const cached = await waitForCached(
+      roomList,
+      (rows) => rows?.[0]?.display_name === 'Alicia',
+    )
+    expect(cached?.[0].display_name).toBe('Alicia')
+
+    server.use(http.get(`${BASE_URL}/v1/rooms`, () => HttpResponse.error()))
+    const restarted = createRoomsStore(
+      api(),
+      storage,
+      harness({ cache }).roomList,
+    )
+    void restarted.refresh()
+    await waitForRows(restarted)
+    expect(roomTitle(restarted.rooms.value[0], restarted.titles.value)).toBe(
+      'Alicia',
+    )
+  })
+
+  it('does not write live patches under the next reader after sign-out', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [{ ...OPS, display_name: 'Ops' }] }),
+      ),
+    )
+    const { roomList } = harness()
+    const writes: (readonly RoomDto[])[] = []
+    const spy: RoomListCache = {
+      read: () => roomList.read(),
+      write: (rows) => {
+        writes.push(rows)
+        roomList.write(rows)
+      },
+    }
+    const store = createRoomsStore(api(), memoryStorage(), spy, {
+      cacheWriteDelayMs: 20,
+    })
+    await store.refresh()
+    expect(writes).toHaveLength(1)
+    store.noteDisplayName(ACCOUNT, OPS.room_id, 'Operations')
+    store.resetSession()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(writes).toHaveLength(1)
+  })
+
+  it('writes a scheduled live patch at once when flushed, and nothing otherwise', async () => {
+    // A tab closed inside the coalescing window: the page-hide flush must
+    // persist the rename rather than leave it to a timer that never fires.
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [{ ...OPS, display_name: 'Ops' }] }),
+      ),
+    )
+    const { roomList } = harness()
+    const writes: (readonly RoomDto[])[] = []
+    const spy: RoomListCache = {
+      read: () => roomList.read(),
+      write: (rows) => {
+        writes.push(rows)
+        roomList.write(rows)
+      },
+    }
+    const store = createRoomsStore(api(), memoryStorage(), spy, {
+      cacheWriteDelayMs: 60_000,
+    })
+    await store.refresh()
+    expect(writes).toHaveLength(1)
+
+    store.flushCacheWrite()
+    expect(writes).toHaveLength(1)
+
+    store.noteDisplayName(ACCOUNT, OPS.room_id, 'Operations')
+    store.flushCacheWrite()
+    expect(writes).toHaveLength(2)
+    expect(writes[1][0].display_name).toBe('Operations')
+
+    // The timer it replaced is gone, and a second flush has nothing to send.
+    store.flushCacheWrite()
+    expect(writes).toHaveLength(2)
   })
 
   it('keeps a row whose unread counts are missing or nonsense', async () => {

@@ -42,7 +42,12 @@ const LOUNGE = makeRoom({
   canonical_alias: '#lounge:hs',
   last_activity_ts: Date.now() - 3_600_000,
 })
-const DM = makeRoom({ room_id: '!dm:hs', is_direct: true })
+const DM = makeRoom({
+  room_id: '!dm:hs',
+  is_direct: true,
+  // The server's calculated name (ADR 0118), which titles the unnamed row.
+  display_name: 'Bob',
+})
 const OTHER = makeRoom({
   account_id: OTHER_ACCOUNT,
   account_user_id: '@work:example.org',
@@ -419,11 +424,11 @@ describe('RoomList', () => {
     )
   })
 
-  it('lists rooms with member-derived DM titles and deep-link hrefs', async () => {
+  it('lists rooms with calculated DM titles and deep-link hrefs', async () => {
     const { findByText, container } = renderPage()
 
     expect(await findByText('Ops')).toBeTruthy()
-    expect(await findByText('Bob')).toBeTruthy() // resolved DM title
+    expect(await findByText('Bob')).toBeTruthy() // the DM's `display_name`
 
     const links = [...container.querySelectorAll('a.room-link')].map((a) =>
       a.getAttribute('href'),
