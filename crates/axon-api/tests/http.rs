@@ -755,6 +755,113 @@ async fn insert_media_event(
     event_id
 }
 
+async fn insert_custom_reaction(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    mxc: &str,
+) -> String {
+    let event_id = format!("$reaction-{}:localhost", Uuid::new_v4());
+    let content = json!({ "m.relates_to": {
+        "rel_type": "m.annotation", "event_id": "$target:localhost", "key": mxc
+    }});
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_000,
+            event_type: "m.reaction",
+            content: Some(content.clone()),
+            raw_event: json!({ "type": "m.reaction", "content": content }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .unwrap();
+    event_id
+}
+
+/// The reaction key alone is enough to resolve plaintext media; no image
+/// attachment or pack metadata needs to exist for this URL.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn custom_reaction_media_download_thumbnail_and_redaction() {
+    let store = store().await;
+    let account_id = store
+        .upsert_account(
+            &format!("@reaction-media-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let room_id = format!("!reaction-media-{}:localhost", Uuid::new_v4());
+    let media_id = Uuid::new_v4().simple().to_string();
+    let mxc = format!("mxc://example.org/{media_id}");
+    let event_id = insert_custom_reaction(&store, account_id, &room_id, &mxc).await;
+    let media = Arc::new(ConfiguredMediaProxy::ok(b"reaction-image"));
+    let app = media_app(store.clone(), media.clone());
+    let path = format!("/v1/media/{account_id}/example.org/{media_id}");
+    let thumb = format!("{path}/thumbnail?width=32&height=32");
+    for uri in [&path, &thumb] {
+        let (status, headers, bytes) = get_media_bytes(&app, uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"reaction-image");
+        // A reaction declares no trustworthy MIME type. Keep the existing
+        // safe fallback rather than assuming every remote object is a PNG.
+        assert_eq!(headers["content-type"], "application/octet-stream");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+    }
+    assert_eq!(media.calls().len(), 1);
+    assert_eq!(media.calls()[0].mxc_url, mxc);
+    assert!(media.calls()[0].encrypted_file.is_none());
+    assert_eq!(media.thumbnail_calls().len(), 1);
+
+    let redaction_id = format!("$redact-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &redaction_id,
+            room_id: &room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_001,
+            event_type: "m.room.redaction",
+            content: Some(json!({})),
+            raw_event: json!({ "type": "m.room.redaction", "redacts": event_id }),
+            megolm_session_id: None,
+            redacts: Some(&event_id),
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .unwrap();
+    for uri in [&path, &thumb] {
+        let (status, _, _) = get_media_bytes(&app, uri, Some("*")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(media.calls().len(), 1);
+    assert_eq!(media.thumbnail_calls().len(), 1);
+
+    // A redacted older reaction must not hide a later active reference.
+    insert_custom_reaction(&store, account_id, &room_id, &mxc).await;
+    for uri in [&path, &thumb] {
+        let (status, _, bytes) = get_media_bytes(&app, uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"reaction-image");
+    }
+    assert_eq!(media.calls().len(), 2);
+    assert_eq!(media.thumbnail_calls().len(), 2);
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
+
 /// Shared body for `media_route_fails_closed_for_missing_and_redacted_metadata`
 /// and `thumbnail_route_fails_closed_for_missing_and_redacted_metadata`: a
 /// store miss, and a redacted event, must both `404` without the request ever

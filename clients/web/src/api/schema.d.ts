@@ -1653,7 +1653,8 @@ export interface paths {
         /**
          * Proxy an `mxc://` download through the account's homeserver connection.
          * @description The `server_name` and `media_id` path segments form the `mxc://` URI that
-         *     was embedded in a Matrix event's primary or thumbnail media descriptor.
+         *     was embedded in a Matrix event's media descriptor, member avatar, or
+         *     MSC4027 custom reaction key.
          *     The response body is the raw media bytes, streamed from the on-disk cache
          *     with range-request and conditional-GET support.
          */

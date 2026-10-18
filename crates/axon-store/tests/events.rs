@@ -806,6 +806,85 @@ async fn get_event_by_mxc_url_finds_plain_thumbnail() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_custom_reaction_boundaries() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let owner = common::test_account(&store, "mxc-reaction").await;
+    let other = common::test_account(&store, "mxc-reaction-other").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    let annotation = json!({ "m.relates_to": {
+        "rel_type": "m.annotation", "event_id": "$target:localhost", "key": mxc
+    }});
+
+    // A lookalike field on an unrelated event must not authorize a download.
+    insert_event_with_type(
+        &store,
+        owner,
+        &room_id,
+        "m.room.message",
+        annotation.clone(),
+    )
+    .await;
+    insert_event_with_type(
+        &store,
+        owner,
+        &room_id,
+        "m.reaction",
+        json!({
+            "m.relates_to": { "rel_type": "m.reference", "key": mxc }
+        }),
+    )
+    .await;
+    assert!(store
+        .get_event_by_mxc_url(owner, &mxc)
+        .await
+        .unwrap()
+        .is_none());
+
+    let reaction = insert_event_with_type(&store, owner, &room_id, "m.reaction", annotation).await;
+    assert_eq!(
+        store
+            .get_event_by_mxc_url(owner, &mxc)
+            .await
+            .unwrap()
+            .unwrap()
+            .event_id,
+        reaction
+    );
+    assert!(store
+        .get_event_by_mxc_url(other, &mxc)
+        .await
+        .unwrap()
+        .is_none());
+
+    // A reaction must never mask an encrypted attachment's descriptor, even
+    // when the reaction arrived first and has the lower event-row id.
+    let attachment = insert_image_event(
+        &store,
+        owner,
+        &room_id,
+        json!({
+            "msgtype": "m.image", "file": { "url": mxc, "key": {} }
+        }),
+    )
+    .await;
+    assert_eq!(
+        store
+            .get_event_by_mxc_url(owner, &mxc)
+            .await
+            .unwrap()
+            .unwrap()
+            .event_id,
+        attachment
+    );
+
+    common::cleanup_account(&pool, owner).await;
+    common::cleanup_account(&pool, other).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn get_event_by_mxc_url_finds_member_avatar() {
     let store = common::migrated_store().await;
     let pool = common::raw_pool().await;

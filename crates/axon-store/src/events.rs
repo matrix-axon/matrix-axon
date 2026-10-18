@@ -1224,8 +1224,11 @@ impl Store {
 
     /// Find the first event for `account_id` whose media URL matches `mxc_url`.
     /// Checks primary and thumbnail URLs for both plain and encrypted media, and
-    /// member/profile avatar URLs for plain avatar media, so the caller can
-    /// recover the matching encryption descriptor when needed.
+    /// member/profile avatar URLs and MSC4027 annotation keys for plain media,
+    /// so the caller can recover the matching encryption descriptor when needed.
+    /// Attachments take precedence over reaction keys to preserve decryption.
+    /// Only the first matching reaction is needed, even for a frequently used
+    /// emote; its index includes `id` to bound that branch before the union.
     /// Each JSON path is a separate branch so PostgreSQL can use the matching
     /// partial expression index rather than filtering every event for an
     /// account through one multi-way `OR`.
@@ -1241,6 +1244,21 @@ impl Store {
                    SELECT id FROM ( \
                        SELECT id, 1 AS priority FROM events \
                        WHERE account_id = $1 AND content->>'url' = $2 \
+                       UNION ALL \
+                       SELECT id, 6 AS priority FROM ( \
+                           SELECT reaction.id FROM events reaction \
+                           WHERE reaction.account_id = $1 \
+                             AND reaction.event_type = 'm.reaction' \
+                             AND reaction.content->'m.relates_to'->>'rel_type' = 'm.annotation' \
+                             AND reaction.content->'m.relates_to'->>'key' = $2 \
+                             AND NOT EXISTS ( \
+                                 SELECT 1 FROM events rr \
+                                 WHERE rr.account_id = reaction.account_id \
+                                   AND rr.event_type = 'm.room.redaction' \
+                                   AND rr.redacts = reaction.event_id \
+                             ) \
+                           ORDER BY reaction.id LIMIT 1 \
+                       ) reaction_matches \
                        UNION ALL \
                        SELECT id, 5 AS priority FROM events \
                        WHERE account_id = $1 \

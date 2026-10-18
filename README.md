@@ -151,6 +151,8 @@ Homeserver(s)  →  Axon (single binary)  →  axon-web (alpha client)
 ```
 
 One Rust binary, one Postgres database, media cached to local disk.
+The authenticated media download and thumbnail endpoints also resolve custom reaction images whose keys are `mxc://` URLs (MSC4027), without requiring an image pack definition.
+Displaying these images in Axon's reference clients is separate client work.
 See the [architecture diagram](docs/mvp/tech-spec.md#architecture-overview) for detail.
 
 ## Clients
