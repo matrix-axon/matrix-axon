@@ -70,12 +70,17 @@ for app in "${apps[@]}"; do
 		;;
 	esac
 
-	gh release download "$TAG" --repo "$repo" --pattern "$asset" --dir "$work" --clobber
-	[ -s "$work/$asset" ] || {
-		echo "release $TAG has no $asset" >&2
+	# One directory per app, so a file left by an earlier iteration can never
+	# satisfy the check below. The asset names contain no glob characters, so
+	# --pattern matches exactly that asset.
+	appdir="$work/$app"
+	mkdir -p "$appdir"
+	gh release download "$TAG" --repo "$repo" --pattern "$asset" --dir "$appdir"
+	if [ ! -s "$appdir/$asset" ] || [ "$(find "$appdir" -type f | wc -l)" -ne 1 ]; then
+		echo "release $TAG did not give exactly $asset" >&2
 		exit 1
-	}
-	sha=$(sha256_file "$work/$asset")
+	fi
+	sha=$(sha256_file "$appdir/$asset")
 
 	dest="$out/manifests/m/MatrixAxon/$pkg/$version"
 	mkdir -p "$dest"

@@ -1,6 +1,6 @@
 # ADR 0120 — Publish axon-server, axon-tui and the desktop client to winget
 
-**Status:** Proposed; tracked in [issue 728](https://github.com/matrix-axon/matrix-axon/issues/728).
+**Status:** Accepted; partly implemented. The first submissions are made (Decided item 5); the `cross-build.yml` update job and its `WINGET_TOKEN` secret are not written yet. Tracked in [issue 728](https://github.com/matrix-axon/matrix-axon/issues/728); the installer checks that remain are [issue 753](https://github.com/matrix-axon/matrix-axon/issues/753).
 Builds on ADR 0119 (Windows signing) and follows the Homebrew publishing job in `cross-build.yml`.
 
 ## Context
@@ -86,6 +86,7 @@ Submitting to winget does not make a build "released": the GitHub Release remain
 4. **Job location.** `cross-build.yml`.
 5. **First submissions.** Made by hand at version 0.1.10 from the `matrix-axon/winget-pkgs` fork, using `packaging/winget/render.sh` and its README: [454178](https://github.com/microsoft/winget-pkgs/pull/454178) (`MatrixAxon.AxonServer`), [454182](https://github.com/microsoft/winget-pkgs/pull/454182) (`MatrixAxon.AxonTui`) and [454185](https://github.com/microsoft/winget-pkgs/pull/454185) (`MatrixAxon.Axon`).
    Each passed `winget validate`, a local `winget install --manifest`, and the winget-pkgs pipeline, and is awaiting moderator review.
+   The hashes in the three submitted manifests matched the live v0.1.10 release assets when last compared; the hand-uploaded installer must not be replaced while 454185 is open.
    The tag build for v0.1.10 attached no installer (the verify step failed, fixed by the CI change that follows it), so the installer in 454185 is a signed build uploaded to that release by hand.
 
 ## Open
@@ -94,7 +95,7 @@ Submitting to winget does not make a build "released": the GitHub Release remain
    This change sets it to `matrix-axon` so the installer's uninstall entry matches the manifest's `Publisher:`.
    The installer in 454185 was built by hand from v0.1.10 and registers `Publisher` = `matrixaxon` under the uninstall key `Axon` (read from a Windows install), not `matrix-axon`; v0.1.11 is the first tag build with the setting.
    Until then, the manifest's `Publisher:` and the installed app's differ for 0.1.10, which the winget-pkgs pipeline accepted but which may affect how `winget list` and `winget upgrade` match an installed Axon to the package.
-   Tauri's NSIS template also keys the stored install directory on the publisher, so installing over an older build should be checked to land in the same folder.
+   Tauri's NSIS template also keys the stored install directory on the publisher, so installing over an older build should be checked to land in the same folder (issue 753).
 2. **Merge, then the update job.** The three pull requests are in moderator review.
    The `cross-build.yml` job that submits later versions with `wingetcreate update` is not written yet, and needs the `WINGET_TOKEN` secret.
 

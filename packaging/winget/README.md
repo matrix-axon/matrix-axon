@@ -39,13 +39,12 @@ $dir = "$HOME\winget-out\manifests\m\MatrixAxon\AxonServer\0.1.10"
 winget validate --manifest $dir
 winget install --manifest $dir
 axon-server --version     # resolved through the portable alias; open a new shell first
-winget uninstall ARP\User\X64\MatrixAxon.AxonServer__DefaultSource
 ```
 
 Repeat for `AxonTui` (`axon-tui --version`).
 
 A package installed from a local manifest is not known to winget by its package identifier, so `winget uninstall MatrixAxon.AxonServer` finds nothing.
-All three are listed (`winget list MatrixAxon`) and uninstalled by an ARP identifier:
+Uninstall each one by its ARP identifier (`winget list MatrixAxon` shows them):
 
 ```powershell
 winget uninstall ARP\User\X64\MatrixAxon.AxonServer__DefaultSource
@@ -71,14 +70,18 @@ Also install over an older build, if one is around, and confirm it lands in the 
 
 ### 3. Open the pull request from the fork
 
-One per package. Fork once, then for each package:
+One per package. Set up the clone once:
 
 ```sh
 git clone --depth 1 --single-branch https://github.com/matrix-axon/winget-pkgs
 cd winget-pkgs
 git remote add upstream https://github.com/microsoft/winget-pkgs
-git fetch --depth 1 upstream master
+```
 
+Then, from that clone, for each package (set `PKG` and `VER` again each time):
+
+```sh
+git fetch --depth 1 upstream master
 PKG=AxonServer; VER=0.1.10
 git switch -c "MatrixAxon.$PKG-$VER" upstream/master
 mkdir -p manifests/m/MatrixAxon/$PKG
