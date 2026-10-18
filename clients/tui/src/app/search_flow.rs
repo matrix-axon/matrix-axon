@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::api::{
-    ApiError, AxonClient, EventDto, RoomDto, SearchPage, SearchResultDto, TimelinePage,
+    ApiError, AxonClient, EventDto, RoomListSnapshot, SearchPage, SearchResultDto, TimelinePage,
 };
 use crate::search::{
     parse_search_terms, ParsedSearch, SearchCommandInput, SearchContextKey, SearchFormState,
@@ -39,7 +39,7 @@ pub(crate) enum SearchOutcome {
     Jump {
         hit: EventDto,
         action: SearchJumpAction,
-        room_refresh: Option<Result<Vec<RoomDto>, ApiError>>,
+        room_refresh: Option<Result<RoomListSnapshot, ApiError>>,
         result: Result<TimelinePage, ApiError>,
         thread_load: Option<Box<SearchJumpThreadLoad>>,
     },
@@ -713,7 +713,7 @@ impl App {
         &mut self,
         hit: EventDto,
         action: SearchJumpAction,
-        room_refresh: Option<Result<Vec<RoomDto>, ApiError>>,
+        room_refresh: Option<Result<RoomListSnapshot, ApiError>>,
         result: Result<TimelinePage, ApiError>,
         thread_load: Option<Box<SearchJumpThreadLoad>>,
     ) {

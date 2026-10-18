@@ -201,6 +201,9 @@ shows it.
 - **In-timeline find on web.** The web client has no Ctrl-F of its own; search
   is the answer there, which the `search` scenes cover.
 
+- **Calculated room titles in the TUI (ADR 0118).** The `rooms` scene shows an unnamed DM title.
+  Unnamed non-DM groups, live hero renames, and switching by calculated title are not covered; the corpus and driver have no such scenario.
+
 ## Findings the demo scenes pinned
 
 Things that are true of the clients, discovered by scripting them, and which a
@@ -208,10 +211,8 @@ scene now depends on:
 
 ### TUI
 
-- `/room` resolves a room id, a canonical alias, or a room **name**. A DM has no
-  name — its "Maya Harrison" title is derived per render from the other member —
-  so `/room Maya Harrison` answers "room not found" and the `send` scene
-  addresses the DM by id.
+- `/room` resolves room IDs, aliases, and displayed titles, including server-calculated names for unnamed rooms (ADR 0118).
+  The `send` scene still addresses the DM by ID; title-based switching is not covered by that driver.
 - The search result view binds bare letters to its own actions (`s` sort, `g`
   group, `e` edit, `r` reply, `t` thread). A command typed while it has focus is
   not typed at all: it is read as that sequence of shortcuts. Esc first.

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
@@ -77,12 +77,14 @@ impl AxonClient {
         self.token.is_some()
     }
 
-    pub async fn list_rooms(&self, account_id: Option<Uuid>) -> Result<Vec<RoomDto>, ApiError> {
+    pub async fn list_rooms(&self, account_id: Option<Uuid>) -> Result<RoomListSnapshot, ApiError> {
+        let started = Instant::now();
         let mut request = self.http.get(format!("{}/v1/rooms", self.base_url));
         if let Some(account_id) = account_id {
             request = request.query(&[("account_id", account_id)]);
         }
-        self.send(read_request(request)).await
+        let rooms = self.send(read_request(request)).await?;
+        Ok(RoomListSnapshot { rooms, started })
     }
 
     pub async fn list_accounts(&self) -> Result<Vec<AccountDto>, ApiError> {
@@ -1156,6 +1158,16 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
                 payload,
             })
         }
+        "room_display_name.changed" => {
+            let payload = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::RoomDisplayName {
+                account_id: envelope.account_id,
+                payload,
+            })
+        }
         "unread_counts.changed" => {
             let payload: UnreadCountsChangedDto = match serde_json::from_value(envelope.payload) {
                 Ok(payload) => payload,
@@ -1180,6 +1192,10 @@ fn next_live_reconnect_backoff(current: Duration) -> Duration {
 
 #[derive(Debug)]
 pub enum LiveFrame {
+    RoomDisplayName {
+        account_id: Uuid,
+        payload: RoomDisplayNameChangedDto,
+    },
     /// Instance-scoped, including when the envelope account is the nil UUID.
     Preferences(PreferencesChangedDto),
     Connected,
@@ -1817,6 +1833,30 @@ pub struct AccountDataChangedDto {
     pub content: Value,
 }
 
+/// Request start travels with every room-list result, including search/lifecycle reads.
+/// A live title received later must survive this snapshot.
+#[derive(Debug)]
+pub struct RoomListSnapshot {
+    pub rooms: Vec<RoomDto>,
+    pub started: Instant,
+}
+
+#[cfg(test)]
+impl From<Vec<RoomDto>> for RoomListSnapshot {
+    fn from(rooms: Vec<RoomDto>) -> Self {
+        Self {
+            rooms,
+            started: Instant::now(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoomDisplayNameChangedDto {
+    pub room_id: String,
+    pub display_name: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoomDto {
     pub account_id: Uuid,
@@ -1827,6 +1867,9 @@ pub struct RoomDto {
     pub topic: Option<String>,
     pub avatar_url: Option<String>,
     pub canonical_alias: Option<String>,
+    /// SDK-calculated title; absent on older servers and null before reconciliation.
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// `m.room.create` `type`, if any (for example `m.space`).
     #[serde(default)]
     pub room_type: Option<String>,
@@ -1850,10 +1893,15 @@ pub struct RoomDto {
 
 impl RoomDto {
     pub fn title(&self) -> &str {
-        self.name
-            .as_deref()
-            .or(self.canonical_alias.as_deref())
-            .unwrap_or(&self.room_id)
+        [
+            self.name.as_deref(),
+            self.canonical_alias.as_deref(),
+            self.display_name.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|title| !title.trim().is_empty())
+        .unwrap_or(&self.room_id)
     }
 
     pub fn is_favourite(&self) -> bool {
@@ -2340,6 +2388,92 @@ impl fmt::Display for Escaped<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn room_snapshot_is_stamped_before_the_http_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let mut request = Vec::new();
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "request ended before the headers");
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let received = Instant::now();
+            tx.send(received).unwrap();
+            let body = r#"{"data":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let snapshot = client.list_rooms(None).await.unwrap();
+        assert!(snapshot.started < rx.await.unwrap());
+        assert!(snapshot.rooms.is_empty());
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn calculated_title_precedence_and_older_server_compatibility() {
+        let mut room: RoomDto = serde_json::from_value(serde_json::json!({
+            "account_id": Uuid::nil(), "room_id": "!room:x", "last_activity_ts": 0,
+        }))
+        .unwrap();
+        assert_eq!(room.title(), "!room:x");
+        room.display_name = Some("Empty Room".to_owned());
+        assert_eq!(room.title(), "Empty Room");
+        room.canonical_alias = Some("#alias:x".to_owned());
+        assert_eq!(room.title(), "#alias:x");
+        room.name = Some("Named".to_owned());
+        assert_eq!(room.title(), "Named");
+        room.name = Some("  ".to_owned());
+        assert_eq!(room.title(), "#alias:x");
+        room.canonical_alias = Some("".to_owned());
+        assert_eq!(room.title(), "Empty Room");
+        room.display_name = Some(" ".to_owned());
+        assert_eq!(room.title(), "!room:x");
+    }
+
+    #[test]
+    fn calculated_title_frame_is_demultiplexed_and_validated() {
+        let account_id = Uuid::from_u128(42);
+        let mut frame = serde_json::json!({
+            "type": "room_display_name.changed", "account_id": account_id,
+            "payload": {"room_id": "!room:x", "display_name": "Alice, Bob"},
+        });
+        match decode_ws_frame(&frame.to_string()) {
+            Some(LiveFrame::RoomDisplayName {
+                account_id: actual,
+                payload,
+            }) => {
+                assert_eq!(actual, account_id);
+                assert_eq!(payload.room_id, "!room:x");
+                assert_eq!(payload.display_name, "Alice, Bob");
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+        for value in [Value::Null, serde_json::json!(4), serde_json::json!({})] {
+            frame["payload"]["display_name"] = value;
+            assert!(matches!(
+                decode_ws_frame(&frame.to_string()),
+                Some(LiveFrame::ProtocolError(_))
+            ));
+        }
+        frame["payload"] = serde_json::json!({"display_name": "Alice"});
+        assert!(matches!(
+            decode_ws_frame(&frame.to_string()),
+            Some(LiveFrame::ProtocolError(_))
+        ));
+    }
 
     #[test]
     fn preference_frame_with_nil_account_is_instance_scoped() {

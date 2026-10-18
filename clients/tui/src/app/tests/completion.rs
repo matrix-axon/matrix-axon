@@ -533,3 +533,30 @@ fn tab_completion_fills_whereami_command() {
 
     assert_eq!(app.input.buffer, "/whereami");
 }
+
+#[test]
+fn calculated_room_title_completion_and_resolution_honor_account_filter() {
+    let mut visible = room("!visible:x", None, None);
+    visible.account_id = Uuid::from_u128(1);
+    visible.display_name = Some("Alice, Bob".to_owned());
+    let mut hidden = visible.clone();
+    hidden.room_id = "!hidden:x".to_owned();
+    hidden.account_id = Uuid::from_u128(2);
+    let mut app = app_with_rooms(vec![visible, hidden]);
+    assert!(matches!(
+        app.resolve_room_target("Alice, Bob"),
+        RoomTargetResolution::Ambiguous(_)
+    ));
+    app.set_accounts(vec![
+        account_with_id(Uuid::from_u128(1), "@one:x", AccountState::Active),
+        account_with_id(Uuid::from_u128(2), "@two:x", AccountState::Active),
+    ]);
+    app.accounts.selected = AccountSelection::Account(0);
+    app.input.buffer = "/room Ali".to_owned();
+    app.complete_room_input(false);
+    assert_eq!(app.input.buffer, "/room Alice, Bob");
+    assert_eq!(
+        app.resolve_room_target("alice, bob"),
+        RoomTargetResolution::Match(0)
+    );
+}
