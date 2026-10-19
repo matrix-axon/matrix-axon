@@ -402,6 +402,37 @@ pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
 /// timeline reads remain the path for genuinely large result sets.
 const RELATION_READ_CAP: i64 = 1000;
 
+/// The [`Store::room_threads`] summary query. Its `WHERE` clause matches the
+/// predicate of `events_room_thread_root_idx` (migration
+/// `20261019120000_room_thread_summary_index.sql`) so the summary is an
+/// index-only scan over one room's thread members; keep the two in step (#763).
+fn room_threads_sql() -> String {
+    format!(
+        "SELECT th.root_event_id, th.reply_count, \
+                th.latest_reply_event_id, th.latest_reply_ts \
+         FROM ( \
+             SELECT relates_to->>'event_id' AS root_event_id, \
+                    COUNT(*)                  AS reply_count, \
+                    (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] \
+                        AS latest_reply_event_id, \
+                    MAX(origin_ts)            AS latest_reply_ts \
+             FROM events m \
+             WHERE account_id = $1 AND room_id = $2 \
+               AND relates_to->>'rel_type' = 'm.thread' \
+               AND raw_event->>'state_key' IS NULL \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM events rr \
+                   WHERE rr.account_id = m.account_id \
+                     AND rr.event_type = 'm.room.redaction' \
+                     AND rr.redacts = m.event_id \
+               ) \
+             GROUP BY relates_to->>'event_id' \
+         ) th \
+         ORDER BY th.latest_reply_ts DESC, th.root_event_id \
+         LIMIT {RELATION_READ_CAP}"
+    )
+}
+
 /// Hard cap on the number of distinct `(sender, key)` reaction pairs aggregated
 /// into a single event's tally — applied in the shared [`TIMELINE_SELECT`] on-row
 /// reactions map and in [`Store::event_reactions`]. Unlike [`RELATION_READ_CAP`]
@@ -1143,30 +1174,7 @@ impl Store {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<Vec<ThreadSummary>, StoreError> {
-        let sql = format!(
-            "SELECT th.root_event_id, th.reply_count, \
-                    th.latest_reply_event_id, th.latest_reply_ts \
-             FROM ( \
-                 SELECT relates_to->>'event_id' AS root_event_id, \
-                        COUNT(*)                  AS reply_count, \
-                        (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] \
-                            AS latest_reply_event_id, \
-                        MAX(origin_ts)            AS latest_reply_ts \
-                 FROM events m \
-                 WHERE account_id = $1 AND room_id = $2 \
-                   AND relates_to->>'rel_type' = 'm.thread' \
-                   AND raw_event->>'state_key' IS NULL \
-                   AND NOT EXISTS ( \
-                       SELECT 1 FROM events rr \
-                       WHERE rr.account_id = m.account_id \
-                         AND rr.event_type = 'm.room.redaction' \
-                         AND rr.redacts = m.event_id \
-                   ) \
-                 GROUP BY relates_to->>'event_id' \
-             ) th \
-             ORDER BY th.latest_reply_ts DESC, th.root_event_id \
-             LIMIT {RELATION_READ_CAP}"
-        );
+        let sql = room_threads_sql();
         let rows = sqlx_core::query_as::query_as::<Postgres, ThreadSummary>(&sql)
             .bind(account_id)
             .bind(room_id)
@@ -1362,5 +1370,46 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for EventSenderTrust {
             forwarder_user_id: row.try_get("forwarder_user_id")?,
             forwarder_device_id: row.try_get("forwarder_device_id")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The summary query stays an index-only scan on
+    /// `events_room_thread_root_idx` (#763). With every other way of reading
+    /// `events` disabled, the planner can only pick that scan if the query's
+    /// `WHERE` clause still implies the index predicate and the index still
+    /// covers every column the aggregate reads; otherwise it falls back to a
+    /// disabled sequential scan and this fails.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn room_threads_uses_index_only_scan() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let store = Store::connect(&url, 1).await.expect("connect + migrate");
+        let mut tx = store.pool().begin().await.expect("begin");
+        for scan in ["enable_seqscan", "enable_bitmapscan", "enable_indexscan"] {
+            sqlx_core::query::query(&format!("SET LOCAL {scan} = off"))
+                .execute(&mut *tx)
+                .await
+                .expect("restrict scans");
+        }
+        let plan: Vec<(String,)> =
+            sqlx_core::query_as::query_as(&format!("EXPLAIN {}", room_threads_sql()))
+                .bind(Uuid::new_v4())
+                .bind("!room:localhost")
+                .fetch_all(&mut *tx)
+                .await
+                .expect("explain");
+        let plan = plan
+            .into_iter()
+            .map(|(line,)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("Index Only Scan using events_room_thread_root_idx on events m"),
+            "room_threads no longer matches its index:\n{plan}"
+        );
     }
 }
