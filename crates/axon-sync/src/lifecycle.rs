@@ -989,10 +989,6 @@ impl AccountLifecycle {
         }
     }
 
-    /// Reserve one Matrix identity for a QR acquisition under the same lock as
-    /// password login, token import, deletion, and finalization. The lock covers
-    /// only the local conflict decision and durable breadcrumb insertion; the
-    /// multi-minute remote protocol starts after this method returns.
     /// The account-state half of [`Self::reserve_matrix_oauth_acquire`],
     /// without the lock or the breadcrumb: an advisory check, so a browser
     /// sign-in that would be refused anyway does not first replace the
@@ -1009,6 +1005,11 @@ impl AccountLifecycle {
         }
     }
 
+    /// Reserve one Matrix identity for a QR or browser acquisition under the
+    /// same lock as password login, token import, deletion, and finalization.
+    /// The lock covers only the local conflict decision and durable breadcrumb
+    /// insertion; the multi-minute remote protocol starts after this method
+    /// returns.
     pub(crate) async fn reserve_matrix_oauth_acquire(
         &self,
         flow_id: Uuid,
