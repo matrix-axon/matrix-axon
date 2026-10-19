@@ -9,6 +9,7 @@ import {
   connectCacheSetting,
   connectRoomsSessionReset,
   connectMatrixOAuthQrSessionReset,
+  connectEphemeralSenderSessionReset,
   connectInvitesSessionReset,
   connectLiveInvites,
   connectLiveVerification,
@@ -231,6 +232,7 @@ export function testServices(
   connectLiveRooms(live, rooms)
   connectLiveInvites(live, invites)
   connectInvitesSessionReset(auth, invites)
+  connectEphemeralSenderSessionReset(auth, ephemeralSender)
   connectLiveVerification(live, verification, accounts)
   connectVerificationSessionReset(auth, verification)
   // `() => 0`: the replay gate is off in the shared harness so a test can emit a

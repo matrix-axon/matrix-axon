@@ -1,5 +1,6 @@
 import { effect, signal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
+import { isTransientStatus } from '../api/client'
 import { deviceStateChange } from '../api/frames'
 import { randomId } from '../random-id'
 import type { LiveConnection } from './live-connection'
@@ -581,7 +582,7 @@ export function createDeviceStateStore(
       // looping on a 401 after sign-out — so the write is dropped. It stays
       // unacked either way, which keeps `settled` from letting the server's
       // older value overwrite the local one.
-      if (response.status >= 500 || response.status === 429) {
+      if (isTransientStatus(response.status)) {
         requeue()
       }
       return

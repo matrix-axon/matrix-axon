@@ -1021,6 +1021,9 @@ pub(crate) struct App {
     /// [`read_markers`] for why these are two values, not one. Session-local: it
     /// is not device state and is deliberately never hydrated.
     pub(crate) receipt_targets: HashMap<RoomKey, read_markers::ReceiptTarget>,
+    /// Rooms whose current `receipt_targets` entry the homeserver did not
+    /// accept (#625), so naming that same target again counts as an advance.
+    pub(crate) failed_receipts: HashSet<RoomKey>,
     /// A read-marker advance waiting out its debounce window before being PUT
     /// (M12). One slot; arming for a different room flushes the old one.
     pub(crate) pending_marker_put: Option<read_markers::PendingMarkerPut>,
@@ -1280,6 +1283,7 @@ impl App {
             drafts_tx: None,
             read_markers: HashMap::new(),
             receipt_targets: HashMap::new(),
+            failed_receipts: HashSet::new(),
             pending_marker_put: None,
             typing: None,
             ephemeral: ephemeral::EphemeralState::default(),

@@ -2634,6 +2634,42 @@ button.event-person:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.link-previews {
+  max-width: 32rem;
+  margin-top: 0.5rem;
+}
+
+.link-preview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 0.4rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  overflow-wrap: anywhere;
+}
+
+.link-preview-host,
+.link-preview-site {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.link-preview-description {
+  color: var(--fg);
+  font-weight: 400;
+}
+
+.link-previews summary {
+  margin-top: 0.4rem;
+  cursor: pointer;
+  color: var(--muted);
+}
+
 .read-receipts-wrap {
   position: relative;
   display: inline-block;
