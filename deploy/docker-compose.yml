@@ -20,6 +20,11 @@
 services:
   postgres:
     image: postgres:16
+    # Docker gives each container a 64 MB /dev/shm. Postgres puts parallel-query and
+    # parallel-VACUUM working memory there, so a manual VACUUM of a large table
+    # fails with "could not resize shared memory segment ... No space left on
+    # device" at the default size.
+    shm_size: 256mb
     # Postgres is NOT published to the host (no `ports:`) — it is reachable only on
     # the internal compose bridge, by axon-server. The password is therefore a
     # formality between two containers on a private network, and the default below
