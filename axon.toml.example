@@ -157,7 +157,9 @@ store_key = "change-me"
 # separate from [oauth] below: here Axon is a Matrix OAuth client, while the
 # top-level section configures Axon as an authorization server for /v1/ clients.
 [sync.matrix_oauth]
-# Total timeout for each discovery or dynamic-registration request. Default 15.
+# Total timeout for each request Axon itself sends to the authorization
+# server: discovery, dynamic registration, and browser sign-in's device
+# authorization and token-poll requests (ADR 0117). Default 15.
 request_timeout_secs = 15
 # Dynamic registration is preferred. If an authorization server does not allow
 # it, provision a public client ID out-of-band and match either the homeserver

@@ -416,8 +416,10 @@ pub struct SyncConfig {
 /// Matrix authorization-server registration settings (ADR 0097).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MatrixOAuthConfig {
-    /// Total budget for each OAuth discovery or dynamic-registration request.
-    /// Defaults to 15 seconds.
+    /// Total budget for each request Axon itself sends to the authorization
+    /// server: discovery, dynamic registration, and browser sign-in's device
+    /// authorization and token-poll requests (ADR 0117). Defaults to 15
+    /// seconds.
     #[serde(default = "default_matrix_oauth_request_timeout_secs")]
     pub request_timeout_secs: u64,
     /// Public client IDs provisioned out-of-band for servers that do not allow

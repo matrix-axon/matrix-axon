@@ -210,6 +210,210 @@
         }
       }
     },
+    "/v1/accounts/login/browser": {
+      "post": {
+        "tags": [
+          "matrix-oauth"
+        ],
+        "summary": "Start a browser sign-in for a homeserver that delegates authentication to\nan OAuth 2.0 authorization server.",
+        "description": "The flow yields a link and a short code. The user opens the link in any\nbrowser, on any device, signs in, and approves; meanwhile the client polls\nthis flow. No second Matrix client is needed. The account that results is\nsigned in but its device is **not** verified.",
+        "operationId": "create_matrix_oauth_browser",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMatrixOAuthBrowserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Browser sign-in flow created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_MatrixOAuthBrowserFlowDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Matrix user ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A QR login, another browser sign-in, or an active lifecycle operation already owns this identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the login-flow limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Global active or retained login-flow capacity reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/login/browser/{flow_id}": {
+      "get": {
+        "tags": [
+          "matrix-oauth"
+        ],
+        "summary": "Read the current replayable flow stage and only its stage-appropriate data.",
+        "description": "The link and user code are returned only in `waiting_for_authorization`.",
+        "operationId": "get_matrix_oauth_browser",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Browser sign-in flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current browser sign-in state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_MatrixOAuthBrowserFlowDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or expired flow, or a QR login flow's id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "matrix-oauth"
+        ],
+        "summary": "Cancel a flow idempotently, including an unknown or already-expired id.",
+        "operationId": "cancel_matrix_oauth_browser",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Browser sign-in flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Flow cancelled or already absent/terminal"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The id belongs to a QR login flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/login/qr": {
       "post": {
         "tags": [
@@ -348,7 +552,7 @@
             }
           },
           "404": {
-            "description": "Unknown or expired flow",
+            "description": "Unknown or expired flow, or a browser sign-in flow's id",
             "content": {
               "application/json": {
                 "schema": {
@@ -391,6 +595,16 @@
                 "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
               }
             },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The id belongs to a browser sign-in flow",
             "content": {
               "application/json": {
                 "schema": {
@@ -9408,6 +9622,74 @@
           }
         }
       },
+      "ApiResponse_MatrixOAuthBrowserFlowDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Replayable, presentation-safe state of one browser sign-in. Optional\nfields are omitted unless they belong to the current stage.",
+            "required": [
+              "flow_id",
+              "expected_user_id",
+              "stage"
+            ],
+            "properties": {
+              "account_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid",
+                "description": "The signed-in account, present only in `done`. It is active but its\ndevice is **not** verified: lead the user on to recovery-key import or\ninteractive verification."
+              },
+              "cancel_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why the flow was cancelled when its own client did not cancel it,\npresent only in `cancelled`. An open set: `replaced` means a newer\nbrowser sign-in for the same Matrix user took over, so this flow's\nlink and code no longer work. Absent after an ordinary cancellation."
+              },
+              "error_code": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why the flow failed, present only in `failed`. An open set: treat a\ncode you do not recognize as a generic failure. Codes specific to this\nmethod are `authorization_denied` (the user refused) and\n`authorization_expired` (nobody approved in time)."
+              },
+              "expected_user_id": {
+                "type": "string"
+              },
+              "flow_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "stage": {
+                "$ref": "#/components/schemas/MatrixOAuthBrowserStage"
+              },
+              "user_code": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The short code the authorization server asks the user to confirm.\nPresent only in `waiting_for_authorization`.",
+                "maxLength": 64
+              },
+              "verification_uri": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The link to open in a browser, on any device. Present only in\n`waiting_for_authorization`. Anyone holding it can approve the\nsign-in, so present it as something to open, not to share, and show\nits host so the user can see where it leads.",
+                "maxLength": 2048
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_MatrixOAuthQrFlowDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -12148,6 +12430,21 @@
           }
         }
       },
+      "CreateMatrixOAuthBrowserRequest": {
+        "type": "object",
+        "description": "Create one pre-account browser sign-in flow.",
+        "required": [
+          "expected_user_id"
+        ],
+        "properties": {
+          "expected_user_id": {
+            "type": "string",
+            "description": "Canonical Matrix user ID the completed OAuth session must belong to.\nIts server name is where the homeserver is discovered.",
+            "maxLength": 1024
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateMatrixOAuthQrGrantRequest": {
         "type": "object",
         "description": "Create one QR login-grant flow for an existing trusted account.",
@@ -12993,6 +13290,77 @@
             "description": "When it was revoked, RFC 3339; null while it has not been."
           }
         }
+      },
+      "MatrixOAuthBrowserFlowDto": {
+        "type": "object",
+        "description": "Replayable, presentation-safe state of one browser sign-in. Optional\nfields are omitted unless they belong to the current stage.",
+        "required": [
+          "flow_id",
+          "expected_user_id",
+          "stage"
+        ],
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The signed-in account, present only in `done`. It is active but its\ndevice is **not** verified: lead the user on to recovery-key import or\ninteractive verification."
+          },
+          "cancel_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the flow was cancelled when its own client did not cancel it,\npresent only in `cancelled`. An open set: `replaced` means a newer\nbrowser sign-in for the same Matrix user took over, so this flow's\nlink and code no longer work. Absent after an ordinary cancellation."
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the flow failed, present only in `failed`. An open set: treat a\ncode you do not recognize as a generic failure. Codes specific to this\nmethod are `authorization_denied` (the user refused) and\n`authorization_expired` (nobody approved in time)."
+          },
+          "expected_user_id": {
+            "type": "string"
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/MatrixOAuthBrowserStage"
+          },
+          "user_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The short code the authorization server asks the user to confirm.\nPresent only in `waiting_for_authorization`.",
+            "maxLength": 64
+          },
+          "verification_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The link to open in a browser, on any device. Present only in\n`waiting_for_authorization`. Anyone holding it can approve the\nsign-in, so present it as something to open, not to share, and show\nits host so the user can see where it leads.",
+            "maxLength": 2048
+          }
+        }
+      },
+      "MatrixOAuthBrowserStage": {
+        "type": "string",
+        "description": "Stable browser sign-in stages exposed by `/v1/`.",
+        "enum": [
+          "starting",
+          "waiting_for_authorization",
+          "finalizing",
+          "done",
+          "failed",
+          "cancelled"
+        ]
       },
       "MatrixOAuthQrFlowDto": {
         "type": "object",
@@ -14938,7 +15306,7 @@
     },
     {
       "name": "matrix-oauth",
-      "description": "Matrix OAuth QR login flows"
+      "description": "Matrix OAuth QR login and browser sign-in flows"
     },
     {
       "name": "rooms",

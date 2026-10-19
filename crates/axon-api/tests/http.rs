@@ -22,8 +22,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, AppState, MatrixOAuthQrAcquireService, MatrixOAuthQrError,
-    MatrixOAuthQrFlowDto, MatrixOAuthQrGrantError, MatrixOAuthQrGrantFlowDto,
+    AccountLifecycle, AppState, MatrixOAuthBrowserError, MatrixOAuthBrowserFlowDto,
+    MatrixOAuthBrowserService, MatrixOAuthBrowserStage, MatrixOAuthQrAcquireService,
+    MatrixOAuthQrError, MatrixOAuthQrFlowDto, MatrixOAuthQrGrantError, MatrixOAuthQrGrantFlowDto,
     MatrixOAuthQrGrantService, MatrixOAuthQrPresentation, MatrixOAuthQrStage, MediaProxy,
     RedecryptUtdsStats,
 };
@@ -400,6 +401,109 @@ fn matrix_oauth_qr_app(store: Store, service: Arc<StubMatrixOAuthQr>) -> axum::R
             None,
         )
         .with_matrix_oauth_acquire(service),
+    )
+}
+
+/// Browser sign-in port double. `qr_flow_id` stands for a flow that exists
+/// but belongs to the QR route family, which this surface must not see.
+struct StubMatrixOAuthBrowser {
+    flow_id: Uuid,
+    qr_flow_id: Uuid,
+    calls: Mutex<Vec<&'static str>>,
+}
+
+impl StubMatrixOAuthBrowser {
+    fn new(flow_id: Uuid, qr_flow_id: Uuid) -> Self {
+        Self {
+            flow_id,
+            qr_flow_id,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn flow(&self, stage: MatrixOAuthBrowserStage) -> MatrixOAuthBrowserFlowDto {
+        let waiting = stage == MatrixOAuthBrowserStage::WaitingForAuthorization;
+        MatrixOAuthBrowserFlowDto {
+            flow_id: self.flow_id,
+            expected_user_id: "@alice:example.org".to_owned(),
+            stage,
+            verification_uri: waiting
+                .then(|| "https://auth.example.org/link?code=WDJB-MJHT".to_owned()),
+            user_code: waiting.then(|| "WDJB-MJHT".to_owned()),
+            account_id: None,
+            error_code: None,
+            cancel_reason: None,
+        }
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn not_found(flow_id: Uuid) -> MatrixOAuthBrowserError {
+        MatrixOAuthBrowserError::NotFound(format!(
+            "Matrix OAuth browser sign-in flow {flow_id} not found"
+        ))
+    }
+}
+
+#[async_trait]
+impl MatrixOAuthBrowserService for StubMatrixOAuthBrowser {
+    async fn create(
+        &self,
+        expected_user_id: &str,
+    ) -> Result<MatrixOAuthBrowserFlowDto, MatrixOAuthBrowserError> {
+        self.calls.lock().unwrap().push("create");
+        match expected_user_id {
+            "@alice:example.org" => Ok(self.flow(MatrixOAuthBrowserStage::Starting)),
+            "@busy:example.org" => Err(MatrixOAuthBrowserError::Conflict(
+                "a Matrix OAuth login is already in progress for this Matrix user".to_owned(),
+            )),
+            "@full:example.org" => Err(MatrixOAuthBrowserError::TooMany(
+                "too many Matrix OAuth login flows are active or retained; retry later".to_owned(),
+            )),
+            _ => Err(MatrixOAuthBrowserError::InvalidRequest(
+                "expected_user_id is not a valid Matrix user ID".to_owned(),
+            )),
+        }
+    }
+
+    async fn get(
+        &self,
+        flow_id: Uuid,
+    ) -> Result<MatrixOAuthBrowserFlowDto, MatrixOAuthBrowserError> {
+        self.calls.lock().unwrap().push("get");
+        if flow_id != self.flow_id {
+            return Err(Self::not_found(flow_id));
+        }
+        Ok(self.flow(MatrixOAuthBrowserStage::WaitingForAuthorization))
+    }
+
+    async fn cancel(&self, flow_id: Uuid) -> Result<(), MatrixOAuthBrowserError> {
+        self.calls.lock().unwrap().push("cancel");
+        if flow_id == self.qr_flow_id {
+            return Err(Self::not_found(flow_id));
+        }
+        Ok(())
+    }
+}
+
+fn matrix_oauth_browser_app(store: Store, service: Arc<StubMatrixOAuthBrowser>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(
+        AppState::new(
+            store,
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        .with_matrix_oauth_browser(service),
     )
 }
 
@@ -1866,6 +1970,157 @@ async fn matrix_oauth_qr_routes_are_authenticated_and_preserve_stage_fields() {
         service.calls(),
         ["create", "get", "scan", "check", "cancel"]
     );
+}
+
+/// ADR 0117: the browser sign-in routes are bearer-gated, return their own
+/// DTO (no QR fields, link and code only while waiting), and map the port's
+/// errors onto the documented statuses.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn matrix_oauth_browser_routes_are_authenticated_and_return_their_own_dto() {
+    let store = store().await;
+    let flow_id = Uuid::new_v4();
+    let qr_flow_id = Uuid::new_v4();
+    let service = Arc::new(StubMatrixOAuthBrowser::new(flow_id, qr_flow_id));
+    let app = matrix_oauth_browser_app(store, service.clone());
+    let create = |user: &str| json!({ "expected_user_id": user });
+
+    for (method, path, body) in [
+        (
+            "POST",
+            "/v1/accounts/login/browser".to_owned(),
+            Some(create("@alice:example.org")),
+        ),
+        ("GET", format!("/v1/accounts/login/browser/{flow_id}"), None),
+        (
+            "DELETE",
+            format!("/v1/accounts/login/browser/{flow_id}"),
+            None,
+        ),
+    ] {
+        let (status, _) = request(&app, method, &path, body, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+    }
+    assert!(service.calls().is_empty(), "auth rejects before the port");
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/v1/accounts/login/browser",
+        Some(create("@alice:example.org")),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["data"]["flow_id"], flow_id.to_string());
+    assert_eq!(body["data"]["expected_user_id"], "@alice:example.org");
+    assert_eq!(body["data"]["stage"], "starting");
+    for absent in [
+        "verification_uri",
+        "user_code",
+        "account_id",
+        "error_code",
+        "presentation",
+        "qr_code_data",
+        "check_code",
+        "authorization_user_code",
+    ] {
+        assert!(
+            body["data"].get(absent).is_none(),
+            "{absent} must be omitted"
+        );
+    }
+
+    let (status, body) = get(&app, &format!("/v1/accounts/login/browser/{flow_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["stage"], "waiting_for_authorization");
+    assert_eq!(
+        body["data"]["verification_uri"],
+        "https://auth.example.org/link?code=WDJB-MJHT"
+    );
+    assert_eq!(body["data"]["user_code"], "WDJB-MJHT");
+
+    // A flow the browser surface does not own is not found, for a read and
+    // for a cancellation alike.
+    let (status, _) = get(&app, &format!("/v1/accounts/login/browser/{qr_flow_id}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = request(
+        &app,
+        "DELETE",
+        &format!("/v1/accounts/login/browser/{qr_flow_id}"),
+        None,
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body) = request(
+        &app,
+        "DELETE",
+        &format!("/v1/accounts/login/browser/{flow_id}"),
+        None,
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+
+    for (user, expected) in [
+        ("@busy:example.org", StatusCode::CONFLICT),
+        ("@full:example.org", StatusCode::TOO_MANY_REQUESTS),
+        ("not-a-matrix-id", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/v1/accounts/login/browser",
+            Some(create(user)),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, expected, "{user}");
+    }
+    assert_eq!(
+        service.calls(),
+        ["create", "get", "get", "cancel", "cancel", "create", "create", "create"]
+    );
+
+    // The request takes the user ID and nothing else: no presentation, and no
+    // way to smuggle a credential in.
+    let calls_before = service.calls().len();
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/v1/accounts/login/browser",
+        Some(json!({ "expected_user_id": "@alice:example.org", "presentation": "display" })),
+        Some(&bearer()),
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "unknown fields are refused: {status}"
+    );
+    assert_eq!(service.calls().len(), calls_before);
+
+    // No input route exists: nothing is scanned and there is no check code.
+    for suffix in ["scan", "check-code"] {
+        let (status, _) = request(
+            &app,
+            "POST",
+            &format!("/v1/accounts/login/browser/{flow_id}/{suffix}"),
+            Some(json!({})),
+            Some(&bearer()),
+        )
+        .await;
+        assert!(
+            matches!(
+                status,
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ),
+            "{suffix}: {status}"
+        );
+    }
+    assert_eq!(service.calls().len(), calls_before);
 }
 
 #[tokio::test]
