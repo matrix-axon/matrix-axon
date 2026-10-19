@@ -145,11 +145,22 @@ fn retry_delay(failures: i32) -> Duration {
     RETRY_BASE.saturating_mul(1 << doublings).min(RETRY_MAX)
 }
 
-/// What a failure does to a room that had already failed `prior` times in a row
-/// — its delay, whether it is now parked, and whether its token is dropped.
-fn failure_record(failure: PageFailure, prior: i32) -> RoomBackfillFailure<'static> {
+/// What a failure does to a room that had already failed `prior` times in a row,
+/// and had its token rejected `prior_rejections` times in all — its delay,
+/// whether it is now parked, and whether its token is dropped.
+///
+/// A first rejection restarts the room from its live end at once. A later one
+/// parks it as well: the pages back down to the same depth succeed and reset
+/// `prior`, so a homeserver that rejects the token at that depth every time would
+/// otherwise be walked back to it again and again with no delay.
+fn failure_record(
+    failure: PageFailure,
+    prior: i32,
+    prior_rejections: i32,
+) -> RoomBackfillFailure<'static> {
     let failures = prior.saturating_add(1);
     let (retry_after, parked, clear_token) = match failure {
+        PageFailure::Rejected if prior_rejections > 0 => (PARK_FOR, true, true),
         PageFailure::Rejected => (Duration::ZERO, false, true),
         PageFailure::Inaccessible => (PARK_FOR, true, false),
         PageFailure::Retryable if failures >= PARK_AFTER => (PARK_FOR, true, false),
@@ -174,8 +185,9 @@ async fn record_failure(
 ) {
     let account_id = ctx.account_id;
     let prior = state.map_or(0, |s| s.consecutive_failures);
+    let prior_rejections = state.map_or(0, |s| s.token_rejections);
     let was_parked = state.is_some_and(|s| s.parked);
-    let record = failure_record(failure, prior);
+    let record = failure_record(failure, prior, prior_rejections);
     let failures = prior.saturating_add(1);
     let retry_in_secs = record.retry_after.as_secs();
     if record.parked && !was_parked {
@@ -470,17 +482,37 @@ fn needs_decryption(raw: &Raw<AnyTimelineEvent>) -> bool {
     )
 }
 
+/// Why [`fetch_page`] returned no page.
+enum FetchError {
+    /// The homeserver answered with an error, or the request failed in transit.
+    Homeserver(matrix_sdk::Error),
+    /// The request was still unanswered after the page timeout.
+    TimedOut,
+}
+
 /// Fetch and decrypt one `/messages` page, returning the events and the resume
 /// token for the next page (`None` once the room's history is exhausted).
 ///
 /// This is `Room::messages` minus its event-cache write — see the module docs and
 /// issue #287. Everything else matches except retries: see [`send_page`].
+///
+/// `timeout` bounds the request only. Decryption is local work, so a slow decrypt
+/// must not be recorded against the homeserver (ADR 0121); the caller's
+/// cancellation still covers it.
 async fn fetch_page(
     room: &matrix_sdk::Room,
     request: get_message_events::v3::Request,
     timeout: Duration,
-) -> Result<(Vec<TimelineEvent>, Option<String>), matrix_sdk::Error> {
-    let response = send_page(&room.client(), request, timeout).await?;
+) -> Result<(Vec<TimelineEvent>, Option<String>), FetchError> {
+    // The SDK's own timeout is the same length and also ends in a retryable
+    // failure, so it does not matter which fires first. This outer one also covers
+    // time the SDK spends before the request is on the wire.
+    let response =
+        match tokio::time::timeout(timeout, send_page(&room.client(), request, timeout)).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => return Err(FetchError::Homeserver(err)),
+            Err(_elapsed) => return Err(FetchError::TimedOut),
+        };
 
     let mut events = Vec::with_capacity(response.chunk.len());
     for raw in response.chunk {
@@ -522,14 +554,32 @@ async fn backfill_room_page(
     let account_id = ctx.account_id;
     let room_id = room.room_id().as_str().to_owned();
 
-    let (from_token, complete, count) = match state {
-        Some(s) => (s.oldest_seen_token, s.complete, s.events_backfilled),
-        None => (None, false, 0),
+    let (from_token, complete, count, failing) = match state {
+        Some(s) => (
+            s.oldest_seen_token,
+            s.complete,
+            s.events_backfilled,
+            s.parked || s.consecutive_failures > 0,
+        ),
+        None => (None, false, 0, false),
     };
     if complete {
         return PageOutcome::Idle;
     }
     if params.target_depth != 0 && count as u64 >= params.target_depth {
+        // A room can reach its cap with failures still recorded, when the cap is
+        // lowered below a failing room's depth. It is not paged while the cap
+        // stands, so no success would clear them, and status would count it as
+        // parked.
+        if failing {
+            if let Err(err) = ctx
+                .store
+                .clear_room_backfill_failures(account_id, &room_id)
+                .await
+            {
+                tracing::warn!(account_id = %account_id, room_id = %room_id, error = %err, "backfill: clear failures failed");
+            }
+        }
         return PageOutcome::Idle;
     }
 
@@ -538,25 +588,23 @@ async fn backfill_room_page(
     let had_token = from_token.is_some();
     request.from = from_token;
 
-    // The `/messages` call crosses the homeserver boundary, so bound it: race it
-    // against a timeout *and* the cancellation token. Without this, a hung request
+    // The `/messages` call crosses the homeserver boundary, so bound it: a timeout
+    // on the request (inside `fetch_page`), and the cancellation token on the
+    // request and the decryption after it. Without this, a hung request
     // would keep the backfill task parked inside the await, and shutdown / logout /
     // delete — which cancel the token and then await this task's handle — would
     // stall until the request eventually resolved.
     let (events, end) = tokio::select! {
         biased;
         _ = cancel.cancelled() => return PageOutcome::Abandoned,
-        result = tokio::time::timeout(
-            params.page_timeout,
-            fetch_page(room, request, params.page_timeout),
-        ) => match result {
-            Ok(Ok(m)) => m,
-            Ok(Err(err)) => {
+        result = fetch_page(room, request, params.page_timeout) => match result {
+            Ok(m) => m,
+            Err(FetchError::Homeserver(err)) => {
                 let failure = PageFailure::of(&err, had_token);
                 tracing::warn!(account_id = %account_id, room_id = %room_id, error = %err, failure = failure.as_str(), "backfill: /messages page failed");
                 return PageOutcome::Failed(failure);
             }
-            Err(_elapsed) => {
+            Err(FetchError::TimedOut) => {
                 // The homeserver may still be working on it: a timeout is never a
                 // token rejection, so the same token is retried after a backoff.
                 tracing::warn!(account_id = %account_id, room_id = %room_id, timeout_secs = params.page_timeout.as_secs(), "backfill: /messages page timed out");
@@ -743,7 +791,7 @@ mod tests {
     #[test]
     fn repeated_timeouts_back_off_then_park_without_dropping_the_token() {
         for prior in 0..PARK_AFTER - 1 {
-            let record = failure_record(PageFailure::Retryable, prior);
+            let record = failure_record(PageFailure::Retryable, prior, 0);
             assert!(
                 !record.clear_token,
                 "failure {} dropped the token",
@@ -752,28 +800,40 @@ mod tests {
             assert!(!record.parked, "failure {} parked early", prior + 1);
             assert_eq!(record.retry_after, retry_delay(prior + 1));
         }
-        let fifth = failure_record(PageFailure::Retryable, PARK_AFTER - 1);
+        let fifth = failure_record(PageFailure::Retryable, PARK_AFTER - 1, 0);
         assert!(fifth.parked, "the fifth consecutive failure parks the room");
         assert!(!fifth.clear_token);
         assert_eq!(fifth.retry_after, PARK_FOR);
         // A parked room failing its daily retry stays parked.
-        let again = failure_record(PageFailure::Retryable, PARK_AFTER + 3);
+        let again = failure_record(PageFailure::Retryable, PARK_AFTER + 3, 0);
         assert!(again.parked && !again.clear_token);
         assert_eq!(again.retry_after, PARK_FOR);
     }
 
     #[test]
     fn a_rejected_token_restarts_from_the_live_end_at_once() {
-        let record = failure_record(PageFailure::Rejected, 0);
+        let record = failure_record(PageFailure::Rejected, 0, 0);
         assert!(record.clear_token);
         assert!(!record.parked);
         assert_eq!(record.retry_after, Duration::ZERO);
         assert_eq!(record.kind, "rejected");
     }
 
+    /// The pages back down to a rejected depth succeed, so `prior` is 0 again by
+    /// the time the token there is rejected a second time. Only the rejection
+    /// count stops the walk-back from repeating every sweep.
+    #[test]
+    fn a_second_rejection_parks_the_room_and_still_drops_the_token() {
+        let record = failure_record(PageFailure::Rejected, 0, 1);
+        assert!(record.clear_token, "the rejected token is still worthless");
+        assert!(record.parked);
+        assert_eq!(record.retry_after, PARK_FOR);
+        assert_eq!(record.kind, "rejected");
+    }
+
     #[test]
     fn an_inaccessible_room_parks_on_the_first_refusal() {
-        let record = failure_record(PageFailure::Inaccessible, 0);
+        let record = failure_record(PageFailure::Inaccessible, 0, 0);
         assert!(record.parked);
         assert!(!record.clear_token);
         assert_eq!(record.retry_after, PARK_FOR);

@@ -4,10 +4,10 @@
 //!
 //! * The `room_backfill` cursor ([`Store::get_room_backfill`],
 //!   [`Store::save_room_backfill`], [`Store::record_room_backfill_failure`],
-//!   [`Store::delete_room_backfill`]) — per-room progress so the backfill engine
-//!   resumes where it left off across restarts, plus the failure backoff and
-//!   parking that keep a failing room from hammering the homeserver. See ADR 0043
-//!   and ADR 0121.
+//!   [`Store::clear_room_backfill_failures`], [`Store::delete_room_backfill`]) —
+//!   per-room progress so the backfill engine resumes where it left off across
+//!   restarts, plus the failure backoff and parking that keep a failing room from
+//!   hammering the homeserver. See ADR 0043 and ADR 0121.
 //! * [`Store::purge_room`] — the destructive "forget this room" path used by the
 //!   optional purge-on-leave behavior (ADR 0044): delete every stored trace of a
 //!   room for one account (events, state, room account-data, backfill cursor,
@@ -40,12 +40,16 @@ pub struct RoomBackfillState {
     /// The room has failed too often, or the homeserver refused it, and is only
     /// retried once per park interval (ADR 0121).
     pub parked: bool,
+    /// How many times the homeserver has rejected the room's resume token. Unlike
+    /// the failure count, a successful page does not reset it (ADR 0121).
+    pub token_rejections: i32,
 }
 
 /// The columns [`RoomBackfillState`] reads, shared by the single-room and
 /// per-account cursor queries so the two cannot drift.
 const CURSOR_COLUMNS: &str = "oldest_seen_token, complete, events_backfilled, \
-     consecutive_failures, parked, (retry_at IS NULL OR retry_at <= now()) AS retry_due";
+     consecutive_failures, parked, token_rejections, \
+     (retry_at IS NULL OR retry_at <= now()) AS retry_due";
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomBackfillState {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
@@ -56,6 +60,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomBackfillState {
             consecutive_failures: row.try_get("consecutive_failures")?,
             retry_due: row.try_get("retry_due")?,
             parked: row.try_get("parked")?,
+            token_rejections: row.try_get("token_rejections")?,
         })
     }
 }
@@ -72,7 +77,8 @@ pub struct RoomBackfillFailure<'a> {
     /// Whether the room is now parked.
     pub parked: bool,
     /// Drop the saved resume token, so the next page starts from the room's live
-    /// timeline end. Set only when the homeserver rejected the token.
+    /// timeline end, and count a token rejection. Set only when the homeserver
+    /// rejected the token.
     pub clear_token: bool,
 }
 
@@ -186,7 +192,8 @@ impl Store {
     /// Record progress after a backfill page: set the resume token and `complete`
     /// flag, and add `added` to the running `events_backfilled` count. Upsert, so
     /// the first page for a room inserts the row and later pages update it. A
-    /// successful page also clears any failure backoff or parking (ADR 0121).
+    /// successful page also clears any failure backoff or parking, but not the
+    /// token rejection count (ADR 0121).
     ///
     /// Progress is saved only *after* a page's events are fully persisted, so a
     /// crash mid-page simply re-pages from the previously saved token — idempotent,
@@ -226,8 +233,9 @@ impl Store {
     /// when the room may be paged again. Upsert, so a room whose very first page
     /// fails still gets a row to carry its backoff. The saved token is kept unless
     /// [`clear_token`](RoomBackfillFailure::clear_token) is set, so a retry resumes
-    /// from the same position. A later successful page
-    /// ([`save_room_backfill`](Self::save_room_backfill)) clears all of it.
+    /// from the same position; a cleared token also counts a rejection. A later
+    /// successful page ([`save_room_backfill`](Self::save_room_backfill)) clears
+    /// all of it except that count.
     pub async fn record_room_backfill_failure(
         &self,
         account_id: Uuid,
@@ -236,13 +244,16 @@ impl Store {
     ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "INSERT INTO room_backfill \
-                 (account_id, room_id, consecutive_failures, last_failure, retry_at, parked) \
-             VALUES ($1, $2, 1, $3, now() + make_interval(secs => $4), $5) \
+                 (account_id, room_id, consecutive_failures, last_failure, retry_at, parked, \
+                  token_rejections) \
+             VALUES ($1, $2, 1, $3, now() + make_interval(secs => $4), $5, \
+                     CASE WHEN $6 THEN 1 ELSE 0 END) \
              ON CONFLICT (account_id, room_id) DO UPDATE SET \
                  consecutive_failures = room_backfill.consecutive_failures + 1, \
                  last_failure = EXCLUDED.last_failure, \
                  retry_at = EXCLUDED.retry_at, \
                  parked = EXCLUDED.parked, \
+                 token_rejections = room_backfill.token_rejections + EXCLUDED.token_rejections, \
                  oldest_seen_token = CASE WHEN $6 THEN NULL \
                                           ELSE room_backfill.oldest_seen_token END",
         )
@@ -252,6 +263,29 @@ impl Store {
         .bind(failure.retry_after.as_secs_f64())
         .bind(failure.parked)
         .bind(failure.clear_token)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clear a room's failure count, class, backoff and parking without recording
+    /// a page, for a room backfill has stopped paging (ADR 0121). The token
+    /// rejection count is kept, as on a successful page.
+    pub async fn clear_room_backfill_failures(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<(), StoreError> {
+        sqlx_core::query::query(
+            "UPDATE room_backfill SET \
+                 consecutive_failures = 0, \
+                 last_failure = NULL, \
+                 retry_at = NULL, \
+                 parked = false \
+             WHERE account_id = $1 AND room_id = $2",
+        )
+        .bind(account_id)
+        .bind(room_id)
         .execute(&self.pool)
         .await?;
         Ok(())

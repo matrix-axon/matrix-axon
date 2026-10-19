@@ -55,6 +55,9 @@ A failed `/messages` page falls into one of three classes, and each gets its own
 A 400 is a deterministic answer about the token, so one is enough; the ADR 0043 retry count existed only because failures could not be told apart.
 A 400 for a request with no `from` says nothing about a token and is retryable.
 Clearing the token on rejection loses nothing, because a rejected token is worthless.
+A second rejection of a room's token also parks the room (decision 3).
+The pages back down from the live end succeed and reset the failure count, so a homeserver that rejects every token at some depth would otherwise have Axon walk back to that depth again every sweep.
+The room's rejection count is stored separately, and a successful page does not reset it.
 A restart from the end now happens only after a rejection, so the deeper position is never thrown away because of slowness alone.
 For the same reason, a sweep whose cursor read fails is skipped, not run with no cursors: every room would look new, page from its live end and overwrite its saved token.
 
@@ -65,12 +68,16 @@ The count, the class of the last failure and the time of the next attempt are st
 A sweep skips any room whose next attempt is still in the future, without issuing a request.
 A page that succeeds clears all of it.
 
+The page timeout bounds the `/messages` request only, not the decryption of the page after it.
+Decryption is local work, and a slow decrypt is not a homeserver failure.
+
 The backfill `/messages` request disables the SDK's internal retry, so a 5xx is retried only on this schedule, not also up to several times inside the 30 s page timeout.
 
 ### 3. Park a room that keeps failing
 
-After 5 consecutive failures, or one inaccessible answer, the room is parked: its next attempt is 24 hours away and it is logged once at WARN with the account ID, room ID and failure class.
+After 5 consecutive failures, one inaccessible answer, or a second token rejection, the room is parked: its next attempt is 24 hours away and it is logged once at WARN with the account ID, room ID and failure class.
 A parked room is retried once each park interval, and stays parked if that attempt fails.
+A room at the configured target depth is not paged while that depth stands, so its failure state is cleared, and it is not counted as parked.
 `GET /v1/status` reports the count of parked rooms per account (`rooms_parked`), so an operator can see that backfill has stopped somewhere rather than finding out from the homeserver.
 
 Five failures at 1, 2, 4 and 8 minute gaps leave at most five abandoned requests running upstream before the room goes quiet.
@@ -111,7 +118,8 @@ One silo per PR:
 - A homeserver that cannot serve a room's history costs it at most a handful of abandoned requests a day per Axon instance, not one every few minutes.
 - A room that really is stuck stays visibly stuck: parked, counted in status and logged, rather than silently retried.
   Unparking it early needs a restart and a database edit; there is no API for it.
-- Rooms whose tokens are rejected recover exactly as before, without the three-strike delay.
+- Rooms whose tokens are rejected once recover exactly as before, without the three-strike delay.
+  A room whose token is rejected again walks back from its live end at most once a day.
 - Spaces no longer carry deep history in `events`.
   Space timelines show what live sync delivered.
 - Clients that keyed retry logic off a 502 from these routes see a 504 instead; neither first-party client distinguishes the two today.

@@ -263,6 +263,87 @@ async fn a_rejected_token_is_cleared_and_the_room_stays_due() {
     assert!(state.retry_due, "a rejection is retried next sweep");
     assert!(!state.complete);
     assert_eq!(state.events_backfilled, 10);
+    assert_eq!(state.token_rejections, 1);
+
+    // The walk back down from the live end succeeds. That clears the failure
+    // count but not the rejection count, which is what lets a second rejection
+    // at the same depth park the room.
+    store
+        .save_room_backfill(account_id, &room_id, Some("walked-back"), false, 20)
+        .await
+        .expect("save");
+    let state = store
+        .get_room_backfill(account_id, &room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.consecutive_failures, 0);
+    assert_eq!(state.token_rejections, 1, "a success keeps the count");
+
+    // A retryable failure clears no token and counts no rejection.
+    store
+        .record_room_backfill_failure(
+            account_id,
+            &room_id,
+            retryable(Duration::from_secs(60), false),
+        )
+        .await
+        .expect("record failure");
+    let state = store
+        .get_room_backfill(account_id, &room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.token_rejections, 1);
+    assert_eq!(state.oldest_seen_token.as_deref(), Some("walked-back"));
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A room that will not be paged again (it reached a lowered depth cap) has its
+/// failure state cleared without a page, so status stops counting it as parked.
+/// The rejection count stays, as it does on a successful page.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn clearing_failures_unparks_the_room_and_keeps_its_cursor() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "bf-unpark").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    store
+        .save_room_backfill(account_id, &room_id, Some("tok"), false, 300)
+        .await
+        .expect("save");
+    store
+        .record_room_backfill_failure(
+            account_id,
+            &room_id,
+            RoomBackfillFailure {
+                kind: "rejected",
+                retry_after: Duration::from_secs(86_400),
+                parked: true,
+                clear_token: true,
+            },
+        )
+        .await
+        .expect("park");
+    store
+        .clear_room_backfill_failures(account_id, &room_id)
+        .await
+        .expect("clear");
+    let state = store
+        .get_room_backfill(account_id, &room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!state.parked);
+    assert!(state.retry_due);
+    assert_eq!(state.consecutive_failures, 0);
+    assert_eq!(last_failure(&pool, account_id, &room_id).await, None);
+    assert_eq!(state.token_rejections, 1);
+    assert_eq!(state.events_backfilled, 300, "the cursor is untouched");
+    assert!(!state.complete);
 
     common::cleanup_account(&pool, account_id).await;
 }
