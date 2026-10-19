@@ -402,31 +402,32 @@ pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
 /// timeline reads remain the path for genuinely large result sets.
 const RELATION_READ_CAP: i64 = 1000;
 
-/// The [`Store::room_threads`] summary query. Its `WHERE` clause matches the
-/// predicate of `events_room_thread_root_idx` (migration
-/// `20261019120000_room_thread_summary_index.sql`) so the summary is an
-/// index-only scan over one room's thread members; keep the two in step (#763).
+/// The [`Store::room_threads`] summary query. It reads only columns
+/// `events_room_thread_root_idx` covers, and filters on that index's
+/// `thread_root IS NOT NULL` predicate, so the summary is an index-only scan
+/// over one room's thread members (#763). `thread_root` is set by a trigger for
+/// non-state `m.thread` members (migration
+/// `20261019120000_room_thread_summary_index.sql`).
 fn room_threads_sql() -> String {
     format!(
         "SELECT th.root_event_id, th.reply_count, \
                 th.latest_reply_event_id, th.latest_reply_ts \
          FROM ( \
-             SELECT relates_to->>'event_id' AS root_event_id, \
+             SELECT thread_root               AS root_event_id, \
                     COUNT(*)                  AS reply_count, \
                     (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] \
                         AS latest_reply_event_id, \
                     MAX(origin_ts)            AS latest_reply_ts \
              FROM events m \
              WHERE account_id = $1 AND room_id = $2 \
-               AND relates_to->>'rel_type' = 'm.thread' \
-               AND raw_event->>'state_key' IS NULL \
+               AND thread_root IS NOT NULL \
                AND NOT EXISTS ( \
                    SELECT 1 FROM events rr \
                    WHERE rr.account_id = m.account_id \
                      AND rr.event_type = 'm.room.redaction' \
                      AND rr.redacts = m.event_id \
                ) \
-             GROUP BY relates_to->>'event_id' \
+             GROUP BY thread_root \
          ) th \
          ORDER BY th.latest_reply_ts DESC, th.root_event_id \
          LIMIT {RELATION_READ_CAP}"
@@ -1165,10 +1166,12 @@ impl Store {
     /// event can't legitimately carry an `m.thread` relation, but a hostile or
     /// buggy client could send one, and redacted members are excluded since their
     /// content is gone; the latest reply is likewise resolved only over that
-    /// surviving set. The root event itself is not a member — fetch it with
-    /// [`get_event`](Self::get_event) or page the thread with
-    /// [`thread_timeline`](Self::thread_timeline), which still surfaces redacted
-    /// members (masked) for structural continuity.
+    /// surviving set. A member whose root ID is longer than the 255 bytes the
+    /// spec allows an event ID is left out, since no real event can be its root
+    /// and the summary index only holds bounded roots. The root event itself is
+    /// not a member — fetch it with [`get_event`](Self::get_event) or page the
+    /// thread with [`thread_timeline`](Self::thread_timeline), which still
+    /// surfaces redacted members (masked) for structural continuity.
     pub async fn room_threads(
         &self,
         account_id: Uuid,
@@ -1378,11 +1381,13 @@ mod tests {
     use super::*;
 
     /// The summary query stays an index-only scan on
-    /// `events_room_thread_root_idx` (#763). With every other way of reading
-    /// `events` disabled, the planner can only pick that scan if the query's
-    /// `WHERE` clause still implies the index predicate and the index still
-    /// covers every column the aggregate reads; otherwise it falls back to a
-    /// disabled sequential scan and this fails.
+    /// `events_room_thread_root_idx` (#763). Disabling sequential and bitmap
+    /// scans keeps a tiny test table from planning around the index; disabling
+    /// index scans penalizes plain and index-only scans alike, so the cheaper
+    /// index-only scan still wins whenever it is possible. It stops being
+    /// possible if the query stops implying the index's `thread_root IS NOT
+    /// NULL` predicate or reads a column the index doesn't cover, and the plan
+    /// then falls back to some other scan of `events m`.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn room_threads_uses_index_only_scan() {
