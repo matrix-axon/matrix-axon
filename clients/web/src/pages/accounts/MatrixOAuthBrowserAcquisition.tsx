@@ -236,10 +236,16 @@ export function MatrixOAuthBrowserAcquisition({
   useEffect(() => {
     void matrixOAuthBrowser.resume()
     // Leaving the panel is the end of a finished flow's message: coming back
-    // must not replay "Signed in" or a failure for a sign-in long over.
+    // must not replay "Signed in" or a failure for a sign-in long over. One
+    // the store is still completing (refreshing the account list) has not
+    // been seen yet, so it stays for the panel to finish when it returns.
     return () => {
       const current = matrixOAuthBrowser.flow.peek()
-      if (current !== null && isTerminalMatrixOAuthBrowserFlow(current)) {
+      if (
+        current !== null &&
+        isTerminalMatrixOAuthBrowserFlow(current) &&
+        matrixOAuthBrowser.operation.peek() === 'idle'
+      ) {
         matrixOAuthBrowser.reset()
       }
     }

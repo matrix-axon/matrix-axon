@@ -385,6 +385,67 @@ describe('browser sign-in on the Accounts page', () => {
     await page.findByText(/not verified yet/)
   })
 
+  it('finishes a reactivation whose sign-in completed while the user switched tabs', async () => {
+    let state = 'deactivated'
+    let releaseRefresh: () => void = () => {}
+    const refreshHeld = new Promise<void>((resolve) => {
+      releaseRefresh = resolve
+    })
+    const bob = () => [{ ...BOB, state, device_id: 'AXONDEV', verified: false }]
+    server.use(
+      http.post(CREATE_URL, () =>
+        HttpResponse.json(
+          { data: { ...WAITING.data, expected_user_id: BOB.user_id } },
+          { status: 201 },
+        ),
+      ),
+      http.get(FLOW_URL, () => {
+        state = 'active'
+        return HttpResponse.json({
+          data: {
+            flow_id: FLOW_ID,
+            expected_user_id: BOB.user_id,
+            stage: 'done',
+            account_id: BOB.account_id,
+          },
+        })
+      }),
+    )
+    const page = renderPage(bob)
+    // The refresh that follows the sign-in is held, so the tab switch lands
+    // while the store is still completing it.
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts`, async () => {
+        if (state === 'active') {
+          await refreshHeld
+        }
+        return HttpResponse.json({ data: bob() })
+      }),
+    )
+    fireEvent.click(await page.findByRole('button', { name: 'Sign in again' }))
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+    fireEvent.click(page.getByRole('button', { name: 'Start browser sign-in' }))
+    await page.findByRole('link', { name: 'Open sign-in page' })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() =>
+      expect(page.services.matrixOAuthBrowser.operation.value).toBe(
+        'refreshing_accounts',
+      ),
+    )
+
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with password' }))
+    releaseRefresh()
+    await waitFor(() =>
+      expect(page.services.matrixOAuthBrowser.operation.value).toBe('idle'),
+    )
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+
+    // The sign-in is not lost: back on its tab it ends the reactivation and
+    // still leads on to verification.
+    await page.findByText(/not verified yet/)
+    await page.findByRole('heading', { name: 'Add account' })
+  })
+
   it('shows why a reactivation could not be cancelled, from any tab', async () => {
     const QR_FLOW = {
       data: {
