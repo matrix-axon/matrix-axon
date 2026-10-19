@@ -205,6 +205,13 @@ Idle transactions are terminated after 30 seconds so an abandoned transaction ca
 These are per-statement deadlines, not a deadline for an entire multi-step operation.
 A timed-out SQL statement fails and rolls back its writes; a canceled HTTP response does not prove that a write failed to commit.
 
+Upgrades apply schema migrations at startup, before the server accepts requests.
+A migration that adds a column or index to the `events` table holds it locked until the migration commits.
+The thread-summary index (#763) took 96 seconds on a 2.7 GB `events` table, of which the backfill and the index build are separate statements under the 600-second deadline.
+On a much larger database, raise `migration_statement_secs` for the upgrade if a statement times out; the failed migration rolls back and runs again at the next start.
+A migration that rewrites many rows, as that one does, leaves index-only scans reading the table itself until autovacuum next processes it.
+To get the faster plans at once, run `VACUUM (ANALYZE) events;` after the upgrade, or `VACUUM (PARALLEL 0, ANALYZE) events;` in a container whose `/dev/shm` is small (Docker's default is 64 MB).
+
 Configure these values under `[database.timeouts]` in [axon.toml.example](axon.toml.example), or through overrides such as `AXON_DATABASE__TIMEOUTS__STATEMENT_SECS=20` and `AXON_DATABASE__TIMEOUTS__MAINTENANCE_STATEMENT_SECS=240`.
 All deadlines must be between 1 and 86400 seconds; zero is rejected.
 The statement deadlines must satisfy `statement_secs <= maintenance_statement_secs <= migration_statement_secs`.

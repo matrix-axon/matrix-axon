@@ -1387,7 +1387,14 @@ mod tests {
     /// index-only scan still wins whenever it is possible. It stops being
     /// possible if the query stops implying the index's `thread_root IS NOT
     /// NULL` predicate or reads a column the index doesn't cover, and the plan
-    /// then falls back to some other scan of `events m`.
+    /// then falls back to some other scan of `events`.
+    ///
+    /// That reading of `enable_indexscan` holds on PostgreSQL 14 through 18
+    /// (18 counts disabled plan nodes instead of adding a cost penalty, and
+    /// both scan kinds still count as one); check it again on a new major
+    /// version. The assertion leaves out the table alias, and only the outer
+    /// `events` scan can use this partial index: the redaction subquery does
+    /// not imply `thread_root IS NOT NULL`.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn room_threads_uses_index_only_scan() {
@@ -1413,7 +1420,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            plan.contains("Index Only Scan using events_room_thread_root_idx on events m"),
+            plan.contains("Index Only Scan using events_room_thread_root_idx on events"),
             "room_threads no longer matches its index:\n{plan}"
         );
     }
