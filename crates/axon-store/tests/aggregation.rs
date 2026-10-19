@@ -754,6 +754,151 @@ async fn thread_reply_count_excludes_state_events() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// `relates_to` is the sender's whole `m.relates_to` object, so its size is
+/// unbounded. A thread member carrying kilobytes of extra keys must still store
+/// and count: the summary index holds only the bounded root, never the JSON,
+/// which would exceed the 2704-byte B-tree row limit (#763).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_member_with_oversized_relation_metadata_is_summarized() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "agg-thread-oversized").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let base = 1_700_000_000_000;
+
+    let root = insert_message(&store, account_id, &room_id, base, "thread root").await;
+    // Random hex, so TOAST compression can't shrink it under the limit.
+    let padding: String = (0..150)
+        .map(|_| Uuid::new_v4().simple().to_string())
+        .collect();
+    let member = insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        SENDER,
+        base + 1,
+        "m.room.message",
+        json!({ "msgtype": "m.text", "body": "padded reply" }),
+        json!({ "rel_type": "m.thread", "event_id": root, "org.example.padding": padding }),
+    )
+    .await;
+
+    let threads = store
+        .room_threads(account_id, &room_id)
+        .await
+        .expect("threads");
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].root_event_id, root);
+    assert_eq!(threads[0].reply_count, 1);
+    assert_eq!(
+        threads[0].latest_reply_event_id.as_deref(),
+        Some(member.as_str())
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A root ID longer than the 255 bytes the spec allows an event ID can't name a
+/// real root, so its members stay out of the summaries; a 255-byte root is the
+/// longest that counts. The over-long member is still stored and still pages in
+/// its thread timeline.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_summaries_skip_root_ids_longer_than_an_event_id() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "agg-thread-long-root").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let base = 1_700_000_000_000;
+
+    let longest = format!("${}", "a".repeat(254));
+    let too_long = format!("${}", "b".repeat(255));
+    assert_eq!((longest.len(), too_long.len()), (255, 256));
+    insert_thread_reply(&store, account_id, &room_id, base, &longest, "fits").await;
+    let stray =
+        insert_thread_reply(&store, account_id, &room_id, base + 1, &too_long, "stray").await;
+
+    let threads = store
+        .room_threads(account_id, &room_id)
+        .await
+        .expect("threads");
+    let roots: Vec<&str> = threads.iter().map(|t| t.root_event_id.as_str()).collect();
+    assert_eq!(roots, [longest.as_str()]);
+
+    let page = store
+        .thread_timeline(account_id, &room_id, &too_long, None, 50)
+        .await
+        .expect("thread timeline");
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].event_id, stray);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A UTD's `relates_to` is unknown until it decrypts, so it joins its thread's
+/// summary only when `update_decrypted_event` back-fills the relation; the
+/// trigger that maintains `thread_root` must see that write too.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn decrypted_thread_member_joins_the_summary() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "agg-thread-utd").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let base = 1_700_000_000_000;
+
+    let root = insert_message(&store, account_id, &room_id, base, "thread root").await;
+    let utd = format!("$utd-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &utd,
+            room_id: &room_id,
+            account_id,
+            sender: SENDER,
+            origin_ts: base + 1,
+            event_type: "m.room.encrypted",
+            content: None,
+            raw_event: json!({ "type": "m.room.encrypted", "content": { "algorithm": "m.megolm.v1.aes-sha2" } }),
+            megolm_session_id: Some("session"),
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert UTD");
+    let before = store
+        .room_threads(account_id, &room_id)
+        .await
+        .expect("threads before decryption");
+    assert!(before.is_empty(), "an undecrypted member has no known root");
+
+    store
+        .update_decrypted_event(
+            account_id,
+            &utd,
+            &json!({ "msgtype": "m.text", "body": "late reply" }),
+            "m.room.message",
+            Some("late reply"),
+            Some(&json!({ "rel_type": "m.thread", "event_id": root })),
+        )
+        .await
+        .expect("decrypt");
+
+    let threads = store
+        .room_threads(account_id, &room_id)
+        .await
+        .expect("threads after decryption");
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].root_event_id, root);
+    assert_eq!(
+        threads[0].latest_reply_event_id.as_deref(),
+        Some(utd.as_str())
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// Relations are room-local: an edit or reaction stored in room B must not
 /// resolve onto a target with the same `event_id` in room A. (Regression for the
 /// missing `room_id` scoping in the relation lookups.)
