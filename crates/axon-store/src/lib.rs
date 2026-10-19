@@ -34,7 +34,7 @@ mod upstream_reconcile;
 pub use accounts::{
     Account, AccountAuthKind, AccountState, MatrixOAuthRegistration, StoredAccountSession,
 };
-pub use backfill::{AccountBackfillProgress, RoomBackfillState};
+pub use backfill::{AccountBackfillProgress, RoomBackfillFailure, RoomBackfillState};
 pub use device_state::{DeviceStateRow, DeviceStateUpsert};
 pub use display_names::DisplayNameWrite;
 pub use error::StoreError;

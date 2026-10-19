@@ -2,7 +2,7 @@
 
 ## Context
 
-ADR 0018 established *that* history backfill ships in the MVP and its broad
+ADR 0018 established _that_ history backfill ships in the MVP and its broad
 shape: a bounded, resumable engine that pages each room's timeline backward
 through the SDK's `/messages` pagination and persists through the same ingestion
 path as live sync. It left the concrete build decisions open. `implementation.md`
@@ -23,7 +23,7 @@ joined or **re-joined** room is picked up without a restart, which is what makes
 "joined rooms only" safe.
 
 The instant-usability window each room shows on first sync is still
-`sync.timeline_limit` (ADR 0015); backfill only extends history *behind* it, so
+`sync.timeline_limit` (ADR 0015); backfill only extends history _behind_ it, so
 there is no aggressive cold-start phase to bound.
 
 ### Joined rooms only
@@ -52,12 +52,18 @@ from the top is idempotent, so the room recovers a valid token and resumes
 walking backward; a transient network error just retries the saved token next
 sweep.
 
+> **Amended by [ADR 0121](0121-slow-homeserver-backfill-and-mutation-timeouts.md).**
+> Counting every failure the same way sent a room whose page kept _timing out_
+> back to its live end forever. Failures are now classified: only a `400` for a
+> request that carried a token restarts from the live end, and a slow or failing
+> room is backed off and parked, with that state persisted on `room_backfill`.
+
 ### Target depth: to room start by default
 
 `sync.backfill_target_depth` caps events per room; `0` (the default) means "to
 room start" (unbounded). Unbounded is safe because the engine is continuous and
 throttled (`sync.backfill_page_size`, `sync.backfill_throttle_ms`). Hitting a
-non-zero cap stops paging a room *without* marking it complete, so raising the cap
+non-zero cap stops paging a room _without_ marking it complete, so raising the cap
 later resumes it.
 
 ### Same ingestion path, minus the live emit
