@@ -444,6 +444,11 @@ describe('AccountsPage', () => {
     expect(
       getByRole('heading', { name: 'Reactivate @bob:example.org' }),
     ).toBeTruthy()
+    expect(
+      getByRole('tab', { name: 'Sign in with QR code' }).getAttribute(
+        'aria-selected',
+      ),
+    ).toBe('true')
     services.matrixOAuthQr.reset()
   })
 

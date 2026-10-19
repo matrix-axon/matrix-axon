@@ -57,6 +57,13 @@ export function AccountsPage() {
       setAcquisition({ reactivation: account, method: 'password' }),
     [],
   )
+  // A sign-in that refuses to be cancelled says why on its own tab, which
+  // need not be the one on screen when the user cancels.
+  const showMethod = useCallback(
+    (method: AcquisitionMethod) =>
+      setAcquisition((current) => ({ ...current, method })),
+    [],
+  )
   const cancelReactivation = useCallback(async () => {
     const current = matrixOAuthQr.flow.value
     if (
@@ -64,25 +71,28 @@ export function AccountsPage() {
       !isTerminalMatrixOAuthQrFlow(current) &&
       !(await matrixOAuthQr.cancel())
     ) {
+      showMethod('qr')
       return
     }
+    // Over now whatever the browser sign-in does, so it cannot come back.
+    matrixOAuthQr.reset()
     const browserFlow = matrixOAuthBrowser.flow.value
     if (
       browserFlow !== null &&
       !isTerminalMatrixOAuthBrowserFlow(browserFlow) &&
       !(await matrixOAuthBrowser.cancel())
     ) {
+      showMethod('browser')
       // Too late to cancel: the sign-in finished instead, and with it the
-      // reactivation.
+      // reactivation. Its tab says the account is still to be verified.
       if (matrixOAuthBrowser.flow.value?.stage === 'done') {
         finishReactivation()
       }
       return
     }
-    matrixOAuthQr.reset()
     matrixOAuthBrowser.reset()
     finishReactivation()
-  }, [finishReactivation, matrixOAuthBrowser, matrixOAuthQr])
+  }, [finishReactivation, matrixOAuthBrowser, matrixOAuthQr, showMethod])
 
   useEffect(() => {
     void accounts.refresh()
@@ -115,9 +125,7 @@ export function AccountsPage() {
       <AccountAcquisition
         reactivation={acquisition.reactivation}
         method={acquisition.method}
-        onMethodChange={(method) =>
-          setAcquisition((current) => ({ ...current, method }))
-        }
+        onMethodChange={showMethod}
         onCancelReactivation={cancelReactivation}
         onSuccess={finishReactivation}
       />

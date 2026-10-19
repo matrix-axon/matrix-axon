@@ -329,6 +329,8 @@ export function MatrixOAuthBrowserAcquisition({
       completionHandled.current !== flow.flow_id
     ) {
       completionHandled.current = flow.flow_id
+      // As after a password sign-in: "Add another account" starts blank.
+      onUserIdChange('')
       onSuccess?.()
     }
   }, [
@@ -339,6 +341,7 @@ export function MatrixOAuthBrowserAcquisition({
     flowMatchesExpectedUser,
     inherited,
     onSuccess,
+    onUserIdChange,
     operation,
   ])
 

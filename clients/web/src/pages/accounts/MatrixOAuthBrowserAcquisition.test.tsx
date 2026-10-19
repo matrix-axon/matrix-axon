@@ -212,6 +212,10 @@ describe('browser sign-in on the Accounts page', () => {
     expect(page.queryByRole('button', { name: 'Go to rooms' })).toBeNull()
     fireEvent.click(page.getByRole('button', { name: 'Add another account' }))
     await page.findByRole('button', { name: 'Start browser sign-in' })
+    // Blank for the next account, as after a password sign-in.
+    expect(
+      (page.getByLabelText('Matrix user ID') as HTMLInputElement).value,
+    ).toBe('')
   })
 
   it('explains a refusal and lets the user start again', async () => {
@@ -372,6 +376,80 @@ describe('browser sign-in on the Accounts page', () => {
     await page.findByRole('heading', { name: 'Add account' })
     expect(page.services.matrixOAuthBrowser.flow.value?.stage).toBe('done')
     await page.findByRole('button', { name: 'Log out' })
+    // The browser tab, where the new session is shown still to be verified.
+    expect(
+      page
+        .getByRole('tab', { name: 'Sign in with browser' })
+        .getAttribute('aria-selected'),
+    ).toBe('true')
+    await page.findByText(/not verified yet/)
+  })
+
+  it('shows why a reactivation could not be cancelled, from any tab', async () => {
+    const QR_FLOW = {
+      data: {
+        flow_id: '10000000-0000-4000-8000-000000000002',
+        expected_user_id: BOB.user_id,
+        presentation: 'display',
+        stage: 'waiting_for_authorization',
+      },
+    }
+    let qrCancelled = false
+    server.use(
+      http.post(CREATE_URL, () =>
+        HttpResponse.json(
+          { data: { ...WAITING.data, expected_user_id: BOB.user_id } },
+          { status: 201 },
+        ),
+      ),
+      // Approved meanwhile: Axon accepts the cancellation and changes nothing.
+      http.delete(FLOW_URL, () => new HttpResponse(null, { status: 204 })),
+      http.get(FLOW_URL, () =>
+        HttpResponse.json({
+          data: {
+            flow_id: FLOW_ID,
+            expected_user_id: BOB.user_id,
+            stage: 'finalizing',
+          },
+        }),
+      ),
+      http.post(`${TEST_BASE_URL}/v1/accounts/login/qr`, () =>
+        HttpResponse.json(QR_FLOW, { status: 201 }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/login/qr/:flowId`, () =>
+        HttpResponse.json(QR_FLOW),
+      ),
+      http.delete(`${TEST_BASE_URL}/v1/accounts/login/qr/:flowId`, () => {
+        qrCancelled = true
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const page = renderPage([BOB])
+    fireEvent.click(await page.findByRole('button', { name: 'Sign in again' }))
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with browser' }))
+    fireEvent.click(page.getByRole('button', { name: 'Start browser sign-in' }))
+    await page.findByRole('link', { name: 'Open sign-in page' })
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with QR code' }))
+    fireEvent.click(page.getByRole('button', { name: 'Start QR sign-in' }))
+    await page.findByText(/Approve the Matrix device authorization request/)
+    fireEvent.click(page.getByRole('tab', { name: 'Sign in with password' }))
+
+    fireEvent.click(page.getByRole('button', { name: 'Cancel reactivation' }))
+
+    // Not a dead button: the browser tab opens on the reason.
+    await page.findByText(/Too late to cancel/)
+    expect(
+      page
+        .getByRole('tab', { name: 'Sign in with browser' })
+        .getAttribute('aria-selected'),
+    ).toBe('true')
+    expect(
+      page.getByRole('heading', { name: 'Reactivate @bob:example.org' }),
+    ).toBeTruthy()
+    // The QR sign-in it did cancel is gone, not left to come back.
+    expect(qrCancelled).toBe(true)
+    expect(page.services.matrixOAuthQr.flow.value).toBeNull()
+    page.services.matrixOAuthBrowser.reset()
   })
 
   it('does not replay a finished sign-in when the panel is opened again', async () => {
