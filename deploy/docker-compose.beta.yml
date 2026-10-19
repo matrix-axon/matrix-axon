@@ -22,6 +22,11 @@
 services:
   postgres:
     image: postgres:16
+    # Docker gives each container a 64 MB /dev/shm. Postgres puts parallel-query and
+    # parallel-VACUUM working memory there, so a manual VACUUM of a large table
+    # fails with "could not resize shared memory segment ... No space left on
+    # device" at the default size.
+    shm_size: 256mb
     # Bridge-internal only (no published port); the default password is a formality
     # between two containers. Override POSTGRES_PASSWORD only if you publish 5432.
     environment:
