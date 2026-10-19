@@ -3,6 +3,29 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.11 - 2026-10-19
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(tui): use server-calculated room display names by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/738
+* feat(web): title unnamed rooms from the server's calculated display name by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/733
+* feat(web): render bundled URL preview cards by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/740
+#### Bug Fixes
+* fix(ci): verify the axon.exe packed in the installer, not the one left on disk by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/736
+* fix: prevent reply avatars from overlapping quoted text by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/739
+* fix(web): re-send a read receipt the homeserver did not accept by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/751
+* fix(tui): re-send a read receipt the homeserver did not accept by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/752
+* fix(sync): back off and park a failing backfill room instead of re-paging it from the live end by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/746
+#### Documentation
+* docs(adr): add ADR 0120 for publishing to winget by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/737
+#### Dependencies
+* build(desktop): ignore the zbus 5 unmaintained advisories by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/748
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.10...v0.1.11
+
 ## v0.1.10 - 2026-10-15
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
