@@ -94,12 +94,26 @@ permit.finish(Outcome::of(&result, elapsed)); // feeds the limit
     does for backfill.
   - Callers that go through an SDK method sending with the client's default
     config (`download_room_keys_for_room`, `join_room_by_id`) cannot. They wrap
-    the call in an outer `tokio::time::timeout` of 30 s, the SDK's default
-    request timeout. Dropping the future at the timeout also ends the SDK's
-    retry loop, so the permit's span is bounded and the timeout is reported as
-    one. Within those 30 s the SDK may retry a 5xx a few times under one
-    permit; that is accepted. Changing the client-wide config instead would
-    also change sync and every interactive request.
+    the call in an outer `tokio::time::timeout` of 30 s. The SDK's own 30 s
+    timeout applies to each attempt, not to the call, so it is the outer
+    timeout that bounds the call and its retries. Dropping the future at the
+    timeout ends the SDK's retry loop, so the permit's span is bounded and the
+    timeout is reported as one. Within those 30 s the SDK may retry a 5xx a few
+    times under one permit; that is accepted. Changing the client-wide config
+    instead would also change sync and every interactive request.
+  - The outer timeout covers the whole SDK call, so for
+    `download_room_keys_for_room` it can fire while the downloaded keys are
+    being imported into the crypto store. In matrix-sdk 0.19.1 that import is
+    safe to cancel. The keys are written in one SQLite transaction on a
+    blocking thread, so dropping the future either stops the write before it
+    starts or lets it finish in the background, and never leaves it half
+    written. What a drop can lose is the room-keys notification sent after the
+    write, which `redecrypt::run` listens for. The sweep can also re-decrypt
+    that room's rows before a background write lands. Either way those rows
+    stay undecryptable until the next sweep, as they do today when a download
+    fails. A timeout during the import is also recorded as a homeserver
+    timeout. Both are accepted: the import is local and short next to a 30 s
+    bound, so the timeout almost always fires during the request.
 - **A permit dropped without `finish`** (cancellation, shutdown) releases its
   slot and teaches the gate nothing.
 
@@ -192,23 +206,27 @@ Synapse then kept working on it for a further:
 
 A client that frees its slot on timeout keeps adding work at exactly the moment
 the homeserver is overloaded; that is what happened on 2026-10-17. No fixed hold
-matches that distribution. `TIMEOUT_HOLD` is set to cover most of the median
-case. The longer tail is bounded by the breaker instead: with held slots and a
-doubling cooldown, an unrecovered homeserver gets at most a few probes an hour.
+matches that distribution. A 15-minute `TIMEOUT_HOLD` outlasts the remaining
+work of 43 % of the abandoned requests. Holding longer buys little: the
+distribution is flat past the median, so 20 minutes would cover 51 % and 30
+minutes only 56 %, while every extra minute of hold delays recovery from a
+short slowdown. The longer tail is bounded by the breaker instead: with held
+slots and a doubling cooldown, an unrecovered homeserver gets at most a few
+probes an hour.
 
 ### 5. Constants
 
 In keeping with ADR 0121 decision 3, these are constants, not configuration:
 
-| Constant        | Value  | Why                                                                                         |
-| --------------- | ------ | ------------------------------------------------------------------------------------------- |
-| `INITIAL_LIMIT` | 2      | Backfill already pages one room at a time per account; 2 lets another caller run beside it  |
-| `MAX_LIMIT`     | 4      | Background work is never urgent; a small ceiling bounds the worst case per instance         |
-| `GROW_AFTER`    | 10     | Slow growth, so a recovering homeserver is not hit with the full limit at once              |
-| `FAST_FRACTION` | ½      | A success counts toward growth in under half its own timeout (decision 2)                   |
-| `TIMEOUT_HOLD`  | 15 min | Between the 10th percentile (3 min) and median (18 min) of the incident's post-timeout work |
-| `COOLDOWN`      | 1 min  | Applies only to an open caused by 5xx/429/transport errors; matches ADR 0121's retry base   |
-| `COOLDOWN_MAX`  | 30 min | Recovery is noticed within half an hour of an outage ending                                 |
+| Constant        | Value  | Why                                                                                          |
+| --------------- | ------ | -------------------------------------------------------------------------------------------- |
+| `INITIAL_LIMIT` | 2      | Backfill already pages one room at a time per account; 2 lets another caller run beside it   |
+| `MAX_LIMIT`     | 4      | Background work is never urgent; a small ceiling bounds the worst case per instance          |
+| `GROW_AFTER`    | 10     | Slow growth, so a recovering homeserver is not hit with the full limit at once               |
+| `FAST_FRACTION` | ½      | A success counts toward growth in under half its own timeout (decision 2)                    |
+| `TIMEOUT_HOLD`  | 15 min | Outlasts 43 % of the incident's post-timeout work; 30 min would cover only 56 % (decision 4) |
+| `COOLDOWN`      | 1 min  | Applies only to an open caused by 5xx/429/transport errors; matches ADR 0121's retry base    |
+| `COOLDOWN_MAX`  | 30 min | Recovery is noticed within half an hour of an outage ending                                  |
 
 ### 6. Visible in `GET /v1/status`
 
@@ -228,11 +246,17 @@ expensive (see the `backfill_progress` caveat on `/v1/status`).
 - **The incident's background load would have stopped within the first minute
   or two.** The access log for the space shows only backfill's `/messages`
   traffic (#741), at about 100 abandoned requests an hour (177 at the peak).
-  With the gate, the first two timeouts open the breaker, their held slots keep
-  background traffic at zero for 15 minutes, and after that an unrecovered
-  Synapse gets one probe per cooldown. The log was filtered to the space's room
-  ID, so it says nothing about sync or SDK-internal traffic; if those added
-  load, the gate does not reduce it.
+  With the gate, the first timeout halves the limit from 2 to 1. The second
+  request was already in flight, so its timeout does not halve again (decision
+  2), but both slots are held, and two held slots at a limit of 1 keep
+  background traffic at zero for 15 minutes. The gate closes through its held
+  slots, not the breaker. When the holds expire, one request is admitted. If
+  it also times out, the limit reaches 0 and the breaker opens. From then on
+  each probe waits out both its cooldown and the previous probe's held slot,
+  so an unrecovered Synapse gets one request every 15 minutes, falling to one
+  every 30 minutes as the cooldown doubles past the hold. The log was filtered
+  to the space's room ID, so it says nothing about sync or SDK-internal
+  traffic; if those added load, the gate does not reduce it.
 - **Several axon instances on one homeserver back off together** without any
   coordination, and the homeserver's response time sets how much background
   work it gets.
