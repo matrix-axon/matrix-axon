@@ -146,20 +146,24 @@ impl Store {
         })
     }
 
-    /// Remove the row when `session_id` owns it. An absent id, or another
-    /// session's id, removes nothing. Either way this is success: the route
-    /// answers `204` and does not say which one happened.
+    /// Remove the row when `session_id` owns it.
+    ///
+    /// An absent id, or another session's id, removes nothing and returns
+    /// `false`. Either way the route answers `204`. The bool is only for the
+    /// log: a miss must not be recorded as a delete.
     pub async fn delete_push_registration(
         &self,
         id: Uuid,
         session_id: Uuid,
-    ) -> Result<(), StoreError> {
-        sqlx_core::query::query("DELETE FROM push_registrations WHERE id = $1 AND session_id = $2")
-            .bind(id)
-            .bind(session_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    ) -> Result<bool, StoreError> {
+        let removed = sqlx_core::query::query(
+            "DELETE FROM push_registrations WHERE id = $1 AND session_id = $2",
+        )
+        .bind(id)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(removed.rows_affected() > 0)
     }
 
     /// Whether this session still has a refresh token that can mint another

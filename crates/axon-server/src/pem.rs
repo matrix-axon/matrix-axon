@@ -9,8 +9,9 @@ use std::time::Duration;
 
 const MAX_KEY_BYTES: usize = 16 * 1024;
 
-/// One PEM source. An empty inline string is not a source: together with a
-/// path it is still "both", which is the Apple sign-in rule.
+/// One PEM source. An empty inline string or an empty path is set, but it is
+/// not a usable source. Together with the other field it is still "both".
+/// Apple uses that rule. Push resolves emptiness in its own config check.
 pub(crate) enum PrivateKeySource<'a> {
     Inline(&'a str),
     Path(&'a Path),
@@ -19,17 +20,16 @@ pub(crate) enum PrivateKeySource<'a> {
 /// Require exactly one of an inline PEM or a path.
 ///
 /// `label` is a short name such as `"Apple"` and is the only caller-controlled
-/// text that appears in an error. An empty `private_key` plus a path is
-/// rejected: the field is set, it is just empty.
+/// text that appears in an error. An empty `private_key` or an empty
+/// `private_key_path` still counts as that field being set.
 pub(crate) fn one_private_key<'a>(
     label: &str,
     inline: Option<&'a str>,
     path: Option<&'a Path>,
 ) -> anyhow::Result<PrivateKeySource<'a>> {
-    let path = path.filter(|path| !path.as_os_str().is_empty());
     match (inline, path) {
         (Some(pem), None) if !pem.is_empty() => Ok(PrivateKeySource::Inline(pem)),
-        (None, Some(path)) => Ok(PrivateKeySource::Path(path)),
+        (None, Some(path)) if !path.as_os_str().is_empty() => Ok(PrivateKeySource::Path(path)),
         _ => anyhow::bail!(
             "set exactly one of {label} private_key (at most 16 KiB) or private_key_path"
         ),

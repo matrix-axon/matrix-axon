@@ -329,7 +329,19 @@ mod tests {
                 .contains("exactly one"),
             "an empty private_key plus a path is still both sources"
         );
+        config.providers.apple.private_key = Some("PRIVATE_SENTINEL".into());
+        config.providers.apple.private_key_path = Some(std::path::PathBuf::new());
+        assert!(
+            apple_provider(&config)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("exactly one"),
+            "an empty private_key_path plus an inline key is still both sources"
+        );
         config.providers.apple.private_key = None;
+        config.providers.apple.private_key_path = Some("PRIVATE_SENTINEL".into());
         let error = apple_provider(&config).await.err().unwrap().to_string();
         assert!(error.contains("NotFound"));
         assert!(error.contains("relative to the process working directory"));

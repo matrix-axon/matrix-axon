@@ -144,6 +144,14 @@ async fn registration_routes_reject_a_bad_body_and_upsert_without_echoing_the_to
             "bad_request",
         ),
         (
+            json!({"provider": "fcm", "token": "   ", "disclosure": "activity"}),
+            "bad_request",
+        ),
+        (
+            json!({"provider": "fcm", "token": " device-token", "disclosure": "activity"}),
+            "bad_request",
+        ),
+        (
             json!({"provider": "fcm", "token": "x".repeat(4097), "disclosure": "activity"}),
             "bad_request",
         ),

@@ -22,14 +22,19 @@ const MAX_TOKEN_BYTES: usize = 4096;
 /// Why `token` must not be written. `None` means it is acceptable.
 ///
 /// Postgres `TEXT` rejects a NUL and the request would otherwise become a 500.
-/// The other ASCII controls are rejected with it: a device token is hex or
-/// URL-safe text, and a control character is not a length problem.
+/// The other ASCII controls are rejected with it. Leading or trailing
+/// whitespace is rejected too: `" abc"` and `"abc"` would otherwise be two
+/// devices, and a whitespace-only token is not a device token. The stored
+/// value is the bytes the client sent; this does not trim.
 fn unacceptable_token(token: &str) -> Option<&'static str> {
     if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
         return Some("length");
     }
     if token.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
         return Some("control");
+    }
+    if token != token.trim() {
+        return Some("whitespace");
     }
     None
 }
@@ -76,7 +81,7 @@ pub async fn put_registration(
             "push registration rejected: token"
         );
         return Err(ApiError::bad_request(
-            "token must be 1 to 4096 bytes and must not contain control characters",
+            "token must be 1 to 4096 bytes without surrounding whitespace or control characters",
         ));
     }
     if !matches!(
@@ -167,10 +172,12 @@ pub async fn delete_registration(
     Extension(caller): Extension<AuthedToken>,
     Path(id): Path<Uuid>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    store
+    let removed = store
         .delete_push_registration(id, caller.session_id)
         .await?;
-    tracing::info!(registration_id = %id, "push registration delete");
+    if removed {
+        tracing::info!(registration_id = %id, "push registration deleted");
+    }
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -186,5 +193,9 @@ mod tests {
         assert_eq!(unacceptable_token("device\0token"), Some("control"));
         assert_eq!(unacceptable_token("device\ntoken"), Some("control"));
         assert_eq!(unacceptable_token("device\u{7f}token"), Some("control"));
+        assert_eq!(unacceptable_token("   "), Some("whitespace"));
+        assert_eq!(unacceptable_token(" device-token"), Some("whitespace"));
+        assert_eq!(unacceptable_token("device-token "), Some("whitespace"));
+        assert_eq!(unacceptable_token("device token"), None);
     }
 }
