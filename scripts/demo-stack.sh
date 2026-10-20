@@ -434,6 +434,7 @@ EOF
         say "wrote $capture_out"
       else
         say "pilot exited with status $pilot_status — $capture_out may be a partial take"
+        say "why: the 'demo(tui): scene ... failed' lines above; the failed frame is in $repo_root/smoke-artifacts/demo-tui/"
       fi
       exit "$pilot_status"
     else
