@@ -198,7 +198,9 @@ fn drive(
     })?;
     log.note("first paint");
 
-    for step in &scene.steps {
+    let total = scene.steps.len();
+    for (index, step) in scene.steps.iter().enumerate() {
+        let at = || format!("scene {}, step {}/{total}", scene.name, index + 1);
         match step {
             Step::Command(command) => {
                 driver.type_text(command)?;
@@ -221,7 +223,7 @@ fn drive(
                         config.timeout,
                         move |screen| needles.iter().all(|needle| screen.contains(needle)),
                     )
-                    .with_context(|| format!("scene {}", scene.name))?;
+                    .with_context(at)?;
                 log.note(format!("saw {texts:?}"));
             }
             Step::WaitSent(text) => {
@@ -239,7 +241,7 @@ fn drive(
                                     .any(|line| line.contains(&needle))
                         },
                     )
-                    .with_context(|| format!("scene {}", scene.name))?;
+                    .with_context(at)?;
                 log.note(format!("sent {text:?}"));
             }
             Step::WaitGone(texts) => {
@@ -250,7 +252,7 @@ fn drive(
                         config.timeout,
                         move |screen| !needles.iter().any(|needle| screen.contains(needle)),
                     )
-                    .with_context(|| format!("scene {}", scene.name))?;
+                    .with_context(at)?;
                 log.note(format!("gone {texts:?}"));
             }
             Step::Dwell(base) => {

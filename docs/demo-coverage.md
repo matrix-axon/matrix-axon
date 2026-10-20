@@ -222,7 +222,7 @@ scene now depends on:
 ### TUI
 
 - `/room` resolves room IDs, aliases, and displayed titles, including server-calculated names for unnamed rooms (ADR 0118).
-  The `send` scene still addresses the DM by ID; title-based switching is not covered by that driver.
+  The `send` scene still addresses the DM by ID (and waits on the `showing <title>` status, which names a DM by the other member); title-based switching is not covered by that driver.
 - The search result view binds bare letters to its own actions (`s` sort, `g`
   group, `e` edit, `r` reply, `t` thread). A command typed while it has focus is
   not typed at all: it is read as that sequence of shortcuts. Esc first.

@@ -163,6 +163,21 @@ case "$cmd" in
   upload) upload_for_scope ;;
   all)
     "$stack" up
+    # A failed leg must not strand the stack: left up, the next 'up' refuses
+    # ("manifest already exists") and a bare 'tui' quietly reuses a stack whose
+    # containers may be long dead. --keep-up opts out, for inspecting a failure.
+    teardown_on_failure() {
+      local status=$?
+      if [ "$status" -ne 0 ]; then
+        if [ "$keep_up" -eq 1 ]; then
+          printf 'demo-all: failed (exit %s) — stack left up (--keep-up); tear it down with: scripts/demo-all.sh down\n' "$status" >&2
+        else
+          printf 'demo-all: failed (exit %s) — tearing the stack down (--keep-up preserves it)\n' "$status" >&2
+          "$stack" down || true
+        fi
+      fi
+    }
+    trap teardown_on_failure EXIT
     [ "$web_only" -eq 1 ] || "$stack" record --capture
     if [ "$tui_only" -eq 0 ]; then
       "$web" record
@@ -171,6 +186,7 @@ case "$cmd" in
     if [ "$do_upload" -eq 1 ]; then
       upload_for_scope
     fi
+    trap - EXIT
     if [ "$keep_up" -eq 1 ]; then
       say "leaving the stack up (--keep-up) — tear it down with: scripts/demo-all.sh down"
     else
