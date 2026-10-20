@@ -111,16 +111,7 @@ impl SecretTracker {
     fn assert_absent_from(&self, path: &Path) -> Result<()> {
         let log = std::fs::read_to_string(path).context("read Axon log for disclosure check")?;
         let lower = log.to_ascii_lowercase();
-        for forbidden in [
-            "qr_code_data",
-            "check_code",
-            "authorization_user_code",
-            "verification_uri",
-            "access_token",
-            "refresh_token",
-            "secrets_bundle",
-            "recovery_key",
-        ] {
+        for forbidden in FORBIDDEN_LOG_FIELDS {
             if lower.contains(forbidden) {
                 bail!("Axon log contains secret-bearing field name {forbidden}");
             }
@@ -133,6 +124,19 @@ impl SecretTracker {
         Ok(())
     }
 }
+
+/// Field names that must never appear in Axon's log, or in anything copied out
+/// of it.
+const FORBIDDEN_LOG_FIELDS: [&str; 8] = [
+    "qr_code_data",
+    "check_code",
+    "authorization_user_code",
+    "verification_uri",
+    "access_token",
+    "refresh_token",
+    "secrets_bundle",
+    "recovery_key",
+];
 
 struct AxonProcess {
     config: Config,
@@ -523,6 +527,21 @@ impl Api {
         .await
     }
 
+    /// Ask Axon to retry every pending UTD now. Unlike the arrival stream, this
+    /// path downloads each room's keys from the server-side backup first, so
+    /// it separates "the key is obtainable but nothing asked for it" from "the
+    /// key cannot be obtained".
+    async fn redecrypt(&self, account_id: Uuid) -> Result<RedecryptProbe> {
+        self.envelope(
+            "re-decryption probe",
+            Method::POST,
+            &format!("/v1/accounts/{account_id}/utds/redecrypt"),
+            None,
+            StatusCode::OK,
+        )
+        .await
+    }
+
     async fn timeline(&self, account_id: Uuid, room_id: &str) -> TimelinePoll {
         let encoded: String = url::form_urlencoded::byte_serialize(room_id.as_bytes()).collect();
         let response = self
@@ -602,6 +621,16 @@ impl FlowState for GrantFlow {
     fn error_code(&self) -> Option<&str> {
         self.error_code.as_deref()
     }
+}
+
+/// Counters only: nothing in this response can carry secrets or event content.
+#[derive(Deserialize)]
+struct RedecryptProbe {
+    selected: usize,
+    attempted: usize,
+    decrypted: usize,
+    still_pending: usize,
+    timed_out: bool,
 }
 
 #[derive(Deserialize)]
@@ -1347,6 +1376,233 @@ async fn wait_axon_decrypts(api: &Api, account_id: Uuid, peer: &SeededPeer) -> R
     }
 }
 
+/// How many redacted log lines a stall report may print.
+const STALL_LOG_LINES: usize = 25;
+
+/// Numeric fields a diagnostic log line may keep. Every other field is dropped:
+/// values such as `error`, `room_id` and `event_id` can carry SDK text or ids.
+const STALL_LOG_NUMERIC_FIELDS: [&str; 7] = [
+    "count",
+    "selected",
+    "attempted",
+    "decrypted",
+    "still_pending",
+    "startup_marked",
+    "polls",
+];
+
+/// Reduce one Axon log line to `<time> <LEVEL> <target> <message> [n=<digits>…]`,
+/// or `None` when the line is not one the stall report is allowed to show.
+///
+/// Allowlisted by target (`axon_sync::redecrypt`, `axon_sync::backup`, and the
+/// SDK's `matrix_sdk::encryption::backups`, which the harness logs at `error`
+/// only) or by severity (`WARN`/`ERROR` from any `axon_sync` target). The message is the text
+/// before the first `key=value` token; field values never survive, apart from
+/// the numeric counters above. A line naming a secret-bearing field, or
+/// containing a tracked secret, is dropped whole.
+fn redact_stall_log_line(line: &str, secrets: &[String]) -> Option<String> {
+    let mut plain = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // Skip a CSI colour sequence: ESC [ ... final byte.
+            if chars.peek() == Some(&'[') {
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            plain.push(ch);
+        }
+    }
+    let lower = plain.to_ascii_lowercase();
+    if FORBIDDEN_LOG_FIELDS
+        .iter()
+        .any(|forbidden| lower.contains(forbidden))
+        || secrets
+            .iter()
+            .any(|secret| secret.len() >= 6 && plain.contains(secret.as_str()))
+    {
+        return None;
+    }
+
+    let tokens: Vec<&str> = plain.split_whitespace().collect();
+    let target_at = tokens.iter().position(|token| {
+        let target = token.trim_end_matches(':');
+        target.split("::").next() == Some("axon_sync")
+            || target.starts_with("matrix_sdk::encryption::backups")
+    })?;
+    let target = tokens[target_at].trim_end_matches(':');
+    let level = tokens[..target_at]
+        .iter()
+        .rev()
+        .find(|token| matches!(**token, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR"))?;
+    let severe = matches!(*level, "WARN" | "ERROR");
+    let by_target = target.starts_with("axon_sync::redecrypt")
+        || target.starts_with("axon_sync::backup")
+        || target.starts_with("matrix_sdk::encryption::backups");
+    let in_axon_sync = target.split("::").next() == Some("axon_sync");
+    // The one INFO line outside those targets the report needs: the startup
+    // sweep summary, whose counters show the pre-probe state.
+    let startup_sweep = target.starts_with("axon_sync::engine")
+        && plain.contains("startup UTD re-decryption sweep completed");
+    if !(by_target || startup_sweep || severe && in_axon_sync) {
+        return None;
+    }
+
+    let mut message = Vec::new();
+    let mut counters = Vec::new();
+    // Message words come only before the first `key=value` token. After it,
+    // everything (including the words of a quoted value) is field content.
+    let mut in_fields = false;
+    let mut message_done = false;
+    for token in &tokens[target_at + 1..] {
+        if let Some((key, value)) = token.split_once('=') {
+            in_fields = true;
+            if STALL_LOG_NUMERIC_FIELDS.contains(&key)
+                && !value.is_empty()
+                && value.chars().all(|c| c.is_ascii_digit())
+            {
+                counters.push(format!("{key}={value}"));
+            }
+        } else if !in_fields && !message_done && message.len() < 12 {
+            // A dropped word is marked, so `retrying 3 times` cannot read as
+            // `retrying times`.
+            message.push(if is_plain_message_word(token) {
+                *token
+            } else {
+                "…"
+            });
+            // A word ending in `:` introduces interpolated error text.
+            message_done = token.ends_with(':');
+        }
+    }
+    if message.iter().all(|word| *word == "…") {
+        return None;
+    }
+    // `HH:MM:SS` from a leading RFC 3339 timestamp, so events can be ordered
+    // against the harness's own timestamps.
+    let clock = tokens
+        .first()
+        .and_then(|token| token.split('T').nth(1))
+        .map(|time| time.chars().take(8).collect::<String>())
+        .filter(|time| time.len() == 8)
+        .unwrap_or_else(|| "--:--:--".to_owned());
+    let mut out = format!("{clock} {level} {target} {}", message.join(" "));
+    if !counters.is_empty() {
+        out.push(' ');
+        out.push_str(&counters.join(" "));
+    }
+    // Cut on a char boundary: `String::truncate` panics inside a multi-byte char.
+    Some(out.chars().take(200).collect())
+}
+
+/// A message word that cannot be an id or interpolated SDK text: ASCII
+/// letters, `_` and `-`, with optional trailing punctuation. Anything
+/// with a sigil (`!`, `$`, `@`, `#`), digits, a path or a quote is dropped.
+fn is_plain_message_word(token: &str) -> bool {
+    let word = token.trim_end_matches([',', '.', ':', ';']);
+    !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphabetic() || b == b'_' || b == b'-')
+}
+
+/// Upper bound on the explicit re-decryption probe, so a hung key-backup
+/// download cannot hold the report (and the original error) until the job
+/// timeout.
+const STALL_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Most of the Axon log the report will scan, taken from its end.
+const STALL_LOG_TAIL_BYTES: usize = 1 << 20;
+
+/// Print what is safe to say about why Axon never decrypted the pre-login
+/// history. The run directory holding Axon's log is deleted when the lane
+/// exits and uploads no artifacts, so this is the only record of the stall.
+///
+/// Two observations, both free of event content and secrets:
+/// 1. the counters from an explicit re-decryption (which fetches the room
+///    keys from backup first), and the history state after it; and
+/// 2. a short allowlisted tail of Axon's own re-decryption and backup lines.
+async fn report_decrypt_stall(
+    api: &Api,
+    account_id: Uuid,
+    peer: &SeededPeer,
+    log_path: &Path,
+    secrets: &SecretTracker,
+) {
+    // The probe repairs a stall it can fix, so everything observed after it
+    // (the history read, the log tail) describes the post-probe state, not the
+    // state at timeout; the output labels it accordingly.
+    let probe = tokio::time::timeout(STALL_PROBE_TIMEOUT, api.redecrypt(account_id))
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("timed out after {STALL_PROBE_TIMEOUT:?}")));
+    match probe {
+        Ok(probe) => eprintln!(
+            "matrix-oauth: diag: explicit re-decryption selected={} attempted={} decrypted={} still_pending={} timed_out={}",
+            probe.selected, probe.attempted, probe.decrypted, probe.still_pending, probe.timed_out
+        ),
+        Err(error) => eprintln!("matrix-oauth: diag: explicit re-decryption failed: {error}"),
+    }
+    // The back-fill is written before the sweep returns, but allow the timeline
+    // read a moment to settle rather than reporting a stale read.
+    let mut after = HistoryObservation::RequestFailed;
+    for attempt in 0..5 {
+        after = observe_history(
+            api.timeline(account_id, peer.room_id.as_str()).await,
+            peer.history_event_id.as_str(),
+            &peer.history_marker,
+        );
+        if after == HistoryObservation::Decrypted {
+            break;
+        }
+        if attempt < 4 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    eprintln!("matrix-oauth: diag: history after explicit re-decryption {after}");
+
+    let tracked = secrets.0.lock().expect("secret tracker lock").clone();
+    let Ok(bytes) = tokio::fs::read(log_path).await else {
+        eprintln!("matrix-oauth: diag: Axon log unreadable");
+        return;
+    };
+    // Lossy, so one invalid byte costs a line rather than the whole tail; a
+    // partial first line after the cut fails the allowlist and is dropped.
+    let tail = &bytes[bytes.len().saturating_sub(STALL_LOG_TAIL_BYTES)..];
+    let log = String::from_utf8_lossy(tail);
+    let mut kept: Vec<String> = log
+        .lines()
+        .filter_map(|line| redact_stall_log_line(line, &tracked))
+        .collect();
+    let dropped = kept.len().saturating_sub(STALL_LOG_LINES);
+    kept.drain(..dropped);
+    eprintln!(
+        "matrix-oauth: diag: {} allowlisted Axon log line(s) shown, {} earlier omitted",
+        kept.len(),
+        dropped
+    );
+    for line in kept {
+        eprintln!("matrix-oauth: diag: log {line}");
+    }
+}
+
+async fn wait_axon_decrypts_or_report(
+    process: &AxonProcess,
+    api: &Api,
+    account_id: Uuid,
+    peer: &SeededPeer,
+    secrets: &SecretTracker,
+) -> Result<()> {
+    let result = wait_axon_decrypts(api, account_id, peer).await;
+    if result.is_err() {
+        report_decrypt_stall(api, account_id, peer, &process.log_path, secrets).await;
+    }
+    result
+}
+
 async fn fresh_client(config: &Config) -> Result<Client> {
     let store = config.run_dir.join(format!("fresh-sdk-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&store)
@@ -1436,7 +1692,7 @@ async fn run_acquire_lane(
     let api = process.api()?;
     let account_id = acquire_axon(&api, peer, approver, secrets).await?;
     wait_account_ready(&api, account_id).await?;
-    wait_axon_decrypts(&api, account_id, peer).await?;
+    wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
 
     eprintln!("matrix-oauth(acquire): restarting after OAuth access-token expiry");
     process.stop().await?;
@@ -1444,7 +1700,7 @@ async fn run_acquire_lane(
     process.spawn().await?;
     let api = process.api()?;
     wait_account_ready(&api, account_id).await?;
-    wait_axon_decrypts(&api, account_id, peer).await?;
+    wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
     Ok(())
 }
 
@@ -1759,10 +2015,105 @@ mod tests {
     use anyhow::anyhow;
 
     use super::{
-        assert_mas_decision, bounded_body, combine_run_outcomes, observe_history, trusted_session,
-        wait_for_health, Api, Approval, Config, HistoryObservation, SecretTracker, Timeline,
-        TimelineEvent, TimelinePoll, BODY_LIMIT,
+        assert_mas_decision, bounded_body, combine_run_outcomes, observe_history,
+        redact_stall_log_line, trusted_session, wait_for_health, Api, Approval, Config,
+        HistoryObservation, SecretTracker, Timeline, TimelineEvent, TimelinePoll, BODY_LIMIT,
     };
+
+    #[test]
+    fn stall_log_lines_keep_the_message_and_numeric_counters_only() {
+        let line = "2026-10-16T00:57:35.123456Z DEBUG axon_sync::redecrypt: re-decrypted UTD account_id=0a1b room_id=!abc:localhost event_id=$ev error=\"boom with secret text\"";
+        assert_eq!(
+            redact_stall_log_line(line, &[]).as_deref(),
+            Some("00:57:35 DEBUG axon_sync::redecrypt re-decrypted UTD")
+        );
+        let counted = "2026-10-16T00:57:35Z  INFO axon_sync::redecrypt: sweeping pending UTDs account_id=x count=3 scope=AllPending";
+        assert_eq!(
+            redact_stall_log_line(counted, &[]).as_deref(),
+            Some("00:57:35 INFO axon_sync::redecrypt sweeping pending UTDs count=3")
+        );
+    }
+
+    #[test]
+    fn stall_log_lines_strip_ansi_and_accept_sdk_backup_errors() {
+        let line = "\u{1b}[2m2026-10-16T01:00:00Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \u{1b}[2mmatrix_sdk::encryption::backups\u{1b}[0m: failed to download room key";
+        assert_eq!(
+            redact_stall_log_line(line, &[]).as_deref(),
+            Some("01:00:00 ERROR matrix_sdk::encryption::backups failed to download room key")
+        );
+    }
+
+    #[test]
+    fn stall_log_lines_outside_the_allowlist_are_dropped() {
+        // Wrong target, and an ordinary axon_sync line below WARN.
+        assert_eq!(
+            redact_stall_log_line("2026-10-16T00:00:00Z INFO sqlx::query: select 1", &[]),
+            None
+        );
+        assert_eq!(
+            redact_stall_log_line(
+                "2026-10-16T00:00:00Z INFO axon_sync::engine: sync service started",
+                &[]
+            ),
+            None
+        );
+        // WARN from any axon_sync target is allowed.
+        assert!(redact_stall_log_line(
+            "2026-10-16T00:00:00Z WARN axon_sync::engine: no active accounts; sync engine idle",
+            &[]
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn stall_log_lines_naming_or_containing_secrets_are_dropped_whole() {
+        let named = "2026-10-16T00:00:00Z WARN axon_sync::backup: stored recovery_key for account";
+        assert_eq!(redact_stall_log_line(named, &[]), None);
+        let tracked = "2026-10-16T00:00:00Z WARN axon_sync::backup: leaked hunter2-runtime-value";
+        assert_eq!(
+            redact_stall_log_line(tracked, &["hunter2-runtime-value".to_owned()]),
+            None
+        );
+    }
+
+    #[test]
+    fn stall_log_messages_drop_ids_and_interpolated_error_text() {
+        let line = "2026-10-16T00:00:00Z WARN axon_sync::backup: failed to fetch keys for !room:server event $abc123: M_UNKNOWN secret sdk text";
+        assert_eq!(
+            redact_stall_log_line(line, &[]).as_deref(),
+            Some("00:00:00 WARN axon_sync::backup failed to fetch keys for … event …")
+        );
+        let handle = "2026-10-16T00:00:00Z WARN axon_sync::backup: lookup for @alice:server done";
+        assert_eq!(
+            redact_stall_log_line(handle, &[]).as_deref(),
+            Some("00:00:00 WARN axon_sync::backup lookup for … done")
+        );
+    }
+
+    #[test]
+    fn stall_log_marks_dropped_words_and_keeps_the_startup_sweep_summary() {
+        let retry = "2026-10-16T00:00:00Z WARN axon_sync::backup: retrying 3 times";
+        assert_eq!(
+            redact_stall_log_line(retry, &[]).as_deref(),
+            Some("00:00:00 WARN axon_sync::backup retrying … times")
+        );
+        let sweep = "2026-10-16T00:00:00Z INFO axon_sync::engine: startup UTD re-decryption sweep completed selected=4 attempted=4 decrypted=0 still_pending=4 startup_marked=2";
+        assert_eq!(
+            redact_stall_log_line(sweep, &[]).as_deref(),
+            Some("00:00:00 INFO axon_sync::engine startup UTD re-decryption sweep completed selected=4 attempted=4 decrypted=0 still_pending=4 startup_marked=2")
+        );
+    }
+
+    #[test]
+    fn stall_log_lines_truncate_on_a_char_boundary() {
+        let word = "é".repeat(60);
+        let line = format!("2026-10-16T00:00:00Z WARN axon_sync::backup: {word}");
+        // Non-ASCII words are dropped outright, and a long line must not panic.
+        assert_eq!(redact_stall_log_line(&line, &[]), None);
+        let many = "ok ".repeat(100);
+        let long = format!("2026-10-16T00:00:00Z WARN axon_sync::backup: {many}");
+        assert!(redact_stall_log_line(&long, &[]).expect("kept").len() <= 200);
+    }
 
     #[tokio::test]
     async fn trusted_login_validates_identity_and_redacts_errors_and_redirects() {
