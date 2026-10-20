@@ -1382,26 +1382,28 @@ mod tests {
 
     /// The summary query stays an index-only scan on
     /// `events_room_thread_root_idx` (#763). Disabling sequential and bitmap
-    /// scans keeps a tiny test table from planning around the index; disabling
-    /// index scans penalizes plain and index-only scans alike, so the cheaper
-    /// index-only scan still wins whenever it is possible. It stops being
-    /// possible if the query stops implying the index's `thread_root IS NOT
-    /// NULL` predicate or reads a column the index doesn't cover, and the plan
-    /// then falls back to some other scan of `events`.
+    /// scans keeps a tiny test table from planning around the index. Index
+    /// scans stay enabled: `enable_indexscan = off` also disables index-only
+    /// scans, so every scan type then counts as disabled and the planner falls
+    /// back to raw cost, where a one-page table with an empty visibility map
+    /// makes a sequential scan cheaper than any index scan. With them enabled
+    /// the index-only scan is the only way to read this index without a heap
+    /// fetch per row. It stops being possible if the query stops implying the
+    /// index's `thread_root IS NOT NULL` predicate or reads a column the index
+    /// doesn't cover, and the plan then falls back to some other scan of
+    /// `events`.
     ///
-    /// That reading of `enable_indexscan` holds on PostgreSQL 14 through 18
-    /// (18 counts disabled plan nodes instead of adding a cost penalty, and
-    /// both scan kinds still count as one); check it again on a new major
-    /// version. The assertion leaves out the table alias, and only the outer
-    /// `events` scan can use this partial index: the redaction subquery does
-    /// not imply `thread_root IS NOT NULL`.
+    /// Checked on PostgreSQL 18; check it again on a new major version. The
+    /// assertion leaves out the table alias, and only the outer `events` scan
+    /// can use this partial index: the redaction subquery does not imply
+    /// `thread_root IS NOT NULL`.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn room_threads_uses_index_only_scan() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let store = Store::connect(&url, 1).await.expect("connect + migrate");
         let mut tx = store.pool().begin().await.expect("begin");
-        for scan in ["enable_seqscan", "enable_bitmapscan", "enable_indexscan"] {
+        for scan in ["enable_seqscan", "enable_bitmapscan"] {
             sqlx_core::query::query(&format!("SET LOCAL {scan} = off"))
                 .execute(&mut *tx)
                 .await
