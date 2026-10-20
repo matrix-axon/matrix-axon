@@ -346,18 +346,11 @@ else
   echo "error: the signed app lacks com.apple.developer.applesignin — Sign in with Apple would fail with error 1000" >&2
   problems=1
 fi
-# codesign prints a short header on stderr and the plist on stdout. Read the
-# string from the XML so that header cannot confuse plutil.
-entitlements_xml=$(codesign -d --entitlements - --xml "$shipped_app" 2>/dev/null || true)
-shipped_aps=$(printf '%s\n' "$entitlements_xml" | awk '
-  /<key>aps-environment<\/key>/ { found = 1; next }
-  found && /<string>/ {
-    sub(/.*<string>/, "")
-    sub(/<\/string>.*/, "")
-    print
-    exit
-  }
-')
+# codesign prints a short header on stderr and the plist on stdout, on a single
+# line, so a line-oriented parser never sees the value after its key. plutil
+# reads the XML properly; it exits non-zero when the key is absent.
+shipped_aps=$(codesign -d --entitlements - --xml "$shipped_app" 2>/dev/null \
+  | plutil -extract aps-environment raw -o - - 2>/dev/null || true)
 echo "    aps-environment: ${shipped_aps:-"(none)"}"
 if [ "${shipped_aps:-}" != "$aps_environment" ]; then
   echo "error: the signed app declares aps-environment '${shipped_aps:-"(none)"}', not '$aps_environment'" >&2
