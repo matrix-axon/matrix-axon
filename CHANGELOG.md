@@ -3,6 +3,24 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.12 - 2026-10-20
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(api): sign in to OAuth-only homeservers through the browser with the device grant by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/730
+* feat(web): sign in through the homeserver's browser page by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/731
+* feat: register device push tokens by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/734
+#### Bug Fixes
+* fix(deploy): give the Postgres containers a 256 MB /dev/shm by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/768
+* fix(store): serve room thread summaries from a room-scoped index-only scan by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/764
+#### Documentation
+* docs(adr): guard the homeserver against axon's background load (ADR 0122) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/750
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.11...v0.1.12
+
 ## v0.1.11 - 2026-10-19
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
