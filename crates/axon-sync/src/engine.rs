@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axon_core::PushMaterial;
 use axon_core::{
     AccountDataFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveEvent, LiveFrame,
     SenderTrustFrame, SyncConfig, SyncStateFrame, UnreadCountsFrame,
@@ -158,6 +159,9 @@ pub struct SyncEngine {
     matrix_oauth_acquire: MatrixOAuthAcquireEngine,
     /// Account-scoped Matrix OAuth QR grant registry and SDK driver (ADR 0097).
     matrix_oauth_grant: MatrixOAuthGrantEngine,
+    /// Process-wide push router. Held here so the observation channel stays
+    /// open when no account is running.
+    push: crate::push::PushIngress,
 }
 
 impl SyncEngine {
@@ -172,6 +176,8 @@ impl SyncEngine {
         config: SyncConfig,
         index: Option<IndexHandle>,
         media: MediaCacheHandle,
+        push_material: PushMaterial,
+        push_changed: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<Self, SyncError> {
         let cancel = CancellationToken::new();
         // The bus exists for the lifetime of the engine regardless of how many
@@ -192,6 +198,13 @@ impl SyncEngine {
         // machinery.
         let tracker = TaskTracker::new();
         let tasks: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let push = crate::push::spawn(
+            store.clone(),
+            push_material,
+            push_changed,
+            cancel.clone(),
+            &tracker,
+        );
         // Owned here (not inside `AccountLifecycle`) so the reconcile-time port, the
         // API-time port, and the supervised watchers all share one lock per identity.
         let locks: IdentityLocks = Arc::new(Mutex::new(HashMap::new()));
@@ -232,6 +245,7 @@ impl SyncEngine {
             backfill_health.clone(),
             sync_health.clone(),
             matrix_oauth_grants.clone(),
+            push.clone(),
         );
         crate::reconcile::reconcile_matrix_oauth_acquires(&config, &store).await?;
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
@@ -279,6 +293,7 @@ impl SyncEngine {
                 backfill_health.clone(),
                 sync_health.clone(),
                 matrix_oauth_grants.clone(),
+                push.clone(),
             );
         }
 
@@ -332,6 +347,7 @@ impl SyncEngine {
             sync_health,
             matrix_oauth_acquire,
             matrix_oauth_grant,
+            push,
         })
     }
 
@@ -383,6 +399,7 @@ impl SyncEngine {
             self.backfill_health.clone(),
             self.sync_health.clone(),
             self.matrix_oauth_grant.registry(),
+            self.push.clone(),
         )
     }
 
@@ -513,6 +530,7 @@ pub(crate) fn spawn_supervised(
     backfill_health: BackfillHealth,
     sync_health: SyncHealth,
     matrix_oauth_grants: MatrixOAuthGrantRegistry,
+    push: crate::push::PushIngress,
 ) {
     let task_cancel = cancel.child_token();
     let account_id = account.account_id;
@@ -531,6 +549,7 @@ pub(crate) fn spawn_supervised(
         backfill_health,
         sync_health,
         matrix_oauth_grants,
+        push,
     ));
     if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
         account_id,
@@ -561,6 +580,7 @@ async fn supervise_account(
     backfill_health: BackfillHealth,
     sync_health: SyncHealth,
     matrix_oauth_grants: MatrixOAuthGrantRegistry,
+    push: crate::push::PushIngress,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -583,6 +603,7 @@ async fn supervise_account(
             index.as_ref(),
             &backfill_health,
             &sync_health,
+            push.clone(),
         )
         .await
         {
@@ -1754,6 +1775,7 @@ async fn run_account(
     index: Option<&IndexHandle>,
     backfill_health: &BackfillHealth,
     sync_health: &SyncHealth,
+    push: crate::push::PushIngress,
 ) -> Result<(), SyncError> {
     // The manager owns client construction + caching (and single-flight with the
     // gateway, which may have connected this account already). A connect failure
@@ -1897,6 +1919,22 @@ async fn run_account(
         live_tx.clone(),
     ));
 
+    // Subscribe before `start`, so the first response is not missed on the
+    // capacity-32 broadcast. This run owns the task: a child token and a join
+    // below, the same as the other watchers. The engine tracker must not hold
+    // it, or a supervised restart would leak the previous client.
+    let room_updates = client.subscribe_to_all_room_updates();
+    let room_updates_cancel = cancel.child_token();
+    let room_updates_handle = tokio::spawn(crate::push::watch_room_updates(
+        room_updates,
+        crate::push::RoomWatch {
+            account_id: account.account_id,
+            own_user_id: account.user_id.clone(),
+            push: push.clone(),
+            cancel: room_updates_cancel.clone(),
+        },
+    ));
+
     sync_service.start().await;
     tracing::info!(account_id = %account.account_id, "sync service started");
 
@@ -2018,6 +2056,7 @@ async fn run_account(
         account.account_id,
         live_tx.clone(),
         unread_cancel.clone(),
+        push,
     ));
 
     // Pending-invite watcher (issue #279, ADR 0091): persist
@@ -2217,6 +2256,14 @@ async fn run_account(
             "sender-trust watcher did not shut down cleanly"
         );
     }
+    room_updates_cancel.cancel();
+    if let Err(err) = room_updates_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "push room-update watcher did not shut down cleanly"
+        );
+    }
     unread_cancel.cancel();
     if let Err(err) = unread_handle.await {
         tracing::warn!(
@@ -2365,6 +2412,81 @@ async fn watch_sender_trust(
     }
 }
 
+/// The pair a push observation should treat as `after`.
+///
+/// `Held` means an increase was not persisted because matrix-sdk still has an
+/// unmatched receipt. `cached` is the pair already stored, when there is one.
+/// `Ready` is the pair [`capture_unread_counts`] would write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnreadAfter {
+    NotJoined,
+    Held { cached: Option<(u64, u64)> },
+    Ready { pair: (u64, u64) },
+}
+
+/// The unread pair the watcher would persist for `room` right now.
+///
+/// This does not write. A not-joined room is [`UnreadAfter::NotJoined`].
+/// [`capture_unread_counts`] is the only caller, and it publishes a count
+/// only for [`UnreadAfter::Ready`]. A held increase is not a push observation.
+pub(crate) async fn unread_after(
+    room: &Room,
+    store: &Store,
+    account_id: Uuid,
+    cached: Option<(u64, u64)>,
+    gone_upstream: bool,
+) -> UnreadAfter {
+    if room.state() != RoomState::Joined {
+        return UnreadAfter::NotJoined;
+    }
+    let (sdk_snapshot, receipts) = UnreadCountsSnapshot::from_room(room);
+    let room_id = room.room_id();
+    let suppression = unread_suppression_reason(gone_upstream, room.is_tombstoned());
+    let snapshot = if suppression.is_some() {
+        UnreadCountsSnapshot::new(0, 0)
+    } else {
+        sdk_snapshot
+    };
+    if suppression.is_some() && cached != Some(snapshot.pair()) {
+        tracing::debug!(
+            %account_id,
+            %room_id,
+            sdk_notification_count = sdk_snapshot.notification,
+            reason = suppression.unwrap_or("room is absent upstream"),
+            "pinning unread counts to zero"
+        );
+    }
+    if suppression.is_none() && !receipts.settled() && unread_counts_increased(cached, snapshot) {
+        let evidence = RoomReceiptEvidence {
+            room,
+            store,
+            account_id,
+        };
+        if !pending_receipts_stale(&evidence, &receipts).await {
+            tracing::debug!(
+                %account_id,
+                %room_id,
+                notification_count = snapshot.notification,
+                highlight_count = snapshot.highlight,
+                pending = ?receipts.pending,
+                "holding unread-count increase: matrix-sdk has unmatched read receipts for this room"
+            );
+            return UnreadAfter::Held { cached };
+        }
+        tracing::info!(
+            %account_id,
+            %room_id,
+            notification_count = snapshot.notification,
+            active = ?receipts.active,
+            pending = ?receipts.pending,
+            "releasing unread-count increase: every unmatched read receipt precedes the active one"
+        );
+    }
+    UnreadAfter::Ready {
+        pair: snapshot.pair(),
+    }
+}
+
 /// Capture `room`'s current SDK-derived unread counts and persist them if
 /// they differ from the last value this watcher wrote (issue #313, ADR 0070).
 /// `last` is the watcher's own in-memory cache of what it has already
@@ -2387,101 +2509,27 @@ async fn capture_unread_counts(
     live_tx: &broadcast::Sender<LiveFrame>,
     last: &Mutex<HashMap<OwnedRoomId, (u64, u64)>>,
     gone_upstream: &Mutex<HashSet<OwnedRoomId>>,
-) {
-    if room.state() != RoomState::Joined {
-        return;
-    }
-    let (sdk_snapshot, receipts) = UnreadCountsSnapshot::from_room(room);
+) -> Option<(u64, u64)> {
     let room_id = room.room_id();
-    // A room that can never again be corrected by reading it is pinned to zero
-    // rather than skipped (ADR 0090): skipping would leave whatever wrong value
-    // is already persisted in place, which is the frozen badge this exists to
-    // clear. Zeroing flows through the ordinary write path below, so the row,
-    // the dedup cache, and the live frame stay consistent.
-    let suppression = unread_suppression_reason(
-        gone_upstream
-            .lock()
-            .expect("unread-counts gone-upstream lock")
-            .contains(room_id),
-        room.is_tombstoned(),
-    );
-    let snapshot = if suppression.is_some() {
-        UnreadCountsSnapshot::new(0, 0)
-    } else {
-        sdk_snapshot
-    };
-    let value = snapshot.pair();
     let cached = last
         .lock()
         .expect("unread-counts cache lock")
         .get(room_id)
         .copied();
+    let gone = gone_upstream
+        .lock()
+        .expect("unread-counts gone-upstream lock")
+        .contains(room_id);
+    // Holdback, tombstone zeroing, and the gone-upstream pin live in
+    // `unread_after`. A held increase returns here without a publish.
+    let UnreadAfter::Ready { pair } = unread_after(room, store, account_id, cached, gone).await
+    else {
+        return None;
+    };
+    let snapshot = UnreadCountsSnapshot::new(pair.0, pair.1);
     if cached_unread_counts_match(cached, snapshot) {
-        return;
+        return None;
     }
-    if let Some(reason) = suppression {
-        tracing::debug!(
-            %account_id,
-            %room_id,
-            sdk_notification_count = sdk_snapshot.notification,
-            reason,
-            "pinning unread counts to zero"
-        );
-    }
-    // Never let an unsettled room *raise* a count. While matrix-sdk holds an
-    // unmatched receipt for this room its counts come from a fallback anchor
-    // (see `UnreadCountsSnapshot::from_room`), so an increase here is an
-    // artifact of where that anchor landed rather than anything the user has
-    // not read — the phantom badge issue #313's watcher would otherwise
-    // persist and broadcast.
-    //
-    // A *decrease* is still written: it can only mean the SDK found a better
-    // anchor, so accepting it lets a room that already carries a phantom count
-    // self-correct instead of staying wrong until the receipt matches. The
-    // deliberate cost is that a genuine new message arriving while `pending` is
-    // non-empty has its count held back; `pending` drains as soon as a receipt
-    // matches an event, and `UNREAD_COUNTS_RESWEEP` re-evaluates every room
-    // afterwards, so the true value lands within one sweep. Suppressing an
-    // increase leaves both the cache and the row untouched, which is what makes
-    // that later re-evaluation see a diff and write it.
-    //
-    // `pending` does not always drain, though. A receipt naming an event older
-    // than the active one — typically a stale `thread_id: "main"` receipt from
-    // another client — stays unmatched for good once its event is out of the
-    // chunk, and would hold every increase in the room forever (issue #507).
-    // Such a receipt cannot be the read position, so it does not make the
-    // counts a fallback, provided the active receipt really is the anchor; see
-    // `pending_receipts_stale` for what proves that.
-    if suppression.is_none() && !receipts.settled() && unread_counts_increased(cached, snapshot) {
-        let evidence = RoomReceiptEvidence {
-            room,
-            store,
-            account_id,
-        };
-        if !pending_receipts_stale(&evidence, &receipts).await {
-            tracing::debug!(
-                %account_id,
-                %room_id,
-                notification_count = snapshot.notification,
-                highlight_count = snapshot.highlight,
-                pending = ?receipts.pending,
-                "holding unread-count increase: matrix-sdk has unmatched read receipts for this room"
-            );
-            return;
-        }
-        tracing::info!(
-            %account_id,
-            %room_id,
-            notification_count = snapshot.notification,
-            active = ?receipts.active,
-            pending = ?receipts.pending,
-            "releasing unread-count increase: every unmatched read receipt precedes the active one"
-        );
-    }
-    // matrix-sdk's counts are `u64`; Postgres has no unsigned type, so narrow
-    // at this boundary via the shared helper, and derive the live frame's
-    // values from the *same* clamped number rather than the raw SDK fields, so
-    // the DB row and the broadcast frame can't disagree.
     let (notification_count, highlight_count) = snapshot.clamped();
     if let Err(err) = store
         .upsert_room_unread_counts(
@@ -2493,17 +2541,18 @@ async fn capture_unread_counts(
         .await
     {
         tracing::warn!(%account_id, %room_id, error = %err, "failed to persist unread counts");
-        return;
+        return None;
     }
     last.lock()
         .expect("unread-counts cache lock")
-        .insert(room_id.to_owned(), value);
+        .insert(room_id.to_owned(), pair);
     let _ = live_tx.send(LiveFrame::UnreadCountsChanged(UnreadCountsFrame {
         account_id,
         room_id: room_id.as_str().to_owned(),
-        notification_count: notification_count as u64,
-        highlight_count: highlight_count as u64,
+        notification_count: pair.0,
+        highlight_count: pair.1,
     }));
+    Some(pair)
 }
 
 /// Re-walk every currently-joined room and capture each one's unread counts,
@@ -2520,13 +2569,18 @@ async fn capture_unread_counts(
 /// many rooms over time; previously only `ON DELETE CASCADE` on account
 /// deletion cleaned these up). Only the periodic re-sweep passes `true`; see the
 /// body for why the startup sweep must not prune.
+struct UnreadPush {
+    last: Arc<Mutex<HashMap<OwnedRoomId, (u64, u64)>>>,
+    gone: Arc<Mutex<HashSet<OwnedRoomId>>>,
+    push: crate::push::PushIngress,
+}
+
 async fn sweep_unread_counts(
     client: &Client,
     store: &Store,
     account_id: Uuid,
     live_tx: &broadcast::Sender<LiveFrame>,
-    last: &Mutex<HashMap<OwnedRoomId, (u64, u64)>>,
-    gone_upstream: &Mutex<HashSet<OwnedRoomId>>,
+    unread: &UnreadPush,
     prune: bool,
 ) {
     use futures_util::stream::{self, StreamExt};
@@ -2552,9 +2606,22 @@ async fn sweep_unread_counts(
     if prune && !rooms.is_empty() {
         let joined: HashSet<OwnedRoomId> =
             rooms.iter().map(|room| room.room_id().to_owned()).collect();
-        last.lock()
+        let removed: Vec<OwnedRoomId> = unread
+            .last
+            .lock()
+            .expect("unread-counts cache lock")
+            .keys()
+            .filter(|room_id| !joined.contains(*room_id))
+            .cloned()
+            .collect();
+        unread
+            .last
+            .lock()
             .expect("unread-counts cache lock")
             .retain(|room_id, _| joined.contains(room_id));
+        for room_id in &removed {
+            unread.push.room_dropped(account_id, room_id.as_str());
+        }
 
         let joined_ids: Vec<String> = joined
             .iter()
@@ -2568,9 +2635,25 @@ async fn sweep_unread_counts(
         }
     }
 
+    let push = unread.push.clone();
+    let last = Arc::clone(&unread.last);
+    let gone = Arc::clone(&unread.gone);
     stream::iter(rooms)
-        .for_each_concurrent(UNREAD_COUNTS_SWEEP_CONCURRENCY, |room| async move {
-            capture_unread_counts(&room, store, account_id, live_tx, last, gone_upstream).await;
+        .for_each_concurrent(UNREAD_COUNTS_SWEEP_CONCURRENCY, |room| {
+            let push = push.clone();
+            let last = Arc::clone(&last);
+            let gone = Arc::clone(&gone);
+            async move {
+                if let Some(pair) =
+                    capture_unread_counts(&room, store, account_id, live_tx, &last, &gone).await
+                {
+                    push.observe(crate::push::count_observation(
+                        account_id,
+                        room.room_id().as_str(),
+                        pair,
+                    ));
+                }
+            }
         })
         .await;
 }
@@ -2863,39 +2946,27 @@ async fn watch_unread_counts(
     account_id: Uuid,
     live_tx: broadcast::Sender<LiveFrame>,
     cancel: CancellationToken,
+    push: crate::push::PushIngress,
 ) {
-    let last: Mutex<HashMap<OwnedRoomId, (u64, u64)>> =
-        Mutex::new(seed_unread_counts_cache(&store, account_id).await);
-    // Rooms a probe has already confirmed absent upstream (ADR 0090). Seeded from
-    // the store for the same reason `last` is: a restart must not re-derive a
-    // count for a room it has already ruled out, and the verdict is durable.
-    let gone_upstream: Mutex<HashSet<OwnedRoomId>> = Mutex::new(
-        read_gone_upstream_rooms(&store, account_id)
-            .await
-            .unwrap_or_else(|err| {
-                // Only safe to swallow here: there is no prior set to lose, and
-                // the first re-sweep re-reads it. Erring open means a purged
-                // room's badge stays wrong until then, which beats pinning a
-                // live room to zero on a verdict we never actually read.
-                tracing::warn!(
-                    %account_id, error = %err,
-                    "failed to read rooms absent upstream; starting that set empty"
-                );
-                HashSet::new()
-            }),
-    );
-
+    let unread = UnreadPush {
+        last: Arc::new(Mutex::new(
+            seed_unread_counts_cache(&store, account_id).await,
+        )),
+        gone: Arc::new(Mutex::new(
+            read_gone_upstream_rooms(&store, account_id)
+                .await
+                .unwrap_or_else(|err| {
+                    tracing::warn!(
+                        %account_id, error = %err,
+                        "failed to read rooms absent upstream; starting that set empty"
+                    );
+                    HashSet::new()
+                }),
+        )),
+        push,
+    };
     let mut updates = client.room_info_notable_update_receiver();
-    sweep_unread_counts(
-        &client,
-        &store,
-        account_id,
-        &live_tx,
-        &last,
-        &gone_upstream,
-        false,
-    )
-    .await;
+    sweep_unread_counts(&client, &store, account_id, &live_tx, &unread, false).await;
 
     // The first tick of `interval` fires immediately; defer it by one period
     // so the resweep timer doesn't immediately re-run what the startup sweep
@@ -2929,20 +3000,26 @@ async fn watch_unread_counts(
                 // Only on a successful read; a failed one keeps the previous
                 // set. See `apply_gone_upstream_refresh`.
                 apply_gone_upstream_refresh(
-                    &gone_upstream,
+                    &unread.gone,
                     account_id,
                     read_gone_upstream_rooms(&store, account_id).await,
                 );
-                sweep_unread_counts(&client, &store, account_id, &live_tx, &last, &gone_upstream, true)
-                    .await;
+                sweep_unread_counts(&client, &store, account_id, &live_tx, &unread, true).await;
             }
             update = updates.recv() => match update {
                 Ok(update) => {
                     if let Some(room) = client.get_room(&update.room_id) {
-                        capture_unread_counts(
-                            &room, &store, account_id, &live_tx, &last, &gone_upstream,
+                        if let Some(pair) = capture_unread_counts(
+                            &room, &store, account_id, &live_tx, &unread.last, &unread.gone,
                         )
-                        .await;
+                        .await
+                        {
+                            unread.push.observe(crate::push::count_observation(
+                                account_id,
+                                room.room_id().as_str(),
+                                pair,
+                            ));
+                        }
                     }
                 }
                 // We always re-derive the current value rather than diff the missed

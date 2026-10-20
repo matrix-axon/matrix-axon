@@ -1,3 +1,8 @@
+// A workspace `cargo build` turns on reqwest's `cookies` feature through the
+// Matrix OAuth smoke crate. The unread watcher's spawned future then nests
+// that HTTP stack deeply enough that proving `Send` overflows rustc's default
+// recursion limit.
+#![recursion_limit = "256"]
 //! matrix-rust-sdk sync engine wrapper (Simplified Sliding Sync only).
 //!
 //! `axon-sync` owns the live connection to each account's homeserver. It builds
@@ -35,6 +40,7 @@ mod media;
 mod member_counts;
 mod member_profiles;
 mod meta;
+mod push;
 mod reconcile;
 mod redecrypt;
 mod room_sweep;

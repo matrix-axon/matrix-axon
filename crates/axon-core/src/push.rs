@@ -11,8 +11,10 @@ use serde::Deserialize;
 
 use crate::error::ConfigError;
 
-/// `[push]` — APNs and FCM key material. Delivery is a later change. This
-/// section only decides whether each provider's key can be loaded.
+/// `[push]` — APNs and FCM key material.
+///
+/// An empty section leaves the provider unconfigured. The router still
+/// accepts registrations and skips sends for a provider with no key.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PushConfig {
     /// Apple Push Notification service, for iOS and iPadOS.

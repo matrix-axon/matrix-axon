@@ -627,7 +627,9 @@ Treat this as a living checklist: when an upstream issue closes with "fixed bug 
 
 Mirrors the PRD non-goals and out-of-scope items; the agent should not drift into these:
 
-- No push code paths (no APNs, FCM, web push). The event-emit surface is designed to accept a router later; do not build the router.
+- No Web Push.
+  APNs and FCM delivery is ADR 0113.
+  Do not add a third provider, a Windows push service, or a wake for a quit Mac app.
 - No multi-human-per-process isolation. One human per Axon.
 - No federation hooks, no peer-to-peer ingestion.
 - No native client scaffolding (iOS, desktop). Generated Swift stubs only.
