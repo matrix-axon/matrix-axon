@@ -1,4 +1,5 @@
 import { effect, signal, type Signal } from '@preact/signals'
+import { PUSH_DISCLOSURES, type PushDisclosure } from '../push/registration'
 import { DEFAULT_ZOOM, parseZoom } from '../zoom'
 
 /**
@@ -186,6 +187,15 @@ export interface SettingsV1 {
    * must not start posting messages.
    */
   messageNotifications: boolean
+  /**
+   * What a remote push banner may say (ADR 0113).
+   *
+   * `activity` is the default: the banner is titled Axon and says "New
+   * activity", with no room name and no message text. The browser and the
+   * desktop shells do not register a device token, so this only changes a
+   * phone or tablet registration.
+   */
+  pushDisclosure: PushDisclosure
 }
 
 const DEFAULTS: SettingsV1 = {
@@ -216,6 +226,7 @@ const DEFAULTS: SettingsV1 = {
   appBadgeEnabled: true,
   cacheRoomList: true,
   messageNotifications: false,
+  pushDisclosure: 'activity',
 }
 
 const MAX_RECENT_REACTIONS = 3
@@ -411,6 +422,11 @@ function parse(raw: string | null): SettingsV1 {
       typeof v1.messageNotifications === 'boolean'
         ? v1.messageNotifications
         : DEFAULTS.messageNotifications,
+    pushDisclosure: oneOf(
+      PUSH_DISCLOSURES,
+      v1.pushDisclosure,
+      DEFAULTS.pushDisclosure,
+    ),
   }
 }
 
@@ -441,6 +457,8 @@ export interface SettingsStore {
   appBadgeEnabled: Signal<boolean>
   cacheRoomList: Signal<boolean>
   messageNotifications: Signal<boolean>
+  /** What a remote banner may say. Default `activity`. */
+  pushDisclosure: Signal<PushDisclosure>
   /**
    * Pin a room key, or re-pin an already-pinned one to the top — most
    * recently pinned first (ADR 0038).
@@ -498,6 +516,7 @@ export function createSettingsStore(
   const appBadgeEnabled = signal<boolean>(initial.appBadgeEnabled)
   const cacheRoomList = signal<boolean>(initial.cacheRoomList)
   const messageNotifications = signal<boolean>(initial.messageNotifications)
+  const pushDisclosure = signal<PushDisclosure>(initial.pushDisclosure)
 
   effect(() => {
     const envelope: SettingsV1 = {
@@ -528,6 +547,7 @@ export function createSettingsStore(
       appBadgeEnabled: appBadgeEnabled.value,
       cacheRoomList: cacheRoomList.value,
       messageNotifications: messageNotifications.value,
+      pushDisclosure: pushDisclosure.value,
     }
     try {
       storage.setItem(STORAGE_KEY, JSON.stringify(envelope))
@@ -564,6 +584,7 @@ export function createSettingsStore(
     appBadgeEnabled,
     cacheRoomList,
     messageNotifications,
+    pushDisclosure,
     pinRoom(key: string) {
       pinnedRooms.value = [key, ...pinnedRooms.value.filter((k) => k !== key)]
     },

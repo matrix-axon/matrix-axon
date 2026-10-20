@@ -41,6 +41,7 @@ import type {
   Theme,
   TimeFormat,
 } from '../stores/settings'
+import { PUSH_DISCLOSURES, type PushDisclosure } from '../push/registration'
 import {
   assignMessageGestureAction,
   cloneMessageGesturePreferences,
@@ -859,12 +860,53 @@ function DebugSettings() {
   )
 }
 
+const PUSH_DISCLOSURE_LABELS: Record<PushDisclosure, string> = {
+  activity: 'New activity',
+  sender_and_room: 'Sender and room',
+  preview: 'Preview',
+}
+
+function pushDisclosureNote(disclosure: PushDisclosure): string {
+  if (disclosure === 'sender_and_room') {
+    return 'A banner names the sender and the room, not the message.'
+  }
+  if (disclosure === 'preview') {
+    return 'A banner includes a short preview of the message.'
+  }
+  return 'A banner says "New activity" and does not name the room.'
+}
+
 function MessageNotificationSettings() {
-  const { platform, settings } = useServices()
+  const { api, platform, remotePushError, settings } = useServices()
   const enabled = settings.messageNotifications.value
+  const remote = platform.remotePush
   const [permission, setPermission] =
     useState<NotificationPermissionState | null>(null)
   const [askFailed, setAskFailed] = useState(false)
+  const [pushKeyMissing, setPushKeyMissing] = useState(false)
+
+  useEffect(() => {
+    if (remote === null) {
+      return
+    }
+    let cancelled = false
+    void api.GET('/v1/status').then(
+      ({ data }) => {
+        if (cancelled || data === undefined) {
+          return
+        }
+        const push = data.data.push
+        const loaded = remote.provider === 'apns' ? push?.apns : push?.fcm
+        setPushKeyMissing(loaded === false)
+      },
+      () => {
+        // A status failure is not a reason to skip registration.
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [api, remote])
 
   useEffect(() => {
     let cancelled = false
@@ -958,6 +1000,39 @@ function MessageNotificationSettings() {
           Off until you turn it on. A permission used for the app-icon badge
           does not turn this on, and a desktop app does not ask on its own.
         </p>
+      )}
+      {remote !== null && (
+        <div
+          class="theme-picker"
+          role="radiogroup"
+          aria-label="Push notification detail"
+        >
+          {PUSH_DISCLOSURES.map((value) => (
+            <label key={value}>
+              <input
+                type="radio"
+                name="push-disclosure"
+                value={value}
+                checked={settings.pushDisclosure.value === value}
+                onChange={() => (settings.pushDisclosure.value = value)}
+              />
+              {PUSH_DISCLOSURE_LABELS[value]}
+            </label>
+          ))}
+        </div>
+      )}
+      {remote !== null && (
+        <p class="muted">{pushDisclosureNote(settings.pushDisclosure.value)}</p>
+      )}
+      {pushKeyMissing && (
+        <p class="muted">
+          This server has not loaded the{' '}
+          {remote?.provider === 'fcm' ? 'Android' : 'Apple'} push key. Axon
+          still registers this device.
+        </p>
+      )}
+      {remotePushError.value !== null && (
+        <p class="muted">{remotePushError.value}</p>
       )}
     </section>
   )

@@ -604,6 +604,48 @@ describe('message notifications in the shell', () => {
     expect(posted?.options.id).toBeGreaterThan(0)
   })
 
+  it('posts a phone notification with the room collapse id', async () => {
+    const invoke = vi.fn(() => Promise.resolve(null))
+    installInvoke(invoke)
+    const platform = tauriPlatform(undefined, 'ios')
+    expect(platform.remotePush?.provider).toBe('apns')
+    await platform.notify({
+      title: 'Ops',
+      body: '@alice: hello',
+      accountId: 'acct',
+      roomId: 'abc',
+      eventId: '$evt',
+      threadRootId: null,
+    })
+    expect(invoke).toHaveBeenCalledWith(
+      'plugin:remote-push|post_local',
+      expect.objectContaining({
+        args: expect.objectContaining({
+          collapseId: 'ba7816bf8f01cfea414140de5dae2223',
+          accountId: 'acct',
+          roomId: 'abc',
+          eventId: '$evt',
+          threadRootId: null,
+        }),
+      }),
+      undefined,
+    )
+    expect(invoke).not.toHaveBeenCalledWith(
+      'plugin:notification|notify',
+      expect.anything(),
+      undefined,
+    )
+  })
+
+  it('does not ask the remote push plugin when the runtime is absent', () => {
+    const invoke = vi.fn(() => Promise.resolve(null))
+    installInvoke(invoke)
+    delete shell().__TAURI_INTERNALS__
+    const platform = tauriPlatform(undefined, 'android')
+    expect(platform.remotePush?.provider).toBe('fcm')
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
   it('asks the plugin directly for permission', async () => {
     const invoke = vi.fn((cmd: string) =>
       Promise.resolve(cmd.endsWith('request_permission') ? 'prompt' : null),

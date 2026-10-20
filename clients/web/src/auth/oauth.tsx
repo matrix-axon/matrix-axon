@@ -211,6 +211,28 @@ export interface OAuthAuthProvider extends AuthProvider {
   discoverProviders(): Promise<void>
   clearToken(): void
   /**
+   * Refresh even when the access token is still inside its skew.
+   *
+   * Push registration calls this once before the first PUT. `'refreshed'`
+   * means a new access-token string came back. `'failed'` means there is no
+   * session, or the refresh did not yield a different token. This does not
+   * notify {@link onAccessTokenRefreshed}; the caller registers with the
+   * token it just received.
+   */
+  refreshNow(): Promise<'refreshed' | 'failed'>
+  /**
+   * The current access token without refreshing it. Sign-out reads this
+   * before the session is cleared so a registration DELETE can still present
+   * it. Not for ordinary requests.
+   */
+  peekToken(): string | null
+  /**
+   * Fires after a refresh that this registration did not itself request
+   * (`getToken` and a 401). Not after the initial sign-in, and not after
+   * {@link refreshNow}.
+   */
+  onAccessTokenRefreshed(listener: () => void): () => void
+  /**
    * Whether completing a sign-in happens somewhere other than this app.
    *
    * `false` in a browser, where `startSignIn` navigates the page and simply
@@ -452,6 +474,8 @@ export function createOAuthAuthProvider({
   )
   const lastSignInAt = signal<number | null>(null)
   let refreshInFlight: Promise<string | null> | null = null
+  let notifyRefreshListeners = false
+  const refreshListeners = new Set<() => void>()
   let lastAuthFailureRefreshAt = 0
 
   function persist(next: OAuthSession | null, mode = sessionMode.value): void {
@@ -576,7 +600,8 @@ export function createOAuthAuthProvider({
     )
   }
 
-  async function refreshAccessToken(): Promise<string | null> {
+  async function refreshAccessToken(notify: boolean): Promise<string | null> {
+    notifyRefreshListeners = notifyRefreshListeners || notify
     if (refreshInFlight !== null) {
       return refreshInFlight
     }
@@ -593,6 +618,15 @@ export function createOAuthAuthProvider({
           }),
         )
         persist({ ...next, provider: current.provider })
+        if (notifyRefreshListeners) {
+          for (const listener of [...refreshListeners]) {
+            try {
+              listener()
+            } catch {
+              // A listener must not fail the refresh that just succeeded.
+            }
+          }
+        }
         return next.accessToken
       } catch (error) {
         // Only a refusal ends the session. Not knowing is not a reason to throw
@@ -605,6 +639,7 @@ export function createOAuthAuthProvider({
         return null
       } finally {
         refreshInFlight = null
+        notifyRefreshListeners = false
       }
     })()
     return refreshInFlight
@@ -619,7 +654,7 @@ export function createOAuthAuthProvider({
       if (current.expiresAt - Date.now() > REFRESH_SKEW_MS) {
         return current.accessToken
       }
-      return refreshAccessToken()
+      return refreshAccessToken(true)
     },
     onAuthFailure() {
       // A `401` says this access token was not accepted; it does not say the
@@ -639,7 +674,25 @@ export function createOAuthAuthProvider({
         return
       }
       lastAuthFailureRefreshAt = now
-      void refreshAccessToken()
+      void refreshAccessToken(true)
+    },
+    async refreshNow() {
+      const current = session.value
+      if (current === null) {
+        return 'failed'
+      }
+      const previous = current.accessToken
+      const next = await refreshAccessToken(false)
+      return next !== null && next !== previous ? 'refreshed' : 'failed'
+    },
+    peekToken() {
+      return session.value?.accessToken ?? null
+    },
+    onAccessTokenRefreshed(listener) {
+      refreshListeners.add(listener)
+      return () => {
+        refreshListeners.delete(listener)
+      }
     },
     clearToken() {
       persist(null)

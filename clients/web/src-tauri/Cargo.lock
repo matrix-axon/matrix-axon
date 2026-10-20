@@ -231,6 +231,7 @@ dependencies = [
  "tauri-plugin-native-auth",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "tauri-plugin-remote-push",
  "tauri-plugin-single-instance",
  "tauri-plugin-websocket",
  "webkit2gtk",
@@ -4188,6 +4189,16 @@ dependencies = [
  "url",
  "windows 0.61.3",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-remote-push"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

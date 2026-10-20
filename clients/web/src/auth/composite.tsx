@@ -19,6 +19,23 @@ import {
 export interface CompositeAuthProvider extends AppAuthProvider {
   oauth: OAuthAuthProvider
   tokenPaste: TokenPasteProvider
+  /**
+   * Refresh the OAuth session even when its access token is still fresh.
+   * A pasted or management token has no refresh grant and answers
+   * `'unsupported'`.
+   */
+  refreshNow(): Promise<'refreshed' | 'unsupported' | 'failed'>
+  /** The bearer currently held, before {@link clearToken} drops it. */
+  peekToken(): string | null
+  /**
+   * Runs before the session is cleared. The argument is {@link peekToken}.
+   * A hook must not throw out of `clearToken`.
+   */
+  onBeforeSignOut(
+    hook: (token: string | null) => void | Promise<void>,
+  ): () => void
+  /** See {@link OAuthAuthProvider.onAccessTokenRefreshed}. */
+  onAccessTokenRefreshed(listener: () => void): () => void
 }
 
 export function createCompositeAuthProvider(
@@ -33,6 +50,7 @@ export function createCompositeAuthProvider(
     })
   const oauth = createOAuthAuthProvider({ ...options, persistence })
   const tokenPaste = createTokenPasteProvider(persistence)
+  const signOutHooks = new Set<(token: string | null) => void | Promise<void>>()
 
   function active(): AuthProvider {
     return oauth.signedIn.value ? oauth : tokenPaste
@@ -46,8 +64,41 @@ export function createCompositeAuthProvider(
       active().onAuthFailure()
     },
     clearToken() {
+      const token = provider.peekToken()
+      for (const hook of [...signOutHooks]) {
+        try {
+          const result = hook(token)
+          if (result instanceof Promise) {
+            void result.catch(() => {})
+          }
+        } catch {
+          // Sign-out still clears the session when a hook fails.
+        }
+      }
       oauth.clearToken()
       tokenPaste.clearToken()
+    },
+    refreshNow() {
+      if (!oauth.signedIn.value) {
+        return Promise.resolve('unsupported')
+      }
+      return oauth.refreshNow()
+    },
+    peekToken() {
+      if (oauth.signedIn.value) {
+        return oauth.peekToken()
+      }
+      const pasted = tokenPaste.getToken()
+      return typeof pasted === 'string' ? pasted : null
+    },
+    onBeforeSignOut(hook) {
+      signOutHooks.add(hook)
+      return () => {
+        signOutHooks.delete(hook)
+      }
+    },
+    onAccessTokenRefreshed(listener) {
+      return oauth.onAccessTokenRefreshed(listener)
     },
     signedIn: computed(() => oauth.signedIn.value || tokenPaste.signedIn.value),
     completeOAuthRedirect(url: URL): Promise<OAuthCallbackResult> {

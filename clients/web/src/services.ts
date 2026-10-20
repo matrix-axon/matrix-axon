@@ -11,6 +11,7 @@ import {
   timelineEvent,
   unreadCountsChange,
   verificationFrame,
+  type LiveFrame,
 } from './api/frames'
 import { openLiveSocket } from './api/ws'
 import { setPerfEnabled, setTelemetrySink } from './perf'
@@ -21,7 +22,13 @@ import {
   type Platform,
 } from './platform'
 import { markdownToPlainText } from './markdown/markdown'
-import { messageNotificationBody } from './platform/notifications'
+import {
+  messageNotificationBody,
+  subscribeNotificationPermission,
+  type NotificationPermissionState,
+} from './platform/notifications'
+import { deletePushRegistration, putPushRegistration } from './push/http'
+import { createPushRegistration } from './push/registration'
 import { readStoredServerUrl } from './server-url'
 import {
   createCompositeAuthProvider,
@@ -195,6 +202,14 @@ export interface AppServices {
    * working browser default there.
    */
   platform: Platform
+  /**
+   * Why the last remote-push registration failed, or `null` when the last
+   * attempt succeeded or this platform does not register.
+   *
+   * A failure here does not turn message notifications off. That checkbox is
+   * also the local toast.
+   */
+  remotePushError: Signal<string | null>
 }
 
 /**
@@ -342,6 +357,22 @@ export function connectLiveThreadUnread(
 const NOTIFIED_EVENT_LIMIT = 2000
 
 /**
+ * Event ids already handled, including ones a delivered remote alert named.
+ * Survives a cold start so the reconnect slack does not toast them again.
+ */
+export const NOTIFICATION_HANDLED_KEY = 'axon.notification-handled'
+
+/** How long the delivered-notification read may block toasts. */
+const RESUME_READ_TIMEOUT_MS = 5_000
+
+/** A reader for alerts the OS is still showing, and the durable handled set. */
+export interface NotificationResume {
+  storage?: Storage
+  readDeliveredEventIds?: () => Promise<readonly string[]>
+  onVisible?: (listener: () => void) => () => void
+}
+
+/**
  * How long an event and its count frame may wait for each other. Longer than
  * the gap between those two frames on a live socket, and short enough that a
  * muted room cannot keep a message around for a later, unrelated rise.
@@ -432,6 +463,7 @@ export function connectMessageNotifications(
   enabled: () => boolean = () => false,
   now: () => number = () => Date.now(),
   isFocused: () => boolean = () => document.hasFocus(),
+  resume?: NotificationResume,
 ): () => void {
   let liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
   // Set when the socket drops and comes back, on this client's clock.
@@ -444,6 +476,74 @@ export function connectMessageNotifications(
   const pending = new Map<string, HeldNotice[]>()
   const owed = new Map<string, number>()
   let disposed = false
+  loadHandledIds(resume?.storage, seen)
+
+  // Frames wait only while a delivered-notification read is actually in
+  // flight. With no reader, posts stay synchronous, which is what the
+  // existing session tests rely on.
+  let holding = false
+  let resumeEpoch = 0
+  let resumeTimer: ReturnType<typeof setTimeout> | null = null
+  const queued: LiveFrame[] = []
+
+  const handleFrame = (frame: LiveFrame) => {
+    const counts = unreadCountsChange(frame)
+    if (counts !== null) {
+      onCounts(frame.accountId, counts)
+      return
+    }
+    const event = timelineEvent(frame)
+    if (event !== null) {
+      onEvent(event)
+    }
+  }
+
+  const finishResume = (epoch: number, ids: readonly string[]) => {
+    if (disposed || epoch !== resumeEpoch) {
+      return
+    }
+    if (resumeTimer !== null) {
+      clearTimeout(resumeTimer)
+      resumeTimer = null
+    }
+    for (const id of ids) {
+      if (id !== '') {
+        remember(id)
+      }
+    }
+    holding = false
+    const batch = queued.splice(0)
+    for (const frame of batch) {
+      handleFrame(frame)
+    }
+  }
+
+  const beginResumeRead = () => {
+    const read = resume?.readDeliveredEventIds
+    if (read === undefined || disposed || holding) {
+      return
+    }
+    holding = true
+    const epoch = ++resumeEpoch
+    let settled = false
+    const finishOnce = (ids: readonly string[]) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      finishResume(epoch, ids)
+    }
+    resumeTimer = setTimeout(() => finishOnce([]), RESUME_READ_TIMEOUT_MS)
+    void read().then(
+      (ids) => finishOnce(ids),
+      () => finishOnce([]),
+    )
+  }
+
+  if (resume?.readDeliveredEventIds !== undefined) {
+    beginResumeRead()
+  }
+  const stopVisible = resume?.onVisible?.(() => beginResumeRead()) ?? (() => {})
 
   const disposeReconnects = effect(() => {
     if (live.reconnects.value === 0) {
@@ -462,13 +562,14 @@ export function connectMessageNotifications(
       return
     }
     seen.add(eventId)
-    if (seen.size <= NOTIFIED_EVENT_LIMIT) {
-      return
-    }
-    const oldest = seen.values().next().value
-    if (oldest !== undefined) {
+    while (seen.size > NOTIFIED_EVENT_LIMIT) {
+      const oldest = seen.values().next().value
+      if (oldest === undefined) {
+        break
+      }
       seen.delete(oldest)
     }
+    writeHandledIds(resume?.storage, seen)
   }
 
   const roomIsFocused = (accountId: string, roomId: string) =>
@@ -641,20 +742,78 @@ export function connectMessageNotifications(
   }
 
   const unsubscribe = live.subscribe((frame) => {
-    const counts = unreadCountsChange(frame)
-    if (counts !== null) {
-      onCounts(frame.accountId, counts)
+    if (holding) {
+      queued.push(frame)
       return
     }
-    const event = timelineEvent(frame)
-    if (event !== null) {
-      onEvent(event)
-    }
+    handleFrame(frame)
   })
   return () => {
     disposed = true
+    if (resumeTimer !== null) {
+      clearTimeout(resumeTimer)
+    }
+    stopVisible()
     unsubscribe()
     disposeReconnects()
+  }
+}
+
+function loadHandledIds(storage: Storage | undefined, seen: Set<string>): void {
+  if (storage === undefined) {
+    return
+  }
+  let raw: string | null
+  try {
+    raw = storage.getItem(NOTIFICATION_HANDLED_KEY)
+  } catch {
+    return
+  }
+  if (raw === null) {
+    return
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw) as unknown
+  } catch {
+    return
+  }
+  if (!Array.isArray(parsed)) {
+    return
+  }
+  for (const id of parsed.slice(-NOTIFIED_EVENT_LIMIT)) {
+    if (typeof id === 'string' && id !== '') {
+      seen.add(id)
+    }
+  }
+}
+
+function writeHandledIds(
+  storage: Storage | undefined,
+  seen: Set<string>,
+): void {
+  if (storage === undefined) {
+    return
+  }
+  try {
+    storage.setItem(
+      NOTIFICATION_HANDLED_KEY,
+      JSON.stringify([...seen].slice(-NOTIFIED_EVENT_LIMIT)),
+    )
+  } catch {
+    // A full store must not swallow the toast.
+  }
+}
+
+function subscribeDocumentVisible(listener: () => void): () => void {
+  const onChange = () => {
+    if (document.visibilityState === 'visible') {
+      listener()
+    }
+  }
+  document.addEventListener('visibilitychange', onChange)
+  return () => {
+    document.removeEventListener('visibilitychange', onChange)
   }
 }
 
@@ -1580,6 +1739,55 @@ export function createServices(
   connectFavouriteSession(auth, favourites)
   connectSpaceOrderSession(auth, spaceOrder)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
+  const remotePushError = signal<string | null>(null)
+  const remotePush = platform.remotePush ?? null
+  if (remotePush !== null) {
+    let permissionIsGranted = false
+    const registration = createPushRegistration({
+      remote: remotePush,
+      signedIn: () => auth.signedIn.value,
+      enabled: () => settings.messageNotifications.value,
+      permissionGranted: () => permissionIsGranted,
+      disclosure: () => settings.pushDisclosure.value,
+      refreshSession: () => auth.refreshNow(),
+      onAccessTokenRefreshed: (listener) =>
+        auth.onAccessTokenRefreshed(listener),
+      accessToken: () => auth.getToken(),
+      onBeforeSignOut: (hook) => auth.onBeforeSignOut(hook),
+      put: (token, body) =>
+        putPushRegistration(platform.fetch, baseUrl, token, body),
+      remove: (token, id) =>
+        deletePushRegistration(platform.fetch, baseUrl, token, id),
+      storage,
+      scheduleRetry: (run) => {
+        setTimeout(run, 30_000)
+      },
+      onRemoteFailure: (message) => {
+        remotePushError.value = message
+      },
+    })
+    const permissionKnown = signal(false)
+    const applyPermission = (state: NotificationPermissionState) => {
+      permissionIsGranted = state === 'granted'
+      permissionKnown.value = true
+    }
+    void platform.notificationPermission().then(applyPermission, () => {
+      permissionIsGranted = false
+      permissionKnown.value = true
+    })
+    subscribeNotificationPermission(applyPermission)
+    effect(() => {
+      const signedIn = auth.signedIn.value
+      const enabled = settings.messageNotifications.value
+      // Read so a disclosure change re-runs this effect. The registration
+      // reads the current value itself when it PUTs.
+      void settings.pushDisclosure.value
+      if (signedIn && enabled && !permissionKnown.value) {
+        return
+      }
+      void registration.reconcile()
+    })
+  }
   connectMessageNotifications(
     live,
     rooms,
@@ -1587,6 +1795,15 @@ export function createServices(
     activeRoom,
     platform,
     () => settings.messageNotifications.value,
+    undefined,
+    undefined,
+    remotePush === null
+      ? undefined
+      : {
+          storage,
+          readDeliveredEventIds: () => remotePush.deliveredEventIds(),
+          onVisible: subscribeDocumentVisible,
+        },
   )
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
@@ -1638,6 +1855,7 @@ export function createServices(
     activeThread,
     composerFocus,
     platform,
+    remotePushError,
   }
 }
 

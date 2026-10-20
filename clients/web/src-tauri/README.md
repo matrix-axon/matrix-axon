@@ -290,6 +290,24 @@ pointer back here. `package-ios.sh` therefore checks the exported `.ipa` and
 refuses to install or upload a build that lacks the entitlement, or the
 `org.matrixaxon.axon` URL scheme that browser sign-in returns through.
 
+### Remote push is a visible alert, not a background wake
+
+The packaged iOS, iPadOS, and Android app registers a device token when message notifications are on (issue #605, ADR 0113).
+iOS and iPadOS are one Apple build.
+The App ID needs the Push Notifications capability.
+`Entitlements.ios.plist` carries `aps-environment` as `development`, which is the debugging profile.
+`scripts/package-ios.sh` rewrites that value from `--export-method`: `debugging` stays `development`, and the client reports `sandbox`; `release-testing` and `app-store-connect` become `production`.
+The app does not set `UIBackgroundModes` or `remote-notification`.
+A suspended app shows the system alert.
+It does not launch to run code, and a quit Mac app is not woken.
+Android notifications stay on the `messages-v2` channel.
+FCM needs `clients/web/src-tauri/google-services.json`, which is gitignored.
+`scripts/package-android.sh` copies it into the generated project and applies the Google services plugin only when the file is present.
+Without it the Android build still succeeds, and token registration fails until the file is added.
+The plugin pin is `com.google.gms:google-services:4.4.2` beside Android Gradle Plugin 9.3.1, and that pin may fail to resolve.
+A real banner still needs a device token from a build signed for the configured bundle id or package name.
+The server test that used a fake token stopped at Apple's `BadDeviceToken`.
+
 ### The signing team is not yours
 
 `bundle.iOS.developmentTeam` in `tauri.conf.json` is one developer's Apple
