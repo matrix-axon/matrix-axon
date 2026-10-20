@@ -84,3 +84,17 @@ jobs:
           # $PACKAGES is deliberately unquoted: it is a space-separated list.
           # shellcheck disable=SC2086
           scripts/postgres-tests.sh $PACKAGES
+
+      - name: Notify axon-developer room of result
+        if: ${{ always() }}
+        # A failed notification must not fail the run; `smoke.yml`'s `notify`
+        # lane is the job that exists to notice a broken webhook. The message
+        # template says "Smoke Test Run"; `JOB_LABEL` names which job it is.
+        continue-on-error: true
+        env:
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+          SMOKE_LANE: postgres
+          JOB_LABEL: postgres-tests
+          STATUS: ${{ job.status }}
+        run: ./scripts/notify-smoke-result.sh
