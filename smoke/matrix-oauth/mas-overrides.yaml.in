@@ -7,7 +7,7 @@ database:
 
 matrix:
   kind: synapse
-  homeserver: localhost
+  homeserver: "@SYNAPSE_SERVER_NAME@"
   endpoint: http://synapse:8008
   secret: axon-matrix-oauth-smoke-shared-secret
 

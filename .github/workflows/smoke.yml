@@ -13,7 +13,8 @@ name: smoke
 # stack — costs more than it saves at this size.
 #
 # `matrix-oauth` independently runs the four ADR 0097 API and interoperability
-# lanes on the same post-merge and nightly events. It stays in its own job so
+# lanes, and the ADR 0117 browser sign-in lane, on the same post-merge and
+# nightly events. It stays in its own job so
 # its secret-safe no-artifact policy and failure signal cannot be confused with
 # the ordinary smoke harness. A manual dispatch can run it on its own, whole
 # (`matrix-oauth-all`) or one lane at a time, to chase a flake without waiting
@@ -48,6 +49,7 @@ on:
           - matrix-oauth-api
           - matrix-oauth-acquire
           - matrix-oauth-grant
+          - matrix-oauth-browser
           - matrix-oauth-unsupported
 
 permissions:

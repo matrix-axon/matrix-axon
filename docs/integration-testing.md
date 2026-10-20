@@ -76,9 +76,9 @@ It's slower than the lint/test lane because it pulls the Synapse and Postgres im
 
 ## Matrix OAuth QR interoperability (ADR 0097)
 
-The same manual integration workflow exposes four pinned Synapse + MAS lanes: `matrix-oauth-api`, `matrix-oauth-acquire`, `matrix-oauth-grant`, and `matrix-oauth-unsupported`.
+The same manual integration workflow exposes five pinned Synapse + MAS lanes: `matrix-oauth-api`, `matrix-oauth-acquire`, `matrix-oauth-grant`, `matrix-oauth-browser`, and `matrix-oauth-unsupported`.
 Choose `matrix-oauth-all` to run the complete set, or `all` to run both the re-decryption suite above and every Matrix OAuth lane.
-The smoke workflow also runs all four Matrix OAuth lanes in a separate job after every push to `main` and on its nightly schedule.
+The smoke workflow also runs all five Matrix OAuth lanes in a separate job after every push to `main` and on its nightly schedule.
 It can be dispatched by hand with a `matrix-oauth-*` lane as well; the two entry points run the same job, but only the smoke workflow posts the result to the axon-developer room, so use the integration workflow for a quiet ad hoc run.
 
 Locally, run a single lane with:
@@ -87,11 +87,13 @@ Locally, run a single lane with:
 scripts/matrix-oauth-test.sh api
 scripts/matrix-oauth-test.sh acquire
 scripts/matrix-oauth-test.sh grant
+scripts/matrix-oauth-test.sh browser
 scripts/matrix-oauth-test.sh unsupported
 ```
 
 The acquisition lane proves Axon becomes cross-signed, receives encryption secrets, decrypts pre-login history, and restores and refreshes its OAuth session after a restart beyond the test token lifetime.
 The separate grant lane proves a trusted Axon account can authorize a fresh SDK device only after explicit authorization-server approval, after which that device is cross-signed and decrypts history using the transferred backup secret.
+The browser lane (ADR 0117) proves that a user who approves on the authorization server's page ends with an active account that is not yet verified, that the recovery key then verifies it and decrypts pre-login history, that the session refreshes after a restart beyond the test token lifetime, and that a rejection ends as `authorization_denied`.
 The API and unsupported lanes cover failure, rejection, cancellation, timeout, account scoping, capability gating, and secret-safe diagnostics.
 
 The fixture writes runtime protocol material only to memory or a throwaway run directory that is removed by its cleanup trap.

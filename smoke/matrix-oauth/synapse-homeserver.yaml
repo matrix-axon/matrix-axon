@@ -1,6 +1,7 @@
 # Dedicated Synapse configuration for the ADR 0097 interoperability lanes.
 # It is localhost-only and uses a throwaway SQLite database under the run dir.
-server_name: "localhost"
+# `localhost:<published port>`, set by the launcher; see there for why.
+server_name: "@SYNAPSE_SERVER_NAME@"
 public_baseurl: "@SYNAPSE_PUBLIC_BASE@"
 pid_file: /data/homeserver.pid
 signing_key_path: /data/localhost.signing.key

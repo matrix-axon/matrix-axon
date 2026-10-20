@@ -7,9 +7,9 @@ set -euo pipefail
 
 mode="${1:-}"
 case "$mode" in
-  api|acquire|grant|unsupported) ;;
+  api|acquire|grant|browser|unsupported) ;;
   *)
-    echo "usage: scripts/matrix-oauth-test.sh <api|acquire|grant|unsupported>" >&2
+    echo "usage: scripts/matrix-oauth-test.sh <api|acquire|grant|browser|unsupported>" >&2
     exit 2
     ;;
 esac
@@ -59,6 +59,11 @@ docker run --rm --user 0 \
   -v "$mas_config_volume:/run/matrix-oauth" \
   "$mas_image" config generate --output /run/matrix-oauth/generated.yaml
 
+# Browser sign-in (ADR 0117) finds the homeserver from the user ID alone, so
+# the server name must lead to the published port: a bare `localhost` would
+# be looked up on the default port, where nothing listens.
+synapse_server_name="localhost:$MATRIX_OAUTH_SYNAPSE_PORT"
+
 device_code_grant_enabled=true
 if [ "$mode" = unsupported ]; then
   device_code_grant_enabled=false
@@ -67,9 +72,11 @@ fi
 sed \
   -e "s|@MAS_PUBLIC_BASE@|http://127.0.0.1:$MATRIX_OAUTH_MAS_PORT/|g" \
   -e "s|@DEVICE_CODE_GRANT_ENABLED@|$device_code_grant_enabled|g" \
+  -e "s|@SYNAPSE_SERVER_NAME@|$synapse_server_name|g" \
   "$fixture_dir/mas-overrides.yaml.in" >"$run_dir/mas-overrides.yaml"
 sed \
   -e "s|@SYNAPSE_PUBLIC_BASE@|http://127.0.0.1:$MATRIX_OAUTH_SYNAPSE_PORT/|g" \
+  -e "s|@SYNAPSE_SERVER_NAME@|$synapse_server_name|g" \
   "$fixture_dir/synapse-homeserver.yaml" >"$run_dir/synapse-homeserver.yaml"
 cp "$fixture_dir/synapse-log.config" "$run_dir/synapse-log.config"
 mkdir -p "$run_dir/synapse"
@@ -113,7 +120,7 @@ export MATRIX_OAUTH_HOMESERVER="http://127.0.0.1:$MATRIX_OAUTH_SYNAPSE_PORT"
 export MATRIX_OAUTH_MAS_BASE="http://127.0.0.1:$MATRIX_OAUTH_MAS_PORT"
 export MATRIX_OAUTH_DATABASE_URL="postgres://axon:axon@127.0.0.1:$MATRIX_OAUTH_POSTGRES_PORT/axon"
 export MATRIX_OAUTH_MATRIX_PASSWORD="$matrix_password"
-export MATRIX_OAUTH_USER_ID='@alice:localhost'
+export MATRIX_OAUTH_USER_ID="@alice:$synapse_server_name"
 export MATRIX_OAUTH_TRUSTED_DEVICE_ID="$trusted_device_id"
 export MATRIX_OAUTH_HARNESS_RUN_DIR="$run_dir/harness"
 

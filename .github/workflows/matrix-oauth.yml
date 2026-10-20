@@ -54,8 +54,9 @@ jobs:
             matrix-oauth-api) lanes=(api) ;;
             matrix-oauth-acquire) lanes=(acquire) ;;
             matrix-oauth-grant) lanes=(grant) ;;
+            matrix-oauth-browser) lanes=(browser) ;;
             matrix-oauth-unsupported) lanes=(unsupported) ;;
-            matrix-oauth-all|all) lanes=(api acquire grant unsupported) ;;
+            matrix-oauth-all|all) lanes=(api acquire grant browser unsupported) ;;
             *) echo "unknown Matrix OAuth suite" >&2; exit 2 ;;
           esac
           failed=0
