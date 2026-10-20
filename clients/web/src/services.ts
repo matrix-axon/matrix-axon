@@ -355,6 +355,7 @@ export function connectLiveThreadUnread(
 
 /** How many event ids one session remembers, so a replay cannot toast twice. */
 const NOTIFIED_EVENT_LIMIT = 2000
+const HANDLED_FLUSH_MS = 1_000
 
 /**
  * Event ids already handled, including ones a delivered remote alert named.
@@ -511,6 +512,7 @@ export function connectMessageNotifications(
         remember(id)
       }
     }
+    flushHandled()
     holding = false
     const batch = queued.splice(0)
     for (const frame of batch) {
@@ -557,6 +559,32 @@ export function connectMessageNotifications(
     owed.clear()
   })
 
+  let handledFlush: ReturnType<typeof setTimeout> | null = null
+  const flushHandled = () => {
+    if (handledFlush !== null) {
+      clearTimeout(handledFlush)
+      handledFlush = null
+    }
+    if (!enabled()) {
+      return
+    }
+    writeHandledIds(resume?.storage, seen)
+  }
+  const scheduleHandledFlush = () => {
+    if (resume?.storage === undefined || !enabled() || handledFlush !== null) {
+      return
+    }
+    handledFlush = setTimeout(flushHandled, HANDLED_FLUSH_MS)
+  }
+  const onHide = () => {
+    if (document.visibilityState === 'hidden') {
+      flushHandled()
+    }
+  }
+  if (resume?.storage !== undefined) {
+    document.addEventListener('visibilitychange', onHide)
+  }
+
   const remember = (eventId: string) => {
     if (seen.has(eventId)) {
       return
@@ -569,7 +597,7 @@ export function connectMessageNotifications(
       }
       seen.delete(oldest)
     }
-    writeHandledIds(resume?.storage, seen)
+    scheduleHandledFlush()
   }
 
   const roomIsFocused = (accountId: string, roomId: string) =>
@@ -753,6 +781,10 @@ export function connectMessageNotifications(
     if (resumeTimer !== null) {
       clearTimeout(resumeTimer)
     }
+    document.removeEventListener('visibilitychange', onHide)
+    // One write for ids still waiting on the debounce. The live path must
+    // not serialize the set on every frame; teardown still has to keep them.
+    flushHandled()
     stopVisible()
     unsubscribe()
     disposeReconnects()
@@ -1742,18 +1774,19 @@ export function createServices(
   const remotePushError = signal<string | null>(null)
   const remotePush = platform.remotePush ?? null
   if (remotePush !== null) {
-    let permissionIsGranted = false
+    const permissionIsGranted = signal(false)
     const registration = createPushRegistration({
       remote: remotePush,
       signedIn: () => auth.signedIn.value,
       enabled: () => settings.messageNotifications.value,
-      permissionGranted: () => permissionIsGranted,
+      permissionGranted: () => permissionIsGranted.value,
       disclosure: () => settings.pushDisclosure.value,
       refreshSession: () => auth.refreshNow(),
       onAccessTokenRefreshed: (listener) =>
         auth.onAccessTokenRefreshed(listener),
       accessToken: () => auth.getToken(),
       onBeforeSignOut: (hook) => auth.onBeforeSignOut(hook),
+      finishSignOut: () => auth.finishSignOut(),
       put: (token, body) =>
         putPushRegistration(platform.fetch, baseUrl, token, body),
       remove: (token, id) =>
@@ -1768,11 +1801,11 @@ export function createServices(
     })
     const permissionKnown = signal(false)
     const applyPermission = (state: NotificationPermissionState) => {
-      permissionIsGranted = state === 'granted'
+      permissionIsGranted.value = state === 'granted'
       permissionKnown.value = true
     }
     void platform.notificationPermission().then(applyPermission, () => {
-      permissionIsGranted = false
+      permissionIsGranted.value = false
       permissionKnown.value = true
     })
     subscribeNotificationPermission(applyPermission)
@@ -1782,9 +1815,14 @@ export function createServices(
       // Read so a disclosure change re-runs this effect. The registration
       // reads the current value itself when it PUTs.
       void settings.pushDisclosure.value
-      if (signedIn && enabled && !permissionKnown.value) {
+      const known = permissionKnown.value
+      // A grant or a revocation has to re-run reconcile. `permissionKnown`
+      // stays true after the first read, so the granted bit is its own signal.
+      const granted = permissionIsGranted.value
+      if (signedIn && enabled && !known) {
         return
       }
+      void granted
       void registration.reconcile()
     })
   }

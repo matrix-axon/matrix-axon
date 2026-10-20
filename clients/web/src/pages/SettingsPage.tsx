@@ -34,6 +34,7 @@ import { browserReloadEnvironment, reloadNow } from '../reload'
 import { disconnectFromServer } from '../server-url'
 import { LinkedSignIns } from './LinkedSignIns'
 import { formatTelemetry } from '../stores/telemetry'
+import type { ApiClient } from '../api/client'
 import { resolveApiBaseUrl, useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
 import type {
@@ -110,6 +111,7 @@ function SettingsPageContents() {
   const { auth, settings, rooms, deviceState, platform } = useServices()
   const [markingRead, setMarkingRead] = useState(false)
   const [protocolMessage, setProtocolMessage] = useState<string | null>(null)
+  const [signOutFailed, setSignOutFailed] = useState(false)
 
   const markAllRead = async () => {
     setMarkingRead(true)
@@ -322,9 +324,25 @@ function SettingsPageContents() {
       <DebugSettings />
       <section class="panel">
         <h2>Session</h2>
-        <button type="button" class="danger" onClick={() => auth.clearToken()}>
+        <button
+          type="button"
+          class="danger"
+          onClick={() => {
+            setSignOutFailed(false)
+            void Promise.resolve(auth.clearToken()).then((cleared) => {
+              if (cleared === false) {
+                setSignOutFailed(true)
+              }
+            })
+          }}
+        >
           Sign out
         </button>
+        {signOutFailed && (
+          <p class="error" role="alert">
+            Could not finish signing out. Try again.
+          </p>
+        )}
         <p class="muted">
           Clear this browser's Axon access and refresh tokens, along with
           everything cached for the session: the room list, message history, and
@@ -876,6 +894,33 @@ function pushDisclosureNote(disclosure: PushDisclosure): string {
   return 'A banner says "New activity" and does not name the room.'
 }
 
+/**
+ * One status read per API client. `GET /v1/status` also computes backfill
+ * progress, and opening Settings again must not start another of those.
+ * A failure is cached as "not missing" so a hung call is not retried.
+ */
+const pushKeyMissingByApi = new WeakMap<ApiClient, Promise<boolean>>()
+
+function loadPushKeyMissing(
+  api: ApiClient,
+  provider: 'apns' | 'fcm',
+): Promise<boolean> {
+  const existing = pushKeyMissingByApi.get(api)
+  if (existing !== undefined) {
+    return existing
+  }
+  const pending = api.GET('/v1/status').then(
+    ({ data }) => {
+      const push = data?.data.push
+      const loaded = provider === 'apns' ? push?.apns : push?.fcm
+      return loaded === false
+    },
+    () => false,
+  )
+  pushKeyMissingByApi.set(api, pending)
+  return pending
+}
+
 function MessageNotificationSettings() {
   const { api, platform, remotePushError, settings } = useServices()
   const enabled = settings.messageNotifications.value
@@ -890,19 +935,11 @@ function MessageNotificationSettings() {
       return
     }
     let cancelled = false
-    void api.GET('/v1/status').then(
-      ({ data }) => {
-        if (cancelled || data === undefined) {
-          return
-        }
-        const push = data.data.push
-        const loaded = remote.provider === 'apns' ? push?.apns : push?.fcm
-        setPushKeyMissing(loaded === false)
-      },
-      () => {
-        // A status failure is not a reason to skip registration.
-      },
-    )
+    void loadPushKeyMissing(api, remote.provider).then((missing) => {
+      if (!cancelled) {
+        setPushKeyMissing(missing)
+      }
+    })
     return () => {
       cancelled = true
     }
@@ -1387,8 +1424,8 @@ function ServerSettings() {
       </button>
       {failed && (
         <p class="error" role="alert">
-          Could not remove your sign-in from the Keychain, so the server was not
-          changed. Try again.
+          Could not finish signing out, so the server was not changed. Try
+          again.
         </p>
       )}
       <p class="muted">

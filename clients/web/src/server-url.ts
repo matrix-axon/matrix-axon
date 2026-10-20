@@ -284,17 +284,23 @@ export function clearStoredServerUrl(storage: Storage): void {
  * even on a second try: the token would otherwise survive into the next
  * document and go to whichever server is chosen next.
  */
-export function disconnectFromServer(
+export async function disconnectFromServer(
   storage: Storage = window.localStorage,
-  clearToken: () => void = () => {},
+  clearToken: () => void | Promise<boolean | void> = () => {},
   reload: (url: string) => void = (url) => window.location.assign(url),
   sessionStorage: Storage = window.sessionStorage,
   secureStorage: SecureStorage | null = null,
 ): Promise<boolean> {
+  // The push registration has to be deleted by the session that owns it
+  // before this document reloads. A hook that could not do that answers
+  // `false` and the server stays.
+  const cleared = await Promise.resolve(clearToken())
+  if (cleared === false) {
+    return false
+  }
   // In-memory first: the auth provider holds signals that outlive a storage
   // write, so clearing only the keys leaves a signed-in shell pointing at a
   // server it has no credential for.
-  clearToken()
   // With a Keychain the server URL goes last, and only once the Keychain has
   // let go of the credentials: the URL is what ties a credential to the server
   // that issued it, so it must outlive any credential we could not delete.

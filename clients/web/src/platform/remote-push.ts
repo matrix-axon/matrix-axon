@@ -30,6 +30,46 @@ export function remotePushFor(shellPlatform: string): RemotePush | null {
   return null
 }
 
+const SEEN_WAKES_KEY = 'axon.push.seen-wakes'
+const SEEN_WAKES_LIMIT = 50
+
+export function loadSeenWakes(storage: Storage): string[] {
+  try {
+    const raw = storage.getItem(SEEN_WAKES_KEY)
+    if (raw === null) {
+      return []
+    }
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed.filter(
+      (id): id is string => typeof id === 'string' && id !== '',
+    )
+  } catch {
+    return []
+  }
+}
+
+export function rememberSeenWake(
+  storage: Storage,
+  seen: string[],
+  eventId: string,
+): void {
+  if (seen.includes(eventId)) {
+    return
+  }
+  seen.push(eventId)
+  if (seen.length > SEEN_WAKES_LIMIT) {
+    seen.shift()
+  }
+  try {
+    storage.setItem(SEEN_WAKES_KEY, JSON.stringify(seen))
+  } catch {
+    // A full store must not drop the navigation.
+  }
+}
+
 function createRemotePush(provider: RemotePushProvider): RemotePush {
   return {
     provider,
@@ -64,7 +104,8 @@ function createRemotePush(provider: RemotePushProvider): RemotePush {
       if (!inTauri()) {
         return () => {}
       }
-      const seen: string[] = []
+      const storage = wakeStorage()
+      const seen = loadSeenWakes(storage)
       let stopped = false
       let unregister: (() => void) | null = null
       const take = (payload: unknown) => {
@@ -78,10 +119,10 @@ function createRemotePush(provider: RemotePushProvider): RemotePush {
         if (seen.includes(click.eventId)) {
           return
         }
-        seen.push(click.eventId)
-        if (seen.length > 50) {
-          seen.shift()
-        }
+        // Record the id before the handler. A server change reloads the
+        // document, and the native side still has this wake until
+        // `pending_wake` is read. The next document must not open it again.
+        rememberSeenWake(storage, seen, click.eventId)
         handler(click)
       }
       void (async () => {
@@ -124,6 +165,38 @@ function createRemotePush(provider: RemotePushProvider): RemotePush {
           threadRootId: message.threadRootId,
         },
       })
+    },
+  }
+}
+
+function wakeStorage(): Storage {
+  try {
+    return sessionStorage
+  } catch {
+    return emptyStorage()
+  }
+}
+
+function emptyStorage(): Storage {
+  const values = new Map<string, string>()
+  return {
+    get length() {
+      return values.size
+    },
+    clear() {
+      values.clear()
+    },
+    getItem(key: string) {
+      return values.get(key) ?? null
+    },
+    key(index: number) {
+      return [...values.keys()][index] ?? null
+    },
+    removeItem(key: string) {
+      values.delete(key)
+    },
+    setItem(key: string, value: string) {
+      values.set(key, value)
     },
   }
 }

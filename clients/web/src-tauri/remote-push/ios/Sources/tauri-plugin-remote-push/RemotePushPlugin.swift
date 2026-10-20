@@ -246,6 +246,8 @@ class RemotePushPlugin: Plugin, UNUserNotificationCenterDelegate {
   }
 
   private func emit(_ wake: WakePayload) {
+    // Kept until `pendingWake` is read, including after a document reload.
+    // The page records the event id for this webview session and ignores a repeat.
     pendingWake = wake
     try? trigger("wake", data: wake)
   }

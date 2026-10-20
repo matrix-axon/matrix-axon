@@ -29,11 +29,16 @@ export interface CompositeAuthProvider extends AppAuthProvider {
   peekToken(): string | null
   /**
    * Runs before the session is cleared. The argument is {@link peekToken}.
-   * A hook must not throw out of `clearToken`.
+   * `clearToken` waits for the hook. A rejection leaves the session in place.
    */
   onBeforeSignOut(
     hook: (token: string | null) => void | Promise<void>,
   ): () => void
+  /**
+   * Drop the local session without running sign-out hooks. A push delete that
+   * succeeds on a later attempt uses this so it does not DELETE again.
+   */
+  finishSignOut(): void
   /** See {@link OAuthAuthProvider.onAccessTokenRefreshed}. */
   onAccessTokenRefreshed(listener: () => void): () => void
 }
@@ -65,16 +70,30 @@ export function createCompositeAuthProvider(
     },
     clearToken() {
       const token = provider.peekToken()
+      const waits: Promise<void>[] = []
       for (const hook of [...signOutHooks]) {
         try {
           const result = hook(token)
           if (result instanceof Promise) {
-            void result.catch(() => {})
+            waits.push(result)
           }
-        } catch {
-          // Sign-out still clears the session when a hook fails.
+        } catch (error) {
+          waits.push(Promise.reject(error))
         }
       }
+      if (waits.length === 0) {
+        provider.finishSignOut()
+        return
+      }
+      return Promise.all(waits).then(
+        () => {
+          provider.finishSignOut()
+          return true
+        },
+        () => false,
+      )
+    },
+    finishSignOut() {
       oauth.clearToken()
       tokenPaste.clearToken()
     },

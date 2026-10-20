@@ -49,6 +49,7 @@ function harness(options?: {
   let refreshCount = 0
   let putFailures = 0
   let removeError: Error | null = null
+  let finishedSignOuts = 0
 
   const remote =
     options && 'remote' in options
@@ -86,6 +87,10 @@ function harness(options?: {
     onBeforeSignOut: (hook) => {
       signOutHook = hook
       return () => {}
+    },
+    finishSignOut: () => {
+      finishedSignOuts += 1
+      signedIn = false
     },
     put: (token, body) => {
       puts.push({ token, body })
@@ -152,6 +157,7 @@ function harness(options?: {
       }
     },
     signOut: (token: string | null) => signOutHook(token),
+    finishedSignOuts: () => finishedSignOuts,
     enabled: () => enabled,
   }
 }
@@ -169,13 +175,13 @@ describe('isPushSessionRefreshRequired', () => {
 })
 
 describe('createPushRegistration', () => {
-  it('refreshes once before the first PUT and registers with the new access token', async () => {
+  it('registers with the current access token and does not refresh first', async () => {
     const push = harness()
     await push.registration.reconcile()
-    expect(push.refreshCount()).toBe(1)
+    expect(push.refreshCount()).toBe(0)
     expect(push.puts).toEqual([
       {
-        token: 'access-2',
+        token: 'access-1',
         body: {
           provider: 'apns',
           token: 'device-token',
@@ -195,7 +201,7 @@ describe('createPushRegistration', () => {
     push.setRefreshOutcome('unsupported')
     push.setAccess('pasted-token')
     await push.registration.reconcile()
-    expect(push.refreshCount()).toBe(1)
+    expect(push.refreshCount()).toBe(0)
     expect(push.puts).toEqual([
       {
         token: 'pasted-token',
@@ -209,21 +215,24 @@ describe('createPushRegistration', () => {
     ])
   })
 
-  it('does not PUT when the refresh fails', async () => {
+  it('does not PUT again when the refresh the server asked for fails', async () => {
     const push = harness()
+    push.failPuts(1)
     push.setRefreshOutcome('failed')
     await push.registration.reconcile()
-    expect(push.puts).toEqual([])
+    expect(push.puts).toHaveLength(1)
+    expect(push.puts[0]?.token).toBe('access-1')
+    expect(push.refreshCount()).toBe(1)
     expect(push.storage.getItem(PUSH_REGISTRATION_KEY)).toBeNull()
     expect(push.failures.at(-1)).toMatch(/refresh the sign-in/)
   })
 
-  it('refreshes again when the server asks, then PUTs with the newer token', async () => {
+  it('refreshes when the server asks, then PUTs with the newer token', async () => {
     const push = harness()
     push.failPuts(1)
     await push.registration.reconcile()
-    expect(push.refreshCount()).toBe(2)
-    expect(push.puts.map((put) => put.token)).toEqual(['access-2', 'access-3'])
+    expect(push.refreshCount()).toBe(1)
+    expect(push.puts.map((put) => put.token)).toEqual(['access-1', 'access-2'])
     expect(JSON.parse(push.storage.getItem(PUSH_REGISTRATION_KEY)!)).toEqual({
       id: REG_ID,
     })
@@ -233,7 +242,7 @@ describe('createPushRegistration', () => {
     const push = harness()
     push.failPuts(2)
     await push.registration.reconcile()
-    expect(push.refreshCount()).toBe(2)
+    expect(push.refreshCount()).toBe(1)
     expect(push.puts).toHaveLength(2)
     expect(push.storage.getItem(PUSH_REGISTRATION_KEY)).toBeNull()
     expect(push.failures.at(-1)).toMatch(/could not register/)
@@ -279,7 +288,7 @@ describe('createPushRegistration', () => {
     await push.registration.reconcile()
     push.setEnabled(false)
     await push.registration.reconcile()
-    expect(push.removed).toEqual([{ token: 'access-2', id: REG_ID }])
+    expect(push.removed).toEqual([{ token: 'access-1', id: REG_ID }])
     expect(push.storage.getItem(PUSH_REGISTRATION_KEY)).toBeNull()
     expect(push.enabled()).toBe(false)
   })
@@ -297,32 +306,56 @@ describe('createPushRegistration', () => {
     expect(push.retries).toHaveLength(1)
   })
 
-  it('deletes with the peeked sign-out token and retries it only in memory', async () => {
+  it('deletes with the peeked sign-out token before the session can be dropped', async () => {
+    const push = harness()
+    await push.registration.reconcile()
+    const done = push.signOut('peeked-token')
+    await done
+    expect(push.removed).toEqual([{ token: 'peeked-token', id: REG_ID }])
+    expect(push.storage.getItem(PUSH_REGISTRATION_KEY)).toBeNull()
+    expect(push.finishedSignOuts()).toBe(0)
+  })
+
+  it('keeps a failed sign-out delete and finishes it on the next launch', async () => {
     const push = harness()
     await push.registration.reconcile()
     push.failRemove()
-    push.setSignedIn(false)
-    push.signOut('peeked-token')
-    await drain()
-    expect(push.removed[0]).toEqual({ token: 'peeked-token', id: REG_ID })
+    await expect(push.signOut('peeked-token')).rejects.toThrow(/still present/)
     const stored = push.storage.getItem(PUSH_REGISTRATION_KEY)!
     expect(stored).not.toContain('peeked-token')
-    expect(JSON.parse(stored)).toEqual({ id: REG_ID, pendingDelete: true })
+    expect(JSON.parse(stored)).toEqual({
+      id: REG_ID,
+      pendingDelete: true,
+      signOut: true,
+    })
     expect(push.retries).toHaveLength(1)
     push.succeedRemove()
-    push.retries[0]?.()
-    await drain()
-    expect(push.removed.at(-1)).toEqual({ token: 'peeked-token', id: REG_ID })
+    await push.registration.reconcile()
+    expect(push.removed.at(-1)).toEqual({ token: 'access-1', id: REG_ID })
     expect(push.storage.getItem(PUSH_REGISTRATION_KEY)).toBeNull()
+    expect(push.finishedSignOuts()).toBe(1)
+    expect(push.puts).toHaveLength(1)
+  })
+
+  it('still deletes when a token refresh arrives after notifications are turned off', async () => {
+    const push = harness()
+    await push.registration.reconcile()
+    push.setEnabled(false)
+    const pending = push.registration.reconcile()
+    push.emitRefresh()
+    await pending
+    expect(push.removed).toEqual([{ token: 'access-1', id: REG_ID }])
+    expect(push.storage.getItem(PUSH_REGISTRATION_KEY)).toBeNull()
+    expect(push.puts).toHaveLength(1)
   })
 
   it('re-PUTs a disclosure change without refreshing first', async () => {
     const push = harness()
     await push.registration.reconcile()
-    expect(push.refreshCount()).toBe(1)
+    expect(push.refreshCount()).toBe(0)
     push.setDisclosure('preview')
     await push.registration.reconcile()
-    expect(push.refreshCount()).toBe(1)
+    expect(push.refreshCount()).toBe(0)
     expect(push.puts[1]?.body.disclosure).toBe('preview')
     expect(push.puts[1]?.body.environment).toBe('sandbox')
   })

@@ -3,7 +3,8 @@
  *
  * The device token is read from the OS on every PUT and is never written to
  * storage. The access token is never written either: a sign-out retry keeps
- * the peeked bearer in memory only.
+ * the peeked bearer in memory only, and a delete that did not finish keeps
+ * the session so the next launch can still present it.
  */
 
 export const PUSH_REGISTRATION_KEY = 'axon.push.registration'
@@ -34,6 +35,12 @@ export interface PutPushBody {
 export interface StoredPushRegistration {
   id: string
   pendingDelete?: boolean
+  /**
+   * The delete was started by sign-out. The owning session is still the only
+   * caller that can remove the row, so this stays until that delete succeeds
+   * and the session is then dropped.
+   */
+  signOut?: boolean
 }
 
 export interface PushRegistrationDeps {
@@ -54,6 +61,12 @@ export interface PushRegistrationDeps {
   onBeforeSignOut: (
     hook: (token: string | null) => void | Promise<void>,
   ) => () => void
+  /**
+   * Drop the local session without running sign-out hooks again. Used when a
+   * sign-out delete succeeds after the original attempt, once the owning
+   * bearer is no longer sitting in that attempt.
+   */
+  finishSignOut: () => void
   put: (accessToken: string, body: PutPushBody) => Promise<{ id: string }>
   remove: (accessToken: string, id: string) => Promise<void>
   storage: Storage
@@ -90,7 +103,7 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
   dispose: () => void
 } {
   let generation = 0
-  let registeredThisEnablement = false
+  let retiring = false
   let chain: Promise<void> = Promise.resolve()
 
   const enqueue = (task: () => Promise<void>): Promise<void> => {
@@ -103,33 +116,28 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
   }
 
   const stopRefresh = deps.onAccessTokenRefreshed(() => {
-    if (!registeredThisEnablement || deps.remote === null) {
+    // Check before bumping generation. A refresh that arrives after a
+    // disable has been queued, but before that task runs, must not cancel
+    // the DELETE. The listener's own register would then no-op.
+    if (!wanted()) {
       return
     }
     const current = ++generation
-    void enqueue(() => register(current, false))
+    void enqueue(() => register(current))
   })
 
   const stopSignOut = deps.onBeforeSignOut((token) => {
+    // The in-flight PUT has to finish before this DELETE, and this promise
+    // has to finish before the session is dropped. A reload in between
+    // leaves the row owned by a session this device can no longer present.
+    retiring = true
     const current = ++generation
-    registeredThisEnablement = false
-    const stored = readStored(deps.storage)
-    if (stored === null) {
-      return
-    }
-    void enqueue(() =>
-      removeRegistration({
-        generation: current,
-        id: stored.id,
-        token,
-        attemptsLeft: DELETE_ATTEMPTS,
-        capturedToken: token,
-      }),
-    )
+    return enqueue(() => signOutRegistration(current, token))
   })
 
   function wanted(): boolean {
     return (
+      !retiring &&
       deps.remote !== null &&
       deps.signedIn() &&
       deps.enabled() &&
@@ -137,22 +145,9 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
     )
   }
 
-  async function register(
-    current: number,
-    refreshFirst: boolean,
-  ): Promise<void> {
+  async function register(current: number): Promise<void> {
     if (!wanted() || deps.remote === null) {
       return
-    }
-    if (refreshFirst) {
-      const outcome = await refreshOutcome()
-      if (current !== generation) {
-        return
-      }
-      if (outcome === 'failed') {
-        deps.onRemoteFailure(REFRESH_FAILED)
-        return
-      }
     }
     const posted = await postRegistration(current)
     if (posted !== 'refresh' || current !== generation) {
@@ -165,13 +160,11 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
       return
     }
     if (outcome === 'failed') {
-      registeredThisEnablement = false
       deps.onRemoteFailure(REFRESH_FAILED)
       return
     }
     const again = await postRegistration(current)
     if (again === 'refresh' && current === generation) {
-      registeredThisEnablement = false
       deps.onRemoteFailure(REGISTER_FAILED)
     }
   }
@@ -236,7 +229,6 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
         return 'stop'
       }
       writeStored(deps.storage, { id: result.id })
-      registeredThisEnablement = true
       deps.onRemoteFailure(null)
       return 'ok'
     } catch (error) {
@@ -244,10 +236,37 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
         return 'refresh'
       }
       if (current === generation) {
-        registeredThisEnablement = false
         deps.onRemoteFailure(REGISTER_FAILED)
       }
       return 'stop'
+    }
+  }
+
+  async function signOutRegistration(
+    current: number,
+    token: string | null,
+  ): Promise<void> {
+    const stored = readStored(deps.storage)
+    if (stored === null) {
+      return
+    }
+    writeStored(deps.storage, {
+      id: stored.id,
+      pendingDelete: true,
+      signOut: true,
+    })
+    await removeRegistration({
+      generation: current,
+      id: stored.id,
+      token,
+      attemptsLeft: DELETE_ATTEMPTS,
+      capturedToken: token,
+      signOut: true,
+      completeSignOut: false,
+    })
+    const left = readStored(deps.storage)
+    if (left?.id === stored.id && left.pendingDelete === true) {
+      throw new Error('the push registration is still present')
     }
   }
 
@@ -257,6 +276,8 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
     token: string | null
     attemptsLeft: number
     capturedToken: string | null
+    signOut: boolean
+    completeSignOut: boolean
   }): Promise<void> {
     const token = options.token
     if (token === null || token === '') {
@@ -270,8 +291,13 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
       return
     }
     const stored = readStored(deps.storage)
+    const finish = options.completeSignOut && stored?.signOut === true
     if (stored?.id === options.id) {
       deps.storage.removeItem(PUSH_REGISTRATION_KEY)
+    }
+    if (finish) {
+      retiring = false
+      deps.finishSignOut()
     }
     if (options.generation === generation) {
       deps.onRemoteFailure(null)
@@ -283,8 +309,16 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
     id: string
     attemptsLeft: number
     capturedToken: string | null
+    signOut: boolean
   }): void {
-    writeStored(deps.storage, { id: options.id, pendingDelete: true })
+    const signOut =
+      options.signOut || readStored(deps.storage)?.signOut === true
+    writeStored(
+      deps.storage,
+      signOut
+        ? { id: options.id, pendingDelete: true, signOut: true }
+        : { id: options.id, pendingDelete: true },
+    )
     if (options.attemptsLeft <= 1) {
       if (options.generation === generation) {
         deps.onRemoteFailure(DELETE_FAILED)
@@ -298,28 +332,20 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
         if (stored?.id !== options.id || stored.pendingDelete !== true) {
           return
         }
-        if (captured !== null) {
-          if (deps.signedIn()) {
-            return
-          }
-          await removeRegistration({
-            generation: options.generation,
-            id: options.id,
-            token: captured,
-            attemptsLeft: options.attemptsLeft - 1,
-            capturedToken: captured,
-          })
-          return
-        }
-        if (!deps.signedIn() || (deps.enabled() && deps.permissionGranted())) {
+        // The captured bearer is the session that owns the row. A later
+        // sign-in cannot delete it, so do not drop the retry when one starts.
+        const token = captured ?? (await bearer())
+        if (token === null) {
           return
         }
         await removeRegistration({
           generation: options.generation,
           id: options.id,
-          token: await bearer(),
+          token,
           attemptsLeft: options.attemptsLeft - 1,
-          capturedToken: null,
+          capturedToken: captured,
+          signOut: stored.signOut === true,
+          completeSignOut: stored.signOut === true,
         })
       })
     })
@@ -333,11 +359,40 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
   function reconcile(): Promise<void> {
     const current = ++generation
     return enqueue(async () => {
-      if (deps.remote === null || !deps.signedIn()) {
+      if (deps.remote === null) {
+        return
+      }
+      const pending = readStored(deps.storage)
+      if (pending?.pendingDelete === true) {
+        // Signed out, the owning bearer is gone and a new session's DELETE
+        // would be a no-op. Leave the marker until that session is back.
+        if (!deps.signedIn()) {
+          return
+        }
+        const token = await bearer()
+        if (current !== generation) {
+          return
+        }
+        await removeRegistration({
+          generation: current,
+          id: pending.id,
+          token,
+          attemptsLeft: DELETE_ATTEMPTS,
+          capturedToken: null,
+          signOut: pending.signOut === true,
+          completeSignOut: pending.signOut === true,
+        })
+        if (readStored(deps.storage)?.pendingDelete === true) {
+          return
+        }
+        if (pending.signOut === true) {
+          return
+        }
+      }
+      if (!deps.signedIn()) {
         return
       }
       if (!deps.enabled() || !deps.permissionGranted()) {
-        registeredThisEnablement = false
         const stored = readStored(deps.storage)
         if (stored === null) {
           if (current === generation) {
@@ -355,10 +410,12 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
           token,
           attemptsLeft: DELETE_ATTEMPTS,
           capturedToken: null,
+          signOut: false,
+          completeSignOut: false,
         })
         return
       }
-      await register(current, !registeredThisEnablement)
+      await register(current)
     })
   }
 
@@ -413,7 +470,13 @@ export function readStored(storage: Storage): StoredPushRegistration | null {
       return null
     }
     const pending = (parsed as { pendingDelete?: unknown }).pendingDelete
-    return pending === true ? { id, pendingDelete: true } : { id }
+    const signOut = (parsed as { signOut?: unknown }).signOut === true
+    if (pending === true) {
+      return signOut
+        ? { id, pendingDelete: true, signOut: true }
+        : { id, pendingDelete: true }
+    }
+    return { id }
   } catch {
     return null
   }

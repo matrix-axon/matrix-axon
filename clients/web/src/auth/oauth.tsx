@@ -213,11 +213,12 @@ export interface OAuthAuthProvider extends AuthProvider {
   /**
    * Refresh even when the access token is still inside its skew.
    *
-   * Push registration calls this once before the first PUT. `'refreshed'`
-   * means a new access-token string came back. `'failed'` means there is no
-   * session, or the refresh did not yield a different token. This does not
-   * notify {@link onAccessTokenRefreshed}; the caller registers with the
-   * token it just received.
+   * Push registration calls this only after the server answers
+   * `push_session_refresh_required`. `'refreshed'` means a new access-token
+   * string came back. `'failed'` means there is no session, or the refresh
+   * did not yield a different token. This does not notify
+   * {@link onAccessTokenRefreshed}; the caller registers with the token it
+   * just received.
    */
   refreshNow(): Promise<'refreshed' | 'failed'>
   /**

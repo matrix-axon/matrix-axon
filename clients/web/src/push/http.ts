@@ -1,4 +1,5 @@
-import { apiUrl } from '../server-url'
+import type { AuthProvider } from '../auth/provider'
+import { apiErrorCode, createApiClient } from '../api/client'
 import type { PutPushBody } from './registration'
 
 /**
@@ -15,26 +16,39 @@ export class PushRequestError extends Error {
   }
 }
 
+/**
+ * The registration calls carry an explicit bearer: sign-out still holds the
+ * session that owns the row, which is not always `auth.getToken()` after a
+ * refresh. The client is the shared one, so the JSON API deadline applies.
+ */
+function clientFor(
+  fetch: typeof globalThis.fetch,
+  baseUrl: string,
+  accessToken: string,
+) {
+  const auth: AuthProvider = {
+    getToken: () => accessToken,
+    onAuthFailure() {},
+    LoginBootstrap: () => null,
+  }
+  return createApiClient(auth, baseUrl, { fetch })
+}
+
 export async function putPushRegistration(
   fetch: typeof globalThis.fetch,
   baseUrl: string,
   accessToken: string,
   body: PutPushBody,
 ): Promise<{ id: string }> {
-  const response = await fetch(apiUrl('/v1/push/registrations', baseUrl), {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    throw await pushError(response)
+  const { data, error } = await clientFor(fetch, baseUrl, accessToken).PUT(
+    '/v1/push/registrations',
+    { body },
+  )
+  if (error !== undefined) {
+    throw new PushRequestError(apiErrorCode(error))
   }
-  const id = registrationId(await response.json().catch(() => null))
-  if (id === null) {
+  const id = data?.data.id
+  if (typeof id !== 'string' || id === '') {
     throw new PushRequestError(null)
   }
   return { id }
@@ -46,39 +60,12 @@ export async function deletePushRegistration(
   accessToken: string,
   id: string,
 ): Promise<void> {
-  const response = await fetch(
-    apiUrl(`/v1/push/registrations/${encodeURIComponent(id)}`, baseUrl),
-    {
-      method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/json',
-      },
-    },
-  )
-  if (response.status >= 200 && response.status < 300) {
-    return
+  const { error, response } = await clientFor(
+    fetch,
+    baseUrl,
+    accessToken,
+  ).DELETE('/v1/push/registrations/{id}', { params: { path: { id } } })
+  if (error !== undefined || !response.ok) {
+    throw new PushRequestError(apiErrorCode(error))
   }
-  throw await pushError(response)
-}
-
-async function pushError(response: Response): Promise<PushRequestError> {
-  const payload = await response.json().catch(() => null)
-  return new PushRequestError(errorCode(payload))
-}
-
-function registrationId(payload: unknown): string | null {
-  if (typeof payload !== 'object' || payload === null) {
-    return null
-  }
-  const data = (payload as { data?: { id?: unknown } }).data
-  return typeof data?.id === 'string' && data.id !== '' ? data.id : null
-}
-
-function errorCode(payload: unknown): string | null {
-  if (typeof payload !== 'object' || payload === null) {
-    return null
-  }
-  const code = (payload as { error?: { code?: unknown } }).error?.code
-  return typeof code === 'string' ? code : null
 }

@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.webkit.WebView
+import java.security.MessageDigest
 import androidx.core.app.NotificationCompat
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -50,6 +51,23 @@ class RemotePushPlugin(private val activity: Activity) : Plugin(activity) {
 
     companion object {
         var instance: RemotePushPlugin? = null
+
+        /**
+         * Set from the activity lifecycle. A background FCM message is posted
+         * by this process so `event_id` is on the notification extras. The
+         * system-drawn alert keeps that id only on the content intent, which
+         * `activeNotifications` cannot read.
+         */
+        @Volatile
+        var processInForeground: Boolean = false
+    }
+
+    override fun onResume() {
+        processInForeground = true
+    }
+
+    override fun onPause() {
+        processInForeground = false
     }
 
     override fun load(webView: WebView) {
@@ -133,56 +151,26 @@ class RemotePushPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject("notification permission is not granted")
             return
         }
-        val manager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        ensureChannel(manager)
-        val notification = NotificationCompat.Builder(activity, CHANNEL_ID)
-            .setSmallIcon(smallIcon())
-            .setContentTitle(args.title)
-            .setContentText(args.body)
-            .setAutoCancel(true)
-            .setContentIntent(contentIntent(args))
-            .build()
-        notification.extras.putString("event_id", args.eventId)
-        // Tag plus id 0 matches FCM's android.notification.tag, so this
-        // replaces the remote alert for the same room.
-        manager.notify(args.collapseId, 0, notification)
+        postCollapsedNotification(
+            activity,
+            args.title,
+            args.body,
+            args.collapseId,
+            args.eventId,
+            contentIntent(args),
+        )
         invoke.resolve()
     }
 
     private fun deliver(intent: Intent?) {
         val wake = wakeFrom(intent) ?: return
+        // Kept until pendingWake is read. A document reload asks again; the
+        // page ignores an event id it already opened in this webview session.
         pendingWake = wake
         trigger("wake", wake)
     }
 
-    private fun canPost(): Boolean {
-        if (Build.VERSION.SDK_INT < 33) {
-            return true
-        }
-        return activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            android.content.pm.PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun ensureChannel(manager: NotificationManager) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return
-        }
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) {
-            return
-        }
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Messages",
-            NotificationManager.IMPORTANCE_HIGH,
-        )
-        channel.description = "New messages"
-        manager.createNotificationChannel(channel)
-    }
-
-    private fun smallIcon(): Int {
-        val icon = activity.applicationInfo.icon
-        return if (icon == 0) android.R.drawable.ic_dialog_info else icon
-    }
+    private fun canPost(): Boolean = canPostNotifications(activity)
 
     private fun contentIntent(args: PostLocalArgs): PendingIntent {
         val intent = Intent(activity, activity.javaClass).apply {
@@ -200,16 +188,148 @@ class RemotePushPlugin(private val activity: Activity) : Plugin(activity) {
 }
 
 class AxonFirebaseMessagingService : FirebaseMessagingService() {
+    override fun handleIntent(intent: Intent) {
+        if (
+            intent.action == "com.google.firebase.messaging.NEW_TOKEN" ||
+            intent.extras == null ||
+            RemotePushPlugin.processInForeground
+        ) {
+            super.handleIntent(intent)
+            return
+        }
+        val message = try {
+            RemoteMessage(intent.extras!!)
+        } catch (_: Exception) {
+            super.handleIntent(intent)
+            return
+        }
+        val eventId = firstText(message.data["event_id"], intent.getStringExtra("event_id"))
+        val account = firstText(message.data["account_id"], intent.getStringExtra("account_id"))
+        val room = firstText(message.data["room_id"], intent.getStringExtra("room_id"))
+        if (eventId.isEmpty() || account.isEmpty() || room.isEmpty() || !canPostNotifications(this)) {
+            super.handleIntent(intent)
+            return
+        }
+        val title = message.notification?.title?.takeIf { it.isNotBlank() }
+            ?: intent.getStringExtra("gcm.notification.title")
+            ?: "Axon"
+        val body = message.notification?.body?.takeIf { it.isNotBlank() }
+            ?: intent.getStringExtra("gcm.notification.body")
+            ?: "New activity"
+        val thread = firstText(
+            message.data["thread_root_id"],
+            intent.getStringExtra("thread_root_id"),
+        )
+        val launch = packageManager.getLaunchIntentForPackage(packageName) ?: run {
+            super.handleIntent(intent)
+            return
+        }
+        launch.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        launch.putExtra("account_id", account)
+        launch.putExtra("room_id", room)
+        launch.putExtra("event_id", eventId)
+        if (thread.isNotEmpty()) {
+            launch.putExtra("thread_root_id", thread)
+        }
+        val pending = PendingIntent.getActivity(
+            this,
+            collapseTag(room, intent.getStringExtra("gcm.notification.tag")).hashCode(),
+            launch,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        // Do not call super. The SDK would draw a second alert whose extras
+        // omit event_id, and the resume read would miss it.
+        postCollapsedNotification(
+            this,
+            title,
+            body,
+            collapseTag(
+                room,
+                intent.getStringExtra("gcm.notification.tag")
+                    ?: intent.getStringExtra("gcm.n.tag"),
+            ),
+            eventId,
+            pending,
+        )
+    }
+
     override fun onMessageReceived(message: RemoteMessage) {
-        // Foreground. The page posts the local toast; showing this too would
-        // double it. A background notification message is drawn by the system
-        // before this method runs, on the messages-v2 channel.
+        // Foreground messages reach here via handleIntent's super call.
+        // The page posts the local toast. Showing this too would double it.
     }
 
     override fun onNewToken(token: String) {
         // The next registration reads the current token from Firebase.
         // Nothing here stores it in a log or a file.
     }
+}
+
+private fun postCollapsedNotification(
+    context: Context,
+    title: String,
+    body: String,
+    collapseId: String,
+    eventId: String,
+    contentIntent: PendingIntent,
+) {
+    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    ensureChannel(manager)
+    val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        .setSmallIcon(smallIcon(context))
+        .setContentTitle(title)
+        .setContentText(body)
+        .setAutoCancel(true)
+        .setContentIntent(contentIntent)
+        .build()
+    notification.extras.putString("event_id", eventId)
+    // Tag plus id 0 matches FCM's android.notification.tag, so this
+    // replaces the remote alert for the same room.
+    manager.notify(collapseId, 0, notification)
+}
+
+private fun canPostNotifications(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < 33) {
+        return true
+    }
+    return context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+}
+
+private fun ensureChannel(manager: NotificationManager) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+        return
+    }
+    if (manager.getNotificationChannel(CHANNEL_ID) != null) {
+        return
+    }
+    val channel = NotificationChannel(
+        CHANNEL_ID,
+        "Messages",
+        NotificationManager.IMPORTANCE_HIGH,
+    )
+    channel.description = "New messages"
+    manager.createNotificationChannel(channel)
+}
+
+private fun smallIcon(context: Context): Int {
+    val icon = context.applicationInfo.icon
+    return if (icon == 0) android.R.drawable.ic_dialog_info else icon
+}
+
+private fun collapseTag(roomId: String, hinted: String?): String {
+    if (hinted != null && COLLAPSE_ID.matches(hinted)) {
+        return hinted
+    }
+    val digest = MessageDigest.getInstance("SHA-256").digest(roomId.toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { "%02x".format(it) }.take(32)
+}
+
+private fun firstText(primary: String?, fallback: String?): String {
+    val first = primary?.trim().orEmpty()
+    if (first.isNotEmpty()) {
+        return first
+    }
+    return fallback?.trim().orEmpty()
 }
 
 private fun wakeFrom(intent: Intent?): JSObject? {
