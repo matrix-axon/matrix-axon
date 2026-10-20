@@ -1432,6 +1432,25 @@ async fn wait_account_ready(api: &Api, account_id: Uuid) -> Result<()> {
 }
 
 async fn wait_axon_decrypts(api: &Api, account_id: Uuid, peer: &SeededPeer) -> Result<()> {
+    wait_axon_shows_decrypted(
+        api,
+        account_id,
+        peer,
+        peer.history_event_id.as_str(),
+        &peer.history_marker,
+        "pre-login encrypted history",
+    )
+    .await
+}
+
+async fn wait_axon_shows_decrypted(
+    api: &Api,
+    account_id: Uuid,
+    peer: &SeededPeer,
+    event_id: &str,
+    marker: &str,
+    what: &str,
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     let mut last = None;
     let mut polls = 0;
@@ -1441,8 +1460,8 @@ async fn wait_axon_decrypts(api: &Api, account_id: Uuid, peer: &SeededPeer) -> R
     loop {
         let observation = observe_history(
             api.timeline(account_id, peer.room_id.as_str()).await,
-            peer.history_event_id.as_str(),
-            &peer.history_marker,
+            event_id,
+            marker,
         );
         polls += 1;
         match observation {
@@ -1454,14 +1473,14 @@ async fn wait_axon_decrypts(api: &Api, account_id: Uuid, peer: &SeededPeer) -> R
         }
         encrypted_seen |= observation == HistoryObservation::EncryptedEvent;
         if last != Some(observation) {
-            eprintln!("matrix-oauth: history observation {observation}");
+            eprintln!("matrix-oauth: {what} observation {observation}");
             last = Some(observation);
         }
         if observation == HistoryObservation::Decrypted {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Axon did not decrypt the pre-login encrypted history (polls={polls}, api_failures={api_failures}, event_seen={event_seen}, encrypted_seen={encrypted_seen}, last={observation})");
+            bail!("Axon did not decrypt the {what} (polls={polls}, api_failures={api_failures}, event_seen={event_seen}, encrypted_seen={encrypted_seen}, last={observation})");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -1785,14 +1804,61 @@ async fn run_acquire_lane(
     wait_account_ready(&api, account_id).await?;
     wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
 
-    eprintln!("matrix-oauth(acquire): restarting after OAuth access-token expiry");
+    restart_after_token_expiry(process, account_id, peer, secrets, "acquire").await
+}
+
+/// Restart Axon after its access token has expired, then prove the refresh
+/// token works.
+///
+/// Persisted state alone satisfies "active and verified" and the pre-login
+/// history read, both of which Axon serves from PostgreSQL without touching
+/// the homeserver. So the peer sends a new encrypted message while Axon is
+/// down, and the restart counts only once Axon shows it decrypted: Axon can
+/// get it only by syncing, and with the old access token expired, syncing
+/// needs a successful refresh.
+async fn restart_after_token_expiry(
+    process: &mut AxonProcess,
+    account_id: Uuid,
+    peer: &SeededPeer,
+    secrets: &SecretTracker,
+    lane: &str,
+) -> Result<()> {
+    eprintln!("matrix-oauth({lane}): restarting after OAuth access-token expiry");
     process.stop().await?;
     tokio::time::sleep(Duration::from_secs(65)).await;
+    let (event_id, marker) = send_live_message(peer).await?;
     process.spawn().await?;
     let api = process.api()?;
     wait_account_ready(&api, account_id).await?;
     wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
-    Ok(())
+    wait_axon_shows_decrypted(
+        &api,
+        account_id,
+        peer,
+        event_id.as_str(),
+        &marker,
+        "message sent during the restart",
+    )
+    .await
+}
+
+/// Send a new encrypted message from the seeded peer. It syncs first so the
+/// room key is shared with Axon's current device.
+async fn send_live_message(peer: &SeededPeer) -> Result<(OwnedEventId, String)> {
+    peer.client
+        .sync_once(SyncSettings::default())
+        .await
+        .map_err(|_| anyhow!("pre-send trusted-device sync failed"))?;
+    let room = peer
+        .client
+        .get_room(&peer.room_id)
+        .ok_or_else(|| anyhow!("trusted device lost the encrypted room"))?;
+    let marker = format!("matrix-oauth-live-{}", Uuid::new_v4());
+    let sent = room
+        .send(RoomMessageEventContent::text_plain(&marker))
+        .await
+        .map_err(|_| anyhow!("encrypted live message send failed"))?;
+    Ok((sent.response.event_id, marker))
 }
 
 async fn run_grant_lane(
@@ -1944,14 +2010,7 @@ async fn run_browser_lane(
     wait_account_ready(&api, account_id).await?;
     wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
 
-    eprintln!("matrix-oauth(browser): restarting after OAuth access-token expiry");
-    process.stop().await?;
-    tokio::time::sleep(Duration::from_secs(65)).await;
-    process.spawn().await?;
-    let api = process.api()?;
-    wait_account_ready(&api, account_id).await?;
-    wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
-    Ok(())
+    restart_after_token_expiry(process, account_id, peer, secrets, "browser").await
 }
 
 async fn run_api_lane(

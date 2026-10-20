@@ -91,7 +91,7 @@ scripts/matrix-oauth-test.sh browser
 scripts/matrix-oauth-test.sh unsupported
 ```
 
-The acquisition lane proves Axon becomes cross-signed, receives encryption secrets, decrypts pre-login history, and restores and refreshes its OAuth session after a restart beyond the test token lifetime.
+The acquisition lane proves Axon becomes cross-signed, receives encryption secrets, decrypts pre-login history, and restores and refreshes its OAuth session after a restart beyond the test token lifetime. Account state and stored history survive a restart without any homeserver traffic, so the refresh counts only once Axon decrypts a message the peer sent while it was down.
 The separate grant lane proves a trusted Axon account can authorize a fresh SDK device only after explicit authorization-server approval, after which that device is cross-signed and decrypts history using the transferred backup secret.
 The browser lane (ADR 0117) proves that a user who approves on the authorization server's page ends with an active account that is not yet verified, that the recovery key then verifies it and decrypts pre-login history, that the session refreshes after a restart beyond the test token lifetime, and that a rejection ends as `authorization_denied`.
 The API and unsupported lanes cover failure, rejection, cancellation, timeout, account scoping, capability gating, and secret-safe diagnostics.

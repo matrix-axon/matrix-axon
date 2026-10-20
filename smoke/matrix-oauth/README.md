@@ -31,9 +31,9 @@ In CI the lanes run after every push to `main` and nightly from `smoke.yml`, and
 The lanes cover:
 
 - `api`: authenticated acquisition boundaries, invalid identity, idempotent cancellation and bounded identity-release recovery, explicit authorization rejection, account-scoped grant isolation, malformed QR redaction, grant cancellation, and real rendezvous expiry;
-- `acquire`: a trusted SDK device authorizes Axon, Axon becomes cross-signed, receives backup material, decrypts history created before login, then restores and refreshes its OAuth session after restart beyond the 60-second test access-token lifetime;
+- `acquire`: a trusted SDK device authorizes Axon, Axon becomes cross-signed, receives backup material, decrypts history created before login, then restores and refreshes its OAuth session after restart beyond the 60-second test access-token lifetime, which counts only once Axon decrypts a message the peer sent while it was down;
 - `grant`: a trusted Axon account authorizes a fresh SDK device only after explicit MAS approval, and the new device becomes cross-signed, activates the transferred backup secret, and decrypts the seeded history;
-- `browser`: a browser sign-in (ADR 0117) that MAS's device page rejects ends as `authorization_denied` and is unreachable through the QR routes; an approved one leaves an active account that is not yet verified, the recovery key then verifies it and Axon decrypts history created before sign-in, and the session restores and refreshes after a restart beyond the 60-second test access-token lifetime; and
+- `browser`: a browser sign-in (ADR 0117) that MAS's device page rejects ends as `authorization_denied` and is unreachable through the QR routes; an approved one leaves an active account that is not yet verified, the recovery key then verifies it and Axon decrypts history created before sign-in, and the session restores and refreshes after a restart beyond the 60-second test access-token lifetime, checked the same way as `acquire`; and
 - `unsupported`: MAS omits the device-authorization capability, and both QR acquisition and browser sign-in terminate with the stable `unsupported` classification.
 
 The integration workflow exposes each lane separately and provides `matrix-oauth-all` to run all five manually.
