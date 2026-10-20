@@ -265,6 +265,17 @@ pub fn router(state: AppState) -> Router {
         // Server status (M10): the backfill engine's disk-space health, so a
         // client can tell when backfill has paused.
         .route("/v1/status", get(routes::status::get_status))
+        // Device push tokens (ADR 0113). The body cap is inside the auth
+        // layer, so a missing bearer is still 401 before the body is read.
+        .route(
+            "/v1/push/registrations",
+            put(routes::push::put_registration)
+                .layer(DefaultBodyLimit::max(routes::push::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/v1/push/registrations/{id}",
+            axum::routing::delete(routes::push::delete_registration),
+        )
         .route("/v1/rooms", get(routes::rooms::list_rooms))
         // Pending invites (ADR 0091). Cross-account like `/v1/rooms`; accept
         // and reject reuse the existing join / leave verbs.

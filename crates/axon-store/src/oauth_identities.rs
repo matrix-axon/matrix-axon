@@ -164,6 +164,27 @@ impl Store {
             return Ok(IdentityRemoval::NotFound);
         }
         for sql in [
+            // Registrations for every session this unbind ends, read before
+            // the statements below clear `oauth_identity_id` and delete the
+            // refresh rows. That is the access tokens of this identity, the
+            // non-expiring tokens those sessions minted (each its own
+            // session), and every refresh row about to disappear.
+            "WITH RECURSIVE minted AS ( \
+                 SELECT child.id, child.session_id FROM tokens child \
+                   JOIN tokens session ON child.created_by_token_id = session.id \
+                  WHERE session.oauth_identity_id = $1 \
+                 UNION \
+                 SELECT child.id, child.session_id FROM tokens child \
+                   JOIN minted ON child.created_by_token_id = minted.id \
+             ), ended AS ( \
+                 SELECT session_id FROM minted \
+                 UNION \
+                 SELECT session_id FROM tokens WHERE oauth_identity_id = $1 \
+                 UNION \
+                 SELECT session_id FROM oauth_refresh_tokens WHERE oauth_identity_id = $1 \
+             ) \
+             DELETE FROM push_registrations \
+              WHERE session_id IN (SELECT session_id FROM ended)",
             // Tokens this identity's sessions minted through the management
             // API, and tokens those minted in turn (ADR 0109). They carry no
             // identity of their own, so without this a non-expiring token

@@ -8778,6 +8778,111 @@
         }
       }
     },
+    "/v1/push/registrations": {
+      "put": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Register or re-home a device token.",
+        "description": "Upsert on `(provider, token)`. The same session updates disclosure,\nenvironment, and the access token that last wrote the row. A different\nsession becomes the owner and keeps the same id. The response does not\ninclude the token.",
+        "operationId": "put_registration",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutPushRegistrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The registration, without the device token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_PushRegistrationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The provider, token, disclosure, environment, or session cannot be registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/push/registrations/{id}": {
+      "delete": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Delete the registration when this session owns it.",
+        "description": "An unknown id, or another session's id, is also `204`. The route is\nidempotent and does not reveal whether some other device has that id.",
+        "operationId": "delete_registration",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registration id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The registration is gone, or this session did not own it"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/rooms": {
       "get": {
         "tags": [
@@ -8981,7 +9086,7 @@
         "tags": [
           "status"
         ],
-        "summary": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\nthe running build's identity; and whether the management API is served.",
+        "summary": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
         "operationId": "get_status",
         "responses": {
           "200": {
@@ -10024,6 +10129,46 @@
           }
         }
       },
+      "ApiResponse_PushRegistrationDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A device push registration (`PUT /v1/push/registrations`).\nThe device token is not in the response.",
+            "required": [
+              "id",
+              "provider",
+              "disclosure"
+            ],
+            "properties": {
+              "disclosure": {
+                "type": "string",
+                "description": "What a later send may put in the banner: `activity`,\n`sender_and_room`, or `preview`."
+              },
+              "environment": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`sandbox` or `production` for APNs. Null for FCM."
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Stable id, used to delete the registration."
+              },
+              "provider": {
+                "type": "string",
+                "description": "`apns` or `fcm`."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_PutDeviceStateResponse": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -10476,7 +10621,8 @@
               "backfill",
               "build",
               "sync",
-              "management"
+              "management",
+              "push"
             ],
             "properties": {
               "backfill": {
@@ -10490,6 +10636,10 @@
               "management": {
                 "$ref": "#/components/schemas/ManagementStatusDto",
                 "description": "The management API's availability (ADR 0109)."
+              },
+              "push": {
+                "$ref": "#/components/schemas/PushStatusDto",
+                "description": "Which push providers loaded key material (ADR 0113)."
               },
               "sync": {
                 "type": "array",
@@ -14021,6 +14171,55 @@
           }
         }
       },
+      "PushRegistrationDto": {
+        "type": "object",
+        "description": "A device push registration (`PUT /v1/push/registrations`).\nThe device token is not in the response.",
+        "required": [
+          "id",
+          "provider",
+          "disclosure"
+        ],
+        "properties": {
+          "disclosure": {
+            "type": "string",
+            "description": "What a later send may put in the banner: `activity`,\n`sender_and_room`, or `preview`."
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`sandbox` or `production` for APNs. Null for FCM."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable id, used to delete the registration."
+          },
+          "provider": {
+            "type": "string",
+            "description": "`apns` or `fcm`."
+          }
+        }
+      },
+      "PushStatusDto": {
+        "type": "object",
+        "description": "Whether this process loaded a provider key (`GET /v1/status`, ADR 0113).\nTrue is key material, not \"a device is registered\". Registration still\nsucceeds when the flag is false.",
+        "required": [
+          "apns",
+          "fcm"
+        ],
+        "properties": {
+          "apns": {
+            "type": "boolean",
+            "description": "An APNs auth key was loaded at startup."
+          },
+          "fcm": {
+            "type": "boolean",
+            "description": "An FCM service-account key was loaded at startup."
+          }
+        }
+      },
       "PutDeviceStateRequest": {
         "type": "object",
         "description": "Body of `PUT /v1/devices/{device_id}/state/{namespace}` (M12): a merge-upsert.\nOnly the keys present are touched — other keys in the namespace are left\nalone — and a `null` value deletes the key (stored as a tombstone so the\ndeletion wins the cross-device merge).",
@@ -14079,6 +14278,36 @@
           "updated_at": {
             "type": "string",
             "description": "When the write landed (server clock), RFC 3339."
+          }
+        }
+      },
+      "PutPushRegistrationRequest": {
+        "type": "object",
+        "description": "Body of `PUT /v1/push/registrations`.",
+        "required": [
+          "provider",
+          "token",
+          "disclosure"
+        ],
+        "properties": {
+          "disclosure": {
+            "type": "string",
+            "description": "`activity`, `sender_and_room`, or `preview`. Required, so an omitted\nfield cannot land on `preview`."
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`sandbox` or `production` for APNs. Omit for FCM."
+          },
+          "provider": {
+            "type": "string",
+            "description": "`apns` or `fcm`. Any other value, including `webpush`, is\n`push_provider_unsupported`."
+          },
+          "token": {
+            "type": "string",
+            "description": "The APNs device token or the FCM registration token.\nEmpty, or longer than 4096 bytes, is rejected before a write."
           }
         }
       },
@@ -15015,7 +15244,8 @@
           "backfill",
           "build",
           "sync",
-          "management"
+          "management",
+          "push"
         ],
         "properties": {
           "backfill": {
@@ -15029,6 +15259,10 @@
           "management": {
             "$ref": "#/components/schemas/ManagementStatusDto",
             "description": "The management API's availability (ADR 0109)."
+          },
+          "push": {
+            "$ref": "#/components/schemas/PushStatusDto",
+            "description": "Which push providers loaded key material (ADR 0113)."
           },
           "sync": {
             "type": "array",
@@ -15323,6 +15557,10 @@
     {
       "name": "status",
       "description": "Server health and backfill status"
+    },
+    {
+      "name": "push",
+      "description": "Device push registration for a suspended mobile client (ADR 0113)"
     },
     {
       "name": "management",
