@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import "AxonLaunchPayload.h"
 
 // Captures the remote-notification dictionary iOS hands the app when a tap
 // launches it. The notification plugin's delegate drops that tap, and this
@@ -59,3 +60,5 @@ __attribute__((constructor)) static void axonRemotePushBoot(void) {
     axonOriginalSetDelegate = (void (*)(id, SEL, id))method_getImplementation(method);
     method_setImplementation(method, (IMP)axonSetDelegate);
 }
+
+void axon_remote_push_link(void) {}

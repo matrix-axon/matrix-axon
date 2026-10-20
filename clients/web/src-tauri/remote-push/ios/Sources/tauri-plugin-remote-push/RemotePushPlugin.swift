@@ -1,3 +1,4 @@
+import AxonLaunchPayload
 import Foundation
 import Tauri
 import UIKit
@@ -41,6 +42,8 @@ class RemotePushPlugin: Plugin, UNUserNotificationCenterDelegate {
 
   override init() {
     super.init()
+    // Keeps LaunchPayload.m, and its constructor, in the static library.
+    axon_remote_push_link()
     RemotePushPlugin.shared = self
   }
 
@@ -275,7 +278,7 @@ func initPlugin() -> Plugin {
 private func chain(
   _ cls: AnyClass,
   _ sel: Selector,
-  _ registered: @convention(block) (AnyObject, UIApplication, Data) -> Void
+  _ registered: @escaping @convention(block) (AnyObject, UIApplication, Data) -> Void
 ) {
   guard let method = class_getInstanceMethod(cls, sel) else {
     return
