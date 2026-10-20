@@ -78,6 +78,12 @@ demo-artifacts/
 # `project.pbxproj` carries this machine's signing team.
 clients/web/src-tauri/gen/
 
+# A mobile plugin's copy of the Tauri Swift API (`.tauri/tauri-api`), written
+# by tauri-plugin's build script on every build, plus the Package.resolved
+# SwiftPM generates beside the plugin's Package.swift.
+clients/web/src-tauri/*/.tauri/
+clients/web/src-tauri/*/ios/Package.resolved
+
 # Android signing material (ADR 0107): the upload keystore lives outside the
 # repo, and these are here only so one dropped into the tree by accident cannot
 # be committed.
