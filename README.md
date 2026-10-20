@@ -205,6 +205,13 @@ Idle transactions are terminated after 30 seconds so an abandoned transaction ca
 These are per-statement deadlines, not a deadline for an entire multi-step operation.
 A timed-out SQL statement fails and rolls back its writes; a canceled HTTP response does not prove that a write failed to commit.
 
+Upgrades apply schema migrations at startup, before the server accepts requests.
+A migration that adds a column or index to the `events` table holds it locked until the migration commits.
+The thread-summary index (#763) took 96 seconds on a 2.7 GB `events` table, of which the backfill and the index build are separate statements under the 600-second deadline.
+On a much larger database, raise `migration_statement_secs` for the upgrade if a statement times out; the failed migration rolls back and runs again at the next start.
+A migration that rewrites many rows, as that one does, leaves index-only scans reading the table itself until autovacuum next processes it.
+To get the faster plans at once, run `VACUUM (ANALYZE) events;` after the upgrade, or `VACUUM (PARALLEL 0, ANALYZE) events;` in a container whose `/dev/shm` is small (Docker's default is 64 MB).
+
 Configure these values under `[database.timeouts]` in [axon.toml.example](axon.toml.example), or through overrides such as `AXON_DATABASE__TIMEOUTS__STATEMENT_SECS=20` and `AXON_DATABASE__TIMEOUTS__MAINTENANCE_STATEMENT_SECS=240`.
 All deadlines must be between 1 and 86400 seconds; zero is rejected.
 The statement deadlines must satisfy `statement_secs <= maintenance_statement_secs <= migration_statement_secs`.
@@ -306,11 +313,31 @@ The [native server contract](docs/apple-oauth-native.md) provides single-use cha
 See [ADR 0054's implementation addendum](docs/adr/0054-oauth-authorization-server.md#implementation-addendum-apple-rollout) for the remaining server and mobile work.
 The [Apple browser verification guide](docs/apple-oauth-browser.md) covers configuration, automated checks, and the required registered-deployment acceptance pass.
 
+**Remote push.**
+A suspended iOS, iPadOS, or Android client registers a device token with `PUT /v1/push/registrations` and removes it with `DELETE /v1/push/registrations/{id}`.
+`GET /v1/status` reports `push.apns` and `push.fcm`, true when this process loaded that provider's key.
+Registration succeeds when the key is not configured.
+Waking a device is a separate step from storing the registration.
+Set `[push.apns]` with `team_id`, `key_id`, `bundle_id`, and exactly one of `private_key` or `private_key_path`.
+Set `[push.fcm]` with `project_id`, `client_email`, `package_name`, and exactly one of those key sources.
+A provider whose every field is empty stays off.
+A provider that is only partly set fails while the configuration is loading, before Axon contacts the database.
+A key file that cannot be read, or a private key that is not that provider's key type, also stops startup.
+Key files are regular files of at most 16 KiB, owner-only on Unix, same as the Apple sign-in key, and that sign-in key stays under `[oauth.providers.apple]`.
+The environment names are `AXON_PUSH__APNS__PRIVATE_KEY`, `AXON_PUSH__APNS__PRIVATE_KEY_PATH`, `AXON_PUSH__FCM__PRIVATE_KEY`, and the same shape for the other fields.
+
 The Matrix OAuth session foundation for Axon's own homeserver sessions is configured separately under `sync.matrix_oauth` (ADR 0097).
 It dynamically registers a public client when the discovered authorization server permits it; operators can configure a static public client ID for issuers that disable dynamic registration.
 Access and refresh tokens are encrypted with `sync.store_key`, and client secrets are not supported.
 The authenticated QR acquisition API is available at `POST /v1/accounts/login/qr` and its flow-specific polling/input routes; it supports either displaying QR data or submitting a decoded scan and activates the account only after Axon independently confirms that its new device is cross-signed.
-The web client exposes both presentations on its unified `/accounts` page, including camera or image scanning, check-code handling, authorization approval, cancellation, and reload resume.
+Browser sign-in (ADR 0117) is a third way to add an account on such a homeserver, for a user with no second Matrix client to scan with.
+`POST /v1/accounts/login/browser` starts a flow for a Matrix user ID; the flow yields a link and a short code, the user opens the link in any browser on any device and approves, and the client polls `GET /v1/accounts/login/browser/{flow_id}` until it is `done`.
+The link is valid for up to thirty minutes and is returned only while the flow waits for approval.
+It needs a homeserver whose authorization server offers the OAuth device authorization grant, and reports `unsupported` otherwise.
+An account added this way is signed in but its device is not verified; verify it afterwards with a recovery key or interactive verification.
+The web client offers it on the Accounts page as **Sign in with browser**; the TUI does not yet.
+[Browser sign-in](docs/matrix-oauth-browser-sign-in.md) lists the failure codes and how to diagnose a failed sign-in from the server log.
+The web client exposes both QR presentations on its unified `/accounts` page, including camera or image scanning, check-code handling, authorization approval, cancellation, and reload resume.
 The TUI presentation remains a later client-specific slice.
 The existing password and token-import account routes remain available.
 

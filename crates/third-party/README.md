@@ -27,3 +27,9 @@ Upstream serialization and migration regressions can also run with `cargo test -
 Upstream issue [2010](https://github.com/matrix-org/matrix-rust-sdk/issues/2010) concerns the related count-validity contract, but is not a tracker for this exact patch.
 No exact upstream issue was found when this patch was prepared.
 Remove the vendored dependency and patch after a released SDK exposes equivalent provenance; verify omitted-field, legacy-cache, membership-transition, and initial-replacement behavior before upgrading.
+
+## Also re-check when the SDK pin moves
+
+Browser sign-in (ADR 0117) sends its own device authorization request, because the SDK keeps that request private to QR login.
+The two scope strings it sends are copied from the SDK's private `login_scopes` builder in `matrix-sdk`'s `authentication/oauth/mod.rs`, and no test can compare them with the original.
+On every `matrix-sdk` upgrade, re-read those constants and update `SCOPE_CLIENT_API` and `SCOPE_DEVICE_PREFIX` in `crates/axon-sync/src/matrix_oauth_device_grant.rs` to match; also check whether the SDK has made the device grant public, in which case those two requests can be replaced.

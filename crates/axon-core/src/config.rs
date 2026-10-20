@@ -69,6 +69,10 @@ pub struct Config {
     /// bearer tokens via Apple/Google/Microsoft sign-in (M14, ADR 0054).
     #[serde(default)]
     pub oauth: OauthConfig,
+    /// Remote-push provider keys (ADR 0113). Absent, or with every field
+    /// empty, means that provider is not configured. Delivery is separate.
+    #[serde(default)]
+    pub push: crate::push::PushConfig,
     /// Set when the loaded file was the pre-rename platform path
     /// (`~/.config/axon/axon.toml` and the macOS/Windows equivalents). Not
     /// serialized; the server logs a warning once tracing is up. `None` for a
@@ -416,8 +420,10 @@ pub struct SyncConfig {
 /// Matrix authorization-server registration settings (ADR 0097).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MatrixOAuthConfig {
-    /// Total budget for each OAuth discovery or dynamic-registration request.
-    /// Defaults to 15 seconds.
+    /// Total budget for each request Axon itself sends to the authorization
+    /// server: discovery, dynamic registration, and browser sign-in's device
+    /// authorization and token-poll requests (ADR 0117). Defaults to 15
+    /// seconds.
     #[serde(default = "default_matrix_oauth_request_timeout_secs")]
     pub request_timeout_secs: u64,
     /// Public client IDs provisioned out-of-band for servers that do not allow
@@ -658,7 +664,7 @@ pub struct GenericOauthProviderConfig {
     pub client_secret: Option<String>,
 }
 
-fn redacted_option<T>(value: &Option<T>) -> Option<&'static str> {
+pub(crate) fn redacted_option<T>(value: &Option<T>) -> Option<&'static str> {
     value.as_ref().map(|_| "[REDACTED]")
 }
 
@@ -1215,7 +1221,16 @@ impl Config {
             .extract()
             .map_err(|err| ConfigError::Figment(Box::new(err)))?;
 
-        config.database.validate()?;
+        let mut problems = Vec::new();
+        if let Err(error) = config.database.validate() {
+            problems.push(error.validation_detail());
+        }
+        if let Err(error) = config.push.validate() {
+            problems.push(error.validation_detail());
+        }
+        if !problems.is_empty() {
+            return Err(ConfigError::Validation(problems.join("; ")));
+        }
 
         if let Some(path) = path.filter(|p| path_is_legacy_platform_config(p)) {
             apply_legacy_dir_defaults(&figment, &mut config, true);
@@ -1442,6 +1457,10 @@ mod tests {
         config.oauth.providers.apple.private_key_path = Some("PATH_SENTINEL".into());
         config.oauth.providers.google.client_secret = Some("GOOGLE_SECRET_SENTINEL".into());
         config.oauth.providers.microsoft.client_secret = Some("MICROSOFT_SECRET_SENTINEL".into());
+        config.push.apns.private_key = Some("APNS_PRIVATE_SENTINEL".into());
+        config.push.apns.private_key_path = Some("APNS_PATH_SENTINEL".into());
+        config.push.fcm.private_key = Some("FCM_PRIVATE_SENTINEL".into());
+        config.push.fcm.private_key_path = Some("FCM_PATH_SENTINEL".into());
         for output in [
             format!("{:?}", config.oauth.providers.apple),
             format!("{:?}", config.oauth.providers.google),
@@ -1452,8 +1471,29 @@ mod tests {
             assert!(!output.contains("PATH_SENTINEL"));
             assert!(!output.contains("GOOGLE_SECRET_SENTINEL"));
             assert!(!output.contains("MICROSOFT_SECRET_SENTINEL"));
+            assert!(!output.contains("APNS_PRIVATE_SENTINEL"));
+            assert!(!output.contains("APNS_PATH_SENTINEL"));
+            assert!(!output.contains("FCM_PRIVATE_SENTINEL"));
+            assert!(!output.contains("FCM_PATH_SENTINEL"));
             assert!(output.contains("[REDACTED]"));
         }
+    }
+
+    #[test]
+    fn a_partial_push_provider_fails_during_load_without_the_key() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AXON_PUSH__APNS__TEAM_ID", "TEAM");
+            jail.set_env("AXON_PUSH__APNS__PRIVATE_KEY", "PRIVATE_SENTINEL");
+            let error = Config::load(None).expect_err("partial push").to_string();
+            assert!(error.contains("push.apns"), "{error}");
+            assert!(!error.contains("PRIVATE_SENTINEL"), "{error}");
+            jail.set_env("AXON_PUSH__APNS__TEAM_ID", " ");
+            jail.set_env("AXON_PUSH__APNS__PRIVATE_KEY", "");
+            Config::load(None).expect("whitespace-only push field is empty");
+            Ok(())
+        });
     }
 
     use super::*;
@@ -1712,6 +1752,7 @@ mod tests {
             search: SearchConfig::default(),
             media: MediaConfig::default(),
             oauth: OauthConfig::default(),
+            push: crate::push::PushConfig::default(),
             legacy_config_path: None,
             used_legacy_data_dirs: false,
         };

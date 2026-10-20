@@ -27,6 +27,7 @@ import {
 } from '../services'
 import { setPerfEnabled } from '../perf'
 import { createAccountsStore } from '../stores/accounts'
+import { createMatrixOAuthBrowserStore } from '../stores/matrix-oauth-browser'
 import {
   createMatrixOAuthQrGrantStore,
   createMatrixOAuthQrStore,
@@ -153,6 +154,11 @@ export function testServices(
   const matrixOAuthQrGrant = createMatrixOAuthQrGrantStore(api, {
     storage: options.pendingStorage ?? memoryStorage(),
   })
+  const matrixOAuthBrowser = createMatrixOAuthBrowserStore(api, accounts, {
+    storage: options.pendingStorage ?? memoryStorage(),
+    // As for QR above: interaction tests drive polls themselves.
+    pollDelayMs: 30_000,
+  })
   const qr = options.qr ?? createBrowserQrAdapter()
   const cache = options.cache ?? createMemoryCacheStore()
   const telemetry = createTelemetryStore({
@@ -252,7 +258,12 @@ export function testServices(
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
-  connectMatrixOAuthQrSessionReset(auth, matrixOAuthQr, matrixOAuthQrGrant)
+  connectMatrixOAuthQrSessionReset(
+    auth,
+    matrixOAuthQr,
+    matrixOAuthQrGrant,
+    matrixOAuthBrowser,
+  )
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
@@ -269,6 +280,7 @@ export function testServices(
     accounts,
     matrixOAuthQr,
     matrixOAuthQrGrant,
+    matrixOAuthBrowser,
     qr,
     rooms,
     invites,

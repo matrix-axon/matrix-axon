@@ -35,6 +35,21 @@ const QR_BINARY_BASE64 = Buffer.from([0, 1, 2, 3, 127, 128, 254, 255])
   .toString('base64')
   .replace(/=+$/, '')
 let qrFlow = null
+let browserFlowSeq = 0
+/** The newest browser sign-in, and the one it replaced, if any. */
+let browserFlow = null
+let replacedBrowserFlow = null
+function browserFlowById(flowId) {
+  return [browserFlow, replacedBrowserFlow].find(
+    (flow) => flow !== null && flow.flow_id === flowId,
+  )
+}
+function isOpenBrowserFlow(flow) {
+  return (
+    flow !== null &&
+    (flow.stage === 'starting' || flow.stage === 'waiting_for_authorization')
+  )
+}
 let submittedQrBase64 = null
 
 function account(id, userId) {
@@ -806,6 +821,67 @@ async function handleApi(req, res, url) {
     res.writeHead(204).end()
     return
   }
+  if (method === 'POST' && pathname === '/v1/accounts/login/browser') {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const request = parseJsonBody(raw)
+      // As Axon does: a new sign-in replaces an unapproved one for the same
+      // user, which then reads as cancelled with the reason.
+      replacedBrowserFlow =
+        isOpenBrowserFlow(browserFlow) &&
+        browserFlow.expected_user_id === request.expected_user_id
+          ? {
+              flow_id: browserFlow.flow_id,
+              expected_user_id: browserFlow.expected_user_id,
+              stage: 'cancelled',
+              cancel_reason: 'replaced',
+            }
+          : null
+      browserFlowSeq += 1
+      // A bare link, as some authorization servers return: the page has to
+      // show the code because the link does not carry it.
+      browserFlow = {
+        flow_id: `44444444-4444-4444-8444-${String(browserFlowSeq).padStart(12, '0')}`,
+        expected_user_id: request.expected_user_id,
+        stage: 'waiting_for_authorization',
+        verification_uri: 'https://auth.example/link',
+        user_code: 'WXYZ-1234',
+      }
+      json(res, { data: browserFlow }, 201)
+    })
+    return
+  }
+  const browserFlowPath = pathname.match(
+    /^\/v1\/accounts\/login\/browser\/([^/]+)$/,
+  )
+  if (method === 'GET' && browserFlowPath !== null) {
+    const found = browserFlowById(browserFlowPath[1])
+    return found === undefined
+      ? json(
+          res,
+          { error: { code: 'not_found', message: 'unknown flow' } },
+          404,
+        )
+      : json(res, { data: found })
+  }
+  if (method === 'DELETE' && browserFlowPath !== null) {
+    // As Axon does: the request always succeeds, but it only cancels a flow
+    // that is not already being finished, and the flow stays readable.
+    if (
+      browserFlow !== null &&
+      browserFlow.flow_id === browserFlowPath[1] &&
+      isOpenBrowserFlow(browserFlow)
+    ) {
+      browserFlow = {
+        flow_id: browserFlow.flow_id,
+        expected_user_id: browserFlow.expected_user_id,
+        stage: 'cancelled',
+      }
+    }
+    res.writeHead(204).end()
+    return
+  }
   if (method === 'GET' && pathname === '/v1/status') {
     return json(res, {
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
@@ -1489,6 +1565,26 @@ const server = createServer((req, res) => {
         submitted: submittedQrBase64,
       },
     })
+  }
+  // Stands in for the user approving at the authorization server, which no
+  // spec can reach: moves the open browser sign-in to the stage named.
+  if (req.method === 'POST' && url.pathname === '/__e2e/browser-sign-in') {
+    const stage = url.searchParams.get('stage')
+    if (stage === null) {
+      browserFlow = null
+      replacedBrowserFlow = null
+    } else if (browserFlow !== null) {
+      browserFlow = {
+        flow_id: browserFlow.flow_id,
+        expected_user_id: browserFlow.expected_user_id,
+        stage,
+        ...(stage === 'done' ? { account_id: ACCOUNT_ID } : {}),
+        ...(stage === 'failed'
+          ? { error_code: url.searchParams.get('error_code') }
+          : {}),
+      }
+    }
+    return json(res, { data: browserFlow })
   }
   if (req.method === 'POST' && url.pathname === '/__e2e/search-503') {
     searchDisabled = url.searchParams.get('disabled') === 'true'

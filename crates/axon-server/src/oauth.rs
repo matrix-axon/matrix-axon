@@ -129,8 +129,6 @@ pub(crate) async fn apple_provider_with_http(
     config: &axon_core::OauthConfig,
     http: reqwest::Client,
 ) -> anyhow::Result<axon_api::AppleProvider> {
-    use tokio::io::AsyncReadExt;
-    const MAX_KEY_BYTES: usize = 16 * 1024;
     let apple = &config.providers.apple;
     let callback = axon_api::oauth_callback_url(
         config.external_base_url.as_deref().unwrap_or_default(),
@@ -155,73 +153,14 @@ pub(crate) async fn apple_provider_with_http(
             .is_none_or(|explicit| explicit == &callback),
         "Apple redirect_uri must exactly match external_base_url plus /v1/oauth/apple/callback"
     );
-    let pem = match (&apple.private_key, &apple.private_key_path) {
-        (Some(pem), None) if !pem.is_empty() && pem.len() <= MAX_KEY_BYTES => {
-            pem.as_bytes().to_vec()
-        }
-        (None, Some(path)) => tokio::time::timeout(Duration::from_secs(5), async {
-            let metadata = tokio::fs::metadata(path)
-                .await
-                .map_err(|error| key_file_error("inspect", path.is_relative(), error.kind()))?;
-            anyhow::ensure!(
-                metadata.is_file() && metadata.len() <= MAX_KEY_BYTES as u64,
-                "Apple key must be a regular file of at most 16 KiB"
-            );
-            let mut options = tokio::fs::OpenOptions::new();
-            options.read(true);
-            // A path swapped to a FIFO after inspection must not strand a
-            // blocking filesystem worker even after the async timeout fires.
-            #[cfg(unix)]
-            options.custom_flags(libc::O_NONBLOCK);
-            let file = options
-                .open(path)
-                .await
-                .map_err(|error| key_file_error("read", path.is_relative(), error.kind()))?;
-            let metadata = file
-                .metadata()
-                .await
-                .map_err(|error| key_file_error("inspect", path.is_relative(), error.kind()))?;
-            anyhow::ensure!(metadata.is_file(), "Apple key must be a regular file");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                anyhow::ensure!(
-                    metadata.permissions().mode() & 0o077 == 0,
-                    "Apple key file must have owner-only permissions (chmod 600)"
-                );
-            }
-            let mut bytes = Vec::new();
-            file.take((MAX_KEY_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-                .await
-                .map_err(|error| key_file_error("read", path.is_relative(), error.kind()))?;
-            anyhow::ensure!(
-                !bytes.is_empty() && bytes.len() <= MAX_KEY_BYTES,
-                "Apple key file must contain at most 16 KiB of PEM"
-            );
-            Ok::<_, anyhow::Error>(bytes)
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("Apple key file read timed out"))??,
-        _ => anyhow::bail!(
-            "set exactly one of Apple private_key (at most 16 KiB) or private_key_path"
-        ),
-    };
+    let source = crate::pem::one_private_key(
+        "Apple",
+        apple.private_key.as_deref(),
+        apple.private_key_path.as_deref(),
+    )?;
+    let pem = crate::pem::load_private_key("Apple", &source).await?;
     axon_api::AppleProvider::new(http, apple, &pem)
         .map_err(|_| anyhow::anyhow!("invalid Apple provider credentials"))
-}
-
-fn key_file_error(
-    operation: &'static str,
-    relative: bool,
-    kind: std::io::ErrorKind,
-) -> anyhow::Error {
-    let hint = if relative {
-        "private_key_path is relative to the process working directory; use an absolute path"
-    } else {
-        "check private_key_path and file permissions"
-    };
-    anyhow::anyhow!("cannot {operation} Apple key file ({kind:?}); {hint}")
 }
 
 /// List or unbind already-bound identities.
@@ -380,7 +319,29 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("exactly one"));
+        config.providers.apple.private_key = Some(String::new());
+        assert!(
+            apple_provider(&config)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("exactly one"),
+            "an empty private_key plus a path is still both sources"
+        );
+        config.providers.apple.private_key = Some("PRIVATE_SENTINEL".into());
+        config.providers.apple.private_key_path = Some(std::path::PathBuf::new());
+        assert!(
+            apple_provider(&config)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("exactly one"),
+            "an empty private_key_path plus an inline key is still both sources"
+        );
         config.providers.apple.private_key = None;
+        config.providers.apple.private_key_path = Some("PRIVATE_SENTINEL".into());
         let error = apple_provider(&config).await.err().unwrap().to_string();
         assert!(error.contains("NotFound"));
         assert!(error.contains("relative to the process working directory"));

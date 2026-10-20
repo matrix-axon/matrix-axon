@@ -157,7 +157,9 @@ store_key = "change-me"
 # separate from [oauth] below: here Axon is a Matrix OAuth client, while the
 # top-level section configures Axon as an authorization server for /v1/ clients.
 [sync.matrix_oauth]
-# Total timeout for each discovery or dynamic-registration request. Default 15.
+# Total timeout for each request Axon itself sends to the authorization
+# server: discovery, dynamic registration, and browser sign-in's device
+# authorization and token-poll requests (ADR 0117). Default 15.
 request_timeout_secs = 15
 # Dynamic registration is preferred. If an authorization server does not allow
 # it, provision a public client ID out-of-band and match either the homeserver
@@ -249,3 +251,28 @@ request_timeout_secs = 15
 # native_enabled = false
 # native_audiences = ["org.matrixaxon.axon"] # actual entitled app bundle ID
 # See docs/apple-oauth-native.md for owner binding and the challenge contract.
+
+# [push.apns]
+# Apple Push Notification service for iOS and iPadOS (ADR 0113).
+# Leave every field empty to stay unconfigured. Setting some of them, or a
+# key file that cannot be read, stops startup. Exactly one of private_key or
+# private_key_path. The file is regular, at most 16 KiB, and owner-only on
+# Unix. This is not the Sign in with Apple key.
+# AXON_PUSH__APNS__TEAM_ID, AXON_PUSH__APNS__KEY_ID, AXON_PUSH__APNS__BUNDLE_ID,
+# AXON_PUSH__APNS__PRIVATE_KEY, AXON_PUSH__APNS__PRIVATE_KEY_PATH.
+# team_id = "YOURTEAMID"
+# key_id = "YOURKEYID"
+# bundle_id = "org.matrixaxon.axon"
+# private_key_path = "/etc/axon-server/apns.p8"
+
+# [push.fcm]
+# Firebase Cloud Messaging for Android. Same empty-or-complete rule, and the
+# same key-file bounds. Omit environment on the registration; APNs is the
+# provider that sends sandbox or production.
+# AXON_PUSH__FCM__PROJECT_ID, AXON_PUSH__FCM__CLIENT_EMAIL,
+# AXON_PUSH__FCM__PACKAGE_NAME, AXON_PUSH__FCM__PRIVATE_KEY,
+# AXON_PUSH__FCM__PRIVATE_KEY_PATH.
+# project_id = "your-project"
+# client_email = "firebase-adminsdk@your-project.iam.gserviceaccount.com"
+# package_name = "org.matrixaxon.axon"
+# private_key_path = "/etc/axon-server/fcm.pem"
