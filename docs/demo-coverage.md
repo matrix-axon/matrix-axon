@@ -114,6 +114,7 @@ shows it.
   Narrow room panes use a compact “+” action button and omit the redundant Sort caption while retaining its accessible label.
   The Rooms menu stays right-aligned when its controls wrap, and reaction sender tooltips and read-receipt lists fit their message column.
   Message actions wrap within narrow headers, and long-press labels stay inside the action bar.
+  Read-receipt dismissal is ready before the popup paints, including an immediate Escape after opening.
   These bounds are **not covered** by the recordings; `clients/web/e2e/popup-bounds.spec.ts` exercises narrow tablet and phone layouts.
 - **Empty spaces in the web picker.**
   Confirmed empty roots stay hidden during background refreshes, while unknown and failed roots remain available.

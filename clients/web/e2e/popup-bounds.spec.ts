@@ -143,10 +143,31 @@ for (const width of [320, 390, 1024]) {
     await chip.focus()
     await expect(row.locator('.reaction-senders-tooltip')).toBeVisible()
     await expectPopupWithin(page, '.reaction-senders-tooltip')
+    // Deliver Escape as soon as the popup mounts, before the next paint.
+    // Visibility alone does not guarantee that a passive effect has run.
+    await row.locator('.read-receipts').evaluate(
+      (button) =>
+        new Promise<void>((resolve) => {
+          const root = button.closest('.read-receipts-wrap')!
+          const observer = new MutationObserver(() => {
+            if (root.querySelector('.read-receipts-popover') === null) return
+            observer.disconnect()
+            button.dispatchEvent(
+              new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+            )
+            resolve()
+          })
+          observer.observe(root, { childList: true, subtree: true })
+          button.click()
+        }),
+    )
+    await expect(row.locator('.read-receipts-popover')).toBeHidden()
     await row.locator('.read-receipts').click()
     await expect(row.locator('.read-receipts-popover')).toBeVisible()
     await expectPopupWithin(page, '.read-receipts-popover')
     await page.keyboard.press('Escape')
+    await expect(row.locator('.read-receipts-popover')).toBeHidden()
+
     if (width < 768) {
       await row.locator('.event-body').click()
       await row.getByRole('button', { name: 'Delete', exact: true }).click()
