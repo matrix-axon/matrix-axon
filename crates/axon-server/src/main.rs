@@ -15,10 +15,13 @@ mod gateway;
 mod init;
 mod lifecycle;
 mod matrix_oauth_acquire;
+mod matrix_oauth_browser;
 mod matrix_oauth_grant;
 mod media;
 mod member_profiles;
 mod oauth;
+mod pem;
+mod push;
 mod search;
 mod status;
 mod token;
@@ -44,6 +47,7 @@ use crate::devices::DeviceAdapter;
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
 use crate::matrix_oauth_acquire::MatrixOAuthAcquireAdapter;
+use crate::matrix_oauth_browser::MatrixOAuthBrowserAdapter;
 use crate::matrix_oauth_grant::MatrixOAuthGrantAdapter;
 use crate::media::CachingMediaProxy;
 use crate::member_profiles::MemberProfileAdapter;
@@ -184,6 +188,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let store = Store::connect_with_config(&config.database)
         .await
         .context("connecting to database")?;
+    let push = crate::push::load_push_material(&config.push)
+        .await
+        .context("loading push provider keys")?;
+    let reaped = store
+        .reap_push_registrations()
+        .await
+        .context("reaping push registrations")?;
+    if reaped > 0 {
+        tracing::info!(
+            reaped,
+            "removed push registrations whose sessions are not live"
+        );
+    }
     let bootstrap = maybe_offer_web_bootstrap(&store, &config).await?;
 
     // Open the search index and spawn its background indexing actor (M9), when
@@ -284,6 +301,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let matrix_oauth_acquire = Arc::new(MatrixOAuthAcquireAdapter(
         sync_engine.matrix_oauth_acquire(),
     ));
+    // Browser sign-in is a third method of the same acquisition engine (ADR 0117).
+    let matrix_oauth_browser = Arc::new(MatrixOAuthBrowserAdapter(
+        sync_engine.matrix_oauth_acquire(),
+    ));
     let matrix_oauth_grant = Arc::new(MatrixOAuthGrantAdapter(sync_engine.matrix_oauth_grant()));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
@@ -343,6 +364,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_sync_state(sync_state)
     .with_backup_state(backup_state)
     .with_matrix_oauth_acquire(matrix_oauth_acquire)
+    .with_matrix_oauth_browser(matrix_oauth_browser)
     .with_matrix_oauth_grant(matrix_oauth_grant)
     .with_build_info(axon_api::BuildInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -360,7 +382,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_power_levels(power_levels)
     .with_account_actions(account_actions)
     .with_management(config.server.management_api)
-    .with_web_client(config.server.web_client);
+    .with_web_client(config.server.web_client)
+    .with_push(push);
     if !config.server.management_api {
         tracing::info!(
             "management API disabled (server.management_api = false); \

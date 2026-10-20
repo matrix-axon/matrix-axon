@@ -76,15 +76,19 @@ pub struct MatrixOAuthQrFlowDto {
     pub error_code: Option<String>,
 }
 
-/// HTTP-shaped errors returned by the server adapter.
+/// HTTP-shaped errors returned by the server adapters of both account
+/// sign-in methods that run on the acquisition engine: QR and browser.
 #[derive(Debug)]
-pub enum MatrixOAuthQrError {
+pub enum MatrixOAuthLoginError {
     InvalidRequest(String),
     Conflict(String),
     NotFound(String),
     TooMany(String),
     Internal,
 }
+
+/// The QR routes' name for [`MatrixOAuthLoginError`].
+pub type MatrixOAuthQrError = MatrixOAuthLoginError;
 
 /// Drives Matrix OAuth QR login without exposing matrix-rust-sdk to `axon-api`.
 #[async_trait]

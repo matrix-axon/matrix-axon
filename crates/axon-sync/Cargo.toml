@@ -50,5 +50,7 @@ sqlx-core = { workspace = true }
 # mxdomain (well-known) and the homeserver (versions probe).
 axum = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true, features = ["net"] }
+# `test-util` pauses the clock so the device-grant poll loop's intervals,
+# clamps, and deadlines are asserted exactly instead of slept through.
+tokio = { workspace = true, features = ["net", "test-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }

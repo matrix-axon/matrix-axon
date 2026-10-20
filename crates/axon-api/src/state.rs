@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axon_core::LiveFrame;
+use axon_core::{LiveFrame, PushMaterial};
 use axon_store::Store;
 use axum::extract::FromRef;
 use tokio::sync::broadcast;
@@ -22,6 +22,7 @@ use crate::build_info::BuildInfo;
 use crate::devices::DeviceListService;
 use crate::lifecycle::AccountLifecycle;
 use crate::matrix_oauth_acquire::{MatrixOAuthQrAcquireService, NoopMatrixOAuthQrAcquire};
+use crate::matrix_oauth_browser::{MatrixOAuthBrowserService, NoopMatrixOAuthBrowser};
 use crate::matrix_oauth_grant::{MatrixOAuthQrGrantService, NoopMatrixOAuthQrGrant};
 use crate::media::MediaProxy;
 use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
@@ -118,6 +119,8 @@ pub struct AppState {
     pub lifecycle: Arc<dyn AccountLifecycle>,
     /// Pre-account Matrix OAuth QR-login flow driver (ADR 0097).
     pub matrix_oauth_acquire: Arc<dyn MatrixOAuthQrAcquireService>,
+    /// Pre-account Matrix OAuth browser sign-in flow driver (ADR 0117).
+    pub matrix_oauth_browser: Arc<dyn MatrixOAuthBrowserService>,
     /// Account-scoped Matrix OAuth QR login-grant driver (ADR 0097).
     pub matrix_oauth_grant: Arc<dyn MatrixOAuthQrGrantService>,
     /// Device-verification port for the `/v1/accounts/{id}/verify` handlers.
@@ -201,6 +204,10 @@ pub struct AppState {
     /// config key is; the binary passes `[server] web_client` through
     /// [`with_web_client`](Self::with_web_client).
     pub web_client: WebClientConfig,
+    /// Push provider keys loaded at startup (ADR 0113). Unconfigured when the
+    /// operator left `[push]` empty. `GET /v1/status` reads the flags; the
+    /// bytes stay here for the process that will send.
+    pub push: Arc<PushMaterial>,
 }
 
 /// Whether the embedded web client is served (`[server] web_client`, ADR 0116).
@@ -381,6 +388,7 @@ impl AppState {
             account_actions: Arc::new(NoopAccountActionsSender),
             lifecycle,
             matrix_oauth_acquire: Arc::new(NoopMatrixOAuthQrAcquire),
+            matrix_oauth_browser: Arc::new(NoopMatrixOAuthBrowser),
             matrix_oauth_grant: Arc::new(NoopMatrixOAuthQrGrant),
             verify,
             trust,
@@ -401,6 +409,7 @@ impl AppState {
             bootstrap: None,
             management: ManagementConfig::default(),
             web_client: WebClientConfig::default(),
+            push: Arc::new(PushMaterial::unconfigured()),
         }
     }
 
@@ -467,6 +476,15 @@ impl AppState {
         service: Arc<dyn MatrixOAuthQrAcquireService>,
     ) -> Self {
         self.matrix_oauth_acquire = service;
+        self
+    }
+
+    /// Inject the Matrix OAuth browser sign-in driver.
+    pub fn with_matrix_oauth_browser(
+        mut self,
+        service: Arc<dyn MatrixOAuthBrowserService>,
+    ) -> Self {
+        self.matrix_oauth_browser = service;
         self
     }
 
@@ -562,6 +580,13 @@ impl AppState {
     /// with `[server] web_client`.
     pub fn with_web_client(mut self, enabled: bool) -> Self {
         self.web_client.enabled = enabled;
+        self
+    }
+
+    /// Install the push keys loaded at startup. The binary calls this after
+    /// reading `[push]`. Tests that don't care leave both providers off.
+    pub fn with_push(mut self, push: PushMaterial) -> Self {
+        self.push = Arc::new(push);
         self
     }
 
@@ -976,6 +1001,12 @@ impl FromRef<AppState> for ManagementConfig {
     }
 }
 
+impl FromRef<AppState> for Arc<PushMaterial> {
+    fn from_ref(state: &AppState) -> Arc<PushMaterial> {
+        Arc::clone(&state.push)
+    }
+}
+
 impl FromRef<AppState> for Store {
     fn from_ref(state: &AppState) -> Store {
         state.store.clone()
@@ -1039,6 +1070,12 @@ impl FromRef<AppState> for Arc<dyn AccountLifecycle> {
 impl FromRef<AppState> for Arc<dyn MatrixOAuthQrAcquireService> {
     fn from_ref(state: &AppState) -> Arc<dyn MatrixOAuthQrAcquireService> {
         state.matrix_oauth_acquire.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn MatrixOAuthBrowserService> {
+    fn from_ref(state: &AppState) -> Arc<dyn MatrixOAuthBrowserService> {
+        state.matrix_oauth_browser.clone()
     }
 }
 

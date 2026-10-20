@@ -1692,6 +1692,8 @@ pub struct StatusDto {
     pub sync: Vec<AccountSyncStatusDto>,
     /// The management API's availability (ADR 0109).
     pub management: ManagementStatusDto,
+    /// Which push providers loaded key material (ADR 0113).
+    pub push: PushStatusDto,
 }
 
 /// Whether this server serves `/v1/management/*`.
@@ -1701,6 +1703,49 @@ pub struct ManagementStatusDto {
     /// management route then answers `403 management_disabled`, and a client
     /// should hide its management UI rather than probe.
     pub enabled: bool,
+}
+
+/// Whether this process loaded a provider key (`GET /v1/status`, ADR 0113).
+/// True is key material, not "a device is registered". Registration still
+/// succeeds when the flag is false.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PushStatusDto {
+    /// An APNs auth key was loaded at startup.
+    pub apns: bool,
+    /// An FCM service-account key was loaded at startup.
+    pub fcm: bool,
+}
+
+/// A device push registration (`PUT /v1/push/registrations`).
+/// The device token is not in the response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PushRegistrationDto {
+    /// Stable id, used to delete the registration.
+    pub id: Uuid,
+    /// `apns` or `fcm`.
+    pub provider: String,
+    /// What a later send may put in the banner: `activity`,
+    /// `sender_and_room`, or `preview`.
+    pub disclosure: String,
+    /// `sandbox` or `production` for APNs. Null for FCM.
+    pub environment: Option<String>,
+}
+
+/// Body of `PUT /v1/push/registrations`.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PutPushRegistrationRequest {
+    /// `apns` or `fcm`. Any other value, including `webpush`, is
+    /// `push_provider_unsupported`.
+    pub provider: String,
+    /// The APNs device token or the FCM registration token.
+    /// Empty, or longer than 4096 bytes, is rejected before a write.
+    pub token: String,
+    /// `activity`, `sender_and_room`, or `preview`. Required, so an omitted
+    /// field cannot land on `preview`.
+    pub disclosure: String,
+    /// `sandbox` or `production` for APNs. Omit for FCM.
+    #[serde(default)]
+    pub environment: Option<String>,
 }
 
 /// An upstream sign-in identity bound to this instance's owner
@@ -1969,6 +2014,9 @@ pub struct AccountBackfillDto {
     pub rooms_total: i64,
     /// Of those, how many are backfilled to the room's start.
     pub rooms_backfilled: i64,
+    /// Of those, how many backfill has parked after repeated failures: they are
+    /// retried only about once a day (ADR 0121).
+    pub rooms_parked: i64,
     /// Whether every joined room is fully backfilled (nothing left to fetch).
     pub complete: bool,
 }
@@ -1980,6 +2028,7 @@ impl From<axon_store::AccountBackfillProgress> for AccountBackfillDto {
             events: p.events_total,
             rooms_total: p.rooms_total,
             rooms_backfilled: p.rooms_backfilled,
+            rooms_parked: p.rooms_parked,
             complete: p.rooms_total > 0 && p.rooms_backfilled == p.rooms_total,
         }
     }

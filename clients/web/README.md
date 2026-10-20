@@ -14,7 +14,10 @@ status, recovery, megolm backup snapshot and enable, logout, reactivation,
 deletion, and password acquisition),
 Matrix OAuth QR account acquisition (display or selectable-camera/image scan,
 check codes, authorization, reload resume, and cancellation) plus trusted-account
-QR authorization of new clients such as Element X, theme +
+QR authorization of new clients such as Element X, browser sign-in for
+homeservers that only sign in on a web page (ADR 0117: a link to the
+homeserver's own page and a code, reload resume, cancellation, and a prompt to
+verify the new device), theme +
 schema-versioned settings, history routing with the permanent deep-link
 shape `/:accountId/rooms/:roomId?thread=&event=` (signed off), the
 cross-account room list with TUI semantics (pinning ADR 0038, sort/filters
@@ -70,6 +73,14 @@ that paints before `/v1/rooms` answers and reconciles in place, marked
 "Updating…" until it does — room metadata only, no message bodies; on by
 default and switchable off under Settings → Room list, which also erases what
 was stored).
+
+Messages with bundled URL previews (`m.url_previews` or Beeper's `com.beeper.linkpreviews`) show text cards beneath the body in room and thread timelines, including attachment captions.
+Compact pinned thread headers omit the cards; the full root message retains them.
+Cards show the destination hostname, site name, title, and description when supplied; the destination is the matched URL in the message body, rather than the preview's canonical URL.
+Two cards appear initially, with an expansion control for additional previews (up to eight).
+Preview images and automatic preview generation are not supported; rendering cards makes no additional network requests.
+Formatted messages containing spoilers omit preview cards, even after the spoiler is revealed.
+Malformed or oversized preview metadata is ignored.
 
 On touch devices, Settings → Messages configures double tap, touch and hold,
 and swipe left as unique bindings for reply, thread, reaction, edit, or delete.

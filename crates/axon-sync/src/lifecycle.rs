@@ -21,7 +21,9 @@ use std::time::Duration;
 use axon_core::{LiveFrame, SyncConfig};
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
-use axon_store::{Account, AccountState, CommitMatrixOAuthAcquire, Store, StoreError};
+use axon_store::{
+    Account, AccountState, CommitMatrixOAuthAcquire, FinalizeMatrixOAuthAcquire, Store, StoreError,
+};
 use matrix_sdk::authentication::oauth::OAuthSession;
 use matrix_sdk::encryption::recovery::RecoveryError;
 use matrix_sdk::encryption::secret_storage::{SecretStorageError, SecretStore};
@@ -114,9 +116,10 @@ pub enum LifecycleError {
     #[error("account is already active: {0}")]
     AlreadyActive(Uuid),
 
-    /// A prior QR acquisition has crossed its durable commit point and still
-    /// owns this identity while SDK-store adoption is reconciled. → 409.
-    #[error("Matrix OAuth QR login is still finalizing for {0}")]
+    /// A Matrix OAuth acquisition (QR login or browser sign-in) holds this
+    /// identity: it is in progress, or has crossed its durable commit point
+    /// and SDK-store adoption is still being reconciled. → 409.
+    #[error("Matrix OAuth login is still finalizing for {0}")]
     LoginFinalizing(String),
 
     /// The QR protocol completed but the SDK's own device is not actually
@@ -170,6 +173,22 @@ pub enum LifecycleError {
     /// A storage-layer failure while resolving or transitioning the account row.
     #[error("store error: {0}")]
     Store(String),
+}
+
+/// What a Matrix OAuth acquisition method promises about the new device's
+/// trust, and therefore what finalization must find before it commits.
+///
+/// Deliberately an enum with no default, passed explicitly at every call
+/// site, so no caller can drop the QR presentations' fail-closed check by
+/// omission (ADR 0117).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatrixOAuthAcquireTrust {
+    /// QR login promises "sign in and verify": the device must already be
+    /// cross-signed by its owner, or the flow fails closed (ADR 0097).
+    CrossSigned,
+    /// Browser sign-in authenticates and makes no verification claim. The
+    /// account activates unverified, like a password login (ADR 0117).
+    Unverified,
 }
 
 /// A Matrix OAuth acquisition finalization failure, including the staging-bound
@@ -970,10 +989,27 @@ impl AccountLifecycle {
         }
     }
 
-    /// Reserve one Matrix identity for a QR acquisition under the same lock as
-    /// password login, token import, deletion, and finalization. The lock covers
-    /// only the local conflict decision and durable breadcrumb insertion; the
-    /// multi-minute remote protocol starts after this method returns.
+    /// The account-state half of [`Self::reserve_matrix_oauth_acquire`],
+    /// without the lock or the breadcrumb: an advisory check, so a browser
+    /// sign-in that would be refused anyway does not first replace the
+    /// user's open one (ADR 0117). The reservation still decides.
+    pub(crate) async fn check_matrix_oauth_acquire_target(
+        &self,
+        expected_user_id: &str,
+    ) -> Result<(), LifecycleError> {
+        match self.resolve_login_target(expected_user_id).await? {
+            ResolvedTarget::AlreadyActive(account_id) => {
+                Err(LifecycleError::AlreadyActive(account_id))
+            }
+            ResolvedTarget::Retained(_) | ResolvedTarget::New => Ok(()),
+        }
+    }
+
+    /// Reserve one Matrix identity for a QR or browser acquisition under the
+    /// same lock as password login, token import, deletion, and finalization.
+    /// The lock covers only the local conflict decision and durable breadcrumb
+    /// insertion; the multi-minute remote protocol starts after this method
+    /// returns.
     pub(crate) async fn reserve_matrix_oauth_acquire(
         &self,
         flow_id: Uuid,
@@ -1068,11 +1104,14 @@ impl AccountLifecycle {
         account_id
     }
 
-    /// Finalize a successful Matrix OAuth QR login under the same per-identity
-    /// lock as login/logout/delete. The encrypted session and durable adoption
-    /// breadcrumb commit together while the account remains deactivated; only
-    /// after the SDK store is in its permanent location is the account activated
-    /// and handed to the normal supervisor.
+    /// Finalize a successful Matrix OAuth acquisition under the same
+    /// per-identity lock as login/logout/delete. The encrypted session and
+    /// durable adoption breadcrumb commit together while the account remains
+    /// deactivated; only after the SDK store is in its permanent location is the
+    /// account activated and handed to the normal supervisor.
+    ///
+    /// `trust` is what the acquisition method promised: QR login requires a
+    /// cross-signed device here, browser sign-in does not.
     pub(crate) async fn finalize_matrix_oauth_acquire(
         &self,
         flow_id: Uuid,
@@ -1080,6 +1119,7 @@ impl AccountLifecycle {
         expected_user_id: &str,
         client: Client,
         session: OAuthSession,
+        trust: MatrixOAuthAcquireTrust,
     ) -> Result<Uuid, MatrixOAuthAcquireFinalizeFailure> {
         let lock = self.lock_for(expected_user_id, "");
         let _guard = lock.lock().await;
@@ -1096,11 +1136,16 @@ impl AccountLifecycle {
                 ResolvedTarget::Retained(_) | ResolvedTarget::New => {}
             }
 
-            if !tokio::time::timeout(QR_TRUST_DERIVATION_TIMEOUT, derive_verified(&client))
-                .await
-                .unwrap_or(false)
-            {
-                return Err(LifecycleError::DeviceNotVerified);
+            match trust {
+                MatrixOAuthAcquireTrust::CrossSigned => {
+                    if !tokio::time::timeout(QR_TRUST_DERIVATION_TIMEOUT, derive_verified(&client))
+                        .await
+                        .unwrap_or(false)
+                    {
+                        return Err(LifecycleError::DeviceNotVerified);
+                    }
+                }
+                MatrixOAuthAcquireTrust::Unverified => {}
             }
 
             let refresh_token = session
@@ -1110,12 +1155,12 @@ impl AccountLifecycle {
                 .as_deref()
                 .ok_or_else(|| {
                     LifecycleError::Upstream(
-                        "Matrix OAuth QR login returned no refresh token".to_owned(),
+                        "Matrix OAuth login returned no refresh token".to_owned(),
                     )
                 })?;
             if session.user.meta.user_id.as_str() != expected_user_id {
                 return Err(LifecycleError::AuthFailed(
-                    "Matrix OAuth QR login returned a different Matrix user".to_owned(),
+                    "Matrix OAuth login returned a different Matrix user".to_owned(),
                 ));
             }
             let store_key = self
@@ -1169,27 +1214,28 @@ impl AccountLifecycle {
             .finalize_matrix_oauth_acquire(flow_id, account.account_id)
             .await
             .map_err(MatrixOAuthAcquireFinalizeFailure::after_commit)?;
-        if !finalized {
+        let FinalizeMatrixOAuthAcquire::Activated { verified } = finalized else {
             self.manager.evict(account.account_id).await;
             return Err(MatrixOAuthAcquireFinalizeFailure::after_commit(
                 LifecycleError::Store(
-                    "Matrix OAuth QR finalization breadcrumb disappeared".to_owned(),
+                    "Matrix OAuth finalization breadcrumb disappeared".to_owned(),
                 ),
             ));
-        }
+        };
         // The activation transaction succeeded, so use the row we already own
         // rather than introducing a fallible read between activation and
         // supervision. No account fields other than lifecycle/trust change in
         // that transaction.
         let mut active = account;
         active.state = AccountState::Active;
-        active.verified = true;
+        active.verified = verified;
         let account_id = self.supervise(active);
         tracing::info!(
             %flow_id,
             %account_id,
             user_id = expected_user_id,
-            "Matrix OAuth QR login finalized and supervised"
+            verified,
+            "Matrix OAuth login finalized and supervised"
         );
         Ok(account_id)
     }
@@ -1818,7 +1864,7 @@ impl AccountLifecycle {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A media-cache handle over a throwaway temp directory, for the lifecycle
@@ -1844,16 +1890,22 @@ mod tests {
     /// Build a lifecycle over the test DB. The branches exercised here all return
     /// before any homeserver/SDK contact, so the manager/data_dir are never used.
     async fn lifecycle() -> AccountLifecycle {
-        let url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-        let store = Store::connect(&url, 5).await.expect("connect + migrate");
-        let config = SyncConfig {
+        lifecycle_with(SyncConfig {
             data_dir: std::env::temp_dir().join("axon-lifecycle-test"),
             store_key: Some("test-key".to_owned()),
             timeline_limit: 1,
             live_event_buffer: 16,
             ..SyncConfig::default()
-        };
+        })
+        .await
+    }
+
+    /// A lifecycle over the test database with the caller's sync settings, for
+    /// engine tests that need their own data directory.
+    pub(crate) async fn lifecycle_with(config: SyncConfig) -> AccountLifecycle {
+        let url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let store = Store::connect(&url, 5).await.expect("connect + migrate");
         let manager = ClientManager::new(store.clone(), config.clone());
         let (live_tx, _rx) = broadcast::channel(16);
         AccountLifecycle::new(
@@ -2002,6 +2054,73 @@ mod tests {
             .await
             .unwrap());
         delete_account(&lc.store, account.account_id).await;
+    }
+
+    /// ADR 0117 made the trust gate a per-method argument. This pins that the
+    /// QR methods' value still fails closed: a completed login whose device is
+    /// not cross-signed never commits a session, let alone activates.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn qr_finalization_still_fails_closed_on_an_unverified_device() {
+        let lc = lifecycle().await;
+        let user = format!("@qr-unverified-{}:localhost", Uuid::new_v4());
+        let flow_id = Uuid::new_v4();
+        lc.reserve_matrix_oauth_acquire(flow_id, &user, "display", &flow_id.to_string())
+            .await
+            .unwrap();
+        let session = OAuthSession {
+            client_id: matrix_sdk::authentication::oauth::ClientId::new("client".to_owned()),
+            user: matrix_sdk::authentication::oauth::UserSession {
+                meta: matrix_sdk::SessionMeta {
+                    user_id: user.as_str().try_into().unwrap(),
+                    device_id: "DEVICE".into(),
+                },
+                tokens: matrix_sdk::SessionTokens {
+                    access_token: "access".to_owned(),
+                    refresh_token: Some("refresh".to_owned()),
+                },
+            },
+        };
+
+        // A client with no crypto identity has no cross-signed own device.
+        let Err(failure) = lc
+            .finalize_matrix_oauth_acquire(
+                flow_id,
+                &flow_id.to_string(),
+                &user,
+                offline_client().await,
+                session,
+                MatrixOAuthAcquireTrust::CrossSigned,
+            )
+            .await
+        else {
+            panic!("an unverified device must not finalize a QR login");
+        };
+        assert!(matches!(failure.error, LifecycleError::DeviceNotVerified));
+        assert!(
+            failure.acquisition_client.is_some(),
+            "the driver keeps the client so it can revoke the session"
+        );
+        assert!(
+            lc.store
+                .matrix_oauth_acquire_is_staging(flow_id)
+                .await
+                .unwrap(),
+            "nothing may commit before the trust check passes"
+        );
+        assert!(lc
+            .store
+            .list_accounts()
+            .await
+            .unwrap()
+            .iter()
+            .all(|account| account.user_id != user));
+
+        assert!(lc
+            .store
+            .abandon_matrix_oauth_acquire(flow_id)
+            .await
+            .unwrap());
     }
 
     /// Login on an already-`active` account is an idempotent no-op: it returns the

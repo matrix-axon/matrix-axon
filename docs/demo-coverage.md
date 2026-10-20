@@ -44,6 +44,7 @@ shows it.
 | DM title derived from the other member                  | `rooms`               | `rooms`                                                                                                   | `rooms`         |
 | Timeline text, sender names, day separators             | `timeline`            | `timeline`                                                                                                | `timeline`      |
 | Formatted (HTML) messages with links                    | `timeline`            | `timeline`                                                                                                | `timeline`      |
+| Bundled URL preview text cards (MSC4095)                | **n/a**               | **not covered** — demo corpus has no bundled preview metadata                                             | **not covered** |
 | Reactions (seeded badges render)                        | `timeline`            | `timeline`                                                                                                | `send`          |
 | React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
 | Reaction badge updating live from another user's react  | **not covered**       | **not covered**                                                                                           | **not covered** |
@@ -78,6 +79,7 @@ shows it.
 | Megolm key backup snapshot and enable (ADR 0098)        | **not covered**       | **not covered** — `/accounts` is not a demo scene                                                         | **not covered** |
 | Matrix OAuth QR account acquisition                     | **n/a**               | **not covered** — demo stack has no MAS or second trusted device                                          | **not covered** |
 | Matrix OAuth QR device authorization                    | **n/a**               | **not covered** — demo stack has no MAS or second client to authorize                                     | **not covered** |
+| Matrix OAuth browser sign-in                            | **n/a**               | **not covered** — demo stack has no MAS, and the approval happens on its page                             | **not covered** |
 | Native Sign in with Apple (iOS shell, ADR 0054)         | **n/a**               | **not covered** — the web recordings run in a browser, not the iOS shell                                  | **not covered** |
 | Typing indicators and read receipts (M18)               | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Inline image whose terminal encode failed (placeholder) | **not covered**       | **n/a**                                                                                                   | **n/a**         |
@@ -119,6 +121,8 @@ shows it.
   Matrix device; the demo stack provides neither.
 - **Matrix OAuth QR device authorization.** Needs MAS and a second Matrix
   client to authorize; the demo stack provides neither.
+- **Matrix OAuth browser sign-in.** Needs MAS, and the approval happens on
+  its page rather than in a client; the demo stack has no MAS.
 - **Native Sign in with Apple.** The Apple sheet exists only in the iOS
   shell, with a real Apple Account on a signed, entitled build; the web
   recordings drive a browser, and a simulator recording would still need a

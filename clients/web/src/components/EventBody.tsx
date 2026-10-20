@@ -6,6 +6,7 @@ import type { TimelineEvent } from '../stores/timeline'
 import { FormattedBody } from './FormattedBody'
 import { MediaAttachment } from './MediaAttachment'
 import { MediaImage } from './MediaImage'
+import { LinkPreviews } from './LinkPreviews'
 
 function MediaBody({
   event,
@@ -98,6 +99,7 @@ export function EventBody({
   event,
   senderDisplay,
   resolveName,
+  showLinkPreviews = true,
 }: {
   event: TimelineEvent
   /** Resolved sender name for the `m.emote` prefix; falls back to the raw
@@ -106,6 +108,8 @@ export function EventBody({
   /** Members-store lookup for state-event notices (ADR 0083); the notice
    *  names users the event itself may not, e.g. whoever kicked someone. */
   resolveName?: (userId: string) => string
+  /** Compact thread-root headers show only the existing message body. */
+  showLinkPreviews?: boolean
 }) {
   // Resolved up front, but rendered in two places: a still-uploading send
   // outranks the placeholders below (it can be neither redacted nor a UTD),
@@ -139,21 +143,34 @@ export function EventBody({
     return <UtdPlaceholder />
   }
 
+  const previews =
+    showLinkPreviews && event.type === 'm.room.message' ? (
+      <LinkPreviews content={event.content} body={event.body} />
+    ) : null
+
   if (resolved !== null) {
-    return <MediaBody event={event} resolved={resolved} />
+    return (
+      <>
+        <MediaBody event={event} resolved={resolved} />
+        {previews}
+      </>
+    )
   }
 
   const msgtype = contentMsgtype(event.content)
   if (msgtype === 'm.emote') {
     return (
-      <em>
-        * {senderDisplay ?? event.sender}{' '}
-        <FormattedBody
-          accountId={event.account_id}
-          body={event.body}
-          content={event.content}
-        />
-      </em>
+      <>
+        <em>
+          * {senderDisplay ?? event.sender}{' '}
+          <FormattedBody
+            accountId={event.account_id}
+            body={event.body}
+            content={event.content}
+          />
+        </em>
+        {previews}
+      </>
     )
   }
   const bodyClassName = isEmojiOnlyMessageBody(event.body)
@@ -170,5 +187,10 @@ export function EventBody({
   if (!hasVisibleText(event.body)) {
     return <span class="muted placeholder">{unsupportedEventLabel(event)}</span>
   }
-  return msgtype === 'm.notice' ? <span class="muted">{body}</span> : body
+  return (
+    <>
+      {msgtype === 'm.notice' ? <span class="muted">{body}</span> : body}
+      {previews}
+    </>
+  )
 }

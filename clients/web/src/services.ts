@@ -30,6 +30,10 @@ import {
 import { parseOAuthProviders } from './auth/oauth'
 import { createAccountsStore, type AccountsStore } from './stores/accounts'
 import {
+  createMatrixOAuthBrowserStore,
+  type MatrixOAuthBrowserStore,
+} from './stores/matrix-oauth-browser'
+import {
   createMatrixOAuthQrGrantStore,
   createMatrixOAuthQrStore,
   type MatrixOAuthQrGrantStore,
@@ -123,6 +127,7 @@ export interface AppServices {
   accounts: AccountsStore
   matrixOAuthQr: MatrixOAuthQrStore
   matrixOAuthQrGrant: MatrixOAuthQrGrantStore
+  matrixOAuthBrowser: MatrixOAuthBrowserStore
   qr: BrowserQrAdapter
   rooms: RoomsStore
   invites: InvitesStore
@@ -1133,10 +1138,15 @@ export function connectRoomsSessionReset(
   })
 }
 
-/** Drop every QR flow and presentation byte when the Axon session ends. */
+/**
+ * Drop every Matrix sign-in flow and its presentation data (QR bytes, links,
+ * codes) when the Axon session ends.
+ */
 export function connectMatrixOAuthQrSessionReset(
   auth: CompositeAuthProvider,
-  ...stores: Array<MatrixOAuthQrStore | MatrixOAuthQrGrantStore>
+  ...stores: Array<
+    MatrixOAuthQrStore | MatrixOAuthQrGrantStore | MatrixOAuthBrowserStore
+  >
 ): () => void {
   return effect(() => {
     if (!auth.signedIn.value) {
@@ -1154,6 +1164,24 @@ export function connectInvitesSessionReset(
   return effect(() => {
     if (!auth.signedIn.value) {
       invites.resetSession()
+    }
+  })
+}
+
+/**
+ * Cancel queued and retrying read receipts and typing notices when the Axon
+ * session ends. The sender outlives a sign-out; without this, a receipt retry
+ * that fires afterwards goes out with whatever credentials exist then — none,
+ * so its 401 reaches `onAuthFailure()`, which discards the *next* session's
+ * token if the user has already signed in again (review on #751).
+ */
+export function connectEphemeralSenderSessionReset(
+  auth: CompositeAuthProvider,
+  ephemeralSender: EphemeralSender,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) {
+      ephemeralSender.resetSession()
     }
   })
 }
@@ -1457,6 +1485,9 @@ export function createServices(
   const matrixOAuthQrGrant = createMatrixOAuthQrGrantStore(api, {
     storage: sessionStorage,
   })
+  const matrixOAuthBrowser = createMatrixOAuthBrowserStore(api, accounts, {
+    storage: sessionStorage,
+  })
   const qr = createBrowserQrAdapter()
   const cache = createIndexedDbCacheStore()
   requestPersistentStorage()
@@ -1542,6 +1573,7 @@ export function createServices(
   connectLiveRooms(live, rooms)
   connectLiveInvites(live, invites)
   connectInvitesSessionReset(auth, invites)
+  connectEphemeralSenderSessionReset(auth, ephemeralSender)
   connectLiveVerification(live, verification, accounts)
   connectVerificationSessionReset(auth, verification)
   connectMessageGestureSession(auth, messageGestures)
@@ -1565,7 +1597,12 @@ export function createServices(
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
-  connectMatrixOAuthQrSessionReset(auth, matrixOAuthQr, matrixOAuthQrGrant)
+  connectMatrixOAuthQrSessionReset(
+    auth,
+    matrixOAuthQr,
+    matrixOAuthQrGrant,
+    matrixOAuthBrowser,
+  )
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
@@ -1582,6 +1619,7 @@ export function createServices(
     accounts,
     matrixOAuthQr,
     matrixOAuthQrGrant,
+    matrixOAuthBrowser,
     qr,
     rooms,
     invites,

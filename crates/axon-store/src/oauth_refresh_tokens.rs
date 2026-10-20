@@ -214,29 +214,25 @@ impl Store {
     }
 
     /// Revoke every currently-active refresh token for one identity+client
-    /// pair in a single statement. The reuse-detection response (see
+    /// pair, and delete push registrations for those sessions, in one
+    /// statement. The reuse-detection response (see
     /// [`redeem_refresh_token`](Self::redeem_refresh_token)); also usable
     /// directly by a future "sign out this client" management action.
+    /// Returns how many refresh tokens were revoked.
     pub async fn revoke_refresh_tokens_for_identity_client(
         &self,
         oauth_identity_id: Uuid,
         client_id: &str,
     ) -> Result<u64, StoreError> {
-        let result = sqlx_core::query::query(
-            "UPDATE oauth_refresh_tokens SET revoked_at = now() \
-              WHERE oauth_identity_id = $1 AND client_id = $2 AND revoked_at IS NULL",
-        )
-        .bind(oauth_identity_id)
-        .bind(client_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected())
+        self.revoke_refresh_sessions(oauth_identity_id, Some(client_id))
+            .await
     }
 
     /// Revoke every currently-active refresh token for one identity, across
     /// *every* client — broader than
     /// [`revoke_refresh_tokens_for_identity_client`](Self::revoke_refresh_tokens_for_identity_client),
     /// which is scoped to a single client's reuse-detection blast radius.
+    /// Registrations for those sessions are deleted in the same transaction.
     /// Leaves the identity bound. Unbinding uses
     /// [`delete_identity`](Self::delete_identity) to remove these rows and
     /// invalidate the identity's other credentials in the same transaction.
@@ -244,14 +240,25 @@ impl Store {
         &self,
         oauth_identity_id: Uuid,
     ) -> Result<u64, StoreError> {
-        let result = sqlx_core::query::query(
-            "UPDATE oauth_refresh_tokens SET revoked_at = now() \
-              WHERE oauth_identity_id = $1 AND revoked_at IS NULL",
-        )
-        .bind(oauth_identity_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected())
+        self.revoke_refresh_sessions(oauth_identity_id, None).await
+    }
+
+    /// Lock the active refresh rows, revoke them, and delete their push
+    /// registrations. `client_id` of `None` covers every client. Locking the
+    /// rows first includes a rotation that commits during the wait, and the
+    /// credential lock keeps a registration PUT from inserting after the delete.
+    async fn revoke_refresh_sessions(
+        &self,
+        oauth_identity_id: Uuid,
+        client_id: Option<&str>,
+    ) -> Result<u64, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        Self::lock_credentials(&mut tx).await?;
+        let session_ids = Self::end_sessions_in_tx(&mut tx, oauth_identity_id, client_id).await?;
+        let revoked = u64::try_from(session_ids.len()).unwrap_or(0);
+        crate::push::delete_push_registrations_in_tx(&mut tx, &session_ids).await?;
+        tx.commit().await?;
+        Ok(revoked)
     }
 
     /// Delete rows that are done mattering to reuse detection: revoked more

@@ -2353,6 +2353,18 @@ impl ApiError {
     pub fn is_service_unavailable(&self) -> bool {
         matches!(self, ApiError::Status { status, .. } if *status == StatusCode::SERVICE_UNAVAILABLE)
     }
+
+    /// `true` when the same request might succeed if sent again: no answer at
+    /// all (a timeout or connection failure), a 5xx, or a 429.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ApiError::Request(_) => true,
+            ApiError::Status { status, .. } => {
+                status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS
+            }
+            _ => false,
+        }
+    }
 }
 
 impl From<reqwest::Error> for ApiError {
@@ -3012,6 +3024,20 @@ mod tests {
             message: "x".to_owned(),
         };
         assert!(!other.is_not_found());
+    }
+
+    #[test]
+    fn transient_errors_are_detected() {
+        let status = |status| ApiError::Status {
+            status,
+            message: "x".to_owned(),
+        };
+        assert!(ApiError::Request("request timed out".to_owned()).is_transient());
+        assert!(status(StatusCode::BAD_GATEWAY).is_transient());
+        assert!(status(StatusCode::TOO_MANY_REQUESTS).is_transient());
+        assert!(!status(StatusCode::NOT_FOUND).is_transient());
+        assert!(!status(StatusCode::FORBIDDEN).is_transient());
+        assert!(!ApiError::Url("x".to_owned()).is_transient());
     }
 
     #[test]

@@ -56,6 +56,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 dotenvy = { workspace = true }
 libc = { workspace = true }
+# Parse APNs (ES256) and FCM (RS256) private keys at startup. The same crate
+# already verifies OAuth tokens; a bad PEM must fail before status reports
+# the provider as configured.
+jsonwebtoken = { workspace = true }
 # OAuth 2.0 authorization server (M14, ADR 0054): builds each configured
 # provider's `GenericOidcProvider` (discovery-doc fetch) at boot.
 reqwest = { workspace = true, features = ["json", "form", "rustls"] }

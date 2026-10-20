@@ -23,6 +23,7 @@ mod oauth_bind_requests;
 mod oauth_identities;
 mod oauth_native;
 mod oauth_refresh_tokens;
+mod push;
 mod rooms;
 mod search;
 mod spaces;
@@ -34,7 +35,7 @@ mod upstream_reconcile;
 pub use accounts::{
     Account, AccountAuthKind, AccountState, MatrixOAuthRegistration, StoredAccountSession,
 };
-pub use backfill::{AccountBackfillProgress, RoomBackfillState};
+pub use backfill::{AccountBackfillProgress, RoomBackfillFailure, RoomBackfillState};
 pub use device_state::{DeviceStateRow, DeviceStateUpsert};
 pub use display_names::DisplayNameWrite;
 pub use error::StoreError;
@@ -45,7 +46,8 @@ pub use events::{
 pub use instance_preferences::InstancePreference;
 pub use invites::{RoomInvite, RoomInviteSnapshot};
 pub use matrix_oauth_acquire::{
-    CommitMatrixOAuthAcquire, MatrixOAuthAcquireBreadcrumb, MatrixOAuthAcquireFinalization,
+    CommitMatrixOAuthAcquire, FinalizeMatrixOAuthAcquire, MatrixOAuthAcquireBreadcrumb,
+    MatrixOAuthAcquireFinalization,
 };
 pub use media_uploads::{MediaUpload, MediaUploadKind, MediaUploadState, NewMediaUpload};
 pub use member_counts::{MemberCountWrite, RoomMemberCounts};
@@ -57,6 +59,7 @@ pub use oauth_native::{
     IdentityRedemption, IdentityRedemptionRejection, NativeChallenge, NATIVE_CHALLENGE_TTL_SECS,
 };
 pub use oauth_refresh_tokens::{RedeemRefreshTokenError, RotatedRefreshToken};
+pub use push::{NewPushRegistration, PushRegistration, PushRegistrationOutcome};
 pub use rooms::{RoomSummary, RoomTag};
 pub use search::{
     room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,

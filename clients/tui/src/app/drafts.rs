@@ -56,10 +56,17 @@ pub(crate) struct PendingDraftPut {
     pub(crate) due: Instant,
 }
 
-/// Result of a background draft PUT, drained by the main loop. Only failures
-/// carry information — a successful PUT needs no UI reaction.
+/// Result of a background draft or read-state write, drained by the main loop.
+/// Only failures carry information — a successful write needs no UI reaction.
 pub(crate) enum DraftOutcome {
     PutFailed(String),
+    /// A read receipt the server did not accept (#625). Carries the target that
+    /// was sent, so the main loop can tell whether it is still the room's
+    /// newest — see [`App::forget_failed_receipt`].
+    ReceiptFailed {
+        room: RoomKey,
+        target: super::read_markers::ReceiptTarget,
+    },
 }
 
 /// Read this install's device UUID from `device-id` next to the config file,
@@ -232,10 +239,18 @@ impl App {
 
     /// Surface a background draft-PUT failure. Quietly (a Debug status): the
     /// draft is still intact locally and the next change retries naturally.
+    /// A failed read receipt is never surfaced (ADR 0067); it is only forgotten,
+    /// so that reading the room again re-sends it.
     pub(crate) fn handle_draft_outcome(&mut self, outcome: DraftOutcome) {
-        let DraftOutcome::PutFailed(err) = outcome;
-        if !self.is_mid_command() {
-            self.status = Status::Debug(format!("draft sync failed: {err}"));
+        match outcome {
+            DraftOutcome::PutFailed(err) => {
+                if !self.is_mid_command() {
+                    self.status = Status::Debug(format!("draft sync failed: {err}"));
+                }
+            }
+            DraftOutcome::ReceiptFailed { room, target } => {
+                self.forget_failed_receipt(room, target);
+            }
         }
     }
 
