@@ -1,0 +1,86 @@
+name: postgres-tests
+
+# The `#[ignore = "requires Postgres"]` tests: the axon-store, axon-api and
+# axon-sync suites that talk to a real database. `cargo test --all` skips them
+# (they are ignored), and no pull-request job runs them, so before this
+# workflow a plan-shape test (`room_threads_uses_index_only_scan`) sat failing
+# on PostgreSQL 18 with nothing to notice it.
+#
+# They do not gate pull requests: a full run is minutes of Postgres-backed
+# tests on top of a cold test build, and the merge queue is already long
+# enough. They run on the same nightly cadence as `smoke.yml` instead, and by
+# hand. A regression therefore surfaces within a day, on `main`, rather than
+# never.
+#
+# `scripts/postgres-tests.sh` gives each test target its own fresh database;
+# several suites ("requires empty Postgres") fail on a database an earlier
+# binary has used.
+
+on:
+  schedule:
+    # 04:37 UTC — twenty minutes after the nightly smoke run, so the two do not
+    # compete for runners, and off the hour like the other schedules.
+    - cron: "37 4 * * *"
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: Space-separated packages to run (default is every package)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  postgres-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Production runs `postgres:16` (docker-compose.yml). The plan-shape
+        # test is also written against 18, which is where the planner changed
+        # how it ranks disabled scans; run the 16 that ships.
+        image: postgres:16
+        env:
+          POSTGRES_USER: axon
+          POSTGRES_PASSWORD: axon
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U axon -d postgres"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-postgres-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-postgres-tests-
+
+      - name: Run the Postgres-backed tests
+        env:
+          DATABASE_ADMIN_URL: postgres://axon:axon@localhost:5432/postgres
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          # $PACKAGES is deliberately unquoted: it is a space-separated list.
+          # shellcheck disable=SC2086
+          scripts/postgres-tests.sh $PACKAGES
