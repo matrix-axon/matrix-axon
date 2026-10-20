@@ -1610,6 +1610,7 @@ a.button-like {
 /* ---- room list ---- */
 
 .room-controls {
+  container: room-controls / inline-size;
   display: flex;
   align-items: center;
   gap: 0.65rem;
@@ -1702,11 +1703,12 @@ a.button-like {
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  min-width: 0;
+  box-sizing: border-box;
+  min-width: 2.25rem;
   min-height: 2.25rem;
-  padding: 0.2rem 0.7rem;
+  padding: 0.2rem 0.5rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--room-actions-radius, 6px);
   color: var(--accent);
   cursor: pointer;
   font-size: 0.9rem;
@@ -1721,7 +1723,7 @@ a.button-like {
 
 .room-actions-plus {
   position: relative;
-  display: none;
+  display: var(--room-actions-icon, none);
   flex: none;
   width: 1.05rem;
   height: 1.05rem;
@@ -1745,6 +1747,7 @@ a.button-like {
 }
 
 .room-actions-label {
+  display: var(--room-actions-label, inline);
   white-space: nowrap;
 }
 
@@ -1801,24 +1804,25 @@ a.button-like {
   cursor: not-allowed;
 }
 
+/* Match the phone control when the pane, rather than the viewport, is narrow.
+   The select keeps its accessible name while dropping its redundant caption. */
+@container room-controls (max-width: 24rem) {
+  .room-control-row {
+    --room-actions-icon: block;
+    --room-actions-label: none;
+    --room-actions-radius: 999px;
+  }
+
+  .room-sort-label {
+    display: none;
+  }
+}
+
 @media (max-width: 47.99rem) {
-  .room-actions-plus {
-    display: block;
-  }
-
-  .room-actions-menu summary {
-    min-width: 2.25rem;
-    padding-inline: 0.55rem;
-    border-radius: 999px;
-  }
-
-  .room-actions-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
+  .room-control-row {
+    --room-actions-icon: block;
+    --room-actions-label: none;
+    --room-actions-radius: 999px;
   }
 }
 

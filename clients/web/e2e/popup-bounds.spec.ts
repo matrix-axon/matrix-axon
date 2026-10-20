@@ -26,6 +26,23 @@ for (const sidebarWidth of [360, 640]) {
       await page.goto('/')
       await page.locator('a.room-link').first().waitFor()
       const trigger = page.locator('.room-actions-menu summary')
+      const compact =
+        viewport.width < 768 || sidebarWidth === 360 || viewport.width === 768
+      await expect(page.locator('.room-actions-plus')).toBeVisible({
+        visible: compact,
+      })
+      if (viewport.width >= 768 && sidebarWidth === 360) {
+        const row = page.locator('.room-control-row')
+        const boxes = await row.evaluate((el) =>
+          [...el.children].map((child) =>
+            child.getBoundingClientRect().toJSON(),
+          ),
+        )
+        expect(
+          Math.max(...boxes.map((box) => box.top)) -
+            Math.min(...boxes.map((box) => box.top)),
+        ).toBeLessThan(10)
+      }
       await trigger.click()
       const menu = page.locator('.room-actions-popover')
       await expect(menu).toBeVisible()
@@ -43,6 +60,26 @@ for (const sidebarWidth of [360, 640]) {
             return hit !== null && el.contains(hit)
           }),
         ).toBe(true)
+      }
+      if (viewport.width === 1280 && sidebarWidth === 640) {
+        const handle = page.getByRole('button', {
+          name: 'Hide rooms',
+          exact: true,
+        })
+        await handle.press('Home')
+        await expect(page.locator('.room-actions-plus')).toBeVisible()
+        await expectPopupWithin(
+          page,
+          '.room-actions-popover',
+          '.room-list-pane',
+        )
+        await handle.press('End')
+        await expect(page.locator('.room-actions-plus')).toBeHidden()
+        await expectPopupWithin(
+          page,
+          '.room-actions-popover',
+          '.room-list-pane',
+        )
       }
       await menu.getByRole('link', { name: 'Join', exact: true }).click()
       await expect(page).toHaveURL(/\/rooms\/discover#join$/)

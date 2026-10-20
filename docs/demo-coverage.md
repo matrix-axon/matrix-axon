@@ -111,6 +111,7 @@ shows it.
   and its assertions stay honest on a second run — a react-only scene passes
   vacuously the second time, on the badge the first run left behind.
 - **Popup bounds in narrow web panes.**
+  Narrow room panes use a compact “+” action button and omit the redundant Sort caption while retaining its accessible label.
   The Rooms menu stays right-aligned when its controls wrap, and reaction sender tooltips and read-receipt lists fit their message column.
   Message actions wrap within narrow headers, and long-press labels stay inside the action bar.
   These bounds are **not covered** by the recordings; `clients/web/e2e/popup-bounds.spec.ts` exercises narrow tablet and phone layouts.
