@@ -1692,6 +1692,9 @@ a.button-like {
 .room-actions-menu {
   position: relative;
   flex: none;
+  /* Keep the trigger on the right even when the controls wrap. Its menu
+     grows leftward and must not escape the pane from a new row's left edge. */
+  margin-left: auto;
 }
 
 .room-actions-menu summary {
@@ -2697,7 +2700,8 @@ button.event-person:focus-visible {
 
 .read-receipts-wrap {
   position: relative;
-  display: inline-block;
+  /* The message column, rather than the short receipt label, bounds the list. */
+  display: block;
   z-index: 20;
 }
 
@@ -2731,8 +2735,9 @@ button.event-person:focus-visible {
   left: 0;
   bottom: calc(100% + 0.35rem);
   width: max-content;
-  min-width: 10rem;
-  max-width: min(18rem, calc(100vw - 2rem));
+  box-sizing: border-box;
+  min-width: min(10rem, 100%);
+  max-width: min(18rem, 100%);
   max-height: 16rem;
   overflow-y: auto;
   margin: 0;
@@ -3060,6 +3065,8 @@ a.utd-recover:hover {
 }
 
 .reactions {
+  /* Sender tooltips belong to the whole message column, not a narrow chip. */
+  position: relative;
   display: flex;
   gap: 0.35rem;
   margin-top: 0.25rem;
@@ -3096,7 +3103,6 @@ a.utd-recover:hover {
 }
 
 .reaction-chip-wrap {
-  position: relative;
   display: inline-flex;
   z-index: 20;
 }
@@ -3169,11 +3175,12 @@ a.utd-recover:hover {
 .reaction-senders-tooltip {
   position: absolute;
   z-index: 20;
-  left: 50%;
+  left: 0;
   bottom: calc(100% + 0.4rem);
-  transform: translateX(-50%);
+  box-sizing: border-box;
   width: max-content;
-  max-width: min(22rem, calc(100vw - 2rem));
+  max-width: min(22rem, 100%);
+  overflow-wrap: anywhere;
   padding: 0.35rem 0.55rem;
   border: 1px solid var(--border);
   border-radius: 0.55rem;
@@ -3663,6 +3670,8 @@ span.composer-attachment-thumb {
 }
 
 .event-actions {
+  /* Long-press labels stay within the action bar, including its end buttons. */
+  position: relative;
   display: none;
   gap: 0.15rem;
   margin-left: auto;
@@ -3683,7 +3692,6 @@ span.composer-attachment-thumb {
 }
 
 .event-action-tooltip-wrap {
-  position: relative;
   display: inline-flex;
 }
 
@@ -3717,10 +3725,13 @@ span.composer-attachment-thumb {
      sender's baseline (and the avatar next to it) down by a few pixels. */
   .event-head {
     align-items: center;
+    flex-wrap: wrap;
     min-height: 1.75rem;
   }
 
   .event-actions {
+    max-width: 100%;
+    flex-wrap: wrap;
     gap: 0.1rem;
   }
 
@@ -3754,11 +3765,14 @@ span.composer-attachment-thumb {
 
   .event-action-tooltip {
     position: absolute;
-    left: 50%;
+    right: 0;
     bottom: calc(100% + 0.35rem);
     z-index: 30;
     display: block;
-    transform: translateX(-50%);
+    box-sizing: border-box;
+    width: max-content;
+    max-width: 100%;
+    overflow-wrap: anywhere;
     padding: 0.2rem 0.4rem;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -3767,7 +3781,7 @@ span.composer-attachment-thumb {
     box-shadow: var(--shadow);
     font-size: 0.75rem;
     line-height: 1.2;
-    white-space: nowrap;
+    white-space: normal;
     pointer-events: none;
   }
 

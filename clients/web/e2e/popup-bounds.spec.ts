@@ -1,0 +1,157 @@
+import { expect, test, type Page } from '@playwright/test'
+import { ACCOUNT_ID, ROOM_ID, ROOM_URL, signIn } from './helpers'
+
+// A minimum-width sidebar with the spaces rail visible wraps Rooms onto a new
+// row. The unfixed menu starts 44px left of that pane in WebKit at iPad widths;
+// at 320px it starts 62px outside the viewport. Also cover an unwrapped row.
+for (const sidebarWidth of [360, 640]) {
+  for (const viewport of [
+    { width: 1280, height: 960 },
+    { width: 1024, height: 768 },
+    { width: 768, height: 1024 },
+    { width: 390, height: 844 },
+    { width: 320, height: 568 },
+  ]) {
+    test(`Rooms menu stays inside its pane at ${viewport.width}px with ${sidebarWidth}px sidebar`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(viewport)
+      await signIn(page)
+      await page.addInitScript((sidebarWidth) => {
+        localStorage.setItem(
+          'axon.settings',
+          JSON.stringify({ version: 1, sidebarWidth }),
+        )
+      }, sidebarWidth)
+      await page.goto('/')
+      await page.locator('a.room-link').first().waitFor()
+      const trigger = page.locator('.room-actions-menu summary')
+      await trigger.click()
+      const menu = page.locator('.room-actions-popover')
+      await expect(menu).toBeVisible()
+      await expectPopupWithin(page, '.room-actions-popover', '.room-list-pane')
+      for (const label of ['Join', 'DM', 'Create', 'Find']) {
+        const link = menu.getByRole('link', { name: label, exact: true })
+        await expect(link).toBeVisible()
+        expect(
+          await link.evaluate((el) => {
+            const box = el.getBoundingClientRect()
+            const hit = document.elementFromPoint(
+              box.x + box.width / 2,
+              box.y + box.height / 2,
+            )
+            return hit !== null && el.contains(hit)
+          }),
+        ).toBe(true)
+      }
+      await menu.getByRole('link', { name: 'Join', exact: true }).click()
+      await expect(page).toHaveURL(/\/rooms\/discover#join$/)
+    })
+  }
+}
+
+for (const width of [320, 390, 1024]) {
+  test(`message popups fit the timeline at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 })
+    await signIn(page)
+    const event = {
+      account_id: ACCOUNT_ID,
+      event_id: '$popup',
+      room_id: ROOM_ID,
+      sender: '@me:hs',
+      origin_ts: 1000,
+      type: 'm.room.message',
+      body: 'Popup geometry fixture',
+      content: { msgtype: 'm.text', body: 'Popup geometry fixture' },
+      redacted: false,
+      edited: false,
+      edit_count: 0,
+      state_key: null,
+      relates_to: null,
+      reactions: {
+        '👍': {
+          count: 1,
+          me: false,
+          senders: ['@a-very-long-display-name-that-must-fit:hs'],
+        },
+      },
+    }
+    await page.route('**/timeline*', (route) =>
+      route.fulfill({ json: { data: { events: [event], next_cursor: null } } }),
+    )
+    await page.routeWebSocket('**/v1/ws', (ws) => {
+      ws.send(
+        JSON.stringify({
+          type: 'ephemeral.passthrough',
+          account_id: ACCOUNT_ID,
+          payload: {
+            room_id: ROOM_ID,
+            event_type: 'm.receipt',
+            content: {
+              $popup: {
+                'm.read': {
+                  '@a-very-long-display-name-that-must-fit:hs': { ts: 1001 },
+                },
+              },
+            },
+          },
+        }),
+      )
+    })
+    await page.goto(ROOM_URL)
+    const row = page.locator('.event-row', {
+      hasText: 'Popup geometry fixture',
+    })
+    const chip = row.locator('.reaction-chip')
+    await chip.focus()
+    await expect(row.locator('.reaction-senders-tooltip')).toBeVisible()
+    await expectPopupWithin(page, '.reaction-senders-tooltip')
+    await row.locator('.read-receipts').click()
+    await expect(row.locator('.read-receipts-popover')).toBeVisible()
+    await expectPopupWithin(page, '.read-receipts-popover')
+    await page.keyboard.press('Escape')
+    if (width < 768) {
+      await row.locator('.event-body').click()
+      await row.getByRole('button', { name: 'Delete', exact: true }).click()
+      const confirm = row.getByRole('button', {
+        name: 'Confirm delete',
+        exact: true,
+      })
+      // Firefox's desktop profile has no TouchEvent constructor. The handler
+      // needs only this bubbling event to start its long-press timer.
+      await confirm.evaluate((el) =>
+        el.dispatchEvent(new Event('touchstart', { bubbles: true })),
+      )
+      await expect(row.locator('.event-action-tooltip')).toBeVisible()
+      await confirm.evaluate((el) =>
+        el.dispatchEvent(new Event('touchend', { bubbles: true })),
+      )
+      await expectPopupWithin(page, '.event-action-tooltip')
+      for (const button of await row.locator('.event-actions button').all()) {
+        const box = await button.boundingBox()
+        expect(box).not.toBeNull()
+        expect(box!.x).toBeGreaterThanOrEqual(0)
+        expect(box!.x + box!.width).toBeLessThanOrEqual(width)
+      }
+    }
+  })
+}
+
+async function expectPopupWithin(
+  page: Page,
+  selector: string,
+  paneSelector = '.timeline',
+) {
+  const geometry = await page.locator(selector).evaluate((el, paneSelector) => {
+    const box = el.getBoundingClientRect()
+    const pane = el.closest(paneSelector)!.getBoundingClientRect()
+    return {
+      left: box.left,
+      right: box.right,
+      paneLeft: pane.left,
+      paneRight: pane.right,
+    }
+  }, paneSelector)
+  expect.soft(geometry.left).toBeGreaterThanOrEqual(geometry.paneLeft)
+  expect.soft(geometry.right).toBeLessThanOrEqual(geometry.paneRight)
+}
