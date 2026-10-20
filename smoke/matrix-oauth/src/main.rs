@@ -1444,7 +1444,11 @@ fn redact_stall_log_line(line: &str, secrets: &[String]) -> Option<String> {
         || target.starts_with("axon_sync::backup")
         || target.starts_with("matrix_sdk::encryption::backups");
     let in_axon_sync = target.split("::").next() == Some("axon_sync");
-    if !(by_target || severe && in_axon_sync) {
+    // The one INFO line outside those targets the report needs: the startup
+    // sweep summary, whose counters show the pre-probe state.
+    let startup_sweep = target.starts_with("axon_sync::engine")
+        && plain.contains("startup UTD re-decryption sweep completed");
+    if !(by_target || startup_sweep || severe && in_axon_sync) {
         return None;
     }
 
@@ -1464,14 +1468,18 @@ fn redact_stall_log_line(line: &str, secrets: &[String]) -> Option<String> {
                 counters.push(format!("{key}={value}"));
             }
         } else if !in_fields && !message_done && message.len() < 12 {
-            if is_plain_message_word(token) {
-                message.push(*token);
-            }
+            // A dropped word is marked, so `retrying 3 times` cannot read as
+            // `retrying times`.
+            message.push(if is_plain_message_word(token) {
+                *token
+            } else {
+                "…"
+            });
             // A word ending in `:` introduces interpolated error text.
             message_done = token.ends_with(':');
         }
     }
-    if message.is_empty() {
+    if message.iter().all(|word| *word == "…") {
         return None;
     }
     // `HH:MM:SS` from a leading RFC 3339 timestamp, so events can be ordered
@@ -2073,12 +2081,26 @@ mod tests {
         let line = "2026-10-16T00:00:00Z WARN axon_sync::backup: failed to fetch keys for !room:server event $abc123: M_UNKNOWN secret sdk text";
         assert_eq!(
             redact_stall_log_line(line, &[]).as_deref(),
-            Some("00:00:00 WARN axon_sync::backup failed to fetch keys for event")
+            Some("00:00:00 WARN axon_sync::backup failed to fetch keys for … event …")
         );
         let handle = "2026-10-16T00:00:00Z WARN axon_sync::backup: lookup for @alice:server done";
         assert_eq!(
             redact_stall_log_line(handle, &[]).as_deref(),
-            Some("00:00:00 WARN axon_sync::backup lookup for done")
+            Some("00:00:00 WARN axon_sync::backup lookup for … done")
+        );
+    }
+
+    #[test]
+    fn stall_log_marks_dropped_words_and_keeps_the_startup_sweep_summary() {
+        let retry = "2026-10-16T00:00:00Z WARN axon_sync::backup: retrying 3 times";
+        assert_eq!(
+            redact_stall_log_line(retry, &[]).as_deref(),
+            Some("00:00:00 WARN axon_sync::backup retrying … times")
+        );
+        let sweep = "2026-10-16T00:00:00Z INFO axon_sync::engine: startup UTD re-decryption sweep completed selected=4 attempted=4 decrypted=0 still_pending=4 startup_marked=2";
+        assert_eq!(
+            redact_stall_log_line(sweep, &[]).as_deref(),
+            Some("00:00:00 INFO axon_sync::engine startup UTD re-decryption sweep completed selected=4 attempted=4 decrypted=0 still_pending=4 startup_marked=2")
         );
     }
 
