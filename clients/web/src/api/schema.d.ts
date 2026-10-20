@@ -1681,7 +1681,7 @@ export interface paths {
          *     conditional-GET/range-serving machinery, but resolves a resized variant
          *     via [`MediaProxy::get_thumbnail`] instead of the full original, and
          *     corrects `Content-Type` by sniffing the returned bytes (see
-         *     [`correct_thumbnail_content_type`]) since a homeserver-regenerated
+         *     [`correct_image_content_type`]) since a homeserver-regenerated
          *     thumbnail may not match the original's declared mimetype. Encrypted media
          *     is rejected with `400` before the proxy is ever called — see
          *     [`resolve_thumbnail_spec`].

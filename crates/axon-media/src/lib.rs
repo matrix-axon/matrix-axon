@@ -14,19 +14,7 @@ pub use cache::{
     MediaFetcher, MediaResource,
 };
 
-/// Validate and decompose an `mxc://` URI into `(server_name, media_id)`.
-///
-/// Returns `None` if the URI does not start with `mxc://`, if either component
-/// is empty, or if the media ID contains a `/` (which would make it ambiguous
-/// in a URL path).
-pub fn parse_mxc(mxc_url: &str) -> Option<(&str, &str)> {
-    let rest = mxc_url.strip_prefix("mxc://")?;
-    let (server, media_id) = rest.split_once('/')?;
-    if server.is_empty() || media_id.is_empty() || media_id.contains('/') {
-        return None;
-    }
-    Some((server, media_id))
-}
+pub use axon_core::media::parse_mxc;
 
 #[cfg(test)]
 mod tests {
