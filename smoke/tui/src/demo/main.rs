@@ -200,8 +200,57 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("demo(tui): scene {} failed: {err:#}", args.config.scene);
+            report_failure(&args.config.scene, &format!("{err:#}"));
             ExitCode::FAILURE
         }
+    }
+}
+
+/// How many rows from the bottom of the failed screen to echo. The bottom is
+/// where the TUI writes its status line and any error it raised.
+const FAILURE_TAIL_ROWS: usize = 6;
+
+/// Print why the take failed on one line, then the evidence, instead of the
+/// wait's own message with the whole screen dumped inline: the dump scrolls
+/// the cause out of the terminal, and the full frame is already on disk.
+fn report_failure(scene: &str, message: &str) {
+    let (headline, screen) = split_failure(message);
+    eprintln!("demo(tui): scene {scene} failed: {headline}");
+    if let Some(screen) = screen {
+        let rows: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+        let tail = &rows[rows.len().saturating_sub(FAILURE_TAIL_ROWS)..];
+        eprintln!("demo(tui): the bottom of the screen at that point:");
+        for row in tail {
+            eprintln!("    {}", row.trim_end());
+        }
+    }
+    eprintln!(
+        "demo(tui): the full screen and raw transcript are in smoke-artifacts/demo-tui/{scene}/"
+    );
+}
+
+/// Separate a wait's one-line cause from the screen dump appended to it.
+fn split_failure(message: &str) -> (&str, Option<&str>) {
+    match message.split_once("\n--- screen ---\n") {
+        Some((headline, screen)) => (headline, Some(screen)),
+        None => (message, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_failure;
+
+    #[test]
+    fn failure_splits_cause_from_screen() {
+        let msg =
+            "scene tour, step 9/20: timed out after 30s waiting for x\n--- screen ---\nrow1\nrow2";
+        let (headline, screen) = split_failure(msg);
+        assert_eq!(
+            headline,
+            "scene tour, step 9/20: timed out after 30s waiting for x"
+        );
+        assert_eq!(screen, Some("row1\nrow2"));
+        assert_eq!(split_failure("plain"), ("plain", None));
     }
 }
