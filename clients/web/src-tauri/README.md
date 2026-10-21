@@ -655,7 +655,10 @@ replaced from **Xcode's own copies**, not from the portal:
    Apple ID in Xcode → Settings → Accounts, or the `APPLE_API_KEY`,
    `APPLE_API_ISSUER` and `APPLE_API_KEY_PATH` variables.
 2. **Check what you are about to upload.** `list-profiles` must show both as
-   `Xcode-managed` and of the right kind:
+   `Xcode-managed` and of the right kind. It prints each profile's path, and
+   `<file>` below is that path. Xcode keeps them in
+   `~/Library/Developer/Xcode/UserData/Provisioning Profiles` (and an older copy in
+   `~/Library/MobileDevice/Provisioning Profiles`):
 
    ```sh
    scripts/ci/store-credentials.sh list-profiles --bundle-id org.matrixaxon.axon
@@ -664,7 +667,7 @@ replaced from **Xcode's own copies**, not from the portal:
 
    The second command prints `production` for the Store profile and `development`
    for the development one. Both should list the distribution certificate your
-   `APPLE_STORE_CERTIFICATES` secret holds; a Xcode-managed profile lists all of
+   `APPLE_STORE_CERTIFICATES` secret holds; an Xcode-managed profile lists all of
    them, which is why it is the safe choice.
 
 3. **Replace the secrets** with
