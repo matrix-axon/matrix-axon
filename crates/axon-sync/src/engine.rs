@@ -2555,6 +2555,13 @@ async fn capture_unread_counts(
     Some(pair)
 }
 
+/// Cache, gone-upstream set, and push ingress shared by the unread sweeps.
+struct UnreadPush {
+    last: Arc<Mutex<HashMap<OwnedRoomId, (u64, u64)>>>,
+    gone: Arc<Mutex<HashSet<OwnedRoomId>>>,
+    push: crate::push::PushIngress,
+}
+
 /// Re-walk every currently-joined room and capture each one's unread counts,
 /// with up to [`UNREAD_COUNTS_SWEEP_CONCURRENCY`] captures in flight at once
 /// so an account with many rooms doesn't serialize one Postgres round trip
@@ -2569,12 +2576,6 @@ async fn capture_unread_counts(
 /// many rooms over time; previously only `ON DELETE CASCADE` on account
 /// deletion cleaned these up). Only the periodic re-sweep passes `true`; see the
 /// body for why the startup sweep must not prune.
-struct UnreadPush {
-    last: Arc<Mutex<HashMap<OwnedRoomId, (u64, u64)>>>,
-    gone: Arc<Mutex<HashSet<OwnedRoomId>>>,
-    push: crate::push::PushIngress,
-}
-
 async fn sweep_unread_counts(
     client: &Client,
     store: &Store,

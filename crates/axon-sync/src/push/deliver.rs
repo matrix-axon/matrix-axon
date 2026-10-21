@@ -105,6 +105,14 @@ pub(crate) fn fcm_verdict(status: u16, body: &[u8]) -> ProviderVerdict {
     ProviderVerdict::Keep
 }
 
+/// A 401 means FCM refused the cached OAuth bearer.
+///
+/// The registration stays. The next send mints a new access token instead of
+/// reusing one that was revoked or signed by a key that has since rotated.
+fn fcm_bearer_rejected(status: u16) -> bool {
+    status == 401
+}
+
 struct ParsedReason {
     reason: Option<String>,
     timestamp_ms: Option<i64>,
@@ -533,6 +541,10 @@ impl LiveTransport {
         *self.apns_jwt.lock().expect("apns jwt lock") = None;
     }
 
+    fn invalidate_fcm_token(&self) {
+        *self.fcm_token.lock().expect("fcm token lock") = None;
+    }
+
     async fn send_fcm(
         &self,
         account_id: Uuid,
@@ -550,6 +562,9 @@ impl LiveTransport {
         // Apple accepts the lowercase scheme used for APNs.
         let (status, response_body) =
             post_json(&self.http, url, "Bearer", bearer, &[], body).await?;
+        if fcm_bearer_rejected(status) {
+            self.invalidate_fcm_token();
+        }
         log_provider_response(
             "FCM",
             account_id,
@@ -795,6 +810,12 @@ mod tests {
             ProviderVerdict::Keep
         );
         assert_eq!(fcm_verdict(404, b"not json"), ProviderVerdict::Keep);
+        assert!(fcm_bearer_rejected(401));
+        assert!(!fcm_bearer_rejected(403));
+        assert_eq!(
+            fcm_verdict(401, br#"{"error":{"status":"UNAUTHENTICATED"}}"#),
+            ProviderVerdict::Keep
+        );
     }
 
     #[test]
