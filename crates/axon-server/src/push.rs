@@ -2,8 +2,8 @@
 //!
 //! A provider that is empty is not configured. A provider that is only partly
 //! set, or whose key file cannot be read, stops startup. The error does not
-//! contain the PEM. Sends, in a later change, use the bytes returned here and
-//! do not read the file again.
+//! contain the PEM. Sends use the bytes returned here and do not read the
+//! file again.
 
 use anyhow::Context;
 use axon_core::{LoadedApns, LoadedFcm, PushConfig, PushKeySource, PushMaterial};

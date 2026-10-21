@@ -23,6 +23,8 @@ matrix-sdk = { workspace = true, features = [
     "bundled-sqlite",
 ] }
 matrix-sdk-ui = { workspace = true }
+# Room update batches. `matrix-sdk` does not re-export `RoomUpdates`.
+matrix-sdk-base = { workspace = true }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 # `rt` gives TaskTracker (dynamic supervised-task spawning at runtime login).
@@ -30,19 +32,22 @@ tokio-util = { workspace = true, features = ["rt"] }
 # StreamExt::next for the room-key arrival stream.
 futures-util = { workspace = true, features = ["std"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["clock"] }
 serde_json = { workspace = true }
 url = { workspace = true }
-reqwest = { workspace = true, features = ["rustls"] }
+reqwest = { workspace = true, features = ["rustls", "http2"] }
 mime = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 fs4 = { workspace = true }
 # `MediaFetcher` (axon-media) is an async trait implemented by SdkMediaProxy.
 async-trait = { workspace = true }
+# APNs JWT (ES256) and the FCM service-account assertion (RS256).
+jsonwebtoken = { workspace = true }
+# Collapse id: first 32 hex characters of the SHA-256 of the room id.
+sha2 = { workspace = true }
 
 [dev-dependencies]
-# Pin the patched base and exercise its real MSC4186 response processor.
-matrix-sdk-base = { workspace = true }
 # DB-gated lifecycle tests: seed/clean account rows directly through the pool
 # (the active no-op / deleting-conflict / invalid-MXID branches need no homeserver).
 sqlx-core = { workspace = true }

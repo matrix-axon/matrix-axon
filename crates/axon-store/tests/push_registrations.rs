@@ -628,3 +628,64 @@ async fn reap_drops_a_session_only_when_no_live_credential_remains() {
         .expect("delete cli tokens");
     delete_identity(&pool, identity.id).await;
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_check_reports_liveness_and_reap_drops_only_a_dead_session() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let live = store.issue_token("send-live").await.expect("live token");
+    let dead = store.issue_token("send-dead").await.expect("dead token");
+    assert!(store.revoke_token(dead.id).await.expect("revoke"));
+
+    let live_id = register(
+        &store,
+        live.id,
+        live.id,
+        &format!("send-live-{}", Uuid::new_v4()),
+    )
+    .await;
+    let dead_id = insert_registration(
+        &pool,
+        dead.id,
+        dead.id,
+        &format!("send-dead-{}", Uuid::new_v4()),
+    )
+    .await;
+
+    let live_check = store
+        .push_send_check(live_id)
+        .await
+        .expect("check")
+        .expect("row");
+    assert!(live_check.session_live);
+    assert_eq!(live_check.target.id, live_id);
+    assert_eq!(live_check.target.provider, "fcm");
+
+    let dead_check = store
+        .push_send_check(dead_id)
+        .await
+        .expect("check")
+        .expect("row");
+    assert!(!dead_check.session_live);
+
+    store.reap_push_registrations().await.expect("reap");
+    assert!(store
+        .push_send_check(live_id)
+        .await
+        .expect("check")
+        .is_some());
+    assert!(store
+        .push_send_check(dead_id)
+        .await
+        .expect("check")
+        .is_none());
+
+    delete_registration(&pool, live_id).await;
+    sqlx_core::query::query("DELETE FROM tokens WHERE id = $1 OR id = $2")
+        .bind(live.id)
+        .bind(dead.id)
+        .execute(&pool)
+        .await
+        .expect("delete tokens");
+}
