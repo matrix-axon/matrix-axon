@@ -38,6 +38,10 @@ env:
 jobs:
   postgres-tests:
     runs-on: ubuntu-latest
+    # A hung test target would otherwise hold the runner for the six-hour
+    # default and delay the always-run notification until then. A cold build
+    # plus the 49 targets takes well under this.
+    timeout-minutes: 60
 
     services:
       postgres:

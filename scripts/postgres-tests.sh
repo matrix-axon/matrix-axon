@@ -15,6 +15,9 @@
 # binary has bootstrapped the instance. Why one target at a time with
 # `--test-threads=1`: the tests share that database's singleton state.
 #
+# A request that matches no test target (a mistyped package name) is an error,
+# not an empty pass.
+#
 # A failing target does not stop the run, so one nightly shows every broken
 # target, not just the first. The script exits 1 if any failed.
 set -euo pipefail
@@ -53,7 +56,7 @@ while read -r pkg flag name; do
 	psql "$DATABASE_ADMIN_URL" -v ON_ERROR_STOP=1 -qc "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db"
 	echo "::group::$label"
 	# shellcheck disable=SC2086 # $flag/$name are cargo flags, split on purpose
-	if DATABASE_URL="$base/$db" cargo test -p "$pkg" $flag $name -- --ignored --test-threads=1; then
+	if DATABASE_URL="$base/$db" cargo test -p "$pkg" $flag $name -- --ignored --test-threads=1 </dev/null; then
 		echo "ok: $label"
 	else
 		failed+=("$label")
@@ -62,6 +65,10 @@ while read -r pkg flag name; do
 	psql "$DATABASE_ADMIN_URL" -qc "DROP DATABASE IF EXISTS $db" || true
 done <<<"$targets"
 
+if [ "$n" -eq 0 ]; then
+	echo "no test targets matched: $*" >&2
+	exit 2
+fi
 if [ "${#failed[@]}" -gt 0 ]; then
 	echo "FAILED targets (${#failed[@]} of $n):" >&2
 	printf '  %s\n' "${failed[@]}" >&2
