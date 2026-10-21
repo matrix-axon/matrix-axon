@@ -193,6 +193,7 @@ before starting a milestone.
   The fixed 20px slot lazy-loads a 32px thumbnail and tries the original once on a fetch or decode failure, then retains a placeholder.
   Account and MXC changes remount the image child so async state cannot cross identities.
   Counts, sender tooltips, and toggle requests retain the existing reaction aggregate and original key; live updates and reconnect reconciliation remain owned by the timeline store.
+  The optional aggregate `shortcode` supplies a validated display label; older servers, cached rows, and invalid or absent labels retain “Custom reaction”.
   Each message owns one active reaction tooltip so a focused chip yields to a hovered sibling.
   Existing media performance marks cover these requests; no additional debug setting is needed.
 - **Markdown-on-send** (`src/markdown/markdown.ts`): plain prose sends a

@@ -70,7 +70,12 @@ const REACTION_TOOLTIP_NAME_LIMIT = 10
 const REACTION_TOUCH_HOLD_MS = 450
 const MESSAGE_DOUBLE_TAP_MS = 300
 
-type ReactionTally = NonNullable<EventDto['reactions']>[string]
+// Compatibility with the additive server shortcode field: this branch keeps
+// the older generated schema so it can land without the server PR. Validate
+// the optional value at the rendering boundary; missing fields keep working.
+type ReactionTally = NonNullable<EventDto['reactions']>[string] & {
+  shortcode?: unknown
+}
 
 type EmojiPickerClickDetail = {
   unicode?: string
@@ -1439,7 +1444,10 @@ function ReactionChip({
         aria-label={
           customReactionMxc(emoji) === null
             ? undefined
-            : `${reactionLabel(emoji)}: ${tally.count}${tally.me ? ', reacted' : ''}`
+            : reactionDescription(
+                reactionLabel(emoji, tally.shortcode),
+                `${tally.count}${tally.me ? ', reacted' : ''}`,
+              )
         }
         aria-busy={pending === null ? undefined : 'true'}
         aria-describedby={tooltipOpen ? tooltipId : undefined}
@@ -1469,7 +1477,12 @@ function ReactionChip({
           onToggle?.()
         }}
       >
-        <ReactionContent accountId={accountId} reaction={emoji} /> {tally.count}
+        <ReactionContent
+          accountId={accountId}
+          reaction={emoji}
+          shortcode={tally.shortcode}
+        />{' '}
+        {tally.count}
       </button>
       {tooltipOpen && (
         <span id={tooltipId} class="reaction-senders-tooltip" role="tooltip">
@@ -1480,20 +1493,25 @@ function ReactionChip({
   )
 }
 
+function reactionDescription(label: string, detail: string): string {
+  return `${label}${label.endsWith(':') ? '' : ':'} ${detail}`
+}
+
 function reactionTooltip(
   emoji: string,
   tally: ReactionTally,
   members: MembersStore,
 ): string {
   const names = tally.senders.map((sender) => members.displayName(sender))
+  const label = reactionLabel(emoji, tally.shortcode)
   if (names.length === 0) {
-    return reactionLabel(emoji)
+    return label
   }
   const shown = names.slice(0, REACTION_TOOLTIP_NAME_LIMIT)
   const remaining = names.length - shown.length
   return remaining === 0
-    ? `${reactionLabel(emoji)}: ${shown.join(', ')}`
-    : `${reactionLabel(emoji)}: ${shown.join(', ')}, and ${remaining} more`
+    ? reactionDescription(label, shown.join(', '))
+    : reactionDescription(label, `${shown.join(', ')}, and ${remaining} more`)
 }
 
 /** The quoted context above a rich reply (ADR 0033 display). */

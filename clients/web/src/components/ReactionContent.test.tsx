@@ -4,7 +4,11 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { ServicesContext } from '../services'
 import { TEST_BASE_URL, testServices } from '../test/services'
-import { customReactionMxc, ReactionContent } from './ReactionContent'
+import {
+  customReactionMxc,
+  ReactionContent,
+  reactionLabel,
+} from './ReactionContent'
 
 const MXC = 'mxc://hs/reaction'
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -145,4 +149,47 @@ it('releases a late media result after the reaction disappears', async () => {
   view.unmount()
   finish({ result: { ok: true, url: 'blob:late' }, release })
   await waitFor(() => expect(release).toHaveBeenCalledOnce())
+})
+
+it('uses only valid optional shortcodes for custom image labels', () => {
+  expect(reactionLabel(MXC, ':partyparrot:')).toBe(':partyparrot:')
+  expect(reactionLabel(MXC, '  parrot  ')).toBe('parrot')
+  expect(reactionLabel(MXC, 'é'.repeat(50))).toBe('é'.repeat(50))
+  for (const value of [
+    undefined,
+    null,
+    12,
+    {},
+    [],
+    '',
+    '   ',
+    'bad\nname',
+    'x'.repeat(101),
+    'é'.repeat(51),
+  ]) {
+    expect(reactionLabel(MXC, value)).toBe('Custom reaction')
+  }
+  expect(reactionLabel('👍', ':pretend:')).toBe('👍')
+})
+
+it('updates the image label without fetching the same image again', async () => {
+  serve()
+  const view = setup()
+  await waitFor(() =>
+    expect(view.container.querySelector('img')).not.toBeNull(),
+  )
+  const src = view.container.querySelector('img')!.src
+  view.rerender(
+    <ServicesContext.Provider value={view.services}>
+      <ReactionContent
+        accountId="first"
+        reaction={MXC}
+        shortcode="<b>parrot</b>"
+      />
+    </ServicesContext.Provider>,
+  )
+  expect(view.container.querySelector('img')!.alt).toBe('<b>parrot</b>')
+  expect(view.container.querySelector('b')).toBeNull()
+  expect(view.container.querySelector('img')!.src).toBe(src)
+  expect(view.acquire).toHaveBeenCalledTimes(1)
 })

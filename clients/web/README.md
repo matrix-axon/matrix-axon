@@ -118,6 +118,7 @@ If the selected space becomes empty, the picker returns to All rooms.
 Hidden spaces retain their saved order and can reappear after membership updates.
 
 Received custom reaction images render in room and thread reaction chips through the authenticated media proxy.
+Tooltips and accessible labels use the optional reaction `shortcode` when a server supplies it, and fall back to “Custom reaction” for older servers or missing names.
 Loading and failed images retain a compact placeholder; counts and click-to-toggle behavior work as for Unicode reactions.
 Custom-image selection and image-pack browsing are not yet available.
 

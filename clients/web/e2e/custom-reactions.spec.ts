@@ -155,59 +155,74 @@ for (const thread of [false, true]) {
 
 // A clicked chip retains focus while the pointer moves to another reaction.
 // Tooltips share the message column's anchor, so two open tooltips overlap.
-test('hovering custom reactions replaces the tooltip of a focused sibling', async ({
-  page,
-}) => {
-  const reactions = Object.fromEntries(
-    ['alice', 'bob', 'carol'].map((name) => [
-      `mxc://reaction.test/${name}`,
-      { count: 1, me: false, senders: [`@${name}:hs`], my_event_ids: [] },
-    ]),
-  )
-  await page.route('**/timeline*', (route) =>
-    route.fulfill({
-      json: {
-        data: {
-          events: [
-            {
-              account_id: ACCOUNT_ID,
-              room_id: ROOM_ID,
-              event_id: '$hover-reactions',
-              sender: '@alice:hs',
-              origin_ts: 1000,
-              arrival_order: 1,
-              type: 'm.room.message',
-              state_key: null,
-              body: 'Reaction tooltip fixture',
-              content: { msgtype: 'm.text', body: 'Reaction tooltip fixture' },
-              relates_to: null,
-              redacted: false,
-              edited: false,
-              edit_count: 0,
-              reactions,
-            },
-          ],
-          next_cursor: null,
+for (const named of [false, true]) {
+  test(`hovering custom reactions shows the correct tooltip with ${named ? 'new' : 'old'} API responses`, async ({
+    page,
+  }) => {
+    const reactions = Object.fromEntries(
+      ['alice', 'bob', 'carol'].map((name) => [
+        `mxc://reaction.test/${name}`,
+        {
+          count: 1,
+          me: false,
+          shortcode: named ? `:${name}:` : undefined,
+          senders: [`@${name}:hs`],
+          my_event_ids: [],
         },
-      },
-    }),
-  )
-  await page.route(/\/v1\/media\//, (route) =>
-    route.fulfill({ contentType: 'image/png', body: PNG }),
-  )
-  await signIn(page)
-  await page.goto(ROOM_URL)
-  const row = page.locator('[data-event-id="$hover-reactions"]')
-  const chips = row.locator('.reaction-chip')
-  await expect(chips).toHaveCount(3)
-  // Focus the last chip, as happens after clicking it, without sending a react.
-  await chips.nth(2).focus()
-  await expect(row.getByRole('tooltip')).toContainText('@carol:hs')
-  for (const index of [0, 1, 2, 0]) {
-    await chips.nth(index).hover()
-    await expect(row.getByRole('tooltip')).toHaveCount(1)
-    await expect(row.getByRole('tooltip')).toHaveText(
-      `Custom reaction: @${['alice', 'bob', 'carol'][index]}:hs`,
+      ]),
     )
-  }
-})
+    await page.route('**/timeline*', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            events: [
+              {
+                account_id: ACCOUNT_ID,
+                room_id: ROOM_ID,
+                event_id: '$hover-reactions',
+                sender: '@alice:hs',
+                origin_ts: 1000,
+                arrival_order: 1,
+                type: 'm.room.message',
+                state_key: null,
+                body: 'Reaction tooltip fixture',
+                content: {
+                  msgtype: 'm.text',
+                  body: 'Reaction tooltip fixture',
+                },
+                relates_to: null,
+                redacted: false,
+                edited: false,
+                edit_count: 0,
+                reactions,
+              },
+            ],
+            next_cursor: null,
+          },
+        },
+      }),
+    )
+    await page.route(/\/v1\/media\//, (route) =>
+      route.fulfill({ contentType: 'image/png', body: PNG }),
+    )
+    await signIn(page)
+    await page.goto(ROOM_URL)
+    const row = page.locator('[data-event-id="$hover-reactions"]')
+    const chips = row.locator('.reaction-chip')
+    await expect(chips).toHaveCount(3)
+    // Focus the last chip, as happens after clicking it, without sending a react.
+    await chips.nth(2).focus()
+    await expect(row.getByRole('tooltip')).toContainText('@carol:hs')
+    for (const index of [0, 1, 2, 0]) {
+      await chips.nth(index).hover()
+      await expect(row.getByRole('tooltip')).toHaveCount(1)
+      const name = ['alice', 'bob', 'carol'][index]
+      await expect(chips.nth(index)).toHaveAccessibleName(
+        `${named ? `:${name}:` : 'Custom reaction:'} 1`,
+      )
+      await expect(row.getByRole('tooltip')).toHaveText(
+        `${named ? `:${name}:` : 'Custom reaction:'} @${name}:hs`,
+      )
+    }
+  })
+}

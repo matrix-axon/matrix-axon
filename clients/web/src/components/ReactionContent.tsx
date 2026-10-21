@@ -11,17 +11,31 @@ export function customReactionMxc(key: string): string | null {
   return path !== null && !path.mediaId.includes('/') ? key : null
 }
 
-export function reactionLabel(key: string): string {
-  return customReactionMxc(key) === null ? key : 'Custom reaction'
+export function reactionLabel(key: string, shortcode?: unknown): string {
+  if (customReactionMxc(key) === null) return key
+  // Newer servers supply a name; older servers and old cached aggregates do
+  // not. Treat even typed API strings as untrusted optional display text.
+  if (
+    typeof shortcode === 'string' &&
+    shortcode.length <= 100 &&
+    new TextEncoder().encode(shortcode).length <= 100 &&
+    shortcode.trim().length > 0 &&
+    !/\p{Cc}/u.test(shortcode)
+  ) {
+    return shortcode.trim()
+  }
+  return 'Custom reaction'
 }
 
 /** A keyed child keeps async state scoped to both the account and object. */
 export function ReactionContent({
   accountId,
   reaction,
+  shortcode,
 }: {
   accountId: string
   reaction: string
+  shortcode?: unknown
 }) {
   const mxc = customReactionMxc(reaction)
   return mxc === null ? (
@@ -31,11 +45,20 @@ export function ReactionContent({
       key={`${accountId}\0${mxc}`}
       accountId={accountId}
       mxc={mxc}
+      label={reactionLabel(reaction, shortcode)}
     />
   )
 }
 
-function ReactionImage({ accountId, mxc }: { accountId: string; mxc: string }) {
+function ReactionImage({
+  accountId,
+  mxc,
+  label,
+}: {
+  accountId: string
+  mxc: string
+  label: string
+}) {
   const [original, setOriginal] = useState(false)
   const [failedUrl, setFailedUrl] = useState<string | null>(null)
   const { ref, state, invalidate } = useMediaBlob<HTMLSpanElement>(
@@ -60,7 +83,7 @@ function ReactionImage({ accountId, mxc }: { accountId: string; mxc: string }) {
       {ready ? (
         <img
           src={state.url}
-          alt=""
+          alt={label}
           width="20"
           height="20"
           decoding="async"
