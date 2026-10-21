@@ -89,6 +89,9 @@ pub enum ErrorKind {
 }
 
 impl Error {
+    // Desktop commands are the only callers. Android clippy compiles those
+    // branches out, so the helper has to leave with them.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     fn unsupported() -> Self {
         Self {
             kind: ErrorKind::Unsupported,
@@ -133,13 +136,16 @@ fn capabilities() -> Capabilities {
 }
 
 fn provider_for_target() -> Option<Provider> {
+    // Each cfg block is the whole function on that target. A `return` here is
+    // the only statement after the other arms are stripped, which Android
+    // clippy denies.
     #[cfg(target_os = "ios")]
     {
-        return Some(Provider::Apns);
+        Some(Provider::Apns)
     }
     #[cfg(target_os = "android")]
     {
-        return Some(Provider::Fcm);
+        Some(Provider::Fcm)
     }
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
