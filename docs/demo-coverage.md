@@ -110,6 +110,12 @@ shows it.
   follow: script the _undo_ as well, so the scene leaves the room as it found it
   and its assertions stay honest on a second run — a react-only scene passes
   vacuously the second time, on the badge the first run left behind.
+- **Popup bounds in narrow web panes.**
+  Narrow room panes use a compact “+” action button and omit the redundant Sort caption while retaining its accessible label.
+  The Rooms menu stays right-aligned when its controls wrap, and reaction sender tooltips and read-receipt lists fit their message column.
+  Message actions wrap within narrow headers, and long-press labels stay inside the action bar.
+  Read-receipt dismissal is ready before the popup paints, including an immediate Escape after opening.
+  These bounds are **not covered** by the recordings; `clients/web/e2e/popup-bounds.spec.ts` exercises narrow tablet and phone layouts plus the wider mobile presentation.
 - **Empty spaces in the web picker.**
   Confirmed empty roots stay hidden during background refreshes, while unknown and failed roots remain available.
   The `spaces` scene demonstrates populated spaces but does not exercise empty-root hiding or restoration after a membership update.
@@ -216,7 +222,7 @@ scene now depends on:
 ### TUI
 
 - `/room` resolves room IDs, aliases, and displayed titles, including server-calculated names for unnamed rooms (ADR 0118).
-  The `send` scene still addresses the DM by ID; title-based switching is not covered by that driver.
+  The `send` scene still addresses the DM by ID (and waits on the `showing <title>` status, which names a DM by the other member); title-based switching is not covered by that driver.
 - The search result view binds bare letters to its own actions (`s` sort, `g`
   group, `e` edit, `r` reply, `t` thread). A command typed while it has focus is
   not typed at all: it is read as that sequence of shortcuts. Esc first.

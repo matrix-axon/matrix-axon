@@ -755,6 +755,198 @@ async fn insert_media_event(
     event_id
 }
 
+async fn insert_custom_reaction(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    mxc: &str,
+) -> String {
+    let event_id = format!("$reaction-{}:localhost", Uuid::new_v4());
+    let content = json!({ "m.relates_to": {
+        "rel_type": "m.annotation", "event_id": "$target:localhost", "key": mxc
+    }});
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_000,
+            event_type: "m.reaction",
+            content: Some(content.clone()),
+            raw_event: json!({ "type": "m.reaction", "content": content }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .unwrap();
+    event_id
+}
+
+/// The reaction key alone is enough to resolve plaintext media; no image
+/// attachment or pack metadata needs to exist for this URL.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn custom_reaction_media_download_thumbnail_and_redaction() {
+    let store = store().await;
+    let account_id = store
+        .upsert_account(
+            &format!("@reaction-media-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let room_id = format!("!reaction-media-{}:localhost", Uuid::new_v4());
+    let media_id = Uuid::new_v4().simple().to_string();
+    let mxc = format!("mxc://example.org/{media_id}");
+    let event_id = insert_custom_reaction(&store, account_id, &room_id, &mxc).await;
+    let media = Arc::new(ConfiguredMediaProxy::ok(b"\x89PNG\r\n\x1a\nreaction-image"));
+    let app = media_app(store.clone(), media.clone());
+    let path = format!("/v1/media/{account_id}/example.org/{media_id}");
+    let thumb = format!("{path}/thumbnail?width=32&height=32");
+    for uri in [&path, &thumb] {
+        let (status, headers, bytes) = get_media_bytes(&app, uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"\x89PNG\r\n\x1a\nreaction-image");
+        assert_eq!(headers["content-type"], "image/png");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+    }
+    assert_eq!(media.calls().len(), 1);
+    assert_eq!(media.calls()[0].account_id, account_id);
+    assert_eq!(media.calls()[0].mxc_url, mxc);
+    assert!(media.calls()[0].encrypted_file.is_none());
+    assert_eq!(media.thumbnail_calls().len(), 1);
+    assert_eq!(media.thumbnail_calls()[0].mxc_url, mxc);
+    assert_eq!(media.thumbnail_calls()[0].account_id, account_id);
+    assert_eq!(media.thumbnail_calls()[0].spec.width, 32);
+    assert_eq!(media.thumbnail_calls()[0].spec.height, 32);
+
+    let redaction_id = format!("$redact-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &redaction_id,
+            room_id: &room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_001,
+            event_type: "m.room.redaction",
+            content: Some(json!({})),
+            raw_event: json!({ "type": "m.room.redaction", "redacts": event_id }),
+            megolm_session_id: None,
+            redacts: Some(&event_id),
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .unwrap();
+    for uri in [&path, &thumb] {
+        let (status, _, _) = get_media_bytes(&app, uri, Some("*")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(media.calls().len(), 1);
+    assert_eq!(media.thumbnail_calls().len(), 1);
+
+    // Redacting a redaction does not restore its target in Matrix. The
+    // canonical timeline mask uses the pointer even when content is stripped.
+    sqlx_core::query::query(
+        "UPDATE events SET content = NULL WHERE account_id = $1 AND event_id = $2",
+    )
+    .bind(account_id)
+    .bind(&redaction_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    for uri in [&path, &thumb] {
+        let (status, _, _) = get_media_bytes(&app, uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // A redacted older reaction must not hide a later active reference.
+    insert_custom_reaction(&store, account_id, &room_id, &mxc).await;
+    for uri in [&path, &thumb] {
+        let (status, _, bytes) = get_media_bytes(&app, uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"\x89PNG\r\n\x1a\nreaction-image");
+    }
+    assert_eq!(media.calls().len(), 2);
+    assert_eq!(media.thumbnail_calls().len(), 2);
+    for (bytes, expected_type) in [
+        (b"\xff\xd8\xffjpeg".as_slice(), "image/jpeg"),
+        (b"GIF89aimage".as_slice(), "image/gif"),
+        (b"RIFFxxxxWEBPimage".as_slice(), "image/webp"),
+        (
+            b"<svg onload='alert(1)'>".as_slice(),
+            "application/octet-stream",
+        ),
+        (
+            b"<html>untrusted</html>".as_slice(),
+            "application/octet-stream",
+        ),
+    ] {
+        let proxy = Arc::new(ConfiguredMediaProxy::ok(bytes));
+        let type_app = media_app(store.clone(), proxy);
+        for uri in [&path, &thumb] {
+            let (status, headers, body) = get_media_bytes(&type_app, uri, None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(headers["content-type"], expected_type);
+            assert_eq!(headers["x-content-type-options"], "nosniff");
+            assert_eq!(body, bytes, "sniffing must rewind the resource");
+            let (status, headers, body) = send_request(
+                &type_app,
+                "GET",
+                uri,
+                None,
+                Some(&bearer()),
+                Some(("range", "bytes=0-2")),
+            )
+            .await;
+            assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+            assert_eq!(headers["content-type"], expected_type);
+            assert_eq!(body, bytes[..3]);
+        }
+    }
+    let user_id = store
+        .get_account(account_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .user_id;
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &room_id,
+            event_type: "m.room.member",
+            state_key: &user_id,
+            event_id: "$left:localhost",
+            sender: &user_id,
+            origin_ts: 1,
+            content: Some(json!({ "membership": "leave" })),
+        })
+        .await
+        .unwrap();
+    let downloads = media.calls().len();
+    let thumbnails = media.thumbnail_calls().len();
+    for uri in [&path, &thumb] {
+        let (status, _, _) = get_media_bytes(&app, uri, Some("*")).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "membership check precedes conditional cache hits"
+        );
+    }
+    assert_eq!(media.calls().len(), downloads);
+    assert_eq!(media.thumbnail_calls().len(), thumbnails);
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
+
 /// Shared body for `media_route_fails_closed_for_missing_and_redacted_metadata`
 /// and `thumbnail_route_fails_closed_for_missing_and_redacted_metadata`: a
 /// store miss, and a redacted event, must both `404` without the request ever

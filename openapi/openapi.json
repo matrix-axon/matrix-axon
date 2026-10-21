@@ -7843,7 +7843,7 @@
           "media"
         ],
         "summary": "Proxy an `mxc://` download through the account's homeserver connection.",
-        "description": "The `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's primary or thumbnail media descriptor.\nThe response body is the raw media bytes, streamed from the on-disk cache\nwith range-request and conditional-GET support.",
+        "description": "The `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's media descriptor, member avatar, or\nMSC4027 custom reaction key.\nThe response body is the raw media bytes, streamed from the on-disk cache\nwith range-request and conditional-GET support.",
         "operationId": "get_media",
         "parameters": [
           {
@@ -8002,7 +8002,7 @@
           "media"
         ],
         "summary": "Proxy a homeserver-generated thumbnail of an `mxc://` object through the\naccount's homeserver connection.",
-        "description": "Shares [`get_media`]'s event lookup (via [`resolve_media_content`]) and\nconditional-GET/range-serving machinery, but resolves a resized variant\nvia [`MediaProxy::get_thumbnail`] instead of the full original, and\ncorrects `Content-Type` by sniffing the returned bytes (see\n[`correct_thumbnail_content_type`]) since a homeserver-regenerated\nthumbnail may not match the original's declared mimetype. Encrypted media\nis rejected with `400` before the proxy is ever called — see\n[`resolve_thumbnail_spec`].",
+        "description": "Shares [`get_media`]'s event lookup (via [`resolve_media_content`]) and\nconditional-GET/range-serving machinery, but resolves a resized variant\nvia [`MediaProxy::get_thumbnail`] instead of the full original, and\ncorrects `Content-Type` by sniffing the returned bytes (see\n[`correct_image_content_type`]) since a homeserver-regenerated\nthumbnail may not match the original's declared mimetype. Encrypted media\nis rejected with `400` before the proxy is ever called — see\n[`resolve_thumbnail_spec`].",
         "operationId": "get_media_thumbnail",
         "parameters": [
           {
