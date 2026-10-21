@@ -1818,6 +1818,8 @@ a.button-like {
   }
 }
 
+/* A wide phone layout can exceed the compact container width. Keep its
+   mobile trigger even when the controls would have room for the text label. */
 @media (max-width: 47.99rem) {
   .room-control-row {
     --room-actions-icon: block;

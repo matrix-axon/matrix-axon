@@ -26,23 +26,7 @@ for (const sidebarWidth of [360, 640]) {
       await page.goto('/')
       await page.locator('a.room-link').first().waitFor()
       const trigger = page.locator('.room-actions-menu summary')
-      const compact =
-        viewport.width < 768 || sidebarWidth === 360 || viewport.width === 768
-      await expect(page.locator('.room-actions-plus')).toBeVisible({
-        visible: compact,
-      })
-      if (viewport.width >= 768 && sidebarWidth === 360) {
-        const row = page.locator('.room-control-row')
-        const boxes = await row.evaluate((el) =>
-          [...el.children].map((child) =>
-            child.getBoundingClientRect().toJSON(),
-          ),
-        )
-        expect(
-          Math.max(...boxes.map((box) => box.top)) -
-            Math.min(...boxes.map((box) => box.top)),
-        ).toBeLessThan(10)
-      }
+      await expectRoomControlsFit(page)
       await trigger.click()
       const menu = page.locator('.room-actions-popover')
       await expect(menu).toBeVisible()
@@ -68,6 +52,7 @@ for (const sidebarWidth of [360, 640]) {
         })
         await handle.press('Home')
         await expect(page.locator('.room-actions-plus')).toBeVisible()
+        await expectRoomControlsFit(page)
         await expectPopupWithin(
           page,
           '.room-actions-popover',
@@ -75,6 +60,7 @@ for (const sidebarWidth of [360, 640]) {
         )
         await handle.press('End')
         await expect(page.locator('.room-actions-plus')).toBeHidden()
+        await expectRoomControlsFit(page)
         await expectPopupWithin(
           page,
           '.room-actions-popover',
@@ -86,6 +72,20 @@ for (const sidebarWidth of [360, 640]) {
     })
   }
 }
+
+// A wide mobile viewport has room for the text label, but keeps the phone
+// presentation. The container query alone does not cover this layout.
+test('a wide mobile viewport retains the compact room action', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 744, height: 1133 })
+  await signIn(page)
+  await page.goto('/')
+  await page.locator('a.room-link').first().waitFor()
+  await expect(page.locator('.room-actions-plus')).toBeVisible()
+  await expect(page.locator('.room-actions-label')).toBeHidden()
+  await expectRoomControlsFit(page)
+})
 
 for (const width of [320, 390, 1024]) {
   test(`message popups fit the timeline at ${width}px`, async ({ page }) => {
@@ -193,6 +193,39 @@ for (const width of [320, 390, 1024]) {
       }
     }
   })
+}
+
+async function expectRoomControlsFit(page: Page) {
+  const layout = await page.locator('.room-control-row').evaluate((row) => {
+    const box = row.getBoundingClientRect()
+    const controls = [...row.children].map((child) =>
+      child.getBoundingClientRect(),
+    )
+    const icon = row.querySelector('.room-actions-plus')!
+    const label = row.querySelector('.room-actions-label')!
+    return {
+      iconShown: getComputedStyle(icon).display !== 'none',
+      labelShown: getComputedStyle(label).display !== 'none',
+      commonTop: Math.max(...controls.map((control) => control.top)),
+      commonBottom: Math.min(...controls.map((control) => control.bottom)),
+      leftInset:
+        Math.min(...controls.map((control) => control.left)) - box.left,
+      rightInset:
+        box.right - Math.max(...controls.map((control) => control.right)),
+    }
+  })
+  // Check the rendered outcome without duplicating the CSS breakpoints: one
+  // trigger presentation is shown, and every control fits on the same row.
+  expect(layout.iconShown !== layout.labelShown).toBe(true)
+  expect(layout.commonBottom).toBeGreaterThan(layout.commonTop)
+  expect(layout.leftInset).toBeGreaterThanOrEqual(-1)
+  expect(layout.rightInset).toBeGreaterThanOrEqual(-1)
+  await expect(page.locator('.room-actions-menu summary')).toHaveAccessibleName(
+    'Rooms',
+  )
+  await expect(
+    page.getByRole('combobox', { name: 'Sort', exact: true }),
+  ).toBeVisible()
 }
 
 async function expectPopupWithin(
