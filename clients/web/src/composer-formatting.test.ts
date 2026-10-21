@@ -118,6 +118,51 @@ describe('formatEdit', () => {
     expect(run('italic', '2 * x', 4, 5).next).toBe('2 * *x*')
   })
 
+  it('keeps whitespace at the edges of the selection outside the markers', () => {
+    expect(run('bold', 'hello world', 0, 6)).toMatchObject({
+      next: '**hello** world',
+      selected: 'hello',
+    })
+    expect(run('italic', 'a  hi\n', 1, 6).next).toBe('a  *hi*\n')
+    expect(run('link', 'hello world', 5, 11).next).toBe('hello [world](url)')
+    // Only whitespace selected: nothing to format, so it acts as a caret.
+    expect(run('bold', 'a  b', 1, 3)).toMatchObject({
+      next: 'a  ****b',
+      caret: 5,
+    })
+  })
+
+  it('unwraps a selection that has whitespace around the formatted text', () => {
+    expect(run('bold', 'say **hi** now', 3, 11).next).toBe('say hi now')
+  })
+
+  it('sizes the code delimiter to the content', () => {
+    expect(run('code', 'a`b', 0, 3)).toMatchObject({
+      next: '``a`b``',
+      selected: 'a`b',
+    })
+    // A run the same length as the shorter delimiter forces the next size up.
+    expect(run('code', 'a``b`c', 0, 6).next).toBe('```a``b`c```')
+    // Content that touches the delimiter gets a padding space.
+    expect(run('code', '`a', 0, 2)).toMatchObject({
+      next: '`` `a ``',
+      selected: '`a',
+    })
+  })
+
+  it('removes the whole code delimiter when unwrapping', () => {
+    expect(run('code', '``a`b``', 2, 5)).toMatchObject({
+      next: 'a`b',
+      selected: 'a`b',
+    })
+    expect(run('code', '``a`b``', 0, 7).next).toBe('a`b')
+    // The padding space goes with it.
+    expect(run('code', '`` `a ``', 3, 5).next).toBe('`a')
+    expect(run('code', '`` `a ``', 0, 8).next).toBe('`a')
+    // A plain span still loses its single tick.
+    expect(run('code', 'x `y` z', 3, 4).next).toBe('x y z')
+  })
+
   it('makes a link, leaving the URL placeholder selected', () => {
     expect(run('link', 'see docs here', 4, 8)).toMatchObject({
       next: 'see [docs](url) here',

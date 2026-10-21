@@ -76,12 +76,14 @@ export function formatKindForEvent(
   return match?.kind ?? null
 }
 
-/** The Markdown marker each wrapping format puts on both sides. */
-const MARKERS: Record<Exclude<FormatKind, 'link'>, string> = {
+/** The formats whose marker has a fixed length; code and link are special. */
+type FixedKind = 'bold' | 'italic' | 'strike'
+
+/** The Markdown marker each of them puts on both sides. */
+const MARKERS: Record<FixedKind, string> = {
   bold: '**',
   italic: '*',
   strike: '~~',
-  code: '`',
 }
 
 /** Length of the run of `ch` ending at `end` (backwards) or starting at `start`. */
@@ -107,7 +109,7 @@ function runAfter(text: string, start: number, ch: string): number {
  * Bold and italic share `*`, so a run is a count, not a yes/no: `*` is italic,
  * `**` bold, `***` both. Italic is on for an odd run; bold for two or more.
  */
-function isOn(kind: Exclude<FormatKind, 'link'>, n: number): boolean {
+function isOn(kind: FixedKind, n: number): boolean {
   const marker = MARKERS[kind]
   if (marker[0] !== '*') {
     return n >= marker.length
@@ -116,7 +118,7 @@ function isOn(kind: Exclude<FormatKind, 'link'>, n: number): boolean {
 }
 
 function wrapEdit(
-  kind: Exclude<FormatKind, 'link'>,
+  kind: FixedKind,
   text: string,
   start: number,
   end: number,
@@ -164,6 +166,92 @@ function wrapEdit(
   }
 }
 
+/**
+ * Inline code. A code span is delimited by a backtick run that no run inside it
+ * matches, so the delimiter is sized to the content: `a`b` needs two. Content
+ * that begins or ends with a backtick is padded with a space, which Markdown
+ * strips back off, so the delimiter does not run into it.
+ */
+function codeEdit(text: string, start: number, end: number): FormatEdit {
+  const selected = text.slice(start, end)
+
+  // Delimiters just outside the selection. Take the whole run: it is the
+  // delimiter, so a double-backtick span loses both ticks at once.
+  const outside = Math.min(
+    runBefore(text, start, '`'),
+    runAfter(text, end, '`'),
+  )
+  if (outside > 0) {
+    return {
+      from: start - outside,
+      to: end + outside,
+      insert: selected,
+      selectionStart: start - outside,
+      selectionEnd: end - outside,
+    }
+  }
+  // ... or the same with the padding space between them and the selection.
+  const padBefore = /(`+) $/.exec(text.slice(0, start))
+  const padAfter = /^ (`+)/.exec(text.slice(end))
+  if (
+    padBefore !== null &&
+    padAfter !== null &&
+    padBefore[1].length === padAfter[1].length
+  ) {
+    const cut = padBefore[1].length + 1
+    return {
+      from: start - cut,
+      to: end + cut,
+      insert: selected,
+      selectionStart: start - cut,
+      selectionEnd: end - cut,
+    }
+  }
+
+  // Delimiters inside the selection.
+  const inner = Math.min(
+    runAfter(selected, 0, '`'),
+    runBefore(selected, selected.length, '`'),
+    Math.floor(selected.length / 2),
+  )
+  if (inner > 0) {
+    let insert = selected.slice(inner, -inner)
+    // Markdown strips one padding space from each side of a span that has
+    // some other content.
+    if (
+      insert.length > 2 &&
+      insert.startsWith(' ') &&
+      insert.endsWith(' ') &&
+      insert.trim() !== ''
+    ) {
+      insert = insert.slice(1, -1)
+    }
+    return {
+      from: start,
+      to: end,
+      insert,
+      selectionStart: start,
+      selectionEnd: start + insert.length,
+    }
+  }
+
+  const used = new Set((selected.match(/`+/g) ?? []).map((run) => run.length))
+  let size = 1
+  while (used.has(size)) {
+    size++
+  }
+  const ticks = '`'.repeat(size)
+  const pad = selected.startsWith('`') || selected.endsWith('`') ? ' ' : ''
+  const open = ticks.length + pad.length
+  return {
+    from: start,
+    to: end,
+    insert: `${ticks}${pad}${selected}${pad}${ticks}`,
+    selectionStart: start + open,
+    selectionEnd: end + open,
+  }
+}
+
 function linkEdit(text: string, start: number, end: number): FormatEdit {
   const label = text.slice(start, end) || LINK_LABEL_PLACEHOLDER
   const urlStart = start + label.length + 3
@@ -190,8 +278,22 @@ export function formatEdit(
   start: number,
   end: number,
 ): FormatEdit {
-  return kind === 'link'
-    ? linkEdit(text, start, end)
+  // Markers hug the text: a selection that takes in a space at either end
+  // would otherwise give `**hello **`, which Markdown does not render as bold.
+  // The whitespace stays outside, and a selection of nothing but whitespace is
+  // treated as a caret at its end.
+  const raw = text.slice(start, end)
+  if (raw.trim() === '') {
+    start = end
+  } else {
+    start += raw.length - raw.trimStart().length
+    end -= raw.length - raw.trimEnd().length
+  }
+  if (kind === 'link') {
+    return linkEdit(text, start, end)
+  }
+  return kind === 'code'
+    ? codeEdit(text, start, end)
     : wrapEdit(kind, text, start, end)
 }
 

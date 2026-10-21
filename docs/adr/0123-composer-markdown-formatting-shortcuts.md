@@ -54,6 +54,13 @@ composer. The help popup lists both; the toggle's tooltip keeps `Ctrl-B`.
   or inside it.
 - With no selection it inserts an empty pair with the caret between. Pressing it
   again in the empty pair removes it.
+- Markers hug the text. Leading and trailing whitespace in the selection stays
+  outside them, because `**hello **` does not render as bold. A selection of
+  only whitespace acts as a caret.
+- Code sizes its delimiter to the content: the shortest backtick run that no run
+  inside matches, so `a`b` becomes ``` ``a`b`` ```, and content that begins or
+  ends with a backtick gets the padding space Markdown strips. Unwrapping
+  removes the whole delimiter, padding included.
 - Bold and italic share `*`, so they count a run of asterisks: one is italic,
   two bold, three both. Each can be added to or taken off the other.
 - Link wraps the selection as the label and selects the `url` placeholder so
