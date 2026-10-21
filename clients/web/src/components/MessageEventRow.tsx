@@ -323,6 +323,16 @@ export function MessageEventRow({
   onMutation?: () => void
 }) {
   const [historyOpen, setHistoryOpen] = useState(false)
+  // Sender tooltips share one position above the message's reaction row.
+  // A focused chip must yield when the pointer enters another chip.
+  const [reactionTooltipKey, setReactionTooltipKey] = useState<string | null>(
+    null,
+  )
+  const changeReactionTooltip = useCallback((key: string, open: boolean) => {
+    setReactionTooltipKey((current) =>
+      open ? key : current === key ? null : current,
+    )
+  }, [])
   const [confirmingRedact, setConfirmingRedact] = useState(false)
   const [inspectOpen, setInspectOpen] = useState(false)
   const desktopClickTimer = useRef<number | null>(null)
@@ -665,6 +675,8 @@ export function MessageEventRow({
                   emoji={emoji}
                   tally={shownTally}
                   tooltip={reactionTooltip(emoji, shownTally, members)}
+                  tooltipOpen={reactionTooltipKey === emoji}
+                  onTooltipChange={changeReactionTooltip}
                   pending={pending}
                   onToggle={() =>
                     void timeline.toggleReaction(event, emoji).then((ok) => {
@@ -686,6 +698,8 @@ export function MessageEventRow({
                   my_event_ids: [],
                 }}
                 tooltip={`Adding ${reactionLabel(gestureReaction.emoji)} reaction`}
+                tooltipOpen={reactionTooltipKey === gestureReaction.emoji}
+                onTooltipChange={changeReactionTooltip}
                 pending="adding"
               />
             )}
@@ -1345,6 +1359,8 @@ function ReactionChip({
   emoji,
   tally,
   tooltip,
+  tooltipOpen,
+  onTooltipChange,
   pending = null,
   onToggle,
 }: {
@@ -1352,10 +1368,11 @@ function ReactionChip({
   emoji: string
   tally: ReactionTally
   tooltip: string
+  tooltipOpen: boolean
+  onTooltipChange: (key: string, open: boolean) => void
   pending?: 'adding' | 'removing' | null
   onToggle?: () => void
 }) {
-  const [tooltipOpen, setTooltipOpen] = useState(false)
   const root = useRef<HTMLSpanElement>(null)
   const longPressTimer = useRef<number | null>(null)
   const suppressNextClick = useRef(false)
@@ -1379,11 +1396,11 @@ function ReactionChip({
       ) {
         return
       }
-      setTooltipOpen(false)
+      onTooltipChange(emoji, false)
     }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setTooltipOpen(false)
+        onTooltipChange(emoji, false)
       }
     }
     document.addEventListener('mousedown', onDismiss)
@@ -1391,12 +1408,14 @@ function ReactionChip({
     document.addEventListener('keydown', onKeyDown)
     document.addEventListener('scroll', onDismiss, true)
     return () => {
+      // Removing a reaction also relinquishes its tooltip selection.
+      onTooltipChange(emoji, false)
       document.removeEventListener('mousedown', onDismiss)
       document.removeEventListener('touchstart', onDismiss)
       document.removeEventListener('keydown', onKeyDown)
       document.removeEventListener('scroll', onDismiss, true)
     }
-  }, [tooltipOpen])
+  }, [tooltipOpen, onTooltipChange, emoji])
 
   useEffect(
     () => () => {
@@ -1411,8 +1430,8 @@ function ReactionChip({
     <span
       ref={root}
       class="reaction-chip-wrap"
-      onMouseEnter={() => setTooltipOpen(true)}
-      onMouseLeave={() => setTooltipOpen(false)}
+      onMouseEnter={() => onTooltipChange(emoji, true)}
+      onMouseLeave={() => onTooltipChange(emoji, false)}
     >
       <button
         type="button"
@@ -1425,8 +1444,8 @@ function ReactionChip({
         aria-busy={pending === null ? undefined : 'true'}
         aria-describedby={tooltipOpen ? tooltipId : undefined}
         disabled={pending !== null}
-        onFocus={() => setTooltipOpen(true)}
-        onBlur={() => setTooltipOpen(false)}
+        onFocus={() => onTooltipChange(emoji, true)}
+        onBlur={() => onTooltipChange(emoji, false)}
         onTouchStart={() => {
           clearLongPress()
           // Each touch re-arms from scratch: a long press that never produced a
@@ -1435,7 +1454,7 @@ function ReactionChip({
           suppressNextClick.current = false
           longPressTimer.current = window.setTimeout(() => {
             suppressNextClick.current = true
-            setTooltipOpen(true)
+            onTooltipChange(emoji, true)
           }, REACTION_TOUCH_HOLD_MS)
         }}
         onTouchMove={clearLongPress}
