@@ -1707,6 +1707,21 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
     fireEvent.keyDown(document.body, { key: 'b', ctrlKey: true })
     expect(services.settings.sidebarCollapsed.value).toBe(false)
 
+    // The shifted twin is the one that still works from the composer, where
+    // plain Ctrl-B is bold (ADR 0123).
+    fireEvent.keyDown(document.body, {
+      key: 'B',
+      ctrlKey: true,
+      shiftKey: true,
+    })
+    expect(services.settings.sidebarCollapsed.value).toBe(true)
+    fireEvent.keyDown(document.body, {
+      key: 'B',
+      ctrlKey: true,
+      shiftKey: true,
+    })
+    expect(services.settings.sidebarCollapsed.value).toBe(false)
+
     cleanup()
     history.replaceState(null, '', '/accounts')
     const utility = testServices()

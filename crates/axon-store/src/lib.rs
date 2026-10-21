@@ -59,7 +59,9 @@ pub use oauth_native::{
     IdentityRedemption, IdentityRedemptionRejection, NativeChallenge, NATIVE_CHALLENGE_TTL_SECS,
 };
 pub use oauth_refresh_tokens::{RedeemRefreshTokenError, RotatedRefreshToken};
-pub use push::{NewPushRegistration, PushRegistration, PushRegistrationOutcome};
+pub use push::{
+    NewPushRegistration, PushRegistration, PushRegistrationOutcome, PushSendCheck, PushTarget,
+};
 pub use rooms::{RoomSummary, RoomTag};
 pub use search::{
     room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,

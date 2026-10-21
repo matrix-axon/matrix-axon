@@ -982,6 +982,14 @@ function ShellChrome() {
     setHelpOpen(true)
   }
 
+  const toggleSidebar = (event: KeyboardEvent) => {
+    if (mode === 'utility' || singlePane) {
+      return // no sidebar here to collapse
+    }
+    event.preventDefault()
+    settings.sidebarCollapsed.value = !collapsed
+  }
+
   const openSearch = (event?: KeyboardEvent) => {
     if (sasOpen) {
       event?.preventDefault()
@@ -1352,13 +1360,10 @@ function ShellChrome() {
         }
         openHelp(event)
       },
-      'mod+b': (event) => {
-        if (mode === 'utility' || singlePane) {
-          return // no sidebar here to collapse
-        }
-        event.preventDefault()
-        settings.sidebarCollapsed.value = !collapsed
-      },
+      // The composer claims plain `mod+b` for bold before this runs (ADR 0123),
+      // so the shifted twin is the sidebar toggle that survives typing.
+      'mod+b': toggleSidebar,
+      'mod+shift+b': toggleSidebar,
       'mod+alt+s': (event) => {
         if (mode === 'utility' || singlePane || !hasSpaces) return
         event.preventDefault()

@@ -13,7 +13,7 @@ use std::time::Duration;
 use axon_core::{LiveFrame, PushMaterial};
 use axon_store::Store;
 use axum::extract::FromRef;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 use crate::auth::TokenVerifier;
 use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
@@ -208,6 +208,11 @@ pub struct AppState {
     /// operator left `[push]` empty. `GET /v1/status` reads the flags; the
     /// bytes stay here for the process that will send.
     pub push: Arc<PushMaterial>,
+    /// Wakes the push router's registration reload after a PUT or DELETE.
+    ///
+    /// The binary installs the same `Notify` the router waits on. Tests that
+    /// never send keep the default, which nobody is waiting on.
+    pub push_changed: Arc<Notify>,
 }
 
 /// Whether the embedded web client is served (`[server] web_client`, ADR 0116).
@@ -410,6 +415,7 @@ impl AppState {
             management: ManagementConfig::default(),
             web_client: WebClientConfig::default(),
             push: Arc::new(PushMaterial::unconfigured()),
+            push_changed: Arc::new(Notify::new()),
         }
     }
 
@@ -587,6 +593,13 @@ impl AppState {
     /// reading `[push]`. Tests that don't care leave both providers off.
     pub fn with_push(mut self, push: PushMaterial) -> Self {
         self.push = Arc::new(push);
+        self
+    }
+
+    /// Install the notify the push router waits on. PUT and DELETE fire it
+    /// after a registration change so the in-memory snapshot reloads.
+    pub fn with_push_changed(mut self, changed: Arc<Notify>) -> Self {
+        self.push_changed = changed;
         self
     }
 
@@ -1004,6 +1017,12 @@ impl FromRef<AppState> for ManagementConfig {
 impl FromRef<AppState> for Arc<PushMaterial> {
     fn from_ref(state: &AppState) -> Arc<PushMaterial> {
         Arc::clone(&state.push)
+    }
+}
+
+impl FromRef<AppState> for Arc<Notify> {
+    fn from_ref(state: &AppState) -> Arc<Notify> {
+        Arc::clone(&state.push_changed)
     }
 }
 

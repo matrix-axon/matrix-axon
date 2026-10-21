@@ -92,7 +92,8 @@ It does not need to be polished. It exists to validate the API surface and to gi
 
 These are deliberately deferred. Many appear on the post-MVP roadmap.
 
-- **Push notifications.** No APNs, no FCM, no web push. The event store and event-emit surface are designed so a push router can be added later without schema changes.
+- **Web Push.** APNs and FCM delivery for a suspended phone is ADR 0113.
+  A quit Mac app, Windows push services, and Web Push are not in this cut.
 - **Spaces as first-class API resources.** Events flow through; no space-specific endpoints.
 - **Voice / video signaling.**
 - **Advanced search UI** (faceted, semantic). Backend ships, simple search input ships in `axon-tui`; rich UI does not.
