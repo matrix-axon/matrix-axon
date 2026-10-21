@@ -3,6 +3,25 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.13 - 2026-10-21
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* build(deps): bump webpki crates in the desktop shell for RUSTSEC-2026-0381/0382 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/783
+* build(deps): bump webpki crates for RUSTSEC-2026-0381/0382/0383 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/782
+#### Features
+* feat(server): serve custom reaction images through the media proxy by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/774
+#### Bug Fixes
+* fix: keep menus and tooltips inside narrow panes by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/776
+* fix(smoke): follow the TUI's DM display names in the demo tour and report failures usefully by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/775
+#### Build and CI
+* ci: run the Postgres-backed ignored tests nightly on main by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/778
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.12...v0.1.13
+
 ## v0.1.12 - 2026-10-20
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
