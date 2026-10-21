@@ -250,18 +250,26 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
         })
     }
 }
+// Non-control whitespace trimmed by ECMAScript String.trim(), expressed as
+// Unicode code points so PostgreSQL locale classes cannot change the rule.
+const SHORTCODE_TRIM_CHARS: &str = concat!(
+    r"\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006",
+    r"\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF",
+);
+
 // Both reaction projections use the same validation and selection rules.
 // This expression reads the reaction row aliased as `rx`; do not apply it to
 // the target message's content. Labels are optional, untrusted display text.
 fn reaction_shortcode_sql() -> String {
     let candidates = ["shortcode", "com.beeper.reaction.shortcode"]
         .map(|field| {
+            let trimmed = format!("btrim(rx.content->>'{field}', U&'{SHORTCODE_TRIM_CHARS}')");
             format!(
                 "CASE WHEN jsonb_typeof(rx.content->'{field}') = 'string' \
                  AND octet_length(rx.content->>'{field}') BETWEEN 1 AND 100 \
-                 AND btrim(rx.content->>'{field}') <> '' \
-                 AND rx.content->>'{field}' !~ '[[:cntrl:]]' \
-                 THEN btrim(rx.content->>'{field}') END"
+                 AND {trimmed} <> '' \
+                 AND rx.content->>'{field}' COLLATE \"C\" !~ U&'[\\0001-\\001F\\007F-\\009F]' \
+                 THEN {trimmed} END"
             )
         })
         .join(", ");

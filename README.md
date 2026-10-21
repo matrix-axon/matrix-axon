@@ -155,8 +155,10 @@ The authenticated media download and thumbnail endpoints also resolve custom rea
 Known left or banned rooms cannot authorize reaction image downloads.
 Reaction media references must be structurally valid MXC URIs of at most 2,048 bytes; malformed and oversized keys do not authorize a fetch.
 Reaction tallies also expose an optional `shortcode` from the original reaction content (`shortcode`, then `com.beeper.reaction.shortcode`).
-Only custom MXC reactions with nonblank names of at most 100 UTF-8 bytes and no control characters qualify.
+Only custom MXC reactions with nonblank names of at most 100 UTF-8 bytes qualify.
+C0 and C1 control characters are rejected, and surrounding whitespace is trimmed with an explicit ECMAScript-compatible character set; these rules do not depend on the database locale.
 The oldest valid name by `(origin_ts, event_id)` among the existing capped, deduplicated reaction representatives wins; redaction removes that representative from consideration.
+Each sender/key pair keeps its smallest-event-ID representative; a name on another duplicate is ignored until that representative is removed.
 Names are omitted when unavailable, so clients should retain a generic fallback and render supplied names as untrusted text.
 Safe PNG, JPEG, GIF, and WebP signatures determine reaction image response types; unrecognized objects remain downloads with `application/octet-stream` and `nosniff`.
 Media is fetched on client request and uses the existing per-object limit and globally bounded LRU cache.

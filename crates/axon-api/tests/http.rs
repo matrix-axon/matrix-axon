@@ -5446,6 +5446,31 @@ async fn custom_reaction_shortcodes_api() {
         ("mxc://hs/blank", json!({"shortcode": "  "}), None),
         ("mxc://hs/control", json!({"shortcode": "bad\nname"}), None),
         (
+            "mxc://hs/c1-control",
+            json!({"shortcode": "bad\u{0085}name"}),
+            None,
+        ),
+        (
+            "mxc://hs/c1-end",
+            json!({"shortcode": "bad\u{009f}name"}),
+            None,
+        ),
+        (
+            "mxc://hs/unicode-blank",
+            json!({"shortcode": "\u{00a0}\u{2003}\u{feff}"}),
+            None,
+        ),
+        (
+            "mxc://hs/unicode-trim",
+            json!({"shortcode": "\u{00a0}:trimmed:\u{3000}"}),
+            Some(":trimmed:".to_owned()),
+        ),
+        (
+            "mxc://hs/c1-fallback",
+            json!({"shortcode": "bad\u{0085}name", "com.beeper.reaction.shortcode": ":safe:"}),
+            Some(":safe:".to_owned()),
+        ),
+        (
             "mxc://hs/oversized",
             json!({"shortcode": "x".repeat(101)}),
             None,
@@ -5528,6 +5553,33 @@ async fn custom_reaction_shortcodes_api() {
         )
         .await;
     }
+    // The existing smallest-event-id representative wins for duplicate
+    // (sender, key) pairs, even if another duplicate is older and has a label.
+    let duplicate_key = "mxc://hs/duplicate";
+    for (id, label, ts) in [
+        ("$shortcode-a", None, 2500),
+        ("$shortcode-z", Some(":duplicate:"), 1900),
+    ] {
+        let relation = json!({"rel_type": "m.annotation", "event_id": msg, "key": duplicate_key});
+        let content = json!({"m.relates_to": relation, "shortcode": label});
+        store
+            .upsert_event(&NewEvent {
+                account_id,
+                event_id: id,
+                room_id: &room_id,
+                sender: "@dupe:localhost",
+                origin_ts: ts,
+                event_type: "m.reaction",
+                content: Some(content.clone()),
+                raw_event: json!({"type": "m.reaction", "content": content}),
+                megolm_session_id: None,
+                redacts: None,
+                relates_to: Some(relation),
+                decrypted_body_text: None,
+            })
+            .await
+            .unwrap();
+    }
     let app = read_app(store.clone());
     let reactions_url = format!("/v1/accounts/{account_id}/events/{msg}/reactions");
     let (status, response) = get(&app, &reactions_url).await;
@@ -5548,6 +5600,8 @@ async fn custom_reaction_shortcodes_api() {
             );
         }
     }
+    assert_eq!(tally[duplicate_key]["count"], 1);
+    assert!(tally[duplicate_key].get("shortcode").is_none());
     let (winner, expected, remaining) = if first < second {
         (&first, ":alice:", ":bob:")
     } else {
@@ -5569,6 +5623,13 @@ async fn custom_reaction_shortcodes_api() {
         };
         assert_eq!(&event["reactions"], tally);
     }
+    insert_redaction(&store, account_id, &room_id, 2999, "$shortcode-a").await;
+    let (_, duplicate_after) = get(&app, &reactions_url).await;
+    assert_eq!(
+        duplicate_after["data"][duplicate_key]["shortcode"],
+        ":duplicate:"
+    );
+    assert_eq!(duplicate_after["data"][duplicate_key]["count"], 1);
     insert_redaction(&store, account_id, &room_id, 3000, winner).await;
     let (_, after) = get(&app, &reactions_url).await;
     assert_eq!(after["data"][conflict_key]["shortcode"], remaining);

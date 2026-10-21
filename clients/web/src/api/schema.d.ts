@@ -2113,7 +2113,9 @@ export interface components {
                     /**
                      * @description Optional custom-image name from MSC4027 `shortcode` or
                      *     `com.beeper.reaction.shortcode` in the original reaction content.
-                     *     Nonblank, at most 100 UTF-8 bytes, with no control characters.
+                     *     At most 100 UTF-8 bytes before trimming, with no C0/C1 controls.
+                     *     ECMAScript-compatible whitespace is trimmed; whitespace-only names
+                     *     are omitted. Validation does not depend on the database locale.
                      *     Among retained deduplicated reactions, the oldest valid label by
                      *     `(origin_ts, event_id)` wins; absent when no valid label is available.
                      */
@@ -4597,7 +4599,9 @@ export interface components {
             /**
              * @description Optional custom-image name from MSC4027 `shortcode` or
              *     `com.beeper.reaction.shortcode` in the original reaction content.
-             *     Nonblank, at most 100 UTF-8 bytes, with no control characters.
+             *     At most 100 UTF-8 bytes before trimming, with no C0/C1 controls.
+             *     ECMAScript-compatible whitespace is trimmed; whitespace-only names
+             *     are omitted. Validation does not depend on the database locale.
              *     Among retained deduplicated reactions, the oldest valid label by
              *     `(origin_ts, event_id)` wins; absent when no valid label is available.
              */
