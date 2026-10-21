@@ -179,12 +179,12 @@ Bridged events flow through as ordinary Matrix events. The agent does not parse 
 
 First run logs the agent in as a new Matrix device and runs a fresh sliding sync. No importer from Element X / gomuks / Fluffychat / others. The initial-sync success criterion (under ten minutes for a Riley-shape account) is what makes fresh sync acceptable.
 
-### Push deferred entirely
+### Remote push
 
-No APNs / FCM / web push code paths in MVP. The event store schema and the event-emit surface inside the agent are designed so a push router can be added later without schema changes. Push is the highest-priority post-MVP track (see Roadmap signposts).
-
-[ADR 0113](../adr/0113-remote-push-for-suspended-mobile-clients.md) is that later design.
-It adds no code, and the non-goal in `implementation.md` stays until the router lands.
+[ADR 0113](../adr/0113-remote-push-for-suspended-mobile-clients.md) is the design.
+The server routes a wake through APNs (iOS and iPadOS, one registration) and FCM (Android) when an unread-count observation matches that ADR.
+Web Push, a Windows push service, and a wake for a quit Mac app are not in this cut.
+The phone still does not obtain a platform token or render the alert until the client half lands.
 
 ## Open decisions
 
@@ -248,7 +248,7 @@ We do not build any federation code in v1.
 
 Originally post-MVP, roughly in priority order — several of these have since shipped or begun ahead of MVP freeze, noted inline:
 
-1. **Push** (APNs and FCM together; web push after that). P0 immediately after MVP. _(Designed in [ADR 0113](../adr/0113-remote-push-for-suspended-mobile-clients.md). Not started.)_
+1. **Push** (APNs and FCM together; web push after that). P0 immediately after MVP. _(Server router landed, [ADR 0113](../adr/0113-remote-push-for-suspended-mobile-clients.md). The client half has not started.)_
 2. ~~Full OAuth 2.0 + PKCE.~~ _(Shipped ahead of freeze — M14, ADR 0054.)_
 3. **Bridge metadata normalization.** _(Not started.)_
 4. **Import-from-existing-client onboarding** (Element X store reader, maybe gomuks). _(Not started.)_

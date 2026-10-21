@@ -189,6 +189,15 @@ before starting a milestone.
   otherwise; the gates built on that assumption (withholding Download for
   unidentifiable bytes) have been removed, so any bytes that arrive are
   offered for Download.
+- **Custom reaction images** (`components/ReactionContent.tsx`): valid MXC reaction keys render through the existing authenticated media service in room and thread chips.
+  The fixed 20px slot lazy-loads a 32px thumbnail and tries the original once on a fetch or decode failure, then retains a placeholder.
+  Account and MXC changes remount the image child so async state cannot cross identities.
+  Counts, sender tooltips, and toggle requests retain the existing reaction aggregate and original key; live updates and reconnect reconciliation remain owned by the timeline store.
+  The optional aggregate `shortcode` supplies a validated display label; older servers, cached rows, and invalid or absent labels retain “Custom reaction”.
+  Render supplied shortcodes as plain text only.
+  Remove the temporary `ReactionTally` compatibility extension once the generated API schema includes `shortcode`; until then it allows this client change to land independently of the server change.
+  Each message owns one active reaction tooltip so a focused chip yields to a hovered sibling.
+  Existing media performance marks cover these requests; no additional debug setting is needed.
 - **Markdown-on-send** (`src/markdown/markdown.ts`): plain prose sends a
   bare body; detected formatting sends `org.matrix.custom.html`. The server
   never interprets Markdown. Raw inline HTML in composer input is escaped.

@@ -5,6 +5,7 @@
 //! not be logged. Revoke and unbind delete rows in the same transaction that
 //! ends the session. Rotation does not.
 
+use chrono::{DateTime, Utc};
 use sqlx_core::row::Row;
 use sqlx_core::transaction::Transaction;
 use sqlx_postgres::Postgres;
@@ -211,6 +212,122 @@ impl Store {
         let result = sqlx_core::query::query(&sql).execute(&self.pool).await?;
         Ok(result.rows_affected())
     }
+}
+
+/// One registration as the push router last read it.
+///
+/// `token` is the device token. `Debug` redacts it. A log line uses `id`.
+#[derive(Clone)]
+pub struct PushTarget {
+    pub id: Uuid,
+    pub provider: String,
+    pub token: String,
+    pub environment: Option<String>,
+    pub disclosure: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for PushTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushTarget")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("token", &"[REDACTED]")
+            .field("environment", &self.environment)
+            .field("disclosure", &self.disclosure)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+/// The row a send re-reads, plus whether its session still has a live credential.
+pub struct PushSendCheck {
+    pub target: PushTarget,
+    pub session_live: bool,
+}
+
+impl std::fmt::Debug for PushSendCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushSendCheck")
+            .field("target", &self.target)
+            .field("session_live", &self.session_live)
+            .finish()
+    }
+}
+
+impl Store {
+    /// Every registration, for the router's in-memory snapshot.
+    ///
+    /// The device token is included because a failed liveness read is fail-open
+    /// and still has to send. Callers must not log these rows.
+    pub async fn list_push_targets(&self) -> Result<Vec<PushTarget>, StoreError> {
+        let rows = sqlx_core::query::query(
+            "SELECT id, provider, token, environment, disclosure, updated_at \
+             FROM push_registrations",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(push_target).collect()
+    }
+
+    /// Re-read one registration and whether its session is still live.
+    ///
+    /// `None` means the row is gone. A database error is not "not live": the
+    /// caller sends and does not delete.
+    pub async fn push_send_check(&self, id: Uuid) -> Result<Option<PushSendCheck>, StoreError> {
+        let sql = format!(
+            "SELECT id, provider, token, environment, disclosure, updated_at, \
+                    ( \
+                        EXISTS ( \
+                            SELECT 1 FROM tokens \
+                             WHERE tokens.session_id = push_registrations.session_id \
+                               AND {LIVE_CREDENTIAL_SQL} \
+                        ) \
+                        OR EXISTS ( \
+                            SELECT 1 FROM oauth_refresh_tokens \
+                             WHERE oauth_refresh_tokens.session_id = push_registrations.session_id \
+                               AND {LIVE_CREDENTIAL_SQL} \
+                        ) \
+                    ) AS session_live \
+               FROM push_registrations \
+              WHERE id = $1"
+        );
+        let Some(row) = sqlx_core::query::query(&sql)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PushSendCheck {
+            session_live: row.try_get("session_live")?,
+            target: push_target(&row)?,
+        }))
+    }
+
+    /// Delete one registration by id.
+    ///
+    /// The router calls this after a send-time check found no live credential,
+    /// or after the provider said the device token is dead. This is not the
+    /// HTTP delete: that one is scoped to the caller's session.
+    pub async fn delete_push_registration_id(&self, id: Uuid) -> Result<bool, StoreError> {
+        let removed = sqlx_core::query::query("DELETE FROM push_registrations WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(removed.rows_affected() > 0)
+    }
+}
+
+fn push_target(row: &sqlx_postgres::PgRow) -> Result<PushTarget, StoreError> {
+    Ok(PushTarget {
+        id: row.try_get("id")?,
+        provider: row.try_get("provider")?,
+        token: row.try_get("token")?,
+        environment: row.try_get("environment")?,
+        disclosure: row.try_get("disclosure")?,
+        updated_at: row.try_get("updated_at")?,
+    })
 }
 
 /// Drop every registration owned by one of `session_ids`. Empty is a no-op.

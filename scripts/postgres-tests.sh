@@ -34,6 +34,11 @@ case "$DATABASE_ADMIN_URL" in
 esac
 base=${DATABASE_ADMIN_URL%/*}
 
+# The `DROP DATABASE IF EXISTS` below clears a leftover from a killed run. On a
+# fresh runner nothing is left, and Postgres reports that as a NOTICE for every
+# target. Raise the threshold so only warnings and errors reach the log.
+export PGOPTIONS='-c client_min_messages=warning'
+
 # "<package> <cargo flag...>" per lib and integration-test target of the
 # requested packages (all workspace packages by default).
 targets=$(cargo metadata --no-deps --format-version 1 | jq -r --args '

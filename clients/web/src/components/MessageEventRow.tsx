@@ -26,6 +26,11 @@ import {
 } from '../stores/timeline'
 import { EditHistory } from './EditHistory'
 import { EventBody } from './EventBody'
+import {
+  customReactionMxc,
+  ReactionContent,
+  reactionLabel,
+} from './ReactionContent'
 import { EventTime, FailedSend } from './EventStatus'
 import { UserAvatar } from './UserAvatar'
 import {
@@ -65,7 +70,12 @@ const REACTION_TOOLTIP_NAME_LIMIT = 10
 const REACTION_TOUCH_HOLD_MS = 450
 const MESSAGE_DOUBLE_TAP_MS = 300
 
-type ReactionTally = NonNullable<EventDto['reactions']>[string]
+// Compatibility with the additive server shortcode field: this branch keeps
+// the older generated schema so it can land without the server PR. Validate
+// the optional value at the rendering boundary; missing fields keep working.
+type ReactionTally = NonNullable<EventDto['reactions']>[string] & {
+  shortcode?: unknown
+}
 
 type EmojiPickerClickDetail = {
   unicode?: string
@@ -318,6 +328,16 @@ export function MessageEventRow({
   onMutation?: () => void
 }) {
   const [historyOpen, setHistoryOpen] = useState(false)
+  // Sender tooltips share one position above the message's reaction row.
+  // A focused chip must yield when the pointer enters another chip.
+  const [reactionTooltipKey, setReactionTooltipKey] = useState<string | null>(
+    null,
+  )
+  const changeReactionTooltip = useCallback((key: string, open: boolean) => {
+    setReactionTooltipKey((current) =>
+      open ? key : current === key ? null : current,
+    )
+  }, [])
   const [confirmingRedact, setConfirmingRedact] = useState(false)
   const [inspectOpen, setInspectOpen] = useState(false)
   const desktopClickTimer = useRef<number | null>(null)
@@ -634,7 +654,7 @@ export function MessageEventRow({
         </div>
         {reactionBurst !== null && (
           <span class="message-reaction-burst" aria-hidden="true">
-            {reactionBurst}
+            <ReactionContent accountId={accountId} reaction={reactionBurst} />
           </span>
         )}
         {inspectOpen && <EventInspector event={event} />}
@@ -655,10 +675,13 @@ export function MessageEventRow({
                   : null
               return (
                 <ReactionChip
+                  accountId={accountId}
                   key={emoji}
                   emoji={emoji}
                   tally={shownTally}
                   tooltip={reactionTooltip(emoji, shownTally, members)}
+                  tooltipOpen={reactionTooltipKey === emoji}
+                  onTooltipChange={changeReactionTooltip}
                   pending={pending}
                   onToggle={() =>
                     void timeline.toggleReaction(event, emoji).then((ok) => {
@@ -670,6 +693,7 @@ export function MessageEventRow({
             })}
             {pendingNewReaction && gestureReaction !== null && (
               <ReactionChip
+                accountId={accountId}
                 key={`pending-${gestureReaction.emoji}`}
                 emoji={gestureReaction.emoji}
                 tally={{
@@ -678,7 +702,9 @@ export function MessageEventRow({
                   senders: ownUserId === null ? [] : [ownUserId],
                   my_event_ids: [],
                 }}
-                tooltip={`Adding ${gestureReaction.emoji} reaction`}
+                tooltip={`Adding ${reactionLabel(gestureReaction.emoji)} reaction`}
+                tooltipOpen={reactionTooltipKey === gestureReaction.emoji}
+                onTooltipChange={changeReactionTooltip}
                 pending="adding"
               />
             )}
@@ -1334,19 +1360,24 @@ export function canonicalReactionKey(key: string): string {
 }
 
 function ReactionChip({
+  accountId,
   emoji,
   tally,
   tooltip,
+  tooltipOpen,
+  onTooltipChange,
   pending = null,
   onToggle,
 }: {
+  accountId: string
   emoji: string
   tally: ReactionTally
   tooltip: string
+  tooltipOpen: boolean
+  onTooltipChange: (key: string, open: boolean) => void
   pending?: 'adding' | 'removing' | null
   onToggle?: () => void
 }) {
-  const [tooltipOpen, setTooltipOpen] = useState(false)
   const root = useRef<HTMLSpanElement>(null)
   const longPressTimer = useRef<number | null>(null)
   const suppressNextClick = useRef(false)
@@ -1370,11 +1401,11 @@ function ReactionChip({
       ) {
         return
       }
-      setTooltipOpen(false)
+      onTooltipChange(emoji, false)
     }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setTooltipOpen(false)
+        onTooltipChange(emoji, false)
       }
     }
     document.addEventListener('mousedown', onDismiss)
@@ -1382,12 +1413,14 @@ function ReactionChip({
     document.addEventListener('keydown', onKeyDown)
     document.addEventListener('scroll', onDismiss, true)
     return () => {
+      // Removing a reaction also relinquishes its tooltip selection.
+      onTooltipChange(emoji, false)
       document.removeEventListener('mousedown', onDismiss)
       document.removeEventListener('touchstart', onDismiss)
       document.removeEventListener('keydown', onKeyDown)
       document.removeEventListener('scroll', onDismiss, true)
     }
-  }, [tooltipOpen])
+  }, [tooltipOpen, onTooltipChange, emoji])
 
   useEffect(
     () => () => {
@@ -1402,17 +1435,25 @@ function ReactionChip({
     <span
       ref={root}
       class="reaction-chip-wrap"
-      onMouseEnter={() => setTooltipOpen(true)}
-      onMouseLeave={() => setTooltipOpen(false)}
+      onMouseEnter={() => onTooltipChange(emoji, true)}
+      onMouseLeave={() => onTooltipChange(emoji, false)}
     >
       <button
         type="button"
         class={`reaction-chip${tally.me ? ' mine' : ''}${pending === null ? '' : ` gesture-reaction-pending gesture-reaction-${pending}`}`}
+        aria-label={
+          customReactionMxc(emoji) === null
+            ? undefined
+            : reactionDescription(
+                reactionLabel(emoji, tally.shortcode),
+                `${tally.count}${tally.me ? ', reacted' : ''}`,
+              )
+        }
         aria-busy={pending === null ? undefined : 'true'}
         aria-describedby={tooltipOpen ? tooltipId : undefined}
         disabled={pending !== null}
-        onFocus={() => setTooltipOpen(true)}
-        onBlur={() => setTooltipOpen(false)}
+        onFocus={() => onTooltipChange(emoji, true)}
+        onBlur={() => onTooltipChange(emoji, false)}
         onTouchStart={() => {
           clearLongPress()
           // Each touch re-arms from scratch: a long press that never produced a
@@ -1421,7 +1462,7 @@ function ReactionChip({
           suppressNextClick.current = false
           longPressTimer.current = window.setTimeout(() => {
             suppressNextClick.current = true
-            setTooltipOpen(true)
+            onTooltipChange(emoji, true)
           }, REACTION_TOUCH_HOLD_MS)
         }}
         onTouchMove={clearLongPress}
@@ -1436,7 +1477,12 @@ function ReactionChip({
           onToggle?.()
         }}
       >
-        {emoji} {tally.count}
+        <ReactionContent
+          accountId={accountId}
+          reaction={emoji}
+          shortcode={tally.shortcode}
+        />{' '}
+        {tally.count}
       </button>
       {tooltipOpen && (
         <span id={tooltipId} class="reaction-senders-tooltip" role="tooltip">
@@ -1447,20 +1493,25 @@ function ReactionChip({
   )
 }
 
+function reactionDescription(label: string, detail: string): string {
+  return `${label}${label.endsWith(':') ? '' : ':'} ${detail}`
+}
+
 function reactionTooltip(
   emoji: string,
   tally: ReactionTally,
   members: MembersStore,
 ): string {
   const names = tally.senders.map((sender) => members.displayName(sender))
+  const label = reactionLabel(emoji, tally.shortcode)
   if (names.length === 0) {
-    return emoji
+    return label
   }
   const shown = names.slice(0, REACTION_TOOLTIP_NAME_LIMIT)
   const remaining = names.length - shown.length
   return remaining === 0
-    ? `${emoji}: ${shown.join(', ')}`
-    : `${emoji}: ${shown.join(', ')}, and ${remaining} more`
+    ? reactionDescription(label, shown.join(', '))
+    : reactionDescription(label, `${shown.join(', ')}, and ${remaining} more`)
 }
 
 /** The quoted context above a rich reply (ADR 0033 display). */

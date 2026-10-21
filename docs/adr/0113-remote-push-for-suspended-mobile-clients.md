@@ -151,25 +151,24 @@ In the cases below, `after` rose when either count is greater than its `before`.
 `after` fell when neither rose and at least one count is lower.
 `after` equals `before` when both counts are unchanged.
 
-On startup the router reads `room_unread_counts`.
-A room with no row has no seed.
-The first observation of a room after process start is not a rise, whether or not a row was there.
-It stores that observation's `after` as the seed.
+The router does not preload `room_unread_counts`.
+The first observation of a room after process start that carries `after` stores that pair and is not a rise.
 A missing row is not treated as zero, and a row that went stale while the process was down is not compared as a rise.
-A notifying message in that first observation takes the equals path: it fills the slot and records the seeded pair.
-It does not send.
+A notifying message seen before that seed fills the slot and stays there.
+The seed does not send, and it does not drop that message.
 A later observation uses the cases below.
 The slot does not survive the restart.
 
-For one sliding-sync response, #604 reads `room_unread_counts` before that response is handed to the SDK.
-That read is `before`.
-A missing row uses the rule above, not zero.
-After the SDK applies the response, #604 recomputes that room's counts and upserts `room_unread_counts` on the same task, then uses the value it just wrote as `after`.
-It does not wait for the unread task, and it does not read the row back.
-A resweep that writes the row between those two steps is not `after`.
-`after` is only the value #604 just upserted for this response.
-The router stores that pair.
-The unread task persisting the same numbers later is not a second observation.
+`before` for every observation is the pair the router last stored for that account and room.
+#604 does not read `room_unread_counts` from inside the SDK, and it does not add a hook to `process_sliding_sync`.
+The unread task remains the only writer of that table, and the only publisher of a count.
+It emits an observation when the pair it persists changes.
+That observation carries no message.
+Its `after` is the pair just written, including the unmatched-receipt holdback.
+A held increase is not published, so it cannot look like a fall.
+A room-update observation carries the eligible messages and no count.
+On a seeded room a missing count is the equals path.
+The router stores `after` only after it decides.
 
 A resweep, or a room-info update that is not part of a response the router is applying, is its own observation.
 Its `before` is the pair the router last stored.
@@ -485,6 +484,7 @@ They do not include the token, the alert body, the data payload, or the provider
 These two routes do not log their request bodies.
 A provider failure records the HTTP status and, when the body parses as one, APNs `reason` or FCM `error.status`.
 It does not record the raw response body.
+A successful send records the provider, registration id, account id, room id, and HTTP status at debug.
 
 An APNs `410` with reason `Unregistered` deletes that registration only when the response `timestamp` is strictly later than the row's `updated_at`.
 That timestamp is milliseconds since the epoch, the last time APNs confirmed the token was no longer valid for the topic, and the body includes it only on a 410.
@@ -592,9 +592,8 @@ A service worker is part of that later cut and is not added now.
   OpenAPI stays compatible: both routes and the status field are new.
 - #605 is `clients/web/`, including `src-tauri/`.
   It does not start until #604 has landed.
-- `AGENTS.md` and the "What not to build" line in `docs/mvp/implementation.md` still say not to build a push router.
-  They describe the code, which still has none.
-  #604 corrects them in the change that adds the router, as ADR 0109 did for the management API.
+- `AGENTS.md` and the "What not to build" line in `docs/mvp/implementation.md` name the APNs and FCM router and still exclude Web Push, a Windows push service, and a wake for a quit Mac app.
+  #604 is the change that corrected them, as ADR 0109 did for the management API.
 - The threat model in `docs/mvp/tech-spec.md` is updated in this change, because the privacy choice is made here and the spec asked for that update in the push design.
 - A self-hoster who configures neither provider keeps today's behavior.
   Clients may say that remote push is not configured, from `GET /v1/status`.
