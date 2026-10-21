@@ -2057,6 +2057,15 @@ impl BackfillStatusDto {
 /// event at the oldest 1000 distinct `(sender, key)` pairs).
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReactionDto {
+    /// Optional custom-image name from MSC4027 `shortcode` or
+    /// `com.beeper.reaction.shortcode` in the original reaction content.
+    /// At most 100 UTF-8 bytes before trimming, with no C0/C1 controls.
+    /// ECMAScript-compatible whitespace is trimmed; whitespace-only names
+    /// are omitted. Validation does not depend on the database locale.
+    /// Among retained deduplicated reactions, the oldest valid label by
+    /// `(origin_ts, event_id)` wins; absent when no valid label is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcode: Option<String>,
     /// Distinct senders who reacted with this key (a `(sender, key)` duplicate
     /// counts once).
     pub count: i64,
@@ -2076,6 +2085,7 @@ pub struct ReactionDto {
 impl From<ReactionTally> for ReactionDto {
     fn from(t: ReactionTally) -> Self {
         ReactionDto {
+            shortcode: t.shortcode,
             count: t.count,
             me: t.me,
             senders: t.senders,

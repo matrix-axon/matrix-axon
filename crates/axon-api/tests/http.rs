@@ -5397,3 +5397,312 @@ async fn status_degrades_when_progress_pool_is_unavailable() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["data"]["backfill"]["progress_available"], true);
 }
+
+/// The optional label survives both aggregate projections without changing the
+/// reaction key, counts, sender deduplication, redaction, or account/room scope.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn custom_reaction_shortcodes_api() {
+    let store = store().await;
+    let account_id = store
+        .upsert_account(
+            &format!("@shortcodes-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let room_id = format!("!shortcodes-{}:localhost", Uuid::new_v4());
+    let msg = insert_message(&store, account_id, &room_id, 1000, "labels").await;
+    let cases = vec![
+        (
+            "mxc://hs/stable",
+            json!({"shortcode": ":stable:"}),
+            Some(":stable:".to_owned()),
+        ),
+        (
+            "mxc://hs/unstable",
+            json!({"com.beeper.reaction.shortcode": ":beeper:"}),
+            Some(":beeper:".to_owned()),
+        ),
+        (
+            "mxc://hs/both",
+            json!({"shortcode": ":stable:", "com.beeper.reaction.shortcode": ":other:"}),
+            Some(":stable:".to_owned()),
+        ),
+        (
+            "mxc://hs/fallback",
+            json!({"shortcode": 12, "com.beeper.reaction.shortcode": ":valid:"}),
+            Some(":valid:".to_owned()),
+        ),
+        ("mxc://hs/missing", json!({}), None),
+        ("mxc://hs/null", json!({"shortcode": null}), None),
+        (
+            "mxc://hs/object",
+            json!({"shortcode": {"name": "bad"}}),
+            None,
+        ),
+        ("mxc://hs/empty", json!({"shortcode": ""}), None),
+        ("mxc://hs/blank", json!({"shortcode": "  "}), None),
+        ("mxc://hs/control", json!({"shortcode": "bad\nname"}), None),
+        (
+            "mxc://hs/c1-control",
+            json!({"shortcode": "bad\u{0085}name"}),
+            None,
+        ),
+        (
+            "mxc://hs/c1-end",
+            json!({"shortcode": "bad\u{009f}name"}),
+            None,
+        ),
+        (
+            "mxc://hs/unicode-blank",
+            json!({"shortcode": "\u{00a0}\u{2003}\u{feff}"}),
+            None,
+        ),
+        (
+            "mxc://hs/unicode-trim",
+            json!({"shortcode": "\u{00a0}:trimmed:\u{3000}"}),
+            Some(":trimmed:".to_owned()),
+        ),
+        (
+            "mxc://hs/c1-fallback",
+            json!({"shortcode": "bad\u{0085}name", "com.beeper.reaction.shortcode": ":safe:"}),
+            Some(":safe:".to_owned()),
+        ),
+        (
+            "mxc://hs/oversized",
+            json!({"shortcode": "x".repeat(101)}),
+            None,
+        ),
+        (
+            "mxc://hs/multibyte",
+            json!({"shortcode": "é".repeat(51)}),
+            None,
+        ),
+        (
+            "mxc://hs/boundary",
+            json!({"shortcode": "é".repeat(50)}),
+            Some("é".repeat(50)),
+        ),
+        ("👍", json!({"shortcode": ":pretend:"}), None),
+        (
+            "mxc://hs/nested/path",
+            json!({"shortcode": ":pretend:"}),
+            None,
+        ),
+    ];
+    for (key, content, _) in &cases {
+        insert_relation(
+            &store,
+            account_id,
+            &room_id,
+            "@alice:localhost",
+            2000,
+            "m.reaction",
+            content.clone(),
+            json!({"rel_type": "m.annotation", "event_id": msg, "key": key}),
+        )
+        .await;
+    }
+    let conflict_key = "mxc://hs/conflict";
+    let first = insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        "@alice:localhost",
+        2001,
+        "m.reaction",
+        json!({"com.beeper.reaction.shortcode": ":alice:"}),
+        json!({"rel_type": "m.annotation", "event_id": msg, "key": conflict_key}),
+    )
+    .await;
+    let second = insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        "@bob:localhost",
+        2001,
+        "m.reaction",
+        json!({"shortcode": ":bob:"}),
+        json!({"rel_type": "m.annotation", "event_id": msg, "key": conflict_key}),
+    )
+    .await;
+    // Other rooms and other accounts must never contribute a name or a sender.
+    let foreign = store
+        .upsert_account(
+            &format!("@foreign-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    for (account, room) in [
+        (foreign, room_id.clone()),
+        (account_id, format!("!other-{}:localhost", Uuid::new_v4())),
+    ] {
+        insert_relation(
+            &store,
+            account,
+            &room,
+            "@mallory:localhost",
+            1,
+            "m.reaction",
+            json!({"shortcode": ":wrong:"}),
+            json!({"rel_type": "m.annotation", "event_id": msg, "key": conflict_key}),
+        )
+        .await;
+    }
+    // The existing smallest-event-id representative wins for duplicate
+    // (sender, key) pairs, even if another duplicate is older and has a label.
+    let duplicate_key = "mxc://hs/duplicate";
+    for (id, label, ts) in [
+        ("$shortcode-a", None, 2500),
+        ("$shortcode-z", Some(":duplicate:"), 1900),
+    ] {
+        let relation = json!({"rel_type": "m.annotation", "event_id": msg, "key": duplicate_key});
+        let content = json!({"m.relates_to": relation, "shortcode": label});
+        store
+            .upsert_event(&NewEvent {
+                account_id,
+                event_id: id,
+                room_id: &room_id,
+                sender: "@dupe:localhost",
+                origin_ts: ts,
+                event_type: "m.reaction",
+                content: Some(content.clone()),
+                raw_event: json!({"type": "m.reaction", "content": content}),
+                megolm_session_id: None,
+                redacts: None,
+                relates_to: Some(relation),
+                decrypted_body_text: None,
+            })
+            .await
+            .unwrap();
+    }
+    let app = read_app(store.clone());
+    let reactions_url = format!("/v1/accounts/{account_id}/events/{msg}/reactions");
+    let (status, response) = get(&app, &reactions_url).await;
+    assert_eq!(status, StatusCode::OK);
+    let tally = &response["data"];
+    for (key, _, expected) in &cases {
+        assert_eq!(tally[key]["count"], 1);
+        assert_eq!(tally[key]["senders"], json!(["@alice:localhost"]));
+        assert_eq!(
+            tally[key]["shortcode"].as_str(),
+            expected.as_deref(),
+            "{key}"
+        );
+        if expected.is_none() {
+            assert!(
+                tally[key].get("shortcode").is_none(),
+                "absent, not required or null"
+            );
+        }
+    }
+    assert_eq!(tally[duplicate_key]["count"], 1);
+    assert!(tally[duplicate_key].get("shortcode").is_none());
+    let (winner, expected, remaining) = if first < second {
+        (&first, ":alice:", ":bob:")
+    } else {
+        (&second, ":bob:", ":alice:")
+    };
+    assert_eq!(tally[conflict_key]["shortcode"], expected);
+    assert_eq!(tally[conflict_key]["count"], 2);
+    // Single-event and room timeline reads use the shared timeline projection.
+    for url in [
+        format!("/v1/accounts/{account_id}/rooms/{room_id}/timeline"),
+        format!("/v1/accounts/{account_id}/events/{msg}"),
+    ] {
+        let (status, value) = get(&app, &url).await;
+        assert_eq!(status, StatusCode::OK);
+        let event = if url.ends_with("/timeline") {
+            &value["data"]["events"][0]
+        } else {
+            &value["data"]
+        };
+        assert_eq!(&event["reactions"], tally);
+    }
+    insert_redaction(&store, account_id, &room_id, 2999, "$shortcode-a").await;
+    let (_, duplicate_after) = get(&app, &reactions_url).await;
+    assert_eq!(
+        duplicate_after["data"][duplicate_key]["shortcode"],
+        ":duplicate:"
+    );
+    assert_eq!(duplicate_after["data"][duplicate_key]["count"], 1);
+    insert_redaction(&store, account_id, &room_id, 3000, winner).await;
+    let (_, after) = get(&app, &reactions_url).await;
+    assert_eq!(after["data"][conflict_key]["shortcode"], remaining);
+    assert_eq!(after["data"][conflict_key]["count"], 1);
+    let (_, after_event) = get(&app, &format!("/v1/accounts/{account_id}/events/{msg}")).await;
+    assert_eq!(after_event["data"]["reactions"], after["data"]);
+    // Thread messages use the same projection, so labels must survive there too.
+    let reply = insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        "@alice:localhost",
+        4000,
+        "m.room.message",
+        json!({"msgtype": "m.text", "body": "thread labels"}),
+        json!({"rel_type": "m.thread", "event_id": msg}),
+    )
+    .await;
+    insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        "@bob:localhost",
+        4001,
+        "m.reaction",
+        json!({"shortcode": ":thread:"}),
+        json!({"rel_type": "m.annotation", "event_id": reply, "key": "mxc://hs/thread"}),
+    )
+    .await;
+    let (_, thread) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/threads/{msg}/timeline"),
+    )
+    .await;
+    assert_eq!(
+        thread["data"]["events"][0]["reactions"]["mxc://hs/thread"]["shortcode"],
+        ":thread:"
+    );
+    // The label must not escape the existing oldest-1000-pair aggregate cap.
+    let capped = insert_message(&store, account_id, &room_id, 5000, "capped labels").await;
+    for i in 0..1001 {
+        insert_relation(
+            &store,
+            account_id,
+            &room_id,
+            &format!("@cap-{i}:localhost"),
+            5001 + i,
+            "m.reaction",
+            if i == 1000 {
+                json!({"shortcode": ":outside-cap:"})
+            } else {
+                json!({})
+            },
+            json!({"rel_type": "m.annotation", "event_id": capped, "key": "mxc://hs/capped"}),
+        )
+        .await;
+    }
+    let (_, capped_tally) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/events/{capped}/reactions"),
+    )
+    .await;
+    assert_eq!(capped_tally["data"]["mxc://hs/capped"]["count"], 1000);
+    assert!(capped_tally["data"]["mxc://hs/capped"]
+        .get("shortcode")
+        .is_none());
+    let (_, capped_event) = get(&app, &format!("/v1/accounts/{account_id}/events/{capped}")).await;
+    assert_eq!(capped_event["data"]["reactions"], capped_tally["data"]);
+    for account in [account_id, foreign] {
+        sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+            .bind(account)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+}

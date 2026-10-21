@@ -74,6 +74,7 @@ pub async fn get_verification_bundle(
 /// the fix for the dropped-reaction bug (issue #22). The body is a JSON object
 /// keyed by emoji:
 /// `{ "👍": { "count": 2, "me": true, "senders": [...], "my_event_ids": [...] } }`.
+/// An optional `shortcode` names custom MXC reactions when supplied by the sender.
 /// `my_event_ids` carries the account user's own reaction event ids for the key —
 /// the ids a client redacts to withdraw the reaction, since the collapsed
 /// timeline no longer carries the raw `m.reaction` rows. An event with no
