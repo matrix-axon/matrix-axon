@@ -1351,3 +1351,65 @@ describe('Composer link paste', () => {
     expect(textarea.value).toBe('This is a link.')
   })
 })
+
+describe('Composer formatting shortcuts (ADR 0123)', () => {
+  function select(textarea: HTMLTextAreaElement, start: number, end: number) {
+    textarea.focus()
+    textarea.setSelectionRange(start, end)
+  }
+
+  it('bolds the selection on Ctrl-B and keeps it selected', () => {
+    const { textarea, onDraftChange } = renderComposer()
+    fireEvent.input(textarea, { target: { value: 'say hi now' } })
+    select(textarea, 4, 6)
+    const down = new KeyboardEvent('keydown', {
+      key: 'b',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    fireEvent(textarea, down)
+    expect(down.defaultPrevented).toBe(true)
+    expect(textarea.value).toBe('say **hi** now')
+    expect(onDraftChange).toHaveBeenLastCalledWith('say **hi** now')
+    expect(
+      textarea.value.slice(textarea.selectionStart, textarea.selectionEnd),
+    ).toBe('hi')
+  })
+
+  it('toggles back off on a second press', () => {
+    const { textarea } = renderComposer()
+    fireEvent.input(textarea, { target: { value: 'hi' } })
+    select(textarea, 0, 2)
+    fireEvent.keyDown(textarea, { key: 'i', ctrlKey: true })
+    expect(textarea.value).toBe('*hi*')
+    fireEvent.keyDown(textarea, { key: 'i', ctrlKey: true })
+    expect(textarea.value).toBe('hi')
+  })
+
+  it('makes a link on Ctrl-Shift-K', () => {
+    const { textarea } = renderComposer()
+    fireEvent.input(textarea, { target: { value: 'docs' } })
+    select(textarea, 0, 4)
+    fireEvent.keyDown(textarea, { key: 'K', ctrlKey: true, shiftKey: true })
+    expect(textarea.value).toBe('[docs](url)')
+    expect(
+      textarea.value.slice(textarea.selectionStart, textarea.selectionEnd),
+    ).toBe('url')
+  })
+
+  it('leaves unrelated chords alone', () => {
+    const { textarea } = renderComposer()
+    fireEvent.input(textarea, { target: { value: 'hi' } })
+    select(textarea, 0, 2)
+    const down = new KeyboardEvent('keydown', {
+      key: 'x',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    fireEvent(textarea, down)
+    expect(down.defaultPrevented).toBe(false)
+    expect(textarea.value).toBe('hi')
+  })
+})

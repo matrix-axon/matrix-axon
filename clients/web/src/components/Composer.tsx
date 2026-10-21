@@ -4,6 +4,11 @@ import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { needsCameraCaptureButtons } from '../platform'
 import { humanSize } from '../media/human-size'
+import {
+  applyFormatEdit,
+  formatEdit,
+  formatKindForEvent,
+} from '../composer-formatting'
 import { hasModifier, isApplePlatform } from '../shortcuts'
 import {
   SLASH_COMMAND,
@@ -970,6 +975,25 @@ export function Composer({
               })
             }}
             onKeyDown={(event) => {
+              // Markdown formatting chords (ADR 0123). Claimed here, before the
+              // app-wide handlers see the event, so `mod+b` is bold in the box
+              // and the sidebar toggle only where nothing is being typed.
+              const format = formatKindForEvent(event)
+              if (format !== null) {
+                event.preventDefault()
+                const el = event.currentTarget
+                applyFormatEdit(
+                  el,
+                  formatEdit(
+                    format,
+                    el.value,
+                    el.selectionStart,
+                    el.selectionEnd,
+                  ),
+                )
+                setCaret(el.selectionStart)
+                return
+              }
               const wholeMessageCaret =
                 autocomplete === null ? wholeMessageCaretTarget(event) : null
               if (wholeMessageCaret !== null) {
