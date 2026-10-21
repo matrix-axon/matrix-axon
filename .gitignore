@@ -84,6 +84,8 @@ clients/web/src-tauri/gen/
 # The Android copy is under android/.tauri, one directory deeper.
 clients/web/src-tauri/*/.tauri/
 clients/web/src-tauri/*/*/.tauri/
+# Gradle output written beside a mobile plugin when the Android app compiles it.
+clients/web/src-tauri/*/android/build/
 clients/web/src-tauri/*/ios/Package.resolved
 
 # Android signing material (ADR 0107): the upload keystore lives outside the

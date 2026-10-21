@@ -23,7 +23,8 @@ import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
 private const val CHANNEL_ID = "messages-v2"
-private const val COLLAPSE_ID = Regex("^[0-9a-f]{32}$")
+// A Regex is not a Kotlin const. The Android compiler rejects `const val` here.
+private val COLLAPSE_ID = Regex("^[0-9a-f]{32}$")
 
 @InvokeArg
 class PostLocalArgs {
