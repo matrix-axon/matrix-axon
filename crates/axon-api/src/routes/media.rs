@@ -343,9 +343,9 @@ fn resolve_thumbnail_spec(
 /// Recognize a well-known image format from its leading magic bytes. Used to
 /// correct `Content-Type` for homeserver-generated thumbnails and custom
 /// reactions without MIME metadata. Thumbnail bytes may have been re-encoded
-/// (e.g. PNG to JPEG); reaction bytes may be arbitrary sender-controlled media. Only recognizes formats already in
-/// [`is_inline_safe`]'s allowlist, so a positive match is always safe to
-/// serve with its own declared type.
+/// (e.g. PNG to JPEG); reaction bytes may be arbitrary sender-controlled media.
+/// Only recognizes formats already in [`is_inline_safe`]'s allowlist, so a
+/// positive match is always safe to serve with its own declared type.
 fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
