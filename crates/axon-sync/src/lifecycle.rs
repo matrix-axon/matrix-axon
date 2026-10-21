@@ -440,6 +440,8 @@ pub struct AccountLifecycle {
     /// grant before waiting for its identity lock, so secret release cannot
     /// outlive logout or deletion.
     matrix_oauth_grants: MatrixOAuthGrantRegistry,
+    /// Process-wide push router. Account deletion drops that account's slots.
+    push: crate::push::PushIngress,
 }
 
 /// Outcome of [`AccountLifecycle::resolve_login_target`], the identity
@@ -475,6 +477,7 @@ impl AccountLifecycle {
         backfill_health: BackfillHealth,
         sync_health: SyncHealth,
         matrix_oauth_grants: MatrixOAuthGrantRegistry,
+        push: crate::push::PushIngress,
     ) -> Self {
         Self {
             store,
@@ -493,6 +496,7 @@ impl AccountLifecycle {
             backfill_health,
             sync_health,
             matrix_oauth_grants,
+            push,
         }
     }
 
@@ -1100,6 +1104,7 @@ impl AccountLifecycle {
             self.backfill_health.clone(),
             self.sync_health.clone(),
             self.matrix_oauth_grants.clone(),
+            self.push.clone(),
         );
         account_id
     }
@@ -1737,6 +1742,9 @@ impl AccountLifecycle {
         // the boot reconcile) finishes once the task finally dies. This is why the
         // store-dir removal below sits *after* a successful sever.
         self.sever_session(account_id).await?;
+        // The supervised task is gone. Drop queued wakes for this account.
+        // The device registration stays: it still covers every account that remains.
+        self.push.account_removed(account_id);
 
         // External resources before the row (the row is the reconcile's only handle
         // to them): the SDK store dir + its staging backup. Idempotent on a resume.
@@ -1924,6 +1932,7 @@ pub(crate) mod tests {
             crate::backfill::BackfillHealth::new(None),
             crate::sync_health::SyncHealth::new(),
             crate::matrix_oauth_grant::MatrixOAuthGrantRegistry::new(),
+            crate::push::PushIngress::off(),
         )
     }
 

@@ -5,9 +5,12 @@
 //! token. A registration is owned by the credential session, so a refreshed
 //! access token can still delete the row it registered.
 
+use std::sync::Arc;
+
 use axon_store::{NewPushRegistration, PushRegistrationOutcome, Store};
 use axum::extract::State;
 use axum::Extension;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::auth::AuthedToken;
@@ -61,6 +64,7 @@ pub(crate) const MAX_BODY_BYTES: usize = 16 * 1024;
 )]
 pub async fn put_registration(
     State(store): State<Store>,
+    State(changed): State<Arc<Notify>>,
     Extension(caller): Extension<AuthedToken>,
     Json(body): Json<PutPushRegistrationRequest>,
 ) -> Result<ApiResponse<PushRegistrationDto>, ApiError> {
@@ -144,6 +148,7 @@ pub async fn put_registration(
         provider = %registration.provider,
         "push registration upserted"
     );
+    changed.notify_one();
     Ok(ApiResponse::new(PushRegistrationDto {
         id: registration.id,
         provider: registration.provider,
@@ -169,6 +174,7 @@ pub async fn put_registration(
 )]
 pub async fn delete_registration(
     State(store): State<Store>,
+    State(changed): State<Arc<Notify>>,
     Extension(caller): Extension<AuthedToken>,
     Path(id): Path<Uuid>,
 ) -> Result<axum::http::StatusCode, ApiError> {
@@ -177,6 +183,7 @@ pub async fn delete_registration(
         .await?;
     if removed {
         tracing::info!(registration_id = %id, "push registration deleted");
+        changed.notify_one();
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

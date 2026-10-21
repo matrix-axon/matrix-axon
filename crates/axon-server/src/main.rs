@@ -249,11 +249,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Start the sync engine: runs one supervised Simplified Sliding Sync task
     // per active account (accounts come into existence only via the runtime
     // login/import API — there is no boot-time provisioning, ADR 0024).
+    let push_changed = std::sync::Arc::new(tokio::sync::Notify::new());
     let sync_engine = SyncEngine::start(
         store.clone(),
         config.sync.clone(),
         index_handle,
         media_cache.handle(),
+        push.clone(),
+        push_changed.clone(),
     )
     .await
     .context("starting sync engine")?;
@@ -383,7 +386,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_account_actions(account_actions)
     .with_management(config.server.management_api)
     .with_web_client(config.server.web_client)
-    .with_push(push);
+    .with_push(push)
+    .with_push_changed(push_changed);
     if !config.server.management_api {
         tracing::info!(
             "management API disabled (server.management_api = false); \
