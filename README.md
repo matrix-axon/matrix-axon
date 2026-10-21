@@ -154,6 +154,10 @@ One Rust binary, one Postgres database, media cached to local disk.
 The authenticated media download and thumbnail endpoints also resolve custom reaction images whose keys are `mxc://` URLs (MSC4027), without requiring an image pack definition.
 Known left or banned rooms cannot authorize reaction image downloads.
 Reaction media references must be structurally valid MXC URIs of at most 2,048 bytes; malformed and oversized keys do not authorize a fetch.
+Reaction tallies also expose an optional `shortcode` from the original reaction content (`shortcode`, then `com.beeper.reaction.shortcode`).
+Only custom MXC reactions with nonblank names of at most 100 UTF-8 bytes and no control characters qualify.
+The oldest valid name by `(origin_ts, event_id)` among the existing capped, deduplicated reaction representatives wins; redaction removes that representative from consideration.
+Names are omitted when unavailable, so clients should retain a generic fallback and render supplied names as untrusted text.
 Safe PNG, JPEG, GIF, and WebP signatures determine reaction image response types; unrecognized objects remain downloads with `application/octet-stream` and `nosniff`.
 Media is fetched on client request and uses the existing per-object limit and globally bounded LRU cache.
 The reaction index is built transactionally during startup, before this instance starts sync or serves requests; plan a maintenance restart for a large event store.

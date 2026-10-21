@@ -1398,7 +1398,7 @@
         "tags": [
           "events"
         ],
-        "summary": "Per-emoji reaction tally for an event (M8), resolved over the event's reactions\non disk regardless of where the original message falls in the timeline window —\nthe fix for the dropped-reaction bug (issue #22). The body is a JSON object\nkeyed by emoji:\n`{ \"👍\": { \"count\": 2, \"me\": true, \"senders\": [...], \"my_event_ids\": [...] } }`.\n`my_event_ids` carries the account user's own reaction event ids for the key —\nthe ids a client redacts to withdraw the reaction, since the collapsed\ntimeline no longer carries the raw `m.reaction` rows. An event with no\nreactions (or an unknown event) yields an empty object (`{ \"data\": {} }`), not\na 404 — an absent event and one with no reactions are indistinguishable here\nand empty is the natural answer. Against a pathological event, the store\nhard-caps the tally at the oldest 1000 distinct `(sender, key)` pairs\n(deterministically by `(origin_ts, event_id)`), so an event beyond that bound\nreports those rather than literally every reaction.",
+        "summary": "Per-emoji reaction tally for an event (M8), resolved over the event's reactions\non disk regardless of where the original message falls in the timeline window —\nthe fix for the dropped-reaction bug (issue #22). The body is a JSON object\nkeyed by emoji:\n`{ \"👍\": { \"count\": 2, \"me\": true, \"senders\": [...], \"my_event_ids\": [...] } }`.\nAn optional `shortcode` names custom MXC reactions when supplied by the sender.\n`my_event_ids` carries the account user's own reaction event ids for the key —\nthe ids a client redacts to withdraw the reaction, since the collapsed\ntimeline no longer carries the raw `m.reaction` rows. An event with no\nreactions (or an unknown event) yields an empty object (`{ \"data\": {} }`), not\na 404 — an absent event and one with no reactions are indistinguishable here\nand empty is the natural answer. Against a pathological event, the store\nhard-caps the tally at the oldest 1000 distinct `(sender, key)` pairs\n(deterministically by `(origin_ts, event_id)`), so an event beyond that bound\nreports those rather than literally every reaction.",
         "operationId": "get_reactions",
         "parameters": [
           {
@@ -9374,6 +9374,13 @@
                     "type": "string"
                   },
                   "description": "The distinct Matrix user ids that reacted with this key."
+                },
+                "shortcode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Optional custom-image name from MSC4027 `shortcode` or\n`com.beeper.reaction.shortcode` in the original reaction content.\nNonblank, at most 100 UTF-8 bytes, with no control characters.\nAmong retained deduplicated reactions, the oldest valid label by\n`(origin_ts, event_id)` wins; absent when no valid label is available."
                 }
               }
             },
@@ -14355,6 +14362,13 @@
               "type": "string"
             },
             "description": "The distinct Matrix user ids that reacted with this key."
+          },
+          "shortcode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional custom-image name from MSC4027 `shortcode` or\n`com.beeper.reaction.shortcode` in the original reaction content.\nNonblank, at most 100 UTF-8 bytes, with no control characters.\nAmong retained deduplicated reactions, the oldest valid label by\n`(origin_ts, event_id)` wins; absent when no valid label is available."
           }
         }
       },
