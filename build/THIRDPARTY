@@ -2111,9 +2111,9 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 LICENSE: Community Data License Agreement Permissive 2.0 (SPDX ID: CDLA-Permissive-2.0)
 USED BY:
-  - webpki-root-certs 1.0.8
+  - webpki-root-certs 1.0.10
   - webpki-roots 0.26.11
-  - webpki-roots 1.0.8
+  - webpki-roots 1.0.10
 ================================================================================
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -2228,7 +2228,7 @@ THIS SOFTWARE.
 ================================================================================
 LICENSE: ISC License (SPDX ID: ISC)
 USED BY:
-  - rustls-webpki 0.103.15
+  - rustls-webpki 0.103.16
 ================================================================================
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
