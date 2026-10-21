@@ -165,8 +165,19 @@ class RemotePushPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun deliver(intent: Intent?) {
         val wake = wakeFrom(intent) ?: return
-        // Kept until pendingWake is read. A document reload asks again; the
-        // page ignores an event id it already opened in this webview session.
+        // The activity keeps its launch intent across a configuration change.
+        // Leaving the extras in place makes the next plugin load open the
+        // same room again. The in-memory wake stays until pendingWake is read,
+        // so a document reload in this process can still ask once.
+        val eventId = intent?.getStringExtra("event_id")?.trim().orEmpty()
+        clearWakeExtras(intent)
+        val current = activity.intent
+        if (current != null && current !== intent) {
+            val currentEvent = current.getStringExtra("event_id")?.trim().orEmpty()
+            if (currentEvent.isNotEmpty() && currentEvent == eventId) {
+                clearWakeExtras(current)
+            }
+        }
         pendingWake = wake
         trigger("wake", wake)
     }
@@ -232,26 +243,23 @@ class AxonFirebaseMessagingService : FirebaseMessagingService() {
         if (thread.isNotEmpty()) {
             launch.putExtra("thread_root_id", thread)
         }
+        // One tag for the request code and the notify call. A code taken from
+        // gcm.notification.tag alone collides when FCM sent only gcm.n.tag,
+        // and FLAG_UPDATE_CURRENT then hands a tap the other room's extras.
+        val tag = collapseTag(
+            room,
+            intent.getStringExtra("gcm.notification.tag")
+                ?: intent.getStringExtra("gcm.n.tag"),
+        )
         val pending = PendingIntent.getActivity(
             this,
-            collapseTag(room, intent.getStringExtra("gcm.notification.tag")).hashCode(),
+            tag.hashCode(),
             launch,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         // Do not call super. The SDK would draw a second alert whose extras
         // omit event_id, and the resume read would miss it.
-        postCollapsedNotification(
-            this,
-            title,
-            body,
-            collapseTag(
-                room,
-                intent.getStringExtra("gcm.notification.tag")
-                    ?: intent.getStringExtra("gcm.n.tag"),
-            ),
-            eventId,
-            pending,
-        )
+        postCollapsedNotification(this, title, body, tag, eventId, pending)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -331,6 +339,13 @@ private fun firstText(primary: String?, fallback: String?): String {
         return first
     }
     return fallback?.trim().orEmpty()
+}
+
+private fun clearWakeExtras(intent: Intent?) {
+    intent?.removeExtra("account_id")
+    intent?.removeExtra("room_id")
+    intent?.removeExtra("event_id")
+    intent?.removeExtra("thread_root_id")
 }
 
 private fun wakeFrom(intent: Intent?): JSObject? {

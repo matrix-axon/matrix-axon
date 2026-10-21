@@ -7,6 +7,10 @@ import WebKit
 
 private let tokenTimeoutSeconds: TimeInterval = 15
 private let launchPayloadKey = "axon.remote-push.launch"
+private let launchPayloadWrittenAtKey = "axon.remote-push.launch-at"
+/// A tap that launched the process is seconds old by the time the plugin
+/// loads. A later cold start must not open that room.
+private let launchPayloadMaxAge: TimeInterval = 60
 
 struct PostLocalArgs: Decodable {
   let title: String
@@ -58,9 +62,14 @@ class RemotePushPlugin: Plugin, UNUserNotificationCenterDelegate {
   @objc public func deviceToken(_ invoke: Invoke) {
     DispatchQueue.main.async {
       self.installCenterDelegate()
-      self.installTokenHandlers()
       if self.pendingToken != nil {
         invoke.reject("an APNs token request is already in progress")
+        return
+      }
+      // No delegate means the token callbacks cannot be installed. Waiting
+      // out the timeout would still never produce a token.
+      guard self.installTokenHandlers() else {
+        invoke.reject("APNs registration could not be installed")
         return
       }
       self.pendingToken = invoke
@@ -148,12 +157,12 @@ class RemotePushPlugin: Plugin, UNUserNotificationCenterDelegate {
     }
   }
 
-  private func installTokenHandlers() {
+  private func installTokenHandlers() -> Bool {
     if tokenHandlersInstalled {
-      return
+      return true
     }
     guard let delegate = UIApplication.shared.delegate else {
-      return
+      return false
     }
     let cls: AnyClass = type(of: delegate)
     let registerSel = #selector(
@@ -177,6 +186,7 @@ class RemotePushPlugin: Plugin, UNUserNotificationCenterDelegate {
       chainFail(cls, failSel)
     }
     tokenHandlersInstalled = true
+    return true
   }
 
   private func installCenterDelegate() {
@@ -247,16 +257,23 @@ class RemotePushPlugin: Plugin, UNUserNotificationCenterDelegate {
 
   private func emit(_ wake: WakePayload) {
     // Kept until `pendingWake` is read, including after a document reload.
-    // The page records the event id for this webview session and ignores a repeat.
+    // The page ignores that one replay, then forgets the id.
     pendingWake = wake
     try? trigger("wake", data: wake)
   }
 
   private func launchWake() -> WakePayload? {
-    guard let stored = UserDefaults.standard.dictionary(forKey: launchPayloadKey) else {
+    let defaults = UserDefaults.standard
+    guard let stored = defaults.dictionary(forKey: launchPayloadKey) else {
       return nil
     }
-    UserDefaults.standard.removeObject(forKey: launchPayloadKey)
+    let writtenAt = defaults.double(forKey: launchPayloadWrittenAtKey)
+    defaults.removeObject(forKey: launchPayloadKey)
+    defaults.removeObject(forKey: launchPayloadWrittenAtKey)
+    let age = Date().timeIntervalSince1970 - writtenAt
+    if writtenAt <= 0 || age > launchPayloadMaxAge {
+      return nil
+    }
     var hashed: [AnyHashable: Any] = [:]
     for (key, value) in stored {
       hashed[AnyHashable(key)] = value

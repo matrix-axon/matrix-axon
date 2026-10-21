@@ -8,16 +8,21 @@
 // UIApplicationMain, still inside launch, before either plugin is created.
 //
 // The dictionary is the wake payload (account id, room id, event id). It is
-// not a device token. It is removed when the plugin reads it.
+// not a device token. The plugin reads it on load and drops it. The stamp
+// beside it is when the tap launched the process, so a payload load() never
+// reads can expire instead of opening that room on a later cold start.
 
 static NSString *const axonLaunchKey = @"axon.remote-push.launch";
+static NSString *const axonLaunchWrittenAtKey = @"axon.remote-push.launch-at";
 static BOOL axonDidFinishSwizzled = NO;
 static BOOL (*axonOriginalDidFinish)(id, SEL, UIApplication *, NSDictionary *) = NULL;
 
 static BOOL axonDidFinishLaunching(id self, SEL cmd, UIApplication *application, NSDictionary *options) {
     id remote = options[UIApplicationLaunchOptionsRemoteNotificationKey];
     if ([remote isKindOfClass:[NSDictionary class]]) {
-        [[NSUserDefaults standardUserDefaults] setObject:remote forKey:axonLaunchKey];
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        [defaults setObject:remote forKey:axonLaunchKey];
+        [defaults setDouble:[NSDate date].timeIntervalSince1970 forKey:axonLaunchWrittenAtKey];
     }
     if (axonOriginalDidFinish != NULL) {
         return axonOriginalDidFinish(self, cmd, application, options);

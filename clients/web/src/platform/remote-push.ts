@@ -70,6 +70,61 @@ export function rememberSeenWake(
   }
 }
 
+export function clearSeenWakes(storage: Storage, seen: string[]): void {
+  seen.length = 0
+  try {
+    storage.removeItem(SEEN_WAKES_KEY)
+  } catch {
+    // The in-memory list is already empty. A later tap still navigates.
+  }
+}
+
+export interface SeenWakeGate {
+  seen: string[]
+  /**
+   * Set when a retained wake just opened. The next live delivery of this
+   * id is the native copy of that same wake, not a new tap.
+   */
+  suppressLive: string | null
+}
+
+/**
+ * Whether this delivery should navigate.
+ *
+ * A live delivery is a tap. It navigates, except for the one twin of a
+ * retained wake this document just opened. It records the id so the next
+ * document can ignore the copy the native side still holds across a reload.
+ *
+ * A retained delivery is the startup `pending_wake` read. It navigates only
+ * when this document has not already recorded the id. That read consumed
+ * the native slot, so the record is dropped and a later tap of the same
+ * event navigates.
+ */
+export function acceptWake(
+  storage: Storage,
+  gate: SeenWakeGate,
+  eventId: string,
+  source: 'live' | 'retained',
+): boolean {
+  if (source === 'live') {
+    if (gate.suppressLive === eventId) {
+      gate.suppressLive = null
+      return false
+    }
+    rememberSeenWake(storage, gate.seen, eventId)
+    return true
+  }
+  const replay = gate.seen.includes(eventId)
+  clearSeenWakes(storage, gate.seen)
+  gate.suppressLive = replay ? null : eventId
+  return !replay
+}
+
+/** The queued twin of a retained wake did not arrive. A later tap may open. */
+export function releaseRetainedTwin(gate: SeenWakeGate): void {
+  gate.suppressLive = null
+}
+
 function createRemotePush(provider: RemotePushProvider): RemotePush {
   return {
     provider,
@@ -105,24 +160,35 @@ function createRemotePush(provider: RemotePushProvider): RemotePush {
         return () => {}
       }
       const storage = wakeStorage()
-      const seen = loadSeenWakes(storage)
+      const gate: SeenWakeGate = {
+        seen: loadSeenWakes(storage),
+        suppressLive: null,
+      }
       let stopped = false
+      let sawLive = false
       let unregister: (() => void) | null = null
-      const take = (payload: unknown) => {
+      let releaseTimer: ReturnType<typeof setTimeout> | null = null
+      const take = (payload: unknown, source: 'live' | 'retained') => {
         if (stopped) {
           return
         }
         const click = notificationClickFromWake(payload)
         if (click?.eventId == null || click.eventId === '') {
+          // An empty retained read means the native slot was clear. Drop ids
+          // left by an earlier document. A live tap during this read has
+          // already filled the slot again, so those ids stay.
+          if (source === 'retained' && !sawLive) {
+            clearSeenWakes(storage, gate.seen)
+            gate.suppressLive = null
+          }
           return
         }
-        if (seen.includes(click.eventId)) {
+        if (source === 'live') {
+          sawLive = true
+        }
+        if (!acceptWake(storage, gate, click.eventId, source)) {
           return
         }
-        // Record the id before the handler. A server change reloads the
-        // document, and the native side still has this wake until
-        // `pending_wake` is read. The next document must not open it again.
-        rememberSeenWake(storage, seen, click.eventId)
         handler(click)
       }
       void (async () => {
@@ -130,7 +196,9 @@ function createRemotePush(provider: RemotePushProvider): RemotePush {
           const listener = await addPluginListener<unknown>(
             'remote-push',
             'wake',
-            take,
+            (payload) => {
+              take(payload, 'live')
+            },
           )
           unregister = () => {
             void listener.unregister()
@@ -139,13 +207,23 @@ function createRemotePush(provider: RemotePushProvider): RemotePush {
             unregister()
             return
           }
-          take(await invoke('plugin:remote-push|pending_wake'))
+          take(await invoke('plugin:remote-push|pending_wake'), 'retained')
+          // A live twin of that retained wake may already be queued. Release
+          // the one-shot suppress on the next turn, after that twin.
+          releaseTimer = setTimeout(() => {
+            releaseTimer = null
+            releaseRetainedTwin(gate)
+          }, 0)
         } catch {
           // A missing command is a desktop binary. There is no token to log.
         }
       })()
       return () => {
         stopped = true
+        if (releaseTimer !== null) {
+          clearTimeout(releaseTimer)
+          releaseTimer = null
+        }
         unregister?.()
       }
     },
