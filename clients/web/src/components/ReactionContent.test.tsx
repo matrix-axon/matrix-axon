@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
+import { options } from 'preact'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { ServicesContext } from '../services'
@@ -13,13 +14,24 @@ import {
 const MXC = 'mxc://hs/reaction'
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+const previousFrameScheduler = options.requestAnimationFrame
+beforeAll(() => {
+  // Async media completions can schedule effects outside testing-library's
+  // act(). Drain them as microtasks, rather than leaving Preact's native frame
+  // timeout alive after Vitest disposes this file's jsdom globals.
+  options.requestAnimationFrame = queueMicrotask
+  server.listen({ onUnhandledRequest: 'error' })
+})
 afterEach(() => {
   cleanup()
   server.resetHandlers()
   vi.restoreAllMocks()
 })
-afterAll(() => server.close())
+afterAll(async () => {
+  await Promise.resolve()
+  options.requestAnimationFrame = previousFrameScheduler
+  server.close()
+})
 
 function setup(reaction = MXC) {
   const services = testServices({ token: 'test-token' })
