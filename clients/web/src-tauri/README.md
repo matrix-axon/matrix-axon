@@ -636,6 +636,60 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
   or not in it at all. The second and third mean the `.p12` secret lacks that
   identity, which is a different fix from naming another one.
 
+### When a capability change invalidates the iOS profiles
+
+Enabling a capability on the App ID (Push Notifications, Sign in with Apple)
+invalidates every provisioning profile made before it. The stored secrets are
+frozen copies, so the store build fails until they are replaced, although it
+worked the day before. Two profiles are involved, and both secrets must be
+replaced from **Xcode's own copies**, not from the portal:
+
+| Secret                    | Profile name Xcode gives it                        | Kind        |
+| ------------------------- | -------------------------------------------------- | ----------- |
+| `IOS_APPSTORE_PROFILE`    | `iOS Team Store Provisioning Profile: <bundle id>` | app-store   |
+| `IOS_DEVELOPMENT_PROFILE` | `iOS Team Provisioning Profile: <bundle id>`       | development |
+
+1. **Regenerate them on a Mac that can reach the account.** Build once with
+   `scripts/package-ios.sh --export-method app-store-connect` (Xcode makes the
+   Store profile when it exports; the development one when it archives). Needs an
+   Apple ID in Xcode → Settings → Accounts, or the `APPLE_API_KEY`,
+   `APPLE_API_ISSUER` and `APPLE_API_KEY_PATH` variables.
+2. **Check what you are about to upload.** `list-profiles` must show both as
+   `Xcode-managed` and of the right kind. It prints each profile's path, and
+   `<file>` below is that path. Xcode keeps them in
+   `~/Library/Developer/Xcode/UserData/Provisioning Profiles` (and an older copy in
+   `~/Library/MobileDevice/Provisioning Profiles`):
+
+   ```sh
+   scripts/ci/store-credentials.sh list-profiles --bundle-id org.matrixaxon.axon
+   security cms -D -i '<file>' | plutil -extract Entitlements.aps-environment raw -
+   ```
+
+   The second command prints `production` for the Store profile and `development`
+   for the development one. Both should list the distribution certificate your
+   `APPLE_STORE_CERTIFICATES` secret holds; an Xcode-managed profile lists all of
+   them, which is why it is the safe choice.
+
+3. **Replace the secrets** with
+   `base64 -i '<file>' | gh secret set IOS_APPSTORE_PROFILE` (and the same for
+   `IOS_DEVELOPMENT_PROFILE`), then rerun the workflow.
+
+Do not make the Store profile by hand in the portal. The name above is Xcode's, it
+is longer than the portal allows (it cuts off after `org.matrixaxo`), and the
+build exports with automatic signing, which looks the profile up under that name.
+A hand-made `matrix-axon-1` profile, and then one named like the development
+profile, both failed `exportArchive` with `No Accounts` and
+`No profiles for 'org.matrixaxon.axon' were found`, after the archive had passed.
+Two profiles with the same name fail the same way. That the lookup is by name is an
+inference from the working and failing runs, not something Apple documents.
+
+The portal's certificate list shows several certificates with one name and only
+an expiry date. Tell them apart by serial: `security find-certificate -c "Apple
+Distribution" -p | openssl x509 -noout -serial -enddate` for the one in your
+keychain, and `openssl x509 -inform der` on a downloaded `.cer` for the portal's.
+`openssl x509` cannot read a `.mobileprovision`; decode it with `security cms -D`
+first.
+
 ### What the first run will tell us
 
 Everything above has been exercised on a Mac; none of it on a runner. These are the

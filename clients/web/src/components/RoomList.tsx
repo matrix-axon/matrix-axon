@@ -906,8 +906,11 @@ export function RoomList() {
             {favourites.reordering.value ? 'Done' : 'Reorder'}
           </button>
           <label class="sort-select">
-            Sort
+            <span class="room-sort-label" aria-hidden="true">
+              Sort
+            </span>
             <select
+              aria-label="Sort"
               title={hint('Cycle sort order', KEYS.cycleSort)}
               aria-keyshortcuts={keyAria(KEYS.cycleSort)}
               value={settings.roomSort.value}

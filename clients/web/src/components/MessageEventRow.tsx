@@ -780,7 +780,9 @@ export function ReadReceiptsSummary({
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLSpanElement>(null)
 
-  useEffect(() => {
+  // Dismissal must be ready when the popup becomes visible; a passive effect
+  // can miss Escape or an outside press delivered before the next paint.
+  useLayoutEffect(() => {
     if (!open) {
       return
     }
