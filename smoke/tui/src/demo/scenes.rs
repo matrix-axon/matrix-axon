@@ -369,6 +369,11 @@ fn send(demo: &Demo) -> anyhow::Result<Vec<Step>> {
     // answers "room not found". Recorded in `docs/demo-coverage.md`.
     // The switch's status line is another matter: it names the room by its
     // title (ADR 0118), which for a DM is the other member's display name.
+    // That wait proves a room *titled* Maya Harrison is showing, not that the
+    // switch landed on `dm` by id: a second room or DM sharing the name would
+    // satisfy it. The corpus has exactly one, so it is sound here; it also
+    // couples this step to the `showing <title>` status format in
+    // `clients/tui/src/app/rooms.rs`.
     let dm = room_id(demo, "dm-maya")?;
     Ok(vec![
         cmd(&format!("/room {dm}")),
