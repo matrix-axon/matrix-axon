@@ -47,6 +47,7 @@ shows it.
 | Bundled URL preview text cards (MSC4095)                | **n/a**               | **not covered** — demo corpus has no bundled preview metadata                                             | **not covered** |
 | Reactions (seeded badges render)                        | `timeline`            | `timeline`                                                                                                | `send`          |
 | React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
+| Custom reaction images (MSC4027)                        | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Reaction badge updating live from another user's react  | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Replies                                                 | `timeline`            | `timeline`                                                                                                | `send`          |
 | Edits (`m.replace`, applied in place)                   | `threads`             | `threads`                                                                                                 | **not covered** |

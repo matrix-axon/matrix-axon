@@ -3114,6 +3114,9 @@ a.utd-recover:hover {
 }
 
 .reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0.05rem 0.5rem;
@@ -6697,4 +6700,19 @@ audio.media-player {
 
 .verification-chip .topbar-count-badge {
   min-width: 1.25rem;
+}
+
+.reaction-image {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+.reaction-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }

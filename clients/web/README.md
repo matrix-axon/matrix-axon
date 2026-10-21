@@ -117,6 +117,10 @@ A stale or failed room-list read also keeps spaces visible until joined membersh
 If the selected space becomes empty, the picker returns to All rooms.
 Hidden spaces retain their saved order and can reappear after membership updates.
 
+Received custom reaction images render in room and thread reaction chips through the authenticated media proxy.
+Loading and failed images retain a compact placeholder; counts and click-to-toggle behavior work as for Unicode reactions.
+Custom-image selection and image-pack browsing are not yet available.
+
 ## Prerequisites
 
 - **Node.js 24 (LTS)** — recommended, and what CI uses. The hard floor is

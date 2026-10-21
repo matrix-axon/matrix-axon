@@ -26,6 +26,11 @@ import {
 } from '../stores/timeline'
 import { EditHistory } from './EditHistory'
 import { EventBody } from './EventBody'
+import {
+  customReactionMxc,
+  ReactionContent,
+  reactionLabel,
+} from './ReactionContent'
 import { EventTime, FailedSend } from './EventStatus'
 import { UserAvatar } from './UserAvatar'
 import {
@@ -634,7 +639,7 @@ export function MessageEventRow({
         </div>
         {reactionBurst !== null && (
           <span class="message-reaction-burst" aria-hidden="true">
-            {reactionBurst}
+            <ReactionContent accountId={accountId} reaction={reactionBurst} />
           </span>
         )}
         {inspectOpen && <EventInspector event={event} />}
@@ -655,6 +660,7 @@ export function MessageEventRow({
                   : null
               return (
                 <ReactionChip
+                  accountId={accountId}
                   key={emoji}
                   emoji={emoji}
                   tally={shownTally}
@@ -670,6 +676,7 @@ export function MessageEventRow({
             })}
             {pendingNewReaction && gestureReaction !== null && (
               <ReactionChip
+                accountId={accountId}
                 key={`pending-${gestureReaction.emoji}`}
                 emoji={gestureReaction.emoji}
                 tally={{
@@ -678,7 +685,7 @@ export function MessageEventRow({
                   senders: ownUserId === null ? [] : [ownUserId],
                   my_event_ids: [],
                 }}
-                tooltip={`Adding ${gestureReaction.emoji} reaction`}
+                tooltip={`Adding ${reactionLabel(gestureReaction.emoji)} reaction`}
                 pending="adding"
               />
             )}
@@ -1334,12 +1341,14 @@ export function canonicalReactionKey(key: string): string {
 }
 
 function ReactionChip({
+  accountId,
   emoji,
   tally,
   tooltip,
   pending = null,
   onToggle,
 }: {
+  accountId: string
   emoji: string
   tally: ReactionTally
   tooltip: string
@@ -1408,6 +1417,11 @@ function ReactionChip({
       <button
         type="button"
         class={`reaction-chip${tally.me ? ' mine' : ''}${pending === null ? '' : ` gesture-reaction-pending gesture-reaction-${pending}`}`}
+        aria-label={
+          customReactionMxc(emoji) === null
+            ? undefined
+            : `${reactionLabel(emoji)}: ${tally.count}${tally.me ? ', reacted' : ''}`
+        }
         aria-busy={pending === null ? undefined : 'true'}
         aria-describedby={tooltipOpen ? tooltipId : undefined}
         disabled={pending !== null}
@@ -1436,7 +1450,7 @@ function ReactionChip({
           onToggle?.()
         }}
       >
-        {emoji} {tally.count}
+        <ReactionContent accountId={accountId} reaction={emoji} /> {tally.count}
       </button>
       {tooltipOpen && (
         <span id={tooltipId} class="reaction-senders-tooltip" role="tooltip">
@@ -1454,13 +1468,13 @@ function reactionTooltip(
 ): string {
   const names = tally.senders.map((sender) => members.displayName(sender))
   if (names.length === 0) {
-    return emoji
+    return reactionLabel(emoji)
   }
   const shown = names.slice(0, REACTION_TOOLTIP_NAME_LIMIT)
   const remaining = names.length - shown.length
   return remaining === 0
-    ? `${emoji}: ${shown.join(', ')}`
-    : `${emoji}: ${shown.join(', ')}, and ${remaining} more`
+    ? `${reactionLabel(emoji)}: ${shown.join(', ')}`
+    : `${reactionLabel(emoji)}: ${shown.join(', ')}, and ${remaining} more`
 }
 
 /** The quoted context above a rich reply (ADR 0033 display). */
