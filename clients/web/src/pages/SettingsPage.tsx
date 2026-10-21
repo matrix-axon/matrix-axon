@@ -889,9 +889,9 @@ function pushDisclosureNote(disclosure: PushDisclosure): string {
     return 'A banner names the sender and the room, not the message.'
   }
   if (disclosure === 'preview') {
-    return 'A banner includes a short preview of the message.'
+    return 'A banner includes a preview of the message.'
   }
-  return 'A banner says "New activity" and does not name the room.'
+  return 'A banner says "New activity" only.'
 }
 
 /**
@@ -1004,8 +1004,7 @@ function MessageNotificationSettings() {
     <section class="panel">
       <h2>Notifications</h2>
       <p class="muted">
-        Show a notification when a new message arrives while Axon is open and
-        you are not reading that room.
+        Show new message notifications when you are not in the room.
       </p>
       <label class="setting-row">
         <input
