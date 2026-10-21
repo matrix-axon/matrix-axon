@@ -208,6 +208,20 @@ export const KEYS = {
     },
   },
   toggleSidebar: { label: 'Ctrl-B', aria: 'Control+B' },
+  /**
+   * Plain `Ctrl-B` is bold while the composer has focus (ADR 0123), so the
+   * shifted twin is the toggle that works from there too. The help popup lists
+   * both; the toggle's own tooltip keeps the short one.
+   */
+  toggleSidebarAnywhere: {
+    label: 'Ctrl-B or Ctrl-Shift-B',
+    aria: 'Control+B Control+Shift+B',
+  },
+  bold: { label: 'Ctrl-B', aria: 'Control+B' },
+  italic: { label: 'Ctrl-I', aria: 'Control+I' },
+  strike: { label: 'Ctrl-Shift-X', aria: 'Control+Shift+X' },
+  code: { label: 'Ctrl-E', aria: 'Control+E' },
+  link: { label: 'Ctrl-Shift-K', aria: 'Control+Shift+K' },
   toggleSpaces: {
     label: 'Ctrl-Alt-S',
     aria: 'Control+Alt+S',
@@ -401,7 +415,7 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
         description: 'Cycle sort: recent, oldest, A–Z, Z–A',
       },
       {
-        keys: KEYS.toggleSidebar,
+        keys: KEYS.toggleSidebarAnywhere,
         description: 'Show or hide the room list',
       },
       {
@@ -436,6 +450,11 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
       { keys: ':emoji-shortcode:', description: 'Insert an emoji' },
       { keys: '↑', description: 'Edit your last message (empty composer)' },
       { keys: 'Escape', description: 'Cancel reply or edit' },
+      { keys: KEYS.bold, description: 'Bold the selection' },
+      { keys: KEYS.italic, description: 'Italicize the selection' },
+      { keys: KEYS.strike, description: 'Strike through the selection' },
+      { keys: KEYS.code, description: 'Format the selection as code' },
+      { keys: KEYS.link, description: 'Turn the selection into a link' },
       {
         keys: 'Ctrl-Shift-. / Ctrl-Shift-,',
         description: 'Grow / shrink the message box',
