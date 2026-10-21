@@ -1653,7 +1653,8 @@ export interface paths {
         /**
          * Proxy an `mxc://` download through the account's homeserver connection.
          * @description The `server_name` and `media_id` path segments form the `mxc://` URI that
-         *     was embedded in a Matrix event's primary or thumbnail media descriptor.
+         *     was embedded in a Matrix event's media descriptor, member avatar, or
+         *     MSC4027 custom reaction key.
          *     The response body is the raw media bytes, streamed from the on-disk cache
          *     with range-request and conditional-GET support.
          */
@@ -1680,7 +1681,7 @@ export interface paths {
          *     conditional-GET/range-serving machinery, but resolves a resized variant
          *     via [`MediaProxy::get_thumbnail`] instead of the full original, and
          *     corrects `Content-Type` by sniffing the returned bytes (see
-         *     [`correct_thumbnail_content_type`]) since a homeserver-regenerated
+         *     [`correct_image_content_type`]) since a homeserver-regenerated
          *     thumbnail may not match the original's declared mimetype. Encrypted media
          *     is rejected with `400` before the proxy is ever called — see
          *     [`resolve_thumbnail_spec`].

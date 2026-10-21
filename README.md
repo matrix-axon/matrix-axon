@@ -151,6 +151,13 @@ Homeserver(s)  →  Axon (single binary)  →  axon-web (alpha client)
 ```
 
 One Rust binary, one Postgres database, media cached to local disk.
+The authenticated media download and thumbnail endpoints also resolve custom reaction images whose keys are `mxc://` URLs (MSC4027), without requiring an image pack definition.
+Known left or banned rooms cannot authorize reaction image downloads.
+Reaction media references must be structurally valid MXC URIs of at most 2,048 bytes; malformed and oversized keys do not authorize a fetch.
+Safe PNG, JPEG, GIF, and WebP signatures determine reaction image response types; unrecognized objects remain downloads with `application/octet-stream` and `nosniff`.
+Media is fetched on client request and uses the existing per-object limit and globally bounded LRU cache.
+The reaction index is built transactionally during startup, before this instance starts sync or serves requests; plan a maintenance restart for a large event store.
+Displaying these images in Axon's reference clients is separate client work.
 See the [architecture diagram](docs/mvp/tech-spec.md#architecture-overview) for detail.
 
 ## Clients
