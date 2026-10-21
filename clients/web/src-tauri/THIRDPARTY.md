@@ -1374,7 +1374,7 @@ express Statement of Purpose.
 ## LICENSE: Community Data License Agreement Permissive 2.0 (SPDX ID: CDLA-Permissive-2.0)
 ### USED BY:
   - webpki-roots 0.26.11
-  - webpki-roots 1.0.9
+  - webpki-roots 1.0.10
 ================================================================================
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -2020,7 +2020,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ================================================================================
 ## LICENSE: ISC License (SPDX ID: ISC)
 ### USED BY:
-  - rustls-webpki 0.103.15
+  - rustls-webpki 0.103.16
 ================================================================================
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:

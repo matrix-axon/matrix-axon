@@ -367,6 +367,13 @@ fn send(demo: &Demo) -> anyhow::Result<Vec<Step>> {
     // room *name*, and a DM has no name — the "Maya Harrison" in the room list
     // is derived per-render from the other member, and `/room Maya Harrison`
     // answers "room not found". Recorded in `docs/demo-coverage.md`.
+    // The switch's status line is another matter: it names the room by its
+    // title (ADR 0118), which for a DM is the other member's display name.
+    // That wait proves a room *titled* Maya Harrison is showing, not that the
+    // switch landed on `dm` by id: a second room or DM sharing the name would
+    // satisfy it. The corpus has exactly one, so it is sound here; it also
+    // couples this step to the `showing <title>` status format in
+    // `clients/tui/src/app/rooms.rs`.
     let dm = room_id(demo, "dm-maya")?;
     Ok(vec![
         cmd(&format!("/room {dm}")),
@@ -375,7 +382,7 @@ fn send(demo: &Demo) -> anyhow::Result<Vec<Step>> {
         // pushes the room's oldest messages off screen — including any needle
         // taken from them. The status names the room we asked for and is true
         // however much history has accumulated.
-        wait(&[&format!("showing {dm}"), &maya]),
+        wait(&[&format!("showing {maya}")]),
         Step::Dwell(BEAT),
         // Must not begin with a capital J: on an empty input that is the
         // date-jump shortcut, by design (`keymap.rs`), so the rest of the line

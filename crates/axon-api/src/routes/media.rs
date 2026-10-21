@@ -240,7 +240,8 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
 /// Proxy an `mxc://` download through the account's homeserver connection.
 ///
 /// The `server_name` and `media_id` path segments form the `mxc://` URI that
-/// was embedded in a Matrix event's primary or thumbnail media descriptor.
+/// was embedded in a Matrix event's media descriptor, member avatar, or
+/// MSC4027 custom reaction key.
 /// The response body is the raw media bytes, streamed from the on-disk cache
 /// with range-request and conditional-GET support.
 #[utoipa::path(
@@ -291,10 +292,20 @@ pub async fn get_media(
     let encrypted_file = encrypted_file_for_mxc(&content, &mxc_url);
     let content_type = content_type_for_mxc(&content, &mxc_url);
 
-    let resource = proxy
+    let mut resource = proxy
         .get_media(account_id, &mxc_url, encrypted_file)
         .await
         .map_err(|err| log_and_convert_media_error(account_id, &mxc_url, "get_media", err))?;
+
+    // Reaction keys carry no MIME metadata. Recognize only safe raster magic;
+    // HTML/SVG and unrecognized objects retain the octet-stream/nosniff fallback.
+    let content_type = if content["m.relates_to"]["rel_type"] == "m.annotation"
+        && content["m.relates_to"]["key"].as_str() == Some(mxc_url.as_str())
+    {
+        correct_image_content_type(&mut resource, content_type).await
+    } else {
+        content_type
+    };
 
     let range = header_str(&headers, header::RANGE);
     serve_media(account_id, resource, content_type, range, etag).await
@@ -330,14 +341,11 @@ fn resolve_thumbnail_spec(
 }
 
 /// Recognize a well-known image format from its leading magic bytes. Used to
-/// correct `Content-Type` for a homeserver-generated thumbnail, which may be
-/// re-encoded into a different format than the original's declared mimetype
-/// (e.g. a PNG source thumbnailed to JPEG by Synapse) — sniffing the actual
-/// returned bytes is strictly more trustworthy here than trusting the
-/// original's sender-controlled declaration, since the bytes themselves are
-/// homeserver-generated. Only recognizes formats already in
-/// [`is_inline_safe`]'s allowlist, so a positive match is always safe to
-/// serve with its own declared type.
+/// correct `Content-Type` for homeserver-generated thumbnails and custom
+/// reactions without MIME metadata. Thumbnail bytes may have been re-encoded
+/// (e.g. PNG to JPEG); reaction bytes may be arbitrary sender-controlled media.
+/// Only recognizes formats already in [`is_inline_safe`]'s allowlist, so a
+/// positive match is always safe to serve with its own declared type.
 fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
@@ -353,7 +361,7 @@ fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// Correct `declared` (the original's `Content-Type`, from
-/// [`content_type_for_mxc`]) by sniffing the actual thumbnail bytes' magic
+/// [`content_type_for_mxc`]) by sniffing thumbnail or custom-reaction bytes' magic
 /// number — see [`sniff_image_mime`]. Falls back to `declared` unchanged when
 /// the bytes don't match a recognized signature (e.g. the homeserver returned
 /// a format this function doesn't recognize).
@@ -362,7 +370,7 @@ fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
 /// run before any other read/seek on `resource.file` — in particular, before
 /// [`serve_media`], which assumes the cursor starts at `0` for a full-body
 /// response.
-async fn correct_thumbnail_content_type(resource: &mut MediaResource, declared: String) -> String {
+async fn correct_image_content_type(resource: &mut MediaResource, declared: String) -> String {
     let mut magic = [0u8; 12];
     let n = resource.file.read(&mut magic).await.unwrap_or(0);
     let _ = resource.file.seek(SeekFrom::Start(0)).await;
@@ -429,7 +437,7 @@ fn log_and_convert_media_error(
 /// conditional-GET/range-serving machinery, but resolves a resized variant
 /// via [`MediaProxy::get_thumbnail`] instead of the full original, and
 /// corrects `Content-Type` by sniffing the returned bytes (see
-/// [`correct_thumbnail_content_type`]) since a homeserver-regenerated
+/// [`correct_image_content_type`]) since a homeserver-regenerated
 /// thumbnail may not match the original's declared mimetype. Encrypted media
 /// is rejected with `400` before the proxy is ever called — see
 /// [`resolve_thumbnail_spec`].
@@ -485,8 +493,8 @@ pub async fn get_media_thumbnail(
 
     // The homeserver may have re-encoded the thumbnail into a different
     // format than the original's declared mimetype — see
-    // `correct_thumbnail_content_type`'s doc.
-    let content_type = correct_thumbnail_content_type(&mut resource, declared_content_type).await;
+    // `correct_image_content_type`'s doc.
+    let content_type = correct_image_content_type(&mut resource, declared_content_type).await;
 
     let range = header_str(&headers, header::RANGE);
     serve_media(account_id, resource, content_type, range, etag).await
@@ -874,10 +882,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn correct_thumbnail_content_type_overrides_on_recognized_signature() {
+    async fn correct_image_content_type_overrides_on_recognized_signature() {
         let mut resource = resource_from(b"\x89PNG\r\n\x1a\nrest-of-file").await;
-        let corrected =
-            correct_thumbnail_content_type(&mut resource, "image/jpeg".to_owned()).await;
+        let corrected = correct_image_content_type(&mut resource, "image/jpeg".to_owned()).await;
         assert_eq!(corrected, "image/png");
         // The cursor must be back at the start for the subsequent full-body serve.
         let mut buf = Vec::new();
@@ -886,9 +893,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn correct_thumbnail_content_type_falls_back_when_unrecognized() {
+    async fn correct_image_content_type_falls_back_when_unrecognized() {
         let mut resource = resource_from(b"not an image").await;
-        let corrected = correct_thumbnail_content_type(&mut resource, "image/png".to_owned()).await;
+        let corrected = correct_image_content_type(&mut resource, "image/png".to_owned()).await;
         assert_eq!(corrected, "image/png");
     }
 

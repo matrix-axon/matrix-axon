@@ -1224,8 +1224,12 @@ impl Store {
 
     /// Find the first event for `account_id` whose media URL matches `mxc_url`.
     /// Checks primary and thumbnail URLs for both plain and encrypted media, and
-    /// member/profile avatar URLs for plain avatar media, so the caller can
-    /// recover the matching encryption descriptor when needed.
+    /// member/profile avatar URLs and MSC4027 annotation keys for plain media,
+    /// so the caller can recover the matching encryption descriptor when needed.
+    /// Attachments take precedence over reaction keys to preserve decryption.
+    /// Choose a recent usable reaction before the union, using the key/id index
+    /// and the existing redaction index. Known left/banned rooms cannot supply
+    /// reaction references; missing membership data follows get_event_if_joined.
     /// Each JSON path is a separate branch so PostgreSQL can use the matching
     /// partial expression index rather than filtering every event for an
     /// account through one multi-way `OR`.
@@ -1234,6 +1238,9 @@ impl Store {
         account_id: Uuid,
         mxc_url: &str,
     ) -> Result<Option<TimelineRow>, StoreError> {
+        if axon_core::media::parse_mxc(mxc_url).is_none() {
+            return Ok(None);
+        }
         let sql = format!(
             "{} \
              WHERE e.account_id = $1 \
@@ -1241,6 +1248,33 @@ impl Store {
                    SELECT id FROM ( \
                        SELECT id, 1 AS priority FROM events \
                        WHERE account_id = $1 AND content->>'url' = $2 \
+                       UNION ALL \
+                       SELECT id, 6 AS priority FROM ( \
+                           SELECT reaction.id FROM events reaction \
+                           WHERE reaction.account_id = $1 \
+                             AND reaction.event_type = 'm.reaction' \
+                             AND reaction.content->'m.relates_to'->>'rel_type' = 'm.annotation' \
+                             AND reaction.content->'m.relates_to'->>'key' = $2 \
+                             AND reaction.content->'m.relates_to'->>'key' LIKE 'mxc://%' \
+                             AND octet_length(reaction.content->'m.relates_to'->>'key') <= 2048 \
+                             AND reaction.raw_event->>'state_key' IS NULL \
+                             AND jsonb_typeof(reaction.content->'m.relates_to'->'event_id') = 'string' \
+                             AND reaction.content->'m.relates_to'->>'event_id' <> '' \
+                             AND NOT EXISTS ( \
+                                 SELECT 1 FROM room_state rs \
+                                 JOIN accounts owner ON owner.account_id = reaction.account_id \
+                                 WHERE rs.account_id = reaction.account_id AND rs.room_id = reaction.room_id \
+                                   AND rs.event_type = 'm.room.member' AND rs.state_key = owner.user_id \
+                                   AND rs.content->>'membership' IN ('leave', 'ban') \
+                             ) \
+                             AND NOT EXISTS ( \
+                                 SELECT 1 FROM events rr \
+                                 WHERE rr.account_id = reaction.account_id \
+                                   AND rr.event_type = 'm.room.redaction' \
+                                   AND rr.redacts = reaction.event_id \
+                             ) \
+                           ORDER BY reaction.id DESC LIMIT 1 \
+                       ) reaction_matches \
                        UNION ALL \
                        SELECT id, 5 AS priority FROM events \
                        WHERE account_id = $1 \
@@ -1382,26 +1416,28 @@ mod tests {
 
     /// The summary query stays an index-only scan on
     /// `events_room_thread_root_idx` (#763). Disabling sequential and bitmap
-    /// scans keeps a tiny test table from planning around the index; disabling
-    /// index scans penalizes plain and index-only scans alike, so the cheaper
-    /// index-only scan still wins whenever it is possible. It stops being
-    /// possible if the query stops implying the index's `thread_root IS NOT
-    /// NULL` predicate or reads a column the index doesn't cover, and the plan
-    /// then falls back to some other scan of `events`.
+    /// scans keeps a tiny test table from planning around the index. Index
+    /// scans stay enabled: `enable_indexscan = off` also disables index-only
+    /// scans, so every scan type then counts as disabled and the planner falls
+    /// back to raw cost, where a one-page table with an empty visibility map
+    /// makes a sequential scan cheaper than any index scan. With them enabled
+    /// the index-only scan is the only way to read this index without a heap
+    /// fetch per row. It stops being possible if the query stops implying the
+    /// index's `thread_root IS NOT NULL` predicate or reads a column the index
+    /// doesn't cover, and the plan then falls back to some other scan of
+    /// `events`.
     ///
-    /// That reading of `enable_indexscan` holds on PostgreSQL 14 through 18
-    /// (18 counts disabled plan nodes instead of adding a cost penalty, and
-    /// both scan kinds still count as one); check it again on a new major
-    /// version. The assertion leaves out the table alias, and only the outer
-    /// `events` scan can use this partial index: the redaction subquery does
-    /// not imply `thread_root IS NOT NULL`.
+    /// Checked on PostgreSQL 18; check it again on a new major version. The
+    /// assertion leaves out the table alias, and only the outer `events` scan
+    /// can use this partial index: the redaction subquery does not imply
+    /// `thread_root IS NOT NULL`.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn room_threads_uses_index_only_scan() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let store = Store::connect(&url, 1).await.expect("connect + migrate");
         let mut tx = store.pool().begin().await.expect("begin");
-        for scan in ["enable_seqscan", "enable_bitmapscan", "enable_indexscan"] {
+        for scan in ["enable_seqscan", "enable_bitmapscan"] {
             sqlx_core::query::query(&format!("SET LOCAL {scan} = off"))
                 .execute(&mut *tx)
                 .await

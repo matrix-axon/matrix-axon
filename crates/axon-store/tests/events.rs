@@ -806,6 +806,162 @@ async fn get_event_by_mxc_url_finds_plain_thumbnail() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_custom_reaction_boundaries() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let owner = common::test_account(&store, "mxc-reaction").await;
+    let other = common::test_account(&store, "mxc-reaction-other").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    let annotation = json!({ "m.relates_to": {
+        "rel_type": "m.annotation", "event_id": "$target:localhost", "key": mxc
+    }});
+
+    // A lookalike field on an unrelated event must not authorize a download.
+    insert_event_with_type(
+        &store,
+        owner,
+        &room_id,
+        "m.room.message",
+        annotation.clone(),
+    )
+    .await;
+    insert_event_with_type(
+        &store,
+        owner,
+        &room_id,
+        "m.reaction",
+        json!({
+            "m.relates_to": { "rel_type": "m.reference", "key": mxc }
+        }),
+    )
+    .await;
+    assert!(store
+        .get_event_by_mxc_url(owner, &mxc)
+        .await
+        .unwrap()
+        .is_none());
+
+    let reaction = insert_event_with_type(&store, owner, &room_id, "m.reaction", annotation).await;
+    assert_eq!(
+        store
+            .get_event_by_mxc_url(owner, &mxc)
+            .await
+            .unwrap()
+            .unwrap()
+            .event_id,
+        reaction
+    );
+    assert!(store
+        .get_event_by_mxc_url(other, &mxc)
+        .await
+        .unwrap()
+        .is_none());
+
+    let user_id = store.get_account(owner).await.unwrap().unwrap().user_id;
+    for membership in ["leave", "ban", "join"] {
+        store
+            .upsert_room_state(&RoomStateUpsert {
+                account_id: owner,
+                room_id: &room_id,
+                event_type: "m.room.member",
+                state_key: &user_id,
+                sender: &user_id,
+                event_id: "$membership:localhost",
+                origin_ts: 1,
+                content: Some(json!({ "membership": membership })),
+            })
+            .await
+            .unwrap();
+        let found = store.get_event_by_mxc_url(owner, &mxc).await.unwrap();
+        assert_eq!(found.is_some(), membership == "join");
+    }
+    // Missing/undecrypted content is never an eligible candidate, and must
+    // not prevent another usable reference from being found.
+    sqlx_core::query::query(
+        "UPDATE events SET content = NULL WHERE account_id = $1 AND event_id = $2",
+    )
+    .bind(owner)
+    .bind(&reaction)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(store
+        .get_event_by_mxc_url(owner, &mxc)
+        .await
+        .unwrap()
+        .is_none());
+    let active = insert_event_with_type(&store, owner, &room_id, "m.reaction", json!({
+        "m.relates_to": { "rel_type": "m.annotation", "event_id": "$target:localhost", "key": mxc }
+    })).await;
+    assert_eq!(
+        store
+            .get_event_by_mxc_url(owner, &mxc)
+            .await
+            .unwrap()
+            .unwrap()
+            .event_id,
+        active
+    );
+    for malformed in [
+        "https://example.org/media",
+        "mxc:///empty",
+        "mxc://example.org/a/b",
+    ] {
+        insert_event_with_type(&store, owner, &room_id, "m.reaction", json!({
+            "m.relates_to": { "rel_type": "m.annotation", "event_id": "$target", "key": malformed }
+        })).await;
+        assert!(store
+            .get_event_by_mxc_url(owner, malformed)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    let oversized = format!("mxc://example.org/{}", "x".repeat(8192));
+    insert_event_with_type(
+        &store,
+        owner,
+        &room_id,
+        "m.reaction",
+        json!({
+            "m.relates_to": { "rel_type": "m.annotation", "event_id": "$target", "key": oversized }
+        }),
+    )
+    .await;
+    assert!(store
+        .get_event_by_mxc_url(owner, &oversized)
+        .await
+        .unwrap()
+        .is_none());
+
+    // A reaction must never mask an encrypted attachment's descriptor, even
+    // when the reaction arrived first and has the lower event-row id.
+    let attachment = insert_image_event(
+        &store,
+        owner,
+        &room_id,
+        json!({
+            "msgtype": "m.image", "file": { "url": mxc, "key": {} }
+        }),
+    )
+    .await;
+    assert_eq!(
+        store
+            .get_event_by_mxc_url(owner, &mxc)
+            .await
+            .unwrap()
+            .unwrap()
+            .event_id,
+        attachment
+    );
+
+    common::cleanup_account(&pool, owner).await;
+    common::cleanup_account(&pool, other).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn get_event_by_mxc_url_finds_member_avatar() {
     let store = common::migrated_store().await;
     let pool = common::raw_pool().await;
