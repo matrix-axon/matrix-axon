@@ -24,6 +24,7 @@ smoke-artifacts
 # Environment / secrets
 .env
 .env.*
+.envrc
 !.env.example
 
 # Local config (may hold secrets); the example is tracked
