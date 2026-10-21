@@ -33,4 +33,10 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "zvariant, via zbus 5 <- tauri plugins (see #747)" },
   { id = "RUSTSEC-2026-0371", reason = "zbus_names, via zbus 5 <- tauri plugins (see #747)" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, via zbus 5 <- tauri plugins (see #747)" },
+  # webpki-roots 0.26.11 trusts emSign intermediates; only >= 1.0.10 is fixed and
+  # 0.26 gets no patch. It arrives through tauri-plugin-websocket's
+  # tokio-tungstenite (0.29 here, and every release up to 0.30 wants ^0.26).
+  # Exit: a tauri-plugin-websocket release on a tokio-tungstenite that takes
+  # webpki-roots 1.x, or dropping the plugin (#781).
+  { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26, via tokio-tungstenite <- tauri-plugin-websocket (see #781)" },
 ]
