@@ -58,6 +58,19 @@ describe('formatKindForEvent (ADR 0123)', () => {
     ).toBe('strike')
   })
 
+  it('leaves keydowns to the IME while a composition is open', () => {
+    expect(
+      formatKindForEvent(
+        key({ key: 'b', ctrlKey: true, isComposing: true }),
+        false,
+      ),
+    ).toBe(null)
+    // Engines that flag the composing keydown only by its legacy keyCode.
+    expect(
+      formatKindForEvent(key({ key: 'b', ctrlKey: true, keyCode: 229 }), false),
+    ).toBe(null)
+  })
+
   it('ignores AltGr, which arrives as Ctrl+Alt', () => {
     expect(
       formatKindForEvent(key({ key: 'e', ctrlKey: true, altKey: true }), false),

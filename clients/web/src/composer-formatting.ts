@@ -66,6 +66,12 @@ export function formatKindForEvent(
   event: KeyboardEvent,
   apple = isApplePlatform(),
 ): FormatKind | null {
+  // Mid-composition (an IME candidate string is open) the keydown belongs to
+  // the IME; editing the text under it can corrupt the candidate. Some engines
+  // report the composing keydown only as keyCode 229.
+  if (event.isComposing || event.keyCode === 229) {
+    return null
+  }
   if (event.altKey || !isPrimaryModifier(event, apple)) {
     return null
   }
@@ -301,8 +307,10 @@ export function formatEdit(
  * Apply `edit` to a textarea the way typing would, so the browser records it
  * for Ctrl-Z. Assigning `value` (or `setRangeText`) discards the undo stack;
  * `execCommand` is deprecated but is still the only way to edit programmatically
- * and keep it. Where it is missing or refuses (jsdom), fall back to
- * `setRangeText` and raise the `input` event ourselves.
+ * and keep it. Where it is missing or refuses (jsdom, or a browser that
+ * returns false), fall back to `setRangeText` and raise the `input` event
+ * ourselves. The fallback is a deliberate degradation: the edit still lands and
+ * the draft updates, but it has no undo entry of its own.
  */
 export function applyFormatEdit(
   textarea: HTMLTextAreaElement,
