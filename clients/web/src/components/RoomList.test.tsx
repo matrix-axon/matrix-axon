@@ -243,6 +243,35 @@ it('filters the room list to selected space children without overriding its sort
   ])
 })
 
+it('badges a space with the unread total of its rooms, capped at 99+', async () => {
+  const space = makeRoom({
+    room_id: '!whatsapp:hs',
+    name: 'WhatsApp',
+    room_type: 'm.space',
+  })
+  const { findByRole } = renderPage(
+    [
+      space,
+      makeRoom({ room_id: '!a:hs', name: 'Alpha', notification_count: 60 }),
+      makeRoom({ room_id: '!b:hs', name: 'Beta', notification_count: 50 }),
+    ],
+    undefined,
+    {
+      withSpaces: true,
+      spaceChildren: {
+        '!whatsapp:hs': [
+          { room_id: '!a:hs', via: ['hs'], suggested: false },
+          { room_id: '!b:hs', via: ['hs'], suggested: false },
+        ],
+      },
+    },
+  )
+  const button = await findByRole('button', {
+    name: 'WhatsApp, 110 unread',
+  })
+  expect(button.querySelector('.space-unread')?.textContent).toBe('99+')
+})
+
 it('keeps joined spaces in the picker rather than the all-rooms list', async () => {
   const space = makeRoom({
     room_id: '!whatsapp:hs',
@@ -1083,6 +1112,30 @@ describe('RoomList account labels', () => {
     ].map((el) => el.textContent)
     expect(options).toContain('@me:example.org')
     expect(options).toContain('@work:example.org')
+  })
+
+  it("shows each account's unread total in the dropdown", async () => {
+    const { findByText, getByLabelText } = renderPage([
+      { ...OPS, notification_count: 2 },
+      { ...LOUNGE, notification_count: 3 },
+      makeRoom({
+        account_id: OTHER_ACCOUNT,
+        account_user_id: '@work:example.org',
+        room_id: '!work:hs',
+        name: 'Work',
+        notification_count: 4,
+      }),
+    ])
+    await findByText('Work')
+
+    const options = [
+      ...getByLabelText('Account').querySelectorAll('option'),
+    ].map((el) => el.textContent)
+    expect(options).toEqual([
+      'All accounts (9 unread)',
+      '@me:example.org (5 unread)',
+      '@work:example.org (4 unread)',
+    ])
   })
 
   it('omits the account entirely when only one account has rooms', async () => {

@@ -140,6 +140,18 @@ impl Store {
             config.timeouts.migration_statement_secs,
             "axon-migrations",
         )?;
+        // Before migrating, so a database Axon cannot serve is left untouched.
+        let encoding = sqlx_core::query_scalar::query_scalar::<_, String>(
+            "SELECT current_setting('server_encoding')",
+        )
+        .fetch_one(&migration_pool)
+        .await
+        .map_err(StoreError::from)
+        .and_then(require_utf8);
+        if encoding.is_err() {
+            migration_pool.close().await;
+        }
+        encoding?;
         tracing::info!("running database migrations");
         let result = migrations::embedded_migrator()?.run(&migration_pool).await;
         migration_pool.close().await;
@@ -298,5 +310,35 @@ impl Store {
     /// It uses ordinary statement deadlines and cannot consume auth/sync slots.
     pub fn read_pool(&self) -> &PgPool {
         &self.read_pool
+    }
+}
+
+// Axon writes UTF-8 and its SQL uses `U&'…'` literals above U+007F, which
+// PostgreSQL cannot convert to SQL_ASCII (GH #803); LATIN1 and the like
+// cannot store most Matrix text at all.
+fn require_utf8(encoding: String) -> Result<(), StoreError> {
+    if encoding == "UTF8" {
+        Ok(())
+    } else {
+        Err(StoreError::UnsupportedEncoding(encoding))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_utf8_databases_are_accepted() {
+        assert!(require_utf8("UTF8".into()).is_ok());
+        for encoding in ["SQL_ASCII", "LATIN1", "WIN1252", "EUC_JP"] {
+            let error = require_utf8(encoding.into()).expect_err(encoding);
+            assert!(matches!(&error, StoreError::UnsupportedEncoding(e) if e == encoding));
+            assert_eq!(error.diagnostic_reason(), "database_encoding");
+            let message = error.to_string();
+            assert!(message.contains(encoding), "{message}");
+            assert!(message.contains("createdb -E UTF8"), "{message}");
+            assert!(message.contains("pg_dump --encoding=UTF8"), "{message}");
+        }
     }
 }

@@ -119,7 +119,10 @@ export function RoomList() {
   // mode; a string means the name input is active and overrides the category.
   const [nameQuery, setNameQuery] = useState<string | null>(null)
   // Session-only account narrowing, the TUI's always-applied outer filter.
-  const [accountFilter, setAccountFilter] = useState<string>('all')
+  // Shared with the space rail, which hides spaces the account has no rooms in.
+  const accountFilter = spaces.accountFilter.value
+  const setAccountFilter = (value: string) =>
+    (spaces.accountFilter.value = value)
   const filterInput = useRef<HTMLInputElement>(null)
   const list = useRef<HTMLUListElement>(null)
   const scroller = useRef<HTMLElement | null>(null)
@@ -291,9 +294,9 @@ export function RoomList() {
       accountFilter !== 'all' &&
       (!showAccountFilter || !activeAccountIds.has(accountFilter))
     ) {
-      setAccountFilter('all')
+      spaces.accountFilter.value = 'all'
     }
-  }, [accountFilter, activeAccountIds, showAccountFilter])
+  }, [accountFilter, activeAccountIds, showAccountFilter, spaces])
   const visibleKeys = useMemo(() => visible.map(roomKey), [visible])
   const favouriteCount = useMemo(
     () =>
@@ -955,20 +958,11 @@ export function RoomList() {
           </details>
         </div>
         {showAccountFilter && (
-          <label class="sort-select">
-            Account
-            <select
-              value={accountFilter}
-              onChange={(event) => setAccountFilter(event.currentTarget.value)}
-            >
-              <option value="all">All accounts</option>
-              {activeAccountEntries.map(([id, userId]) => (
-                <option key={id} value={id}>
-                  {userId}
-                </option>
-              ))}
-            </select>
-          </label>
+          <AccountSelect
+            value={accountFilter}
+            entries={activeAccountEntries}
+            onChange={setAccountFilter}
+          />
         )}
       </div>
 
@@ -1568,4 +1562,52 @@ function relativeTime(ts: number): string {
     return `${Math.floor(seconds / 86400)}d`
   }
   return new Date(ts).toISOString().slice(0, 10)
+}
+
+/**
+ * A component of its own so the per-room unread subscriptions it needs live
+ * here: reading counts in `RoomList` would re-render the whole list for an
+ * event in one room (see the single-row render test).
+ */
+function AccountSelect({
+  value,
+  entries,
+  onChange,
+}: {
+  value: string
+  entries: ReadonlyArray<readonly [string, string]>
+  onChange: (value: string) => void
+}) {
+  const { rooms } = useServices()
+  // Unread notifications per account, over every room the account is in; the
+  // total is what "All accounts" covers.
+  const byAccount = new Map<string, number>()
+  let total = 0
+  for (const room of rooms.rooms.value) {
+    if (!entries.some(([id]) => id === room.account_id)) continue
+    const count = rooms.unreadCount(roomKey(room))
+    byAccount.set(
+      room.account_id,
+      (byAccount.get(room.account_id) ?? 0) + count,
+    )
+    total += count
+  }
+  const label = (text: string, count: number) =>
+    count > 0 ? `${text} (${count} unread)` : text
+  return (
+    <label class="sort-select">
+      Account
+      <select
+        value={value}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      >
+        <option value="all">{label('All accounts', total)}</option>
+        {entries.map(([id, userId]) => (
+          <option key={id} value={id}>
+            {label(userId, byAccount.get(id) ?? 0)}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
 }
