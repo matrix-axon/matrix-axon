@@ -3,6 +3,27 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.14 - 2026-10-22
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* fix(deps): bump vite to 8.3.4 for the launch-editor advisories by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/786
+#### Features
+* feat: route APNs and FCM wakes for new messages by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/791
+* feat(web): Markdown formatting shortcuts in the composer by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/795
+* feat(web): render custom reaction images and names by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/796
+* feat(server): expose custom reaction shortcodes by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/797
+#### Build and CI
+* ci: silence the Postgres nightly's drop-if-exists notices by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/792
+#### Other Changes
+* stop tracking .envrc so it can be used for local env settings by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/793
+* minor version bump on vitest to address code injection security hole by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/798
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.13...v0.1.14
+
 ## v0.1.13 - 2026-10-21
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
