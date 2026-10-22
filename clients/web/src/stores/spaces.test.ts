@@ -50,6 +50,7 @@ function harness() {
   const stale = signal(false)
   const error = signal<string | null>(null)
   const reconnects = signal(0)
+  const counts = signal<ReadonlyMap<string, number>>(new Map())
   const listeners = new Set<(frame: LiveFrame) => void>()
   const api = createApiClient(
     {
@@ -68,7 +69,12 @@ function harness() {
   } as unknown as LiveConnection
   const store = createSpacesStore(
     api,
-    { rooms, stale, error } as unknown as RoomsStore,
+    {
+      rooms,
+      stale,
+      error,
+      unreadCount: (key: string) => counts.value.get(key) ?? 0,
+    } as unknown as RoomsStore,
     live,
   )
   return {
@@ -76,6 +82,7 @@ function harness() {
     rooms,
     stale,
     error,
+    counts,
     reconnects,
     emit: (frame: LiveFrame) => listeners.forEach((listen) => listen(frame)),
   }
@@ -300,4 +307,99 @@ it('treats subspace-only parents as empty in the shallow room picker', async () 
     '!nested:hs',
   ])
   expect(store.selected.value).toBeNull()
+})
+
+const OTHER = '6b53f7f0-0000-4000-8000-000000000002'
+const inOther = (roomId: string, roomType?: string): RoomDto =>
+  ({
+    account_id: OTHER,
+    room_id: roomId,
+    room_type: roomType,
+    name: roomId,
+    last_activity_ts: 0,
+  }) as unknown as RoomDto
+
+it('hides spaces the filtered account has no joined rooms in', async () => {
+  server.use(
+    http.get(
+      `${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/space/children`,
+      () =>
+        HttpResponse.json({
+          data: [{ room_id: '!child:hs', via: ['hs'], suggested: false }],
+        }),
+    ),
+  )
+  const { store, rooms } = harness()
+  // The same space and child exist for both accounts, but only OTHER's space
+  // has the child joined; ACCOUNT is in the space without that room.
+  rooms.value = [space(), inOther(SPACE, 'm.space'), inOther('!child:hs')]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value.map((room) => room.account_id)).toEqual([OTHER])
+  store.accountFilter.value = ACCOUNT
+  expect(store.visible.value).toEqual([])
+  store.accountFilter.value = OTHER
+  expect(store.visible.value.map((room) => room.account_id)).toEqual([OTHER])
+  store.accountFilter.value = 'all'
+  expect(store.visible.value.map((room) => room.account_id)).toEqual([OTHER])
+})
+
+it('clears the selected space when the account filter hides it', async () => {
+  server.use(
+    http.get(childrenUrl, () =>
+      HttpResponse.json({
+        data: [{ room_id: '!child:hs', via: ['hs'], suggested: false }],
+      }),
+    ),
+  )
+  const { store, rooms } = harness()
+  rooms.value = [space(), plainRoom('!child:hs')]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  store.selected.value = `${ACCOUNT}/${SPACE}`
+  store.accountFilter.value = OTHER
+  expect(store.selected.value).toBeNull()
+})
+
+it('sums unread over joined direct children only', async () => {
+  server.use(
+    http.get(childrenUrl, () =>
+      HttpResponse.json({
+        data: [
+          { room_id: '!a:hs', via: ['hs'], suggested: false },
+          { room_id: '!b:hs', via: ['hs'], suggested: false },
+          { room_id: '!unjoined:hs', via: ['hs'], suggested: false },
+        ],
+      }),
+    ),
+  )
+  const { store, rooms, counts } = harness()
+  rooms.value = [space(), plainRoom('!a:hs'), plainRoom('!b:hs')]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  const key = `${ACCOUNT}/${SPACE}`
+  expect(store.unread.value.has(key)).toBe(false)
+  counts.value = new Map([
+    [`${ACCOUNT}/!a:hs`, 3],
+    [`${ACCOUNT}/!b:hs`, 4],
+    [`${ACCOUNT}/!unjoined:hs`, 50],
+    [`${ACCOUNT}/!elsewhere:hs`, 9],
+  ])
+  expect(store.unread.value.get(key)).toBe(7)
+  counts.value = new Map()
+  expect(store.unread.value.has(key)).toBe(false)
+})
+
+it('keeps the account filter when the room catalog is stale or failed', async () => {
+  server.use(
+    http.get(
+      `${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/space/children`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+  )
+  const { store, rooms, stale, error } = harness()
+  rooms.value = [space(), inOther(SPACE, 'm.space')]
+  store.accountFilter.value = OTHER
+  stale.value = true
+  expect(store.visible.value.map((room) => room.account_id)).toEqual([OTHER])
+  stale.value = false
+  error.value = 'Could not load rooms'
+  expect(store.visible.value.map((room) => room.account_id)).toEqual([OTHER])
 })

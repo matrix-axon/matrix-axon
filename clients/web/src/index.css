@@ -601,6 +601,7 @@ body {
   display: block;
 }
 .space-picker-entry {
+  position: relative;
   display: grid;
   width: 2.8rem;
   height: 2.8rem;
@@ -611,6 +612,27 @@ body {
   border-radius: 0.7rem;
   background: transparent;
   color: inherit;
+}
+/* Overlaps the avatar's top-right corner so the rail stays as narrow as it was.
+   Doubled with `.badge` so it outranks that rule's later size and padding. */
+.badge.space-unread {
+  position: absolute;
+  top: -0.2rem;
+  right: -0.2rem;
+  min-width: 0.9rem;
+  padding: 0 0.25rem;
+  font-size: 0.55rem;
+  line-height: 0.9rem;
+  text-align: center;
+}
+/* Touch targets and thumbs want the larger figure; the rail is denser on desktop. */
+@media (max-width: 47.99rem) {
+  .badge.space-unread {
+    min-width: 1.1rem;
+    padding: 0 0.3rem;
+    font-size: 0.65rem;
+    line-height: 1.1rem;
+  }
 }
 .space-picker-entry:hover:not(:disabled) {
   border-color: transparent;
@@ -1828,11 +1850,39 @@ a.button-like {
   }
 }
 
+/* Drawn from the theme tokens rather than the browser's native control, which
+   differs per engine and OS and ignores the app's light/dark choice. The
+   chevron is two gradients so it can use a token (a data-URI SVG cannot). */
 select {
+  appearance: none;
   font: inherit;
-  padding: 0.3rem 0.4rem;
+  padding: 0.3rem 1.6rem 0.3rem 0.5rem;
   border: 1px solid var(--border);
   border-radius: 6px;
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 0.85rem) 50%,
+    calc(100% - 0.55rem) 50%;
+  background-size: 0.3rem 0.3rem;
+  background-repeat: no-repeat;
+  color: var(--fg);
+  cursor: pointer;
+}
+select:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+select option {
   background: var(--bg);
   color: var(--fg);
 }

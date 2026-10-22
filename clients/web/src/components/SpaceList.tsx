@@ -96,6 +96,7 @@ export function SpaceList() {
       {entries.map((space, index) => {
         const key = roomKey(space)
         const title = roomTitle(space, rooms.titles.value)
+        const unread = spaces.unread.value.get(key) ?? 0
         const move = (toIndex: number) => {
           if (toIndex < 0 || toIndex >= order.length) return
           spaceOrder.move(key, toIndex, order)
@@ -144,7 +145,7 @@ export function SpaceList() {
                 focusAfterMove.current = key
               }}
               title={`${title} (Alt-${horizontal ? '←/→' : '↑/↓'} to move)`}
-              aria-label={title}
+              aria-label={unread > 0 ? `${title}, ${unread} unread` : title}
               aria-keyshortcuts={
                 horizontal
                   ? 'Alt+ArrowLeft Alt+ArrowRight'
@@ -156,6 +157,14 @@ export function SpaceList() {
                 room={space}
                 title={title}
               />
+              {unread > 0 && (
+                <span
+                  class="badge unread-count space-unread"
+                  aria-hidden="true"
+                >
+                  {unread > 99 ? '99+' : unread}
+                </span>
+              )}
             </button>
             {/* Drag-and-drop is undiscoverable and uneven on touch, so pointer
                 users get buttons too — but only on request, so the rail stays
