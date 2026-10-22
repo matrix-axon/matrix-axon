@@ -649,3 +649,51 @@ async fn invalid_formatting_is_400_and_skips_sender() {
     // Neither malformed request reached the sender.
     assert!(stub.calls().is_empty());
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn stickers_validate_and_forward_metadata_and_relations() {
+    let sender = Arc::new(StubSender::ok("$sticker"));
+    let app = app(store().await, sender.clone());
+    let account = Uuid::new_v4();
+    let uri = format!("/v1/accounts/{account}/rooms/!stickers:hs/send-sticker");
+    for info in [
+        json!({}),
+        json!({"w":278,"h":185,"mimetype":"image/png","size":129986,"is_animated":false}),
+    ] {
+        let (status, body) = send(
+            &app,
+            "POST",
+            &uri,
+            Some(json!({"body":"Mnt","url":"mxc://hs/sticker","info":info,"thread_root":"$root"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["event_id"], "$sticker");
+    }
+    assert_eq!(sender.calls().len(), 2);
+    let calls = sender.calls();
+    let Call::Sticker {
+        sticker,
+        thread_root,
+        ..
+    } = &calls[1]
+    else {
+        panic!("sticker call expected")
+    };
+    assert_eq!(sticker.info["w"], 278);
+    assert_eq!(thread_root.as_deref(), Some("$root"));
+    for request in [
+        json!({"body":" ","url":"mxc://hs/x"}),
+        json!({"body":"x","url":"https://tracker.test/x"}),
+        json!({"body":"x","url":"mxc://hs/x","info":{"w":0}}),
+        json!({"body":"x","url":"mxc://hs/x","info":{"h":999999}}),
+        json!({"body":"x","url":"mxc://hs/x","info":{"mimetype":"text/html"}}),
+    ] {
+        assert_eq!(
+            send(&app, "POST", &uri, Some(request)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(sender.calls().len(), 2);
+}

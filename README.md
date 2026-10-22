@@ -151,6 +151,8 @@ Homeserver(s)  →  Axon (single binary)  →  axon-web (alpha client)
 ```
 
 One Rust binary, one Postgres database, media cached to local disk.
+Personal and room image packs support emoji and sticker discovery; use the emoji-packs endpoint's `usage=sticker` mode for sticker-capable entries.
+The `send-sticker` endpoint sends a standard `m.sticker` event with optional reply or thread relations; see [custom emoji and stickers](docs/custom-emoji.md).
 The authenticated media download and thumbnail endpoints also resolve custom reaction images whose keys are `mxc://` URLs (MSC4027), without requiring an image pack definition.
 Known left or banned rooms cannot authorize reaction image downloads.
 Reaction media references must be structurally valid MXC URIs of at most 2,048 bytes; malformed and oversized keys do not authorize a fetch.

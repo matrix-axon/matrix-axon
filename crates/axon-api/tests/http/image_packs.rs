@@ -76,7 +76,7 @@ async fn emoji_packs_discovery_preview_isolation_and_removal() {
         "images": {
             "adam": {"body": "adam", "url": "mxc://example.org/adam", "usage": ["sticker", "emoticon"]},
             "allthethings": {"url": "mxc://example.org/allthethings"},
-            "iswydt": {"url": "mxc://example.org/iswydt", "info": {"mimetype": "text/html"}},
+            "iswydt": {"url": "mxc://example.org/iswydt", "info": {"mimetype": "image/png"}},
             "sticker": {"url": "mxc://example.org/sticker", "usage": ["sticker"]}
         }
     })).await;
@@ -129,7 +129,7 @@ async fn emoji_packs_discovery_preview_isolation_and_removal() {
     assert_eq!(packs[1]["event_type"], "m.room.image_pack");
     assert_eq!(packs[1]["images"][0]["shortcode"], "new");
     // None of these images has ever been sent as a reaction or attachment.
-    for id in ["adam", "allthethings", "iswydt", "new", "avatar"] {
+    for id in ["adam", "allthethings", "iswydt", "new", "avatar", "sticker"] {
         let path = format!("/v1/media/{}/example.org/{id}", a.account_id);
         for uri in [path.clone(), format!("{path}/thumbnail?width=32&height=32")] {
             let (status, headers, bytes) = get_media_bytes(&app, &uri, None).await;
@@ -140,7 +140,7 @@ async fn emoji_packs_discovery_preview_isolation_and_removal() {
         }
     }
     let calls = proxy.calls().len();
-    for id in ["old", "foreign", "sticker", "unknown"] {
+    for id in ["old", "foreign", "unknown"] {
         let path = format!("/v1/media/{}/example.org/{id}", a.account_id);
         assert_eq!(
             get_media_bytes(&app, &path, Some("*")).await.0,
@@ -354,6 +354,23 @@ async fn emoji_packs_mixed_sources_keep_pack_identity_and_usage() {
     assert_eq!(packs[1]["images"].as_array().unwrap().len(), 2);
     assert_eq!(packs[2]["images"].as_array().unwrap().len(), 1);
     assert_eq!(packs[2]["images"][0]["body"], "A wave");
+    let (status, stickers) = get(&app, &format!("{uri}?usage=sticker")).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<_> = stickers["data"]["packs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["images"].as_array().unwrap())
+        .map(|i| i["shortcode"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["wave", "both", "sticker", "hidden"]);
+    assert!(stickers["data"]["packs"][1]["images"][1]["sticker"]
+        .as_bool()
+        .unwrap());
+    assert_eq!(
+        get(&app, &format!("{uri}?usage=invalid")).await.0,
+        StatusCode::BAD_REQUEST
+    );
     // Every source can preview unused images, including GIFs, with safe MIME.
     for id in ["personal-wave", "legacy-wave", "stable-wave", "both"] {
         let path = format!("/v1/media/{}/example.org/{id}", account.account_id);
@@ -365,7 +382,7 @@ async fn emoji_packs_mixed_sources_keep_pack_identity_and_usage() {
         let path = format!("/v1/media/{}/example.org/{id}", account.account_id);
         assert_eq!(
             get_media_bytes(&app, &path, Some("*")).await.0,
-            StatusCode::NOT_FOUND
+            StatusCode::NOT_MODIFIED
         );
     }
     store.delete_account_row(account.account_id).await.unwrap();
@@ -489,8 +506,16 @@ async fn emoji_preview_continues_past_invalid_candidate_pages() {
     let room = "!pack-pages:localhost";
     joined(&store, account.account_id, &account.user_id, room).await;
     for i in 0..70 {
-        state(&store,account.account_id,room,"im.ponies.room_emotes",&format!("a{i:03}"),
-            json!({"pack":{"usage":["sticker"]},"images":{"wave":{"url":"mxc://example.org/paged"}}}),2).await;
+        state(
+            &store,
+            account.account_id,
+            room,
+            "im.ponies.room_emotes",
+            &format!("a{i:03}"),
+            json!({"images":{"bad\nname":{"url":"mxc://example.org/paged"}}}),
+            2,
+        )
+        .await;
     }
     state(
         &store,

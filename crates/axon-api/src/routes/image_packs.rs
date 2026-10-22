@@ -1,16 +1,32 @@
-//! Discovery for custom-reaction pickers, backed by current cached state.
+//! Discovery for custom reaction and sticker pickers, backed by cached state.
 
 use axon_core::image_pack::{parse_image_pack, MAX_ROOM_PACKS};
 use axon_store::Store;
 use axum::extract::State;
-use serde::Serialize;
-use utoipa::ToSchema;
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::extract::Path;
+use crate::dto::StickerInfoDto;
+use crate::extract::{Path, Query};
 use crate::response::{ApiError, ApiResponse};
 
-/// Current-room and personal emoticon packs, as known to Axon's sync cache.
+#[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImagePackUsage {
+    #[default]
+    Emoticon,
+    Sticker,
+}
+
+#[derive(Debug, Default, Deserialize, IntoParams)]
+pub struct ImagePackQuery {
+    /// Default: emoticon. Sticker mode includes sticker-only and mixed entries.
+    #[serde(default)]
+    pub usage: ImagePackUsage,
+}
+
+/// Current-room and personal image packs, as known to Axon's sync cache.
 /// Empty results do not prove absence upstream while initial sync is pending.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RoomEmojiPacksDto {
@@ -43,13 +59,17 @@ pub struct CustomEmojiDto {
     pub url: String,
     /// Optional plain-text description, distinct from the search shortcode.
     pub body: Option<String>,
+    pub emoticon: bool,
+    pub sticker: bool,
+    pub info: Option<StickerInfoDto>,
 }
 
 /// List custom emoji available from the current room and personal pack.
 /// Supports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal
 /// `im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with
 /// the same state key. Personal packs precede room packs; names are not merged.
-/// Sticker-only entries are excluded. Other-room subscriptions and canonical
+/// Sticker-only entries are excluded by default; `usage=sticker` selects
+/// sticker-capable images instead. Other-room subscriptions and canonical
 /// space inheritance are not included. Requires positive joined membership.
 /// This is a local cache read, not a homeserver request or an authoritative
 /// statement that no packs exist upstream. Re-read on picker open/reconnect.
@@ -60,6 +80,7 @@ pub struct CustomEmojiDto {
     get,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs",
     params(
+        ImagePackQuery,
         ("account_id" = Uuid, Path, description = "Axon account id"),
         ("room_id" = String, Path, description = "Matrix room id"),
     ),
@@ -74,6 +95,7 @@ pub struct CustomEmojiDto {
 pub async fn room_emoji_packs(
     State(store): State<Store>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
+    Query(query): Query<ImagePackQuery>,
 ) -> Result<ApiResponse<RoomEmojiPacksDto>, ApiError> {
     let rows = store
         .image_pack_snapshot(account_id, &room_id)
@@ -102,16 +124,28 @@ pub async fn room_emoji_packs(
             tracing::debug!(%account_id, %room_id, event_id = ?row.event_id, oversized = row.oversized, "omitted invalid or unavailable emoji pack");
             continue;
         };
-        let partial = pack.partial || pack.images.len() > remaining;
-        result.partial |= partial;
-        let images: Vec<_> = pack
+        let selected: Vec<_> = pack
             .images
+            .into_iter()
+            .filter(|image| match query.usage {
+                ImagePackUsage::Emoticon => image.emoticon,
+                ImagePackUsage::Sticker => image.sticker,
+            })
+            .collect();
+        let partial = pack.partial || selected.len() > remaining;
+        result.partial |= partial;
+        let images: Vec<_> = selected
             .into_iter()
             .take(remaining)
             .map(|image| CustomEmojiDto {
                 shortcode: image.shortcode,
                 url: image.url,
                 body: image.body,
+                emoticon: image.emoticon,
+                sticker: image.sticker,
+                info: image
+                    .info
+                    .and_then(|info| serde_json::from_value(info).ok()),
             })
             .collect();
         remaining -= images.len();

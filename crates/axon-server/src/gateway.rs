@@ -157,6 +157,21 @@ impl MessageSender for GatewayAdapter {
         .await
     }
 
+    async fn send_sticker(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        sticker: &axon_core::image_pack::Sticker,
+        relation: Relation<'_>,
+    ) -> Result<String, SendError> {
+        self.with_mutation_timeout(
+            "sticker send",
+            self.gateway
+                .send_sticker(account_id, room_id, sticker, relation),
+        )
+        .await
+    }
+
     async fn send_media(
         &self,
         account_id: Uuid,

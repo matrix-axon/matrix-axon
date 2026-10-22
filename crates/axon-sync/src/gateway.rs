@@ -846,6 +846,20 @@ fn message_relates_to(relation: Relation<'_>) -> Result<Option<Value>, GatewayEr
     })
 }
 
+fn sticker_content(
+    sticker: &axon_core::image_pack::Sticker,
+    relation: Relation<'_>,
+) -> Result<Value, GatewayError> {
+    if !sticker.validate() {
+        return Err(GatewayError::Invalid("invalid sticker".into()));
+    }
+    let mut content = json!({"body":sticker.body,"url":sticker.url,"info":axon_core::image_pack::sticker_info(&sticker.info).expect("validated info")});
+    if let Some(relation) = message_relates_to(relation)? {
+        content["m.relates_to"] = relation;
+    }
+    Ok(content)
+}
+
 /// Per-`(account_id, room_id)` lock guarding [`SdkGateway::set_power_levels`]'s
 /// read-modify-send sequence (ADR 0068, M19e review). Without this, two
 /// concurrent writers to the same room's power levels each read the same
@@ -994,6 +1008,23 @@ impl SdkGateway {
             .await
             .map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
+    }
+
+    /// Send a sticker through the SDK's normal encryption-aware event path.
+    pub async fn send_sticker(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        sticker: &axon_core::image_pack::Sticker,
+        relation: Relation<'_>,
+    ) -> Result<String, GatewayError> {
+        let content = sticker_content(sticker, relation)?;
+        let room = self.room(account_id, room_id).await?;
+        let response = room
+            .send_raw("m.sticker", content)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(response.response.event_id.to_string())
     }
 
     /// Send a staged media attachment as an `m.image` or `m.file`.
@@ -1954,7 +1985,8 @@ mod tests {
         effective_mime, is_room_gone_answer, leave_fallback_is_unconfirmed, media_message_type,
         merge_power_level_changes, message_relates_to, parse_room_id_or_alias, parse_server_name,
         parse_server_names, parse_tag_name, parse_user_id, persist_local_m_tag,
-        replacement_content, thread_member_root, validate_tag_order, TagWrite, MAX_TAG_NAME_BYTES,
+        replacement_content, sticker_content, thread_member_root, validate_tag_order, TagWrite,
+        MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
 
@@ -2748,6 +2780,38 @@ mod tests {
                 "expected {expected:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn sticker_content_retains_metadata_and_thread_semantics() {
+        let sticker = axon_core::image_pack::Sticker {
+            body: "A wave".into(),
+            url: "mxc://example.org/wave".into(),
+            info: json!({"w":256,"h":128,"mimetype":"image/png","is_animated":false}),
+        };
+        let content = sticker_content(
+            &sticker,
+            Relation {
+                reply_to: None,
+                thread_root: Some("$root"),
+            },
+        )
+        .unwrap();
+        assert_eq!(content["url"], sticker.url);
+        assert_eq!(content["info"], sticker.info);
+        assert_eq!(
+            content["m.relates_to"],
+            json!({"rel_type":"m.thread","event_id":"$root"})
+        );
+        assert!(content.get("msgtype").is_none());
+        assert!(sticker_content(
+            &sticker,
+            Relation {
+                reply_to: None,
+                thread_root: Some("bad")
+            }
+        )
+        .is_err());
     }
 
     #[test]

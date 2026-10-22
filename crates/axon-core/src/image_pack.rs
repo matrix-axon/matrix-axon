@@ -1,5 +1,5 @@
 //! Bounded, SDK-independent decoding of Matrix image packs.
-//! Only images usable as emoticons are exposed to reaction pickers.
+//! Emoji and sticker usage is retained independently for each image.
 
 use serde_json::Value;
 
@@ -28,6 +28,58 @@ pub struct PackImage {
     pub shortcode: String,
     pub url: String,
     pub body: Option<String>,
+    pub emoticon: bool,
+    pub sticker: bool,
+    pub info: Option<Value>,
+}
+
+/// A standalone sticker send. `info` is a bounded ImageInfo object, not
+/// arbitrary caller-controlled event content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sticker {
+    pub body: String,
+    pub url: String,
+    pub info: Value,
+}
+
+impl Sticker {
+    pub fn validate(&self) -> bool {
+        self.body.len() <= 1024
+            && !self.body.trim().is_empty()
+            && !self.body.chars().any(char::is_control)
+            && crate::media::parse_mxc(&self.url).is_some()
+            && sticker_info(&self.info).is_some()
+    }
+}
+
+/// Project only bounded Matrix ImageInfo fields. No remote thumbnail URLs,
+/// encryption descriptors, or arbitrary extensions are copied into a send.
+pub fn sticker_info(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut info = serde_json::Map::new();
+    for (key, limit) in [("w", 16384), ("h", 16384), ("size", 104857600)] {
+        if let Some(value) = source.get(key) {
+            let number = value.as_u64()?;
+            if number > limit || (key != "size" && number == 0) {
+                return None;
+            }
+            info.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(value) = source.get("mimetype") {
+        if !matches!(
+            value.as_str()?,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) {
+            return None;
+        }
+        info.insert("mimetype".into(), value.clone());
+    }
+    if let Some(value) = source.get("is_animated") {
+        value.as_bool()?;
+        info.insert("is_animated".into(), value.clone());
+    }
+    Some(Value::Object(info))
 }
 
 /// Same display-name bounds as reaction aggregates; names remain untrusted text.
@@ -49,12 +101,13 @@ fn mxc(value: Option<&Value>) -> Option<String> {
     crate::media::parse_mxc(s).map(|_| s.to_owned())
 }
 
-fn emoticon_usage(value: Option<&Value>) -> Option<bool> {
+fn image_usage(value: Option<&Value>) -> Option<(bool, bool)> {
     match value {
-        None => Some(true),
-        Some(Value::Array(items)) if items.iter().all(Value::is_string) => {
-            Some(items.is_empty() || items.iter().any(|v| v.as_str() == Some("emoticon")))
-        }
+        None => Some((true, true)),
+        Some(Value::Array(items)) if items.iter().all(Value::is_string) => Some((
+            items.is_empty() || items.iter().any(|v| v.as_str() == Some("emoticon")),
+            items.is_empty() || items.iter().any(|v| v.as_str() == Some("sticker")),
+        )),
         _ => None,
     }
 }
@@ -89,14 +142,14 @@ pub fn parse_image_pack(content: &Value) -> Option<ImagePack> {
             pack.partial = true;
             continue;
         };
-        match emoticon_usage(image.get("usage").or(pack_usage)) {
-            Some(false) => continue,
+        let (emoticon, sticker) = match image_usage(image.get("usage").or(pack_usage)) {
+            Some((false, false)) => continue,
+            Some(usage) => usage,
             None => {
                 pack.partial = true;
                 continue;
             }
-            Some(true) => {}
-        }
+        };
         let Some(url) = mxc(image.get("url")) else {
             pack.partial = true;
             continue;
@@ -107,10 +160,17 @@ pub fn parse_image_pack(content: &Value) -> Option<ImagePack> {
             pack.partial = true;
             continue;
         }
+        let info = image.get("info").and_then(sticker_info);
+        if image.get("info").is_some() && info.is_none() {
+            pack.partial = true;
+        }
         pack.images.push(PackImage {
             shortcode: name.to_owned(),
             url,
             body: text(image.get("body"), 1024),
+            emoticon,
+            sticker,
+            info,
         });
     }
     Some(pack)
@@ -120,6 +180,32 @@ pub fn parse_image_pack(content: &Value) -> Option<ImagePack> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sticker_metadata_is_optional_bounded_and_projected() {
+        assert_eq!(
+            sticker_info(&json!({"w":278,"h":185,"mimetype":"image/png","unknown":"ignored"})),
+            Some(json!({"w":278,"h":185,"mimetype":"image/png"}))
+        );
+        for invalid in [
+            json!({"w":0}),
+            json!({"h":16385}),
+            json!({"size":104857601}),
+            json!({"mimetype":"text/html"}),
+            json!({"is_animated":"yes"}),
+        ] {
+            assert!(sticker_info(&invalid).is_none());
+        }
+        let pack = parse_image_pack(&json!({"images":{"wave":{"url":"mxc://hs/wave"}}})).unwrap();
+        assert!(pack.images[0].emoticon && pack.images[0].sticker);
+        assert!(pack.images[0].info.is_none());
+        let sticker = Sticker {
+            body: "wave".into(),
+            url: "mxc://hs/wave".into(),
+            info: json!({}),
+        };
+        assert!(sticker.validate());
+    }
 
     #[test]
     fn parses_personal_pack_shape_seen_in_production() {
@@ -155,8 +241,12 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!(pack.images.len(), 1);
+        assert_eq!(pack.images.len(), 2);
         assert_eq!(pack.images[0].shortcode, "emote");
+        assert!(pack.images[0].emoticon);
+        assert!(!pack.images[0].sticker);
+        assert!(!pack.images[1].emoticon);
+        assert!(pack.images[1].sticker);
         assert!(pack.partial);
         assert!(parse_image_pack(&json!({"images": []})).is_none());
     }
