@@ -75,12 +75,10 @@ pub async fn room_emoji_packs(
     State(store): State<Store>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
 ) -> Result<ApiResponse<RoomEmojiPacksDto>, ApiError> {
-    if !store.image_pack_room_joined(account_id, &room_id).await? {
-        return Err(ApiError::not_found("joined room not found"));
-    }
     let rows = store
-        .image_pack_sources(account_id, Some(&room_id), None)
-        .await?;
+        .image_pack_snapshot(account_id, &room_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("joined room not found"))?;
     let mut result = RoomEmojiPacksDto {
         packs: Vec::new(),
         partial: false,
@@ -88,6 +86,10 @@ pub async fn room_emoji_packs(
     let mut room_packs = 0;
     let mut remaining = 1000;
     for row in rows {
+        if remaining == 0 {
+            result.partial = true;
+            break;
+        }
         if row.room_id.is_some() {
             room_packs += 1;
             if room_packs > MAX_ROOM_PACKS {

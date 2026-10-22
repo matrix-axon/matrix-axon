@@ -62,7 +62,14 @@ fn emoticon_usage(value: Option<&Value>) -> Option<bool> {
 /// The caller must enforce MAX_PACK_BYTES before transferring/decoding JSON.
 /// Unknown fields are discarded. Invalid images cannot authorize media fetches.
 pub fn parse_image_pack(content: &Value) -> Option<ImagePack> {
-    let images = content.get("images")?.as_object()?;
+    // An empty object is the protocol's normal way to clear a pack.
+    let empty = serde_json::Map::new();
+    let images = if content.as_object().is_some_and(|object| object.is_empty()) {
+        &empty
+    } else {
+        content.get("images")?.as_object()?
+    };
+    let mut names = std::collections::HashSet::new();
     let metadata = content.get("pack");
     let pack_usage = metadata.and_then(|p| p.get("usage"));
     let mut pack = ImagePack {
@@ -94,6 +101,12 @@ pub fn parse_image_pack(content: &Value) -> Option<ImagePack> {
             pack.partial = true;
             continue;
         };
+        // Keep the first usable image in deterministic source-key order.
+        // Never return ambiguous normalized keys within one pack.
+        if !names.insert(name) {
+            pack.partial = true;
+            continue;
+        }
         pack.images.push(PackImage {
             shortcode: name.to_owned(),
             url,
@@ -164,5 +177,22 @@ mod tests {
         let pack = parse_image_pack(&json!({"images": images})).unwrap();
         assert!(pack.partial);
         assert_eq!(pack.images.len(), MAX_PACK_IMAGES);
+    }
+
+    #[test]
+    fn clears_and_normalized_name_collisions() {
+        let cleared = parse_image_pack(&json!({})).unwrap();
+        assert!(cleared.images.is_empty());
+        assert!(!cleared.partial);
+        assert!(parse_image_pack(&json!({"pack": {}})).is_none());
+        let pack = parse_image_pack(&json!({"images": {
+            "wave": {"url": "mxc://example.org/first"},
+            "\u{a0}wave": {"url": "mxc://example.org/second"}
+        }}))
+        .unwrap();
+        assert!(pack.partial);
+        assert_eq!(pack.images.len(), 1);
+        assert_eq!(pack.images[0].shortcode, "wave");
+        assert_eq!(pack.images[0].url, "mxc://example.org/first");
     }
 }
