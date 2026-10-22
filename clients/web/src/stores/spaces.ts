@@ -17,7 +17,18 @@ export type SpaceChildDto = components['schemas']['SpaceChildDto']
 
 export interface SpacesStore {
   selected: Signal<string | null>
+  /**
+   * Session-only account narrowing shared by the rail and the room list:
+   * `'all'` or an account id. The rail hides spaces the account has no rooms in.
+   */
+  accountFilter: Signal<string>
   visible: ReadonlySignal<readonly RoomDto[]>
+  /**
+   * Total unread notifications per space key, summed over the joined direct
+   * child rooms of the space's own account. Spaces with nothing unread are
+   * absent.
+   */
+  unread: ReadonlySignal<ReadonlyMap<string, number>>
   children: ReadonlySignal<ReadonlyMap<string, readonly SpaceChildDto[]>>
   loading: ReadonlySignal<ReadonlySet<string>>
   errors: ReadonlySignal<ReadonlyMap<string, string>>
@@ -60,6 +71,7 @@ export function createSpacesStore(
 ): SpacesStore {
   const selected = signal<string | null>(null)
   const reordering = signal(false)
+  const accountFilter = signal('all')
   const children = signal<ReadonlyMap<string, readonly SpaceChildDto[]>>(
     new Map(),
   )
@@ -79,14 +91,20 @@ export function createSpacesStore(
   // Only a successful projection with no direct joined child room confirms emptiness.
   // Filtering and room sort do not participate in this decision.
   const visible = computed(() => {
+    // The account filter applies even when membership is unknown.
+    const scoped = joinedSpaces().filter(
+      (space) =>
+        accountFilter.value === 'all' ||
+        space.account_id === accountFilter.value,
+    )
     // Cached/unconfirmed room summaries cannot establish joined membership.
-    if (rooms.stale.value || rooms.error.value !== null) return joinedSpaces()
+    if (rooms.stale.value || rooms.error.value !== null) return scoped
     const joined = new Set(
       rooms.rooms.value
         .filter((room) => room.room_type !== 'm.space')
         .map(roomKey),
     )
-    return joinedSpaces().filter((space) => {
+    return scoped.filter((space) => {
       const key = roomKey(space)
       const members = children.value.get(key)
       return (
@@ -99,6 +117,28 @@ export function createSpacesStore(
         )
       )
     })
+  })
+
+  const unread = computed(() => {
+    const totals = new Map<string, number>()
+    const joined = new Set(
+      rooms.rooms.value
+        .filter((room) => room.room_type !== 'm.space')
+        .map(roomKey),
+    )
+    for (const space of joinedSpaces()) {
+      const key = roomKey(space)
+      let total = 0
+      for (const child of children.value.get(key) ?? []) {
+        const childKey = roomKey({
+          account_id: space.account_id,
+          room_id: child.room_id,
+        })
+        if (joined.has(childKey)) total += rooms.unreadCount(childKey)
+      }
+      if (total > 0) totals.set(key, total)
+    }
+    return totals
   })
 
   const runNext = () => {
@@ -209,5 +249,15 @@ export function createSpacesStore(
     for (const space of untracked(joinedSpaces)) refresh(space)
   })
 
-  return { selected, visible, children, loading, errors, reordering, refresh }
+  return {
+    selected,
+    accountFilter,
+    visible,
+    unread,
+    children,
+    loading,
+    errors,
+    reordering,
+    refresh,
+  }
 }
