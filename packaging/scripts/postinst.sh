@@ -67,6 +67,18 @@ pg_scalar() {
 	su -s /bin/sh postgres -c "psql -Atqc \"$1\""
 }
 
+# Encoding name of database $1; empty when it does not exist.
+database_encoding() {
+	pg_scalar "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = '$1'"
+}
+
+# True when database `axon` exists and is not UTF8, which axon-server refuses
+# to start on. A failed probe is not treated as non-UTF8.
+axon_database_not_utf8() {
+	AXON_DB_ENCODING=$(database_encoding axon) || return 1
+	[ -n "$AXON_DB_ENCODING" ] && [ "$AXON_DB_ENCODING" != "UTF8" ]
+}
+
 provision_local_postgres() {
 	# Role + database named `axon` so peer auth matches User=axon.
 	# pgcrypto must be created as a superuser (baseline migration).
@@ -74,7 +86,14 @@ provision_local_postgres() {
 		su -s /bin/sh postgres -c "psql -v ON_ERROR_STOP=1 -c 'CREATE ROLE axon LOGIN'" || return 1
 	fi
 	if [ "$(pg_scalar "SELECT 1 FROM pg_database WHERE datname = 'axon'")" != "1" ]; then
-		su -s /bin/sh postgres -c "createdb -O axon axon" || return 1
+		# Axon requires UTF8. createdb copies template1, which is SQL_ASCII on a
+		# cluster initialized under the C/POSIX locale. The C locale accepts
+		# UTF8 on any cluster, and Axon's queries do not depend on the locale.
+		if [ "$(database_encoding template1)" = "UTF8" ]; then
+			su -s /bin/sh postgres -c "createdb -O axon axon" || return 1
+		else
+			su -s /bin/sh postgres -c "createdb -E UTF8 -T template0 --locale=C -O axon axon" || return 1
+		fi
 	fi
 	if ! su -s /bin/sh postgres -c "psql -v ON_ERROR_STOP=1 -d axon -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'"; then
 		cat >&2 <<'EOF'
@@ -154,6 +173,142 @@ SQL
 		return 2
 	}
 	return 0
+}
+
+# $1 = why it was not converted; $2 = the command that resumes setup once the
+# data has moved.
+print_non_utf8_database() {
+	reason=$1
+	# convert_axon_database has usually stopped the unit by now, and setup
+	# returns without starting it, so say so rather than leave it implied.
+	if is_systemd; then
+		case $(systemctl show -p ActiveState --value axon-server.service 2>/dev/null) in
+		inactive | failed)
+			reason="$reason
+axon-server is stopped now and cannot run until these steps are done."
+			;;
+		esac
+	fi
+	cat >&2 <<EOF
+
+axon-server's Postgres database 'axon' uses the $AXON_DB_ENCODING encoding.
+Axon requires UTF8 and will not start on it.
+$reason
+
+To copy the data into a new UTF8 database and swap it in under the same name:
+
+  sudo systemctl stop axon-server
+  sudo -u postgres createdb -E UTF8 -T template0 --locale=C -O axon axon_utf8
+  sudo -u postgres bash -o pipefail -c 'pg_dump --encoding=UTF8 axon | psql -q -v ON_ERROR_STOP=1 -d axon_utf8' &&
+    sudo -u postgres psql -c 'ALTER DATABASE axon RENAME TO axon_old; ALTER DATABASE axon_utf8 RENAME TO axon'
+  $2
+
+The rename runs only if the copy succeeded. If the copy reports an invalid
+byte sequence, the database holds bytes that are not UTF-8: drop axon_utf8
+and report it, since Axon itself only writes UTF-8.
+
+Once Axon works, drop the old copy:
+
+  sudo -u postgres dropdb axon_old
+EOF
+}
+
+# Bytes free on the filesystem holding the cluster's data directory.
+cluster_free_bytes() {
+	dir=$(pg_scalar "SHOW data_directory") || return 1
+	kb=$(df -Pk "$dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
+	[ -n "$kb" ] || return 1
+	echo $((kb * 1024))
+}
+
+# Copy database `axon` into a new UTF8 database and swap it in under the same
+# name, keeping the original as `axon_old`. The original is only renamed, and
+# only once the copy has succeeded. Stops the unit first and converts only once
+# nothing is connected, since rows written after the dump's snapshot would be
+# missing from the copy. $1 = the command that resumes setup, for the manual
+# steps printed when this returns 1 without converting.
+convert_axon_database() {
+	resume=$1
+	if ! is_systemd; then
+		print_non_utf8_database "It was not converted automatically because without systemd axon-server cannot be confirmed stopped." "$resume"
+		return 1
+	fi
+	if ! systemctl stop axon-server.service >/dev/null 2>&1; then
+		print_non_utf8_database "It was not converted automatically because stopping axon-server failed." "$resume"
+		return 1
+	fi
+	state=$(systemctl show -p ActiveState --value axon-server.service 2>/dev/null) || state=unknown
+	case $state in
+	inactive | failed) ;;
+	*)
+		print_non_utf8_database "It was not converted automatically because axon-server is still ${state:-unknown} after stopping it." "$resume"
+		return 1
+		;;
+	esac
+	# Also catches a hand-started server, a CLI command, or an open psql. A
+	# client that connects after this and stays connected makes the rename
+	# below fail. Autovacuum workers are not clients, and the rename evicts them.
+	sessions=$(pg_scalar "SELECT count(*) FROM pg_stat_activity WHERE datname = 'axon' AND backend_type = 'client backend'") || sessions=
+	if [ "$sessions" != "0" ]; then
+		print_non_utf8_database "It was not converted automatically because client sessions (${sessions:-count unknown}) are still connected to it." "$resume"
+		return 1
+	fi
+	for name in axon_utf8 axon_old; do
+		if [ "$(pg_scalar "SELECT 1 FROM pg_database WHERE datname = '$name'")" = "1" ]; then
+			print_non_utf8_database "It was not converted automatically because a database named '$name' already exists." "$resume"
+			return 1
+		fi
+	done
+	# df measures the data directory, which holds only the default tablespace.
+	if [ "$(pg_scalar "SELECT t.spcname FROM pg_database d JOIN pg_tablespace t ON t.oid = d.dattablespace WHERE d.datname = 'axon'")" != "pg_default" ]; then
+		print_non_utf8_database "It was not converted automatically because it is not in the default tablespace." "$resume"
+		return 1
+	fi
+	size=$(pg_scalar "SELECT pg_database_size('axon')") || size=
+	free=$(cluster_free_bytes) || free=
+	if [ -z "$size" ] || [ -z "$free" ]; then
+		print_non_utf8_database "It was not converted automatically because the free disk space could not be measured." "$resume"
+		return 1
+	fi
+	# A restored copy is no larger than the original. The margin covers index
+	# builds and the WAL the restore writes before checkpoints recycle it
+	# (max_wal_size defaults to 1 GB).
+	need=$((size + size / 4 + 1073741824))
+	if [ "$free" -lt "$need" ]; then
+		print_non_utf8_database "It was not converted automatically: the copy needs about $((need / 1048576)) MB free next to the cluster's data directory, and $((free / 1048576)) MB is free." "$resume"
+		return 1
+	fi
+	if ! dump_failed=$(mktemp); then
+		print_non_utf8_database "It was not converted automatically because a temporary file could not be created." "$resume"
+		return 1
+	fi
+	echo "Copying the $AXON_DB_ENCODING database 'axon' ($((size / 1048576)) MB) into a new UTF8 database. This can take several minutes." >&2
+	if ! su -s /bin/sh postgres -c "createdb -E UTF8 -T template0 --locale=C -O axon axon_utf8"; then
+		rm -f "$dump_failed"
+		print_non_utf8_database "It was not converted automatically because creating 'axon_utf8' failed." "$resume"
+		return 1
+	fi
+	# --encoding=UTF8 makes the server reject bytes that are not UTF-8; a
+	# SQL_ASCII dump would load them into the UTF8 database unchecked. POSIX
+	# sh has no pipefail, so pg_dump reports its own failure in a file.
+	if { su -s /bin/sh postgres -c "pg_dump --encoding=UTF8 axon" || echo failed >"$dump_failed"; } |
+		su -s /bin/sh postgres -c "psql -X -q -v ON_ERROR_STOP=1 -d axon_utf8" >/dev/null &&
+		[ ! -s "$dump_failed" ] &&
+		su -s /bin/sh postgres -c "psql -X -q -v ON_ERROR_STOP=1 -c 'ALTER DATABASE axon RENAME TO axon_old; ALTER DATABASE axon_utf8 RENAME TO axon'"; then
+		rm -f "$dump_failed"
+		AXON_DB_ENCODING=UTF8
+		cat >&2 <<'EOF'
+Database 'axon' is now UTF8. The original is kept as 'axon_old'; once Axon
+works, drop it with:
+
+  sudo -u postgres dropdb axon_old
+EOF
+		return 0
+	fi
+	rm -f "$dump_failed"
+	su -s /bin/sh postgres -c "dropdb --if-exists axon_utf8" || true
+	print_non_utf8_database "Copying it into a UTF8 database failed (see the errors above), so it was left unchanged." "$resume"
+	return 1
 }
 
 print_leftover_database() {
@@ -579,6 +734,9 @@ configure() {
 
 	if [ -f "$CONFIG" ]; then
 		if config_uses_local_socket && local_postgres_ready; then
+			if axon_database_not_utf8; then
+				convert_axon_database "sudo systemctl start axon-server" || return 0
+			fi
 			store_key_check && sk=0 || sk=$?
 			if [ "$sk" = 1 ]; then
 				stop_unit
@@ -607,6 +765,10 @@ configure() {
 
 	if ! provision_local_postgres; then
 		return 0
+	fi
+	# A database left by an earlier install is reused, so it may predate UTF8 creation.
+	if axon_database_not_utf8; then
+		convert_axon_database "sudo dpkg-reconfigure axon-server    # RPM: sudo dnf reinstall axon-server" || return 0
 	fi
 	if ! peer_connects; then
 		print_peer_failed

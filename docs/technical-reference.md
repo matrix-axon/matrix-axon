@@ -41,6 +41,30 @@ Media is fetched on client request and uses the existing per-object limit and gl
 The reaction index is built transactionally during startup, before this instance starts sync or serves requests; plan a maintenance restart for a large event store.
 Displaying these images in Axon's reference clients is separate client work.
 
+## Database encoding
+
+Axon's database must use the `UTF8` encoding, and the server refuses to start on any other.
+The Docker Compose stack, the Debian and RPM packages, and the Homebrew caveats all create a `UTF8` database.
+A plain `createdb` copies the encoding of the cluster, and `initdb` under a `C` or `POSIX` locale gives `SQL_ASCII`, which Axon cannot use.
+Check with `psql -d axon -c 'SHOW server_encoding'`.
+
+To move an existing database, stop `axon-server`, copy the data into a new `UTF8` database, and swap it in under the old name, running each command as a PostgreSQL superuser:
+
+```sh
+createdb -E UTF8 -T template0 --locale=C -O axon axon_utf8
+bash -o pipefail -c 'pg_dump --encoding=UTF8 axon | psql -q -v ON_ERROR_STOP=1 -d axon_utf8' &&
+  psql -c 'ALTER DATABASE axon RENAME TO axon_old; ALTER DATABASE axon_utf8 RENAME TO axon'
+```
+
+Start the server, and once it works, `dropdb axon_old`.
+The rename runs only if the copy succeeded.
+`--encoding=UTF8` makes PostgreSQL check every byte as it dumps; a dump in the old encoding would load bytes that are not UTF-8 into the new database unchecked.
+If the copy reports an invalid byte sequence, drop `axon_utf8` and open an issue, since Axon itself only writes UTF-8.
+The pipe writes no dump file, which would hold your decrypted message history.
+The `C` locale accepts `UTF8` on any cluster, and Axon's queries do not depend on the locale.
+The copy carries everything inside the database, but not what is set on the database itself: `ALTER DATABASE axon SET` and `ALTER ROLE ... IN DATABASE axon SET` parameters, grants on the database, and its comment.
+None of the install methods set these; if you added any by hand, `psql -c '\drds'` and `psql -c '\l+ axon_old'` list them after the swap, to re-apply on `axon`.
+
 ## Database deadlines
 
 Every server database connection has PostgreSQL statement and lock deadlines, including connections replaced after a request is canceled.
