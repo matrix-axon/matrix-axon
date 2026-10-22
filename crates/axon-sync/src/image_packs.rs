@@ -80,12 +80,17 @@ pub(crate) async fn run(client: Client, ctx: PersistContext, cancel: Cancellatio
         let client = client.clone();
         async move {
             for (room_id, room) in response.rooms {
+                let mut projection_attempts = 0;
+                let mut malformed_events = 0;
+                let mut ignored_events = 0;
                 for raw in room.required_state {
                     let Ok(event) = raw.deserialize() else {
+                        malformed_events += 1;
                         continue;
                     };
                     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw.json().get())
                     else {
+                        malformed_events += 1;
                         continue;
                     };
                     if !value
@@ -102,14 +107,21 @@ pub(crate) async fn run(client: Client, ctx: PersistContext, cancel: Cancellatio
                             )
                         })
                     {
+                        ignored_events += 1;
                         continue;
                     }
+                    projection_attempts += 1;
                     persist_room_state_value(event, &value, &room_id, &client, &ctx).await;
+                }
+                if projection_attempts + malformed_events + ignored_events > 0 {
+                    tracing::debug!(%account_id, %room_id, projection_attempts, malformed_events,
+                        ignored_events, "processed image pack state batch");
                 }
             }
         }
     })
     .await;
+    tracing::debug!(%account_id, "image pack sync stopped");
 }
 
 async fn transport<F, Fut>(
@@ -121,38 +133,75 @@ async fn transport<F, Fut>(
     F: FnMut(v5::Response) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    tracing::debug!(%account_id, "image pack sync started");
     let mut pos = None;
     let mut range_end = 99u32;
     let mut backoff = Duration::from_secs(2);
     loop {
+        let started = std::time::Instant::now();
+        let initial = pos.is_none();
         let result = tokio::select! {
             _ = cancel.cancelled() => return,
             result = tokio::time::timeout(REQUEST_TIMEOUT, poll(&client, request(pos.clone(), range_end))) => result,
         };
         let delay = match result {
             Ok(Ok(response)) => {
+                let request_elapsed_ms = started.elapsed().as_millis() as u64;
+                let room_count = response.rooms.len();
+                let state_event_count: usize = response
+                    .rooms
+                    .values()
+                    .map(|room| room.required_state.len())
+                    .sum();
+                let previous_range_end = range_end;
+                let listed_room_count = response
+                    .lists
+                    .get("packs")
+                    .map(|list| u64::from(list.count));
                 pos = Some(response.pos.clone());
                 if let Some(list) = response.lists.get("packs") {
                     let count = u64::from(list.count).min(u64::from(u32::MAX)) as u32;
                     range_end = range_end.saturating_add(100).min(count.saturating_sub(1));
                 }
+                let consume_started = std::time::Instant::now();
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = consume(response) => {},
+                }
+                let recovered = backoff > Duration::from_secs(2);
+                if initial || recovered || state_event_count > 0 || range_end != previous_range_end
+                {
+                    tracing::debug!(%account_id, initial, recovered, room_count, state_event_count,
+                        listed_room_count, requested_range_end = previous_range_end, next_range_end = range_end,
+                        request_elapsed_ms, processing_elapsed_ms = consume_started.elapsed().as_millis() as u64,
+                        "image pack sync progressed");
                 }
                 backoff = Duration::from_secs(2);
                 // A server returning immediately cannot create a busy poll loop.
                 Duration::from_secs(1)
             }
             failure => {
-                if matches!(&failure, Ok(Err(error)) if error.client_api_error_kind() == Some(&matrix_sdk::ruma::api::error::ErrorKind::UnknownPos))
-                {
+                let position_reset = matches!(&failure, Ok(Err(error)) if error.client_api_error_kind() == Some(&matrix_sdk::ruma::api::error::ErrorKind::UnknownPos));
+                let http_status = match &failure {
+                    Ok(Err(error)) => error
+                        .as_client_api_error()
+                        .map(|error| error.status_code.as_u16()),
+                    _ => None,
+                };
+                let failure_kind = match &failure {
+                    Err(_) => "outer_timeout",
+                    Ok(Err(_)) if position_reset => "unknown_position",
+                    _ => "request_error",
+                };
+                if position_reset {
                     pos = None;
                     range_end = 99;
                 }
                 // Keep the position through transient failures. Restarting a
                 // connection on every timeout would repeatedly rehydrate rooms.
-                tracing::warn!(%account_id, retry_secs = backoff.as_secs(), "image pack sync interrupted; retrying");
+                tracing::warn!(%account_id, failure_kind, http_status, position_reset,
+                    request_elapsed_ms = started.elapsed().as_millis() as u64,
+                    retry_secs = backoff.as_secs(), "image pack sync interrupted; retrying");
                 let delay = backoff;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
                 delay

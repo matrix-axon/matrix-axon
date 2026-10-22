@@ -94,7 +94,8 @@ Transient failures retain the sync position; only an unknown-position response r
 ADR 0124 records the transport decision and its relationship to the proposed ADR 0122 load gate.
 The connection starts fresh after restart, so existing packs hydrate without a manual re-sync or historical-event backfill.
 Personal pack updates use the existing generic account-data sync path.
-Structured sync diagnostics are available through the normal tracing configuration under `axon_sync::image_packs`; no separate developer-mode switch is required.
+Structured sync diagnostics are available through the normal tracing configuration; no separate developer-mode switch is required.
+See the targeted DEBUG configuration below.
 
 Picker images can be fetched through the existing authenticated original and thumbnail media routes before they have ever been used as reactions.
 Current account-scoped emoji and sticker packs authorize these previews; removed or redacted room packs, departed rooms, invalid entries, and another account's packs do not.
@@ -142,3 +143,38 @@ Malformed pack metadata is omitted and marks its pack partial, while a usable im
 Invalid send metadata returns 400 before calling the gateway.
 Sticker-only images authorize previews under the same account, membership, redaction, and resource limits as emoji images.
 Received stickers use the existing generic timeline ingestion and attachment media authorization paths.
+
+## Troubleshooting discovery and inheritance
+
+Temporarily add these directives to the server's normal log filter:
+
+```text
+axon_store::image_packs=debug,axon_api::routes::image_packs=debug,axon_sync::image_packs=debug
+```
+
+Open the emoji or sticker picker in the affected room, then find `image pack inheritance stopped` using its `account_id` and `room_id`.
+The log records the terminal `stop_room_id`, ancestor count, and aggregate parent-link evidence from the same database snapshot as discovery.
+Its `stop_reason` distinguishes:
+
+- `no_parent_link`: the terminal room has no cached `m.space.parent` event.
+- `no_canonical_parent`: parent events exist, but none declares boolean `canonical: true`.
+- `invalid_parent_link`: canonical claims are redacted or lack a usable nonempty `via` list.
+- `parent_not_joined`: usable canonical claims exist, but their parents are not positively joined locally.
+- `parent_not_space`: joined canonical parents lack cached creation state identifying them as spaces.
+- `unverifiable_parent`: a joined canonical space has neither a usable reciprocal child link nor locally verifiable sender permission.
+- `cycle` or `depth_limit`: traversal reached its existing safety bounds, also reported by the response's `partial` flag.
+
+A normal successful chain also ends with a reason, usually `no_parent_link` at the outermost space.
+Check `ancestor_count` and `stop_room_id` before interpreting the reason as a problem with the original room.
+When multiple claims fail at different stages, the reason identifies the furthest stage reached by any candidate; evidence counts expose the earlier exclusions.
+Additional evidence queries run only while the store DEBUG diagnostic is enabled, and do not change discovery results.
+
+`selected image pack` identifies each returned source room/event, selected image count, images filtered by emoji/sticker usage, and partial content.
+`image pack discovery completed` records fetched source count, returned pack/image counts, invalid source count, usage-filtered image count, partial status, and total elapsed milliseconds.
+These records help distinguish missing inheritance, usage filtering, malformed packs, and response limits.
+
+Sync DEBUG records identify worker startup/shutdown, per-room projection attempts and malformed/ignored event counts, and hydration/update/recovery progress with room/state counts, requested/next room ranges, and request/processing durations.
+Unchanged successful polls do not emit progress records.
+Retry warnings include the failure category, Matrix HTTP status when available, request duration, retry delay, and whether an unknown position reset the connection.
+Projection attempts are not success counts: persistence failures retain the shared state-ingestion warning with account, room, and event type.
+Logs do not include pack names, shortcodes, image URLs, event bodies, access tokens, or opaque sync positions.

@@ -98,6 +98,7 @@ pub async fn room_emoji_packs(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Query(query): Query<ImagePackQuery>,
 ) -> Result<ApiResponse<RoomEmojiPacksDto>, ApiError> {
+    let started = std::time::Instant::now();
     let snapshot = store
         .image_pack_snapshot(account_id, &room_id)
         .await?
@@ -109,6 +110,9 @@ pub async fn room_emoji_packs(
         packs: Vec::new(),
         partial: snapshot.partial,
     };
+    let source_count = snapshot.rows.len();
+    let mut invalid_packs = 0;
+    let mut filtered_images = 0;
     let mut room_packs = 0;
     let mut remaining = 1000;
     for row in snapshot.rows {
@@ -125,9 +129,12 @@ pub async fn room_emoji_packs(
         }
         let Some(pack) = row.content.as_ref().and_then(parse_image_pack) else {
             result.partial = true;
-            tracing::debug!(%account_id, %room_id, event_id = ?row.event_id, oversized = row.oversized, "omitted invalid or unavailable emoji pack");
+            invalid_packs += 1;
+            tracing::debug!(%account_id, %room_id, source_room_id = ?row.room_id,
+                event_id = ?row.event_id, oversized = row.oversized, "omitted invalid or unavailable emoji pack");
             continue;
         };
+        let image_count = pack.images.len();
         let selected: Vec<_> = pack
             .images
             .into_iter()
@@ -136,8 +143,10 @@ pub async fn room_emoji_packs(
                 ImagePackUsage::Sticker => image.sticker,
             })
             .collect();
+        filtered_images += image_count - selected.len();
         let partial = pack.partial || selected.len() > remaining;
         result.partial |= partial;
+        let selected_count = selected.len();
         let images: Vec<_> = selected
             .into_iter()
             .take(remaining)
@@ -152,6 +161,10 @@ pub async fn room_emoji_packs(
                     .and_then(|info| serde_json::from_value(info).ok()),
             })
             .collect();
+        tracing::debug!(%account_id, %room_id, source_room_id = ?row.room_id,
+            event_id = ?row.event_id, usage = ?query.usage, image_count = images.len(),
+            filtered_images = image_count - selected_count, partial,
+            "selected image pack");
         remaining -= images.len();
         result.packs.push(EmojiPackDto {
             room_id: row.room_id,
@@ -164,5 +177,10 @@ pub async fn room_emoji_packs(
             partial,
         });
     }
+    tracing::debug!(%account_id, %room_id, usage = ?query.usage, source_count,
+        pack_count = result.packs.len(), image_count = 1000 - remaining,
+        invalid_packs, filtered_images, partial = result.partial,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "image pack discovery completed");
     Ok(ApiResponse::new(result))
 }

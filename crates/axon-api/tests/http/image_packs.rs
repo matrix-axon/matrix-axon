@@ -938,3 +938,188 @@ async fn emoji_packs_ancestor_depth_budget_and_account_isolation() {
     store.delete_account_row(a.account_id).await.unwrap();
     store.delete_account_row(b.account_id).await.unwrap();
 }
+
+#[derive(Clone)]
+struct PackLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for PackLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn logged_packs(app: &axum::Router, uri: &str, level: tracing::Level) -> (Value, String) {
+    use tracing::instrument::WithSubscriber;
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = PackLogWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(level)
+        .with_writer(move || writer.clone())
+        .finish();
+    let (status, body) = get(app, uri).with_subscriber(subscriber).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    (body, logs)
+}
+
+fn inheritance_log(logs: &str) -> &str {
+    logs.lines()
+        .find(|line| line.contains("axon_store::image_packs: image pack inheritance stopped"))
+        .expect("inheritance diagnostic")
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn emoji_packs_debug_explains_inheritance_without_changing_results() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@pack-logs-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!logging-child:localhost";
+    let ancestor = "!logging-parent:localhost";
+    joined(&store, a.account_id, &a.user_id, room).await;
+    space(&store, &a, ancestor).await;
+    let app = media_app(store.clone(), Arc::new(ConfiguredMediaProxy::ok(b"image")));
+    let uri = format!("/v1/accounts/{}/rooms/{room}/emoji-packs", a.account_id);
+    let (debug_body, logs) = logged_packs(&app, &uri, tracing::Level::DEBUG).await;
+    assert!(inheritance_log(&logs).contains("stop_reason=\"no_parent_link\""));
+    let (info_body, logs) = logged_packs(&app, &uri, tracing::Level::INFO).await;
+    assert_eq!(debug_body, info_body);
+    assert!(!logs.contains("image pack inheritance stopped"));
+    for (index, content, reason) in [
+        (0, json!({"via":["localhost"]}), "no_canonical_parent"),
+        (1, json!({"canonical":true,"via":[]}), "invalid_parent_link"),
+        (
+            2,
+            json!({"canonical":true,"via":["localhost"]}),
+            "unverifiable_parent",
+        ),
+    ] {
+        state(
+            &store,
+            a.account_id,
+            room,
+            "m.space.parent",
+            ancestor,
+            content,
+            10 + index,
+        )
+        .await;
+        let (_, logs) = logged_packs(&app, &uri, tracing::Level::DEBUG).await;
+        assert!(
+            inheritance_log(&logs).contains(&format!("stop_reason=\"{reason}\"")),
+            "{logs}"
+        );
+    }
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.room.member",
+        &a.user_id,
+        json!({"membership":"leave"}),
+        20,
+    )
+    .await;
+    let (_, logs) = logged_packs(&app, &uri, tracing::Level::DEBUG).await;
+    assert!(inheritance_log(&logs).contains("stop_reason=\"parent_not_joined\""));
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.room.member",
+        &a.user_id,
+        json!({"membership":"join"}),
+        21,
+    )
+    .await;
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.room.create",
+        "",
+        json!({}),
+        22,
+    )
+    .await;
+    let (_, logs) = logged_packs(&app, &uri, tracing::Level::DEBUG).await;
+    assert!(inheritance_log(&logs).contains("stop_reason=\"parent_not_space\""));
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.room.create",
+        "",
+        json!({"type":"m.space"}),
+        23,
+    )
+    .await;
+    parent(&store, a.account_id, room, ancestor, 24).await;
+    state(&store,a.account_id,ancestor,"m.room.image_pack","main",json!({
+        "pack":{"display_name":"do-not-log-pack-name"},
+        "images":{
+            "do-not-log-shortcode":{"url":"mxc://example.org/do-not-log-image-url","body":"do-not-log-body","usage":["sticker"]},
+            "both":{"url":"mxc://example.org/both"}
+        }
+    }),25).await;
+    let (debug_body, logs) = logged_packs(&app, &uri, tracing::Level::DEBUG).await;
+    assert!(inheritance_log(&logs).contains("ancestor_count=1"));
+    assert!(inheritance_log(&logs).contains(&format!("stop_room_id=\"{ancestor}\"")));
+    let summary = logs
+        .lines()
+        .find(|line| line.contains("image pack discovery completed"))
+        .unwrap();
+    for field in [
+        "pack_count=1",
+        "image_count=1",
+        "filtered_images=1",
+        "elapsed_ms=",
+    ] {
+        assert!(summary.contains(field), "{summary}");
+    }
+    assert!(
+        !logs.contains("do-not-log-"),
+        "pack content must not reach logs"
+    );
+    let (info_body, _) = logged_packs(&app, &uri, tracing::Level::INFO).await;
+    assert_eq!(debug_body, info_body);
+    parent(&store, a.account_id, ancestor, ancestor, 26).await;
+    let (body, logs) = logged_packs(&app, &uri, tracing::Level::DEBUG).await;
+    assert_eq!(body["data"]["partial"], true);
+    assert!(inheritance_log(&logs).contains("stop_reason=\"cycle\""));
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.space.parent",
+        ancestor,
+        json!({}),
+        27,
+    )
+    .await;
+    let mut previous = ancestor.to_owned();
+    for index in 0..16 {
+        let next = format!("!logging-depth-{index}:localhost");
+        space(&store, &a, &next).await;
+        parent(&store, a.account_id, &previous, &next, 28).await;
+        previous = next;
+    }
+    let (body, logs) = logged_packs(&app, &uri, tracing::Level::DEBUG).await;
+    assert_eq!(body["data"]["partial"], true);
+    assert!(inheritance_log(&logs).contains("stop_reason=\"depth_limit\""));
+    assert!(inheritance_log(&logs).contains("ancestor_count=16"));
+    store.delete_account_row(a.account_id).await.unwrap();
+}

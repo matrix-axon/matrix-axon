@@ -103,6 +103,46 @@ const ANCESTORS: &str = r#",
     )
 "#;
 
+// Only attached to discovery queries when this module's DEBUG diagnostics are
+// enabled. Reuse the same validated links and membership snapshot as traversal;
+// do not run extra reads or return sender-controlled content to the logger.
+const INHERITANCE_DIAGNOSTICS: &str = r#",
+    stopped AS (SELECT * FROM ancestry ORDER BY depth DESC LIMIT 1),
+    parent_evidence AS (
+        SELECT count(*) AS parent_links,
+            count(*) FILTER (WHERE link.content->'canonical'='true'::jsonb) AS canonical_links,
+            count(*) FILTER (WHERE link.content->'canonical'='true'::jsonb AND valid.event_id IS NOT NULL) AS valid_links,
+            count(*) FILTER (WHERE link.content->'canonical'='true'::jsonb AND valid.event_id IS NOT NULL AND joined.room_id IS NOT NULL) AS joined_parents,
+            count(*) FILTER (WHERE link.content->'canonical'='true'::jsonb AND valid.event_id IS NOT NULL AND joined.room_id IS NOT NULL AND creation.content->>'type'='m.space') AS space_parents
+        FROM room_state link JOIN stopped ON stopped.room_id=link.room_id
+        LEFT JOIN space_links valid ON valid.room_id=link.room_id
+            AND valid.event_type=link.event_type AND valid.state_key=link.state_key
+        LEFT JOIN joined_rooms joined ON joined.room_id=link.state_key
+        LEFT JOIN room_state creation ON creation.account_id=$1 AND creation.room_id=link.state_key
+            AND creation.event_type='m.room.create' AND creation.state_key=''
+        WHERE link.account_id=$1 AND link.event_type='m.space.parent'
+    ), inheritance_diagnostics AS (
+        SELECT jsonb_build_object(
+            'stop_room_id', stopped.room_id,
+            'ancestor_count', (SELECT count(*)-1 FROM hierarchy),
+            'parent_links', evidence.parent_links,
+            'canonical_links', evidence.canonical_links,
+            'valid_links', evidence.valid_links,
+            'joined_parents', evidence.joined_parents,
+            'space_parents', evidence.space_parents,
+            'stop_reason', CASE
+                WHEN stopped.cycle THEN 'cycle'
+                WHEN stopped.depth>{max_ancestors} THEN 'depth_limit'
+                WHEN evidence.parent_links=0 THEN 'no_parent_link'
+                WHEN evidence.canonical_links=0 THEN 'no_canonical_parent'
+                WHEN evidence.valid_links=0 THEN 'invalid_parent_link'
+                WHEN evidence.joined_parents=0 THEN 'parent_not_joined'
+                WHEN evidence.space_parents=0 THEN 'parent_not_space'
+                ELSE 'unverifiable_parent' END
+        ) AS details FROM stopped CROSS JOIN parent_evidence evidence
+    )
+"#;
+
 // Current room packs require positive membership. Stable tuples supersede
 // legacy tuples with the same state key, including when the stable tuple was
 // cleared/redacted. Personal account data never crosses account boundaries.
@@ -158,6 +198,17 @@ impl Store {
         } else {
             String::new()
         };
+        let diagnostics_enabled = room_id.is_some() && tracing::enabled!(tracing::Level::DEBUG);
+        let diagnostics = if diagnostics_enabled {
+            INHERITANCE_DIAGNOSTICS.replace("{max_ancestors}", &MAX_ANCESTORS.to_string())
+        } else {
+            String::new()
+        };
+        let diagnostic_details = if diagnostics_enabled {
+            "(SELECT details FROM inheritance_diagnostics)"
+        } else {
+            "NULL::jsonb"
+        };
         let scope = if room_id.is_some() {
             "room_id IS NULL OR room_id IN (SELECT room_id FROM hierarchy)"
         } else {
@@ -174,7 +225,7 @@ impl Store {
             "false"
         };
         let sql = format!(
-            "{SOURCES}{hierarchy}, authorized AS (SELECT $2::text IS NULL OR EXISTS ( \
+            "{SOURCES}{hierarchy}{diagnostics}, authorized AS (SELECT $2::text IS NULL OR EXISTS ( \
              SELECT 1 FROM joined_rooms WHERE room_id=$2) AS joined), \
              candidates AS MATERIALIZED (SELECT * FROM sources \
              WHERE ({scope}) \
@@ -188,7 +239,7 @@ impl Store {
              CASE WHEN NOT oversized THEN content END AS content,oversized FROM measured), \
              selected AS (SELECT *, {rank} AS source_rank FROM bounded \
              ORDER BY source_rank,COALESCE(room_id,''),event_type,COALESCE(state_key,'') LIMIT $7) \
-             SELECT authorized.joined,{partial} AS hierarchy_partial,selected.* FROM authorized LEFT JOIN selected ON authorized.joined \
+             SELECT authorized.joined,{partial} AS hierarchy_partial,{diagnostic_details} AS diagnostic_details,selected.* FROM authorized LEFT JOIN selected ON authorized.joined \
              ORDER BY source_rank,COALESCE(room_id,''),event_type,COALESCE(state_key,'')"
         );
         let rows = sqlx_core::query::query(&sql)
@@ -201,6 +252,21 @@ impl Store {
             .bind((MAX_ROOM_PACKS + 2) as i64)
             .fetch_all(&self.read_pool)
             .await?;
+        if let Some(row) = rows.first() {
+            if row.try_get::<bool, _>("joined")? {
+                if let Some(details) = row.try_get::<Option<Value>, _>("diagnostic_details")? {
+                    tracing::debug!(%account_id, room_id, stop_room_id = details["stop_room_id"].as_str(),
+                        stop_reason = details["stop_reason"].as_str(),
+                        ancestor_count = details["ancestor_count"].as_i64(),
+                        parent_links = details["parent_links"].as_i64(),
+                        canonical_links = details["canonical_links"].as_i64(),
+                        valid_links = details["valid_links"].as_i64(),
+                        joined_parents = details["joined_parents"].as_i64(),
+                        space_parents = details["space_parents"].as_i64(),
+                        "image pack inheritance stopped");
+                }
+            }
+        }
         let mut joined = false;
         let mut sources = Vec::new();
         let mut partial = false;
