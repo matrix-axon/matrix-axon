@@ -52,7 +52,7 @@ async function submitComposer(page: Page): Promise<void> {
   const composer = page.getByRole('textbox', { name: /^Message/ })
   const hint = await composer.getAttribute('enterkeyhint')
   if (hint === 'enter') {
-    await page.getByRole('button', { name: 'Send' }).click()
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
     return
   }
   await composer.press('Enter')

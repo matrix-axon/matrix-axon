@@ -1,4 +1,5 @@
 import type { JSX } from 'preact'
+import { StickerPickerButton, type StickerPickerOptions } from './StickerPicker'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
@@ -158,6 +159,7 @@ export function Composer({
   onEditLast,
   attachments,
   onAttach,
+  stickers,
   autoFocus = false,
   onFocus,
   focusRequest,
@@ -210,6 +212,7 @@ export function Composer({
    * the edit-mode composer does — an edit replaces text, not media.
    */
   onAttach?(files: FileList | readonly File[]): void
+  stickers?: StickerPickerOptions
   /** Focus this composer when it first mounts. */
   autoFocus?: boolean
   onFocus?(): void
@@ -1238,6 +1241,7 @@ export function Composer({
             )}
           </>
         )}
+        {stickers !== undefined && <StickerPickerButton {...stickers} />}
         <button
           type="submit"
           class="composer-send"

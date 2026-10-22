@@ -40,7 +40,9 @@ describe('emoji pack boundary', () => {
       ],
     })
     expect(result.partial).toBe(true)
-    expect(result.packs[0].images).toEqual([{ ...image(), body: null }])
+    expect(result.packs[0].images).toEqual([
+      { ...image(), body: null, emoticon: true, sticker: false, info: null },
+    ])
   })
   it('caps packs, per-pack examination and overall images', () => {
     const images = Array.from({ length: 600 }, (_, i) => image(`emoji${i}`))
@@ -56,4 +58,60 @@ describe('emoji pack boundary', () => {
     expect(() => parseEmojiPacks(null)).toThrow()
     expect(parseEmojiPacks({ packs: [pack([])] }).partial).toBe(false)
   })
+})
+
+it('filters independent sticker/emoticon usage without guessing stickers on old servers', () => {
+  const value = {
+    packs: [
+      pack([
+        image('legacy'),
+        { ...image('emote'), emoticon: true, sticker: false },
+        { ...image('sticker'), emoticon: false, sticker: true },
+        { ...image('both'), emoticon: true, sticker: true },
+      ]),
+    ],
+  }
+  expect(
+    parseEmojiPacks(value).packs[0].images.map((i) => i.shortcode),
+  ).toEqual(['legacy', 'emote', 'both'])
+  expect(
+    parseEmojiPacks(value, 'sticker').packs[0].images.map((i) => i.shortcode),
+  ).toEqual(['sticker', 'both'])
+})
+
+it('projects only bounded image metadata into sticker sends', () => {
+  const metadata = {
+    w: 320,
+    h: 240,
+    size: 42,
+    mimetype: 'image/gif',
+    is_animated: true,
+  }
+  const result = parseEmojiPacks(
+    {
+      packs: [
+        pack([
+          {
+            ...image(),
+            sticker: true,
+            info: { ...metadata, arbitrary: '<script>' },
+          },
+          {
+            ...image('bad'),
+            sticker: true,
+            info: {
+              w: 16385,
+              h: -1,
+              size: Infinity,
+              mimetype: 'text/html',
+              is_animated: 'yes',
+            },
+          },
+        ]),
+      ],
+    },
+    'sticker',
+  )
+  expect(result.packs[0].images[0].info).toEqual(metadata)
+  expect(result.packs[0].images[1].info).toEqual({})
 })

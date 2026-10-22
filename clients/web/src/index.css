@@ -6781,3 +6781,18 @@ audio.media-player {
   max-width: 100%;
   overflow-wrap: anywhere;
 }
+
+.sticker-picker-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 28rem;
+  height: 34rem;
+  max-width: 100%;
+  max-height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.composer-sticker {
+  flex-shrink: 0;
+}

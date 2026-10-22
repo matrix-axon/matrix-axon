@@ -77,7 +77,7 @@ test('reacting to the newest message keeps the reaction chip inside the timeline
 
   const composer = page.getByRole('textbox', { name: 'Message E2E Room' })
   await composer.fill('/react 👍')
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
 
   await expect(page.getByText('👍 1')).toBeVisible()
   await expect

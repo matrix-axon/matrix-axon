@@ -127,6 +127,11 @@ Pack snapshots refresh whenever this view opens and after a live-connection reco
 Loading, partial results, empty results, and failures have explicit states with retry controls.
 Older servers without pack discovery continue to support the Unicode picker and received reaction images.
 Custom selections do not enter the global Unicode recent-reaction or gesture preferences.
+To send a standalone sticker, choose **Send sticker** beside the room or thread composer, search the personal and current-room packs, and select an image.
+Only sticker-capable images appear; mixed-use images also remain available in the reaction picker.
+Selecting a sticker preserves any unsent text or staged attachments, and failed sends offer Retry and Discard in the timeline.
+Replies and thread context are preserved, and received stickers display the original image so animated stickers retain their animation.
+Older servers show an unavailable or empty sticker state without affecting text and reaction sends.
 Shared packs subscribed from other rooms, inherited space packs, and pack editing remain outside this version.
 
 For testing this client together with the companion server change, this bookmark is stacked on `codex/server-room-emoji`.
@@ -139,7 +144,8 @@ AXON_WEB_DIST="$PWD/clients/web/dist" cargo build -p axon-server --features embe
 ```
 
 Run that server with your test configuration, open a joined room with a personal or room pack, and use the picker steps above.
-Both room and thread sends should display the chosen shortcode in their reaction tooltips; selecting an owned chip withdraws it.
+For reactions, both room and thread sends should display the chosen shortcode in their tooltips; selecting an owned chip withdraws it.
+For standalone stickers, use **Send sticker** in each composer and confirm that the selected image appears as its own timeline event while any unsent draft remains in place.
 
 ## Prerequisites
 
