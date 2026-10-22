@@ -21,6 +21,7 @@ for (const thread of [false, true]) {
     }
     const sent: unknown[] = []
     const texts: unknown[] = []
+    const mediaReads: string[] = []
     let reads = 0
     let lastText = ''
     await page.route(
@@ -48,6 +49,7 @@ for (const thread of [false, true]) {
                 room_id: ROOM_ID,
                 state_key: 'Testing',
                 event_type: 'm.room.image_pack',
+                display_name: 'Testing Sticker Pack',
                 images: [
                   {
                     shortcode: 'adam',
@@ -55,6 +57,12 @@ for (const thread of [false, true]) {
                     body: 'Adam sticker',
                     emoticon: false,
                     sticker: true,
+                  },
+                  {
+                    shortcode: `adam_${'x'.repeat(95)}`,
+                    url: 'mxc://pack.test/long-adam',
+                    sticker: true,
+                    emoticon: false,
                   },
                 ],
               },
@@ -114,6 +122,17 @@ for (const thread of [false, true]) {
             : root
       return route.fulfill({ json: { data } })
     })
+    await page.route(/\/v1\/media\//, (route) => {
+      expect(route.request().headers().authorization).toBe('Bearer e2e-token')
+      mediaReads.push(route.request().url())
+      return route.fulfill({
+        contentType: 'image/png',
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQAAAAA3bvkkAAAACklEQVQI12NoAAAAggCB3UNq9AAAAABJRU5ErkJggg==',
+          'base64',
+        ),
+      })
+    })
     await signIn(page)
     await page.goto(
       thread
@@ -129,7 +148,7 @@ for (const thread of [false, true]) {
       await row.locator('.event-body').click()
       await row.getByRole('button', { name: 'Reply', exact: true }).click()
     }
-    await draft.fill(':adam:')
+    await draft.fill(':AdAm:')
     // Typing the closing colon never sends without explicit submission.
     expect(sent).toHaveLength(0)
     await composer.getByRole('button', { name: 'Send', exact: true }).click()
@@ -156,6 +175,30 @@ for (const thread of [false, true]) {
     await expect.poll(() => texts.length).toBe(2)
     expect(texts[1]).toMatchObject({ body: '👍' })
     expect(reads).toBe(2)
+    await draft.fill(':aD')
+    const choices = composer.getByRole('listbox', { name: 'Emoji matches' })
+    const choice = choices.getByRole('option', { name: /:adam:.*Sticker/ })
+    await expect(choice).toBeVisible()
+    await expect(choice.locator('img')).toBeVisible()
+    await expect
+      .poll(() => mediaReads.some((url) => url.includes('/adam/thumbnail?')))
+      .toBe(true)
+    const viewport = page.viewportSize()!
+    const box = (await choices.boundingBox())!
+    expect(box.x).toBeGreaterThanOrEqual(0)
+    expect(box.y).toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width)
+    expect(
+      await choices.evaluate((el) => el.scrollWidth <= el.clientWidth),
+    ).toBe(true)
+    await page.screenshot({
+      path: test.info().outputPath('sticker-autocomplete.png'),
+    })
+    await choice.click()
+    await expect(draft).toHaveValue(':adam: ')
+    expect(sent).toHaveLength(1)
+    await composer.getByRole('button', { name: 'Send', exact: true }).click()
+    await expect.poll(() => sent.length).toBe(2)
   })
 }
 
