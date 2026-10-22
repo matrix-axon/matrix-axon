@@ -3,6 +3,27 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.15 - 2026-10-22
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* bump dompurify to address GHSA-cg2g-xh64-v4q7 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/807
+#### Features
+* feat(web): scope space rail to the selected account and badge unread counts by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/806
+#### Bug Fixes
+* fix: require a UTF8 database, and create or convert one in the Linux packages by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/804
+#### Documentation
+* docs: slim the README and move operator reference into docs/ by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/805
+#### Build and CI
+* test(smoke): add a browser sign-in lane to the Matrix OAuth harness by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/802
+#### Other Changes
+* ci: let Release-plz be dispatched by hand by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/809
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.14...v0.1.15
+
 ## v0.1.14 - 2026-10-22
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
