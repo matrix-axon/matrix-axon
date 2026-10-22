@@ -209,6 +209,25 @@ describe('httpFallbackFor', () => {
 })
 
 describe('disconnectFromServer with a Keychain', () => {
+  it('does not reload when sign-out keeps the session', async () => {
+    const storage = memoryStorage({
+      [SERVER_URL_KEY]: 'https://old.example',
+      'axon.token': 'legacy',
+    })
+    const reload = vi.fn()
+
+    const reloaded = await disconnectFromServer(
+      storage,
+      () => Promise.resolve(false),
+      reload,
+    )
+
+    expect(reloaded).toBe(false)
+    expect(reload).not.toHaveBeenCalled()
+    expect(storage.getItem(SERVER_URL_KEY)).toBe('https://old.example')
+    expect(storage.getItem('axon.token')).toBe('legacy')
+  })
+
   it('reloads only after the Keychain has forgotten the token', async () => {
     let finishWrites!: () => void
     const secure: SecureStorage = Object.assign(memoryStorage(), {

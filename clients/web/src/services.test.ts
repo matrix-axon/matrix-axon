@@ -8,6 +8,7 @@ import {
   TIMELINE_EVENT,
   UNREAD_COUNTS_CHANGED,
 } from './api/frames'
+import { memoryStorage } from './test/memory-storage'
 import {
   connectCacheReset,
   connectCacheSetting,
@@ -18,6 +19,8 @@ import {
   connectLiveRooms,
   connectLiveThreadUnread,
   connectMessageNotifications,
+  NOTIFICATION_HANDLED_KEY,
+  type NotificationResume,
   connectReadMarkers,
   connectTimelineCacheReset,
   connectUnreadCounts,
@@ -45,7 +48,6 @@ import {
 import { createTimelineStoreCache } from './stores/timeline-cache'
 import { createUpdateChecker } from './stores/update-check'
 import { FakeWebSocket } from './test/fake-socket'
-import { memoryStorage } from './test/memory-storage'
 import { browserPlatform } from './platform'
 import { createServices } from './services'
 import { testServices } from './test/services'
@@ -420,6 +422,7 @@ function messageNotificationHarness(options?: {
   senderName?: string
   notificationCount?: number
   highlightCount?: number
+  resume?: NotificationResume
 }) {
   let socket: FakeWebSocket | undefined
   const live = createLiveConnection({
@@ -460,6 +463,7 @@ function messageNotificationHarness(options?: {
     () => options?.enabled !== false,
     options?.now,
     options?.isFocused,
+    options?.resume,
   )
   live.start()
   socket!.emitOpen()
@@ -622,6 +626,56 @@ describe('connectMessageNotifications', () => {
       expect(notify).toHaveBeenLastCalledWith(
         postedNotice(clock + 2000, { eventId: '$live' }),
       )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('skips a slack post whose id was already handled', async () => {
+    vi.useFakeTimers()
+    try {
+      let clock = T0
+      const storage = memoryStorage({
+        [NOTIFICATION_HANDLED_KEY]: JSON.stringify(['$gap']),
+      })
+      const { notify, socket } = messageNotificationHarness({
+        now: () => clock,
+        resume: { storage },
+      })
+      clock = T0 + 60 * 60_000
+      socket().emitClose()
+      await vi.advanceTimersByTimeAsync(INITIAL_BACKOFF_MS)
+      socket().emitOpen()
+      socket().emitMessage(messageFrame(clock - 60_000, { event_id: '$gap' }))
+      await flushNotifications()
+      expect(notify).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('holds slack posts until the delivered-notification read finishes', async () => {
+    vi.useFakeTimers()
+    try {
+      let clock = T0
+      let resolveIds: (ids: readonly string[]) => void = () => {}
+      const read = new Promise<readonly string[]>((resolve) => {
+        resolveIds = resolve
+      })
+      const { notify, socket } = messageNotificationHarness({
+        now: () => clock,
+        resume: { readDeliveredEventIds: () => read },
+      })
+      clock = T0 + 60 * 60_000
+      socket().emitClose()
+      await vi.advanceTimersByTimeAsync(INITIAL_BACKOFF_MS)
+      socket().emitOpen()
+      socket().emitMessage(messageFrame(clock - 60_000, { event_id: '$gap' }))
+      await flushNotifications()
+      expect(notify).not.toHaveBeenCalled()
+      resolveIds(['$gap'])
+      await flushNotifications()
+      expect(notify).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }

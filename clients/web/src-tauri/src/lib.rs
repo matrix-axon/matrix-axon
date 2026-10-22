@@ -85,6 +85,10 @@ pub fn run() {
         // request, the post, the click listener and the Android channel, and
         // not the plugin's full default set.
         .plugin(tauri_plugin_notification::init())
+        // APNs and FCM device tokens. After the notification plugin so the
+        // iOS delegate wrap sees the plugin's delegate. Inert on desktop:
+        // `capabilities` says so. See `remote-push/src/lib.rs`.
+        .plugin(tauri_plugin_remote_push::init())
         // The OAuth callback. Sign-in happens in the user's real browser
         // (RFC 8252), which redirects to this app's registered scheme.
         .plugin(tauri_plugin_deep_link::init())

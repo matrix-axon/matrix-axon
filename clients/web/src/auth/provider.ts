@@ -45,6 +45,10 @@ export type OAuthCallbackResult = { ok: true } | { ok: false; message: string }
  */
 export interface AppAuthProvider extends AuthProvider {
   signedIn: ReadonlySignal<boolean>
-  clearToken(): void
+  /**
+   * Drop the local session. May return a promise when a hook has to finish
+   * first (the push registration delete). `false` means the session was kept.
+   */
+  clearToken(): void | Promise<boolean | void>
   completeOAuthRedirect(url: URL): Promise<OAuthCallbackResult>
 }

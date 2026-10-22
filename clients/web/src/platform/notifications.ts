@@ -304,6 +304,54 @@ function asTarget(value: unknown): NotificationTarget | null {
   }
 }
 
+/**
+ * A remote wake. The provider sends `account_id`, `room_id`, `event_id`, and
+ * an optional `thread_root_id`. A local tap may use the camelCase names.
+ * A dismiss is not a wake. The event id is required: without it there is no
+ * message to open.
+ */
+export function notificationClickFromWake(
+  payload: unknown,
+): NotificationClick | null {
+  const record = asRecord(payload)
+  if (
+    record === null ||
+    record.actionId === 'dismiss' ||
+    record.action === 'dismiss'
+  ) {
+    return null
+  }
+  return clickFromWake(record) ?? clickFromWake(asRecord(record.aps))
+}
+
+function clickFromWake(
+  record: Record<string, unknown> | null,
+): NotificationClick | null {
+  if (record === null) {
+    return null
+  }
+  const accountId = firstId(record, 'accountId', 'account_id')
+  const roomId = firstId(record, 'roomId', 'room_id')
+  const eventId = firstId(record, 'eventId', 'event_id')
+  if (accountId === null || roomId === null || eventId === null) {
+    return null
+  }
+  return {
+    accountId,
+    roomId,
+    eventId,
+    threadRootId: firstId(record, 'threadRootId', 'thread_root_id'),
+  }
+}
+
+function firstId(
+  record: Record<string, unknown>,
+  camel: string,
+  snake: string,
+): string | null {
+  return optionalId(record[camel]) ?? optionalId(record[snake])
+}
+
 function clickFromExtra(value: unknown): NotificationClick | null {
   const extra = asRecord(value)
   if (extra === null) {

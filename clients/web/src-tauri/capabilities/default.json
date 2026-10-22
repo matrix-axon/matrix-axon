@@ -76,6 +76,10 @@
     {
       "identifier": "notification:allow-delete-channel",
       "comment": "Delete the retired Android `messages` channel, which was created at Default importance and cannot be raised. The page calls this only on Android and logs a failure instead of posting into a channel that cannot alert."
+    },
+    {
+      "identifier": "remote-push:default",
+      "comment": "Register an APNs or FCM device token on iOS, iPadOS, and Android (ADR 0113). Desktop commands answer unsupported. The page does not request a token there, and it does not request Web Push or a wake for a quit Mac app."
     }
   ]
 }

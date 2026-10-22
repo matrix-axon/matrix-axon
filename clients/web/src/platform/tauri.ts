@@ -16,7 +16,13 @@ import WebSocketClient from '@tauri-apps/plugin-websocket'
 import { fileFromPath } from '../media/dropped-file'
 import { MAX_UPLOAD_BYTES } from '../media/media-service'
 import { basename } from '../media/filename'
-import { iconBadgeSupportFor, isMenuCommand, isMobileShell } from './index'
+import {
+  iconBadgeSupportFor,
+  isMenuCommand,
+  isMobileShell,
+  isTauriRuntime,
+} from './index'
+import { remotePushFor } from './remote-push'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
 import {
@@ -347,6 +353,15 @@ export function tauriPlatform(
   shellPlatform: string = __AXON_TAURI_PLATFORM__,
 ): Platform {
   const iconBadgeSupport = iconBadgeSupportFor(shellPlatform)
+  const remotePush = remotePushFor(shellPlatform)
+  if (remotePush !== null && isTauriRuntime()) {
+    // The plugin stores a cold-start wake and also emits it. The listener
+    // dedupes those two deliveries. Desktop never reaches this: it has no
+    // remote push, and a quit Mac app is not woken.
+    remotePush.onWake((click) => {
+      deliverNotificationClick(click)
+    })
+  }
   startMessageNotifications()
   // One read per platform object. A Settings request replaces it, so a grant
   // applies to the next message and a denial does not stick across that request.
@@ -581,6 +596,12 @@ export function tauriPlatform(
       return pending
     },
     notify(message) {
+      if (remotePush !== null) {
+        // The same collapse id as the remote alert, so a local toast and a
+        // banner for one room replace each other. The stock plugin's numeric
+        // id cannot carry that value.
+        return remotePush.postCollapsed(message)
+      }
       // Remember the id before the post. An iOS tap returns the id and not
       // `extra`; the map turns it back into a room. Desktop 2.5 ignores both.
       const id = rememberNotificationTarget(localStorage, {
@@ -617,6 +638,7 @@ export function tauriPlatform(
       iconBadgeSupport === 'none'
         ? null
         : (count) => invoke('set_icon_badge', { count }),
+    remotePush,
   }
 }
 

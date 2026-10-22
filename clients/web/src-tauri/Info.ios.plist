@@ -29,6 +29,14 @@
     operator's server needs the matching `redirect_uris` entry.
   -->
   <!--
+    No UIBackgroundModes.
+    Remote push for a suspended app is a visible alert (ADR 0113), not a
+    silent wake.
+    remote-notification would let iOS launch the process in the background,
+    and this client does not do that.
+    package-ios.sh rejects an .ipa that declares it.
+  -->
+  <!--
     Export compliance, so TestFlight stops asking on every upload.
 
     Declared false on the basis that this client implements no encryption of

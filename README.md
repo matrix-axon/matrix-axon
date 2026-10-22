@@ -328,6 +328,7 @@ The [Apple browser verification guide](docs/apple-oauth-browser.md) covers confi
 
 **Remote push.**
 A suspended iOS, iPadOS, or Android client registers a device token with `PUT /v1/push/registrations` and removes it with `DELETE /v1/push/registrations/{id}`.
+The packaged iOS, iPadOS, and Android app registers when message notifications are on, and deletes that registration when they are turned off or the Axon session ends.
 `GET /v1/status` reports `push.apns` and `push.fcm`, true when this process loaded that provider's key.
 Registration succeeds when the key is not configured.
 Waking a device is a separate step from storing the registration.

@@ -66,6 +66,45 @@ describe('createCompositeAuthProvider', () => {
     expect(pending.getItem('axon.oauth.pending')).toBeNull()
   })
 
+  it('waits for a sign-out hook before dropping the session', async () => {
+    const storage = memoryStorage({ 'axon.token': 'manual-token' })
+    const auth = createCompositeAuthProvider({
+      providers: [],
+      baseUrl: 'http://axon.test',
+      storage,
+      pendingStorage: memoryStorage(),
+    })
+    let release: () => void = () => {}
+    auth.onBeforeSignOut(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        }),
+    )
+
+    const pending = auth.clearToken()
+    expect(auth.signedIn.value).toBe(true)
+    release()
+    await pending
+    expect(auth.signedIn.value).toBe(false)
+    expect(storage.getItem('axon.token')).toBeNull()
+  })
+
+  it('keeps the session when a sign-out hook fails', async () => {
+    const storage = memoryStorage({ 'axon.token': 'manual-token' })
+    const auth = createCompositeAuthProvider({
+      providers: [],
+      baseUrl: 'http://axon.test',
+      storage,
+      pendingStorage: memoryStorage(),
+    })
+    auth.onBeforeSignOut(() => Promise.reject(new Error('still registered')))
+
+    await expect(auth.clearToken()).resolves.toBe(false)
+    expect(auth.signedIn.value).toBe(true)
+    expect(storage.getItem('axon.token')).toBe('manual-token')
+  })
+
   it('lets the user choose a one-time pasted-token login', () => {
     const storage = memoryStorage()
     const sessionStorage = memoryStorage()

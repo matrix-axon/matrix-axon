@@ -1,0 +1,12 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Register an APNs or FCM device token, read the alerts still on screen, and post a local notification that collapses with the remote one."
+permissions = [
+  "allow-capabilities",
+  "allow-device-token",
+  "allow-delivered-event-ids",
+  "allow-pending-wake",
+  "allow-post-local",
+  "allow-register-listener",
+]
