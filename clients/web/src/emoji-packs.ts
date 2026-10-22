@@ -20,7 +20,10 @@ function text(value: unknown, max: number): string | null {
 }
 
 /** Bound rendering even when a server returns malformed or excessive data. */
-export function parseEmojiPacks(value: unknown): EmojiPacks {
+export function parseEmojiPacks(
+  value: unknown,
+  usage: 'emoticon' | 'sticker' = 'emoticon',
+): EmojiPacks {
   const root = object(value)
   if (!root || !Array.isArray(root.packs))
     throw new Error('Invalid emoji pack response')
@@ -64,7 +67,17 @@ export function parseEmojiPacks(value: unknown): EmojiPacks {
         continue
       }
       names.add(shortcode)
-      images.push({ shortcode, url, body: text(image?.body, 1024) })
+      const emoticon = image?.emoticon !== false
+      const sticker = image?.sticker === true
+      if (usage === 'emoticon' ? !emoticon : !sticker) continue
+      images.push({
+        shortcode,
+        url,
+        body: text(image?.body, 1024),
+        emoticon,
+        sticker,
+        info: parseStickerInfo(image?.info),
+      })
       remaining--
     }
     partial ||= packPartial
@@ -80,4 +93,40 @@ export function parseEmojiPacks(value: unknown): EmojiPacks {
     })
   }
   return { packs, partial }
+}
+
+/** Only bounded known ImageInfo fields enter a send. */
+function parseStickerInfo(value: unknown): CustomEmoji['info'] {
+  const raw = object(value)
+  if (!raw) return null
+  const info: NonNullable<CustomEmoji['info']> = {}
+  for (const key of ['w', 'h', 'size'] as const) {
+    const limit = key === 'size' ? 104857600 : 16384
+    const n = raw[key]
+    if (
+      typeof n === 'number' &&
+      Number.isSafeInteger(n) &&
+      n <= limit &&
+      n >= (key === 'size' ? 0 : 1)
+    )
+      info[key] = n
+  }
+  if (
+    typeof raw.mimetype === 'string' &&
+    ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(
+      raw.mimetype,
+    )
+  )
+    info.mimetype = raw.mimetype
+  if (typeof raw.is_animated === 'boolean') info.is_animated = raw.is_animated
+  return info
+}
+
+/** Keep sticker names and metadata consistent across room and thread sends. */
+export function stickerFromImage(image: CustomEmoji) {
+  return {
+    url: image.url,
+    body: image.body?.trim() ? image.body : image.shortcode,
+    info: image.info,
+  }
 }

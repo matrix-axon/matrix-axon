@@ -1,3 +1,4 @@
+import { stickerFromImage } from '../emoji-packs'
 import { Fragment, type JSX } from 'preact'
 import { useLocation, useRoute } from 'preact-iso'
 import {
@@ -2178,6 +2179,25 @@ export function RoomPage() {
             mentionCompletions={mentionCompletions}
             roomReferenceCompletions={roomReferenceCompletions}
             emojiCompletions={emojiCompletions}
+            stickers={
+              action?.kind === 'edit'
+                ? undefined
+                : {
+                    accountId,
+                    roomId,
+                    onSelect: (image) => {
+                      const replyTo =
+                        action?.kind === 'reply'
+                          ? action.event.event_id
+                          : undefined
+                      if (action?.kind === 'reply') setAction(null)
+                      void timeline.sendSticker(stickerFromImage(image), {
+                        replyTo,
+                        senderId: ownUserId ?? undefined,
+                      })
+                    },
+                  }
+            }
             onAttach={attachable ? stage : undefined}
             attachments={{ ...attachments, onRemove: removeAttachment }}
             onSubmit={submitMessage}

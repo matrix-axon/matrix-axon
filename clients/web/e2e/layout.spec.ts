@@ -1354,7 +1354,7 @@ test('narrow: message actions fit as icon buttons', async ({ page }) => {
 
   const body = `mobile action fit ${Date.now()}`
   await page.getByRole('textbox', { name: /^Message/ }).fill(body)
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
 
   const row = page.locator('.event-row', { hasText: body }).last()
   await expect(row).toBeVisible()
@@ -1398,7 +1398,7 @@ test('narrow: opening message actions does not move the sender or avatar', async
 
   const body = `stable header ${Date.now()}`
   await page.getByRole('textbox', { name: /^Message/ }).fill(body)
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
   const row = page.locator('.event-row', { hasText: body }).last()
   await expect(row).toBeVisible()
   // A pending echo renders the row but carries no action bar, so the tap below
@@ -1436,11 +1436,11 @@ test('narrow: tapping a second message dismisses the first action bar', async ({
   const second = `second action ${Date.now()}`
   const composer = page.getByRole('textbox', { name: /^Message/ })
   await composer.fill(first)
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
   const row1 = page.locator('.event-row', { hasText: first }).last()
   await expect(row1).toBeVisible()
   await composer.fill(second)
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
   const row2 = page.locator('.event-row', { hasText: second }).last()
   await expect(row2).toBeVisible()
   await expectSendsSettled(page)

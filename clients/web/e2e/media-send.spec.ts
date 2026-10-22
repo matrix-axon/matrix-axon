@@ -84,7 +84,7 @@ test('attaches a file, uploads its real bytes, and sends it with a caption', asy
   const composer = page.getByRole('textbox', { name: /^Message/ })
   await composer.fill('look at this')
   await expect(composer).toHaveValue('look at this')
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
 
   await expect
     .poll(async () => (await staged(page)).length)
@@ -129,7 +129,7 @@ test('shows the picked image immediately, before the upload finishes', async ({
     mimeType: 'image/png',
     buffer: PNG_BYTES,
   })
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
 
   // The echo renders the local file while the bytes are still in flight — no
   // proxy fetch has resolved, and none could have.
@@ -166,7 +166,7 @@ test('sends several picked images in order, with distinct bytes', async ({
   await expect(page.locator('.composer-attachment')).toHaveCount(0)
   await expect(page.getByText(/captions the first attachment/)).toBeVisible()
 
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
 
   await expect
     .poll(async () => (await staged(page)).length, { timeout: 15_000 })
