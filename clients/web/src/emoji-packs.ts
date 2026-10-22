@@ -163,24 +163,25 @@ export function standaloneStickerShortcode(body: string): string | null {
   return /^:([^:\r\n]+):$/u.exec(value)?.[1] ?? null
 }
 
-export async function lookupStickerShortcode(
+export async function lookupImageShortcode(
   api: ApiClient,
   accountId: string,
   roomId: string,
   shortcode: string,
   signal: AbortSignal,
+  usage: 'emoticon' | 'sticker' = 'sticker',
 ): Promise<CustomEmoji | null> {
   const { data, status } = await loadImagePacks(
     api,
     accountId,
     roomId,
-    'sticker',
+    usage,
     signal,
   )
   // An older server has no discovery route; ordinary shortcode handling stays usable.
   if (!data) {
     if (status === 404) return null
-    throw new Error('Sticker discovery failed')
+    throw new Error('Image pack discovery failed')
   }
   // Server order is personal first, then deterministic room-pack order.
   for (const pack of data.packs) {
@@ -193,12 +194,17 @@ export async function lookupStickerShortcode(
 }
 
 /** Suggest the same winner that a case-insensitive standalone send resolves. */
-export function stickerShortcodeSuggestions(packs: EmojiPacks, query: string) {
+export function imageShortcodeSuggestions(
+  packs: EmojiPacks,
+  query: string,
+  usage: 'emoticon' | 'sticker' = 'sticker',
+) {
   const folded = query.toLowerCase()
   const seen = new Set<string>()
   const matches = []
   for (const pack of packs.packs) {
     for (const image of pack.images) {
+      if (usage === 'emoticon' ? !image.emoticon : !image.sticker) continue
       // Legacy packs can contain names that cannot round-trip as one token.
       if (
         standaloneStickerShortcode(`:${image.shortcode}:`) !== image.shortcode
@@ -211,8 +217,8 @@ export function stickerShortcodeSuggestions(packs: EmojiPacks, query: string) {
       matches.push({
         value: `:${image.shortcode}:`,
         label: `:${image.shortcode}:`,
-        description: `Sticker · ${pack.display_name || (pack.room_id === null ? 'Personal' : 'Room')}`,
-        sticker: image,
+        description: `${usage === 'emoticon' ? 'Custom emoji' : 'Sticker'} · ${pack.display_name || (pack.room_id === null ? 'Personal' : 'Room')}`,
+        image,
       })
       if (matches.length === 20) return matches
     }

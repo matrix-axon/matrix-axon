@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseEmojiPacks, stickerShortcodeSuggestions } from './emoji-packs'
+import { parseEmojiPacks, imageShortcodeSuggestions } from './emoji-packs'
 
 const image = (shortcode = 'wave', url = 'mxc://hs/wave') => ({
   shortcode,
@@ -135,13 +135,13 @@ it('bounds sticker completions and deduplicates case-folded names in source orde
     },
     'sticker',
   )
-  const matches = stickerShortcodeSuggestions(value, 'aD')
+  const matches = imageShortcodeSuggestions(value, 'aD')
   expect(matches).toHaveLength(20)
   expect(matches[0].value).toBe(':Adam:')
   expect(
     matches.filter((m) => m.value.toLowerCase() === ':adam:'),
   ).toHaveLength(1)
-  expect(matches[0].sticker.url).toBe('mxc://hs/wave')
+  expect(matches[0].image.url).toBe('mxc://hs/wave')
 })
 
 it('keeps non-token legacy names out of shortcode completions', () => {
@@ -157,6 +157,6 @@ it('keeps non-token legacy names out of shortcode completions', () => {
     'sticker',
   )
   expect(
-    stickerShortcodeSuggestions(packs, 'AD').map((match) => match.value),
+    imageShortcodeSuggestions(packs, 'AD').map((match) => match.value),
   ).toEqual([':adam:'])
 })

@@ -1,10 +1,10 @@
 import {
-  lookupStickerShortcode,
+  lookupImageShortcode,
   standaloneStickerShortcode,
   type CustomEmoji,
 } from '../emoji-packs'
 import type { JSX } from 'preact'
-import { useStickerCompletions } from './use-sticker-completions'
+import { useImagePackCompletions } from './use-image-pack-completions'
 import { ReactionContent } from './ReactionContent'
 import { StickerPickerButton, type StickerPickerOptions } from './StickerPicker'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -29,7 +29,7 @@ export interface ComposerAutocompleteOption {
   value: string
   label: string
   description: string
-  sticker?: CustomEmoji
+  image?: CustomEmoji
 }
 
 type AutocompleteKind =
@@ -346,18 +346,22 @@ export function Composer({
     draft.slice(emojiQuery.end).trim() === ''
       ? emojiQuery.query
       : null
-  const stickerMatches = useStickerCompletions(stickers, stickerQuery)
-  const stickerValues = new Set(
-    stickerMatches.map((match) => match.value.toLowerCase()),
+  const packMatches = useImagePackCompletions(
+    stickers,
+    reactionEmojiQuery?.query ?? stickerQuery,
+    reactionEmojiQuery !== null ? 'emoticon' : 'sticker',
+  )
+  const packValues = new Set(
+    packMatches.map((match) => match.value.toLowerCase()),
   )
   const unicodeMatches =
     emojiQuery === null || emojiCompletions === undefined
       ? []
       : emojiCompletions(emojiQuery.query)
   const emojiMatches = [
-    ...stickerMatches,
+    ...packMatches,
     ...unicodeMatches.filter(
-      (match) => !stickerValues.has(match.value.toLowerCase()),
+      (match) => !packValues.has(match.value.toLowerCase()),
     ),
   ].slice(0, 20)
   // One menu at a time: the command names while the name is still being typed,
@@ -645,11 +649,12 @@ export function Composer({
       return
     }
     if (commandsEnabled && isSlashCommandDraft(body)) {
+      const submittedDraft = draft
       const result = onCommand?.(body)
       if (isPromiseLike(result)) {
         void result
           .then((handled) => {
-            if (handled) {
+            if (handled && textarea.current?.value === submittedDraft) {
               setDraft('')
               onDraftChange?.('')
             }
@@ -676,7 +681,7 @@ export function Composer({
       // Keep the submitted draft until discovery succeeds. A subsequent edit
       // belongs to the next message and must survive the pending lookup.
       const submittedDraft = draft
-      void lookupStickerShortcode(
+      void lookupImageShortcode(
         stickers.api,
         stickers.accountId,
         stickers.roomId,
@@ -867,7 +872,7 @@ export function Composer({
       {autocompleteOpen && (
         <div
           id={autocompleteId}
-          class={`slash-command-menu${stickerMatches.length > 0 ? ' sticker-suggestions' : ''}`}
+          class={`slash-command-menu${packMatches.length > 0 ? ' sticker-suggestions' : ''}`}
           role="listbox"
           aria-label={
             autocompleteKind === 'mention'
@@ -929,7 +934,7 @@ export function Composer({
                     type="button"
                     role="option"
                     aria-selected={isSelected}
-                    class={`slash-command-option${room.sticker ? ' sticker-completion' : ''}${isSelected ? ' selected' : ''}`}
+                    class={`slash-command-option${room.image ? ' sticker-completion' : ''}${isSelected ? ' selected' : ''}`}
                     onMouseDown={(event) => {
                       event.preventDefault()
                       if (autocompleteKind === 'room') {
@@ -942,11 +947,11 @@ export function Composer({
                     }}
                   >
                     <span class="slash-command-name">
-                      {room.sticker && stickers && (
+                      {room.image && stickers && (
                         <ReactionContent
                           accountId={stickers.accountId}
-                          reaction={room.sticker.url}
-                          shortcode={room.sticker.shortcode}
+                          reaction={room.image.url}
+                          shortcode={room.image.shortcode}
                         />
                       )}
                       {room.label}
