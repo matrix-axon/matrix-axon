@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseEmojiPacks } from './emoji-packs'
+import { parseEmojiPacks, stickerShortcodeSuggestions } from './emoji-packs'
 
 const image = (shortcode = 'wave', url = 'mxc://hs/wave') => ({
   shortcode,
@@ -114,4 +114,49 @@ it('projects only bounded image metadata into sticker sends', () => {
   )
   expect(result.packs[0].images[0].info).toEqual(metadata)
   expect(result.packs[0].images[1].info).toEqual({})
+})
+
+it('bounds sticker completions and deduplicates case-folded names in source order', () => {
+  const value = parseEmojiPacks(
+    {
+      packs: [
+        pack([{ ...image('Adam'), sticker: true }]),
+        pack(
+          [
+            { ...image('adam', 'mxc://hs/room-adam'), sticker: true },
+            ...Array.from({ length: 30 }, (_, i) => ({
+              ...image(`AD${i}`),
+              sticker: true,
+            })),
+          ],
+          '!room:hs',
+        ),
+      ],
+    },
+    'sticker',
+  )
+  const matches = stickerShortcodeSuggestions(value, 'aD')
+  expect(matches).toHaveLength(20)
+  expect(matches[0].value).toBe(':Adam:')
+  expect(
+    matches.filter((m) => m.value.toLowerCase() === ':adam:'),
+  ).toHaveLength(1)
+  expect(matches[0].sticker.url).toBe('mxc://hs/wave')
+})
+
+it('keeps non-token legacy names out of shortcode completions', () => {
+  const packs = parseEmojiPacks(
+    {
+      packs: [
+        pack([
+          { ...image('adam:other'), sticker: true },
+          { ...image('adam'), sticker: true },
+        ]),
+      ],
+    },
+    'sticker',
+  )
+  expect(
+    stickerShortcodeSuggestions(packs, 'AD').map((match) => match.value),
+  ).toEqual([':adam:'])
 })

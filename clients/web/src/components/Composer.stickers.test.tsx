@@ -11,6 +11,9 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { createApiClient } from '../api/client'
 import { Composer } from './Composer'
 
+// Media loading is covered in real-browser autocomplete tests.
+vi.mock('./ReactionContent', () => ({ ReactionContent: () => null }))
+
 const BASE = 'http://axon.test'
 const PACKS = `${BASE}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`
 const api = createApiClient(
@@ -74,7 +77,9 @@ function servePacks() {
 
 it('submits the first matching sticker through the same callback as picker selection', async () => {
   servePacks()
-  const { send, input, onSelect, onSubmit, onDraftChange } = setup()
+  const { send, input, onSelect, onSubmit, onDraftChange } = setup({
+    initialValue: ':AdAm:',
+  })
   expect(onSelect).not.toHaveBeenCalled()
   fireEvent.click(send)
   expect(send.hasAttribute('disabled')).toBe(true)
@@ -195,4 +200,27 @@ it('does not send a delayed lookup after the composer is unmounted', async () =>
   })
   expect(onSelect).not.toHaveBeenCalled()
   expect(onSubmit).not.toHaveBeenCalled()
+})
+
+it('suggests stickers case-insensitively, completes with Tab, and preserves source spelling', async () => {
+  servePacks()
+  const { input, send, onSelect } = setup({ initialValue: '' })
+  fireEvent.input(input, { target: { value: ':AD' } })
+  const choice = await screen.findByRole('option', { name: /:adam:.*Sticker/ })
+  expect(choice.textContent).toContain('Personal')
+  // A room duplicate resolves to the personal image, so show one effective choice.
+  expect(screen.getAllByRole('option')).toHaveLength(1)
+  fireEvent.keyDown(input, { key: 'Tab' })
+  expect(input.value.trim()).toBe(':adam:')
+  expect(onSelect).not.toHaveBeenCalled()
+  fireEvent.click(send)
+  await waitFor(() => expect(onSelect).toHaveBeenCalledWith(image))
+})
+
+it('keeps sticker suggestions out of prose and reaction commands', () => {
+  const first = setup({ initialValue: 'Hello :AD' })
+  expect(screen.queryByRole('option')).toBeNull()
+  first.unmount()
+  setup({ initialValue: '/react :AD', onCommand: vi.fn() })
+  expect(screen.queryByRole('option')).toBeNull()
 })

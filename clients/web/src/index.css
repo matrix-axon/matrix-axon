@@ -6846,3 +6846,24 @@ audio.media-player {
 .composer-sticker {
   flex-shrink: 0;
 }
+
+/* Mixed sticker/Unicode suggestions must fit even a narrow thread pane. */
+.sticker-suggestions {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sticker-suggestions .slash-command-option {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.sticker-suggestions .slash-command-name,
+.sticker-suggestions .slash-command-description {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sticker-completion .reaction-image {
+  margin-inline-end: 0.35rem;
+  vertical-align: middle;
+}
