@@ -15,6 +15,28 @@ use crate::engine::{persist_room_state_value, PersistContext};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
+// Parent claims and their reciprocal/permission evidence must hydrate on cold
+// start as well as update live. Do not request all room members: unverifiable
+// non-reciprocal claims are conservatively omitted by discovery.
+const REQUIRED_STATE: &[(&str, &str)] = &[
+    (axon_core::image_pack::ROOM_PACK_TYPES[0], "*"),
+    (axon_core::image_pack::ROOM_PACK_TYPES[1], "*"),
+    ("m.space.parent", "*"),
+    ("m.space.child", "*"),
+    ("m.room.create", ""),
+    ("m.room.power_levels", ""),
+    ("m.room.member", "$ME"),
+];
+
+fn allowed_state(kind: &str, key: &str, local_user: &str) -> bool {
+    REQUIRED_STATE.iter().any(|(allowed, state_key)| {
+        kind == *allowed
+            && (*state_key == "*"
+                || key == *state_key
+                || (*state_key == "$ME" && key == local_user))
+    })
+}
+
 fn request(pos: Option<String>, range_end: u32) -> v5::Request {
     let mut request = v5::Request::new();
     request.conn_id = Some("axon-packs".into());
@@ -23,9 +45,9 @@ fn request(pos: Option<String>, range_end: u32) -> v5::Request {
     let mut list = request::List::default();
     list.ranges = vec![(0u32.into(), range_end.into())];
     list.room_details.timeline_limit = 0u32.into();
-    list.room_details.required_state = axon_core::image_pack::ROOM_PACK_TYPES
-        .into_iter()
-        .map(|kind| (StateEventType::from(kind), "*".to_owned()))
+    list.room_details.required_state = REQUIRED_STATE
+        .iter()
+        .map(|(kind, key)| (StateEventType::from(*kind), (*key).to_owned()))
         .collect();
     let mut filters = request::ListFilters::default();
     filters.is_invite = Some(false);
@@ -69,7 +91,16 @@ pub(crate) async fn run(client: Client, ctx: PersistContext, cancel: Cancellatio
                     if !value
                         .get("type")
                         .and_then(serde_json::Value::as_str)
-                        .is_some_and(|kind| axon_core::image_pack::ROOM_PACK_TYPES.contains(&kind))
+                        .is_some_and(|kind| {
+                            allowed_state(
+                                kind,
+                                value
+                                    .get("state_key")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or(""),
+                                ctx.local_user_id.as_ref(),
+                            )
+                        })
                     {
                         continue;
                     }
@@ -173,6 +204,37 @@ mod tests {
         client
     }
 
+    #[test]
+    fn hierarchy_state_allowlist_is_scoped() {
+        for (kind, key) in REQUIRED_STATE {
+            assert!(allowed_state(
+                kind,
+                if *key == "$ME" {
+                    "@me:example.org"
+                } else {
+                    key
+                },
+                "@me:example.org"
+            ));
+        }
+        assert!(allowed_state(
+            "m.space.parent",
+            "!parent:example.org",
+            "@me:example.org"
+        ));
+        assert!(!allowed_state(
+            "m.room.member",
+            "@other:example.org",
+            "@me:example.org"
+        ));
+        assert!(!allowed_state(
+            "m.room.power_levels",
+            "unexpected",
+            "@me:example.org"
+        ));
+        assert!(!allowed_state("m.room.name", "", "@me:example.org"));
+    }
+
     #[tokio::test]
     async fn state_only_sync_requests_both_types_and_delivers_pack_updates() {
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -232,7 +294,15 @@ mod tests {
         assert_eq!(list["filters"]["is_invite"], false);
         assert_eq!(
             list["required_state"],
-            json!([["m.room.image_pack", "*"], ["im.ponies.room_emotes", "*"]])
+            json!([
+                ["m.room.image_pack", "*"],
+                ["im.ponies.room_emotes", "*"],
+                ["m.space.parent", "*"],
+                ["m.space.child", "*"],
+                ["m.room.create", ""],
+                ["m.room.power_levels", ""],
+                ["m.room.member", "$ME"]
+            ])
         );
         assert_eq!(events.len(), 2);
         assert_eq!(

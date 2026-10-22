@@ -44,7 +44,7 @@ pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,
     ThreadSummary, TimelineCursor, TimelineRow,
 };
-pub use image_packs::ImagePackRow;
+pub use image_packs::{ImagePackRow, ImagePackSnapshot};
 pub use instance_preferences::InstancePreference;
 pub use invites::{RoomInvite, RoomInviteSnapshot};
 pub use matrix_oauth_acquire::{

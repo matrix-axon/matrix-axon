@@ -26,18 +26,18 @@ pub struct ImagePackQuery {
     pub usage: ImagePackUsage,
 }
 
-/// Current-room and personal image packs, as known to Axon's sync cache.
+/// Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.
 /// Empty results do not prove absence upstream while initial sync is pending.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RoomEmojiPacksDto {
     pub packs: Vec<EmojiPackDto>,
-    /// Invalid/oversized content was omitted, or a pack/image limit was reached.
+    /// Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found.
     pub partial: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EmojiPackDto {
-    /// Null for the account's personal pack; otherwise the current room ID.
+    /// Null for the account's personal pack; otherwise its source room or ancestor space ID.
     pub room_id: Option<String>,
     /// Source state/account-data type, preserving stable or legacy identifiers.
     pub event_type: String,
@@ -64,13 +64,14 @@ pub struct CustomEmojiDto {
     pub info: Option<StickerInfoDto>,
 }
 
-/// List custom emoji available from the current room and personal pack.
+/// List custom emoji available from the current room, canonical ancestor spaces, and personal pack.
 /// Supports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal
 /// `im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with
-/// the same state key. Personal packs precede room packs; names are not merged.
+/// the same state key. Personal packs precede room packs, then nearest ancestors; names are not merged.
 /// Sticker-only entries are excluded by default; `usage=sticker` selects
-/// sticker-capable images instead. Other-room subscriptions and canonical
-/// space inheritance are not included. Requires positive joined membership.
+/// sticker-capable images instead. Up to 16 joined canonical ancestor spaces
+/// are inherited through locally validated parent relationships. Other-room
+/// subscriptions are not included. Requires positive joined membership.
 /// This is a local cache read, not a homeserver request or an authoritative
 /// statement that no packs exist upstream. Re-read on picker open/reconnect.
 /// At most 64 room packs plus one personal pack, 128 KiB per source, 512 entries
@@ -85,7 +86,7 @@ pub struct CustomEmojiDto {
         ("room_id" = String, Path, description = "Matrix room id"),
     ),
     responses(
-        (status = 200, description = "Cached personal and current-room emoji packs", body = ApiResponse<RoomEmojiPacksDto>),
+        (status = 200, description = "Cached personal, current-room, and canonical ancestor emoji packs", body = ApiResponse<RoomEmojiPacksDto>),
         (status = 401, description = "Missing or invalid bearer token", body = crate::response::ErrorResponse),
         (status = 404, description = "Account inactive or joined room not known locally", body = crate::response::ErrorResponse),
         (status = 500, description = "Internal database failure", body = crate::response::ErrorResponse),
@@ -97,17 +98,20 @@ pub async fn room_emoji_packs(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Query(query): Query<ImagePackQuery>,
 ) -> Result<ApiResponse<RoomEmojiPacksDto>, ApiError> {
-    let rows = store
+    let snapshot = store
         .image_pack_snapshot(account_id, &room_id)
         .await?
         .ok_or_else(|| ApiError::not_found("joined room not found"))?;
+    if snapshot.partial {
+        tracing::debug!(%account_id, %room_id, "image pack ancestry traversal reached a cycle or depth limit");
+    }
     let mut result = RoomEmojiPacksDto {
         packs: Vec::new(),
-        partial: false,
+        partial: snapshot.partial,
     };
     let mut room_packs = 0;
     let mut remaining = 1000;
-    for row in rows {
+    for row in snapshot.rows {
         if remaining == 0 {
             result.partial = true;
             break;

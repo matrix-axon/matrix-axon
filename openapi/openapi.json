@@ -3529,7 +3529,7 @@
         "tags": [
           "rooms"
         ],
-        "summary": "List custom emoji available from the current room and personal pack.\nSupports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal\n`im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with\nthe same state key. Personal packs precede room packs; names are not merged.\nSticker-only entries are excluded by default; `usage=sticker` selects\nsticker-capable images instead. Other-room subscriptions and canonical\nspace inheritance are not included. Requires positive joined membership.\nThis is a local cache read, not a homeserver request or an authoritative\nstatement that no packs exist upstream. Re-read on picker open/reconnect.\nAt most 64 room packs plus one personal pack, 128 KiB per source, 512 entries\nexamined per pack, and 1000 returned images across packs. `partial` signals\nomitted invalid/oversized data or truncation. All names are untrusted text.",
+        "summary": "List custom emoji available from the current room, canonical ancestor spaces, and personal pack.\nSupports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal\n`im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with\nthe same state key. Personal packs precede room packs, then nearest ancestors; names are not merged.\nSticker-only entries are excluded by default; `usage=sticker` selects\nsticker-capable images instead. Up to 16 joined canonical ancestor spaces\nare inherited through locally validated parent relationships. Other-room\nsubscriptions are not included. Requires positive joined membership.\nThis is a local cache read, not a homeserver request or an authoritative\nstatement that no packs exist upstream. Re-read on picker open/reconnect.\nAt most 64 room packs plus one personal pack, 128 KiB per source, 512 entries\nexamined per pack, and 1000 returned images across packs. `partial` signals\nomitted invalid/oversized data or truncation. All names are untrusted text.",
         "operationId": "room_emoji_packs",
         "parameters": [
           {
@@ -3563,7 +3563,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Cached personal and current-room emoji packs",
+            "description": "Cached personal, current-room, and canonical ancestor emoji packs",
             "content": {
               "application/json": {
                 "schema": {
@@ -10508,7 +10508,7 @@
         "properties": {
           "data": {
             "type": "object",
-            "description": "Current-room and personal image packs, as known to Axon's sync cache.\nEmpty results do not prove absence upstream while initial sync is pending.",
+            "description": "Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.\nEmpty results do not prove absence upstream while initial sync is pending.",
             "required": [
               "packs",
               "partial"
@@ -10522,7 +10522,7 @@
               },
               "partial": {
                 "type": "boolean",
-                "description": "Invalid/oversized content was omitted, or a pack/image limit was reached."
+                "description": "Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found."
               }
             }
           }
@@ -13207,7 +13207,7 @@
               "string",
               "null"
             ],
-            "description": "Null for the account's personal pack; otherwise the current room ID."
+            "description": "Null for the account's personal pack; otherwise its source room or ancestor space ID."
           },
           "state_key": {
             "type": [
@@ -14915,7 +14915,7 @@
       },
       "RoomEmojiPacksDto": {
         "type": "object",
-        "description": "Current-room and personal image packs, as known to Axon's sync cache.\nEmpty results do not prove absence upstream while initial sync is pending.",
+        "description": "Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.\nEmpty results do not prove absence upstream while initial sync is pending.",
         "required": [
           "packs",
           "partial"
@@ -14929,7 +14929,7 @@
           },
           "partial": {
             "type": "boolean",
-            "description": "Invalid/oversized content was omitted, or a pack/image limit was reached."
+            "description": "Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found."
           }
         }
       },

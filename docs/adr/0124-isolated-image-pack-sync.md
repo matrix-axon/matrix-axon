@@ -15,7 +15,9 @@ Feeding that response into SDK sync processing risks replacing state owned by th
 ## Decision
 
 Use one additional state-only Simplified Sliding Sync transport per supervised account run.
-Send typed raw HTTP requests through the authenticated SDK client, with connection ID `axon-packs`, both room-pack types, all state keys, a growing range in steps of 100 rooms, and a timeline limit of zero.
+Send typed raw HTTP requests through the authenticated SDK client, with connection ID `axon-packs`, both room-pack types and parent/child links at all state keys, creation and power-level singletons, the local user's membership, a growing range in steps of 100 rooms, and a timeline limit of zero.
+Hierarchy state supports canonical ancestor pack inheritance without relying on incidental primary-sync state.
+Do not request whole member lists; a non-reciprocal parent claim without cached sender membership is unverifiable and omitted.
 Only allowlisted `required_state` events enter the shared PostgreSQL room-state projection.
 Never feed these responses into SDK sync processing; ignore all summaries, timelines, pagination fields, and extensions.
 The primary service remains the sole owner of SDK room state.

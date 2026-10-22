@@ -772,13 +772,14 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List custom emoji available from the current room and personal pack.
+         * List custom emoji available from the current room, canonical ancestor spaces, and personal pack.
          *     Supports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal
          *     `im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with
-         *     the same state key. Personal packs precede room packs; names are not merged.
+         *     the same state key. Personal packs precede room packs, then nearest ancestors; names are not merged.
          *     Sticker-only entries are excluded by default; `usage=sticker` selects
-         *     sticker-capable images instead. Other-room subscriptions and canonical
-         *     space inheritance are not included. Requires positive joined membership.
+         *     sticker-capable images instead. Up to 16 joined canonical ancestor spaces
+         *     are inherited through locally validated parent relationships. Other-room
+         *     subscriptions are not included. Requires positive joined membership.
          *     This is a local cache read, not a homeserver request or an authoritative
          *     statement that no packs exist upstream. Re-read on picker open/reconnect.
          *     At most 64 room packs plus one personal pack, 128 KiB per source, 512 entries
@@ -2629,12 +2630,12 @@ export interface components {
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_RoomEmojiPacksDto: {
             /**
-             * @description Current-room and personal image packs, as known to Axon's sync cache.
+             * @description Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.
              *     Empty results do not prove absence upstream while initial sync is pending.
              */
             data: {
                 packs: components["schemas"]["EmojiPackDto"][];
-                /** @description Invalid/oversized content was omitted, or a pack/image limit was reached. */
+                /** @description Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found. */
                 partial: boolean;
             };
         };
@@ -3874,7 +3875,7 @@ export interface components {
             event_type: string;
             images: components["schemas"]["CustomEmojiDto"][];
             partial: boolean;
-            /** @description Null for the account's personal pack; otherwise the current room ID. */
+            /** @description Null for the account's personal pack; otherwise its source room or ancestor space ID. */
             room_id?: string | null;
             /** @description Null for personal account data. Empty string is a valid room pack key. */
             state_key?: string | null;
@@ -4841,12 +4842,12 @@ export interface components {
             topic?: string | null;
         };
         /**
-         * @description Current-room and personal image packs, as known to Axon's sync cache.
+         * @description Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.
          *     Empty results do not prove absence upstream while initial sync is pending.
          */
         RoomEmojiPacksDto: {
             packs: components["schemas"]["EmojiPackDto"][];
-            /** @description Invalid/oversized content was omitted, or a pack/image limit was reached. */
+            /** @description Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found. */
             partial: boolean;
         };
         /**
@@ -7968,7 +7969,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Cached personal and current-room emoji packs */
+            /** @description Cached personal, current-room, and canonical ancestor emoji packs */
             200: {
                 headers: {
                     [name: string]: unknown;

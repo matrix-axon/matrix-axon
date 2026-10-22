@@ -1,6 +1,6 @@
 # Custom emoji discovery
 
-Axon exposes the current room's emoji packs and the account's personal pack through:
+Axon exposes the current room's emoji packs, joined canonical ancestor spaces' packs, and the account's personal pack through:
 
 ```text
 GET /v1/accounts/{account_id}/rooms/{room_id}/emoji-packs
@@ -8,11 +8,20 @@ GET /v1/accounts/{account_id}/rooms/{room_id}/emoji-packs
 
 This is a read of the sync cache, requiring an active account and positive joined membership in the addressed room.
 It includes stable `m.room.image_pack` state, legacy `im.ponies.room_emotes` state, and the legacy `im.ponies.user_emotes` personal account-data pack.
-Personal packs come first; room packs follow in deterministic event-type/state-key order.
+Personal packs come first, followed by current-room packs and then canonical ancestors from nearest to furthest.
+Within each room, packs follow deterministic event-type/state-key order.
 A stable room tuple supersedes the legacy tuple with the same state key, even when the stable tuple has been cleared or redacted.
 Pack identity is its source type, room ID, and state key; shortcode collisions across packs are preserved.
-Missing pack display names or avatars remain null; a client may fall back to the current room's name/avatar or a personal-pack label.
-Subscribed packs from other rooms and canonical-space inheritance are not included in this version.
+Missing pack display names or avatars remain null; a client may fall back to the source room's name/avatar or a personal-pack label.
+Canonical inheritance follows [MSC2545](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/2545-emotes.md#space-image-packs) and the [Matrix parent relationship validation rules](https://spec.matrix.org/latest/client-server-api/#mspaceparent-relationships).
+Each inherited room must be a positively joined space with a non-redacted canonical parent claim and a nonempty string `via` list.
+The claim must have a valid reciprocal child link, or its sender must have cached joined membership and current permission to send `m.space.child` in the parent.
+Unverifiable claims are omitted; discovery does not perform homeserver requests to fill missing membership evidence.
+If several locally valid canonical parents exist, the lexicographically lowest room ID wins.
+Traversal stops at 16 ancestors or a cycle and marks the response partial if that prevents further traversal.
+An ancestor appears once, preserving its own source room ID and pack identities.
+All inherited packs share the existing pack and image budgets with personal and current-room packs.
+Subscribed packs from other rooms are not included in this version.
 Creating or editing packs is also outside this API.
 
 The integration tests cover personal and room packs together, standalone legacy room packs, and stable room packs at different state keys.
@@ -67,14 +76,16 @@ The size result is computed once per candidate; checking rendered size as well p
 At most 64 room packs and one personal pack are exposed, with at most 512 entries examined per pack and 1,000 images returned overall.
 The top-level or per-pack `partial` flag reports skipped invalid/oversized content or truncation.
 The last returned pack is marked partial if its images were truncated; subsequent packs are omitted once the overall image budget is exhausted.
-Membership authorization and discovery use one database statement snapshot.
+Membership authorization, relationship validation, ancestor traversal, and pack discovery use one database statement snapshot.
 An empty result does not prove absence upstream while initial sync is incomplete.
 Consumers should re-read when opening the picker and after reconnecting.
 
 The SDK UI room list does not request image-pack state and does not expose configuration to add required state.
 Axon therefore runs one additional state-only Simplified Sliding Sync connection per active account run, requesting both room-pack types with all state keys in batches of 100 rooms and no timeline events.
-The transport uses raw SDK HTTP requests, disables SDK retries, and projects only allowlisted pack state through the shared state persistence helper.
+The transport uses raw SDK HTTP requests, disables SDK retries, and projects only allowlisted pack and hierarchy state through the shared state persistence helper.
 It never submits a response to SDK sync processing, so summary fields, recency, pagination tokens, timelines, and extensions cannot overwrite the primary connection's SDK state.
+The connection also requests parent/child links, creation and power-level state, and the local user's membership so inherited packs hydrate after restart.
+It does not request whole member lists; one-way claims without cached sender membership remain unverifiable.
 The projection retains existing timestamp guards and redaction/departure handling.
 The account run owns, cancels, and joins this worker before restart, preventing duplicate workers and retained SDK clients.
 Each long poll has a 30-second server wait and 90-second client/outer deadline.

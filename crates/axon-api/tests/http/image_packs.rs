@@ -550,3 +550,391 @@ async fn emoji_preview_continues_past_invalid_candidate_pages() {
     );
     store.delete_account_row(account.account_id).await.unwrap();
 }
+
+async fn space(store: &Store, account: &axon_store::Account, room: &str) {
+    joined(store, account.account_id, &account.user_id, room).await;
+    state(
+        store,
+        account.account_id,
+        room,
+        "m.room.create",
+        "",
+        json!({"type":"m.space"}),
+        1,
+    )
+    .await;
+    state(store, account.account_id, room, "m.room.image_pack", "main",
+        json!({"images":{"shared":{"url":format!("mxc://example.org/{}", &room[1..room.find(':').unwrap()]),"usage":["emoticon","sticker"]}}}), 2).await;
+}
+
+async fn parent(store: &Store, account: Uuid, child: &str, parent: &str, ts: i64) {
+    state(
+        store,
+        account,
+        child,
+        "m.space.parent",
+        parent,
+        json!({"canonical":true,"via":["localhost"]}),
+        ts,
+    )
+    .await;
+    state(
+        store,
+        account,
+        parent,
+        "m.space.child",
+        child,
+        json!({"via":["localhost"]}),
+        ts,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn emoji_packs_canonical_ancestors_order_usage_and_removal() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@inherit-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!child:localhost";
+    joined(&store, a.account_id, &a.user_id, room).await;
+    personal(&store, a.account_id, json!({"images":{"personal":{"url":"mxc://example.org/personal","usage":["emoticon","sticker"]}}})).await;
+    state(&store,a.account_id,room,"m.room.image_pack","main",
+        json!({"images":{"local":{"url":"mxc://example.org/local","usage":["emoticon","sticker"]}}}),2).await;
+    // Room IDs deliberately sort in the opposite order to inheritance depth.
+    for id in [
+        "!z-parent:localhost",
+        "!a-grandparent:localhost",
+        "!zz-other:localhost",
+    ] {
+        space(&store, &a, id).await;
+    }
+    parent(&store, a.account_id, room, "!z-parent:localhost", 3).await;
+    parent(
+        &store,
+        a.account_id,
+        "!z-parent:localhost",
+        "!a-grandparent:localhost",
+        3,
+    )
+    .await;
+    // Multiple valid canonical claims use the lexicographically lowest ID.
+    parent(&store, a.account_id, room, "!zz-other:localhost", 3).await;
+    let app = media_app(store.clone(), Arc::new(ConfiguredMediaProxy::ok(b"image")));
+    let uri = format!("/v1/accounts/{}/rooms/{room}/emoji-packs", a.account_id);
+    for suffix in ["", "?usage=sticker"] {
+        let (status, body) = get(&app, &format!("{uri}{suffix}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["partial"], false);
+        let packs = body["data"]["packs"].as_array().unwrap();
+        assert_eq!(
+            packs
+                .iter()
+                .map(|p| p["room_id"].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Value::Null,
+                json!(room),
+                json!("!z-parent:localhost"),
+                json!("!a-grandparent:localhost")
+            ]
+        );
+        assert!(packs
+            .iter()
+            .all(|p| p["images"].as_array().unwrap().len() == 1));
+    }
+    assert!(store
+        .image_pack_authorizes_media(a.account_id, "mxc://example.org/z-parent")
+        .await
+        .unwrap());
+    // A cycle stops before repeating packs and reports bounded traversal.
+    parent(
+        &store,
+        a.account_id,
+        "!a-grandparent:localhost",
+        "!z-parent:localhost",
+        4,
+    )
+    .await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["partial"], true);
+    assert_eq!(body["data"]["packs"].as_array().unwrap().len(), 4);
+    // Clearing the parent's claim immediately removes the grandparent.
+    state(
+        &store,
+        a.account_id,
+        "!z-parent:localhost",
+        "m.space.parent",
+        "!a-grandparent:localhost",
+        json!({}),
+        5,
+    )
+    .await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"].as_array().unwrap().len(), 3);
+    assert_eq!(body["data"]["partial"], false);
+    // Departure removes an ancestor even if its cached packs and links remain.
+    state(
+        &store,
+        a.account_id,
+        "!z-parent:localhost",
+        "m.room.member",
+        &a.user_id,
+        json!({"membership":"leave"}),
+        6,
+    )
+    .await;
+    state(
+        &store,
+        a.account_id,
+        room,
+        "m.space.parent",
+        "!zz-other:localhost",
+        json!({}),
+        6,
+    )
+    .await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"].as_array().unwrap().len(), 2);
+    assert!(!store
+        .image_pack_authorizes_media(a.account_id, "mxc://example.org/z-parent")
+        .await
+        .unwrap());
+    store.delete_account_row(a.account_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn emoji_packs_parent_claim_validation() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@claims-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!claims:localhost";
+    let ancestor = "!ancestor:localhost";
+    joined(&store, a.account_id, &a.user_id, room).await;
+    space(&store, &a, ancestor).await;
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.space.child",
+        room,
+        json!({"via":["localhost"]}),
+        2,
+    )
+    .await;
+    let app = media_app(store.clone(), Arc::new(ConfiguredMediaProxy::ok(b"image")));
+    let uri = format!("/v1/accounts/{}/rooms/{room}/emoji-packs", a.account_id);
+    for (index, content) in [
+        json!({"via":["localhost"]}),
+        json!({"via":["localhost"],"canonical":false}),
+        json!({"via":["localhost"],"canonical":"true"}),
+        json!({"via":[],"canonical":true}),
+        json!({"via":"localhost","canonical":true}),
+        json!({"via":[42],"canonical":true}),
+        json!({"via":[""],"canonical":true}),
+        // Valid claim, but neither reciprocal nor authorized.
+        json!({"via":["localhost"],"canonical":true}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 7 {
+            state(
+                &store,
+                a.account_id,
+                ancestor,
+                "m.space.child",
+                room,
+                json!({}),
+                9,
+            )
+            .await;
+        }
+        state(
+            &store,
+            a.account_id,
+            room,
+            "m.space.parent",
+            ancestor,
+            content,
+            10 + index as i64,
+        )
+        .await;
+        let (_, body) = get(&app, &uri).await;
+        assert_eq!(body["data"]["packs"], json!([]), "case {index}: {body}");
+    }
+    // The sender's current membership and power can validate a one-way claim.
+    joined(&store, a.account_id, "@pack-owner:localhost", ancestor).await;
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.room.power_levels",
+        "",
+        json!({"users":{"@pack-owner:localhost":50}}),
+        20,
+    )
+    .await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"].as_array().unwrap().len(), 1, "{body}");
+    for (index, levels) in [
+        json!({"users":{"@pack-owner:localhost":49}}),
+        json!({"users":{"@pack-owner:localhost":"100"}}),
+        json!({"users":{"@pack-owner:localhost":100},"events":{"m.space.child":101}}),
+        json!({"users":{"@pack-owner:localhost":1e100}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        state(
+            &store,
+            a.account_id,
+            ancestor,
+            "m.room.power_levels",
+            "",
+            levels,
+            21 + index as i64,
+        )
+        .await;
+        let (_, body) = get(&app, &uri).await;
+        assert_eq!(body["data"]["packs"], json!([]), "case {index}: {body}");
+    }
+    // State-event overrides and user defaults have the same precedence as Matrix.
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.room.power_levels",
+        "",
+        json!({"users_default":40,"state_default":100,"events":{"m.space.child":40}}),
+        26,
+    )
+    .await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"].as_array().unwrap().len(), 1);
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.room.member",
+        "@pack-owner:localhost",
+        json!({"membership":"leave"}),
+        27,
+    )
+    .await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"], json!([]));
+    // A reciprocal link validates the claim regardless of the sender's power.
+    parent(&store, a.account_id, room, ancestor, 30).await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"].as_array().unwrap().len(), 1);
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.space.child",
+        room,
+        json!({"via":[]}),
+        31,
+    )
+    .await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"], json!([]));
+    parent(&store, a.account_id, room, ancestor, 32).await;
+    // Even retained content cannot revive a redacted parent claim.
+    store
+        .upsert_room_state_with_redaction(
+            &RoomStateUpsert {
+                account_id: a.account_id,
+                room_id: room,
+                event_type: "m.space.parent",
+                state_key: ancestor,
+                event_id: &format!("$pack-32-{ancestor}"),
+                sender: "@pack-owner:localhost",
+                origin_ts: 32,
+                content: Some(json!({"canonical":true,"via":["localhost"]})),
+            },
+            None,
+            RoomStateRedaction::Redacted {
+                event_id: Some("$redact-parent"),
+            },
+        )
+        .await
+        .unwrap();
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"], json!([]));
+    parent(&store, a.account_id, room, ancestor, 33).await;
+
+    state(
+        &store,
+        a.account_id,
+        ancestor,
+        "m.room.create",
+        "",
+        json!({"type":"ordinary"}),
+        33,
+    )
+    .await;
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["packs"], json!([]));
+    store.delete_account_row(a.account_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn emoji_packs_ancestor_depth_budget_and_account_isolation() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@depth-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let b = store
+        .upsert_account(
+            &format!("@depth-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!depth:localhost";
+    for account in [&a, &b] {
+        joined(&store, account.account_id, &account.user_id, room).await;
+    }
+    let mut previous = room.to_owned();
+    for index in 0..17 {
+        let id = format!("!depth-{index}:localhost");
+        space(&store, &a, &id).await;
+        parent(&store, a.account_id, &previous, &id, 2).await;
+        previous = id;
+    }
+    let app = media_app(store.clone(), Arc::new(ConfiguredMediaProxy::ok(b"image")));
+    let (_, body) = get(
+        &app,
+        &format!("/v1/accounts/{}/rooms/{room}/emoji-packs", a.account_id),
+    )
+    .await;
+    assert_eq!(body["data"]["partial"], true, "{body}");
+    assert_eq!(body["data"]["packs"].as_array().unwrap().len(), 16);
+    let (_, body) = get(
+        &app,
+        &format!("/v1/accounts/{}/rooms/{room}/emoji-packs", b.account_id),
+    )
+    .await;
+    assert_eq!(body["data"]["packs"], json!([]));
+    assert_eq!(body["data"]["partial"], false);
+    store.delete_account_row(a.account_id).await.unwrap();
+    store.delete_account_row(b.account_id).await.unwrap();
+}
