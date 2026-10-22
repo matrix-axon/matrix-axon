@@ -255,6 +255,123 @@ async fn emoji_packs_discovery_preview_isolation_and_removal() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn emoji_packs_mixed_sources_keep_pack_identity_and_usage() {
+    let store = store().await;
+    let account = store
+        .upsert_account(
+            &format!("@pack-variations-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!pack-variations:localhost";
+    joined(&store, account.account_id, &account.user_id, room).await;
+    joined(
+        &store,
+        account.account_id,
+        &account.user_id,
+        "!other:localhost",
+    )
+    .await;
+    personal(
+        &store,
+        account.account_id,
+        json!({
+            "images": {"wave": {"url": "mxc://example.org/personal-wave"}}
+        }),
+    )
+    .await;
+    // The empty state key is a normal pack identity, not a singleton restriction.
+    state(
+        &store,
+        account.account_id,
+        room,
+        "im.ponies.room_emotes",
+        "",
+        json!({
+            "pack": {"display_name": "Legacy stickers", "usage": ["sticker"]},
+            "images": {
+                "wave": {"url": "mxc://example.org/legacy-wave", "usage": ["emoticon"]},
+                "sticker": {"url": "mxc://example.org/sticker-only"},
+                "both": {"url": "mxc://example.org/both", "usage": []}
+            }
+        }),
+        2,
+    )
+    .await;
+    state(&store, account.account_id, room, "m.room.image_pack", "Extras / work", json!({
+        "pack": {"usage": ["emoticon"]},
+        "images": {
+            "wave": {"url": "mxc://example.org/stable-wave", "body": "A wave", "info": {"mimetype": "image/gif", "is_animated": true}},
+            "hidden": {"url": "mxc://example.org/hidden-sticker", "usage": ["sticker"]}
+        }
+    }), 3).await;
+    state(
+        &store,
+        account.account_id,
+        "!other:localhost",
+        "m.room.image_pack",
+        "",
+        json!({
+            "images": {"elsewhere": {"url": "mxc://example.org/elsewhere"}}
+        }),
+        4,
+    )
+    .await;
+
+    let proxy = Arc::new(ConfiguredMediaProxy::ok(b"GIF89apack-image"));
+    let app = media_app(store.clone(), proxy);
+    let uri = format!(
+        "/v1/accounts/{}/rooms/{room}/emoji-packs",
+        account.account_id
+    );
+    let (status, body) = get(&app, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["partial"], false);
+    let packs = body["data"]["packs"].as_array().unwrap();
+    assert_eq!(packs.len(), 3);
+    assert_eq!(packs[0]["room_id"], Value::Null);
+    assert_eq!(packs[0]["display_name"], Value::Null);
+    assert_eq!(packs[1]["event_type"], "im.ponies.room_emotes");
+    assert_eq!(packs[1]["state_key"], "");
+    assert_eq!(packs[2]["event_type"], "m.room.image_pack");
+    assert_eq!(packs[2]["state_key"], "Extras / work");
+    let waves: Vec<_> = packs
+        .iter()
+        .flat_map(|pack| pack["images"].as_array().unwrap())
+        .filter(|image| image["shortcode"] == "wave")
+        .map(|image| image["url"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        waves,
+        [
+            "mxc://example.org/personal-wave",
+            "mxc://example.org/legacy-wave",
+            "mxc://example.org/stable-wave"
+        ]
+    );
+    assert_eq!(packs[1]["images"].as_array().unwrap().len(), 2);
+    assert_eq!(packs[2]["images"].as_array().unwrap().len(), 1);
+    assert_eq!(packs[2]["images"][0]["body"], "A wave");
+    // Every source can preview unused images, including GIFs, with safe MIME.
+    for id in ["personal-wave", "legacy-wave", "stable-wave", "both"] {
+        let path = format!("/v1/media/{}/example.org/{id}", account.account_id);
+        let (status, headers, _) = get_media_bytes(&app, &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "image/gif");
+    }
+    for id in ["sticker-only", "hidden-sticker"] {
+        let path = format!("/v1/media/{}/example.org/{id}", account.account_id);
+        assert_eq!(
+            get_media_bytes(&app, &path, Some("*")).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    store.delete_account_row(account.account_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn emoji_packs_bounds_and_redaction() {
     let store = store().await;
     let a = store
