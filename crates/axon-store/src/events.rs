@@ -250,6 +250,40 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
         })
     }
 }
+// Non-control whitespace trimmed by ECMAScript String.trim(), expressed as
+// Unicode code points so PostgreSQL locale classes cannot change the rule.
+const SHORTCODE_TRIM_CHARS: &str = concat!(
+    r"\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006",
+    r"\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF",
+);
+
+// Both reaction projections use the same validation and selection rules.
+// This expression reads the reaction row aliased as `rx`; do not apply it to
+// the target message's content. Labels are optional, untrusted display text.
+fn reaction_shortcode_sql() -> String {
+    let candidates = ["shortcode", "com.beeper.reaction.shortcode"]
+        .map(|field| {
+            let trimmed = format!("btrim(rx.content->>'{field}', U&'{SHORTCODE_TRIM_CHARS}')");
+            format!(
+                "CASE WHEN jsonb_typeof(rx.content->'{field}') = 'string' \
+                 AND octet_length(rx.content->>'{field}') BETWEEN 1 AND 100 \
+                 AND {trimmed} <> '' \
+                 AND rx.content->>'{field}' COLLATE \"C\" !~ U&'[\\0001-\\001F\\007F-\\009F]' \
+                 THEN {trimmed} END"
+            )
+        })
+        .join(", ");
+    format!(
+        "CASE WHEN octet_length(rx.relates_to->>'key') <= 2048 \
+         AND rx.relates_to->>'key' ~ '^mxc://[^/]+/[^/]+$' \
+         THEN COALESCE({candidates}) END"
+    )
+}
+
+// At most REACTION_AGG_PAIR_CAP labels of at most 100 bytes enter this array.
+// Prefer the oldest valid label in the same retained representative set used
+// for counts/senders; event_id breaks timestamp ties deterministically.
+const REACTION_SHORTCODE_AGG: &str = "(array_agg(capped.shortcode ORDER BY capped.origin_ts, capped.event_id) FILTER (WHERE capped.shortcode IS NOT NULL))[1]";
 
 /// Shared SELECT projection for timeline reads, with read-time redaction masking
 /// **and M8 relation aggregation** (edit collapse + reaction tally). Three
@@ -273,7 +307,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
 ///   `edit_count` too).
 /// * `react` — every non-redacted `m.reaction` (`m.annotation`) in the same room
 ///   targeting `e`, grouped by `key` into a `{key: {count, senders, me,
-///   my_event_ids}}` JSON object; `(sender, key)` is deduplicated via
+///   my_event_ids, shortcode}}` JSON object; `(sender, key)` is deduplicated via
 ///   `COUNT(DISTINCT sender)`, and `me` compares against the account's own
 ///   `user_id` (the `accounts` join `ac`). `my_event_ids` is the account user's
 ///   own (undeduplicated) reaction event ids for the key — the ids a client
@@ -286,11 +320,13 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
 ///   sender spamming a reaction can't consume the budget and hide others
 ///   (`REACTION_AGG_PAIR_CAP`). Restricted to the `m.reaction` event type —
 ///   generic `m.annotation` aggregation is tracked separately (GH #112).
+///   Optional `shortcode` uses the oldest valid label in this retained set.
 ///
 /// Callers append their own `WHERE` (binding `account_id` as `$1`) plus ordering
 /// / pagination. Selects exactly the columns [`TimelineRow`] reads. Built once via
 /// [`LazyLock`] so the scan cap is interpolated from a single constant.
 pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
+    let reaction_shortcode = reaction_shortcode_sql();
     format!(
         "SELECT e.id, e.event_id, e.room_id, e.sender, e.raw_event->>'state_key' AS state_key, \
             e.raw_event->'unsigned'->'prev_content' AS prev_content, \
@@ -352,20 +388,22 @@ pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
                         'count', COUNT(*), \
                         'senders', jsonb_agg(capped.sender ORDER BY capped.sender), \
                         'me', bool_or(capped.is_me), \
+                        'shortcode', {REACTION_SHORTCODE_AGG}, \
                         'my_event_ids', COALESCE( \
                             jsonb_agg(capped.event_id ORDER BY capped.event_id) \
                                 FILTER (WHERE capped.is_me), \
                             '[]'::jsonb) \
                     ) AS tally \
              FROM ( \
-                 SELECT pair.key, pair.sender, pair.event_id, pair.is_me \
+                 SELECT pair.key, pair.sender, pair.event_id, pair.is_me, pair.origin_ts, pair.shortcode \
                  FROM ( \
                      SELECT DISTINCT ON (rx.sender, rx.relates_to->>'key') \
                             rx.relates_to->>'key' AS key, \
                             rx.sender               AS sender, \
                             rx.event_id             AS event_id, \
                             (rx.sender = ac.user_id) AS is_me, \
-                            rx.origin_ts            AS origin_ts \
+                            rx.origin_ts            AS origin_ts, \
+                            {reaction_shortcode} AS shortcode \
                      FROM events rx \
                      WHERE rx.account_id = e.account_id \
                        AND rx.room_id = e.room_id \
@@ -1078,6 +1116,7 @@ impl Store {
         // ordered pair set caps every per-key array (`senders`, `my_event_ids`),
         // the distinct-sender `count`, and the number of keys — and one sender
         // spamming a reaction can't consume the budget or hide other senders.
+        let reaction_shortcode = reaction_shortcode_sql();
         let sql = format!(
             "SELECT capped.key                       AS key, \
                     COUNT(*)                          AS count, \
@@ -1087,16 +1126,18 @@ impl Store {
                             FILTER (WHERE capped.is_me), \
                         ARRAY[]::text[] \
                     ) AS my_event_ids, \
-                    bool_or(capped.is_me) AS me \
+                    bool_or(capped.is_me) AS me, \
+                    {REACTION_SHORTCODE_AGG} AS shortcode \
              FROM ( \
-                 SELECT pair.key, pair.sender, pair.event_id, pair.is_me \
+                 SELECT pair.key, pair.sender, pair.event_id, pair.is_me, pair.origin_ts, pair.shortcode \
                  FROM ( \
                      SELECT DISTINCT ON (rx.sender, rx.relates_to->>'key') \
                             rx.relates_to->>'key' AS key, \
                             rx.sender               AS sender, \
                             rx.event_id             AS event_id, \
                             (rx.sender = ac.user_id) AS is_me, \
-                            rx.origin_ts            AS origin_ts \
+                            rx.origin_ts            AS origin_ts, \
+                            {reaction_shortcode} AS shortcode \
                      FROM events rx \
                      JOIN accounts ac ON ac.account_id = rx.account_id \
                      WHERE rx.account_id = $1 \
@@ -1309,6 +1350,8 @@ impl Store {
 /// [`Store::event_reactions`].
 #[derive(Debug, Clone)]
 pub struct ReactionTally {
+    /// Optional validated custom-image shortcode from the oldest labeled retained pair.
+    pub shortcode: Option<String>,
     /// The reaction key — typically an emoji, e.g. `👍`.
     pub key: String,
     /// Number of distinct senders who reacted with this key (deduplicated).
@@ -1327,6 +1370,7 @@ pub struct ReactionTally {
 impl sqlx_core::from_row::FromRow<'_, PgRow> for ReactionTally {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
         Ok(ReactionTally {
+            shortcode: row.try_get("shortcode")?,
             key: row.try_get("key")?,
             count: row.try_get("count")?,
             senders: row.try_get("senders")?,
