@@ -764,6 +764,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List custom emoji available from the current room and personal pack.
+         *     Supports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal
+         *     `im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with
+         *     the same state key. Personal packs precede room packs; names are not merged.
+         *     Sticker-only entries are excluded. Other-room subscriptions and canonical
+         *     space inheritance are not included. Requires positive joined membership.
+         *     This is a local cache read, not a homeserver request or an authoritative
+         *     statement that no packs exist upstream. Re-read on picker open/reconnect.
+         *     At most 64 room packs plus one personal pack, 128 KiB per source, 512 entries
+         *     examined per pack, and 1000 returned images across packs. `partial` signals
+         *     omitted invalid/oversized data or truncation. All names are untrusted text.
+         */
+        get: operations["room_emoji_packs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}": {
         parameters: {
             query?: never;
@@ -2576,6 +2605,18 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_RoomEmojiPacksDto: {
+            /**
+             * @description Current-room and personal emoticon packs, as known to Axon's sync cache.
+             *     Empty results do not prove absence upstream while initial sync is pending.
+             */
+            data: {
+                packs: components["schemas"]["EmojiPackDto"][];
+                /** @description Invalid/oversized content was omitted, or a pack/image limit was reached. */
+                partial: boolean;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_RoomEntryResultDto: {
             /**
              * @description Response for the four room-entry mutations (`join`/`knock`/`create_room`/
@@ -3689,6 +3730,14 @@ export interface components {
              */
             verification_violation?: boolean | null;
         };
+        CustomEmojiDto: {
+            /** @description Optional plain-text description, distinct from the search shortcode. */
+            body?: string | null;
+            /** @description Untrusted display text, not HTML. Send alongside the MXC reaction key. */
+            shortcode: string;
+            /** @description Validated MXC URI; fetch through the authenticated media proxy. */
+            url: string;
+        };
         /**
          * @description One Matrix device of a user, as reported by `GET …/devices` — the picker a
          *     client shows before starting SAS verification (M16, ADR 0060).
@@ -3790,6 +3839,20 @@ export interface components {
             description: string;
             /** @description The emoji character(s). */
             symbol: string;
+        };
+        EmojiPackDto: {
+            avatar_url?: string | null;
+            display_name?: string | null;
+            /** @description Room state event ID. Personal account data has no event ID. */
+            event_id?: string | null;
+            /** @description Source state/account-data type, preserving stable or legacy identifiers. */
+            event_type: string;
+            images: components["schemas"]["CustomEmojiDto"][];
+            partial: boolean;
+            /** @description Null for the account's personal pack; otherwise the current room ID. */
+            room_id?: string | null;
+            /** @description Null for personal account data. Empty string is a valid room pack key. */
+            state_key?: string | null;
         };
         /**
          * @description Request body for originating or joining megolm key backup
@@ -4569,6 +4632,12 @@ export interface components {
         ReactRequest: {
             /** @description The reaction key — typically an emoji. */
             key: string;
+            /**
+             * @description Optional custom-image name. Requires a structurally valid MXC key.
+             *     At most 100 UTF-8 bytes before trimming, nonblank, with no C0/C1 controls.
+             *     Sent as `shortcode` in the original reaction event, never as its key.
+             */
+            shortcode?: string | null;
         };
         /**
          * @description One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).
@@ -4743,6 +4812,15 @@ export interface components {
             tags?: components["schemas"]["RoomTag"][];
             /** @description Room topic (`m.room.topic`), if set. */
             topic?: string | null;
+        };
+        /**
+         * @description Current-room and personal emoticon packs, as known to Axon's sync cache.
+         *     Empty results do not prove absence upstream while initial sync is pending.
+         */
+        RoomEmojiPacksDto: {
+            packs: components["schemas"]["EmojiPackDto"][];
+            /** @description Invalid/oversized content was omitted, or a pack/image limit was reached. */
+            partial: boolean;
         };
         /**
          * @description Response for the four room-entry mutations (`join`/`knock`/`create_room`/
@@ -7814,6 +7892,58 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    room_emoji_packs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cached personal and current-room emoji packs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomEmojiPacksDto"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account inactive or joined room not known locally */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal database failure */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

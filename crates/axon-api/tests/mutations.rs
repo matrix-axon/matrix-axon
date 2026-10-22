@@ -177,6 +177,7 @@ async fn mutations_route_to_sender_and_envelope_result() {
                 room_id: room_id.to_owned(),
                 event_id: event_id.to_owned(),
                 key: "👍".to_owned(),
+                shortcode: None,
             },
         ]
     );
@@ -230,6 +231,49 @@ async fn send_media_claims_sends_and_completes_upload() {
             thread_root: Some("$root:localhost".to_owned()),
         }]
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn custom_reaction_name_is_validated_and_forwarded() {
+    let sender = Arc::new(StubSender::ok("$named:localhost"));
+    let app = app(store().await, sender.clone());
+    let account_id = Uuid::new_v4();
+    let uri = format!(
+        "/v1/accounts/{account_id}/rooms/!room:localhost/events/$event:localhost/reactions"
+    );
+    let (status, _) = send(
+        &app,
+        "POST",
+        &uri,
+        Some(json!({
+            "key": "mxc://example.org/custom", "shortcode": "\u{00a0}allthethings\u{feff}"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sender.calls(),
+        vec![Call::React {
+            account_id,
+            room_id: "!room:localhost".into(),
+            event_id: "$event:localhost".into(),
+            key: "mxc://example.org/custom".into(),
+            shortcode: Some("allthethings".into()),
+        }]
+    );
+    for body in [
+        json!({"key": "👍", "shortcode": "pretend"}),
+        json!({"key": "mxc://example.org/custom", "shortcode": "\u{a0}\u{feff}"}),
+        json!({"key": "mxc://example.org/custom", "shortcode": "bad\u{85}name"}),
+        json!({"key": "mxc://example.org/custom", "shortcode": "é".repeat(51)}),
+    ] {
+        assert_eq!(
+            send(&app, "POST", &uri, Some(body)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(sender.calls().len(), 1);
 }
 
 #[tokio::test]

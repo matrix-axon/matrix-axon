@@ -111,6 +111,24 @@ pub trait MessageSender: Send + Sync {
         event_id: &str,
         key: &str,
     ) -> Result<String, SendError>;
+
+    /// Additive custom-image naming capability; old implementations retain
+    /// unnamed reactions and fail explicitly rather than silently drop names.
+    async fn react_with_shortcode(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+        shortcode: Option<&str>,
+    ) -> Result<String, SendError> {
+        if shortcode.is_some() {
+            return Err(SendError::Unavailable(
+                "custom reaction names unavailable".into(),
+            ));
+        }
+        self.react(account_id, room_id, event_id, key).await
+    }
 }
 
 /// Sends ephemeral, homeserver-facing signals that have no lasting timeline

@@ -1935,6 +1935,15 @@ async fn run_account(
         },
     ));
 
+    // SDK UI does not expose custom required-state configuration. One separate
+    // state-only Sliding Sync connection hydrates packs through the same SDK
+    // event handlers. Cancel and join it on every supervised run's teardown.
+    let image_packs_cancel = cancel.child_token();
+    let image_packs_handle = tokio::spawn(crate::image_packs::run(
+        client.clone(),
+        account.account_id,
+        image_packs_cancel.clone(),
+    ));
     sync_service.start().await;
     tracing::info!(account_id = %account.account_id, "sync service started");
 
@@ -2198,6 +2207,10 @@ async fn run_account(
     };
     verification_rooms.unregister(account.account_id, verification_room_run_id);
 
+    image_packs_cancel.cancel();
+    if let Err(err) = image_packs_handle.await {
+        tracing::warn!(account_id = %account.account_id, error = %err, "image pack worker did not shut down cleanly");
+    }
     member_counts_cancel.cancel();
     if let Err(err) = member_counts_handle.await {
         tracing::warn!(account_id = %account.account_id, error = %err, "member count worker did not shut down cleanly");

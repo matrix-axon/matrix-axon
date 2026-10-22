@@ -220,6 +220,22 @@ impl MessageSender for GatewayAdapter {
         )
         .await
     }
+
+    async fn react_with_shortcode(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+        shortcode: Option<&str>,
+    ) -> Result<String, SendError> {
+        self.with_mutation_timeout(
+            "react",
+            self.gateway
+                .react_with_shortcode(account_id, room_id, event_id, key, shortcode),
+        )
+        .await
+    }
 }
 
 #[async_trait]

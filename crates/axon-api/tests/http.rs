@@ -17,6 +17,8 @@
 //! `auth_gate_*` tests below.
 
 mod common;
+#[path = "http/image_packs.rs"]
+mod image_packs;
 
 use std::sync::{Arc, Mutex};
 
