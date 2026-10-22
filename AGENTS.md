@@ -13,6 +13,11 @@ See `docs/mvp/prd.md` for the full product description.
 | `docs/mvp/implementation.md`   | Milestone-by-milestone build plan (authoritative for agentic contributors)                                                                                                                                                                                                                                                                       |
 | `docs/adr/`                    | Architecture decision records — decisions made during implementation                                                                                                                                                                                                                                                                             |
 | `docs/integration-testing.md`  | Running axon against a local Synapse (sync + M3c re-decryption) by hand                                                                                                                                                                                                                                                                          |
+| `docs/README.md`               | Index of every guide under `docs/`, grouped by audience — add new docs here                                                                                                                                                                                                                                                                      |
+| `docs/install.md`              | End-user install steps per platform; `README.md` links here for anything beyond the one-liners                                                                                                                                                                                                                                                   |
+| `docs/building.md`             | Building and running from source (prerequisites, first-time setup, `run.sh`)                                                                                                                                                                                                                                                                     |
+| `docs/server-admin.md`         | Server operation: sign-in, tokens, SSO, push, bootstrap, management API, TLS                                                                                                                                                                                                                                                                     |
+| `docs/technical-reference.md`  | Architecture, database deadlines, environment variables and config                                                                                                                                                                                                                                                                               |
 | `docs/client-parity.md`        | Human-maintained cross-silo matrix of which `/v1/` capabilities each client (TUI, web, future iOS) actually exposes — update it in the same PR that changes a tracked row's status, from any silo                                                                                                                                                |
 | `docs/demo-coverage.md`        | Human-maintained record of which demo scene shows each visually significant capability (ADR 0086) — update it in the same PR that changes what a client renders, from any silo                                                                                                                                                                   |
 | `scripts/demo-stack.sh`        | Brings the ADR 0086 demo world up (`up`/`record`/`down`) for recording client videos. `record --capture` has ffmpeg record the TUI's own window (X11/XWayland) instead of a human running a screen recorder. Not a test and not a gate — the stack it starts is meant to stay up while a human (or `--capture`) records against it.              |
@@ -55,6 +60,8 @@ matrix-axon/
   docs/
     mvp/                     # PRD, tech spec, implementation spec (frozen at MVP ship)
     adr/                     # architecture decision records
+    README.md                # index of the guides below and beside it
+    install.md building.md server-admin.md technical-reference.md   # user and operator guides
     self-hosting.md          # produced in Milestone 13 (deployment docs; still pending)
   docker-compose.yml         # Postgres 16 for dev; Synapse under `integration` profile
   packaging/                 # nFPM .deb/.rpm, and the Homebrew formula and cask templates
@@ -225,7 +232,7 @@ this table is the orientation copy.
   Before landing duplicate or near-duplicate logic, extract a shared helper or refactor.
   Duplicated implementations drift apart, and each copy becomes a place a fix can be forgotten — the shared `TIMELINE_SELECT` projection, the config-discovery rules, and the TUI parsers are all single-source-of-truth for exactly this reason.
 - **Docs track code.**
-  A change to behavior that end-user docs (`README.md`), contributor setup (`CONTRIBUTING.md`), or agent instructions (`AGENTS.md`, subtree `AGENTS.md`s) describe must update those docs in the same PR — they must reflect the project's state once the PR merges.
+  A change to behavior that end-user docs (`README.md` and the guides indexed in `docs/README.md`), contributor setup (`CONTRIBUTING.md`), or agent instructions (`AGENTS.md`, subtree `AGENTS.md`s) describe must update those docs in the same PR — they must reflect the project's state once the PR merges.
   Stale docs are a review finding.
 - **Break prose lines semantically, not at a column.**
   New markdown prose gets a newline after each sentence, or after a long clause — one sentence per line.
@@ -351,7 +358,7 @@ Config precedence and discovery are described in the Milestone 2 notes below (fi
   Any integration test, smoke guide, or manual repro that expects throwaway state must set `AXON_SYNC__DATA_DIR`, `AXON_SEARCH__INDEX_PATH`, and `AXON_MEDIA__CACHE_DIR` explicitly — otherwise it reads and writes the real platform dirs (ADR 0050) and leaks state between runs.
 - **Document config.**
   Each silo must have documentation of configuration and examples.
-  For the server, README.md should list the most common config options, and .env.example should include examples of every option that can be set via environmental variables.
+  For the server, `docs/technical-reference.md` should list the most common config options (the README only links to it), and .env.example should include examples of every option that can be set via environmental variables.
   Update these files when config options are added or changed.
 
 ## Design guardrails

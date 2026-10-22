@@ -15,7 +15,31 @@ same URL (`axon-server` itself is not published to the host). Open the browser a
 > This is the _deployment_ stack (`deploy/docker-compose.yml`). The Postgres-only
 > `docker-compose.yml` at the repo root is for local development and is unrelated.
 
-## Quick start (one command)
+## Quick start (prebuilt images, no clone)
+
+Run the full Axon stack — server **and** the web client — from prebuilt images, with **no clone and no build**.
+Images are public, so no `docker login` or credentials are required.
+
+**Prereqs:** [Docker](https://www.docker.com/products/docker-desktop/)
+
+```sh
+# 1. Fetch the one-file Compose, then start it (images pull automatically)
+curl -fsSL "https://raw.githubusercontent.com/matrix-axon/matrix-axon/refs/heads/main/deploy/docker-compose.beta.yml" \
+  -o docker-compose.yml
+docker compose up -d
+
+# 2. Open the printed one-time setup URL in your browser (if installation hasn't yet finished, try again after a minute):
+docker compose logs axon-server | grep 'bootstrap is armed'
+```
+
+Opening that `http://<host>:8080/bootstrap/<code>` URL mints your first credential and signs the web client in with nothing to paste.
+Update later with `docker compose pull && docker compose up -d`;
+stop with `docker compose down` (add `-v` to wipe data too).
+For encrypted remote access, run `tailscale serve http://localhost:8080` on the host, or see [TLS / remote access profiles](#tls--remote-access-profiles) below.
+
+To connect the terminal or desktop client to this stack, see [Installing Axon](../docs/install.md#clients).
+
+## Quick start from a checkout (builds from source)
 
 ```sh
 cd deploy

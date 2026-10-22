@@ -84,15 +84,15 @@ A server that asks for a very long wait cannot stall the flow, because the deadl
 _(Amended after code review: the original decision clamped the interval to sixty seconds, which could poll sooner than the server required.)_
 Token-endpoint responses map as follows:
 
-| Response                                                         | Action                                                              |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `authorization_pending`                                          | keep polling                                                        |
-| `slow_down`                                                      | add five seconds to the interval, every time, with no ceiling       |
-| `access_denied`                                                  | fail as `authorization_denied`                                      |
-| `expired_token`                                                  | fail as `authorization_expired`                                     |
-| transport error, timeout, `429`, or `5xx`                        | retry with back-off; two minutes of failures fail as `upstream`     |
-| any other OAuth error (`invalid_grant`, `server_error`, unknown) | fail as `upstream`                                                  |
-| success without a refresh token                                  | fail as `upstream`, after best-effort revocation                    |
+| Response                                                         | Action                                                          |
+| ---------------------------------------------------------------- | --------------------------------------------------------------- |
+| `authorization_pending`                                          | keep polling                                                    |
+| `slow_down`                                                      | add five seconds to the interval, every time, with no ceiling   |
+| `access_denied`                                                  | fail as `authorization_denied`                                  |
+| `expired_token`                                                  | fail as `authorization_expired`                                 |
+| transport error, timeout, `429`, or `5xx`                        | retry with back-off; two minutes of failures fail as `upstream` |
+| any other OAuth error (`invalid_grant`, `server_error`, unknown) | fail as `upstream`                                              |
+| success without a refresh token                                  | fail as `upstream`, after best-effort revocation                |
 
 Only the stable classification and HTTP status are logged, never the error description.
 
@@ -242,6 +242,11 @@ The real Synapse plus MAS lane proves that a user who approves in a browser ends
 
 That stack signs in to MAS with a local password rather than through an upstream identity provider, and serves plain HTTP on loopback.
 Before the method is enabled by default it is also run once against a real HTTPS deployment whose authorization server fronts an upstream identity provider.
+
+_Amended during implementation: the lane is `browser` in `smoke/matrix-oauth`, and the `unsupported` lane also checks browser sign-in.
+The QR and browser lanes run as separate jobs against the same pinned MAS, rather than as one run.
+Browser sign-in finds the homeserver from the user ID alone, so the harness names its Synapse `localhost:<published port>` in every lane; with a bare `localhost`, that lookup would go to a port where nothing listens.
+The lane's disclosure check also rejects the field names `user_code` and `device_code` in Axon's log._
 
 ## Rejected alternatives
 
