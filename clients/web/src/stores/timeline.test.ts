@@ -1956,3 +1956,58 @@ describe('a reload over an existing slice', () => {
     expect(store.events.value[3].body).toBe('still unconfirmed')
   })
 })
+
+it('sends custom reaction names, retains aggregate names when toggling, and withdraws by event id', async () => {
+  const bodies: unknown[] = []
+  const withdrawals: string[] = []
+  server.use(
+    http.post(
+      `${BASE_URL}/v1/accounts/:account/rooms/:room/events/:id/reactions`,
+      async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ data: { event_id: '$rx' } })
+      },
+    ),
+    http.delete(
+      `${BASE_URL}/v1/accounts/:account/rooms/:room/events/:id`,
+      ({ params }) => {
+        withdrawals.push(String(params.id))
+        return HttpResponse.json({ data: {} })
+      },
+    ),
+    http.get(EVENT_PATH, () => HttpResponse.json({ data: event('$1', 100) })),
+  )
+  const store = makeStore()
+  const key = 'mxc://hs/wave'
+  const target = event('$1', 100)
+  expect(await store.toggleReaction(target, key, 'wave')).toBe(true)
+  expect(await store.toggleReaction(target, '👍')).toBe(true)
+  const tally = {
+    shortcode: 'wave',
+    count: 1,
+    me: false,
+    senders: ['@bob:hs'],
+    my_event_ids: [],
+  }
+  expect(
+    await store.toggleReaction(
+      event('$1', 100, { reactions: { [key]: tally } }),
+      key,
+    ),
+  ).toBe(true)
+  expect(
+    await store.toggleReaction(
+      event('$1', 100, {
+        reactions: { [key]: { ...tally, me: true, my_event_ids: ['$mine'] } },
+      }),
+      key,
+      'wave',
+    ),
+  ).toBe(true)
+  expect(bodies).toEqual([
+    { key, shortcode: 'wave' },
+    { key: '👍' },
+    { key, shortcode: 'wave' },
+  ])
+  expect(withdrawals).toEqual(['$mine'])
+})
