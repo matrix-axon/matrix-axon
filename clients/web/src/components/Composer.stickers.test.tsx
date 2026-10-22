@@ -217,10 +217,73 @@ it('suggests stickers case-insensitively, completes with Tab, and preserves sour
   await waitFor(() => expect(onSelect).toHaveBeenCalledWith(image))
 })
 
-it('keeps sticker suggestions out of prose and reaction commands', () => {
+it('keeps sticker-only suggestions out of prose and reaction commands', async () => {
+  const read = vi.fn()
+  server.use(
+    http.get(PACKS, () => {
+      read()
+      return HttpResponse.json({
+        data: { packs: [pack(null)], partial: false },
+      })
+    }),
+  )
   const first = setup({ initialValue: 'Hello :AD' })
   expect(screen.queryByRole('option')).toBeNull()
   first.unmount()
   setup({ initialValue: '/react :AD', onCommand: vi.fn() })
+  await waitFor(() => expect(read).toHaveBeenCalled())
   expect(screen.queryByRole('option')).toBeNull()
+})
+
+it('completes reaction-capable pack emoji in /react without offering sticker-only images', async () => {
+  server.use(
+    http.get(PACKS, ({ request }) => {
+      expect(new URL(request.url).searchParams.get('usage')).toBeNull()
+      return HttpResponse.json({
+        data: {
+          packs: [
+            {
+              ...pack(null),
+              images: [
+                { ...image, emoticon: true },
+                { ...image, shortcode: 'adam_sticker', emoticon: false },
+              ],
+            },
+          ],
+          partial: false,
+        },
+      })
+    }),
+  )
+  const onCommand = vi.fn(() => true)
+  const { input, onSelect } = setup({ initialValue: '', onCommand })
+  fireEvent.input(input, { target: { value: '/react AD' } })
+  const choice = await screen.findByRole('option', {
+    name: /:adam:.*Custom emoji/,
+  })
+  expect(choice.textContent).toContain('Personal')
+  expect(screen.queryByRole('option', { name: /adam_sticker/ })).toBeNull()
+  fireEvent.keyDown(input, { key: 'Tab' })
+  expect(input.value).toBe('/react :adam: ')
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(onCommand).toHaveBeenCalledWith('/react :adam:')
+  expect(onSelect).not.toHaveBeenCalled()
+})
+
+it('does not clear a newer draft when an asynchronous reaction command finishes', async () => {
+  let finish!: (handled: boolean) => void
+  const pending = new Promise<boolean>((resolve) => {
+    finish = resolve
+  })
+  const { input } = setup({
+    initialValue: '/react :adam:',
+    onCommand: () => pending,
+  })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  fireEvent.input(input, { target: { value: 'next message' } })
+  await act(async () => {
+    finish(true)
+    await pending
+  })
+  expect(input.value).toBe('next message')
 })

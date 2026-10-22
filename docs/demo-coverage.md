@@ -49,7 +49,7 @@ shows it.
 | React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
 | Custom reaction images (MSC4027)                        | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Standalone sticker selection and sending                | **not covered**       | **not covered**                                                                                           | **not covered** |
-| Custom emoji pack selection (personal/current room)     | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Custom emoji packs and `/react` completion              | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Reaction badge updating live from another user's react  | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Replies                                                 | `timeline`            | `timeline`                                                                                                | `send`          |
 | Edits (`m.replace`, applied in place)                   | `threads`             | `threads`                                                                                                 | **not covered** |

@@ -133,6 +133,11 @@ Matching is case-insensitive; personal packs take precedence, followed by the se
 Typing a standalone shortcode prefix such as `:ad` includes sticker suggestions, with previews and pack names, in the existing emoji autocomplete menu.
 Choose a suggestion with Tab, Enter, or a pointer to insert the original shortcode, then submit it to send the sticker.
 Duplicate names after case-folding show their effective first match; the picker remains available to choose a specific image from another pack.
+Reaction commands (`/react` and `/+`) complete reaction-capable custom emoji from the same server discovery snapshot used by the reaction picker, alongside Unicode emoji.
+Type a prefix with or without a leading colon, choose its preview with Tab or a pointer, and submit the command to react to the current target message.
+An exact custom shortcode also works without selecting a suggestion; matching is case-insensitive and preserves the pack's original name in the sent reaction metadata.
+Sticker-only entries are excluded from reaction commands, and servers without pack discovery retain Unicode reaction support.
+
 Only a whole-message shortcode becomes a sticker: names in prose, attachment captions, and edits keep their text behavior.
 Unknown names and servers without pack discovery use the existing text/Unicode shortcode handling.
 A discovery failure keeps the draft and offers another Send attempt; changing rooms cancels a pending lookup.
@@ -140,9 +145,10 @@ Only sticker-capable images appear; mixed-use images also remain available in th
 Selecting a sticker preserves any unsent text or staged attachments, and failed sends offer Retry and Discard in the timeline.
 Replies and thread context are preserved, and received stickers display the original image so animated stickers retain their animation.
 Older servers show an unavailable or empty sticker state without affecting text and reaction sends.
-Shared packs subscribed from other rooms, inherited space packs, and pack editing remain outside this version.
+Available packs follow server discovery, including canonical ancestor spaces when supported by the server.
+Shared packs subscribed from other rooms and pack editing remain outside this version.
 
-For testing this client together with the companion server change, this bookmark is stacked on `codex/server-room-emoji`.
+To test with the companion server changes, run the server from `codex/server-room-emoji` alongside this client.
 Build the web bundle in this workspace and point the embedded-server build at it:
 
 ```bash
