@@ -22,6 +22,15 @@ pub enum StoreError {
     #[error("invalid embedded migration: {0}")]
     EmbeddedMigration(String),
 
+    /// The database's `server_encoding` is not UTF8. Queries compare, trim and
+    /// match Unicode text, which other encodings cannot represent (GH #803).
+    #[error(
+        "database encoding is {0}, but Axon requires UTF8; copy it with `pg_dump --encoding=UTF8` \
+         into a database created with `createdb -E UTF8 -T template0 --locale=C`, and swap that \
+         one in (docs/technical-reference.md, \"Database encoding\")"
+    )]
+    UnsupportedEncoding(String),
+
     /// An account's persisted authentication fields do not form one complete,
     /// current session. The message never contains token material.
     #[error("invalid account session: {0}")]
@@ -61,6 +70,7 @@ impl StoreError {
                 _ => "database_client",
             },
             Self::Migrate(_) | Self::EmbeddedMigration(_) => "database_migration",
+            Self::UnsupportedEncoding(_) => "database_encoding",
             Self::InvalidAccountSession(_) => "invalid_account_session",
             Self::OAuthSessionNotCurrent => "oauth_session_not_current",
         }

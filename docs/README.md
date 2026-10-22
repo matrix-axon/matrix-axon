@@ -10,7 +10,7 @@ This page indexes everything else.
 | [Installing Axon](install.md)                              | Server and clients, per operating system                                         |
 | [Docker guide](../deploy/README.md)                        | The Compose stack: quick start, Tailscale and Caddy profiles, volumes and backup |
 | [Administering the server](server-admin.md)                | Sign-in, tokens, SSO, adding accounts, push, management API, TLS                 |
-| [Technical reference](technical-reference.md)              | Architecture, database deadlines, environment variables and config               |
+| [Technical reference](technical-reference.md)              | Architecture, database encoding and deadlines, environment variables and config  |
 | [axon-tui](../clients/tui/README.md)                       | The terminal client: commands, shortcuts, configuration                          |
 | [axon-web](../clients/web/README.md)                       | The web client                                                                   |
 | [Desktop app](../clients/web/src-tauri/README.md)          | The Tauri shell for macOS, Windows and Linux                                     |
