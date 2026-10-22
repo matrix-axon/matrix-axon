@@ -39,13 +39,13 @@ docker compose logs axon-server | grep 'bootstrap is armed'   # open the printed
 
 For a native setup:
 
-| Your system | Server                                                     | Client                                                                                                                               |
-| ----------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **macOS**   | `brew install matrix-axon/tap/axon-server`                 | `brew install --cask matrix-axon/tap/axon` (desktop app), or `brew install matrix-axon/tap/axon-tui` (terminal)                      |
-| **Windows** | [Docker stack](deploy/README.md)                           | [Desktop installer](https://github.com/matrix-axon/matrix-axon/releases/latest), or the web client in your browser                   |
-| **Linux**   | `.deb` or `.rpm` package ([steps](docs/install.md#server)) | Web client in your browser, or the desktop app (`.deb`, AppImage) or terminal client                                                 |
-| **iOS**     | —                                                          | [App Store](https://apps.apple.com/us/app/matrix-axon/id6813675186) or TestFlight beta                                               |
-| **Android** | —                                                          | [APK](https://github.com/matrix-axon/matrix-axon/releases/latest/download/app-universal-release-signed.apk) or Play Store Beta       |
+| Your system | Server                                                     | Client                                                                                                                         |
+| ----------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **macOS**   | `brew install matrix-axon/tap/axon-server`                 | `brew install --cask matrix-axon/tap/axon` (desktop app), or `brew install matrix-axon/tap/axon-tui` (terminal)                |
+| **Windows** | [Docker stack](deploy/README.md)                           | [Desktop installer](https://github.com/matrix-axon/matrix-axon/releases/latest), or the web client in your browser             |
+| **Linux**   | `.deb` or `.rpm` package ([steps](docs/install.md#server)) | Web client in your browser, or the desktop app (`.deb`, AppImage) or terminal client                                           |
+| **iOS**     | —                                                          | [App Store](https://apps.apple.com/us/app/matrix-axon/id6813675186) or TestFlight beta                                         |
+| **Android** | —                                                          | [APK](https://github.com/matrix-axon/matrix-axon/releases/latest/download/app-universal-release-signed.apk) or Play Store Beta |
 
 Every download is on the [latest release page](https://github.com/matrix-axon/matrix-axon/releases/latest).
 [**Installing Axon**](docs/install.md) has full steps for every platform, and [building from source](docs/building.md) is there if you'd rather compile it yourself.

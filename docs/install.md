@@ -132,4 +132,4 @@ Install an older build [directly from the App Store](https://apps.apple.com/us/a
 ### Android
 
 Download the [Android build](https://github.com/matrix-axon/matrix-axon/releases/latest/download/app-universal-release-signed.apk).
-A Play Store build is coming soon, but we need testers for approval.
+A Play Store beta build is available; post in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net) to be added to the beta distribution. Once we have sufficient beta testers, we'll be able to push a release version.

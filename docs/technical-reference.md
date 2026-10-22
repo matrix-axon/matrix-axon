@@ -14,6 +14,17 @@ Homeserver(s)  →  Axon (single binary)  →  axon-web · axon-tui
 One Rust binary, one Postgres database, media cached to local disk.
 See the [architecture section of the tech spec](mvp/tech-spec.md#architecture-overview) for detail, and the [ADRs](adr/) for the reasoning behind individual decisions.
 
+## Clients
+
+| Client                                            | Platform                                              | Status                                                                   |
+| ------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| [`axon-tui`](clients/tui/README.md)               | Terminal                                              | Active (MVP reference client)                                            |
+| [`axon-web`](clients/web/README.md)               | Web browser (desktop + mobile)                        | Active (nearing MVP)                                                     |
+| [`axon-desktop`](clients/web/src-tauri/README.md) | Linux, macOS, Windows (Tauri shell around `axon-web`) | Active ([download](https://github.com/matrix-axon/matrix-axon/releases)) |
+| `axon-mobile`                                     | iOS + Android (the same shell)                        | Planned (ADR 0102)                                                       |
+
+See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and sequencing.
+
 ### Reaction images
 
 The authenticated media download and thumbnail endpoints also resolve custom reaction images whose keys are `mxc://` URLs (MSC4027), without requiring an image pack definition.
