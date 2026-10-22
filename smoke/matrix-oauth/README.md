@@ -1,6 +1,6 @@
-# Matrix OAuth QR interoperability
+# Matrix OAuth QR and browser sign-in interoperability
 
-`axon-smoke-matrix-oauth` is the ADR 0097 black-box and real interoperability harness.
+`axon-smoke-matrix-oauth` is the ADR 0097 and ADR 0117 black-box and real interoperability harness.
 It drives the shipped `axon-server` only through `/v1/`; its separate matrix-rust-sdk client plays an existing trusted device or a fresh third-party device.
 The harness depends on no Axon product crate.
 
@@ -17,8 +17,12 @@ The `issue-compatibility-token` CLI creates the device before committing its ses
 scripts/matrix-oauth-test.sh api
 scripts/matrix-oauth-test.sh acquire
 scripts/matrix-oauth-test.sh grant
+scripts/matrix-oauth-test.sh browser
 scripts/matrix-oauth-test.sh unsupported
 ```
+
+Synapse's server name is `localhost:<published port>`, so the test user is `@alice:localhost:<port>`.
+Browser sign-in finds the homeserver from the user ID alone, and a bare `localhost` would send that lookup to a port where nothing listens.
 
 Set `TMPDIR` to a filesystem with enough room for the throwaway configuration and SDK stores when `/tmp` is constrained.
 
@@ -27,18 +31,19 @@ In CI the lanes run after every push to `main` and nightly from `smoke.yml`, and
 The lanes cover:
 
 - `api`: authenticated acquisition boundaries, invalid identity, idempotent cancellation and bounded identity-release recovery, explicit authorization rejection, account-scoped grant isolation, malformed QR redaction, grant cancellation, and real rendezvous expiry;
-- `acquire`: a trusted SDK device authorizes Axon, Axon becomes cross-signed, receives backup material, decrypts history created before login, then restores and refreshes its OAuth session after restart beyond the 60-second test access-token lifetime;
-- `grant`: a trusted Axon account authorizes a fresh SDK device only after explicit MAS approval, and the new device becomes cross-signed, activates the transferred backup secret, and decrypts the seeded history; and
-- `unsupported`: MAS omits the device-authorization capability and acquisition terminates with the stable `unsupported` classification.
+- `acquire`: a trusted SDK device authorizes Axon, Axon becomes cross-signed, receives backup material, decrypts history created before login, then restores and refreshes its OAuth session after restart beyond the 60-second test access-token lifetime, which counts only once Axon decrypts a message the peer sent while it was down;
+- `grant`: a trusted Axon account authorizes a fresh SDK device only after explicit MAS approval, and the new device becomes cross-signed, activates the transferred backup secret, and decrypts the seeded history;
+- `browser`: a browser sign-in (ADR 0117) that MAS's device page rejects ends as `authorization_denied` and is unreachable through the QR routes; an approved one leaves an active account that is not yet verified, the recovery key then verifies it and Axon decrypts history created before sign-in, and the session restores and refreshes after a restart beyond the 60-second test access-token lifetime, checked the same way as `acquire`; and
+- `unsupported`: MAS omits the device-authorization capability, and both QR acquisition and browser sign-in terminate with the stable `unsupported` classification.
 
-The integration workflow exposes each lane separately and provides `matrix-oauth-all` to run all four manually.
-The smoke workflow runs all four in a separate job after every push to `main` and on its nightly schedule.
+The integration workflow exposes each lane separately and provides `matrix-oauth-all` to run all five manually.
+The smoke workflow runs all five in a separate job after every push to `main` and on its nightly schedule.
 Both multi-lane jobs attempt every lane after a failure and report the aggregate result, so one run exposes all broken scenarios it reaches within the job budget.
 These expensive, unstable-protocol lanes remain outside the pull-request path.
 
 ## Secret handling
 
-Runtime access tokens, refresh tokens, QR payloads, check codes, authorization user codes and URLs, recovery material, and exported secret bundles must never enter diagnostics or retained artifacts.
+Runtime access tokens, refresh tokens, QR payloads, check codes, authorization user codes and URLs (including browser sign-in's link and code), recovery material, and exported secret bundles must never enter diagnostics or retained artifacts.
 The launcher passes the fixture password through the environment, and the harness retains the resulting trusted-device access token and other known runtime protocol values in memory for disclosure checks.
 The Axon bearer token is passed without command-line arguments.
 

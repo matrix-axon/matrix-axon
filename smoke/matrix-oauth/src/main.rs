@@ -70,7 +70,10 @@ impl Config {
         let mode = std::env::args()
             .nth(1)
             .ok_or_else(|| anyhow!("missing lane name"))?;
-        if !matches!(mode.as_str(), "api" | "acquire" | "grant" | "unsupported") {
+        if !matches!(
+            mode.as_str(),
+            "api" | "acquire" | "grant" | "browser" | "unsupported"
+        ) {
             bail!("unknown lane name");
         }
         let user_id = OwnedUserId::try_from(required("MATRIX_OAUTH_USER_ID")?)
@@ -127,10 +130,12 @@ impl SecretTracker {
 
 /// Field names that must never appear in Axon's log, or in anything copied out
 /// of it.
-const FORBIDDEN_LOG_FIELDS: [&str; 8] = [
+const FORBIDDEN_LOG_FIELDS: [&str; 10] = [
     "qr_code_data",
     "check_code",
     "authorization_user_code",
+    "user_code",
+    "device_code",
     "verification_uri",
     "access_token",
     "refresh_token",
@@ -516,6 +521,66 @@ impl Api {
         Ok(())
     }
 
+    /// Start a browser sign-in (ADR 0117). An earlier flow for the same user
+    /// holds its reservation until its driver has cleaned up, so a `409` right
+    /// after one ends is retried until that release.
+    async fn create_browser(&self) -> Result<BrowserFlow> {
+        let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+        loop {
+            let (status, text) = self
+                .raw(
+                    Method::POST,
+                    "/v1/accounts/login/browser",
+                    Some(json!({ "expected_user_id": self.expected_user_id.as_str() })),
+                    true,
+                )
+                .await?;
+            if status == StatusCode::CREATED {
+                return decode_envelope(&text).map_err(|_| {
+                    anyhow!(
+                        "Axon API browser sign-in creation returned an invalid success envelope"
+                    )
+                });
+            }
+            if status != StatusCode::CONFLICT {
+                bail!(
+                    "Axon API browser sign-in creation returned HTTP {status}; expected 201 Created or transient 409 Conflict"
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("browser sign-in creation kept returning 409 Conflict");
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn browser(&self, flow_id: Uuid) -> Result<BrowserFlow> {
+        self.envelope(
+            "browser sign-in lookup",
+            Method::GET,
+            &format!("/v1/accounts/login/browser/{flow_id}"),
+            None,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Import the account's secrets with its recovery key (ADR 0098).
+    async fn recover(&self, account_id: Uuid, recovery_key: &str) -> Result<()> {
+        let (status, _) = self
+            .raw(
+                Method::POST,
+                &format!("/v1/accounts/{account_id}/recover"),
+                Some(json!({ "recovery_key": recovery_key })),
+                true,
+            )
+            .await?;
+        if status != StatusCode::OK {
+            bail!("Axon API recovery returned HTTP {status}; expected 200 OK");
+        }
+        Ok(())
+    }
+
     async fn accounts(&self) -> Result<Vec<Account>> {
         self.envelope(
             "account listing",
@@ -595,6 +660,16 @@ struct GrantFlow {
     error_code: Option<String>,
 }
 
+#[derive(Clone, Deserialize)]
+struct BrowserFlow {
+    flow_id: Uuid,
+    stage: String,
+    account_id: Option<Uuid>,
+    verification_uri: Option<String>,
+    user_code: Option<String>,
+    error_code: Option<String>,
+}
+
 trait FlowState {
     fn stage(&self) -> &str;
     /// The flow's terminal `error_code`, if it failed. Naming it in the bail
@@ -623,6 +698,16 @@ impl FlowState for GrantFlow {
     }
 }
 
+impl FlowState for BrowserFlow {
+    fn stage(&self) -> &str {
+        &self.stage
+    }
+
+    fn error_code(&self) -> Option<&str> {
+        self.error_code.as_deref()
+    }
+}
+
 /// Counters only: nothing in this response can carry secrets or event content.
 #[derive(Deserialize)]
 struct RedecryptProbe {
@@ -638,7 +723,9 @@ struct Account {
     account_id: Uuid,
     user_id: String,
     state: String,
-    verified: bool,
+    // Nullable on the wire for forward compatibility, though Axon currently
+    // always sends it.
+    verified: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -725,6 +812,9 @@ struct SeededPeer {
     room_id: OwnedRoomId,
     history_event_id: OwnedEventId,
     history_marker: String,
+    /// Held only for the browser lane's recovery step, and tracked as a
+    /// secret for the disclosure check.
+    recovery_key: String,
 }
 
 #[derive(Deserialize)]
@@ -865,12 +955,13 @@ async fn seed_trusted_peer(config: &Config, secrets: &SecretTracker) -> Result<S
     if recovery_key.is_empty() {
         bail!("secure-backup enable returned no recovery key");
     }
-    secrets.remember(recovery_key);
+    secrets.remember(recovery_key.clone());
     Ok(SeededPeer {
         client,
         room_id: room.room_id().to_owned(),
         history_event_id: history_event.response.event_id,
         history_marker,
+        recovery_key,
     })
 }
 
@@ -1329,7 +1420,7 @@ async fn wait_account_ready(api: &Api, account_id: Uuid) -> Result<()> {
             account.account_id == account_id
                 && account.user_id == api.expected_user_id.as_str()
                 && account.state == "active"
-                && account.verified
+                && account.verified == Some(true)
         }) {
             return Ok(());
         }
@@ -1341,6 +1432,25 @@ async fn wait_account_ready(api: &Api, account_id: Uuid) -> Result<()> {
 }
 
 async fn wait_axon_decrypts(api: &Api, account_id: Uuid, peer: &SeededPeer) -> Result<()> {
+    wait_axon_shows_decrypted(
+        api,
+        account_id,
+        peer,
+        peer.history_event_id.as_str(),
+        &peer.history_marker,
+        "pre-login encrypted history",
+    )
+    .await
+}
+
+async fn wait_axon_shows_decrypted(
+    api: &Api,
+    account_id: Uuid,
+    peer: &SeededPeer,
+    event_id: &str,
+    marker: &str,
+    what: &str,
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     let mut last = None;
     let mut polls = 0;
@@ -1350,8 +1460,8 @@ async fn wait_axon_decrypts(api: &Api, account_id: Uuid, peer: &SeededPeer) -> R
     loop {
         let observation = observe_history(
             api.timeline(account_id, peer.room_id.as_str()).await,
-            peer.history_event_id.as_str(),
-            &peer.history_marker,
+            event_id,
+            marker,
         );
         polls += 1;
         match observation {
@@ -1363,14 +1473,14 @@ async fn wait_axon_decrypts(api: &Api, account_id: Uuid, peer: &SeededPeer) -> R
         }
         encrypted_seen |= observation == HistoryObservation::EncryptedEvent;
         if last != Some(observation) {
-            eprintln!("matrix-oauth: history observation {observation}");
+            eprintln!("matrix-oauth: {what} observation {observation}");
             last = Some(observation);
         }
         if observation == HistoryObservation::Decrypted {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Axon did not decrypt the pre-login encrypted history (polls={polls}, api_failures={api_failures}, event_seen={event_seen}, encrypted_seen={encrypted_seen}, last={observation})");
+            bail!("Axon did not decrypt the {what} (polls={polls}, api_failures={api_failures}, event_seen={event_seen}, encrypted_seen={encrypted_seen}, last={observation})");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -1694,14 +1804,61 @@ async fn run_acquire_lane(
     wait_account_ready(&api, account_id).await?;
     wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
 
-    eprintln!("matrix-oauth(acquire): restarting after OAuth access-token expiry");
+    restart_after_token_expiry(process, account_id, peer, secrets, "acquire").await
+}
+
+/// Restart Axon after its access token has expired, then prove the refresh
+/// token works.
+///
+/// Persisted state alone satisfies "active and verified" and the pre-login
+/// history read, both of which Axon serves from PostgreSQL without touching
+/// the homeserver. So the peer sends a new encrypted message while Axon is
+/// down, and the restart counts only once Axon shows it decrypted: Axon can
+/// get it only by syncing, and with the old access token expired, syncing
+/// needs a successful refresh.
+async fn restart_after_token_expiry(
+    process: &mut AxonProcess,
+    account_id: Uuid,
+    peer: &SeededPeer,
+    secrets: &SecretTracker,
+    lane: &str,
+) -> Result<()> {
+    eprintln!("matrix-oauth({lane}): restarting after OAuth access-token expiry");
     process.stop().await?;
     tokio::time::sleep(Duration::from_secs(65)).await;
+    let (event_id, marker) = send_live_message(peer).await?;
     process.spawn().await?;
     let api = process.api()?;
     wait_account_ready(&api, account_id).await?;
     wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
-    Ok(())
+    wait_axon_shows_decrypted(
+        &api,
+        account_id,
+        peer,
+        event_id.as_str(),
+        &marker,
+        "message sent during the restart",
+    )
+    .await
+}
+
+/// Send a new encrypted message from the seeded peer. It syncs first so the
+/// room key is shared with Axon's current device.
+async fn send_live_message(peer: &SeededPeer) -> Result<(OwnedEventId, String)> {
+    peer.client
+        .sync_once(SyncSettings::default())
+        .await
+        .map_err(|_| anyhow!("pre-send trusted-device sync failed"))?;
+    let room = peer
+        .client
+        .get_room(&peer.room_id)
+        .ok_or_else(|| anyhow!("trusted device lost the encrypted room"))?;
+    let marker = format!("matrix-oauth-live-{}", Uuid::new_v4());
+    let sent = room
+        .send(RoomMessageEventContent::text_plain(&marker))
+        .await
+        .map_err(|_| anyhow!("encrypted live message send failed"))?;
+    Ok((sent.response.event_id, marker))
 }
 
 async fn run_grant_lane(
@@ -1744,6 +1901,116 @@ async fn run_grant_lane(
         bail!("fresh SDK device is not cross-signed");
     }
     assert_sdk_decrypts_history(&fresh, peer).await
+}
+
+/// Take one browser sign-in through MAS's device page and return its terminal
+/// state. The link and code are what a user would be shown; the harness opens
+/// the link exactly as the user would, in a browser session of its own.
+async fn drive_browser_sign_in(
+    api: &Api,
+    flow_id: Uuid,
+    approver: &MasApprover,
+    secrets: &SecretTracker,
+    approval: Approval,
+) -> Result<BrowserFlow> {
+    let waiting = wait_for_flow(
+        || api.browser(flow_id),
+        FlowWait::Stage("waiting_for_authorization"),
+        FLOW_TIMEOUT,
+        "browser",
+    )
+    .await?;
+    let uri = waiting
+        .verification_uri
+        .ok_or_else(|| anyhow!("browser flow omitted its verification link"))?;
+    let user_code = waiting
+        .user_code
+        .ok_or_else(|| anyhow!("browser flow omitted its user code"))?;
+    secrets.remember(uri.clone());
+    secrets.remember(user_code);
+    assert_waits_for_approval(|| api.browser(flow_id), "browser").await?;
+    approver.act(&uri, approval).await?;
+    let terminal = wait_for_flow(
+        || api.browser(flow_id),
+        FlowWait::Terminal,
+        FLOW_TIMEOUT,
+        "browser",
+    )
+    .await?;
+    if terminal.verification_uri.is_some() || terminal.user_code.is_some() {
+        bail!("browser terminal state retained its link or code");
+    }
+    Ok(terminal)
+}
+
+async fn run_browser_lane(
+    process: &mut AxonProcess,
+    peer: &SeededPeer,
+    approver: &MasApprover,
+    secrets: &SecretTracker,
+) -> Result<()> {
+    let api = process.api()?;
+
+    eprintln!("matrix-oauth(browser): checking rejection and route isolation");
+    let rejected = api.create_browser().await?;
+    for method in [Method::GET, Method::DELETE] {
+        let (status, _) = api
+            .raw(
+                method,
+                &format!("/v1/accounts/login/qr/{}", rejected.flow_id),
+                None,
+                true,
+            )
+            .await?;
+        if status != StatusCode::NOT_FOUND {
+            bail!("a browser flow was reachable through the QR routes");
+        }
+    }
+    let rejected =
+        drive_browser_sign_in(&api, rejected.flow_id, approver, secrets, Approval::Reject).await?;
+    if rejected.stage != "failed" || rejected.error_code.as_deref() != Some("authorization_denied")
+    {
+        bail!(
+            "rejected browser sign-in ended in {} ({})",
+            rejected.stage,
+            rejected.error_code.as_deref().unwrap_or("no_error_code")
+        );
+    }
+
+    eprintln!("matrix-oauth(browser): signing in through the browser");
+    let flow = api.create_browser().await?;
+    let done =
+        drive_browser_sign_in(&api, flow.flow_id, approver, secrets, Approval::Consent).await?;
+    if done.stage != "done" || done.error_code.is_some() {
+        bail!(
+            "browser sign-in ended in {} ({})",
+            done.stage,
+            done.error_code.as_deref().unwrap_or("no_error_code")
+        );
+    }
+    let account_id = done
+        .account_id
+        .ok_or_else(|| anyhow!("completed browser sign-in omitted account id"))?;
+    // Nothing vouched for this device: it must not claim to be verified until
+    // the recovery key below says so.
+    let accounts = api.accounts().await?;
+    let account = accounts
+        .iter()
+        .find(|account| account.account_id == account_id)
+        .ok_or_else(|| anyhow!("browser sign-in account is not listed"))?;
+    if account.user_id != api.expected_user_id || account.state != "active" {
+        bail!("browser sign-in account is not the expected active account");
+    }
+    if account.verified == Some(true) {
+        bail!("browser sign-in account reported verified before recovery");
+    }
+
+    eprintln!("matrix-oauth(browser): verifying with the recovery key");
+    api.recover(account_id, &peer.recovery_key).await?;
+    wait_account_ready(&api, account_id).await?;
+    wait_axon_decrypts_or_report(process, &api, account_id, peer, secrets).await?;
+
+    restart_after_token_expiry(process, account_id, peer, secrets, "browser").await
 }
 
 async fn run_api_lane(
@@ -1889,6 +2156,19 @@ async fn run_unsupported_lane(
     if terminal.stage != "failed" || terminal.error_code.as_deref() != Some("unsupported") {
         bail!("missing device-authorization capability was not reported as unsupported");
     }
+
+    eprintln!("matrix-oauth(unsupported): checking capability-gated browser sign-in");
+    let flow = api.create_browser().await?;
+    let terminal = wait_for_flow(
+        || api.browser(flow.flow_id),
+        FlowWait::Terminal,
+        FLOW_TIMEOUT,
+        "browser",
+    )
+    .await?;
+    if terminal.stage != "failed" || terminal.error_code.as_deref() != Some("unsupported") {
+        bail!("browser sign-in without the device grant was not reported as unsupported");
+    }
     Ok(())
 }
 
@@ -1973,6 +2253,7 @@ async fn run_lane(
         "api" => run_api_lane(process, &peer, &approver, secrets).await?,
         "acquire" => run_acquire_lane(process, &peer, &approver, secrets).await?,
         "grant" => run_grant_lane(process, &peer, &approver, secrets).await?,
+        "browser" => run_browser_lane(process, &peer, &approver, secrets).await?,
         "unsupported" => run_unsupported_lane(process, &peer, &approver, secrets).await?,
         _ => unreachable!(),
     }
