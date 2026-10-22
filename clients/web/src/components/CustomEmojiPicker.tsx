@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import {
-  parseEmojiPacks,
+  loadImagePacks,
   type EmojiPacks,
   type CustomEmoji,
 } from '../emoji-packs'
@@ -59,28 +59,25 @@ export function ImagePackPicker({
     let cancelled = false
     void (async () => {
       try {
-        const { data, response } = await api.GET(
-          '/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs',
-          {
-            params: {
-              path: { account_id: accountId, room_id: roomId },
-              query: usage === 'sticker' ? { usage: 'sticker' } : undefined,
-            },
-            signal: controller.signal,
-          },
+        const { data, status } = await loadImagePacks(
+          api,
+          accountId,
+          roomId,
+          usage,
+          controller.signal,
         )
         if (cancelled) return
         if (!data) {
           setLoad({
             id,
             error:
-              response.status === 404
+              status === 404
                 ? `${usage === 'sticker' ? 'Stickers' : 'Custom emoji'} are unavailable for this room or server.`
                 : `Could not load ${label}.`,
           })
           return
         }
-        setLoad({ id, data: parseEmojiPacks(data.data, usage) })
+        setLoad({ id, data })
       } catch {
         if (!cancelled) setLoad({ id, error: `Could not load ${label}.` })
       }

@@ -284,6 +284,10 @@ describe('sending', () => {
   it('expands emoji shortcodes before sending a composed message', async () => {
     let sendBody: Record<string, unknown> = {}
     server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/emoji-packs`,
+        () => HttpResponse.json({ data: { packs: [], partial: false } }),
+      ),
       http.post(
         `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/send`,
         async ({ request }) => {

@@ -812,6 +812,7 @@ export function ThreadPanel({
           action?.kind === 'edit'
             ? undefined
             : {
+                api,
                 accountId,
                 roomId,
                 onSelect: (image) => {

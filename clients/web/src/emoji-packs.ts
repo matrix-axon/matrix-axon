@@ -1,3 +1,4 @@
+import type { ApiClient } from './api/client'
 import type { components } from './api/schema'
 import { customReactionMxc, reactionShortcode } from './custom-reactions'
 
@@ -129,4 +130,62 @@ export function stickerFromImage(image: CustomEmoji) {
     body: image.body?.trim() ? image.body : image.shortcode,
     info: image.info,
   }
+}
+
+/** Shared discovery for picker browsing and explicit shortcode sends. */
+export async function loadImagePacks(
+  api: ApiClient,
+  accountId: string,
+  roomId: string,
+  usage: 'emoticon' | 'sticker',
+  signal: AbortSignal,
+) {
+  const { data, response } = await api.GET(
+    '/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs',
+    {
+      params: {
+        path: { account_id: accountId, room_id: roomId },
+        query: usage === 'sticker' ? { usage: 'sticker' } : undefined,
+      },
+      signal,
+    },
+  )
+  return {
+    data: data ? parseEmojiPacks(data.data, usage) : undefined,
+    status: response.status,
+  }
+}
+
+/** Only a complete, standalone token can become a standalone Matrix sticker. */
+export function standaloneStickerShortcode(body: string): string | null {
+  const value = body.trim()
+  if (value.length > 1026) return null
+  return /^:([^:\r\n]+):$/u.exec(value)?.[1] ?? null
+}
+
+export async function lookupStickerShortcode(
+  api: ApiClient,
+  accountId: string,
+  roomId: string,
+  shortcode: string,
+  signal: AbortSignal,
+): Promise<CustomEmoji | null> {
+  const { data, status } = await loadImagePacks(
+    api,
+    accountId,
+    roomId,
+    'sticker',
+    signal,
+  )
+  // An older server has no discovery route; ordinary shortcode handling stays usable.
+  if (!data) {
+    if (status === 404) return null
+    throw new Error('Sticker discovery failed')
+  }
+  // Server order is personal first, then deterministic room-pack order.
+  for (const pack of data.packs) {
+    const image = pack.images.find((image) => image.shortcode === shortcode)
+    if (image) return image
+  }
+  return null
 }
