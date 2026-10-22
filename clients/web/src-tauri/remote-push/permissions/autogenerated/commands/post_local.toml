@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-post-local"
+description = "Enables the post_local command without any pre-configured scope."
+commands.allow = ["post_local"]
+
+[[permission]]
+identifier = "deny-post-local"
+description = "Denies the post_local command without any pre-configured scope."
+commands.deny = ["post_local"]

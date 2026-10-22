@@ -108,6 +108,16 @@ if [ "$build_number" = "auto" ] && [ "$export_method" != "app-store-connect" ]; 
   echo "error: --build-number auto needs --export-method app-store-connect; got $export_method" >&2
   exit 2
 fi
+# Apple's entitlement is development or production. The registration API uses
+# sandbox or production; the client maps development to sandbox.
+case "$export_method" in
+  debugging) aps_environment=development ;;
+  release-testing|app-store-connect) aps_environment=production ;;
+  *)
+    echo "error: --export-method must be debugging, release-testing, or app-store-connect; got '$export_method'" >&2
+    exit 2
+    ;;
+esac
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # The App Store Connect and signing-keychain logic is shared with
@@ -255,6 +265,11 @@ if [ ! -f "$entitlements" ]; then
   exit 1
 fi
 cp "$tauri_dir/Entitlements.ios.plist" "$entitlements"
+# The committed plist says development. Store and TestFlight builds need
+# production, which is what the provisioning profile for those export methods
+# carries. The client reads the signed value.
+plutil -replace aps-environment -string "$aps_environment" "$entitlements"
+echo "    aps-environment: $aps_environment"
 
 echo "==> syncing the app icon from icons/ios"
 if [ ! -d "$appiconset" ]; then
@@ -329,6 +344,23 @@ if codesign -d --entitlements - --xml "$shipped_app" 2>/dev/null | grep -q com.a
   echo "    apple sign-in: entitled"
 else
   echo "error: the signed app lacks com.apple.developer.applesignin — Sign in with Apple would fail with error 1000" >&2
+  problems=1
+fi
+# codesign prints a short header on stderr and the plist on stdout, on a single
+# line, so a line-oriented parser never sees the value after its key. plutil
+# reads the XML properly; it exits non-zero when the key is absent.
+shipped_aps=$(codesign -d --entitlements - --xml "$shipped_app" 2>/dev/null \
+  | plutil -extract aps-environment raw -o - - 2>/dev/null || true)
+echo "    aps-environment: ${shipped_aps:-"(none)"}"
+if [ "${shipped_aps:-}" != "$aps_environment" ]; then
+  echo "error: the signed app declares aps-environment '${shipped_aps:-"(none)"}', not '$aps_environment'" >&2
+  echo "       Push Notifications must be enabled for org.matrixaxon.axon, and the export method selects development or production" >&2
+  problems=1
+fi
+# Absent UIBackgroundModes is the intended bundle. remote-notification would
+# wake a quit app, which this cut does not do.
+if plutil -extract UIBackgroundModes xml1 -o - "$shipped_plist" 2>/dev/null | grep -q '<string>remote-notification</string>'; then
+  echo "error: the .ipa declares UIBackgroundModes remote-notification — a suspended client shows an alert and does not wake to run code" >&2
   problems=1
 fi
 rm -rf "$ipa_check"

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-pending-wake"
+description = "Enables the pending_wake command without any pre-configured scope."
+commands.allow = ["pending_wake"]
+
+[[permission]]
+identifier = "deny-pending-wake"
+description = "Denies the pending_wake command without any pre-configured scope."
+commands.deny = ["pending_wake"]

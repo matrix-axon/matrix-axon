@@ -671,8 +671,8 @@ function ServerFooter() {
       {failed && (
         <span class="error" role="alert">
           {' '}
-          Could not remove your sign-in from the Keychain, so the server was not
-          changed. Try again.
+          Could not finish signing out, so the server was not changed. Try
+          again.
         </span>
       )}
     </p>

@@ -334,6 +334,47 @@ echo "==> installing android/MainActivity.kt"
 cp "$tauri_dir/android/MainActivity.kt" \
   "$tauri_dir/gen/android/app/src/main/java/org/matrixaxon/axon/MainActivity.kt"
 
+# FCM (ADR 0113). google-services.json belongs to this developer and is
+# gitignored. When it is present, copy it into the generated app module and
+# apply the Google services plugin. When it is absent, the build still
+# succeeds and token registration fails until the file is added.
+# The classpath pin is com.google.gms:google-services:4.4.2. The generated
+# project uses Android Gradle Plugin 9.3.1, which may refuse to resolve that
+# pin; the failure is this build, not an app that silently cannot obtain a token.
+google_services="$tauri_dir/google-services.json"
+if [ -f "$google_services" ]; then
+  echo "==> installing google-services.json"
+  cp "$google_services" "$tauri_dir/gen/android/app/google-services.json"
+  root_gradle="$tauri_dir/gen/android/build.gradle.kts"
+  kotlin_line='classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:'
+  if ! grep -F -q "$kotlin_line" "$root_gradle"; then
+    echo "error: $root_gradle has no Kotlin classpath to attach the Google services plugin to" >&2
+    exit 1
+  fi
+  if ! grep -F -q 'com.google.gms:google-services' "$root_gradle"; then
+    gradle_tmp=$(mktemp)
+    awk '
+      { print }
+      index($0, "classpath(\"org.jetbrains.kotlin:kotlin-gradle-plugin:") && !done {
+        print "        classpath(\"com.google.gms:google-services:4.4.2\")"
+        done = 1
+      }
+    ' "$root_gradle" > "$gradle_tmp"
+    mv "$gradle_tmp" "$root_gradle"
+  fi
+  app_gradle="$tauri_dir/gen/android/app/build.gradle.kts"
+  if ! grep -F -q 'com.google.gms.google-services' "$app_gradle"; then
+    cat >> "$app_gradle" <<'EOF'
+
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+EOF
+  fi
+else
+  echo "==> no src-tauri/google-services.json; FCM token registration will fail until that file is added"
+fi
+
 if [ "$aab" -eq 1 ]; then format=--aab; else format=--apk; fi
 build_args=(tauri android build "$format" --target "$target")
 if [ "$debug" -eq 1 ]; then build_args+=(--debug); fi

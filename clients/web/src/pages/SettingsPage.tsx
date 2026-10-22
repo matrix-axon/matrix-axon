@@ -34,6 +34,7 @@ import { browserReloadEnvironment, reloadNow } from '../reload'
 import { disconnectFromServer } from '../server-url'
 import { LinkedSignIns } from './LinkedSignIns'
 import { formatTelemetry } from '../stores/telemetry'
+import type { ApiClient } from '../api/client'
 import { resolveApiBaseUrl, useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
 import type {
@@ -41,6 +42,7 @@ import type {
   Theme,
   TimeFormat,
 } from '../stores/settings'
+import { PUSH_DISCLOSURES, type PushDisclosure } from '../push/registration'
 import {
   assignMessageGestureAction,
   cloneMessageGesturePreferences,
@@ -109,6 +111,7 @@ function SettingsPageContents() {
   const { auth, settings, rooms, deviceState, platform } = useServices()
   const [markingRead, setMarkingRead] = useState(false)
   const [protocolMessage, setProtocolMessage] = useState<string | null>(null)
+  const [signOutFailed, setSignOutFailed] = useState(false)
 
   const markAllRead = async () => {
     setMarkingRead(true)
@@ -321,9 +324,25 @@ function SettingsPageContents() {
       <DebugSettings />
       <section class="panel">
         <h2>Session</h2>
-        <button type="button" class="danger" onClick={() => auth.clearToken()}>
+        <button
+          type="button"
+          class="danger"
+          onClick={() => {
+            setSignOutFailed(false)
+            void Promise.resolve(auth.clearToken()).then((cleared) => {
+              if (cleared === false) {
+                setSignOutFailed(true)
+              }
+            })
+          }}
+        >
           Sign out
         </button>
+        {signOutFailed && (
+          <p class="error" role="alert">
+            Could not finish signing out. Try again.
+          </p>
+        )}
         <p class="muted">
           Clear this browser's Axon access and refresh tokens, along with
           everything cached for the session: the room list, message history, and
@@ -859,12 +878,72 @@ function DebugSettings() {
   )
 }
 
+const PUSH_DISCLOSURE_LABELS: Record<PushDisclosure, string> = {
+  activity: 'New activity',
+  sender_and_room: 'Sender and room',
+  preview: 'Preview',
+}
+
+function pushDisclosureNote(disclosure: PushDisclosure): string {
+  if (disclosure === 'sender_and_room') {
+    return 'A banner names the sender and the room, not the message.'
+  }
+  if (disclosure === 'preview') {
+    return 'A banner includes a preview of the message.'
+  }
+  return 'A banner says "New activity" only.'
+}
+
+/**
+ * One status read per API client. `GET /v1/status` also computes backfill
+ * progress, and opening Settings again must not start another of those.
+ * A failure is cached as "not missing" so a hung call is not retried.
+ */
+const pushKeyMissingByApi = new WeakMap<ApiClient, Promise<boolean>>()
+
+function loadPushKeyMissing(
+  api: ApiClient,
+  provider: 'apns' | 'fcm',
+): Promise<boolean> {
+  const existing = pushKeyMissingByApi.get(api)
+  if (existing !== undefined) {
+    return existing
+  }
+  const pending = api.GET('/v1/status').then(
+    ({ data }) => {
+      const push = data?.data.push
+      const loaded = provider === 'apns' ? push?.apns : push?.fcm
+      return loaded === false
+    },
+    () => false,
+  )
+  pushKeyMissingByApi.set(api, pending)
+  return pending
+}
+
 function MessageNotificationSettings() {
-  const { platform, settings } = useServices()
+  const { api, platform, remotePushError, settings } = useServices()
   const enabled = settings.messageNotifications.value
+  const remote = platform.remotePush
   const [permission, setPermission] =
     useState<NotificationPermissionState | null>(null)
   const [askFailed, setAskFailed] = useState(false)
+  const [pushKeyMissing, setPushKeyMissing] = useState(false)
+
+  useEffect(() => {
+    if (remote === null) {
+      return
+    }
+    let cancelled = false
+    void loadPushKeyMissing(api, remote.provider).then((missing) => {
+      if (!cancelled) {
+        setPushKeyMissing(missing)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [api, remote])
 
   useEffect(() => {
     let cancelled = false
@@ -925,8 +1004,7 @@ function MessageNotificationSettings() {
     <section class="panel">
       <h2>Notifications</h2>
       <p class="muted">
-        Show a notification when a new message arrives while Axon is open and
-        you are not reading that room.
+        Show new message notifications when you are not in the room.
       </p>
       <label class="setting-row">
         <input
@@ -958,6 +1036,39 @@ function MessageNotificationSettings() {
           Off until you turn it on. A permission used for the app-icon badge
           does not turn this on, and a desktop app does not ask on its own.
         </p>
+      )}
+      {remote !== null && (
+        <div
+          class="theme-picker"
+          role="radiogroup"
+          aria-label="Push notification detail"
+        >
+          {PUSH_DISCLOSURES.map((value) => (
+            <label key={value}>
+              <input
+                type="radio"
+                name="push-disclosure"
+                value={value}
+                checked={settings.pushDisclosure.value === value}
+                onChange={() => (settings.pushDisclosure.value = value)}
+              />
+              {PUSH_DISCLOSURE_LABELS[value]}
+            </label>
+          ))}
+        </div>
+      )}
+      {remote !== null && (
+        <p class="muted">{pushDisclosureNote(settings.pushDisclosure.value)}</p>
+      )}
+      {pushKeyMissing && (
+        <p class="muted">
+          This server has not loaded the{' '}
+          {remote?.provider === 'fcm' ? 'Android' : 'Apple'} push key. Axon
+          still registers this device.
+        </p>
+      )}
+      {remotePushError.value !== null && (
+        <p class="muted">{remotePushError.value}</p>
       )}
     </section>
   )
@@ -1312,8 +1423,8 @@ function ServerSettings() {
       </button>
       {failed && (
         <p class="error" role="alert">
-          Could not remove your sign-in from the Keychain, so the server was not
-          changed. Try again.
+          Could not finish signing out, so the server was not changed. Try
+          again.
         </p>
       )}
       <p class="muted">

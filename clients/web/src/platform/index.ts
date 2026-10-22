@@ -7,6 +7,7 @@ import {
   type NotificationClick,
   type NotificationPermissionState,
 } from './notifications'
+import type { RemotePush } from './remote-push'
 
 export type {
   MessageNotification,
@@ -390,6 +391,15 @@ export interface Platform {
    * to show is `iconBadgeSupport`, not this null.
    */
   setIconBadge: IconBadgeSetter | null
+
+  /**
+   * APNs or FCM for a suspended phone or tablet (ADR 0113).
+   *
+   * `null` in a browser and on desktop, including a Mac app. Those builds do
+   * not request a device token. Web Push, Windows push, and waking a quit Mac
+   * app are a later cut.
+   */
+  remotePush: RemotePush | null
 }
 
 /**
@@ -622,6 +632,7 @@ export function browserPlatform(): Platform {
     // The page badges through `navigator` here. See `setIconBadge`.
     iconBadgeSupport: 'web',
     setIconBadge: null,
+    remotePush: null,
   }
 }
 

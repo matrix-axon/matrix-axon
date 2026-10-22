@@ -22,5 +22,18 @@
   <array>
     <string>Default</string>
   </array>
+
+  <!--
+    Push Notifications (ADR 0113). Apple's value is development or production.
+    This file keeps development, which is the debugging profile.
+    scripts/package-ios.sh replaces it after the copy: release-testing and
+    app-store-connect become production.
+    The client reads the signed profile and reports sandbox or production on
+    PUT /v1/push/registrations.
+    This is not the remote-notification background mode.
+    A suspended app shows the alert and does not launch to run code.
+  -->
+  <key>aps-environment</key>
+  <string>development</string>
 </dict>
 </plist>

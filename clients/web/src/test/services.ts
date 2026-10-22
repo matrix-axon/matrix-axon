@@ -299,6 +299,7 @@ export function testServices(
     activeThread,
     composerFocus,
     platform: { ...browserPlatform(), ...options.platform },
+    remotePushError: signal(null),
     sockets,
   }
 }

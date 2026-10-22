@@ -207,6 +207,7 @@ describe('AppRoot wiring the transport into the app', () => {
       // `iconBadgeSupport`.
       iconBadgeSupport: 'web' as const,
       setIconBadge: null,
+      remotePush: null,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.

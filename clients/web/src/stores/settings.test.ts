@@ -41,6 +41,7 @@ describe('createSettingsStore', () => {
       appBadgeEnabled: true,
       cacheRoomList: true,
       messageNotifications: false,
+      pushDisclosure: 'activity',
     })
   })
 
@@ -82,6 +83,7 @@ describe('createSettingsStore', () => {
     expect(store.activeAccountId.value).toBe('acct-9')
     // An envelope written before message notifications existed stays opted out.
     expect(store.messageNotifications.value).toBe(false)
+    expect(store.pushDisclosure.value).toBe('activity')
   })
 })
 

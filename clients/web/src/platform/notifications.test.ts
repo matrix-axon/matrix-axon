@@ -4,6 +4,7 @@ import {
   deliverNotificationClick,
   messageNotificationBody,
   notificationClickFromPayload,
+  notificationClickFromWake,
   notificationPermissionState,
   readNotificationTargets,
   rememberNotificationTarget,
@@ -90,6 +91,56 @@ describe('notificationClickFromPayload', () => {
         },
         targets,
       ),
+    ).toBeNull()
+  })
+})
+
+describe('notificationClickFromWake', () => {
+  it('maps the snake_case wake, including an optional thread root', () => {
+    expect(
+      notificationClickFromWake({
+        account_id: 'acct',
+        room_id: '!room:server',
+        event_id: '$evt',
+        thread_root_id: '$root',
+      }),
+    ).toEqual({
+      accountId: 'acct',
+      roomId: '!room:server',
+      eventId: '$evt',
+      threadRootId: '$root',
+    })
+  })
+
+  it('accepts the camelCase names and a missing thread root', () => {
+    expect(
+      notificationClickFromWake({
+        accountId: 'acct',
+        roomId: '!room:server',
+        eventId: '$evt',
+      }),
+    ).toEqual({
+      accountId: 'acct',
+      roomId: '!room:server',
+      eventId: '$evt',
+      threadRootId: null,
+    })
+  })
+
+  it('requires the event id and ignores a dismiss', () => {
+    expect(
+      notificationClickFromWake({
+        account_id: 'acct',
+        room_id: '!room:server',
+      }),
+    ).toBeNull()
+    expect(
+      notificationClickFromWake({
+        action: 'dismiss',
+        account_id: 'acct',
+        room_id: '!room:server',
+        event_id: '$evt',
+      }),
     ).toBeNull()
   })
 })

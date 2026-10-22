@@ -785,6 +785,64 @@ describe('message notifications', () => {
     ).toBeTruthy()
     expect(services.settings.messageNotifications.value).toBe(false)
   })
+
+  it('offers a disclosure choice only when this device can register for push', async () => {
+    const browser = testServices()
+    const hidden = render(
+      <ServicesContext.Provider value={browser}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(hidden.queryByRole('radio', { name: 'New activity' })).toBeNull()
+    hidden.unmount()
+
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/status`, () =>
+        HttpResponse.json({
+          data: {
+            backfill: { paused: false, free_bytes: 0, accounts: [] },
+            push: { apns: false, fcm: true },
+          },
+        }),
+      ),
+    )
+    const services = testServices({
+      platform: {
+        remotePush: {
+          provider: 'apns',
+          deviceToken: () =>
+            Promise.resolve({ token: 'device', environment: 'sandbox' }),
+          deliveredEventIds: () => Promise.resolve([]),
+          onWake: () => () => {},
+          postCollapsed: () => Promise.resolve(),
+        },
+      },
+    })
+    services.remotePushError.value =
+      'Axon could not register this device for push.'
+    const { findByRole, findByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(
+      (
+        (await findByRole('radio', {
+          name: 'New activity',
+        })) as HTMLInputElement
+      ).checked,
+    ).toBe(true)
+    fireEvent.click(await findByRole('radio', { name: 'Preview' }))
+    expect(services.settings.pushDisclosure.value).toBe('preview')
+    expect(
+      await findByText(
+        'This server has not loaded the Apple push key. Axon still registers this device.',
+      ),
+    ).toBeTruthy()
+    expect(
+      await findByText('Axon could not register this device for push.'),
+    ).toBeTruthy()
+  })
 })
 
 describe('the app icon badge', () => {

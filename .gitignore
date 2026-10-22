@@ -78,6 +78,16 @@ demo-artifacts/
 # `project.pbxproj` carries this machine's signing team.
 clients/web/src-tauri/gen/
 
+# A mobile plugin's copy of the Tauri API (`.tauri/tauri-api`), written
+# by tauri-plugin's build script on every build, plus the Package.resolved
+# SwiftPM generates beside the plugin's Package.swift.
+# The Android copy is under android/.tauri, one directory deeper.
+clients/web/src-tauri/*/.tauri/
+clients/web/src-tauri/*/*/.tauri/
+# Gradle output written beside a mobile plugin when the Android app compiles it.
+clients/web/src-tauri/*/android/build/
+clients/web/src-tauri/*/ios/Package.resolved
+
 # Android signing material (ADR 0107): the upload keystore lives outside the
 # repo, and these are here only so one dropped into the tree by accident cannot
 # be committed.
@@ -85,3 +95,6 @@ clients/web/src-tauri/gen/
 *.keystore
 *.p12
 keystore.properties
+# Firebase config for the Android shell (ADR 0113). Copied into gen/ by
+# package-android.sh when present. This developer's file, not the repo's.
+clients/web/src-tauri/google-services.json
