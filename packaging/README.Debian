@@ -128,10 +128,12 @@ keeping the original as `axon_old` (drop it with `sudo -u postgres dropdb
 axon_old` once Axon works). The original is only renamed, and only after
 the copy succeeds. The copy needs free space next to the cluster's data
 directory of about the database's size plus a quarter, plus 1 GB for WAL.
-When that space is missing, `axon_utf8` or `axon_old` already exists, the
-database is outside the default tablespace, or the copy fails (for example
-on bytes that are not UTF-8), the database is left unchanged and
-`configure` prints the commands to do it by hand.
+It converts only when systemd confirms the service stopped and no client is
+connected to the database, so nothing can write to it during the copy.
+When that cannot be confirmed, the space is missing, `axon_utf8` or
+`axon_old` already exists, the database is outside the default tablespace,
+or the copy fails (for example on bytes that are not UTF-8), the database
+is left unchanged and `configure` prints the commands to do it by hand.
 
 The generated config.toml comments explain how to point `database.url`
 at a remote or passworded server.
