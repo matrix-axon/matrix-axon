@@ -128,6 +128,11 @@ Loading, partial results, empty results, and failures have explicit states with 
 Older servers without pack discovery continue to support the Unicode picker and received reaction images.
 Custom selections do not enter the global Unicode recent-reaction or gesture preferences.
 To send a standalone sticker, choose **Send sticker** beside the room or thread composer, search the personal and current-room packs, and select an image.
+You can also type a complete shortcode such as `:adam:` and press Send (or Enter on desktop) to send that sticker.
+Matching is case-sensitive; personal packs take precedence, followed by the server's room-pack order when names repeat.
+Only a whole-message shortcode becomes a sticker: names in prose, attachment captions, and edits keep their text behavior.
+Unknown names and servers without pack discovery use the existing text/Unicode shortcode handling.
+A discovery failure keeps the draft and offers another Send attempt; changing rooms cancels a pending lookup.
 Only sticker-capable images appear; mixed-use images also remain available in the reaction picker.
 Selecting a sticker preserves any unsent text or staged attachments, and failed sends offer Retry and Discard in the timeline.
 Replies and thread context are preserved, and received stickers display the original image so animated stickers retain their animation.

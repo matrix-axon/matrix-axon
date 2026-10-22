@@ -2183,6 +2183,7 @@ export function RoomPage() {
               action?.kind === 'edit'
                 ? undefined
                 : {
+                    api,
                     accountId,
                     roomId,
                     onSelect: (image) => {

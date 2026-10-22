@@ -1,3 +1,7 @@
+import {
+  lookupStickerShortcode,
+  standaloneStickerShortcode,
+} from '../emoji-packs'
 import type { JSX } from 'preact'
 import { StickerPickerButton, type StickerPickerOptions } from './StickerPicker'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -226,6 +230,9 @@ export function Composer({
   onHeightChange?(height: number | null): void
 }) {
   const [draft, setDraft] = useState(initialValue)
+  const [checkingSticker, setCheckingSticker] = useState(false)
+  const [stickerProblem, setStickerProblem] = useState<string | null>(null)
+  const stickerLookup = useRef<AbortController | null>(null)
   const [composerHeight, setComposerHeight] = useState<number | null>(null)
   const currentComposerHeight = height === undefined ? composerHeight : height
   const [autocompleteDismissedFor, setAutocompleteDismissedFor] = useState<
@@ -258,6 +265,7 @@ export function Composer({
   useEffect(
     () => () => {
       clearAttachHold()
+      stickerLookup.current?.abort()
     },
     [],
   )
@@ -604,6 +612,8 @@ export function Composer({
   }
 
   const submit = () => {
+    if (stickerLookup.current !== null) return
+    setStickerProblem(null)
     const body = draft.trim()
     // A staged file is itself a message: sending it bare, with no caption, is
     // the common case, so an empty draft is only inert when nothing is attached.
@@ -631,6 +641,46 @@ export function Composer({
     // have meant a command. A composer without commands sends both verbatim.
     const message =
       commandsEnabled && body.startsWith('//') ? body.slice(1) : body
+    const shortcode =
+      stickers !== undefined && (attachments?.items.length ?? 0) === 0
+        ? standaloneStickerShortcode(message)
+        : null
+    if (stickers !== undefined && shortcode !== null) {
+      const controller = new AbortController()
+      stickerLookup.current = controller
+      setCheckingSticker(true)
+      // Keep the submitted draft until discovery succeeds. A subsequent edit
+      // belongs to the next message and must survive the pending lookup.
+      const submittedDraft = draft
+      void lookupStickerShortcode(
+        stickers.api,
+        stickers.accountId,
+        stickers.roomId,
+        shortcode,
+        controller.signal,
+      )
+        .then((image) => {
+          if (controller.signal.aborted || textarea.current === null) return
+          if (textarea.current.value === submittedDraft) {
+            setDraft('')
+            onDraftChange?.('')
+          }
+          if (image) stickers.onSelect(image)
+          else void onSubmit(message)
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) {
+            setStickerProblem(
+              'Could not check sticker packs. Your message has not been sent. Try Send again.',
+            )
+          }
+        })
+        .finally(() => {
+          if (stickerLookup.current === controller) stickerLookup.current = null
+          if (!controller.signal.aborted) setCheckingSticker(false)
+        })
+      return
+    }
     setDraft('')
     onDraftChange?.('')
     void onSubmit(message)
@@ -1248,7 +1298,8 @@ export function Composer({
           aria-label="Send"
           title="Send"
           disabled={
-            draft.trim() === '' && (attachments?.items.length ?? 0) === 0
+            checkingSticker ||
+            (draft.trim() === '' && (attachments?.items.length ?? 0) === 0)
           }
         >
           <svg
@@ -1268,6 +1319,8 @@ export function Composer({
           <span class="composer-send-label">Send</span>
         </button>
       </form>
+      {checkingSticker && <p role="status">Checking sticker packs…</p>}
+      {stickerProblem && <p role="alert">{stickerProblem}</p>}
     </div>
   )
 }
