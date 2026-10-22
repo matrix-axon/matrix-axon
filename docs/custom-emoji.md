@@ -87,6 +87,7 @@ It never submits a response to SDK sync processing, so summary fields, recency, 
 The connection also requests parent/child links, creation and power-level state, and the local user's membership so inherited packs hydrate after restart.
 It does not request whole member lists; one-way claims without cached sender membership remain unverifiable.
 The projection retains existing timestamp guards and redaction/departure handling.
+Space parent and child clears with `{}` are persisted unchanged; an absent `via` removes the relationship.
 The account run owns, cancels, and joins this worker before restart, preventing duplicate workers and retained SDK clients.
 Each long poll has a 30-second server wait and 90-second client/outer deadline.
 Successful polls are paced at least one second apart; failures retry with exponential backoff from two to 60 seconds without interrupting message sync.

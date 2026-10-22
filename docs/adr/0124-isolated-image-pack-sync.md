@@ -27,6 +27,8 @@ There is one request in flight per worker, SDK retries are disabled, server long
 Successful polls wait at least one second before the next request.
 Failures back off exponentially from two to 60 seconds and preserve the position, except for `M_UNKNOWN_POS`, which starts a fresh connection.
 Persistence uses the same timestamp, redaction, and departed-room rules as ordinary state ingestion.
+For parent/child relationship clears without `via`, supply an empty routing list only during typed metadata decoding; retain the original raw content in PostgreSQL.
+This accepts protocol-valid `{}` clears even though the SDK's original-event content types require `via`, without treating them as redactions or admitting malformed unrelated state.
 Missing events never imply a pack was deleted.
 Partial failures are logged with account and room identity and do not stop primary sync.
 

@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use matrix_sdk::ruma::api::client::sync::sync_events::v5::{self, request};
-use matrix_sdk::ruma::events::StateEventType;
+use matrix_sdk::ruma::events::{AnySyncStateEvent, StateEventType};
 use matrix_sdk::{config::RequestConfig, Client};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -35,6 +35,34 @@ fn allowed_state(kind: &str, key: &str, local_user: &str) -> bool {
                 || key == *state_key
                 || (*state_key == "$ME" && key == local_user))
     })
+}
+
+fn decode_state_event(raw: &str) -> serde_json::Result<(AnySyncStateEvent, serde_json::Value)> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let event = match serde_json::from_str(raw) {
+        Ok(event) => event,
+        Err(error) => {
+            // Matrix removes a space relationship by omitting `via`, including
+            // sending {}. Ruma's original-event content requires `via`, so use
+            // an empty list only to decode the typed identity/redaction data.
+            // The projection below must retain the untouched raw content.
+            let is_relationship = matches!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some("m.space.parent" | "m.space.child")
+            );
+            let missing_via = value
+                .get("content")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|content| !content.contains_key("via"));
+            if !is_relationship || !missing_via {
+                return Err(error);
+            }
+            let mut for_decode = value.clone();
+            for_decode["content"]["via"] = serde_json::json!([]);
+            serde_json::from_value(for_decode)?
+        }
+    };
+    Ok((event, value))
 }
 
 fn request(pos: Option<String>, range_end: u32) -> v5::Request {
@@ -84,12 +112,7 @@ pub(crate) async fn run(client: Client, ctx: PersistContext, cancel: Cancellatio
                 let mut malformed_events = 0;
                 let mut ignored_events = 0;
                 for raw in room.required_state {
-                    let Ok(event) = raw.deserialize() else {
-                        malformed_events += 1;
-                        continue;
-                    };
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw.json().get())
-                    else {
+                    let Ok((event, value)) = decode_state_event(raw.json().get()) else {
                         malformed_events += 1;
                         continue;
                     };
@@ -251,6 +274,139 @@ mod tests {
             .await
             .unwrap();
         client
+    }
+
+    #[test]
+    fn empty_space_relationship_clears_preserve_raw_content_and_identity() {
+        for kind in ["m.space.parent", "m.space.child"] {
+            let value = json!({"type":kind,"state_key":"!parent:localhost",
+                "sender":"@packs:localhost","event_id":"$clear","origin_server_ts":42,
+                "content":{}});
+            let (event, raw) = decode_state_event(&value.to_string())
+                .expect("a cleared relationship is valid state");
+            assert_eq!(raw, value);
+            assert_eq!(event.event_id().as_str(), "$clear");
+            assert_eq!(u64::from(event.origin_server_ts().0), 42);
+            assert!(!event.is_redacted());
+        }
+    }
+
+    #[test]
+    fn relationship_clear_decoding_preserves_redaction_and_rejects_other_malformed_state() {
+        let mut value = json!({"type":"m.space.parent","state_key":"!parent:localhost",
+            "sender":"@packs:localhost","event_id":"$clear","origin_server_ts":42,
+            "content":{},"unsigned":{"redacted_because":{"event_id":"$redaction"}}});
+        let (event, raw) = decode_state_event(&value.to_string()).unwrap();
+        assert!(event.is_redacted());
+        assert_eq!(raw, value);
+        assert!(matches!(
+            crate::engine::state_redaction_evidence(&event, &raw),
+            axon_store::RoomStateRedaction::Redacted {
+                event_id: Some("$redaction")
+            }
+        ));
+        value.as_object_mut().unwrap().remove("unsigned");
+        value["content"] = json!({"via":"invalid"});
+        assert!(decode_state_event(&value.to_string()).is_err());
+        value["type"] = json!("m.room.name");
+        value["state_key"] = json!("");
+        value["content"] = json!({});
+        assert!(decode_state_event(&value.to_string()).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn relationship_clears_replace_cached_links_through_pack_sync() {
+        use axon_store::{RoomStateUpsert, Store};
+        let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+            .await
+            .unwrap();
+        let account = store
+            .upsert_account(
+                &format!("@space-clears-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .unwrap();
+        for kind in ["m.space.parent", "m.space.child"] {
+            store
+                .upsert_room_state(&RoomStateUpsert {
+                    account_id: account.account_id,
+                    room_id: "!pack:localhost",
+                    event_type: kind,
+                    state_key: "!parent:localhost",
+                    event_id: "$old",
+                    sender: &account.user_id,
+                    origin_ts: 1,
+                    content: Some(json!({"via":["localhost"],"canonical":true})),
+                })
+                .await
+                .unwrap();
+        }
+        let sender = account.user_id.clone();
+        let app = Router::new().fallback(move || {
+            let sender = sender.clone();
+            async move {
+                Json(json!({"pos":"1","lists":{"packs":{"count":1}},
+                "rooms":{"!pack:localhost":{"required_state":[
+                    {"type":"m.space.parent","state_key":"!parent:localhost","sender":sender,
+                        "event_id":"$clear-parent","origin_server_ts":2,"content":{}},
+                    {"type":"m.space.child","state_key":"!parent:localhost","sender":sender,
+                        "event_id":"$clear-child","origin_server_ts":2,"content":{}}
+                ]}}}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = client(address).await;
+        let (state_redaction_tx, _) = tokio::sync::mpsc::channel(32);
+        let (live_tx, _) = tokio::sync::broadcast::channel(8);
+        let ctx = PersistContext {
+            store: store.clone(),
+            account_id: account.account_id,
+            live_tx,
+            index: None,
+            local_user_id: Arc::from(account.user_id.as_str()),
+            purge_on_leave: false,
+            state_redaction_tx,
+        };
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(run(client.clone(), ctx, cancel.clone()));
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut cleared = true;
+                for kind in ["m.space.parent", "m.space.child"] {
+                    let row = store
+                        .room_state(
+                            account.account_id,
+                            "!pack:localhost",
+                            kind,
+                            "!parent:localhost",
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    cleared &= row.content == Some(json!({}));
+                }
+                if cleared {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        cancel.cancel();
+        worker.await.unwrap();
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "space relationship clears must replace cached links"
+        );
+        assert!(client
+            .get_room(matrix_sdk::ruma::room_id!("!pack:localhost"))
+            .is_none());
+        store.delete_account_row(account.account_id).await.unwrap();
     }
 
     #[test]
