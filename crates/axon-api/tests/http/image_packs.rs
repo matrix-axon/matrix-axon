@@ -174,12 +174,13 @@ async fn emoji_packs_discovery_preview_isolation_and_removal() {
         room,
         "m.room.image_pack",
         "main",
-        json!({"images": {}}),
+        json!({}),
         4,
     )
     .await;
     let (_, body) = get(&app, &uri).await;
     assert_eq!(body["data"]["packs"][1]["images"], json!([]));
+    assert_eq!(body["data"]["partial"], false);
     for id in ["new", "old"] {
         assert_eq!(
             get_media_bytes(
@@ -406,7 +407,7 @@ async fn emoji_packs_bounds_and_redaction() {
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    for key in ["a", "b"] {
+    for key in ["a", "b", "c"] {
         state(
             &store,
             a.account_id,
@@ -421,6 +422,8 @@ async fn emoji_packs_bounds_and_redaction() {
     let (_, body) = get(&app, &uri).await;
     assert_eq!(body["data"]["partial"], true);
     let packs = body["data"]["packs"].as_array().unwrap();
+    assert_eq!(packs.len(), 2);
+    assert_eq!(packs[1]["partial"], true);
     assert_eq!(
         packs
             .iter()
@@ -470,4 +473,55 @@ async fn emoji_packs_bounds_and_redaction() {
     assert_eq!(body["data"]["partial"], true);
     assert_eq!(body["data"]["packs"].as_array().unwrap().len(), 64);
     store.delete_account_row(a.account_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn emoji_preview_continues_past_invalid_candidate_pages() {
+    let store = store().await;
+    let account = store
+        .upsert_account(
+            &format!("@pack-pages-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!pack-pages:localhost";
+    joined(&store, account.account_id, &account.user_id, room).await;
+    for i in 0..70 {
+        state(&store,account.account_id,room,"im.ponies.room_emotes",&format!("a{i:03}"),
+            json!({"pack":{"usage":["sticker"]},"images":{"wave":{"url":"mxc://example.org/paged"}}}),2).await;
+    }
+    state(
+        &store,
+        account.account_id,
+        room,
+        "im.ponies.room_emotes",
+        "z-valid",
+        json!({"images":{"wave":{"url":"mxc://example.org/paged"}}}),
+        3,
+    )
+    .await;
+    let app = media_app(
+        store.clone(),
+        Arc::new(ConfiguredMediaProxy::ok(b"GIF89apack")),
+    );
+    let path = format!("/v1/media/{}/example.org/paged", account.account_id);
+    assert_eq!(get_media_bytes(&app, &path, None).await.0, StatusCode::OK);
+    // Without the final usable pack, exhaustion still denies access.
+    state(
+        &store,
+        account.account_id,
+        room,
+        "im.ponies.room_emotes",
+        "z-valid",
+        json!({}),
+        4,
+    )
+    .await;
+    assert_eq!(
+        get_media_bytes(&app, &path, Some("*")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    store.delete_account_row(account.account_id).await.unwrap();
 }
