@@ -135,6 +135,9 @@ CREATE DATABASE axon OWNER axon;
 SQL
 ```
 
+The database must be `UTF8`, or the server refuses to start;
+see [Database encoding](README.md#database-encoding) if your cluster was initialized under a `C` locale.
+
 ### 3. Generate a config
 
 ```bash
