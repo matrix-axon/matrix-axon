@@ -1120,10 +1120,35 @@ impl SdkGateway {
         event_id: &str,
         key: &str,
     ) -> Result<String, GatewayError> {
+        self.react_with_shortcode(account_id, room_id, event_id, key, None)
+            .await
+    }
+
+    /// Send an image reaction with optional plain-text display metadata.
+    pub async fn react_with_shortcode(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+        shortcode: Option<&str>,
+    ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
         let event_id = parse_event_id(event_id)?;
         let content = ReactionEventContent::new(Annotation::new(event_id, key.to_owned()));
-        let resp = room.send(content).await.map_err(map_sdk_err)?;
+        let resp = if let Some(name) = shortcode {
+            let name = axon_core::image_pack::reaction_shortcode(name)
+                .filter(|_| axon_core::media::parse_mxc(key).is_some())
+                .ok_or_else(|| GatewayError::Invalid("invalid custom reaction name/key".into()))?;
+            let mut content = serde_json::to_value(content)
+                .map_err(|_| GatewayError::Invalid("invalid reaction content".into()))?;
+            content["shortcode"] = serde_json::Value::String(name.to_owned());
+            room.send_raw("m.reaction", content)
+                .await
+                .map_err(map_sdk_err)?
+        } else {
+            room.send(content).await.map_err(map_sdk_err)?
+        };
         Ok(resp.response.event_id.to_string())
     }
 

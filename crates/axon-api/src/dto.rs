@@ -719,6 +719,11 @@ pub struct EditRequest {
 pub struct ReactRequest {
     /// The reaction key — typically an emoji.
     pub key: String,
+    /// Optional custom-image name. Requires a structurally valid MXC key.
+    /// At most 100 UTF-8 bytes before trimming, nonblank, with no C0/C1 controls.
+    /// Sent as `shortcode` in the original reaction event, never as its key.
+    #[serde(default)]
+    pub shortcode: Option<String>,
 }
 
 /// Query parameters for redaction (`DELETE …/events/{event_id}`).

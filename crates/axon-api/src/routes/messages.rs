@@ -276,8 +276,15 @@ pub async fn react(
     Path((account_id, room_id, event_id)): Path<(Uuid, String, String)>,
     Json(req): Json<ReactRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    let shortcode = req.shortcode.as_deref().map(|name| {
+        if axon_core::media::parse_mxc(&req.key).is_none() {
+            return Err(ApiError::bad_request("shortcode requires a valid MXC reaction key"));
+        }
+        axon_core::image_pack::reaction_shortcode(name)
+            .ok_or_else(|| ApiError::bad_request("shortcode must be nonblank, at most 100 UTF-8 bytes, without control characters"))
+    }).transpose()?;
     let reaction_id = sender
-        .react(account_id, &room_id, &event_id, &req.key)
+        .react_with_shortcode(account_id, &room_id, &event_id, &req.key, shortcode)
         .await?;
     Ok(ApiResponse::new(SendResultDto {
         event_id: reaction_id,

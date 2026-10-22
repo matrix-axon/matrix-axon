@@ -160,6 +160,8 @@ C0 and C1 control characters are rejected, and surrounding whitespace is trimmed
 The oldest valid name by `(origin_ts, event_id)` among the existing capped, deduplicated reaction representatives wins; redaction removes that representative from consideration.
 Each sender/key pair keeps its smallest-event-ID representative; a name on another duplicate is ignored until that representative is removed.
 Names are omitted when unavailable, so clients should retain a generic fallback and render supplied names as untrusted text.
+The room `emoji-packs` endpoint exposes cached personal and current-room custom emoji, and the media proxy accepts current pack references before their first use as reactions.
+Reaction sends accept an optional `shortcode` alongside the unchanged MXC key; see [Custom emoji discovery](docs/custom-emoji.md) for sources, limits, and cache semantics.
 Safe PNG, JPEG, GIF, and WebP signatures determine reaction image response types; unrecognized objects remain downloads with `application/octet-stream` and `nosniff`.
 Media is fetched on client request and uses the existing per-object limit and globally bounded LRU cache.
 The reaction index is built transactionally during startup, before this instance starts sync or serves requests; plan a maintenance restart for a large event store.
