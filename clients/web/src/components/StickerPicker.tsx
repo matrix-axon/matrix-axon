@@ -1,3 +1,4 @@
+import type { ApiClient } from '../api/client'
 import { useRef, useState } from 'preact/hooks'
 import type { CustomEmoji } from '../emoji-packs'
 import { useShortcuts } from '../shortcuts'
@@ -6,6 +7,7 @@ import { ImagePackPicker } from './CustomEmojiPicker'
 import { useModalFocus } from './use-modal-focus'
 
 export interface StickerPickerOptions {
+  api: ApiClient
   accountId: string
   roomId: string
   onSelect: (image: CustomEmoji) => void

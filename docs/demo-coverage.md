@@ -275,3 +275,5 @@ A recorded demo scene for pack selection remains outstanding; the existing `reac
 
 Standalone sticker selection is covered by `clients/web/e2e/stickers.spec.ts`, including personal and room packs, room/thread sends, draft preservation, original image rendering, keyboard dismissal, and narrow viewport containment.
 It is not yet shown in the recorded demo.
+
+Standalone sticker shortcodes are covered by `clients/web/e2e/sticker-shortcodes.spec.ts` in room and thread composers; the recorded demo does not yet show this path.
