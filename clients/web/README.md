@@ -121,7 +121,25 @@ Received custom reaction images render in room and thread reaction chips through
 Tooltips and accessible labels use the optional reaction `shortcode` when a server supplies it, and fall back to “Custom reaction” for older servers or missing names.
 Supplied names are rendered as plain text, never interpreted as HTML.
 Loading and failed images retain a compact placeholder; counts and click-to-toggle behavior work as for Unicode reactions.
-Custom-image selection and image-pack browsing are not yet available.
+To select a custom reaction, open React → More reactions → Custom emoji in a room or thread.
+The picker groups personal and current-room packs, supports search, and sends the selected name alongside its image key.
+Pack snapshots refresh whenever this view opens and after a live-connection reconnect; Refresh also checks for packs that finished syncing.
+Loading, partial results, empty results, and failures have explicit states with retry controls.
+Older servers without pack discovery continue to support the Unicode picker and received reaction images.
+Custom selections do not enter the global Unicode recent-reaction or gesture preferences.
+Shared packs subscribed from other rooms, inherited space packs, and pack editing remain outside this version.
+
+For testing this client together with the companion server change, this bookmark is stacked on `codex/server-room-emoji`.
+Build the web bundle in this workspace and point the embedded-server build at it:
+
+```bash
+pnpm --dir clients/web install --frozen-lockfile
+pnpm --dir clients/web build
+AXON_WEB_DIST="$PWD/clients/web/dist" cargo build -p axon-server --features embed-web
+```
+
+Run that server with your test configuration, open a joined room with a personal or room pack, and use the picker steps above.
+Both room and thread sends should display the chosen shortcode in their reaction tooltips; selecting an owned chip withdraws it.
 
 ## Prerequisites
 
