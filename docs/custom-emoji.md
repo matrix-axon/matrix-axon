@@ -17,7 +17,7 @@ Creating or editing packs is also outside this API.
 
 The integration tests cover personal and room packs together, standalone legacy room packs, and stable room packs at different state keys.
 They exercise empty and named state keys, multiple packs in one room, identical shortcodes with different images across packs, missing optional metadata, and pack-level versus per-image usage.
-Mixed emoji/sticker packs retain emoticon-capable entries and exclude sticker-only entries.
+Mixed emoji/sticker packs retain independent usage flags; each picker selects its own usage.
 PNG and GIF preview fixtures exercise safe MIME detection independently of declared image metadata.
 Separate cases cover stable-over-legacy replacement, clears and redaction, account and room isolation, membership departure, and resource limits.
 
@@ -49,7 +49,10 @@ An example response is:
 }
 ```
 
-Only emoticon-capable images are included.
+By default only emoticon-capable images are included.
+Use `?usage=sticker` to select sticker-capable images instead, including sticker-only entries.
+Each image exposes independent `emoticon` and `sticker` booleans and optional bounded `info` metadata.
+Mixed-use images appear in both modes; the default response stays compatible with existing reaction pickers.
 Per-image `usage`, when present, overrides the pack's usage; absent or empty usage permits both emoticons and stickers.
 Malformed image entries are skipped without losing valid siblings.
 An empty object clears a pack without marking it partial.
@@ -83,7 +86,7 @@ Personal pack updates use the existing generic account-data sync path.
 Structured sync diagnostics are available through the normal tracing configuration under `axon_sync::image_packs`; no separate developer-mode switch is required.
 
 Picker images can be fetched through the existing authenticated original and thumbnail media routes before they have ever been used as reactions.
-Current account-scoped packs authorize these previews; removed or redacted room packs, departed rooms, invalid entries, and another account's packs do not.
+Current account-scoped emoji and sticker packs authorize these previews; removed or redacted room packs, departed rooms, invalid entries, and another account's packs do not.
 Preview authorization examines matching packs in keyset pages of at most 66 candidates until a usable image/avatar matches or the candidates are exhausted.
 A ten-second overall deadline bounds the scan; expiration is an operational error rather than a false 404.
 Attachment lookups still take precedence, preserving encrypted attachment descriptors.
@@ -103,3 +106,28 @@ To send a selection, use the existing reaction endpoint with its unchanged MXC k
 The optional `shortcode` requires a valid MXC key and is written as top-level metadata in the outgoing `m.reaction` content.
 The key alone determines reaction grouping and withdrawal.
 Requests without `shortcode` retain their existing behavior, so independently distributed clients can upgrade separately.
+
+## Standalone stickers
+
+`POST /v1/accounts/{account_id}/rooms/{room_id}/send-sticker` sends an existing MXC image as a standard `m.sticker` event, without uploading it again.
+The SDK send path handles room encryption; optional `reply_to` and `thread_root` fields use the same relation semantics as text and media sends.
+The existing mutation deadline bounds the SDK operation.
+A successful send is logged with account, room, and resulting event IDs.
+
+```json
+{
+  "body": "A mountain",
+  "url": "mxc://example.org/mountain",
+  "info": { "w": 278, "h": 185, "mimetype": "image/png", "size": 129986 },
+  "thread_root": "$optional-thread-root"
+}
+```
+
+`body` must be nonblank plain text of at most 1,024 UTF-8 bytes without control characters.
+`info` is optional at the Axon boundary; the outgoing Matrix event always includes an object, even when source metadata is absent.
+Only `w`, `h`, `size`, `mimetype`, and `is_animated` are copied from image-pack metadata.
+Dimensions must be between 1 and 16,384; declared size is at most 100 MiB; MIME metadata supports PNG, JPEG, GIF, and WebP.
+Malformed pack metadata is omitted and marks its pack partial, while a usable image remains selectable.
+Invalid send metadata returns 400 before calling the gateway.
+Sticker-only images authorize previews under the same account, membership, redaction, and resource limits as emoji images.
+Received stickers use the existing generic timeline ingestion and attachment media authorization paths.

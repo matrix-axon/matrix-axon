@@ -51,6 +51,7 @@ worker) is web-only.
 | Text send / edit / redact / react | Done (M6, ADR 0021) | Done | Done | |
 | Custom reaction images (MSC4027) | Done — authenticated media proxy accepts active reaction MXC keys | **Gap** — displays reaction keys as text | Done — room and thread reaction chips load images through the media proxy | Existing keys remain unchanged when toggling; image-pack browsing and custom-image selection remain deferred |
 | Custom emoji pack discovery | Done — personal/current-room pack snapshots, preview authorization, and optional shortcode on reaction sends | **Gap** | **Gap** | Picker integration remains a separate client change; shared packs from other rooms and space inheritance are deferred |
+| Standalone sticker sends | Done — sticker pack mode and `send-sticker`, including threads | **Gap** | **Gap** — received sticker rendering exists; composer selection is a separate client change | Personal and current-room packs; mixed-use images can be both reactions and stickers |
 | Bundled URL preview text cards (MSC4095) | Done — metadata passed through in event content | **Gap** — no preview cards | Done — room/thread messages and media captions | Accepts `m.url_previews` and `com.beeper.linkpreviews`; images and automatic generation deferred; formatted spoilers suppress cards |
 | Media send (`m.image`/`m.file`) | Done (M15, ADR 0059) | Done | Done | |
 | Media read proxy + LRU cache | Done (M11, ADR 0045) | Done | Done | |

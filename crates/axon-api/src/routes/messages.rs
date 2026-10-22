@@ -24,6 +24,53 @@ use crate::uploads::StagedUploadService;
 /// The only `format` Matrix defines for `formatted_body`.
 const HTML_FORMAT: &str = "org.matrix.custom.html";
 
+/// Send an existing MXC image as a standalone Matrix `m.sticker` event.
+/// Info accepts raster MIME types, dimensions 1–16,384, and sizes at most
+/// 100 MiB. Empty info is permitted; bytes are never fetched during a send.
+#[utoipa::path(
+    post,
+    path = "/v1/accounts/{account_id}/rooms/{room_id}/send-sticker",
+    params(("account_id" = Uuid, Path), ("room_id" = String, Path)),
+    request_body = crate::dto::SendStickerRequest,
+    responses(
+        (status = 200, description = "Sticker sent", body = ApiResponse<SendResultDto>),
+        (status = 400, description = "Invalid sticker", body = crate::response::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::response::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::response::ErrorResponse),
+        (status = 404, description = "Account or room not found", body = crate::response::ErrorResponse),
+        (status = 502, description = "Upstream failure", body = crate::response::ErrorResponse),
+        (status = 503, description = "Account unavailable", body = crate::response::ErrorResponse),
+        (status = 504, description = "Send deadline exceeded", body = crate::response::ErrorResponse),
+    ),
+    tag = "messages"
+)]
+pub async fn send_sticker(
+    State(sender): State<Arc<dyn MessageSender>>,
+    Path((account_id, room_id)): Path<(Uuid, String)>,
+    Json(req): Json<crate::dto::SendStickerRequest>,
+) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    let sticker = axon_core::image_pack::Sticker {
+        body: req.body,
+        url: req.url,
+        info: serde_json::to_value(req.info.unwrap_or_default())
+            .map_err(|_| ApiError::bad_request("invalid sticker info"))?,
+    };
+    if !sticker.validate() {
+        return Err(ApiError::bad_request(
+            "invalid sticker URL, body, or image metadata",
+        ));
+    }
+    let relation = Relation {
+        reply_to: req.reply_to.as_deref(),
+        thread_root: req.thread_root.as_deref(),
+    };
+    let event_id = sender
+        .send_sticker(account_id, &room_id, &sticker, relation)
+        .await?;
+    tracing::info!(%account_id, %room_id, %event_id, "sticker sent");
+    Ok(ApiResponse::new(SendResultDto { event_id }))
+}
+
 /// Validate and pair a request's optional `format` / `formatted_body` into a
 /// [`Formatted`]. Both must be supplied together (Matrix carries them as a pair),
 /// `format` must be the one recognized markup, and the HTML body must be

@@ -48,6 +48,17 @@ pub enum SendError {
 /// as `Arc<dyn MessageSender>`.
 #[async_trait]
 pub trait MessageSender: Send + Sync {
+    /// Additive standalone sticker capability. Backends must explicitly opt in.
+    async fn send_sticker(
+        &self,
+        _account_id: Uuid,
+        _room_id: &str,
+        _sticker: &axon_core::image_pack::Sticker,
+        _relation: Relation<'_>,
+    ) -> Result<String, SendError> {
+        Err(SendError::Unavailable("sticker sends unavailable".into()))
+    }
+
     /// Send a message to a room; returns the new event id. `body` is the
     /// plain-text content; `formatted`, when present, carries the rich-text
     /// rendering (validated at the handler so both its fields are set).

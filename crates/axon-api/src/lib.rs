@@ -358,6 +358,10 @@ pub fn router(state: AppState) -> Router {
             post(routes::messages::send_message),
         )
         .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/send-sticker",
+            post(routes::messages::send_sticker),
+        )
+        .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/send-media",
             post(routes::messages::send_media),
         )
