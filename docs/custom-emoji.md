@@ -15,6 +15,12 @@ Missing pack display names or avatars remain null; a client may fall back to the
 Subscribed packs from other rooms and canonical-space inheritance are not included in this version.
 Creating or editing packs is also outside this API.
 
+The integration tests cover personal and room packs together, standalone legacy room packs, and stable room packs at different state keys.
+They exercise empty and named state keys, multiple packs in one room, identical shortcodes with different images across packs, missing optional metadata, and pack-level versus per-image usage.
+Mixed emoji/sticker packs retain emoticon-capable entries and exclude sticker-only entries.
+PNG and GIF preview fixtures exercise safe MIME detection independently of declared image metadata.
+Separate cases cover stable-over-legacy replacement, clears and redaction, account and room isolation, membership departure, and resource limits.
+
 An example response is:
 
 ```json
