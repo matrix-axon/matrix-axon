@@ -123,6 +123,8 @@ PostgreSQL 16 is recommended.
 Homebrew no longer has a `:recommended` dependency, so the formula leaves the install to you and a remote database still works.
 Stock Homebrew Postgres creates neither role `axon`, nor database `axon`, nor `pgcrypto`, and `postgresql@16` is keg-only.
 The caveats print `psql` / `createdb` against `$(brew --prefix postgresql@16)`.
+`createdb` asks for `UTF8` from `template0` explicitly.
+Homebrew's own `initdb` already gives `UTF8`, so this matters only for a cluster initialized under the `C` locale, which would otherwise give `SQL_ASCII`.
 init's default URL `postgres://axon:axon@127.0.0.1:5432/axon` works only after those exist.
 Tailscale is a caveat too: `tailscale serve --bg http://127.0.0.1:8080`.
 The menu-bar app is the common case; on a headless Mac mini, `brew install tailscale` is the formula, and the cask `tailscale-app` conflicts with that formula.

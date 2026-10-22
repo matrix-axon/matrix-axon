@@ -117,6 +117,22 @@ then runs `axon-server init` as user `axon` with a peer-auth Unix-socket
 URL (sqlx form: postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon, no
 password). The service is enabled and started.
 
+Axon requires a UTF8 database. A cluster initialized under the C or POSIX
+locale defaults to SQL_ASCII, so on such a cluster the database is created
+with `createdb -E UTF8 -T template0 --locale=C`.
+
+A non-UTF8 `axon` database left by an earlier release is converted by
+`configure`: it stops the service, copies the database into a new UTF8 one
+with `pg_dump --encoding=UTF8`, and swaps the copy in under the same name,
+keeping the original as `axon_old` (drop it with `sudo -u postgres dropdb
+axon_old` once Axon works). The original is only renamed, and only after
+the copy succeeds. The copy needs free space next to the cluster's data
+directory of about the database's size plus a quarter, plus 1 GB for WAL.
+When that space is missing, `axon_utf8` or `axon_old` already exists, the
+database is outside the default tablespace, or the copy fails (for example
+on bytes that are not UTF-8), the database is left unchanged and
+`configure` prints the commands to do it by hand.
+
 The generated config.toml comments explain how to point `database.url`
 at a remote or passworded server.
 
@@ -139,7 +155,7 @@ trees as the service.
 Bring your own Postgres
 -----------------------
 If no local cluster is reachable, the package still installs. After the
-database exists (role can use pgcrypto in that database):
+database exists (UTF8-encoded, and the role can use pgcrypto in it):
 
   axon-server init --non-interactive \
     --config /etc/axon-server/config.toml \

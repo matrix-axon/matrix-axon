@@ -208,7 +208,7 @@ cargo run -p axon-server -- init   # generates a config + store_key, once
 ## Database encoding
 
 Axon's database must use the `UTF8` encoding, and the server refuses to start on any other.
-A database created by the Docker Compose stack is already `UTF8`.
+The Docker Compose stack, the Debian and RPM packages, and the Homebrew caveats all create a `UTF8` database.
 A plain `createdb` copies the encoding of the cluster, and `initdb` under a `C` or `POSIX` locale gives `SQL_ASCII`, which Axon cannot use.
 Check with `psql -d axon -c 'SHOW server_encoding'`.
 
