@@ -216,7 +216,7 @@ test('composer touch focus omits the ring while keyboard focus retains it', asyn
 async function sendMessage(page: Page, body: string): Promise<Locator> {
   const composer = page.getByRole('textbox', { name: /^Message/ })
   await composer.fill(body)
-  await page.getByRole('button', { name: 'Send' }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
   const row = page.locator('.event-row').filter({ hasText: body }).last()
   await expect(row).toBeVisible()
   await expect(row).toHaveClass(/touch-hold-enabled/)

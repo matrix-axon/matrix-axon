@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { parseEmojiPacks, type EmojiPacks } from '../emoji-packs'
+import {
+  parseEmojiPacks,
+  type EmojiPacks,
+  type CustomEmoji,
+} from '../emoji-packs'
 import { useServices } from '../services'
 import { ReactionContent } from './ReactionContent'
 
@@ -15,6 +19,29 @@ export function CustomEmojiPicker({
   roomId: string
   onReact: (key: string, shortcode: string) => void
 }) {
+  return (
+    <ImagePackPicker
+      accountId={accountId}
+      roomId={roomId}
+      onSelect={(image) => onReact(image.url, image.shortcode)}
+    />
+  )
+}
+
+export function ImagePackPicker({
+  accountId,
+  roomId,
+  usage = 'emoticon',
+  onSelect,
+}: {
+  accountId: string
+  roomId: string
+  usage?: 'emoticon' | 'sticker'
+  onSelect: (image: CustomEmoji) => void
+}) {
+  const label = usage === 'sticker' ? 'stickers' : 'custom emoji'
+  const searchLabel =
+    usage === 'sticker' ? 'Search stickers' : 'Search custom emoji'
   const { api, live, auth } = useServices()
   const reconnects = live.reconnects.value
   const signedIn = auth.signedIn.value
@@ -22,7 +49,7 @@ export function CustomEmojiPicker({
   const [query, setQuery] = useState('')
   const [load, setLoad] = useState<Load | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
-  const id = `${accountId}\0${roomId}\0${reconnects}\0${retry}\0${signedIn}`
+  const id = `${accountId}\0${roomId}\0${reconnects}\0${retry}\0${signedIn}\0${usage}`
   useEffect(() => {
     searchRef.current?.focus({ preventScroll: true })
   }, [])
@@ -35,7 +62,10 @@ export function CustomEmojiPicker({
         const { data, response } = await api.GET(
           '/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs',
           {
-            params: { path: { account_id: accountId, room_id: roomId } },
+            params: {
+              path: { account_id: accountId, room_id: roomId },
+              query: usage === 'sticker' ? { usage: 'sticker' } : undefined,
+            },
             signal: controller.signal,
           },
         )
@@ -45,21 +75,21 @@ export function CustomEmojiPicker({
             id,
             error:
               response.status === 404
-                ? 'Custom emoji are unavailable for this room or server.'
-                : 'Could not load custom emoji.',
+                ? `${usage === 'sticker' ? 'Stickers' : 'Custom emoji'} are unavailable for this room or server.`
+                : `Could not load ${label}.`,
           })
           return
         }
-        setLoad({ id, data: parseEmojiPacks(data.data) })
+        setLoad({ id, data: parseEmojiPacks(data.data, usage) })
       } catch {
-        if (!cancelled) setLoad({ id, error: 'Could not load custom emoji.' })
+        if (!cancelled) setLoad({ id, error: `Could not load ${label}.` })
       }
     })()
     return () => {
       cancelled = true
       controller.abort()
     }
-  }, [api, accountId, roomId, signedIn, id])
+  }, [api, accountId, roomId, signedIn, id, usage, label])
 
   const current = load?.id === id ? load : null
   const data = signedIn ? current?.data : undefined
@@ -81,8 +111,8 @@ export function CustomEmojiPicker({
         <input
           ref={searchRef}
           type="search"
-          aria-label="Search custom emoji"
-          placeholder="Search custom emoji"
+          aria-label={searchLabel}
+          placeholder={searchLabel}
           maxLength={100}
           value={query}
           onInput={(event) => setQuery(event.currentTarget.value)}
@@ -96,8 +126,13 @@ export function CustomEmojiPicker({
           Refresh
         </button>
       </div>
-      <div class="custom-emoji-packs" aria-label="Custom emoji packs">
-        {current === null && <p role="status">Loading custom emoji…</p>}
+      <div
+        class="custom-emoji-packs"
+        aria-label={
+          usage === 'sticker' ? 'Sticker packs' : 'Custom emoji packs'
+        }
+      >
+        {current === null && <p role="status">Loading {label}…</p>}
         {current?.error && (
           <p role="status">
             {current.error}{' '}
@@ -109,14 +144,12 @@ export function CustomEmojiPicker({
             </button>
           </p>
         )}
-        {data?.partial && (
-          <p role="status">Some custom emoji could not be shown.</p>
-        )}
+        {data?.partial && <p role="status">Some {label} could not be shown.</p>}
         {data && packs.length === 0 && (
           <p role="status">
             {search
-              ? 'No matching custom emoji.'
-              : 'No custom emoji are available yet. Packs may still be syncing.'}
+              ? `No matching ${label}.`
+              : `No ${label} are available yet. Packs may still be syncing.`}
           </p>
         )}
         {packs.map((pack) => (
@@ -125,7 +158,13 @@ export function CustomEmojiPicker({
           >
             <h3>
               {pack.display_name ||
-                (pack.room_id === null ? 'Personal emoji' : 'Room emoji')}
+                (pack.room_id === null
+                  ? usage === 'sticker'
+                    ? 'Personal stickers'
+                    : 'Personal emoji'
+                  : usage === 'sticker'
+                    ? 'Room stickers'
+                    : 'Room emoji')}
             </h3>
             <div class="custom-emoji-grid">
               {pack.images.map((image) => (
@@ -133,8 +172,12 @@ export function CustomEmojiPicker({
                   type="button"
                   key={image.shortcode}
                   title={`:${image.shortcode}:`}
-                  aria-label={`React with :${image.shortcode}:`}
-                  onClick={() => onReact(image.url, image.shortcode)}
+                  aria-label={
+                    usage === 'sticker'
+                      ? `Send sticker :${image.shortcode}:`
+                      : `React with :${image.shortcode}:`
+                  }
+                  onClick={() => onSelect(image)}
                 >
                   <ReactionContent
                     accountId={accountId}
