@@ -184,8 +184,38 @@ export async function lookupStickerShortcode(
   }
   // Server order is personal first, then deterministic room-pack order.
   for (const pack of data.packs) {
-    const image = pack.images.find((image) => image.shortcode === shortcode)
+    const image = pack.images.find(
+      (image) => image.shortcode.toLowerCase() === shortcode.toLowerCase(),
+    )
     if (image) return image
   }
   return null
+}
+
+/** Suggest the same winner that a case-insensitive standalone send resolves. */
+export function stickerShortcodeSuggestions(packs: EmojiPacks, query: string) {
+  const folded = query.toLowerCase()
+  const seen = new Set<string>()
+  const matches = []
+  for (const pack of packs.packs) {
+    for (const image of pack.images) {
+      // Legacy packs can contain names that cannot round-trip as one token.
+      if (
+        standaloneStickerShortcode(`:${image.shortcode}:`) !== image.shortcode
+      )
+        continue
+      const name = image.shortcode.toLowerCase()
+      if (seen.has(name)) continue
+      seen.add(name)
+      if (!name.startsWith(folded)) continue
+      matches.push({
+        value: `:${image.shortcode}:`,
+        label: `:${image.shortcode}:`,
+        description: `Sticker · ${pack.display_name || (pack.room_id === null ? 'Personal' : 'Room')}`,
+        sticker: image,
+      })
+      if (matches.length === 20) return matches
+    }
+  }
+  return matches
 }

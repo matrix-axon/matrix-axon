@@ -129,7 +129,10 @@ Older servers without pack discovery continue to support the Unicode picker and 
 Custom selections do not enter the global Unicode recent-reaction or gesture preferences.
 To send a standalone sticker, choose **Send sticker** beside the room or thread composer, search the personal and current-room packs, and select an image.
 You can also type a complete shortcode such as `:adam:` and press Send (or Enter on desktop) to send that sticker.
-Matching is case-sensitive; personal packs take precedence, followed by the server's room-pack order when names repeat.
+Matching is case-insensitive; personal packs take precedence, followed by the server's room-pack order when names repeat.
+Typing a standalone shortcode prefix such as `:ad` includes sticker suggestions, with previews and pack names, in the existing emoji autocomplete menu.
+Choose a suggestion with Tab, Enter, or a pointer to insert the original shortcode, then submit it to send the sticker.
+Duplicate names after case-folding show their effective first match; the picker remains available to choose a specific image from another pack.
 Only a whole-message shortcode becomes a sticker: names in prose, attachment captions, and edits keep their text behavior.
 Unknown names and servers without pack discovery use the existing text/Unicode shortcode handling.
 A discovery failure keeps the draft and offers another Send attempt; changing rooms cancels a pending lookup.

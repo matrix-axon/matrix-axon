@@ -1,8 +1,11 @@
 import {
   lookupStickerShortcode,
   standaloneStickerShortcode,
+  type CustomEmoji,
 } from '../emoji-packs'
 import type { JSX } from 'preact'
+import { useStickerCompletions } from './use-sticker-completions'
+import { ReactionContent } from './ReactionContent'
 import { StickerPickerButton, type StickerPickerOptions } from './StickerPicker'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
@@ -26,6 +29,7 @@ export interface ComposerAutocompleteOption {
   value: string
   label: string
   description: string
+  sticker?: CustomEmoji
 }
 
 type AutocompleteKind =
@@ -332,10 +336,30 @@ export function Composer({
     roomReferenceCompletions === undefined
       ? []
       : roomReferenceCompletions(referenceQuery.query)
-  const emojiMatches =
+  // A sticker occupies its own event, so suggest one only where its token
+  // would be a complete standalone message (never in captions or /react).
+  const stickerQuery =
+    emojiQuery !== null &&
+    reactionEmojiQuery === null &&
+    (attachments?.items.length ?? 0) === 0 &&
+    draft.slice(0, emojiQuery.start).trim() === '' &&
+    draft.slice(emojiQuery.end).trim() === ''
+      ? emojiQuery.query
+      : null
+  const stickerMatches = useStickerCompletions(stickers, stickerQuery)
+  const stickerValues = new Set(
+    stickerMatches.map((match) => match.value.toLowerCase()),
+  )
+  const unicodeMatches =
     emojiQuery === null || emojiCompletions === undefined
       ? []
       : emojiCompletions(emojiQuery.query)
+  const emojiMatches = [
+    ...stickerMatches,
+    ...unicodeMatches.filter(
+      (match) => !stickerValues.has(match.value.toLowerCase()),
+    ),
+  ].slice(0, 20)
   // One menu at a time: the command names while the name is still being typed,
   // the room matches once `/room ` has moved on to its argument. Both the open
   // state and the rendered kind come off this single candidate, so an Escape
@@ -843,7 +867,7 @@ export function Composer({
       {autocompleteOpen && (
         <div
           id={autocompleteId}
-          class="slash-command-menu"
+          class={`slash-command-menu${stickerMatches.length > 0 ? ' sticker-suggestions' : ''}`}
           role="listbox"
           aria-label={
             autocompleteKind === 'mention'
@@ -905,7 +929,7 @@ export function Composer({
                     type="button"
                     role="option"
                     aria-selected={isSelected}
-                    class={`slash-command-option${isSelected ? ' selected' : ''}`}
+                    class={`slash-command-option${room.sticker ? ' sticker-completion' : ''}${isSelected ? ' selected' : ''}`}
                     onMouseDown={(event) => {
                       event.preventDefault()
                       if (autocompleteKind === 'room') {
@@ -917,7 +941,16 @@ export function Composer({
                       }
                     }}
                   >
-                    <span class="slash-command-name">{room.label}</span>
+                    <span class="slash-command-name">
+                      {room.sticker && stickers && (
+                        <ReactionContent
+                          accountId={stickers.accountId}
+                          reaction={room.sticker.url}
+                          shortcode={room.sticker.shortcode}
+                        />
+                      )}
+                      {room.label}
+                    </span>
                     <span class="slash-command-description">
                       {room.description}
                     </span>
