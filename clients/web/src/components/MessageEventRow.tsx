@@ -1,3 +1,4 @@
+import { CustomEmojiPicker } from './CustomEmojiPicker'
 import {
   useCallback,
   useEffect,
@@ -721,9 +722,11 @@ export function MessageEventRow({
           <ReactionPicker
             onClose={() => onSetReactionPicker(null)}
             settings={settings}
-            onReact={(key) => {
+            accountId={accountId}
+            roomId={event.room_id}
+            onReact={(key, shortcode) => {
               onSetReactionPicker(null)
-              void timeline.toggleReaction(event, key).then((ok) => {
+              void timeline.toggleReaction(event, key, shortcode).then((ok) => {
                 if (ok) onMutation?.()
               })
             }}
@@ -941,10 +944,14 @@ export function ReactionPicker({
   settings,
   onReact,
   ariaLabel = 'React with',
+  accountId,
+  roomId,
 }: {
   onClose: () => void
   settings: SettingsStore
-  onReact: (key: string) => void
+  onReact: (key: string, shortcode?: string) => void
+  accountId?: string
+  roomId?: string
   ariaLabel?: string
 }) {
   const { containerRef } = useModalFocus<HTMLDivElement>()
@@ -952,6 +959,8 @@ export function ReactionPicker({
   const fullPickerHostRef = useRef<HTMLDivElement>(null)
   const moreButtonRef = useRef<HTMLButtonElement>(null)
   const [mode, setMode] = useState<'compact' | 'full'>('compact')
+  const [category, setCategory] = useState<'unicode' | 'custom'>('unicode')
+  const customAvailable = accountId !== undefined && roomId !== undefined
   const [anchorRect, setAnchorRect] = useState<DOMRectReadOnly | null>(null)
   const [pickerPosition, setPickerPosition] = useState<PickerPosition | null>(
     null,
@@ -986,13 +995,14 @@ export function ReactionPicker({
   )
 
   const react = useCallback(
-    (key: string) => {
+    (key: string, shortcode?: string) => {
       const trimmed = canonicalReactionKey(key.trim())
       if (trimmed === '') {
         return
       }
-      settings.recordRecentReaction(trimmed)
-      onReact(trimmed)
+      if (customReactionMxc(trimmed) === null)
+        settings.recordRecentReaction(trimmed)
+      onReact(trimmed, shortcode)
     },
     [onReact, settings],
   )
@@ -1073,7 +1083,7 @@ export function ReactionPicker({
   )
 
   useEffect(() => {
-    if (mode !== 'full') {
+    if (mode !== 'full' || category !== 'unicode') {
       return
     }
     const host = fullPickerHostRef.current
@@ -1124,7 +1134,7 @@ export function ReactionPicker({
       picker?.removeEventListener('keydown', onKeyDown)
       picker?.remove()
     }
-  }, [mode])
+  }, [mode, category])
 
   const fullPickerDialog =
     mode === 'full' ? (
@@ -1143,12 +1153,44 @@ export function ReactionPicker({
         aria-label="Emoji picker"
       >
         <div class="reaction-full-picker-head">
-          <span>Emoji picker</span>
+          {customAvailable ? (
+            <div
+              class="reaction-picker-categories"
+              role="group"
+              aria-label="Emoji type"
+            >
+              <button
+                type="button"
+                aria-pressed={category === 'unicode'}
+                onClick={() => setCategory('unicode')}
+              >
+                Emoji
+              </button>
+              <button
+                type="button"
+                aria-pressed={category === 'custom'}
+                onClick={() => setCategory('custom')}
+              >
+                Custom emoji
+              </button>
+            </div>
+          ) : (
+            <span>Emoji picker</span>
+          )}
           <button type="button" class="ghost" onClick={onClose}>
             Close picker
           </button>
         </div>
-        <div ref={fullPickerHostRef} class="reaction-full-picker-host" />
+        {category === 'custom' && customAvailable ? (
+          <CustomEmojiPicker
+            key={`${accountId}\0${roomId}`}
+            accountId={accountId}
+            roomId={roomId}
+            onReact={react}
+          />
+        ) : (
+          <div ref={fullPickerHostRef} class="reaction-full-picker-host" />
+        )}
       </div>
     ) : null
 

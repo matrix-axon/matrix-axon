@@ -1,3 +1,4 @@
+import { customReactionMxc, reactionShortcode } from '../custom-reactions'
 import {
   computed,
   signal,
@@ -208,7 +209,11 @@ export interface TimelineStore {
    * Toggle my reaction `key` on an event: reacts, or redacts my existing
    * reaction event (`my_event_ids`) when already reacted.
    */
-  toggleReaction(event: EventDto, key: string): Promise<boolean>
+  toggleReaction(
+    event: EventDto,
+    key: string,
+    shortcode?: string,
+  ): Promise<boolean>
 
   /**
    * Merge a live event pushed over `/v1/ws` into the loaded slice (M-W6): an
@@ -1647,8 +1652,12 @@ export function createTimelineStore(
       return ok
     },
 
-    async toggleReaction(event, key) {
+    async toggleReaction(event, key, shortcode) {
       const mine = event.reactions?.[key]
+      const name =
+        customReactionMxc(key) === null
+          ? null
+          : reactionShortcode(shortcode ?? mine?.shortcode)
       const myReactionId =
         mine?.me === true ? mine.my_event_ids?.[0] : undefined
       const ok = await mutate(() =>
@@ -1677,7 +1686,7 @@ export function createTimelineStore(
                     event_id: event.event_id,
                   },
                 },
-                body: { key },
+                body: { key, ...(name === null ? {} : { shortcode: name }) },
               },
             ),
       )

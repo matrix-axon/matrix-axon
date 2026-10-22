@@ -48,6 +48,7 @@ shows it.
 | Reactions (seeded badges render)                        | `timeline`            | `timeline`                                                                                                | `send`          |
 | React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
 | Custom reaction images (MSC4027)                        | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Custom emoji pack selection (personal/current room)     | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Reaction badge updating live from another user's react  | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Replies                                                 | `timeline`            | `timeline`                                                                                                | `send`          |
 | Edits (`m.replace`, applied in place)                   | `threads`             | `threads`                                                                                                 | **not covered** |
@@ -267,3 +268,6 @@ scene now depends on:
   `scrollBy` rather than pretending to a gesture it is not.
 - **Message actions are hidden until the row is tapped** at phone widths, and
   Enter is not the send affordance a touch-only user has — the Send button is.
+
+The web custom emoji picker is covered by `clients/web/e2e/custom-emoji-picker.spec.ts`, including personal and room packs, image previews, sends, withdrawals, and narrow viewport containment.
+A recorded demo scene for pack selection remains outstanding; the existing `react` scene continues to demonstrate Unicode reactions.
