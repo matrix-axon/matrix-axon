@@ -212,11 +212,36 @@ cluster_free_bytes() {
 
 # Copy database `axon` into a new UTF8 database and swap it in under the same
 # name, keeping the original as `axon_old`. The original is only renamed, and
-# only once the copy has succeeded. The service must be stopped, or rows it
-# writes during the copy are lost. $1 = the command that resumes setup, for the
-# manual steps printed when this returns 1 without converting.
+# only once the copy has succeeded. Stops the unit first and converts only once
+# nothing is connected, since rows written after the dump's snapshot would be
+# missing from the copy. $1 = the command that resumes setup, for the manual
+# steps printed when this returns 1 without converting.
 convert_axon_database() {
 	resume=$1
+	if ! is_systemd; then
+		print_non_utf8_database "It was not converted automatically because without systemd axon-server cannot be confirmed stopped." "$resume"
+		return 1
+	fi
+	if ! systemctl stop axon-server.service >/dev/null 2>&1; then
+		print_non_utf8_database "It was not converted automatically because stopping axon-server failed." "$resume"
+		return 1
+	fi
+	state=$(systemctl show -p ActiveState --value axon-server.service 2>/dev/null) || state=unknown
+	case $state in
+	inactive | failed) ;;
+	*)
+		print_non_utf8_database "It was not converted automatically because axon-server is still ${state:-unknown} after stopping it." "$resume"
+		return 1
+		;;
+	esac
+	# Also catches a hand-started server, a CLI command, or an open psql. A
+	# client that connects after this and stays connected makes the rename
+	# below fail. Autovacuum workers are not clients, and the rename evicts them.
+	sessions=$(pg_scalar "SELECT count(*) FROM pg_stat_activity WHERE datname = 'axon' AND backend_type = 'client backend'") || sessions=
+	if [ "$sessions" != "0" ]; then
+		print_non_utf8_database "It was not converted automatically because client sessions (${sessions:-count unknown}) are still connected to it." "$resume"
+		return 1
+	fi
 	for name in axon_utf8 axon_old; do
 		if [ "$(pg_scalar "SELECT 1 FROM pg_database WHERE datname = '$name'")" = "1" ]; then
 			print_non_utf8_database "It was not converted automatically because a database named '$name' already exists." "$resume"
@@ -699,7 +724,6 @@ configure() {
 	if [ -f "$CONFIG" ]; then
 		if config_uses_local_socket && local_postgres_ready; then
 			if axon_database_not_utf8; then
-				stop_unit
 				convert_axon_database "sudo systemctl start axon-server" || return 0
 			fi
 			store_key_check && sk=0 || sk=$?
