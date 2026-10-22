@@ -134,6 +134,12 @@ When that cannot be confirmed, the space is missing, `axon_utf8` or
 `axon_old` already exists, the database is outside the default tablespace,
 or the copy fails (for example on bytes that are not UTF-8), the database
 is left unchanged and `configure` prints the commands to do it by hand.
+If `configure` had stopped the service, it stays stopped until they have run.
+The copy carries everything inside the database, but not what is set on the
+database itself: `ALTER DATABASE axon SET` and `ALTER ROLE ... IN DATABASE
+axon SET` parameters, grants on the database, and its comment. The package
+sets none of these; if you added any, `sudo -u postgres psql -c '\drds'` and
+`sudo -u postgres psql -c '\l+ axon_old'` list them, to re-apply on `axon`.
 
 The generated config.toml comments explain how to point `database.url`
 at a remote or passworded server.

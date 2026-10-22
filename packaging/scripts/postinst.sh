@@ -178,11 +178,22 @@ SQL
 # $1 = why it was not converted; $2 = the command that resumes setup once the
 # data has moved.
 print_non_utf8_database() {
+	reason=$1
+	# convert_axon_database has usually stopped the unit by now, and setup
+	# returns without starting it, so say so rather than leave it implied.
+	if is_systemd; then
+		case $(systemctl show -p ActiveState --value axon-server.service 2>/dev/null) in
+		inactive | failed)
+			reason="$reason
+axon-server is stopped now and cannot run until these steps are done."
+			;;
+		esac
+	fi
 	cat >&2 <<EOF
 
 axon-server's Postgres database 'axon' uses the $AXON_DB_ENCODING encoding.
 Axon requires UTF8 and will not start on it.
-$1
+$reason
 
 To copy the data into a new UTF8 database and swap it in under the same name:
 

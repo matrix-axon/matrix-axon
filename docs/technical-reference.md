@@ -62,6 +62,8 @@ The rename runs only if the copy succeeded.
 If the copy reports an invalid byte sequence, drop `axon_utf8` and open an issue, since Axon itself only writes UTF-8.
 The pipe writes no dump file, which would hold your decrypted message history.
 The `C` locale accepts `UTF8` on any cluster, and Axon's queries do not depend on the locale.
+The copy carries everything inside the database, but not what is set on the database itself: `ALTER DATABASE axon SET` and `ALTER ROLE ... IN DATABASE axon SET` parameters, grants on the database, and its comment.
+None of the install methods set these; if you added any by hand, `psql -c '\drds'` and `psql -c '\l+ axon_old'` list them after the swap, to re-apply on `axon`.
 
 ## Database deadlines
 
