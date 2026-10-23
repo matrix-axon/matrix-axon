@@ -6814,8 +6814,10 @@ audio.media-player {
 }
 
 .custom-emoji-packs h3 {
-  font-size: 0.9rem;
-  margin: 0.6rem 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin: 0.5rem 0 0.3rem;
 }
 
 .custom-emoji-grid {
@@ -6834,6 +6836,17 @@ audio.media-player {
   min-height: 3rem;
   padding: 0.4rem 0.2rem;
   font-size: 0.75rem;
+  border-color: transparent;
+  background: transparent;
+}
+
+.custom-emoji-grid button:hover:not(:disabled) {
+  background: var(--bg-raised);
+}
+
+.custom-emoji-grid button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .custom-emoji-grid button > span:last-child {

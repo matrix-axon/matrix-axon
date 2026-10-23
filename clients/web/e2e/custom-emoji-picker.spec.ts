@@ -141,9 +141,7 @@ for (const thread of [false, true]) {
     await expect
       .poll(async () => (await dialog.boundingBox())!.y)
       .toBeGreaterThanOrEqual(62)
-    await dialog
-      .getByRole('button', { name: 'Custom emoji', exact: true })
-      .click()
+    await dialog.getByRole('button', { name: 'Custom', exact: true }).click()
     await expect(dialog.getByRole('heading', { name: 'Testing' })).toBeVisible()
     if (!thread)
       await page.screenshot({
@@ -222,9 +220,7 @@ for (const thread of [false, true]) {
     await surface.locator('.event-body').click()
     await surface.getByRole('button', { name: 'React', exact: true }).click()
     await page.getByRole('button', { name: 'More reactions' }).click()
-    await dialog
-      .getByRole('button', { name: 'Custom emoji', exact: true })
-      .click()
+    await dialog.getByRole('button', { name: 'Custom', exact: true }).click()
     await expect.poll(() => packReads).toBe(2)
     await page.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)
@@ -251,9 +247,7 @@ test('an older server leaves Unicode reactions usable', async ({ page }) => {
   await row.getByRole('button', { name: 'React', exact: true }).click()
   await page.getByRole('button', { name: 'More reactions' }).click()
   const dialog = page.getByRole('dialog', { name: 'Emoji picker' })
-  await dialog
-    .getByRole('button', { name: 'Custom emoji', exact: true })
-    .click()
+  await dialog.getByRole('button', { name: 'Custom', exact: true }).click()
   await expect(
     dialog.getByText('Custom emoji are unavailable for this room or server.'),
   ).toBeVisible()

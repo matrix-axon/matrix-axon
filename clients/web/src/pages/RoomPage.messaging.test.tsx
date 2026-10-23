@@ -1247,7 +1247,7 @@ describe('reactions', () => {
     fireEvent.click(await findByRole('button', { name: 'More reactions' }))
     expect(await findByRole('dialog', { name: 'Emoji picker' })).toBeTruthy()
 
-    fireEvent.click(await findByRole('button', { name: 'Close picker' }))
+    fireEvent.click(await findByRole('button', { name: 'Close' }))
 
     expect(queryByRole('dialog', { name: 'Emoji picker' })).toBeNull()
     expect(queryByRole('group', { name: 'React with' })).toBeNull()
