@@ -157,6 +157,21 @@ impl MessageSender for GatewayAdapter {
         .await
     }
 
+    async fn send_sticker(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        sticker: &axon_core::image_pack::Sticker,
+        relation: Relation<'_>,
+    ) -> Result<String, SendError> {
+        self.with_mutation_timeout(
+            "sticker send",
+            self.gateway
+                .send_sticker(account_id, room_id, sticker, relation),
+        )
+        .await
+    }
+
     async fn send_media(
         &self,
         account_id: Uuid,
@@ -217,6 +232,22 @@ impl MessageSender for GatewayAdapter {
         self.with_mutation_timeout(
             "react",
             self.gateway.react(account_id, room_id, event_id, key),
+        )
+        .await
+    }
+
+    async fn react_with_shortcode(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+        shortcode: Option<&str>,
+    ) -> Result<String, SendError> {
+        self.with_mutation_timeout(
+            "react",
+            self.gateway
+                .react_with_shortcode(account_id, room_id, event_id, key, shortcode),
         )
         .await
     }

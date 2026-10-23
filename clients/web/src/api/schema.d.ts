@@ -764,6 +764,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List custom emoji available from the current room, canonical ancestor spaces, and personal pack.
+         *     Supports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal
+         *     `im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with
+         *     the same state key. Personal packs precede room packs, then nearest ancestors; names are not merged.
+         *     Sticker-only entries are excluded by default; `usage=sticker` selects
+         *     sticker-capable images instead. Up to 16 joined canonical ancestor spaces
+         *     are inherited through locally validated parent relationships. Other-room
+         *     subscriptions are not included. Requires positive joined membership.
+         *     This is a local cache read, not a homeserver request or an authoritative
+         *     statement that no packs exist upstream. Re-read on picker open/reconnect.
+         *     At most 64 room packs plus one personal pack, 128 KiB per source, 512 entries
+         *     examined per pack, and 1000 returned images across packs. `partial` signals
+         *     omitted invalid/oversized data or truncation. All names are untrusted text.
+         */
+        get: operations["room_emoji_packs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}": {
         parameters: {
             query?: never;
@@ -1054,6 +1085,27 @@ export interface paths {
         put?: never;
         /** Send a staged media upload to a room. */
         post: operations["send_media"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/{room_id}/send-sticker": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send an existing MXC image as a standalone Matrix `m.sticker` event.
+         *     Info accepts raster MIME types, dimensions 1–16,384, and sizes at most
+         *     100 MiB. Empty info is permitted; bytes are never fetched during a send.
+         */
+        post: operations["send_sticker"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2576,6 +2628,18 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_RoomEmojiPacksDto: {
+            /**
+             * @description Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.
+             *     Empty results do not prove absence upstream while initial sync is pending.
+             */
+            data: {
+                packs: components["schemas"]["EmojiPackDto"][];
+                /** @description Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found. */
+                partial: boolean;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_RoomEntryResultDto: {
             /**
              * @description Response for the four room-entry mutations (`join`/`knock`/`create_room`/
@@ -3689,6 +3753,17 @@ export interface components {
              */
             verification_violation?: boolean | null;
         };
+        CustomEmojiDto: {
+            /** @description Optional plain-text description, distinct from the search shortcode. */
+            body?: string | null;
+            emoticon: boolean;
+            info?: null | components["schemas"]["StickerInfoDto"];
+            /** @description Untrusted display text, not HTML. Send alongside the MXC reaction key. */
+            shortcode: string;
+            sticker: boolean;
+            /** @description Validated MXC URI; fetch through the authenticated media proxy. */
+            url: string;
+        };
         /**
          * @description One Matrix device of a user, as reported by `GET …/devices` — the picker a
          *     client shows before starting SAS verification (M16, ADR 0060).
@@ -3790,6 +3865,20 @@ export interface components {
             description: string;
             /** @description The emoji character(s). */
             symbol: string;
+        };
+        EmojiPackDto: {
+            avatar_url?: string | null;
+            display_name?: string | null;
+            /** @description Room state event ID. Personal account data has no event ID. */
+            event_id?: string | null;
+            /** @description Source state/account-data type, preserving stable or legacy identifiers. */
+            event_type: string;
+            images: components["schemas"]["CustomEmojiDto"][];
+            partial: boolean;
+            /** @description Null for the account's personal pack; otherwise its source room or ancestor space ID. */
+            room_id?: string | null;
+            /** @description Null for personal account data. Empty string is a valid room pack key. */
+            state_key?: string | null;
         };
         /**
          * @description Request body for originating or joining megolm key backup
@@ -3962,6 +4051,8 @@ export interface components {
          * @enum {string}
          */
         FlowStageDto: "requested" | "ready" | "keys_exchanged" | "confirmed" | "done" | "cancelled";
+        /** @enum {string} */
+        ImagePackUsage: "emoticon" | "sticker";
         /**
          * @description Request body for importing an existing session (`POST
          *     /v1/accounts/import`). Adopts a Matrix `access_token` axon didn't mint
@@ -4569,6 +4660,12 @@ export interface components {
         ReactRequest: {
             /** @description The reaction key — typically an emoji. */
             key: string;
+            /**
+             * @description Optional custom-image name. Requires a structurally valid MXC key.
+             *     At most 100 UTF-8 bytes before trimming, nonblank, with no C0/C1 controls.
+             *     Sent as `shortcode` in the original reaction event, never as its key.
+             */
+            shortcode?: string | null;
         };
         /**
          * @description One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).
@@ -4743,6 +4840,15 @@ export interface components {
             tags?: components["schemas"]["RoomTag"][];
             /** @description Room topic (`m.room.topic`), if set. */
             topic?: string | null;
+        };
+        /**
+         * @description Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.
+         *     Empty results do not prove absence upstream while initial sync is pending.
+         */
+        RoomEmojiPacksDto: {
+            packs: components["schemas"]["EmojiPackDto"][];
+            /** @description Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found. */
+            partial: boolean;
         };
         /**
          * @description Response for the four room-entry mutations (`join`/`knock`/`create_room`/
@@ -4969,6 +5075,15 @@ export interface components {
             /** @description The created Matrix event id. */
             event_id: string;
         };
+        /** @description Send an existing MXC image as an `m.sticker`, without uploading it again. */
+        SendStickerRequest: {
+            /** @description A nonblank plain-text description, at most 1,024 UTF-8 bytes. */
+            body: string;
+            info?: null | components["schemas"]["StickerInfoDto"];
+            reply_to?: string | null;
+            thread_root?: string | null;
+            url: string;
+        };
         /**
          * @description Request body for setting this account's avatar (`PUT …/profile/avatar`;
          *     ADR 0068 M19f). Takes an already-staged upload id, mirroring
@@ -5164,6 +5279,20 @@ export interface components {
             push: components["schemas"]["PushStatusDto"];
             /** @description Per-account sync-service status. */
             sync: components["schemas"]["AccountSyncStatusDto"][];
+        };
+        /**
+         * @description Bounded raster ImageInfo metadata for a sticker. All fields are optional;
+         *     an empty object is valid when the source pack has no metadata.
+         */
+        StickerInfoDto: {
+            /** Format: int32 */
+            h?: number | null;
+            is_animated?: boolean | null;
+            mimetype?: string | null;
+            /** Format: int64 */
+            size?: number | null;
+            /** Format: int32 */
+            w?: number | null;
         };
         /** @description Submit the two decimal digits shown by the scanning device. */
         SubmitMatrixOAuthCheckCodeRequest: {
@@ -7823,6 +7952,61 @@ export interface operations {
             };
         };
     };
+    room_emoji_packs: {
+        parameters: {
+            query?: {
+                /** @description Default: emoticon. Sticker mode includes sticker-only and mixed entries. */
+                usage?: components["schemas"]["ImagePackUsage"];
+            };
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cached personal, current-room, and canonical ancestor emoji packs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomEmojiPacksDto"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account inactive or joined room not known locally */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     edit_message: {
         parameters: {
             query?: never;
@@ -9045,6 +9229,96 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    send_sticker: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendStickerRequest"];
+            };
+        };
+        responses: {
+            /** @description Sticker sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_SendResultDto"];
+                };
+            };
+            /** @description Invalid sticker */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream failure */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Send deadline exceeded */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };

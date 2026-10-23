@@ -177,6 +177,7 @@ async fn mutations_route_to_sender_and_envelope_result() {
                 room_id: room_id.to_owned(),
                 event_id: event_id.to_owned(),
                 key: "👍".to_owned(),
+                shortcode: None,
             },
         ]
     );
@@ -230,6 +231,49 @@ async fn send_media_claims_sends_and_completes_upload() {
             thread_root: Some("$root:localhost".to_owned()),
         }]
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn custom_reaction_name_is_validated_and_forwarded() {
+    let sender = Arc::new(StubSender::ok("$named:localhost"));
+    let app = app(store().await, sender.clone());
+    let account_id = Uuid::new_v4();
+    let uri = format!(
+        "/v1/accounts/{account_id}/rooms/!room:localhost/events/$event:localhost/reactions"
+    );
+    let (status, _) = send(
+        &app,
+        "POST",
+        &uri,
+        Some(json!({
+            "key": "mxc://example.org/custom", "shortcode": "\u{00a0}allthethings\u{feff}"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sender.calls(),
+        vec![Call::React {
+            account_id,
+            room_id: "!room:localhost".into(),
+            event_id: "$event:localhost".into(),
+            key: "mxc://example.org/custom".into(),
+            shortcode: Some("allthethings".into()),
+        }]
+    );
+    for body in [
+        json!({"key": "👍", "shortcode": "pretend"}),
+        json!({"key": "mxc://example.org/custom", "shortcode": "\u{a0}\u{feff}"}),
+        json!({"key": "mxc://example.org/custom", "shortcode": "bad\u{85}name"}),
+        json!({"key": "mxc://example.org/custom", "shortcode": "é".repeat(51)}),
+    ] {
+        assert_eq!(
+            send(&app, "POST", &uri, Some(body)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(sender.calls().len(), 1);
 }
 
 #[tokio::test]
@@ -604,4 +648,52 @@ async fn invalid_formatting_is_400_and_skips_sender() {
 
     // Neither malformed request reached the sender.
     assert!(stub.calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn stickers_validate_and_forward_metadata_and_relations() {
+    let sender = Arc::new(StubSender::ok("$sticker"));
+    let app = app(store().await, sender.clone());
+    let account = Uuid::new_v4();
+    let uri = format!("/v1/accounts/{account}/rooms/!stickers:hs/send-sticker");
+    for info in [
+        json!({}),
+        json!({"w":278,"h":185,"mimetype":"image/png","size":129986,"is_animated":false}),
+    ] {
+        let (status, body) = send(
+            &app,
+            "POST",
+            &uri,
+            Some(json!({"body":"Mnt","url":"mxc://hs/sticker","info":info,"thread_root":"$root"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["event_id"], "$sticker");
+    }
+    assert_eq!(sender.calls().len(), 2);
+    let calls = sender.calls();
+    let Call::Sticker {
+        sticker,
+        thread_root,
+        ..
+    } = &calls[1]
+    else {
+        panic!("sticker call expected")
+    };
+    assert_eq!(sticker.info["w"], 278);
+    assert_eq!(thread_root.as_deref(), Some("$root"));
+    for request in [
+        json!({"body":" ","url":"mxc://hs/x"}),
+        json!({"body":"x","url":"https://tracker.test/x"}),
+        json!({"body":"x","url":"mxc://hs/x","info":{"w":0}}),
+        json!({"body":"x","url":"mxc://hs/x","info":{"h":999999}}),
+        json!({"body":"x","url":"mxc://hs/x","info":{"mimetype":"text/html"}}),
+    ] {
+        assert_eq!(
+            send(&app, "POST", &uri, Some(request)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(sender.calls().len(), 2);
 }

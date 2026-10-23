@@ -658,6 +658,36 @@ pub struct SendMessageRequest {
     pub thread_root: Option<String>,
 }
 
+/// Bounded raster ImageInfo metadata for a sticker. All fields are optional;
+/// an empty object is valid when the source pack has no metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct StickerInfoDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mimetype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_animated: Option<bool>,
+}
+
+/// Send an existing MXC image as an `m.sticker`, without uploading it again.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SendStickerRequest {
+    /// A nonblank plain-text description, at most 1,024 UTF-8 bytes.
+    pub body: String,
+    pub url: String,
+    #[serde(default)]
+    pub info: Option<StickerInfoDto>,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    #[serde(default)]
+    pub thread_root: Option<String>,
+}
+
 /// Request body for sending a staged media upload into a room
 /// (`POST …/rooms/{room_id}/send-media`). The `upload_id` must refer to an
 /// unsent staged upload owned by the path account.
@@ -719,6 +749,11 @@ pub struct EditRequest {
 pub struct ReactRequest {
     /// The reaction key — typically an emoji.
     pub key: String,
+    /// Optional custom-image name. Requires a structurally valid MXC key.
+    /// At most 100 UTF-8 bytes before trimming, nonblank, with no C0/C1 controls.
+    /// Sent as `shortcode` in the original reaction event, never as its key.
+    #[serde(default)]
+    pub shortcode: Option<String>,
 }
 
 /// Query parameters for redaction (`DELETE …/events/{event_id}`).

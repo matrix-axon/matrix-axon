@@ -171,6 +171,13 @@ where
 /// One recorded call to the stub, with the arguments the handler passed through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {
+    Sticker {
+        account_id: Uuid,
+        room_id: String,
+        sticker: axon_core::image_pack::Sticker,
+        reply_to: Option<String>,
+        thread_root: Option<String>,
+    },
     Send {
         account_id: Uuid,
         room_id: String,
@@ -210,6 +217,7 @@ pub enum Call {
         room_id: String,
         event_id: String,
         key: String,
+        shortcode: Option<String>,
     },
 }
 
@@ -2165,6 +2173,23 @@ impl StagedUploadService for StubUploads {
 
 #[async_trait]
 impl MessageSender for StubSender {
+    async fn send_sticker(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        sticker: &axon_core::image_pack::Sticker,
+        relation: Relation<'_>,
+    ) -> Result<String, SendError> {
+        self.calls.lock().unwrap().push(Call::Sticker {
+            account_id,
+            room_id: room_id.into(),
+            sticker: sticker.clone(),
+            reply_to: relation.reply_to.map(str::to_owned),
+            thread_root: relation.thread_root.map(str::to_owned),
+        });
+        self.outcome.to_result()
+    }
+
     async fn send_message(
         &self,
         account_id: Uuid,
@@ -2246,11 +2271,24 @@ impl MessageSender for StubSender {
         event_id: &str,
         key: &str,
     ) -> Result<String, SendError> {
+        self.react_with_shortcode(account_id, room_id, event_id, key, None)
+            .await
+    }
+
+    async fn react_with_shortcode(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+        shortcode: Option<&str>,
+    ) -> Result<String, SendError> {
         self.calls.lock().unwrap().push(Call::React {
             account_id,
             room_id: room_id.to_owned(),
             event_id: event_id.to_owned(),
             key: key.to_owned(),
+            shortcode: shortcode.map(str::to_owned),
         });
         self.outcome.to_result()
     }
