@@ -1204,14 +1204,14 @@ export function ReactionPicker({
                 aria-pressed={category === 'custom'}
                 onClick={() => setCategory('custom')}
               >
-                Custom emoji
+                Custom
               </button>
             </div>
           ) : (
             <span>Emoji picker</span>
           )}
           <button type="button" class="ghost" onClick={onClose}>
-            Close picker
+            Close
           </button>
         </div>
         {category === 'custom' && customAvailable ? (

@@ -93,7 +93,7 @@ function StickerDialog({
         <div class="overlay-head">
           <h2>Stickers</h2>
           <button type="button" class="ghost" onClick={onClose}>
-            Close picker
+            Close
           </button>
         </div>
         <ImagePackPicker

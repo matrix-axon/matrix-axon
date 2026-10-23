@@ -242,7 +242,7 @@ test('an older server shows unavailable stickers and leaves the draft intact on 
   const box = (await dialog.locator('.sticker-picker-panel').boundingBox())!
   expect(box.y).toBeGreaterThanOrEqual(0)
   expect(box.y + box.height).toBeLessThanOrEqual(367)
-  await dialog.getByRole('button', { name: 'Close picker' }).click()
+  await dialog.getByRole('button', { name: 'Close' }).click()
   await expect(composer.locator('textarea')).toHaveValue('Draft')
   await expectPaneCenterUncovered(page, '.room-stream')
 })
