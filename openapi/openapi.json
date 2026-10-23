@@ -3524,6 +3524,87 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "List custom emoji available from the current room, canonical ancestor spaces, and personal pack.\nSupports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal\n`im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with\nthe same state key. Personal packs precede room packs, then nearest ancestors; names are not merged.\nSticker-only entries are excluded by default; `usage=sticker` selects\nsticker-capable images instead. Up to 16 joined canonical ancestor spaces\nare inherited through locally validated parent relationships. Other-room\nsubscriptions are not included. Requires positive joined membership.\nThis is a local cache read, not a homeserver request or an authoritative\nstatement that no packs exist upstream. Re-read on picker open/reconnect.\nAt most 64 room packs plus one personal pack, 128 KiB per source, 512 entries\nexamined per pack, and 1000 returned images across packs. `partial` signals\nomitted invalid/oversized data or truncation. All names are untrusted text.",
+        "operationId": "room_emoji_packs",
+        "parameters": [
+          {
+            "name": "usage",
+            "in": "query",
+            "description": "Default: emoticon. Sticker mode includes sticker-only and mixed entries.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ImagePackUsage"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached personal, current-room, and canonical ancestor emoji packs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RoomEmojiPacksDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account inactive or joined room not known locally",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}": {
       "put": {
         "tags": [
@@ -5288,6 +5369,126 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/send-sticker": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Send an existing MXC image as a standalone Matrix `m.sticker` event.\nInfo accepts raster MIME types, dimensions 1–16,384, and sizes at most\n100 MiB. Empty info is permitted; bytes are never fetched during a send.",
+        "operationId": "send_sticker",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendStickerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Sticker sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SendResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid sticker",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Send deadline exceeded",
             "content": {
               "application/json": {
                 "schema": {
@@ -10298,6 +10499,35 @@
           }
         }
       },
+      "ApiResponse_RoomEmojiPacksDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.\nEmpty results do not prove absence upstream while initial sync is pending.",
+            "required": [
+              "packs",
+              "partial"
+            ],
+            "properties": {
+              "packs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EmojiPackDto"
+                }
+              },
+              "partial": {
+                "type": "boolean",
+                "description": "Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_RoomEntryResultDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -12737,6 +12967,48 @@
           }
         }
       },
+      "CustomEmojiDto": {
+        "type": "object",
+        "required": [
+          "shortcode",
+          "url",
+          "emoticon",
+          "sticker"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional plain-text description, distinct from the search shortcode."
+          },
+          "emoticon": {
+            "type": "boolean"
+          },
+          "info": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StickerInfoDto"
+              }
+            ]
+          },
+          "shortcode": {
+            "type": "string",
+            "description": "Untrusted display text, not HTML. Send alongside the MXC reaction key."
+          },
+          "sticker": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string",
+            "description": "Validated MXC URI; fetch through the authenticated media proxy."
+          }
+        }
+      },
       "DeviceDto": {
         "type": "object",
         "description": "One Matrix device of a user, as reported by `GET …/devices` — the picker a\nclient shows before starting SAS verification (M16, ADR 0060).",
@@ -12887,6 +13159,62 @@
           "symbol": {
             "type": "string",
             "description": "The emoji character(s)."
+          }
+        }
+      },
+      "EmojiPackDto": {
+        "type": "object",
+        "required": [
+          "event_type",
+          "images",
+          "partial"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Room state event ID. Personal account data has no event ID."
+          },
+          "event_type": {
+            "type": "string",
+            "description": "Source state/account-data type, preserving stable or legacy identifiers."
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomEmojiDto"
+            }
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "room_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null for the account's personal pack; otherwise its source room or ancestor space ID."
+          },
+          "state_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null for personal account data. Empty string is a valid room pack key."
           }
         }
       },
@@ -13154,6 +13482,13 @@
           "confirmed",
           "done",
           "cancelled"
+        ]
+      },
+      "ImagePackUsage": {
+        "type": "string",
+        "enum": [
+          "emoticon",
+          "sticker"
         ]
       },
       "ImportTokenRequest": {
@@ -14328,6 +14663,13 @@
           "key": {
             "type": "string",
             "description": "The reaction key — typically an emoji."
+          },
+          "shortcode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional custom-image name. Requires a structurally valid MXC key.\nAt most 100 UTF-8 bytes before trimming, nonblank, with no C0/C1 controls.\nSent as `shortcode` in the original reaction event, never as its key."
           }
         }
       },
@@ -14568,6 +14910,26 @@
               "null"
             ],
             "description": "Room topic (`m.room.topic`), if set."
+          }
+        }
+      },
+      "RoomEmojiPacksDto": {
+        "type": "object",
+        "description": "Current-room, canonical ancestor, and personal image packs, as known to Axon's sync cache.\nEmpty results do not prove absence upstream while initial sync is pending.",
+        "required": [
+          "packs",
+          "partial"
+        ],
+        "properties": {
+          "packs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EmojiPackDto"
+            }
+          },
+          "partial": {
+            "type": "boolean",
+            "description": "Invalid/oversized content was omitted, a pack/image/ancestor limit was reached, or a cycle was found."
           }
         }
       },
@@ -14962,6 +15324,45 @@
           }
         }
       },
+      "SendStickerRequest": {
+        "type": "object",
+        "description": "Send an existing MXC image as an `m.sticker`, without uploading it again.",
+        "required": [
+          "body",
+          "url"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "A nonblank plain-text description, at most 1,024 UTF-8 bytes."
+          },
+          "info": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StickerInfoDto"
+              }
+            ]
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
       "SetAccountAvatarRequest": {
         "type": "object",
         "description": "Request body for setting this account's avatar (`PUT …/profile/avatar`;\nADR 0068 M19f). Takes an already-staged upload id, mirroring\n[`SetRoomAvatarRequest`] — Axon has no route that hands a client an\n`mxc://` URI to reference directly.",
@@ -15284,6 +15685,48 @@
               "$ref": "#/components/schemas/AccountSyncStatusDto"
             },
             "description": "Per-account sync-service status."
+          }
+        }
+      },
+      "StickerInfoDto": {
+        "type": "object",
+        "description": "Bounded raster ImageInfo metadata for a sticker. All fields are optional;\nan empty object is valid when the source pack has no metadata.",
+        "properties": {
+          "h": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "is_animated": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "mimetype": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "w": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
           }
         }
       },

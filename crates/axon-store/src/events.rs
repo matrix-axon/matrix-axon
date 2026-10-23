@@ -250,34 +250,34 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
         })
     }
 }
-// Non-control whitespace trimmed by ECMAScript String.trim(), expressed as
-// Unicode code points so PostgreSQL locale classes cannot change the rule.
-const SHORTCODE_TRIM_CHARS: &str = concat!(
-    r"\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006",
-    r"\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF",
-);
-
 // Both reaction projections use the same validation and selection rules.
 // This expression reads the reaction row aliased as `rx`; do not apply it to
 // the target message's content. Labels are optional, untrusted display text.
-fn reaction_shortcode_sql() -> String {
-    let candidates = ["shortcode", "com.beeper.reaction.shortcode"]
-        .map(|field| {
-            let trimmed = format!("btrim(rx.content->>'{field}', U&'{SHORTCODE_TRIM_CHARS}')");
-            format!(
-                "CASE WHEN jsonb_typeof(rx.content->'{field}') = 'string' \
+fn reaction_shortcode_sql() -> &'static str {
+    static SQL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SQL.get_or_init(|| {
+        let trim_chars: String = axon_core::image_pack::SHORTCODE_TRIM_CHARS
+            .chars()
+            .map(|c| format!("\\{:04X}", u32::from(c)))
+            .collect();
+        let candidates = ["shortcode", "com.beeper.reaction.shortcode"]
+            .map(|field| {
+                let trimmed = format!("btrim(rx.content->>'{field}', U&'{trim_chars}')");
+                format!(
+                    "CASE WHEN jsonb_typeof(rx.content->'{field}') = 'string' \
                  AND octet_length(rx.content->>'{field}') BETWEEN 1 AND 100 \
                  AND {trimmed} <> '' \
                  AND rx.content->>'{field}' COLLATE \"C\" !~ U&'[\\0001-\\001F\\007F-\\009F]' \
                  THEN {trimmed} END"
-            )
-        })
-        .join(", ");
-    format!(
-        "CASE WHEN octet_length(rx.relates_to->>'key') <= 2048 \
+                )
+            })
+            .join(", ");
+        format!(
+            "CASE WHEN octet_length(rx.relates_to->>'key') <= 2048 \
          AND rx.relates_to->>'key' ~ '^mxc://[^/]+/[^/]+$' \
          THEN COALESCE({candidates}) END"
-    )
+        )
+    })
 }
 
 // At most REACTION_AGG_PAIR_CAP labels of at most 100 bytes enter this array.
@@ -1457,6 +1457,19 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for EventSenderTrust {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_shortcode_sql_uses_the_exact_rust_trim_set() {
+        let sql = reaction_shortcode_sql();
+        assert!(std::ptr::eq(sql, reaction_shortcode_sql()));
+        let escaped = sql.split("U&'").nth(1).unwrap().split('\'').next().unwrap();
+        let decoded: String = escaped
+            .split('\\')
+            .skip(1)
+            .map(|hex| char::from_u32(u32::from_str_radix(hex, 16).unwrap()).unwrap())
+            .collect();
+        assert_eq!(decoded, axon_core::image_pack::SHORTCODE_TRIM_CHARS);
+    }
 
     /// The summary query stays an index-only scan on
     /// `events_room_thread_root_idx` (#763). Disabling sequential and bitmap

@@ -27,6 +27,12 @@ See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and seq
 
 ### Reaction images
 
+Personal, current-room, and joined canonical ancestor image packs support custom emoji and sticker discovery.
+The room `emoji-packs` endpoint exposes cached packs, with `usage=sticker` selecting sticker-capable entries.
+The media proxy accepts current pack references before their first use as reactions.
+Clients may send an optional shortcode with a custom reaction, or send an existing pack image through `send-sticker` as a standalone `m.sticker` event.
+See [Custom emoji discovery](custom-emoji.md) for limits, sync behavior, inheritance, sending, and diagnostics.
+
 The authenticated media download and thumbnail endpoints also resolve custom reaction images whose keys are `mxc://` URLs (MSC4027), without requiring an image pack definition.
 Known left or banned rooms cannot authorize reaction image downloads.
 Reaction media references must be structurally valid MXC URIs of at most 2,048 bytes; malformed and oversized keys do not authorize a fetch.

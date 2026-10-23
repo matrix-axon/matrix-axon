@@ -276,7 +276,7 @@ pub async fn get_media(
 ) -> Result<Response, ApiError> {
     let mxc_url = format!("mxc://{server_name}/{media_id}");
 
-    let content = resolve_media_content(&store, account_id, &mxc_url).await?;
+    let (content, raster_only) = resolve_media_content(&store, account_id, &mxc_url).await?;
 
     // Conditional GET: the entity tag is content-addressed (a hash of the MXC
     // URI) and needs no download, so answer `304` *before* fetching. This is
@@ -299,9 +299,7 @@ pub async fn get_media(
 
     // Reaction keys carry no MIME metadata. Recognize only safe raster magic;
     // HTML/SVG and unrecognized objects retain the octet-stream/nosniff fallback.
-    let content_type = if content["m.relates_to"]["rel_type"] == "m.annotation"
-        && content["m.relates_to"]["key"].as_str() == Some(mxc_url.as_str())
-    {
+    let content_type = if raster_only {
         correct_image_content_type(&mut resource, content_type).await
     } else {
         content_type
@@ -389,17 +387,26 @@ async fn resolve_media_content(
     store: &Store,
     account_id: Uuid,
     mxc_url: &str,
-) -> Result<Value, ApiError> {
-    let event = store
-        .get_event_by_mxc_url(account_id, mxc_url)
+) -> Result<(Value, bool), ApiError> {
+    if let Some(event) = store.get_event_by_mxc_url(account_id, mxc_url).await? {
+        // Keep attachment/encrypted-descriptor precedence over pack references.
+        let content = event.content.ok_or_else(|| {
+            ApiError::from(MediaError::NotFound(format!(
+                "media unavailable (redacted or not yet decrypted): {mxc_url}"
+            )))
+        })?;
+        let raster_only = content["m.relates_to"]["rel_type"] == "m.annotation"
+            && content["m.relates_to"]["key"].as_str() == Some(mxc_url);
+        return Ok((content, raster_only));
+    }
+    if store
+        .image_pack_authorizes_media(account_id, mxc_url)
         .await?
-        .ok_or_else(|| ApiError::from(MediaError::NotFound(mxc_url.to_owned())))?;
-
-    event.content.ok_or_else(|| {
-        ApiError::from(MediaError::NotFound(format!(
-            "media unavailable (redacted or not yet decrypted): {mxc_url}"
-        )))
-    })
+    {
+        // Packs never provide encrypted descriptors or trusted MIME types.
+        return Ok((serde_json::json!({}), true));
+    }
+    Err(ApiError::from(MediaError::NotFound(mxc_url.to_owned())))
 }
 
 /// Convert a [`MediaProxy`] failure into the response the client sees,
@@ -474,7 +481,7 @@ pub async fn get_media_thumbnail(
 ) -> Result<Response, ApiError> {
     let mxc_url = format!("mxc://{server_name}/{media_id}");
 
-    let content = resolve_media_content(&store, account_id, &mxc_url).await?;
+    let (content, _) = resolve_media_content(&store, account_id, &mxc_url).await?;
 
     let spec = resolve_thumbnail_spec(&content, &mxc_url, query)?;
 

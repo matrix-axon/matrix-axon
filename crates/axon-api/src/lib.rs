@@ -277,6 +277,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(routes::push::delete_registration),
         )
         .route("/v1/rooms", get(routes::rooms::list_rooms))
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs",
+            get(routes::image_packs::room_emoji_packs),
+        )
         // Pending invites (ADR 0091). Cross-account like `/v1/rooms`; accept
         // and reject reuse the existing join / leave verbs.
         .route("/v1/invites", get(routes::invites::list_invites))
@@ -352,6 +356,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/send",
             post(routes::messages::send_message),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/send-sticker",
+            post(routes::messages::send_sticker),
         )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/send-media",

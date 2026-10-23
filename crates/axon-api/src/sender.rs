@@ -48,6 +48,17 @@ pub enum SendError {
 /// as `Arc<dyn MessageSender>`.
 #[async_trait]
 pub trait MessageSender: Send + Sync {
+    /// Additive standalone sticker capability. Backends must explicitly opt in.
+    async fn send_sticker(
+        &self,
+        _account_id: Uuid,
+        _room_id: &str,
+        _sticker: &axon_core::image_pack::Sticker,
+        _relation: Relation<'_>,
+    ) -> Result<String, SendError> {
+        Err(SendError::Unavailable("sticker sends unavailable".into()))
+    }
+
     /// Send a message to a room; returns the new event id. `body` is the
     /// plain-text content; `formatted`, when present, carries the rich-text
     /// rendering (validated at the handler so both its fields are set).
@@ -111,6 +122,24 @@ pub trait MessageSender: Send + Sync {
         event_id: &str,
         key: &str,
     ) -> Result<String, SendError>;
+
+    /// Additive custom-image naming capability; old implementations retain
+    /// unnamed reactions and fail explicitly rather than silently drop names.
+    async fn react_with_shortcode(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+        shortcode: Option<&str>,
+    ) -> Result<String, SendError> {
+        if shortcode.is_some() {
+            return Err(SendError::Unavailable(
+                "custom reaction names unavailable".into(),
+            ));
+        }
+        self.react(account_id, room_id, event_id, key).await
+    }
 }
 
 /// Sends ephemeral, homeserver-facing signals that have no lasting timeline

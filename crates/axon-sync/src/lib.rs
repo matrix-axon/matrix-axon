@@ -27,6 +27,7 @@ mod display_names;
 mod engine;
 mod error;
 mod gateway;
+mod image_packs;
 mod lifecycle;
 mod manager;
 mod matrix_oauth;

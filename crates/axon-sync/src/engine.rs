@@ -1054,6 +1054,18 @@ async fn persist_room_state_event(
     let Some(raw_val) = parse_raw_json(raw.get(), ctx.account_id, "state event") else {
         return;
     };
+    persist_room_state_value(ev, &raw_val, room.room_id(), &room.client(), &ctx).await;
+}
+
+/// Shared projection for ordinary SDK state and the isolated pack transport.
+/// The latter never feeds a sync response into the SDK's room/summary store.
+pub(crate) async fn persist_room_state_value(
+    ev: AnySyncStateEvent,
+    raw_val: &serde_json::Value,
+    room_id: &RoomId,
+    client: &Client,
+    ctx: &PersistContext,
+) {
     let event_type = raw_val
         .get("type")
         .and_then(serde_json::Value::as_str)
@@ -1066,15 +1078,14 @@ async fn persist_room_state_event(
         .unwrap_or("")
         .to_owned();
     let content = raw_val.get("content").cloned();
-    let evidence = state_redaction_evidence(&ev, &raw_val);
+    let evidence = state_redaction_evidence(&ev, raw_val);
     let event_id = ev.event_id().as_str().to_owned();
     let sender = ev.sender().as_str().to_owned();
     let origin_ts = saturating_i64(u64::from(ev.origin_server_ts().0));
-    let room_id = room.room_id().as_str().to_owned();
 
     let upsert = RoomStateUpsert {
         account_id: ctx.account_id,
-        room_id: &room_id,
+        room_id: room_id.as_str(),
         event_type: &event_type,
         state_key: &state_key,
         event_id: &event_id,
@@ -1082,10 +1093,10 @@ async fn persist_room_state_event(
         origin_ts,
         content,
     };
-    // The local leave or ban still writes its durable obligation. Other state from
-    // the same departed-room batch must not recreate metadata after cleanup.
     if !upsert.is_local_departure(Some(ctx.local_user_id.as_ref()))
-        && skip_departed_room_ingestion(&ctx, &room)
+        && client
+            .get_room(room_id)
+            .is_some_and(|room| skip_departed_room_ingestion(ctx, &room))
     {
         return;
     }
@@ -1107,14 +1118,8 @@ async fn persist_room_state_event(
     if matches!(evidence, RoomStateRedaction::Unknown)
         && crate::state_redaction::STATE_TYPES.contains(&event_type.as_str())
     {
-        crate::state_redaction::queue_state_hint(
-            &ctx,
-            &room.client(),
-            room.room_id(),
-            &event_type,
-            &event_id,
-        )
-        .await;
+        crate::state_redaction::queue_state_hint(ctx, client, room_id, &event_type, &event_id)
+            .await;
     }
 
     // Local leave/ban and its purge intent commit together in the store. The
@@ -1935,6 +1940,14 @@ async fn run_account(
         },
     ));
 
+    // Pack responses only project pack state; they never mutate SDK rooms.
+    // See docs/custom-emoji.md for transport isolation and load bounds.
+    let image_packs_cancel = cancel.child_token();
+    let image_packs_handle = tokio::spawn(crate::image_packs::run(
+        client.clone(),
+        backfill_ctx.clone(),
+        image_packs_cancel.clone(),
+    ));
     sync_service.start().await;
     tracing::info!(account_id = %account.account_id, "sync service started");
 
@@ -2198,6 +2211,10 @@ async fn run_account(
     };
     verification_rooms.unregister(account.account_id, verification_room_run_id);
 
+    image_packs_cancel.cancel();
+    if let Err(err) = image_packs_handle.await {
+        tracing::warn!(account_id = %account.account_id, error = %err, "image pack worker did not shut down cleanly");
+    }
     member_counts_cancel.cancel();
     if let Err(err) = member_counts_handle.await {
         tracing::warn!(account_id = %account.account_id, error = %err, "member count worker did not shut down cleanly");
