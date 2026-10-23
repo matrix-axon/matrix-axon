@@ -1,11 +1,12 @@
-# Temporary Matrix SDK member-count patch
+# Temporary Matrix SDK base patches
 
 Axon vendors only `matrix-sdk-base` 0.19.1, from upstream revision `b18166c68bb958a21f0bca8b2d8320cb53583362`.
 The crates.io release archive SHA-256 is `02d98114e35b09143eb0db0c1679176d56d9bcddd141546d7de272a87e6dc94e`.
 The SDK, SDK UI, and base dependency are pinned to 0.19.1; Cargo's root patch selects this source for all consumers.
 This directory is a server dependency, excluded from workspace membership.
 
-`member-count-provenance.patch` contains the complete changes relative to that release.
+`member-count-provenance.patch` contains the member-count changes relative to that release.
+Apply `encryption-state-monotonic.patch` afterward for the encryption-state correction below.
 Only `src/room/room_info.rs`, `src/store/migration_helpers.rs`, and `src/response_processors/room/msc4186/mod.rs` differ from the published crate.
 The upstream license and copyright notices are preserved.
 Registry bookkeeping, the nested Cargo lockfile, and the upstream wasm runner configuration are omitted.
@@ -33,3 +34,13 @@ Remove the vendored dependency and patch after a released SDK exposes equivalent
 Browser sign-in (ADR 0117) sends its own device authorization request, because the SDK keeps that request private to QR login.
 The two scope strings it sends are copied from the SDK's private `login_scopes` builder in `matrix-sdk`'s `authentication/oauth/mod.rs`, and no test can compare them with the original.
 On every `matrix-sdk` upgrade, re-read those constants and update `SCOPE_CLIENT_API` and `SCOPE_DEVICE_PREFIX` in `crates/axon-sync/src/matrix_oauth_device_grant.rs` to match; also check whether the SDK has made the device grant public, in which case those two requests can be replaced.
+
+## Preserve positive room encryption evidence
+
+`encryption-state-monotonic.patch` prevents `RoomInfo::set_encryption_event(None)` from clearing an encryption event already observed by sync or an authenticated state request.
+Room encryption cannot be disabled.
+An older state lookup returning `M_NOT_FOUND` can otherwise finish after a positive sync update and permit plaintext media or event sends.
+The preview send path fetches state directly before permitting plaintext, because the SDK's `latest_encryption_state()` reuses cached `NotEncrypted` values.
+This was reproduced against Synapse with a newly created encrypted room: its state reported Megolm while the SDK uploaded a plaintext preview.
+The regression `cargo test -p axon-sync --lib preview_encryption_refreshes` covers stale plaintext caches, fresh absence, failed state requests, and an older negative response after positive evidence.
+On an SDK upgrade, verify both fresh state lookups and monotonic encryption evidence before removing this correction.

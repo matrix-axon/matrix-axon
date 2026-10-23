@@ -18,6 +18,67 @@ use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+/// Allow-listed bundled preview input; arbitrary event/OG/image fields are
+/// rejected. Matched HTTP(S) URL must occur as a complete link in body/caption,
+/// contain no credentials, and not duplicate another preview's destination.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LinkPreviewRequest {
+    pub matched_url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub site_name: Option<String>,
+    /// Account-owned staged image upload; PNG/JPEG/WebP only, <=2 MiB and
+    /// <=4,000,000 decoded pixels. Type/dimensions come from verified bytes.
+    /// No external URL or preexisting MXC is accepted. Encrypts automatically
+    /// in encrypted rooms. A failed send releases the staged upload for retry;
+    /// a lost response remains uncertain and must not be blindly replayed.
+    pub image_upload_id: Option<Uuid>,
+}
+
+impl LinkPreviewRequest {
+    pub(crate) fn metadata(&self) -> axon_core::link_preview::PreviewMetadata {
+        axon_core::link_preview::PreviewMetadata {
+            matched_url: self.matched_url.clone(),
+            title: self.title.clone(),
+            description: self.description.clone(),
+            site_name: self.site_name.clone(),
+        }
+    }
+}
+
+fn deserialize_previews<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<LinkPreviewRequest>>, D::Error> {
+    struct Bounded(Vec<LinkPreviewRequest>);
+    impl<'de> Deserialize<'de> for Bounded {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Bounded;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("at most eight URL previews")
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<Self::Value, A::Error> {
+                    let mut values = Vec::with_capacity(axon_core::link_preview::MAX_PREVIEWS);
+                    while let Some(value) = seq.next_element()? {
+                        if values.len() == axon_core::link_preview::MAX_PREVIEWS {
+                            return Err(serde::de::Error::custom("at most eight URL previews"));
+                        }
+                        values.push(value);
+                    }
+                    Ok(Bounded(values))
+                }
+            }
+            deserializer.deserialize_seq(Visitor)
+        }
+    }
+    Option::<Bounded>::deserialize(deserializer).map(|value| value.map(|v| v.0))
+}
+
 /// A room in the cross-account list (`GET /v1/rooms`). Identity is
 /// `(account_id, room_id)` — a room joined by two accounts appears twice.
 #[derive(Debug, Serialize, ToSchema)]
@@ -638,6 +699,17 @@ pub struct RoomUpgradeDto {
 /// Markdown.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
+    /// Bundled URL previews (ADR 0125). Omitted/null preserves legacy sending;
+    /// [] explicitly disables previews. At most 8; individual string ceilings
+    /// use UTF-16 code units (URL 4096, title 300, description 1000, site 120).
+    /// The entire resolved preview array must fit 32768 canonical JSON UTF-8
+    /// bytes. Preview-aware messages also use a conservative 40960-byte
+    /// content budget (including formatting/relations and reserved SDK media
+    /// descriptors), leaving room for encryption and federation overhead.
+    /// Overflow is a definite 413, before claiming any uploads or dispatch.
+    #[serde(default, deserialize_with = "deserialize_previews")]
+    #[schema(max_items = 8)]
+    pub url_previews: Option<Vec<LinkPreviewRequest>>,
     /// The plain-text message body (and formatting fallback).
     pub body: String,
     /// Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be
@@ -693,6 +765,12 @@ pub struct SendStickerRequest {
 /// unsent staged upload owned by the path account.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMediaRequest {
+    /// Bundled previews for the caption. Same limits/413 behavior as
+    /// SendMessageRequest.url_previews. Nonempty previews require a caption.
+    /// A thumbnail is uploaded as protected preview media, not a chat message.
+    #[serde(default, deserialize_with = "deserialize_previews")]
+    #[schema(max_items = 8)]
+    pub url_previews: Option<Vec<LinkPreviewRequest>>,
     /// Server-issued staged upload id returned by `POST …/media/uploads`.
     pub upload_id: Uuid,
     /// Optional media caption. When absent — or empty — Axon uses the staged

@@ -11,6 +11,8 @@ use uuid::Uuid;
 /// → 400, an upstream homeserver failure → 502.
 #[derive(Debug, Error)]
 pub enum GatewayError {
+    #[error("message exceeds the event size budget")]
+    EventTooLarge,
     /// No account row exists for this id.
     #[error("no such account: {0}")]
     UnknownAccount(Uuid),

@@ -69,9 +69,18 @@ fn encrypted_file_for_mxc(content: &Value, mxc_url: &str) -> Option<Value> {
             .and_then(|info| info.get("thumbnail_file")),
     ];
 
-    candidates.into_iter().flatten().find_map(|file| {
-        (file.get("url").and_then(Value::as_str) == Some(mxc_url)).then(|| file.clone())
-    })
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|file| {
+            (file.get("url").and_then(Value::as_str) == Some(mxc_url)).then(|| file.clone())
+        })
+        .or_else(|| {
+            axon_core::link_preview::preview_for_mxc(content, mxc_url)
+                .and_then(axon_core::link_preview::encrypted_preview_file)
+                .filter(|f| f.get("url").and_then(Value::as_str) == Some(mxc_url))
+                .cloned()
+        })
 }
 
 /// Derive the MIME type to serve from the event content — the authoritative
@@ -112,7 +121,9 @@ fn content_type_for_mxc(content: &Value, mxc_url: &str) -> String {
             .and_then(|ti| ti.get("mimetype"))
             .and_then(Value::as_str)
     } else {
-        None
+        axon_core::link_preview::preview_for_mxc(content, mxc_url)
+            .and_then(|p| p.get("og:image:type"))
+            .and_then(Value::as_str)
     };
 
     raw.and_then(sanitize_mime)
@@ -632,6 +643,37 @@ mod tests {
             encrypted_file_for_mxc(&content, "mxc://example.org/main")
                 .and_then(|file| file.get("key").cloned()),
             Some(json!("main"))
+        );
+    }
+
+    #[test]
+    fn bundled_preview_mime_and_decryption_descriptor_use_matching_mxc_only() {
+        let content = serde_json::json!({"m.url_previews":[
+            {"og:image":"mxc://example.org/plain","og:image:type":"image/png"},
+            {"matrix:image:encrypted":{"url":"mxc://example.org/cipher","v":"v2"},"og:image:type":"image/webp"}
+        ]});
+        assert!(encrypted_file_for_mxc(&content, "mxc://example.org/plain").is_none());
+        assert_eq!(
+            encrypted_file_for_mxc(&content, "mxc://example.org/cipher").unwrap()["v"],
+            "v2"
+        );
+        assert!(encrypted_file_for_mxc(&content, "mxc://example.org/other").is_none());
+        assert_eq!(
+            content_type_for_mxc(&content, "mxc://example.org/plain"),
+            "image/png"
+        );
+        assert_eq!(
+            content_type_for_mxc(&content, "mxc://example.org/cipher"),
+            "image/webp"
+        );
+        assert_eq!(
+            content_type_for_mxc(&content, "mxc://example.org/other"),
+            "application/octet-stream"
+        );
+        let hostile = serde_json::json!({"m.url_previews":[{"og:image":"mxc://example.org/x","og:image:type":"image/svg+xml"}]});
+        assert_eq!(
+            content_type_for_mxc(&hostile, "mxc://example.org/x"),
+            "application/octet-stream"
         );
     }
 

@@ -65,6 +65,8 @@ jsonwebtoken = { workspace = true }
 reqwest = { workspace = true, features = ["json", "form", "rustls"] }
 chrono = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
+# Decode only bounded preview rasters; no SVG/network/media execution.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [dev-dependencies]
 axon-test-support = { workspace = true }

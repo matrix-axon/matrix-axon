@@ -23,6 +23,8 @@ use uuid::Uuid;
 /// into one of these so the handler layer maps a stable set of statuses.
 #[derive(Debug)]
 pub enum SendError {
+    /// Definite pre-dispatch or explicit homeserver size rejection. -> 413.
+    EventTooLarge,
     /// The addressed account or room doesn't exist / isn't joined. → `404`.
     NotFound(String),
     /// The operation isn't permitted (e.g. editing a message the account didn't
@@ -48,6 +50,19 @@ pub enum SendError {
 /// as `Arc<dyn MessageSender>`.
 #[async_trait]
 pub trait MessageSender: Send + Sync {
+    /// Preview-aware send; implementations must explicitly opt in rather than
+    /// silently drop metadata. An attachment changes body into its caption.
+    async fn send_with_previews(
+        &self,
+        _account_id: Uuid,
+        _room_id: &str,
+        _message: axon_core::link_preview::PreviewSend<'_>,
+        _attachment: Option<MediaAttachment>,
+    ) -> Result<String, SendError> {
+        Err(SendError::Unavailable(
+            "bundled preview sends unavailable".into(),
+        ))
+    }
     /// Additive standalone sticker capability. Backends must explicitly opt in.
     async fn send_sticker(
         &self,

@@ -369,6 +369,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -445,6 +446,7 @@ dependencies = [
  "crossterm",
  "dotenvy",
  "futures-util",
+ "image",
  "jsonwebtoken",
  "libc",
  "percent-encoding",
