@@ -9,6 +9,7 @@ pub mod account_actions;
 pub mod config;
 pub mod error;
 pub mod image_pack;
+pub mod link_preview;
 pub mod live;
 pub mod media;
 pub mod message;

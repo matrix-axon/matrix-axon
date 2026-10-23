@@ -78,7 +78,7 @@ pub async fn send_sticker(
 /// `format` must be the one recognized markup, and the HTML body must be
 /// non-empty — anything else is a `400` so a malformed request never reaches the
 /// homeserver. Returns `Ok(None)` for a plain message (neither field set).
-fn formatted<'a>(
+pub(super) fn formatted<'a>(
     format: &'a Option<String>,
     formatted_body: &'a Option<String>,
 ) -> Result<Option<Formatted<'a>>, ApiError> {
@@ -109,6 +109,8 @@ fn formatted<'a>(
     responses(
         (status = 200, description = "Message sent", body = ApiResponse<SendResultDto>),
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 404, description = "Account, room or preview upload not found", body = crate::response::ErrorResponse),
+        (status = 413, description = "Definite validation rejection: event_too_large (40960-byte content budget), preview_too_large (32768-byte preview budget), or payload_too_large (thumbnail bytes). No event dispatched by preflight; preserve the draft. An explicit homeserver M_TOO_LARGE is also event_too_large.", body = crate::response::ErrorResponse),
         (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
         (status = 503, description = "Account not reachable", body = crate::response::ErrorResponse),
@@ -118,9 +120,14 @@ fn formatted<'a>(
 )]
 pub async fn send_message(
     State(sender): State<Arc<dyn MessageSender>>,
+    State(uploads): State<Arc<dyn StagedUploadService>>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    if req.url_previews.is_some() {
+        return super::bundled_previews::send(sender, uploads, account_id, room_id, req.into())
+            .await;
+    }
     let fmt = formatted(&req.format, &req.formatted_body)?;
     let relation = Relation {
         reply_to: req.reply_to.as_deref(),
@@ -146,6 +153,8 @@ pub async fn send_message(
     responses(
         (status = 200, description = "Media sent", body = ApiResponse<SendResultDto>),
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 413, description = "Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 16384 bytes reserved for media fields. No preflight upload claims or event dispatch.", body = crate::response::ErrorResponse),
+        (status = 504, description = "Preview-aware send deadline exceeded: outcome unknown; do not automatically resend", body = crate::response::ErrorResponse),
         (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 404, description = "Account, room, or upload not found", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
@@ -159,6 +168,10 @@ pub async fn send_media(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<SendMediaRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    if req.url_previews.is_some() {
+        return super::bundled_previews::send(sender, uploads, account_id, room_id, req.into())
+            .await;
+    }
     // Validate before claiming: a malformed request must not consume the upload.
     let fmt = formatted(&req.format, &req.formatted_body)?;
     // An empty caption is no caption, as on the edit path (`set_media_caption`

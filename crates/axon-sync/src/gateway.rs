@@ -77,6 +77,16 @@ fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
     }
 }
 
+/// Only an explicit rejection of the preview-aware EVENT send proves its
+/// size failure. Keep legacy routes and earlier media-upload errors unchanged.
+fn map_preview_send_error(err: matrix_sdk::Error) -> GatewayError {
+    if matches!(err.client_api_error_kind(), Some(ErrorKind::TooLarge)) {
+        GatewayError::EventTooLarge
+    } else {
+        map_sdk_err(err)
+    }
+}
+
 /// Whether this error is the homeserver positively denying that it knows the
 /// room at all (ADR 0094).
 ///
@@ -574,6 +584,15 @@ async fn upload_media_source(
         .await
         .map_err(map_sdk_err)?
         .is_encrypted();
+    upload_media_source_with_encryption(room, content_type, bytes, encrypted).await
+}
+
+async fn upload_media_source_with_encryption(
+    room: &Room,
+    content_type: &mime::Mime,
+    bytes: Vec<u8>,
+    encrypted: bool,
+) -> Result<MediaSource, GatewayError> {
     if encrypted {
         let mut cursor = std::io::Cursor::new(bytes);
         let file = room
@@ -591,6 +610,47 @@ async fn upload_media_source(
             .map_err(map_sdk_err)?;
         Ok(MediaSource::Plain(resp.content_uri))
     }
+}
+
+/// Cached NotEncrypted is insufficient for a preview upload: newly created
+/// encrypted rooms can have that value until sync catches up. Fetch directly
+/// before permitting plaintext, and persist positive evidence under the SDK
+/// store lock so the eventual event send uses the same encryption decision.
+async fn fresh_preview_encryption(room: &Room, account_id: Uuid) -> Result<bool, GatewayError> {
+    use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
+    use matrix_sdk::ruma::events::room::encryption::PossiblyRedactedRoomEncryptionEventContent;
+
+    if room.encryption_settings().is_some() {
+        return Ok(true);
+    }
+    let request = get_state_event_for_key::v3::Request::new(
+        room.room_id().to_owned(),
+        StateEventType::RoomEncryption,
+        String::new(),
+    );
+    let response = match room.client().send(request).await {
+        Ok(response) => Some(
+            response
+                .into_content()
+                .deserialize_as_unchecked::<PossiblyRedactedRoomEncryptionEventContent>()
+                .map_err(|_| GatewayError::Upstream("invalid room encryption state".into()))?,
+        ),
+        Err(err) if err.client_api_error_kind() == Some(&ErrorKind::NotFound) => None,
+        Err(err) => return Err(map_sdk_err(err.into())),
+    };
+    let base_room: &matrix_sdk_base::Room = room;
+    let mut encrypted = false;
+    base_room
+        .update_and_save_room_info(|mut info| {
+            info.set_encryption_event(response);
+            info.mark_encryption_state_synced();
+            encrypted = info.encryption_state().is_encrypted();
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await
+        .map_err(|_| GatewayError::Upstream("could not persist room encryption state".into()))?;
+    tracing::debug!(%account_id, room_id = %room.room_id(), encrypted, "confirmed preview room encryption state");
+    Ok(encrypted)
 }
 
 /// Build the `m.image`/`m.file` [`MessageType`] for an already-uploaded
@@ -635,6 +695,51 @@ fn media_message_type(
             MessageType::File(content)
         }
     }
+}
+
+fn preview_validation_error(error: axon_core::link_preview::PreviewError) -> GatewayError {
+    match error {
+        axon_core::link_preview::PreviewError::Invalid => {
+            GatewayError::Invalid("invalid link preview metadata".into())
+        }
+        _ => GatewayError::EventTooLarge,
+    }
+}
+
+fn preview_with_image(
+    metadata: &axon_core::link_preview::PreviewMetadata,
+    image: &axon_core::link_preview::PreviewImage,
+    source: MediaSource,
+) -> Result<Value, GatewayError> {
+    use axon_core::link_preview;
+    validate_preview_media_source(&source)?;
+    let mut value = link_preview::entry(metadata);
+    value["matrix:image:size"] = json!(image.bytes.len());
+    value["og:image:type"] = json!(image.mimetype);
+    value["og:image:width"] = json!(image.width);
+    value["og:image:height"] = json!(image.height);
+    match source {
+        MediaSource::Plain(url) => value["og:image"] = json!(url),
+        MediaSource::Encrypted(file) => value["matrix:image:encrypted"] = json!(file),
+    }
+    Ok(value)
+}
+
+fn validate_preview_media_source(source: &MediaSource) -> Result<(), GatewayError> {
+    use axon_core::link_preview::MAX_MXC_LENGTH;
+    let url = match source {
+        MediaSource::Plain(url) => url.as_str(),
+        MediaSource::Encrypted(file) => file.url.as_str(),
+    };
+    if url.len() > MAX_MXC_LENGTH
+        || axon_core::media::parse_mxc(url).is_none()
+        || serde_json::to_vec(source).map_or(true, |v| v.len() > 1536)
+    {
+        return Err(GatewayError::Invalid(
+            "invalid preview media URI from homeserver; event was not dispatched".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Send a media attachment as a thread member (`thread_root` without
@@ -824,26 +929,7 @@ fn message_relates_to(relation: Relation<'_>) -> Result<Option<Value>, GatewayEr
         EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("thread_root: {e}")))?;
     }
 
-    Ok(match (relation.thread_root, relation.reply_to) {
-        // Thread member, not a reply. Do not invent an `m.in_reply_to` fallback:
-        // without the latest known in-thread event, falling back to the root
-        // makes thread additions render as replies to the first message.
-        (Some(root), None) => Some(json!({
-            "rel_type": "m.thread",
-            "event_id": root,
-        })),
-        // Explicit reply within a thread.
-        (Some(root), Some(reply)) => Some(json!({
-            "rel_type": "m.thread",
-            "event_id": root,
-            "m.in_reply_to": {
-                "event_id": reply,
-            },
-        })),
-        // Plain reply (no thread).
-        (None, Some(reply)) => Some(json!({ "m.in_reply_to": { "event_id": reply } })),
-        (None, None) => None,
-    })
+    Ok(axon_core::link_preview::relation_content(relation))
 }
 
 fn sticker_content(
@@ -967,6 +1053,109 @@ impl SdkGateway {
     /// when present, adds the rich-text rendering (`format` + `formatted_body`).
     /// `relation`, when set, attaches an `m.relates_to` (a reply and/or thread
     /// membership). Returns the new event id.
+    pub async fn send_with_previews(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        message: axon_core::link_preview::PreviewSend<'_>,
+        attachment: Option<MediaAttachment>,
+    ) -> Result<String, GatewayError> {
+        use axon_core::link_preview::{self, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS};
+        link_preview::preflight(
+            message.body,
+            message.formatted,
+            message.relation,
+            &message
+                .previews
+                .iter()
+                .map(|p| (p.metadata.clone(), p.image.is_some()))
+                .collect::<Vec<_>>(),
+            attachment.is_some(),
+        )
+        .map_err(preview_validation_error)?;
+        let relation = message_relates_to(message.relation)?;
+        let room = self.room(account_id, room_id).await?;
+        ensure_joined(&room)?;
+        let encrypted = fresh_preview_encryption(&room, account_id).await?;
+        let mut entries = Vec::with_capacity(message.previews.len());
+        for preview in message.previews {
+            let entry = if let Some(image) = &preview.image {
+                if image.bytes.len() as u64 > MAX_IMAGE_BYTES
+                    || image.width == 0
+                    || image.height == 0
+                    || u64::from(image.width) * u64::from(image.height) > MAX_IMAGE_PIXELS
+                {
+                    return Err(GatewayError::Invalid("invalid preview image limits".into()));
+                }
+                let mimetype = image
+                    .mimetype
+                    .parse()
+                    .map_err(|_| GatewayError::Invalid("invalid preview image MIME".into()))?;
+                let source = upload_media_source_with_encryption(
+                    &room,
+                    &mimetype,
+                    image.bytes.clone(),
+                    encrypted,
+                )
+                .await?;
+                preview_with_image(&preview.metadata, image, source)?
+            } else {
+                link_preview::entry(&preview.metadata)
+            };
+            entries.push(entry);
+        }
+        let mut content = if let Some(attachment) = attachment {
+            if attachment.filename.len() > 1024
+                || attachment
+                    .content_type
+                    .as_ref()
+                    .is_some_and(|s| s.len() > 256)
+            {
+                return Err(GatewayError::Invalid(
+                    "media filename/type exceeds preview-aware send limits".into(),
+                ));
+            }
+            let mime = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
+            let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+            let source =
+                upload_media_source_with_encryption(&room, &mime, attachment.bytes, encrypted)
+                    .await?;
+            validate_preview_media_source(&source)?;
+            let caption = (!message.body.is_empty()).then(|| match message.formatted {
+                Some(f) => TextMessageEventContent::html(message.body, f.body),
+                None => TextMessageEventContent::plain(message.body),
+            });
+            serde_json::to_value(RoomMessageEventContent::new(media_message_type(
+                attachment.kind,
+                attachment.filename,
+                &mime,
+                source,
+                info,
+                caption,
+            )))
+            .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?
+        } else {
+            link_preview::text_content(message.body, message.formatted, message.relation)
+        };
+        if let Some(relation) = relation {
+            content["m.relates_to"] = relation;
+        }
+        link_preview::install_previews(&mut content, entries);
+        link_preview::check_content(&content).map_err(preview_validation_error)?;
+        // Do not send plaintext thumbnail references after a concurrent room
+        // encryption upgrade. The next explicit attempt will reupload them.
+        if fresh_preview_encryption(&room, account_id).await? != encrypted {
+            return Err(GatewayError::Invalid(
+                "room encryption changed; review and retry the send".into(),
+            ));
+        }
+        let response = room
+            .send_raw("m.room.message", content)
+            .await
+            .map_err(map_preview_send_error)?;
+        Ok(response.response.event_id.to_string())
+    }
+
     pub async fn send_message(
         &self,
         account_id: Uuid,
@@ -2529,6 +2718,152 @@ mod tests {
             "hashes": { "sha256": "7uPH6gQjWjk8i7uD6PbyGL2B1bJwaTL1Sr1YQuT8KPY" },
             "v": "v2"
         })
+    }
+
+    #[test]
+    fn bundled_preview_images_keep_the_encrypted_descriptor_and_plain_mxc_separate() {
+        use axon_core::link_preview::{PreviewImage, PreviewMetadata};
+        let metadata = PreviewMetadata {
+            matched_url: "https://example.org".into(),
+            title: Some("Example".into()),
+            ..Default::default()
+        };
+        let image = PreviewImage {
+            bytes: vec![1, 2, 3],
+            mimetype: "image/png".into(),
+            width: 1,
+            height: 1,
+        };
+        let encrypted: matrix_sdk::ruma::events::room::EncryptedFile =
+            serde_json::from_value(encrypted_file()).unwrap();
+        let value = super::preview_with_image(
+            &metadata,
+            &image,
+            MediaSource::Encrypted(Box::new(encrypted)),
+        )
+        .unwrap();
+        assert!(value.get("og:image").is_none());
+        assert_eq!(
+            value["matrix:image:encrypted"]["url"],
+            "mxc://example.org/cipher"
+        );
+        assert_eq!(value["matrix:image:encrypted"]["key"]["alg"], "A256CTR");
+        assert_eq!(value["matrix:image:size"], 3);
+        let plain = super::preview_with_image(
+            &metadata,
+            &image,
+            MediaSource::Plain("mxc://example.org/plain".into()),
+        )
+        .unwrap();
+        assert_eq!(plain["og:image"], "mxc://example.org/plain");
+        assert!(plain.get("matrix:image:encrypted").is_none());
+    }
+
+    #[tokio::test]
+    async fn preview_encryption_refreshes_stale_plaintext_cache_and_never_downgrades_known_encryption(
+    ) {
+        use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+        use uuid::Uuid;
+        let state = Arc::new((
+            AtomicUsize::new(0),
+            AtomicBool::new(false),
+            AtomicBool::new(false),
+        ));
+        async fn handler(
+            State(state): State<Arc<(AtomicUsize, AtomicBool, AtomicBool)>>,
+            uri: axum::http::Uri,
+        ) -> axum::response::Response {
+            if uri.path().contains("/state/m.room.encryption") {
+                state.0.fetch_add(1, Ordering::SeqCst);
+                if state.2.load(Ordering::SeqCst) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"errcode":"M_FORBIDDEN","error":"denied"})),
+                    )
+                        .into_response();
+                }
+                if state.1.load(Ordering::SeqCst) {
+                    return Json(json!({"algorithm":"m.megolm.v1.aes-sha2"})).into_response();
+                }
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"errcode":"M_NOT_FOUND","error":"absent"})),
+                )
+                    .into_response();
+            }
+            if uri.path().contains("/join") {
+                return Json(json!({"room_id":"!preview:localhost"})).into_response();
+            }
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"errcode":"M_NOT_FOUND","error":"absent"})),
+            )
+                .into_response()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().fallback(handler).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = matrix_sdk::Client::builder()
+            .homeserver_url(format!("http://{address}"))
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            .http_client(reqwest::Client::builder().no_proxy().build().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let session = serde_json::from_value::<matrix_sdk::authentication::matrix::MatrixSession>(json!({"user_id":"@preview:localhost","device_id":"PREVIEW","access_token":"test-only"})).unwrap();
+        client
+            .matrix_auth()
+            .restore_session(session, matrix_sdk::store::RoomLoadSettings::default())
+            .await
+            .unwrap();
+        let room = client
+            .join_room_by_id(matrix_sdk::ruma::room_id!("!preview:localhost"))
+            .await
+            .unwrap();
+        room.update_room_info(|mut info| {
+            info.set_encryption_event(None);
+            info.mark_encryption_state_synced();
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await;
+        // The SDK's ordinary "latest" check reuses a cached false value.
+        assert!(!room.latest_encryption_state().await.unwrap().is_encrypted());
+        assert_eq!(state.0.load(Ordering::SeqCst), 0);
+        assert!(!super::fresh_preview_encryption(&room, Uuid::nil())
+            .await
+            .unwrap());
+        state.2.store(true, Ordering::SeqCst);
+        assert!(super::fresh_preview_encryption(&room, Uuid::nil())
+            .await
+            .is_err());
+        state.2.store(false, Ordering::SeqCst);
+        state.1.store(true, Ordering::SeqCst);
+        assert!(super::fresh_preview_encryption(&room, Uuid::nil())
+            .await
+            .unwrap());
+        assert_eq!(state.0.load(Ordering::SeqCst), 3);
+        state.1.store(false, Ordering::SeqCst);
+        // An older SDK lookup's 404 must preserve positive evidence too.
+        room.update_room_info(|mut info| {
+            info.set_encryption_event(None);
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await;
+        assert!(room.encryption_state().is_encrypted());
+        // Once proven encrypted, a missing/redacted/omitted state cannot
+        // downgrade the send decision. The retained event is authoritative.
+        assert!(super::fresh_preview_encryption(&room, Uuid::nil())
+            .await
+            .unwrap());
+        assert_eq!(state.0.load(Ordering::SeqCst), 3);
+        server.abort();
     }
 
     #[test]

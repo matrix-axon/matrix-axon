@@ -32,6 +32,7 @@ pub(crate) fn json_exceeds_byte_cap(value: &serde_json::Value, cap: usize) -> bo
 pub mod account_actions;
 pub mod accounts;
 pub mod bootstrap;
+mod bundled_previews;
 pub mod device_state;
 pub mod devices;
 pub mod ephemeral;

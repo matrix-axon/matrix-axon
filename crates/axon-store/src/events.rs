@@ -1331,6 +1331,17 @@ impl Store {
                        SELECT id, 2 AS priority FROM events \
                        WHERE account_id = $1 \
                          AND content->'info'->'thumbnail_file'->>'url' = $2 \
+                       UNION ALL \
+                       SELECT id, 3 AS priority FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND (content->'m.url_previews' @> $3::jsonb \
+                              OR content->'m.url_previews' @> $4::jsonb \
+                              OR (NOT (content ? 'm.url_previews') AND \
+                                  (content->'com.beeper.linkpreviews' @> $3::jsonb \
+                                   OR content->'com.beeper.linkpreviews' @> $5::jsonb))) \
+                         AND NOT EXISTS (SELECT 1 FROM events rr \
+                             WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
+                               AND rr.redacts = events.event_id) \
                    ) media_matches \
                    ORDER BY priority ASC, id ASC \
                    LIMIT 1 \
@@ -1340,6 +1351,9 @@ impl Store {
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(mxc_url)
+            .bind(serde_json::json!([{"og:image": mxc_url}]))
+            .bind(serde_json::json!([{"matrix:image:encrypted": {"url": mxc_url}}]))
+            .bind(serde_json::json!([{"beeper:image:encryption": {"url": mxc_url}}]))
             .fetch_optional(&self.read_pool)
             .await?;
         Ok(row)
