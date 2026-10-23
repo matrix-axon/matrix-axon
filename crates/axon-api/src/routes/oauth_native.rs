@@ -184,6 +184,7 @@ async fn authority(
     }
 }
 
+/// Request an Apple sign-in challenge
 #[utoipa::path(post, path="/v1/oauth/apple/native/challenge",
     params(("Authorization" = Option<String>, Header, description = "Bearer owner token; required for purpose=bind, omitted for login/bootstrap. A bind is a credential change: the token must never expire, or come from a sign-in in the last ten minutes.")),
     request_body(content=NativeChallengeRequest, content_type="application/x-www-form-urlencoded"),
@@ -246,6 +247,7 @@ pub async fn challenge(
     }))
 }
 
+/// Exchange an Apple identity token
 #[utoipa::path(post, path="/v1/oauth/apple/native/token",
     params(("Authorization" = Option<String>, Header, description = "Same Bearer owner token used to create a bind challenge; still required and must remain active. Omitted for login/bootstrap.")),
     request_body(content=NativeTokenRequest, content_type="application/x-www-form-urlencoded"),

@@ -15,8 +15,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "List the accounts this Axon manages, oldest first — the **client-visible**\nset: `active` and `deactivated`.",
-        "description": "Logged-out (`deactivated`) accounts are included so a client that has lost the\n`account_id` can still discover one to offer re-login (the login verb both\nproduces and reactivates them). The transient `deleting` teardown state is\nexcluded — a row mid-removal isn't something to act on — but any account, in\nany state, can still be read by id via [`get_account`].",
+        "summary": "List accounts",
+        "description": "List the accounts this Axon manages, oldest first — the **client-visible**\nset: `active` and `deactivated`.\n\nLogged-out (`deactivated`) accounts are included so a client that has lost the\n`account_id` can still discover one to offer re-login (the login verb both\nproduces and reactivates them). The transient `deleting` teardown state is\nexcluded — a row mid-removal isn't something to act on — but any account, in\nany state, can still be read by id via [`get_account`].",
         "operationId": "list_accounts",
         "responses": {
           "200": {
@@ -55,8 +55,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Adopt an existing Matrix access token as a runtime account, then return the\nresulting active account — the runtime replacement for the retired\n`sync.account.access_token` boot-provisioning path: restore a session axon\ndidn't mint itself (issued by another client, or an SSO-only account with no\npassword) without a fresh login. Idempotent by Matrix `username`, exactly\nlike [`login`]: a new identity mints a row, a logged-out (`deactivated`)\naccount is reactivated using its *stored* endpoint (the request's\n`homeserver_url` is only consulted for a new identity), and an already-`active`\naccount is returned unchanged (the token isn't consulted). An account\nmid-deletion (`deleting`) is a `409`.",
-        "description": "Unlike `login`, no homeserver call confirms the token before this returns —\nsession restore is a purely local SDK operation — so the token (and, if the\nhomeserver reports one, the device id) is validated with a `whoami`\nround-trip before the account is activated; a mismatched or revoked token is\na `401`, same as `login`'s rejected-credential case.\n\nSecret-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
+        "summary": "Import an access token as an account",
+        "description": "Adopt an existing Matrix access token as a runtime account, then return the\nresulting active account — the runtime replacement for the retired\n`sync.account.access_token` boot-provisioning path: restore a session axon\ndidn't mint itself (issued by another client, or an SSO-only account with no\npassword) without a fresh login. Idempotent by Matrix `username`, exactly\nlike [`login`]: a new identity mints a row, a logged-out (`deactivated`)\naccount is reactivated using its *stored* endpoint (the request's\n`homeserver_url` is only consulted for a new identity), and an already-`active`\naccount is returned unchanged (the token isn't consulted). An account\nmid-deletion (`deleting`) is a `409`.\n\nUnlike `login`, no homeserver call confirms the token before this returns —\nsession restore is a purely local SDK operation — so the token (and, if the\nhomeserver reports one, the device id) is validated with a `whoami`\nround-trip before the account is activated; a mismatched or revoked token is\na `401`, same as `login`'s rejected-credential case.\n\nSecret-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "import_token",
         "requestBody": {
           "content": {
@@ -135,8 +135,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Add or reactivate a Matrix account at runtime, then return the resulting\nactive account. Idempotent by Matrix `username`: a new identity is minted, a\nlogged-out (`deactivated`) account is reactivated using its stored endpoint,\nand an already-`active` account is returned **unchanged** (a no-op — the desired end\nstate already holds, so the password isn't consulted and nothing is touched).\nAn account mid-deletion (`deleting`) is a `409`. `username` must be a full\nMatrix user ID (a malformed one is a `400`); bad credentials are a `401`. The\npassword is used once and never stored.",
-        "description": "`homeserver_url` is optional: when omitted, the server discovers the\ncanonical homeserver from the user ID's server name (`.well-known/matrix/client`,\nfalling back to the server name itself) — so clients need only username +\npassword. The URL is a connection endpoint; the Matrix ID keys identity.\nA failed discovery is a `502`. The `username` domain is then checked against\nthe homeserver's own declared server name (best-effort): a user ID written\nwith the homeserver's hostname (`@adam:matrix.example.org`) is a `400` whose\nmessage suggests the ID they almost certainly meant (`@adam:example.org`),\nrather than a misleading `401` — and never a silent login as a different\nidentity.\n\nSecret-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
+        "summary": "Log in a Matrix account",
+        "description": "Add or reactivate a Matrix account at runtime, then return the resulting\nactive account. Idempotent by Matrix `username`: a new identity is minted, a\nlogged-out (`deactivated`) account is reactivated using its stored endpoint,\nand an already-`active` account is returned **unchanged** (a no-op — the desired end\nstate already holds, so the password isn't consulted and nothing is touched).\nAn account mid-deletion (`deleting`) is a `409`. `username` must be a full\nMatrix user ID (a malformed one is a `400`); bad credentials are a `401`. The\npassword is used once and never stored.\n\n`homeserver_url` is optional: when omitted, the server discovers the\ncanonical homeserver from the user ID's server name (`.well-known/matrix/client`,\nfalling back to the server name itself) — so clients need only username +\npassword. The URL is a connection endpoint; the Matrix ID keys identity.\nA failed discovery is a `502`. The `username` domain is then checked against\nthe homeserver's own declared server name (best-effort): a user ID written\nwith the homeserver's hostname (`@adam:matrix.example.org`) is a `400` whose\nmessage suggests the ID they almost certainly meant (`@adam:example.org`),\nrather than a misleading `401` — and never a silent login as a different\nidentity.\n\nSecret-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "login",
         "requestBody": {
           "content": {
@@ -215,8 +215,8 @@
         "tags": [
           "matrix-oauth"
         ],
-        "summary": "Start a browser sign-in for a homeserver that delegates authentication to\nan OAuth 2.0 authorization server.",
-        "description": "The flow yields a link and a short code. The user opens the link in any\nbrowser, on any device, signs in, and approves; meanwhile the client polls\nthis flow. No second Matrix client is needed. The account that results is\nsigned in but its device is **not** verified.",
+        "summary": "Start a browser sign-in",
+        "description": "Start a browser sign-in for a homeserver that delegates authentication to\nan OAuth 2.0 authorization server.\n\nThe flow yields a link and a short code. The user opens the link in any\nbrowser, on any device, signs in, and approves; meanwhile the client polls\nthis flow. No second Matrix client is needed. The account that results is\nsigned in but its device is **not** verified.",
         "operationId": "create_matrix_oauth_browser",
         "requestBody": {
           "content": {
@@ -305,8 +305,8 @@
         "tags": [
           "matrix-oauth"
         ],
-        "summary": "Read the current replayable flow stage and only its stage-appropriate data.",
-        "description": "The link and user code are returned only in `waiting_for_authorization`.",
+        "summary": "Get a browser sign-in flow",
+        "description": "Read the current replayable flow stage and only its stage-appropriate data.\n\nThe link and user code are returned only in `waiting_for_authorization`.",
         "operationId": "get_matrix_oauth_browser",
         "parameters": [
           {
@@ -365,7 +365,8 @@
         "tags": [
           "matrix-oauth"
         ],
-        "summary": "Cancel a flow idempotently, including an unknown or already-expired id.",
+        "summary": "Cancel a browser sign-in flow",
+        "description": "Cancel a flow idempotently, including an unknown or already-expired id.",
         "operationId": "cancel_matrix_oauth_browser",
         "parameters": [
           {
@@ -419,7 +420,8 @@
         "tags": [
           "matrix-oauth"
         ],
-        "summary": "Start a QR login that creates and verifies Axon's Matrix device without a\nMatrix password, imported access token, or recovery key.",
+        "summary": "Start a QR login",
+        "description": "Start a QR login that creates and verifies Axon's Matrix device without a\nMatrix password, imported access token, or recovery key.",
         "operationId": "create",
         "requestBody": {
           "content": {
@@ -508,7 +510,8 @@
         "tags": [
           "matrix-oauth"
         ],
-        "summary": "Read the current replayable flow stage and only its stage-appropriate data.",
+        "summary": "Get a QR login flow",
+        "description": "Read the current replayable flow stage and only its stage-appropriate data.",
         "operationId": "get",
         "parameters": [
           {
@@ -567,7 +570,8 @@
         "tags": [
           "matrix-oauth"
         ],
-        "summary": "Cancel a flow idempotently, including an unknown or already-expired id.",
+        "summary": "Cancel a QR login flow",
+        "description": "Cancel a flow idempotently, including an unknown or already-expired id.",
         "operationId": "cancel",
         "parameters": [
           {
@@ -621,7 +625,8 @@
         "tags": [
           "matrix-oauth"
         ],
-        "summary": "Supply one two-digit check code to a display-presentation flow.",
+        "summary": "Submit a QR login check code",
+        "description": "Supply one two-digit check code to a display-presentation flow.",
         "operationId": "submit_check_code",
         "parameters": [
           {
@@ -722,7 +727,8 @@
         "tags": [
           "matrix-oauth"
         ],
-        "summary": "Supply one decoded QR payload to a scan-presentation flow.",
+        "summary": "Submit a scanned QR login payload",
+        "description": "Supply one decoded QR payload to a scan-presentation flow.",
         "operationId": "submit_scan",
         "parameters": [
           {
@@ -823,7 +829,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Read a single account by id, in whatever lifecycle state it is — unlike the\nlist, a direct by-id read is not filtered to `active` (so a client can poll\nan account it knows and watch it transition). An unknown id is a 404.",
+        "summary": "Get an account",
+        "description": "Read a single account by id, in whatever lifecycle state it is — unlike the\nlist, a direct by-id read is not filtered to `active` (so a client can poll\nan account it knows and watch it transition). An unknown id is a 404.",
         "operationId": "get_account",
         "parameters": [
           {
@@ -882,8 +889,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Permanently delete an account and every trace of it: stops syncing it,\ninvalidates its device token upstream, removes its on-disk SDK store, and drops\nits row (cascading away its archived events, room state, and account data).\nReturns `204 No Content` — the resource is gone, so there is nothing to return.",
-        "description": "Unlike [`logout`] this is **not** reversible: re-adding the same Matrix account\nlater is a fresh login with a new `account_id`. Idempotent and crash-safe — a\ndelete of an account already mid-teardown resumes it, and an interrupted delete\nis finished by the next boot's reconcile. An unknown id is a `404`. A `409` means\nthe account's sync task has not finished shutting down; retry shortly. This is\ndurable by construction — nothing auto-provisions accounts, so a deleted account\nnever comes back except through an explicit `login`/`import` call.\n\nDestructive; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
+        "summary": "Delete an account",
+        "description": "Permanently delete an account and every trace of it: stops syncing it,\ninvalidates its device token upstream, removes its on-disk SDK store, and drops\nits row (cascading away its archived events, room state, and account data).\nReturns `204 No Content` — the resource is gone, so there is nothing to return.\n\nUnlike [`logout`] this is **not** reversible: re-adding the same Matrix account\nlater is a fresh login with a new `account_id`. Idempotent and crash-safe — a\ndelete of an account already mid-teardown resumes it, and an interrupted delete\nis finished by the next boot's reconcile. An unknown id is a `404`. A `409` means\nthe account's sync task has not finished shutting down; retry shortly. This is\ndurable by construction — nothing auto-provisions accounts, so a deleted account\nnever comes back except through an explicit `login`/`import` call.\n\nDestructive; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "delete_account",
         "parameters": [
           {
@@ -947,8 +954,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Originate megolm key backup, export `m.megolm_backup.v1` into existing 4S,\nresume a crashed create, or kick an already-enabled upload (ADR 0098).\nNever mints a new recovery key. Never deletes someone else's backup.",
-        "description": "`recovery_key` is required for create, export-only, and crash-resume\nreplace. Omitting it is kick-upload only. Unverified device or a\nhomeserver backup this device is not connected to (and did not sign with\nintent) is a `409`.",
+        "summary": "Enable key backup",
+        "description": "Originate megolm key backup, export `m.megolm_backup.v1` into existing 4S,\nresume a crashed create, or kick an already-enabled upload (ADR 0098).\nNever mints a new recovery key. Never deletes someone else's backup.\n\n`recovery_key` is required for create, export-only, and crash-resume\nreplace. Omitting it is kick-upload only. Unverified device or a\nhomeserver backup this device is not connected to (and did not sign with\nintent) is a `409`.",
         "operationId": "enable_backup",
         "parameters": [
           {
@@ -1039,7 +1046,8 @@
         "tags": [
           "devices"
         ],
-        "summary": "List a Matrix user's devices — the account's own by default, or an\narbitrary user via `?user_id=`. Reads the SDK's local crypto-store cache\non every call (kept current by the account's background sync, not by a\nhomeserver call this endpoint makes itself); no device roster is\npersisted by axon. A `user_id` axon has never tracked (no shared\nencrypted room) returns `200` with an empty `devices` list, not an error.",
+        "summary": "List devices",
+        "description": "List a Matrix user's devices — the account's own by default, or an\narbitrary user via `?user_id=`. Reads the SDK's local crypto-store cache\non every call (kept current by the account's background sync, not by a\nhomeserver call this endpoint makes itself); no device roster is\npersisted by axon. A `user_id` axon has never tracked (no shared\nencrypted room) returns `200` with an empty `devices` list, not an error.",
         "operationId": "list_devices",
         "parameters": [
           {
@@ -1139,7 +1147,8 @@
         "tags": [
           "account-actions"
         ],
-        "summary": "Search a homeserver's public-room directory.",
+        "summary": "Search the public room directory",
+        "description": "Search a homeserver's public-room directory.",
         "operationId": "search_public_rooms",
         "parameters": [
           {
@@ -1268,7 +1277,8 @@
         "tags": [
           "events"
         ],
-        "summary": "Read a single event by `(account_id, event_id)`. Redacted events come back\nmasked (`content`/`body` null, `redacted` true); an unknown id is a 404.",
+        "summary": "Get an event",
+        "description": "Read a single event by `(account_id, event_id)`. Redacted events come back\nmasked (`content`/`body` null, `redacted` true); an unknown id is a 404.",
         "operationId": "get_event",
         "parameters": [
           {
@@ -1338,7 +1348,8 @@
         "tags": [
           "events"
         ],
-        "summary": "The forensic edit history of an event (M8): every `m.replace` targeting it,\noldest first, *unfiltered* by the resolution rules — including edits from a\nnon-sender or an incompatible `msgtype` — for clients that want to show or\naudit the edit trail. The collapsed timeline (and `EventDto.edited` /\n`edit_count`) is the resolved view; this is the raw provenance. An event with\nno edits (or an unknown event) yields an empty array, not a 404. The result is\nhard-capped in the store against a pathological edit count.",
+        "summary": "Get an event's edit history",
+        "description": "The forensic edit history of an event (M8): every `m.replace` targeting it,\noldest first, *unfiltered* by the resolution rules — including edits from a\nnon-sender or an incompatible `msgtype` — for clients that want to show or\naudit the edit trail. The collapsed timeline (and `EventDto.edited` /\n`edit_count`) is the resolved view; this is the raw provenance. An event with\nno edits (or an unknown event) yields an empty array, not a 404. The result is\nhard-capped in the store against a pathological edit count.",
         "operationId": "get_edits",
         "parameters": [
           {
@@ -1398,7 +1409,8 @@
         "tags": [
           "events"
         ],
-        "summary": "Per-emoji reaction tally for an event (M8), resolved over the event's reactions\non disk regardless of where the original message falls in the timeline window —\nthe fix for the dropped-reaction bug (issue #22). The body is a JSON object\nkeyed by emoji:\n`{ \"👍\": { \"count\": 2, \"me\": true, \"senders\": [...], \"my_event_ids\": [...] } }`.\nAn optional `shortcode` names custom MXC reactions when supplied by the sender.\n`my_event_ids` carries the account user's own reaction event ids for the key —\nthe ids a client redacts to withdraw the reaction, since the collapsed\ntimeline no longer carries the raw `m.reaction` rows. An event with no\nreactions (or an unknown event) yields an empty object (`{ \"data\": {} }`), not\na 404 — an absent event and one with no reactions are indistinguishable here\nand empty is the natural answer. Against a pathological event, the store\nhard-caps the tally at the oldest 1000 distinct `(sender, key)` pairs\n(deterministically by `(origin_ts, event_id)`), so an event beyond that bound\nreports those rather than literally every reaction.",
+        "summary": "Get an event's reactions",
+        "description": "Per-emoji reaction tally for an event (M8), resolved over the event's reactions\non disk regardless of where the original message falls in the timeline window —\nthe fix for the dropped-reaction bug (issue #22). The body is a JSON object\nkeyed by emoji:\n`{ \"👍\": { \"count\": 2, \"me\": true, \"senders\": [...], \"my_event_ids\": [...] } }`.\nAn optional `shortcode` names custom MXC reactions when supplied by the sender.\n`my_event_ids` carries the account user's own reaction event ids for the key —\nthe ids a client redacts to withdraw the reaction, since the collapsed\ntimeline no longer carries the raw `m.reaction` rows. An event with no\nreactions (or an unknown event) yields an empty object (`{ \"data\": {} }`), not\na 404 — an absent event and one with no reactions are indistinguishable here\nand empty is the natural answer. Against a pathological event, the store\nhard-caps the tally at the oldest 1000 distinct `(sender, key)` pairs\n(deterministically by `(origin_ts, event_id)`), so an event beyond that bound\nreports those rather than literally every reaction.",
         "operationId": "get_reactions",
         "parameters": [
           {
@@ -1458,7 +1470,8 @@
         "tags": [
           "events"
         ],
-        "summary": "Direct replies to an event (M8): events whose nested\n`m.relates_to.m.in_reply_to.event_id` is this event and which carry no\n`rel_type` (a plain reply, not a thread member). Oldest first;\nredaction-masked. An event with no replies (or an unknown event) yields an\nempty array, not a 404 — empty is the natural answer. The result is\nhard-capped in the store against a pathological room.",
+        "summary": "Get an event's replies",
+        "description": "Direct replies to an event (M8): events whose nested\n`m.relates_to.m.in_reply_to.event_id` is this event and which carry no\n`rel_type` (a plain reply, not a thread member). Oldest first;\nredaction-masked. An event with no replies (or an unknown event) yields an\nempty array, not a 404 — empty is the natural answer. The result is\nhard-capped in the store against a pathological room.",
         "operationId": "get_replies",
         "parameters": [
           {
@@ -1518,7 +1531,8 @@
         "tags": [
           "events"
         ],
-        "summary": "Read the per-event verification bundle (M7c): the durable at-decrypt sender-\ntrust snapshot plus live cross-signing evidence for the sender's device and\nidentity. An unknown account/event is a 404; a logged-out account is a 409\n(no live client to read evidence from). Gated by the bearer-token auth layer\nlike every `/v1/` route.",
+        "summary": "Get an event's verification bundle",
+        "description": "Read the per-event verification bundle (M7c): the durable at-decrypt sender-\ntrust snapshot plus live cross-signing evidence for the sender's device and\nidentity. An unknown account/event is a 404; a logged-out account is a 409\n(no live client to read evidence from). Gated by the bearer-token auth layer\nlike every `/v1/` route.",
         "operationId": "get_verification_bundle",
         "parameters": [
           {
@@ -1608,6 +1622,7 @@
         "tags": [
           "matrix-oauth"
         ],
+        "summary": "Start a QR login grant",
         "operationId": "create_matrix_oauth_qr_grant",
         "parameters": [
           {
@@ -1728,6 +1743,7 @@
         "tags": [
           "matrix-oauth"
         ],
+        "summary": "Get a QR login grant",
         "operationId": "get_matrix_oauth_qr_grant",
         "parameters": [
           {
@@ -1796,6 +1812,7 @@
         "tags": [
           "matrix-oauth"
         ],
+        "summary": "Cancel a QR login grant",
         "operationId": "cancel_matrix_oauth_qr_grant",
         "parameters": [
           {
@@ -1849,6 +1866,7 @@
         "tags": [
           "matrix-oauth"
         ],
+        "summary": "Submit a QR login grant check code",
         "operationId": "submit_matrix_oauth_qr_grant_check_code",
         "parameters": [
           {
@@ -1959,6 +1977,7 @@
         "tags": [
           "matrix-oauth"
         ],
+        "summary": "Submit a scanned QR login grant payload",
         "operationId": "submit_matrix_oauth_qr_grant_scan",
         "parameters": [
           {
@@ -2069,8 +2088,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Log a Matrix account out, then return the resulting (now `deactivated`)\naccount. Stops syncing it, invalidates its device token upstream (best-effort\n— an unreachable homeserver never fails the logout), and moves it to a\nlogged-out state, **retaining all of its data** (archive, search, media) so a\nlater login reactivates the same `account_id`. Idempotent: logging out an\nalready-logged-out account is a `200` no-op. An account mid-deletion\n(`deleting`) is a `409`; an unknown id is a `404`.",
-        "description": "Secret-bearing / destructive; gated by the bearer-token auth layer like every\n`/v1/` route (M7b, ADR 0029).",
+        "summary": "Log out an account",
+        "description": "Log a Matrix account out, then return the resulting (now `deactivated`)\naccount. Stops syncing it, invalidates its device token upstream (best-effort\n— an unreachable homeserver never fails the logout), and moves it to a\nlogged-out state, **retaining all of its data** (archive, search, media) so a\nlater login reactivates the same `account_id`. Idempotent: logging out an\nalready-logged-out account is a `200` no-op. An account mid-deletion\n(`deleting`) is a `409`; an unknown id is a `404`.\n\nSecret-bearing / destructive; gated by the bearer-token auth layer like every\n`/v1/` route (M7b, ADR 0029).",
         "operationId": "logout",
         "parameters": [
           {
@@ -2141,7 +2160,8 @@
         "tags": [
           "media"
         ],
-        "summary": "Stage raw upload bytes for a later room-aware media send.",
+        "summary": "Stage a media upload",
+        "description": "Stage raw upload bytes for a later room-aware media send.",
         "operationId": "stage_upload",
         "parameters": [
           {
@@ -2271,7 +2291,8 @@
         "tags": [
           "media"
         ],
-        "summary": "Delete an unsent staged upload.",
+        "summary": "Delete a staged upload",
+        "description": "Delete an unsent staged upload.",
         "operationId": "delete_upload",
         "parameters": [
           {
@@ -2352,7 +2373,8 @@
         "tags": [
           "account-actions"
         ],
-        "summary": "Set this account's avatar from an already-staged upload.",
+        "summary": "Set the account avatar",
+        "description": "Set this account's avatar from an already-staged upload.",
         "operationId": "set_account_avatar",
         "parameters": [
           {
@@ -2451,7 +2473,8 @@
         "tags": [
           "account-actions"
         ],
-        "summary": "Clear this account's avatar.",
+        "summary": "Clear the account avatar",
+        "description": "Clear this account's avatar.",
         "operationId": "remove_account_avatar",
         "parameters": [
           {
@@ -2542,7 +2565,8 @@
         "tags": [
           "account-actions"
         ],
-        "summary": "Set this account's own display name. An empty `display_name` clears it.",
+        "summary": "Set the account display name",
+        "description": "Set this account's own display name. An empty `display_name` clears it.",
         "operationId": "set_display_name",
         "parameters": [
           {
@@ -2643,8 +2667,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Acquire E2EE keys for an **active** account from its Secure-Storage (4S)\nrecovery key, then return the account with its `verified` flag re-derived\nand an honest megolm-backup action (ADR 0098). Cross-signing is imported\nfrom 4S; if the homeserver has no megolm backup, recover auto-enables one\nusing this same key (it does not mint a new recovery key). Stored UTDs the\nimported keys unlock are back-filled under a 30s cap. The recovery key is\nused once and never persisted.",
-        "description": "A `200` means **4S import succeeded**, not that history keys downloaded and\nnot that backup enabled. The flattened body keeps `account_id` / `verified`\nat the top level for existing clients; `backup_action` and `redecrypt` are\nadditive siblings. `verified` is a derived observation of cross-signing.\n\nThe account must be `active`: a logged-out (`deactivated`) account is a `409`\n(log in first), as is one mid-deletion (`deleting`). A wrong/rotated key, or an\naccount that never set up Secure Backup, is a `400` (a readable error, not a\nsilent permanent UTD). An unknown id is a `404`. Recover never 409s because\nan existing homeserver backup needs joining.\n\nSecret-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
+        "summary": "Recover E2EE keys",
+        "description": "Acquire E2EE keys for an **active** account from its Secure-Storage (4S)\nrecovery key, then return the account with its `verified` flag re-derived\nand an honest megolm-backup action (ADR 0098). Cross-signing is imported\nfrom 4S; if the homeserver has no megolm backup, recover auto-enables one\nusing this same key (it does not mint a new recovery key). Stored UTDs the\nimported keys unlock are back-filled under a 30s cap. The recovery key is\nused once and never persisted.\n\nA `200` means **4S import succeeded**, not that history keys downloaded and\nnot that backup enabled. The flattened body keeps `account_id` / `verified`\nat the top level for existing clients; `backup_action` and `redecrypt` are\nadditive siblings. `verified` is a derived observation of cross-signing.\n\nThe account must be `active`: a logged-out (`deactivated`) account is a `409`\n(log in first), as is one mid-deletion (`deleting`). A wrong/rotated key, or an\naccount that never set up Secure Backup, is a `400` (a readable error, not a\nsilent permanent UTD). An unknown id is a `404`. Recover never 409s because\nan existing homeserver backup needs joining.\n\nSecret-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "recover",
         "parameters": [
           {
@@ -2735,8 +2759,8 @@
         "tags": [
           "room-entry"
         ],
-        "summary": "Create a new room.",
-        "description": "**Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,\nso retrying this call after a client-side timeout can create a second\nroom upstream if the first attempt actually succeeded after Axon's own\ntimeout fired (see `SdkGateway::create_room`).",
+        "summary": "Create a room",
+        "description": "Create a new room.\n\n**Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,\nso retrying this call after a client-side timeout can create a second\nroom upstream if the first attempt actually succeeded after Axon's own\ntimeout fired (see `SdkGateway::create_room`).",
         "operationId": "create_room",
         "parameters": [
           {
@@ -2847,8 +2871,8 @@
         "tags": [
           "room-entry"
         ],
-        "summary": "Create a DM with another user.",
-        "description": "**Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,\nso retrying this call after a client-side timeout can create a second DM\nroom upstream if the first attempt actually succeeded after Axon's own\ntimeout fired (see `SdkGateway::create_dm`). This route always creates a\nnew room; it does not check for or reuse an existing DM with the target\nuser.",
+        "summary": "Create a direct message",
+        "description": "Create a DM with another user.\n\n**Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,\nso retrying this call after a client-side timeout can create a second DM\nroom upstream if the first attempt actually succeeded after Axon's own\ntimeout fired (see `SdkGateway::create_dm`). This route always creates a\nnew room; it does not check for or reuse an existing DM with the target\nuser.",
         "operationId": "create_dm",
         "parameters": [
           {
@@ -2959,7 +2983,8 @@
         "tags": [
           "room-entry"
         ],
-        "summary": "Join a room by id or alias.",
+        "summary": "Join a room",
+        "description": "Join a room by id or alias.",
         "operationId": "join_room",
         "parameters": [
           {
@@ -3070,7 +3095,8 @@
         "tags": [
           "room-entry"
         ],
-        "summary": "Knock on a room, optionally with a reason.",
+        "summary": "Knock on a room",
+        "description": "Knock on a room, optionally with a reason.",
         "operationId": "knock_room",
         "parameters": [
           {
@@ -3181,7 +3207,8 @@
         "tags": [
           "room-settings"
         ],
-        "summary": "Set this room's avatar from an already-staged upload.",
+        "summary": "Set the room avatar",
+        "description": "Set this room's avatar from an already-staged upload.",
         "operationId": "set_room_avatar",
         "parameters": [
           {
@@ -3299,7 +3326,8 @@
         "tags": [
           "room-settings"
         ],
-        "summary": "Clear this room's avatar.",
+        "summary": "Clear the room avatar",
+        "description": "Clear this room's avatar.",
         "operationId": "remove_room_avatar",
         "parameters": [
           {
@@ -3409,7 +3437,8 @@
         "tags": [
           "membership"
         ],
-        "summary": "Ban a user from this room, optionally with a reason.",
+        "summary": "Ban a user",
+        "description": "Ban a user from this room, optionally with a reason.",
         "operationId": "ban_user",
         "parameters": [
           {
@@ -3529,7 +3558,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "List custom emoji available from the current room, canonical ancestor spaces, and personal pack.\nSupports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal\n`im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with\nthe same state key. Personal packs precede room packs, then nearest ancestors; names are not merged.\nSticker-only entries are excluded by default; `usage=sticker` selects\nsticker-capable images instead. Up to 16 joined canonical ancestor spaces\nare inherited through locally validated parent relationships. Other-room\nsubscriptions are not included. Requires positive joined membership.\nThis is a local cache read, not a homeserver request or an authoritative\nstatement that no packs exist upstream. Re-read on picker open/reconnect.\nAt most 64 room packs plus one personal pack, 128 KiB per source, 512 entries\nexamined per pack, and 1000 returned images across packs. `partial` signals\nomitted invalid/oversized data or truncation. All names are untrusted text.",
+        "summary": "List custom emoji packs",
+        "description": "List custom emoji available from the current room, canonical ancestor spaces, and personal pack.\nSupports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal\n`im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with\nthe same state key. Personal packs precede room packs, then nearest ancestors; names are not merged.\nSticker-only entries are excluded by default; `usage=sticker` selects\nsticker-capable images instead. Up to 16 joined canonical ancestor spaces\nare inherited through locally validated parent relationships. Other-room\nsubscriptions are not included. Requires positive joined membership.\nThis is a local cache read, not a homeserver request or an authoritative\nstatement that no packs exist upstream. Re-read on picker open/reconnect.\nAt most 64 room packs plus one personal pack, 128 KiB per source, 512 entries\nexamined per pack, and 1000 returned images across packs. `partial` signals\nomitted invalid/oversized data or truncation. All names are untrusted text.",
         "operationId": "room_emoji_packs",
         "parameters": [
           {
@@ -3610,7 +3640,8 @@
         "tags": [
           "messages"
         ],
-        "summary": "Edit an existing message (sends an `m.replace`).",
+        "summary": "Edit a message",
+        "description": "Edit an existing message (sends an `m.replace`).",
         "operationId": "edit_message",
         "parameters": [
           {
@@ -3737,7 +3768,8 @@
         "tags": [
           "messages"
         ],
-        "summary": "Redact an event, optionally with a reason (`?reason=`).",
+        "summary": "Redact an event",
+        "description": "Redact an event, optionally with a reason (`?reason=`).",
         "operationId": "redact_event",
         "parameters": [
           {
@@ -3865,7 +3897,8 @@
         "tags": [
           "messages"
         ],
-        "summary": "React to an event with an emoji/short key.",
+        "summary": "React to an event",
+        "description": "React to an event with an emoji/short key.",
         "operationId": "react",
         "parameters": [
           {
@@ -3994,7 +4027,8 @@
         "tags": [
           "membership"
         ],
-        "summary": "Forget a left or banned-from room.",
+        "summary": "Forget a room",
+        "description": "Forget a left or banned-from room.",
         "operationId": "forget_room",
         "parameters": [
           {
@@ -4104,7 +4138,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "Bundle of small \"what kind of room is this\" reads: join rule, history\nvisibility, guest access, and encryption algorithm (issue #404, ADR 0084).\nEach is an independent singleton `room_state` lookup — fanned out\nconcurrently rather than four sequential round trips, since none depends\non another's result. An unknown room or unset state reads as `null` for\nthat field, not a 404.",
+        "summary": "Get room info",
+        "description": "Bundle of small \"what kind of room is this\" reads: join rule, history\nvisibility, guest access, and encryption algorithm (issue #404, ADR 0084).\nEach is an independent singleton `room_state` lookup — fanned out\nconcurrently rather than four sequential round trips, since none depends\non another's result. An unknown room or unset state reads as `null` for\nthat field, not a 404.",
         "operationId": "room_info",
         "parameters": [
           {
@@ -4164,7 +4199,8 @@
         "tags": [
           "membership"
         ],
-        "summary": "Invite a user to this room.",
+        "summary": "Invite a user",
+        "description": "Invite a user to this room.",
         "operationId": "invite_user",
         "parameters": [
           {
@@ -4284,7 +4320,8 @@
         "tags": [
           "membership"
         ],
-        "summary": "Kick a user from this room, optionally with a reason.",
+        "summary": "Kick a user",
+        "description": "Kick a user from this room, optionally with a reason.",
         "operationId": "kick_user",
         "parameters": [
           {
@@ -4404,7 +4441,8 @@
         "tags": [
           "membership"
         ],
-        "summary": "Leave this room.",
+        "summary": "Leave a room",
+        "description": "Leave this room.",
         "operationId": "leave_room",
         "parameters": [
           {
@@ -4514,7 +4552,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "List the current members of a room — the resolved `m.room.member` state,\none entry per user. Useful for seeding a display-name map without requiring\nmembership events to appear in the loaded timeline. An unknown\n`account_id`/`room_id` yields an empty list (200), not a 404.",
+        "summary": "List room members",
+        "description": "List the current members of a room — the resolved `m.room.member` state,\none entry per user. Useful for seeding a display-name map without requiring\nmembership events to appear in the loaded timeline. An unknown\n`account_id`/`room_id` yields an empty list (200), not a 404.",
         "operationId": "room_members",
         "parameters": [
           {
@@ -4574,7 +4613,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "Read typed room metadata from account-scoped cached state.\nNo upstream requests or membership aggregation occur on this route.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nContent is limited to 128 KiB per state tuple before transfer and decoding.\nRe-read on reopen/reconnect. Until state invalidation covers required-state\nupdates, open panels need bounded polling to detect changes without a live\nframe. Event `origin_ts` is provenance, not a sync-freshness timestamp.",
+        "summary": "Get room metadata",
+        "description": "Read typed room metadata from account-scoped cached state.\nNo upstream requests or membership aggregation occur on this route.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nContent is limited to 128 KiB per state tuple before transfer and decoding.\nRe-read on reopen/reconnect. Until state invalidation covers required-state\nupdates, open panels need bounded polling to detect changes without a live\nframe. Event `origin_ts` is provenance, not a sync-freshness timestamp.",
         "operationId": "room_metadata",
         "parameters": [
           {
@@ -4636,7 +4676,8 @@
         "tags": [
           "room-settings"
         ],
-        "summary": "Set this room's name. An empty `name` clears it.",
+        "summary": "Set the room name",
+        "description": "Set this room's name. An empty `name` clears it.",
         "operationId": "set_room_name",
         "parameters": [
           {
@@ -4756,7 +4797,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "List the room's currently pinned messages (`m.room.pinned_events`),\nresolved and hydrated exactly like any other timeline read (redaction\nmasking, edit collapse, reaction tally) rather than a raw event-id list\n(issue #404, ADR 0084). Order follows the pinned list's own array order. An\nunknown `account_id`/`room_id`, or a room with no pinned state, yields an\nempty list (200), not a 404.",
+        "summary": "List pinned messages",
+        "description": "List the room's currently pinned messages (`m.room.pinned_events`),\nresolved and hydrated exactly like any other timeline read (redaction\nmasking, edit collapse, reaction tally) rather than a raw event-id list\n(issue #404, ADR 0084). Order follows the pinned list's own array order. An\nunknown `account_id`/`room_id`, or a room with no pinned state, yields an\nempty list (200), not a 404.",
         "operationId": "room_pinned",
         "parameters": [
           {
@@ -4816,7 +4858,8 @@
         "tags": [
           "power-levels"
         ],
-        "summary": "Read this room's fully resolved power levels (defaults filled in).",
+        "summary": "Get power levels",
+        "description": "Read this room's fully resolved power levels (defaults filled in).",
         "operationId": "get_power_levels",
         "parameters": [
           {
@@ -4914,7 +4957,8 @@
         "tags": [
           "power-levels"
         ],
-        "summary": "Apply a power-level change: role thresholds and/or per-user levels,\nmerged into one `m.room.power_levels` write.",
+        "summary": "Set power levels",
+        "description": "Apply a power-level change: role thresholds and/or per-user levels,\nmerged into one `m.room.power_levels` write.",
         "operationId": "set_power_levels",
         "parameters": [
           {
@@ -5034,8 +5078,8 @@
         "tags": [
           "ephemeral"
         ],
-        "summary": "Mark a room read: sets both the public read receipt and the private\nfully-read marker in one homeserver call.",
-        "description": "`event_id` is sent to the homeserver **verbatim**. A receipt is interpreted\nin arrival order while every axon read surface sorts by `origin_ts`, and the\ntwo disagree for backfilled events — so the client must name the event with\nthe greatest `arrival_order` among those it has displayed (ADR 0089). Only\nthe client knows what it displayed, so only the client can choose it: this\nroute does not resolve, substitute, or second-guess the id it is given.",
+        "summary": "Mark a room read",
+        "description": "Mark a room read: sets both the public read receipt and the private\nfully-read marker in one homeserver call.\n\n`event_id` is sent to the homeserver **verbatim**. A receipt is interpreted\nin arrival order while every axon read surface sorts by `origin_ts`, and the\ntwo disagree for backfilled events — so the client must name the event with\nthe greatest `arrival_order` among those it has displayed (ADR 0089). Only\nthe client knows what it displayed, so only the client can choose it: this\nroute does not resolve, substitute, or second-guess the id it is given.",
         "operationId": "send_read_receipt",
         "parameters": [
           {
@@ -5145,7 +5189,8 @@
         "tags": [
           "messages"
         ],
-        "summary": "Send a plain-text message to a room.",
+        "summary": "Send a message",
+        "description": "Send a plain-text message to a room.",
         "operationId": "send_message",
         "parameters": [
           {
@@ -5265,7 +5310,8 @@
         "tags": [
           "messages"
         ],
-        "summary": "Send a staged media upload to a room.",
+        "summary": "Send media",
+        "description": "Send a staged media upload to a room.",
         "operationId": "send_media",
         "parameters": [
           {
@@ -5385,7 +5431,8 @@
         "tags": [
           "messages"
         ],
-        "summary": "Send an existing MXC image as a standalone Matrix `m.sticker` event.\nInfo accepts raster MIME types, dimensions 1–16,384, and sizes at most\n100 MiB. Empty info is permitted; bytes are never fetched during a send.",
+        "summary": "Send a sticker",
+        "description": "Send an existing MXC image as a standalone Matrix `m.sticker` event.\nInfo accepts raster MIME types, dimensions 1–16,384, and sizes at most\n100 MiB. Empty info is permitted; bytes are never fetched during a send.",
         "operationId": "send_sticker",
         "parameters": [
           {
@@ -5505,7 +5552,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "List a space's children (`m.space.child`, MSC1772-ordered: `order` string\nascending, absent sorts last, then `origin_ts`, then `room_id`), each\nenriched with the child room's own cached name/avatar/room_type where Axon\nknows that room too (issue #404, ADR 0084). An unknown `account_id`/\n`room_id`, or a room with no children, yields an empty list (200), not a\n404. The store caps this at a fixed row count against a room with a\npathological number of children (`SPACE_HIERARCHY_CAP` in\n`axon-store::spaces`).",
+        "summary": "List a space's children",
+        "description": "List a space's children (`m.space.child`, MSC1772-ordered: `order` string\nascending, absent sorts last, then `origin_ts`, then `room_id`), each\nenriched with the child room's own cached name/avatar/room_type where Axon\nknows that room too (issue #404, ADR 0084). An unknown `account_id`/\n`room_id`, or a room with no children, yields an empty list (200), not a\n404. The store caps this at a fixed row count against a room with a\npathological number of children (`SPACE_HIERARCHY_CAP` in\n`axon-store::spaces`).",
         "operationId": "space_children",
         "parameters": [
           {
@@ -5565,7 +5613,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "List the spaces a room belongs to (`m.space.parent`) — the reverse lookup\nof [`space_children`]. An unknown `account_id`/`room_id`, or a room with no\nparents, yields an empty list (200), not a 404. Same row cap as\n`space_children`.",
+        "summary": "List a room's parent spaces",
+        "description": "List the spaces a room belongs to (`m.space.parent`) — the reverse lookup\nof [`space_children`]. An unknown `account_id`/`room_id`, or a room with no\nparents, yields an empty list (200), not a 404. Same row cap as\n`space_children`.",
         "operationId": "space_parents",
         "parameters": [
           {
@@ -5625,7 +5674,8 @@
         "tags": [
           "room-settings"
         ],
-        "summary": "Add or update a tag on this room (room account data, not a state event).",
+        "summary": "Set a room tag",
+        "description": "Add or update a tag on this room (room account data, not a state event).",
         "operationId": "set_room_tag",
         "parameters": [
           {
@@ -5752,7 +5802,8 @@
         "tags": [
           "room-settings"
         ],
-        "summary": "Remove a tag from this room.",
+        "summary": "Remove a room tag",
+        "description": "Remove a tag from this room.",
         "operationId": "remove_room_tag",
         "parameters": [
           {
@@ -5871,7 +5922,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "List the threads in a room (M8): one summary per distinct `m.thread` root,\nmost-recently-active first, each with its reply count and latest reply. The\nroot events themselves are read via the single-event endpoint; a thread's\nmembers are paged via [`thread_timeline`]. An unknown `account_id`/`room_id`\n(or a room with no threads) yields an empty list (200), not a 404. The list is\nhard-capped in the store against a room with a pathological thread count.",
+        "summary": "List threads",
+        "description": "List the threads in a room (M8): one summary per distinct `m.thread` root,\nmost-recently-active first, each with its reply count and latest reply. The\nroot events themselves are read via the single-event endpoint; a thread's\nmembers are paged via [`thread_timeline`]. An unknown `account_id`/`room_id`\n(or a room with no threads) yields an empty list (200), not a 404. The list is\nhard-capped in the store against a room with a pathological thread count.",
         "operationId": "room_threads",
         "parameters": [
           {
@@ -5931,7 +5983,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "Read a thread's timeline (M8): the `m.thread` members whose root is\n`root_id`, newest first, with the same cursor pagination as the room\ntimeline. The thread root itself is not included (fetch it via the\nsingle-event endpoint). Reactions and edits on thread members are aggregated\nonto their rows like any other timeline read. An unknown thread yields an\nempty page (200); a malformed cursor is a 400.",
+        "summary": "Get a thread timeline",
+        "description": "Read a thread's timeline (M8): the `m.thread` members whose root is\n`root_id`, newest first, with the same cursor pagination as the room\ntimeline. The thread root itself is not included (fetch it via the\nsingle-event endpoint). Reactions and edits on thread members are aggregated\nonto their rows like any other timeline read. An unknown thread yields an\nempty page (200); a malformed cursor is a 400.",
         "operationId": "thread_timeline",
         "parameters": [
           {
@@ -6029,8 +6082,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "Read a room's timeline, newest first, with cursor pagination.",
-        "description": "An unknown `account_id`/`room_id` yields an empty page (200), not a 404 — an\nempty timeline and a non-existent room are indistinguishable here and an\nempty page is the natural answer.",
+        "summary": "Get a room timeline",
+        "description": "Read a room's timeline, newest first, with cursor pagination.\n\nAn unknown `account_id`/`room_id` yields an empty page (200), not a 404 — an\nempty timeline and a non-existent room are indistinguishable here and an\nempty page is the natural answer.",
         "operationId": "room_timeline",
         "parameters": [
           {
@@ -6129,7 +6182,8 @@
         "tags": [
           "room-settings"
         ],
-        "summary": "Set this room's topic. An empty `topic` clears it.",
+        "summary": "Set the room topic",
+        "description": "Set this room's topic. An empty `topic` clears it.",
         "operationId": "set_room_topic",
         "parameters": [
           {
@@ -6249,7 +6303,8 @@
         "tags": [
           "ephemeral"
         ],
-        "summary": "Set (or clear) this account's typing indicator in a room.",
+        "summary": "Set the typing indicator",
+        "description": "Set (or clear) this account's typing indicator in a room.",
         "operationId": "send_typing_notice",
         "parameters": [
           {
@@ -6359,7 +6414,8 @@
         "tags": [
           "membership"
         ],
-        "summary": "Unban a user from this room, optionally with a reason.",
+        "summary": "Unban a user",
+        "description": "Unban a user from this room, optionally with a reason.",
         "operationId": "unban_user",
         "parameters": [
           {
@@ -6479,7 +6535,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "Where a tombstoned room's replacement lives, and/or where this room was\nupgraded from (issue #404, ADR 0084). The two reads are independent, so\nthey're fanned out concurrently rather than run one after the other. An\nunknown room, or one with neither event, reads as all-`null` (200), not a\n404. Deliberately not folded into `RoomDto` — see [`RoomUpgradeDto`] for\nwhy.",
+        "summary": "Get room upgrade links",
+        "description": "Where a tombstoned room's replacement lives, and/or where this room was\nupgraded from (issue #404, ADR 0084). The two reads are independent, so\nthey're fanned out concurrently rather than run one after the other. An\nunknown room, or one with neither event, reads as all-`null` (200), not a\n404. Deliberately not folded into `RoomDto` — see [`RoomUpgradeDto`] for\nwhy.",
         "operationId": "room_upgrade",
         "parameters": [
           {
@@ -6539,7 +6596,8 @@
         "tags": [
           "account-actions"
         ],
-        "summary": "Add `user_id` to this account's ignore list.",
+        "summary": "Ignore a user",
+        "description": "Add `user_id` to this account's ignore list.",
         "operationId": "ignore_user",
         "parameters": [
           {
@@ -6637,7 +6695,8 @@
         "tags": [
           "account-actions"
         ],
-        "summary": "Remove `user_id` from this account's ignore list.",
+        "summary": "Stop ignoring a user",
+        "description": "Remove `user_id` from this account's ignore list.",
         "operationId": "unignore_user",
         "parameters": [
           {
@@ -6737,7 +6796,8 @@
         "tags": [
           "account-actions"
         ],
-        "summary": "Read a Matrix user's profile (display name + avatar). `user_id` may be\nthis account's own user id or any other user's.",
+        "summary": "Get a user profile",
+        "description": "Read a Matrix user's profile (display name + avatar). `user_id` may be\nthis account's own user id or any other user's.",
         "operationId": "get_user_profile",
         "parameters": [
           {
@@ -6837,8 +6897,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Explicitly retry every pending UTD for an active account. The default startup\npolicy attempts each stored UTD once, then waits for fresh room-key arrivals;\nthis endpoint is the authenticated operator escape hatch for rows whose keys\nare already in the crypto store or whose initial startup attempt predated key\nacquisition.",
-        "description": "The identity lock is held only for the active check and client lookup;\nlogout can proceed and cancels this retry. The HTTP cap is 10 minutes\n(a reverse proxy may cut it earlier). A cap or cancel returns 200 with\npartial counts and `timed_out=true`, not 504.",
+        "summary": "Retry undecryptable events",
+        "description": "Explicitly retry every pending UTD for an active account. The default startup\npolicy attempts each stored UTD once, then waits for fresh room-key arrivals;\nthis endpoint is the authenticated operator escape hatch for rows whose keys\nare already in the crypto store or whose initial startup attempt predated key\nacquisition.\n\nThe identity lock is held only for the active check and client lookup;\nlogout can proceed and cancels this retry. The HTTP cap is 10 minutes\n(a reverse proxy may cut it earlier). A cap or cancel returns 200 with\npartial counts and `timed_out=true`, not 504.",
         "operationId": "redecrypt_utds",
         "parameters": [
           {
@@ -6909,7 +6969,8 @@
         "tags": [
           "verification"
         ],
-        "summary": "List the account's currently-tracked verification flows (live, plus\nrecently-terminal ones still within their grace window).",
+        "summary": "List verification flows",
+        "description": "List the account's currently-tracked verification flows (live, plus\nrecently-terminal ones still within their grace window).",
         "operationId": "list_flows",
         "parameters": [
           {
@@ -6968,8 +7029,8 @@
         "tags": [
           "verification"
         ],
-        "summary": "Start a SAS verification — against one of the account's own trusted devices\n(`device_id`, self-verification) or against another user's identity\n(`user_id`, cross-user verification; ADR 0040) — returning the new flow's\n`flow_id`. The exchange then proceeds asynchronously: watch `verification.*`\nframes over `/v1/ws`, or poll `GET …/verify/{flow_id}`.",
-        "description": "Trust-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
+        "summary": "Start a verification",
+        "description": "Start a SAS verification — against one of the account's own trusted devices\n(`device_id`, self-verification) or against another user's identity\n(`user_id`, cross-user verification; ADR 0040) — returning the new flow's\n`flow_id`. The exchange then proceeds asynchronously: watch `verification.*`\nframes over `/v1/ws`, or poll `GET …/verify/{flow_id}`.\n\nTrust-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "start_verification",
         "parameters": [
           {
@@ -7060,7 +7121,8 @@
         "tags": [
           "verification"
         ],
-        "summary": "Read one verification flow's replayable state — the endpoint a reconnecting\nclient reads to resume (current stage, target device, and the SAS\nemoji/decimals once they're available).",
+        "summary": "Get a verification flow",
+        "description": "Read one verification flow's replayable state — the endpoint a reconnecting\nclient reads to resume (current stage, target device, and the SAS\nemoji/decimals once they're available).",
         "operationId": "get_flow",
         "parameters": [
           {
@@ -7130,7 +7192,8 @@
         "tags": [
           "verification"
         ],
-        "summary": "Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal\nflow succeeds. Trust-bearing; gated by the bearer-token auth layer (M7b).",
+        "summary": "Cancel a verification",
+        "description": "Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal\nflow succeeds. Trust-bearing; gated by the bearer-token auth layer (M7b).",
         "operationId": "cancel",
         "parameters": [
           {
@@ -7203,7 +7266,8 @@
         "tags": [
           "verification"
         ],
-        "summary": "Confirm that the SAS matches, sending this side's MAC. Returns `204` once the\nconfirm is sent; completion (`verification.done`) arrives asynchronously.\nIdempotent. Trust-bearing; gated by the bearer-token auth layer (M7b).",
+        "summary": "Confirm a verification",
+        "description": "Confirm that the SAS matches, sending this side's MAC. Returns `204` once the\nconfirm is sent; completion (`verification.done`) arrives asynchronously.\nIdempotent. Trust-bearing; gated by the bearer-token auth layer (M7b).",
         "operationId": "confirm",
         "parameters": [
           {
@@ -7286,7 +7350,8 @@
         "tags": [
           "device-state"
         ],
-        "summary": "Read one namespace of per-device state: the last-write-wins **merged view\nacross all the account's devices** (per key, the newest write wins; deleted\nkeys are absent). A namespace never written is an empty map, not a `404`.\nThe `device_id` names the calling device; the merge is account-wide.",
+        "summary": "Get device state",
+        "description": "Read one namespace of per-device state: the last-write-wins **merged view\nacross all the account's devices** (per key, the newest write wins; deleted\nkeys are absent). A namespace never written is an empty map, not a `404`.\nThe `device_id` names the calling device; the merge is account-wide.",
         "operationId": "get_device_state",
         "parameters": [
           {
@@ -7374,7 +7439,8 @@
         "tags": [
           "device-state"
         ],
-        "summary": "Write per-device state: a **merge-upsert** of the supplied entries under the\ncalling device. Only the keys present are touched; a `null` value deletes\nthe key (a tombstone, so the deletion wins the cross-device merge).\nLast-write-wins on the server clock — the returned `updated_at` is the\nordering all devices share. A successful write with at least one entry fans\nout a `device_state.changed` frame over `/v1/ws` carrying this `device_id`,\nwhich sibling devices apply and the originator ignores.",
+        "summary": "Update device state",
+        "description": "Write per-device state: a **merge-upsert** of the supplied entries under the\ncalling device. Only the keys present are touched; a `null` value deletes\nthe key (a tombstone, so the deletion wins the cross-device merge).\nLast-write-wins on the server clock — the returned `updated_at` is the\nordering all devices share. A successful write with at least one entry fans\nout a `device_state.changed` frame over `/v1/ws` carrying this `device_id`,\nwhich sibling devices apply and the originator ignores.",
         "operationId": "put_device_state",
         "parameters": [
           {
@@ -7474,7 +7540,8 @@
         "tags": [
           "invites"
         ],
-        "summary": "List pending room invites across accounts, newest first.",
+        "summary": "List invites",
+        "description": "List pending room invites across accounts, newest first.",
         "operationId": "list_invites",
         "parameters": [
           {
@@ -7525,8 +7592,8 @@
         "tags": [
           "management"
         ],
-        "summary": "Start binding a new sign-in identity to this instance's owner.",
-        "description": "Returns a `url` to open in a browser. Signing in there with the provider\nbinds that identity; poll the bind by its `id` to learn when. The bind\nlapses after ten minutes.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
+        "summary": "Start an identity bind",
+        "description": "Start binding a new sign-in identity to this instance's owner.\n\nReturns a `url` to open in a browser. Signing in there with the provider\nbinds that identity; poll the bind by its `id` to learn when. The bind\nlapses after ten minutes.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
         "operationId": "start_bind",
         "requestBody": {
           "content": {
@@ -7625,8 +7692,8 @@
         "tags": [
           "management"
         ],
-        "summary": "Read where an identity bind stands: `pending`, `completed` or `expired`.",
-        "description": "A bind that did not complete is removed once it lapses, so a `404` for an\nid this server issued means the same as `expired`. A completed bind stays\nreadable for a day after that, so a client that polls late still learns it\nsucceeded.",
+        "summary": "Get an identity bind",
+        "description": "Read where an identity bind stands: `pending`, `completed` or `expired`.\n\nA bind that did not complete is removed once it lapses, so a `404` for an\nid this server issued means the same as `expired`. A completed bind stays\nreadable for a day after that, so a client that polls late still learns it\nsucceeded.",
         "operationId": "bind_status",
         "parameters": [
           {
@@ -7697,8 +7764,8 @@
         "tags": [
           "management"
         ],
-        "summary": "List the upstream sign-in identities bound to this instance's owner.",
-        "description": "Each carries `current`, set on the identity the calling session signed in\nwith, and `sign_in_available`, false when its provider is switched off and\nthe identity therefore cannot produce a session.",
+        "summary": "List bound identities",
+        "description": "List the upstream sign-in identities bound to this instance's owner.\n\nEach carries `current`, set on the identity the calling session signed in\nwith, and `sign_in_available`, false when its provider is switched off and\nthe identity therefore cannot produce a session.",
         "operationId": "list_identities",
         "responses": {
           "200": {
@@ -7747,8 +7814,8 @@
         "tags": [
           "management"
         ],
-        "summary": "Unbind a sign-in identity and end every session it was used to start.",
-        "description": "Axon forgets the identity: its access tokens are revoked and its refresh\ntokens deleted, atomically. So are the non-expiring tokens its sessions\nminted through this API, and any those minted in turn; a token minted from\nthe command line or by another identity's session is not affected. This does **not** revoke the upstream\nprovider's own authorization of Axon; that is the provider's to withdraw.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise). Unbinding the identity the calling\nsession signed in with ends that session too.",
+        "summary": "Unbind an identity",
+        "description": "Unbind a sign-in identity and end every session it was used to start.\n\nAxon forgets the identity: its access tokens are revoked and its refresh\ntokens deleted, atomically. So are the non-expiring tokens its sessions\nminted through this API, and any those minted in turn; a token minted from\nthe command line or by another identity's session is not affected. This does **not** revoke the upstream\nprovider's own authorization of Axon; that is the provider's to withdraw.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise). Unbinding the identity the calling\nsession signed in with ends that session too.",
         "operationId": "unbind_identity",
         "parameters": [
           {
@@ -7831,8 +7898,8 @@
         "tags": [
           "management"
         ],
-        "summary": "List this instance's bearer tokens, without their secrets.",
-        "description": "Revoked and expired tokens are included, so an entry the owner does not\nrecognize stays visible after it stops working. The tokens that still work\ncome first, then the rest, newest first within each; at most 500 are\nreturned, which only ever drops the oldest dead ones. `current` marks the\ntoken that made this request.",
+        "summary": "List tokens",
+        "description": "List this instance's bearer tokens, without their secrets.\n\nRevoked and expired tokens are included, so an entry the owner does not\nrecognize stays visible after it stops working. The tokens that still work\ncome first, then the rest, newest first within each; at most 500 are\nreturned, which only ever drops the oldest dead ones. `current` marks the\ntoken that made this request.",
         "operationId": "list_tokens",
         "responses": {
           "200": {
@@ -7879,8 +7946,8 @@
         "tags": [
           "management"
         ],
-        "summary": "Mint a bearer token that never expires.",
-        "description": "The response is the only time the token's secret is available: Axon keeps\nits hash and cannot show it again. It is sent with `Cache-Control:\nno-store`.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise). The new token records which token\nminted it.",
+        "summary": "Mint a token",
+        "description": "Mint a bearer token that never expires.\n\nThe response is the only time the token's secret is available: Axon keeps\nits hash and cannot show it again. It is sent with `Cache-Control:\nno-store`.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise). The new token records which token\nminted it.",
         "operationId": "mint_token",
         "requestBody": {
           "content": {
@@ -7959,8 +8026,8 @@
         "tags": [
           "management"
         ],
-        "summary": "Revoke a token. It stops working at once and stays in the list.",
-        "description": "Revoking a sign-in session's access token also ends the session's ability\nto renew itself. Axon cannot tell one session of a client from another,\nso this signs out every session that client holds for that identity,\nthe caller's included if it is one of them. Access tokens those other\nsessions already hold keep working until they expire, within the hour by\ndefault.\n\nRevoking the token that made the request is allowed: it is how a device\nsigns itself out. Revoking a token that is already revoked succeeds; if it\nwas a session's access token, the session's ability to renew itself is\nended again, in case the first revocation left it.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
+        "summary": "Revoke a token",
+        "description": "Revoke a token. It stops working at once and stays in the list.\n\nRevoking a sign-in session's access token also ends the session's ability\nto renew itself. Axon cannot tell one session of a client from another,\nso this signs out every session that client holds for that identity,\nthe caller's included if it is one of them. Access tokens those other\nsessions already hold keep working until they expire, within the hour by\ndefault.\n\nRevoking the token that made the request is allowed: it is how a device\nsigns itself out. Revoking a token that is already revoked succeeds; if it\nwas a session's access token, the session's ability to renew itself is\nended again, in case the first revocation left it.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
         "operationId": "revoke_token",
         "parameters": [
           {
@@ -8043,8 +8110,8 @@
         "tags": [
           "media"
         ],
-        "summary": "Proxy an `mxc://` download through the account's homeserver connection.",
-        "description": "The `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's media descriptor, member avatar, or\nMSC4027 custom reaction key.\nThe response body is the raw media bytes, streamed from the on-disk cache\nwith range-request and conditional-GET support.",
+        "summary": "Download media",
+        "description": "Proxy an `mxc://` download through the account's homeserver connection.\n\nThe `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's media descriptor, member avatar, or\nMSC4027 custom reaction key.\nThe response body is the raw media bytes, streamed from the on-disk cache\nwith range-request and conditional-GET support.",
         "operationId": "get_media",
         "parameters": [
           {
@@ -8202,8 +8269,8 @@
         "tags": [
           "media"
         ],
-        "summary": "Proxy a homeserver-generated thumbnail of an `mxc://` object through the\naccount's homeserver connection.",
-        "description": "Shares [`get_media`]'s event lookup (via [`resolve_media_content`]) and\nconditional-GET/range-serving machinery, but resolves a resized variant\nvia [`MediaProxy::get_thumbnail`] instead of the full original, and\ncorrects `Content-Type` by sniffing the returned bytes (see\n[`correct_image_content_type`]) since a homeserver-regenerated\nthumbnail may not match the original's declared mimetype. Encrypted media\nis rejected with `400` before the proxy is ever called — see\n[`resolve_thumbnail_spec`].",
+        "summary": "Download a media thumbnail",
+        "description": "Proxy a homeserver-generated thumbnail of an `mxc://` object through the\naccount's homeserver connection.\n\nShares [`get_media`]'s event lookup (via [`resolve_media_content`]) and\nconditional-GET/range-serving machinery, but resolves a resized variant\nvia [`MediaProxy::get_thumbnail`] instead of the full original, and\ncorrects `Content-Type` by sniffing the returned bytes (see\n[`correct_image_content_type`]) since a homeserver-regenerated\nthumbnail may not match the original's declared mimetype. Encrypted media\nis rejected with `400` before the proxy is ever called — see\n[`resolve_thumbnail_spec`].",
         "operationId": "get_media_thumbnail",
         "parameters": [
           {
@@ -8382,6 +8449,7 @@
         "tags": [
           "oauth"
         ],
+        "summary": "Request an Apple sign-in challenge",
         "operationId": "challenge",
         "parameters": [
           {
@@ -8497,6 +8565,7 @@
         "tags": [
           "oauth"
         ],
+        "summary": "Exchange an Apple identity token",
         "operationId": "token",
         "parameters": [
           {
@@ -8592,8 +8661,8 @@
         "tags": [
           "oauth"
         ],
-        "summary": "`GET /v1/oauth/providers`: which sign-in providers this instance offers.",
-        "description": "A client cannot know this by configuration. Which providers exist is a\nproperty of the *server*, and a client that is distributed as a binary —\nthe desktop and mobile shells of ADR 0102 — is pointed at a server it has\nnever seen and cannot have been built against. Baking the list in at build\ntime, as the web client's `VITE_AXON_OAUTH_PROVIDERS` does, works only when\nwhoever builds the bundle also runs the server.\n\nDeliberately un-gated, like the rest of this module: it is read *before*\nthere is a token, to decide which buttons the sign-in screen has. It\ntherefore reveals which IdPs an instance trusts to anyone who can reach it,\nwhich is the same thing its sign-in page would show them, and no more than\n`/v1/oauth/authorize` already tells them by accepting or rejecting a\n`provider`.\n\n`404` when OAuth is off, matching this module's stated policy: an\nunauthenticated caller of a disabled surface sees \"no such route\", not\n\"come back later\".",
+        "summary": "List sign-in providers",
+        "description": "`GET /v1/oauth/providers`: which sign-in providers this instance offers.\n\nA client cannot know this by configuration. Which providers exist is a\nproperty of the *server*, and a client that is distributed as a binary —\nthe desktop and mobile shells of ADR 0102 — is pointed at a server it has\nnever seen and cannot have been built against. Baking the list in at build\ntime, as the web client's `VITE_AXON_OAUTH_PROVIDERS` does, works only when\nwhoever builds the bundle also runs the server.\n\nDeliberately un-gated, like the rest of this module: it is read *before*\nthere is a token, to decide which buttons the sign-in screen has. It\ntherefore reveals which IdPs an instance trusts to anyone who can reach it,\nwhich is the same thing its sign-in page would show them, and no more than\n`/v1/oauth/authorize` already tells them by accepting or rejecting a\n`provider`.\n\n`404` when OAuth is off, matching this module's stated policy: an\nunauthenticated caller of a disabled surface sees \"no such route\", not\n\"come back later\".",
         "operationId": "providers",
         "parameters": [
           {
@@ -8639,7 +8708,8 @@
         "tags": [
           "oauth"
         ],
-        "summary": "Query callback adapter; both methods share the same validation and completion.",
+        "summary": "Complete a sign-in (redirect)",
+        "description": "Query callback adapter; both methods share the same validation and completion.",
         "operationId": "callback_get",
         "parameters": [
           {
@@ -8750,7 +8820,8 @@
         "tags": [
           "oauth"
         ],
-        "summary": "Complete either GET or bounded form POST through the same validated flow.",
+        "summary": "Complete a sign-in (form post)",
+        "description": "Complete either GET or bounded form POST through the same validated flow.",
         "operationId": "callback",
         "parameters": [
           {
@@ -8846,7 +8917,8 @@
         "tags": [
           "preferences"
         ],
-        "summary": "Read one instance preference. An allowlisted key that has never been\nwritten is a `404` so a client can tell \"unset\" from an empty value\n(ADR 0103's one-shot upload of local `spaceOrder`).",
+        "summary": "Get a preference",
+        "description": "Read one instance preference. An allowlisted key that has never been\nwritten is a `404` so a client can tell \"unset\" from an empty value\n(ADR 0103's one-shot upload of local `spaceOrder`).",
         "operationId": "get_preference",
         "parameters": [
           {
@@ -8914,7 +8986,8 @@
         "tags": [
           "preferences"
         ],
-        "summary": "Write one instance preference. Last-write-wins on the whole value. A\nsuccessful write fans out `preferences.changed` carrying this `device_id`.",
+        "summary": "Set a preference",
+        "description": "Write one instance preference. Last-write-wins on the whole value. A\nsuccessful write fans out `preferences.changed` carrying this `device_id`.",
         "operationId": "put_preference",
         "parameters": [
           {
@@ -8984,8 +9057,8 @@
         "tags": [
           "push"
         ],
-        "summary": "Register or re-home a device token.",
-        "description": "Upsert on `(provider, token)`. The same session updates disclosure,\nenvironment, and the access token that last wrote the row. A different\nsession becomes the owner and keeps the same id. The response does not\ninclude the token.",
+        "summary": "Register a push token",
+        "description": "Register or re-home a device token.\n\nUpsert on `(provider, token)`. The same session updates disclosure,\nenvironment, and the access token that last wrote the row. A different\nsession becomes the owner and keeps the same id. The response does not\ninclude the token.",
         "operationId": "put_registration",
         "requestBody": {
           "content": {
@@ -9044,8 +9117,8 @@
         "tags": [
           "push"
         ],
-        "summary": "Delete the registration when this session owns it.",
-        "description": "An unknown id, or another session's id, is also `204`. The route is\nidempotent and does not reveal whether some other device has that id.",
+        "summary": "Delete a push registration",
+        "description": "Delete the registration when this session owns it.\n\nAn unknown id, or another session's id, is also `204`. The route is\nidempotent and does not reveal whether some other device has that id.",
         "operationId": "delete_registration",
         "parameters": [
           {
@@ -9089,7 +9162,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "List rooms across accounts, most-recent-activity first.",
+        "summary": "List rooms",
+        "description": "List rooms across accounts, most-recent-activity first.",
         "operationId": "list_rooms",
         "parameters": [
           {
@@ -9140,8 +9214,8 @@
         "tags": [
           "search"
         ],
-        "summary": "Search across the index, BM25-ranked when a full-text query is present,\nor timestamp-ordered when `sort=newest` or `sort=oldest`, then paginated.\nKeep the query filters and sort unchanged while following cursors.\nChanging the sort requires starting again without a cursor.",
-        "description": "`503` when search is disabled (`search.enabled = false`). A missing/empty `q`\nis allowed only with at least one narrowing filter (`account_id`, `room_id`,\n`sender`, `from`, or `to`); an unbounded empty query or malformed `cursor` is\na `400`. Results are the resolved read-API event view (latest edited body,\nredaction-masked) plus each hit's score.",
+        "summary": "Search messages",
+        "description": "Search across the index, BM25-ranked when a full-text query is present,\nor timestamp-ordered when `sort=newest` or `sort=oldest`, then paginated.\nKeep the query filters and sort unchanged while following cursors.\nChanging the sort requires starting again without a cursor.\n\n`503` when search is disabled (`search.enabled = false`). A missing/empty `q`\nis allowed only with at least one narrowing filter (`account_id`, `room_id`,\n`sender`, `from`, or `to`); an unbounded empty query or malformed `cursor` is\na `400`. Results are the resolved read-API event view (latest edited body,\nredaction-masked) plus each hit's score.",
         "operationId": "search",
         "parameters": [
           {
@@ -9287,7 +9361,8 @@
         "tags": [
           "status"
         ],
-        "summary": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
+        "summary": "Get backfill status",
+        "description": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
         "operationId": "get_status",
         "responses": {
           "200": {

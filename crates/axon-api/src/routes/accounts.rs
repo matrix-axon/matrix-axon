@@ -32,6 +32,8 @@ async fn account_dto(
     AccountDto::from_account(account, state, backup)
 }
 
+/// List accounts
+///
 /// List the accounts this Axon manages, oldest first — the **client-visible**
 /// set: `active` and `deactivated`.
 ///
@@ -65,6 +67,8 @@ pub async fn list_accounts(
     Ok(ApiResponse::new(dtos))
 }
 
+/// Log in a Matrix account
+///
 /// Add or reactivate a Matrix account at runtime, then return the resulting
 /// active account. Idempotent by Matrix `username`: a new identity is minted, a
 /// logged-out (`deactivated`) account is reactivated using its stored endpoint,
@@ -124,6 +128,8 @@ pub async fn login(
     ))
 }
 
+/// Import an access token as an account
+///
 /// Adopt an existing Matrix access token as a runtime account, then return the
 /// resulting active account — the runtime replacement for the retired
 /// `sync.account.access_token` boot-provisioning path: restore a session axon
@@ -185,6 +191,8 @@ pub async fn import_token(
     ))
 }
 
+/// Log out an account
+///
 /// Log a Matrix account out, then return the resulting (now `deactivated`)
 /// account. Stops syncing it, invalidates its device token upstream (best-effort
 /// — an unreachable homeserver never fails the logout), and moves it to a
@@ -227,6 +235,8 @@ pub async fn logout(
     ))
 }
 
+/// Recover E2EE keys
+///
 /// Acquire E2EE keys for an **active** account from its Secure-Storage (4S)
 /// recovery key, then return the account with its `verified` flag re-derived
 /// and an honest megolm-backup action (ADR 0098). Cross-signing is imported
@@ -286,6 +296,8 @@ pub async fn recover(
     }))
 }
 
+/// Enable key backup
+///
 /// Originate megolm key backup, export `m.megolm_backup.v1` into existing 4S,
 /// resume a crashed create, or kick an already-enabled upload (ADR 0098).
 /// Never mints a new recovery key. Never deletes someone else's backup.
@@ -333,6 +345,8 @@ pub async fn enable_backup(
     }))
 }
 
+/// Retry undecryptable events
+///
 /// Explicitly retry every pending UTD for an active account. The default startup
 /// policy attempts each stored UTD once, then waits for fresh room-key arrivals;
 /// this endpoint is the authenticated operator escape hatch for rows whose keys
@@ -364,6 +378,8 @@ pub async fn redecrypt_utds(
     Ok(ApiResponse::new(RedecryptUtdsResponse::from(stats)))
 }
 
+/// Delete an account
+///
 /// Permanently delete an account and every trace of it: stops syncing it,
 /// invalidates its device token upstream, removes its on-disk SDK store, and drops
 /// its row (cascading away its archived events, room state, and account data).
@@ -400,6 +416,8 @@ pub async fn delete_account(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// Get an account
+///
 /// Read a single account by id, in whatever lifecycle state it is — unlike the
 /// list, a direct by-id read is not filtered to `active` (so a client can poll
 /// an account it knows and watch it transition). An unknown id is a 404.

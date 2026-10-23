@@ -32,6 +32,8 @@ use crate::response::{ApiError, ApiResponse};
 use crate::sender::RoomSettingsSender;
 use crate::uploads::StagedUploadService;
 
+/// Set the room name
+///
 /// Set this room's name. An empty `name` clears it.
 #[utoipa::path(
     put,
@@ -83,6 +85,8 @@ pub async fn set_room_name(
     }
 }
 
+/// Set the room topic
+///
 /// Set this room's topic. An empty `topic` clears it.
 #[utoipa::path(
     put,
@@ -134,6 +138,8 @@ pub async fn set_room_topic(
     }
 }
 
+/// Set the room avatar
+///
 /// Set this room's avatar from an already-staged upload.
 #[utoipa::path(
     put,
@@ -193,6 +199,8 @@ pub async fn set_room_avatar(
     }
 }
 
+/// Clear the room avatar
+///
 /// Clear this room's avatar.
 #[utoipa::path(
     delete,
@@ -239,6 +247,8 @@ pub async fn remove_room_avatar(
     }
 }
 
+/// Set a room tag
+///
 /// Add or update a tag on this room (room account data, not a state event).
 #[utoipa::path(
     put,
@@ -293,6 +303,8 @@ pub async fn set_room_tag(
     }
 }
 
+/// Remove a room tag
+///
 /// Remove a tag from this room.
 #[utoipa::path(
     delete,

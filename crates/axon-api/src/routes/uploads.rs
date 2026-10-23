@@ -15,6 +15,8 @@ use crate::uploads::{StageUploadRequest, StagedUploadService};
 const MAX_FILENAME_CHARS: usize = 255;
 const MAX_CONTENT_TYPE_CHARS: usize = 255;
 
+/// Stage a media upload
+///
 /// Stage raw upload bytes for a later room-aware media send.
 #[utoipa::path(
     post,
@@ -68,6 +70,8 @@ pub async fn stage_upload(
     }))
 }
 
+/// Delete a staged upload
+///
 /// Delete an unsent staged upload.
 #[utoipa::path(
     delete,
