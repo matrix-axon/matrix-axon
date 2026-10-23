@@ -153,7 +153,7 @@ pub async fn send_message(
     responses(
         (status = 200, description = "Media sent", body = ApiResponse<SendResultDto>),
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
-        (status = 413, description = "Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 16384 bytes reserved for media fields. No preflight upload claims or event dispatch.", body = crate::response::ErrorResponse),
+        (status = 413, description = "Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. No preflight upload claims or event dispatch.", body = crate::response::ErrorResponse),
         (status = 504, description = "Preview-aware send deadline exceeded: outcome unknown; do not automatically resend", body = crate::response::ErrorResponse),
         (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 404, description = "Account, room, or upload not found", body = crate::response::ErrorResponse),

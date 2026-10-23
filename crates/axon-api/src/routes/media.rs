@@ -77,7 +77,7 @@ fn encrypted_file_for_mxc(content: &Value, mxc_url: &str) -> Option<Value> {
         })
         .or_else(|| {
             axon_core::link_preview::preview_for_mxc(content, mxc_url)
-                .and_then(axon_core::link_preview::encrypted_preview_file)
+                .and_then(|p| axon_core::link_preview::encrypted_preview_file_for_mxc(p, mxc_url))
                 .filter(|f| f.get("url").and_then(Value::as_str) == Some(mxc_url))
                 .cloned()
         })
@@ -648,6 +648,27 @@ mod tests {
                 .and_then(|file| file.get("key").cloned()),
             Some(json!("main"))
         );
+    }
+
+    #[test]
+    fn late_received_preview_and_mixed_descriptor_keys_never_fall_back_to_plain_media() {
+        for array in ["m.url_previews", "com.beeper.linkpreviews"] {
+            let mut cards = vec![serde_json::json!({}); 32];
+            cards[0] = serde_json::json!({"og:image":"mxc://example.org/late"});
+            cards.push(serde_json::json!({
+                "matrix:image:encrypted": {"url":"mxc://example.org/first","v":"v2"},
+                "beeper:image:encryption": {"url":"mxc://example.org/late","v":"v2"},
+                "og:image:type": "image/png"
+            }));
+            let mut content = serde_json::json!({});
+            content[array] = serde_json::json!(cards);
+            for mxc in ["mxc://example.org/first", "mxc://example.org/late"] {
+                assert_eq!(encrypted_file_for_mxc(&content, mxc).unwrap()["url"], mxc);
+                assert_eq!(content_type_for_mxc(&content, mxc), "image/png");
+            }
+            content["m.url_previews"] = serde_json::json!([]);
+            assert!(encrypted_file_for_mxc(&content, "mxc://example.org/late").is_none());
+        }
     }
 
     #[test]

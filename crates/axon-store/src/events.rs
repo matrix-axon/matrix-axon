@@ -1334,11 +1334,45 @@ impl Store {
                        UNION ALL \
                        SELECT id, 3 AS priority FROM events \
                        WHERE account_id = $1 AND event_type = 'm.room.message' \
-                         AND (content->'m.url_previews' @> $3::jsonb \
-                              OR content->'m.url_previews' @> $4::jsonb \
-                              OR (NOT (content ? 'm.url_previews') AND \
-                                  (content->'com.beeper.linkpreviews' @> $3::jsonb \
-                                   OR content->'com.beeper.linkpreviews' @> $5::jsonb))) \
+                         AND content->'m.url_previews' @> $3::jsonb \
+                         AND NOT EXISTS (SELECT 1 FROM events rr \
+                             WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
+                               AND rr.redacts = events.event_id) \
+                       UNION ALL \
+                       SELECT id, 3 AS priority FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'m.url_previews' @> $4::jsonb \
+                         AND NOT EXISTS (SELECT 1 FROM events rr \
+                             WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
+                               AND rr.redacts = events.event_id) \
+                       UNION ALL \
+                       SELECT id, 3 AS priority FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'m.url_previews' @> $5::jsonb \
+                         AND NOT EXISTS (SELECT 1 FROM events rr \
+                             WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
+                               AND rr.redacts = events.event_id) \
+                       UNION ALL \
+                       SELECT id, 3 AS priority FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'com.beeper.linkpreviews' @> $3::jsonb \
+                         AND NOT (content ? 'm.url_previews') \
+                         AND NOT EXISTS (SELECT 1 FROM events rr \
+                             WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
+                               AND rr.redacts = events.event_id) \
+                       UNION ALL \
+                       SELECT id, 3 AS priority FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'com.beeper.linkpreviews' @> $4::jsonb \
+                         AND NOT (content ? 'm.url_previews') \
+                         AND NOT EXISTS (SELECT 1 FROM events rr \
+                             WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
+                               AND rr.redacts = events.event_id) \
+                       UNION ALL \
+                       SELECT id, 3 AS priority FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'com.beeper.linkpreviews' @> $5::jsonb \
+                         AND NOT (content ? 'm.url_previews') \
                          AND NOT EXISTS (SELECT 1 FROM events rr \
                              WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
                                AND rr.redacts = events.event_id) \

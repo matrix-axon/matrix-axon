@@ -51,11 +51,11 @@ fn validate_preview_image(
         image::ImageFormat::WebP => "image/webp",
         _ => return Err(invalid()),
     };
-    if upload
-        .content_type
-        .as_deref()
-        .is_some_and(|t| t.split(';').next().unwrap_or_default().trim() != mimetype)
-    {
+    if upload.content_type.as_deref().is_some_and(|t| {
+        let declared = t.split(';').next().unwrap_or_default().trim();
+        !(declared.eq_ignore_ascii_case(mimetype)
+            || mimetype == "image/jpeg" && declared.eq_ignore_ascii_case("image/jpg"))
+    }) {
         return Err(invalid());
     }
     let (width, height) = reader.into_dimensions().map_err(|_| invalid())?;
@@ -792,6 +792,36 @@ mod tests {
             content_type: Some("image/png".into()),
             size_bytes: bytes.len() as u64,
             bytes,
+        }
+    }
+
+    #[test]
+    fn preview_decoder_normalizes_case_parameters_and_jpeg_aliases() {
+        for (format, canonical, declarations) in [
+            (
+                image::ImageFormat::Png,
+                "image/png",
+                vec!["IMAGE/PNG", "image/PNG; charset=binary"],
+            ),
+            (
+                image::ImageFormat::Jpeg,
+                "image/jpeg",
+                vec!["image/JPEG", "image/jpg", "IMAGE/JPG; x=test"],
+            ),
+            (image::ImageFormat::WebP, "image/webp", vec!["IMAGE/WEBP"]),
+        ] {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(2, 2)
+                .write_to(&mut out, format)
+                .unwrap();
+            for declared in declarations {
+                let mut upload = preview_upload(out.get_ref().clone());
+                upload.content_type = Some(declared.into());
+                assert_eq!(
+                    super::validate_preview_image(upload).unwrap().mimetype,
+                    canonical
+                );
+            }
         }
     }
 
