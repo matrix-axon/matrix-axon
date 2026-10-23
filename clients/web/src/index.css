@@ -3890,9 +3890,15 @@ span.composer-attachment-thumb {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: 28rem;
-  max-width: calc(100vw - 2rem);
+  max-width: calc(
+    var(--app-viewport-width, 100vw) - var(--safe-left) - var(--safe-right) -
+      2rem
+  );
   height: 34rem;
-  max-height: calc(100vh - 2rem);
+  max-height: calc(
+    var(--app-viewport-height, 100vh) - var(--safe-top) - var(--safe-bottom) -
+      2rem
+  );
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 0.9rem;
@@ -3902,7 +3908,10 @@ span.composer-attachment-thumb {
 
 @supports (max-height: 100dvh) {
   .reaction-full-picker {
-    max-height: calc(100dvh - 2rem);
+    max-height: calc(
+      var(--app-viewport-height, 100dvh) - var(--safe-top) -
+        var(--safe-bottom) - 2rem
+    );
   }
 }
 

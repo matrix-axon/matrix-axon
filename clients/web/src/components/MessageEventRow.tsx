@@ -124,7 +124,7 @@ export function fullReactionPickerPosition({
         ? preferredBelow
         : Math.min(Math.max(preferredAbove, margin), maxTop)
 
-  return { left, top }
+  return { left, top: Math.min(Math.max(top, margin), maxTop) }
 }
 
 /**
@@ -1040,22 +1040,43 @@ export function ReactionPicker({
       return
     }
     const dialogBox = dialog.getBoundingClientRect()
-    const viewportWidth = window.innerWidth
-    const viewportHeight = window.innerHeight
+    // Use the shell's visible viewport (which follows the soft keyboard),
+    // then reserve the device safe areas for this body-level popup.
+    const rootStyle = getComputedStyle(document.documentElement)
+    const pixels = (name: string) =>
+      Number.parseFloat(rootStyle.getPropertyValue(name)) || 0
+    const viewportLeft = pixels('--app-viewport-left') + pixels('--safe-left')
+    const viewportTop = pixels('--app-viewport-top') + pixels('--safe-top')
+    const viewportWidth =
+      (pixels('--app-viewport-width') || window.innerWidth) -
+      pixels('--safe-left') -
+      pixels('--safe-right')
+    const viewportHeight =
+      (pixels('--app-viewport-height') || window.innerHeight) -
+      pixels('--safe-top') -
+      pixels('--safe-bottom')
     const fallbackAnchor = {
       top: viewportHeight / 2,
       right: viewportWidth / 2,
       bottom: viewportHeight / 2,
     }
-    const anchor = anchorRect ?? fallbackAnchor
-
-    setPickerPosition(
-      fullReactionPickerPosition({
-        anchor,
-        dialog: dialogBox,
-        viewport: { width: viewportWidth, height: viewportHeight },
-      }),
-    )
+    const anchor =
+      anchorRect === null
+        ? fallbackAnchor
+        : {
+            top: anchorRect.top - viewportTop,
+            right: anchorRect.right - viewportLeft,
+            bottom: anchorRect.bottom - viewportTop,
+          }
+    const position = fullReactionPickerPosition({
+      anchor,
+      dialog: dialogBox,
+      viewport: { width: viewportWidth, height: viewportHeight },
+    })
+    setPickerPosition({
+      left: position.left + viewportLeft,
+      top: position.top + viewportTop,
+    })
   }, [anchorRect, mode])
 
   useLayoutEffect(() => {
@@ -1066,9 +1087,21 @@ export function ReactionPicker({
     if (mode !== 'full') {
       return
     }
+    const observer =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(positionFullPicker)
+    if (fullPickerDialogRef.current !== null) {
+      observer?.observe(fullPickerDialogRef.current)
+    }
+    window.visualViewport?.addEventListener('resize', positionFullPicker)
+    window.visualViewport?.addEventListener('scroll', positionFullPicker)
     window.addEventListener('resize', positionFullPicker)
     window.addEventListener('scroll', positionFullPicker, true)
     return () => {
+      observer?.disconnect()
+      window.visualViewport?.removeEventListener('resize', positionFullPicker)
+      window.visualViewport?.removeEventListener('scroll', positionFullPicker)
       window.removeEventListener('resize', positionFullPicker)
       window.removeEventListener('scroll', positionFullPicker, true)
     }

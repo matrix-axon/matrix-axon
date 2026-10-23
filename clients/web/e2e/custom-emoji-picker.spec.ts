@@ -41,6 +41,7 @@ for (const thread of [false, true]) {
   test(`selects custom emoji and withdraws it in the ${thread ? 'thread' : 'room'}`, async ({
     page,
   }) => {
+    await page.setViewportSize({ width: 320, height: 568 })
     let mine = false
     let packReads = 0
     const sent: unknown[] = []
@@ -122,6 +123,10 @@ for (const thread of [false, true]) {
         ? `${ROOM_URL}?thread=${encodeURIComponent('$pack-root')}`
         : ROOM_URL,
     )
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty('--safe-top', '62px')
+      document.documentElement.style.setProperty('--safe-bottom', '34px')
+    })
     const surface = page.locator(
       thread
         ? '.thread-panel [data-event-id="$pack-reply"]'
@@ -131,6 +136,11 @@ for (const thread of [false, true]) {
     await surface.getByRole('button', { name: 'React', exact: true }).click()
     await page.getByRole('button', { name: 'More reactions' }).click()
     const dialog = page.getByRole('dialog', { name: 'Emoji picker' })
+    // A packaged iPhone reports safe areas even when a keyboard shortens the
+    // available viewport. Both entry points must keep the category tabs clear.
+    await expect
+      .poll(async () => (await dialog.boundingBox())!.y)
+      .toBeGreaterThanOrEqual(62)
     await dialog
       .getByRole('button', { name: 'Custom emoji', exact: true })
       .click()
@@ -142,6 +152,40 @@ for (const thread of [false, true]) {
     await expect(
       dialog.getByRole('heading', { name: 'Personal' }),
     ).toBeVisible()
+    // Replay the shell measurements after a keyboard reduces and offsets the
+    // visual viewport without resizing the layout viewport.
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty(
+        '--app-viewport-height',
+        '400px',
+      )
+      document.documentElement.style.setProperty('--app-viewport-top', '24px')
+    })
+    await expect
+      .poll(async () => {
+        const box = (await dialog.boundingBox())!
+        return box.y + box.height
+      })
+      .toBeLessThanOrEqual(390)
+    await expect
+      .poll(async () => (await dialog.boundingBox())!.y)
+      .toBeGreaterThanOrEqual(86)
+    const headerControlsUsable = await dialog
+      .locator('.reaction-full-picker-head button')
+      .evaluateAll((buttons) =>
+        buttons.every((button) => {
+          const box = button.getBoundingClientRect()
+          const hit = document.elementFromPoint(
+            box.x + box.width / 2,
+            box.y + box.height / 2,
+          )
+          return hit !== null && button.contains(hit)
+        }),
+      )
+    expect(headerControlsUsable).toBe(true)
+    await page.screenshot({
+      path: test.info().outputPath('mobile-custom-emoji.png'),
+    })
     // The list scrolls inside the popup; its controls stay within every viewport.
     const bounds = await dialog.boundingBox()
     const viewport = page.viewportSize()!

@@ -270,7 +270,7 @@ scene now depends on:
 - **Message actions are hidden until the row is tapped** at phone widths, and
   Enter is not the send affordance a touch-only user has — the Send button is.
 
-The web custom emoji picker is covered by `clients/web/e2e/custom-emoji-picker.spec.ts`, including personal and room packs, image previews, sends, withdrawals, and narrow viewport containment.
+The web custom emoji picker is covered by `clients/web/e2e/custom-emoji-picker.spec.ts`, including personal and room packs, image previews, sends, withdrawals, and mobile safe-area and keyboard viewport containment in both room and thread pickers.
 A recorded demo scene for pack selection remains outstanding; the existing `react` scene continues to demonstrate Unicode reactions.
 
 Standalone sticker selection is covered by `clients/web/e2e/stickers.spec.ts`, including personal and room packs, room/thread sends, draft preservation, original image rendering, keyboard dismissal, and narrow viewport containment.

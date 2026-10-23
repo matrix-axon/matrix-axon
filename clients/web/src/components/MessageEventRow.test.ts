@@ -22,6 +22,16 @@ describe('fullReactionPickerPosition', () => {
     ).toEqual({ left: 300, top: 132 })
   })
 
+  it('keeps the picker visible when the keyboard covers its anchor', () => {
+    expect(
+      fullReactionPickerPosition({
+        anchor: { top: 600, right: 300, bottom: 624 },
+        dialog: { width: 280, height: 240 },
+        viewport: { width: 320, height: 300 },
+      }),
+    ).toEqual({ left: 32, top: 52 })
+  })
+
   it('clamps to viewport margins when neither preferred position fits', () => {
     expect(
       fullReactionPickerPosition({
