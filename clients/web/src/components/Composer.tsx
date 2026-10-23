@@ -640,7 +640,12 @@ export function Composer({
   }
 
   const submit = () => {
-    if (stickerLookup.current !== null) return
+    if (stickerLookup.current !== null) {
+      setStickerProblem(
+        'Still checking sticker packs. Wait before sending another message.',
+      )
+      return
+    }
     setStickerProblem(null)
     const body = draft.trim()
     // A staged file is itself a message: sending it bare, with no caption, is
@@ -688,22 +693,39 @@ export function Composer({
         shortcode,
         controller.signal,
       )
-        .then((image) => {
-          if (controller.signal.aborted || textarea.current === null) return
-          if (textarea.current.value === submittedDraft) {
-            setDraft('')
-            onDraftChange?.('')
-          }
-          if (image) stickers.onSelect(image)
-          else void onSubmit(message)
-        })
-        .catch(() => {
-          if (!controller.signal.aborted) {
-            setStickerProblem(
-              'Could not check sticker packs. Your message has not been sent. Try Send again.',
-            )
-          }
-        })
+        .then(
+          (image) => {
+            if (controller.signal.aborted || textarea.current === null) return
+            setStickerProblem(null)
+            const sendProblem = () => {
+              if (!controller.signal.aborted) {
+                setStickerProblem(
+                  'Could not send the message. Check the timeline before retrying.',
+                )
+              }
+            }
+            // Lookup failures are handled by the rejection callback below.
+            // A callback may already have started a send before it throws, so
+            // never describe a callback failure as an unsent lookup failure.
+            try {
+              const sent = image ? stickers.onSelect(image) : onSubmit(message)
+              void Promise.resolve(sent).catch(sendProblem)
+              if (textarea.current.value === submittedDraft) {
+                setDraft('')
+                onDraftChange?.('')
+              }
+            } catch {
+              sendProblem()
+            }
+          },
+          () => {
+            if (!controller.signal.aborted) {
+              setStickerProblem(
+                'Could not check sticker packs. Your message has not been sent. Try Send again.',
+              )
+            }
+          },
+        )
         .finally(() => {
           if (stickerLookup.current === controller) stickerLookup.current = null
           if (!controller.signal.aborted) setCheckingSticker(false)

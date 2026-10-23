@@ -140,7 +140,9 @@ Sticker-only entries are excluded from reaction commands, and servers without pa
 
 Only a whole-message shortcode becomes a sticker: names in prose, attachment captions, and edits keep their text behavior.
 Unknown names and servers without pack discovery use the existing text/Unicode shortcode handling.
-A discovery failure keeps the draft and offers another Send attempt; changing rooms cancels a pending lookup.
+A sticker discovery failure keeps the draft and offers another Send attempt; changing rooms cancels a pending lookup.
+Sending again during a sticker lookup shows a waiting notice and preserves edits for the next message.
+Known Unicode reaction names still send their Unicode fallback if pack discovery fails or times out; custom image reactions never enter global Unicode recents.
 Only sticker-capable images appear; mixed-use images also remain available in the reaction picker.
 Selecting a sticker preserves any unsent text or staged attachments, and failed sends offer Retry and Discard in the timeline.
 Replies and thread context are preserved, and received stickers display the original image so animated stickers retain their animation.

@@ -883,7 +883,7 @@ describe('reactions', () => {
         HttpResponse.json({ data: event('$msg', 100) }),
       ),
     )
-    const { findByLabelText } = renderRoom([event('$msg', 100)])
+    const { services, findByLabelText } = renderRoom([event('$msg', 100)])
     const textarea = (await findByLabelText(
       'Message Ops',
     )) as HTMLTextAreaElement
@@ -893,6 +893,9 @@ describe('reactions', () => {
       expect(posted).toEqual({ key: 'mxc://hs/adam', shortcode: 'Adam' }),
     )
     await waitFor(() => expect(textarea.value).toBe(''))
+    expect(services.settings.recentReactions.value).not.toContain(
+      'mxc://hs/adam',
+    )
   })
 
   it('does not send a pending custom reaction after leaving the room', async () => {
@@ -971,6 +974,69 @@ describe('reactions', () => {
     )
     expect(textarea.value).toBe('/react :adam:')
   })
+
+  it.each(['http', 'network', 'deadline'])(
+    'keeps Unicode shortcode reactions usable after a pack %s failure',
+    async (failure) => {
+      let posted: unknown
+      const originalSetTimeout = globalThis.setTimeout
+      const timer = vi
+        .spyOn(globalThis, 'setTimeout')
+        .mockImplementation(((
+          callback: TimerHandler,
+          delay?: number,
+          ...args: unknown[]
+        ) =>
+          originalSetTimeout(
+            callback,
+            delay === 10_000 ? 20 : delay,
+            ...args,
+          )) as typeof setTimeout)
+      server.use(
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`,
+          async ({ request }) => {
+            if (failure === 'network') return HttpResponse.error()
+            if (failure === 'deadline') {
+              await new Promise<void>((resolve) => {
+                if (request.signal.aborted) resolve()
+                else
+                  request.signal.addEventListener('abort', () => resolve(), {
+                    once: true,
+                  })
+              })
+            }
+            return HttpResponse.json({}, { status: 503 })
+          },
+        ),
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId/reactions`,
+          async ({ request }) => {
+            posted = await request.json()
+            return HttpResponse.json({
+              data: { event_id: '$fallback-reaction' },
+            })
+          },
+        ),
+        http.get(EVENTS_PATH, () =>
+          HttpResponse.json({ data: event('$msg', 100) }),
+        ),
+      )
+      try {
+        const { services, findByLabelText } = renderRoom([event('$msg', 100)])
+        const textarea = (await findByLabelText(
+          'Message Ops',
+        )) as HTMLTextAreaElement
+        fireEvent.input(textarea, { target: { value: '/react :thumbsup:' } })
+        fireEvent.keyDown(textarea, { key: 'Enter' })
+        await waitFor(() => expect(posted).toEqual({ key: '👍' }))
+        await waitFor(() => expect(textarea.value).toBe(''))
+        expect(services.settings.recentReactions.value).toContain('👍')
+      } finally {
+        timer.mockRestore()
+      }
+    },
+  )
 
   it('/react with an emoji reacts to the latest visible message', async () => {
     let posted: unknown
