@@ -116,11 +116,24 @@ export function ImagePackPicker({
         />
         <button
           type="button"
-          class="ghost"
+          class="ghost custom-emoji-refresh"
+          aria-label="Refresh"
+          title="Refresh"
           onClick={() => setRetry((value) => value + 1)}
           disabled={current === null}
         >
-          Refresh
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M20 7v5h-5" />
+            <path d="M20 12a8 8 0 1 0-2.3 5.7" />
+          </svg>
         </button>
       </div>
       <div

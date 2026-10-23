@@ -6805,6 +6805,21 @@ audio.media-player {
   flex: 1;
 }
 
+button.custom-emoji-refresh {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.5rem;
+  border-color: transparent;
+}
+
+.custom-emoji-refresh svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
 .custom-emoji-packs {
   min-height: 0;
   overflow: auto;
