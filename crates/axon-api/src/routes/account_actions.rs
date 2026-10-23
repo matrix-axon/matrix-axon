@@ -44,6 +44,8 @@ use crate::uploads::StagedUploadService;
 /// it means "let the homeserver pick its own default," not "unbounded."
 const MAX_PUBLIC_ROOMS_LIMIT: u32 = 200;
 
+/// Set the account display name
+///
 /// Set this account's own display name. An empty `display_name` clears it.
 #[utoipa::path(
     put,
@@ -91,6 +93,8 @@ pub async fn set_display_name(
     }
 }
 
+/// Set the account avatar
+///
 /// Set this account's avatar from an already-staged upload.
 #[utoipa::path(
     put,
@@ -146,6 +150,8 @@ pub async fn set_account_avatar(
     }
 }
 
+/// Clear the account avatar
+///
 /// Clear this account's avatar.
 #[utoipa::path(
     delete,
@@ -188,6 +194,8 @@ pub async fn remove_account_avatar(
     }
 }
 
+/// Get a user profile
+///
 /// Read a Matrix user's profile (display name + avatar). `user_id` may be
 /// this account's own user id or any other user's.
 #[utoipa::path(
@@ -236,6 +244,8 @@ pub async fn get_user_profile(
     }
 }
 
+/// Ignore a user
+///
 /// Add `user_id` to this account's ignore list.
 #[utoipa::path(
     put,
@@ -281,6 +291,8 @@ pub async fn ignore_user(
     }
 }
 
+/// Stop ignoring a user
+///
 /// Remove `user_id` from this account's ignore list.
 #[utoipa::path(
     delete,
@@ -326,6 +338,8 @@ pub async fn unignore_user(
     }
 }
 
+/// Search the public room directory
+///
 /// Search a homeserver's public-room directory.
 #[utoipa::path(
     get,

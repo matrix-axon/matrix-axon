@@ -13,6 +13,8 @@ use crate::{
     response::{ApiError, ApiResponse},
 };
 
+/// Start a browser sign-in
+///
 /// Start a browser sign-in for a homeserver that delegates authentication to
 /// an OAuth 2.0 authorization server.
 ///
@@ -42,6 +44,8 @@ pub async fn create(
     Ok((StatusCode::CREATED, ApiResponse::new(flow)))
 }
 
+/// Get a browser sign-in flow
+///
 /// Read the current replayable flow stage and only its stage-appropriate data.
 ///
 /// The link and user code are returned only in `waiting_for_authorization`.
@@ -63,6 +67,8 @@ pub async fn get(
     Ok(ApiResponse::new(service.get(flow_id).await?))
 }
 
+/// Cancel a browser sign-in flow
+///
 /// Cancel a flow idempotently, including an unknown or already-expired id.
 #[utoipa::path(
     delete,

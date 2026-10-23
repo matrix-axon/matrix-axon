@@ -66,6 +66,8 @@ fn sign_in_providers(oauth: Option<&OAuthRuntime>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// List bound identities
+///
 /// List the upstream sign-in identities bound to this instance's owner.
 ///
 /// Each carries `current`, set on the identity the calling session signed in
@@ -105,6 +107,8 @@ pub struct UnbindQuery {
     pub allow_lockout: bool,
 }
 
+/// Unbind an identity
+///
 /// Unbind a sign-in identity and end every session it was used to start.
 ///
 /// Axon forgets the identity: its access tokens are revoked and its refresh
@@ -184,6 +188,8 @@ pub async fn unbind_identity(
     }
 }
 
+/// List tokens
+///
 /// List this instance's bearer tokens, without their secrets.
 ///
 /// Revoked and expired tokens are included, so an entry the owner does not
@@ -284,6 +290,8 @@ pub(crate) fn sanitize_label(label: &str) -> Option<String> {
     (!cleaned.is_empty() && !is_generated_label(cleaned)).then(|| cleaned.to_owned())
 }
 
+/// Mint a token
+///
 /// Mint a bearer token that never expires.
 ///
 /// The response is the only time the token's secret is available: Axon keeps
@@ -344,6 +352,8 @@ pub struct RevokeQuery {
     pub allow_lockout: bool,
 }
 
+/// Revoke a token
+///
 /// Revoke a token. It stops working at once and stays in the list.
 ///
 /// Revoking a sign-in session's access token also ends the session's ability
@@ -425,6 +435,8 @@ pub async fn revoke_token(
     }
 }
 
+/// Start an identity bind
+///
 /// Start binding a new sign-in identity to this instance's owner.
 ///
 /// Returns a `url` to open in a browser. Signing in there with the provider
@@ -489,6 +501,8 @@ pub async fn start_bind(
     Ok(response)
 }
 
+/// Get an identity bind
+///
 /// Read where an identity bind stands: `pending`, `completed` or `expired`.
 ///
 /// A bind that did not complete is removed once it lapses, so a `404` for an

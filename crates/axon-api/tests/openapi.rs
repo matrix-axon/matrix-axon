@@ -21,6 +21,30 @@ fn golden_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openapi/openapi.json")
 }
 
+/// Redoc (and every other docs renderer) titles an operation with its
+/// `summary`, falling back to the Rust function name when there is none. A
+/// summary that is a whole sentence of prose reads as badly in the sidebar, so
+/// the first line of each handler's doc comment must be a short title.
+#[test]
+fn every_operation_has_a_short_title_summary() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let mut bad = Vec::new();
+    for (path, item) in spec["paths"].as_object().unwrap() {
+        for (method, op) in item.as_object().unwrap() {
+            match op["summary"].as_str() {
+                Some(s) if s.len() <= 60 && !s.ends_with('.') => {}
+                other => bad.push(format!("{} {path}: {other:?}", method.to_uppercase())),
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "operations need a short title as the first doc-comment line (no trailing period, \
+         at most 60 characters), followed by a blank `///` line:\n{}",
+        bad.join("\n")
+    );
+}
+
 #[test]
 fn native_apple_contract_is_additive_and_form_encoded() {
     let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();

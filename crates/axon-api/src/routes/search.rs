@@ -74,6 +74,8 @@ pub struct SearchQueryDto {
     pub cursor: Option<String>,
 }
 
+/// Search messages
+///
 /// Search across the index, BM25-ranked when a full-text query is present,
 /// or timestamp-ordered when `sort=newest` or `sort=oldest`, then paginated.
 /// Keep the query filters and sort unchanged while following cursors.

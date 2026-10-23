@@ -131,6 +131,8 @@ pub struct ProviderQuery {
     pub flow: Option<String>,
 }
 
+/// List sign-in providers
+///
 /// `GET /v1/oauth/providers`: which sign-in providers this instance offers.
 ///
 /// A client cannot know this by configuration. Which providers exist is a
@@ -272,6 +274,8 @@ pub async fn authorize(
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
+/// Complete a sign-in (redirect)
+///
 /// Query callback adapter; both methods share the same validation and completion.
 #[utoipa::path(
     get,
@@ -304,6 +308,8 @@ pub async fn callback_get(
     callback(store, runtime, bootstrap, provider, peer, input).await
 }
 
+/// Complete a sign-in (form post)
+///
 /// Complete either GET or bounded form POST through the same validated flow.
 #[utoipa::path(
     post,

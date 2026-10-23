@@ -8,6 +8,8 @@ use crate::extract::Path;
 use crate::response::{ApiError, ApiResponse};
 use crate::room_metadata::RoomMetadataDto;
 
+/// Get room metadata
+///
 /// Read typed room metadata from account-scoped cached state.
 /// No upstream requests or membership aggregation occur on this route.
 /// Missing snapshots remain unknown, including for unjoined/unknown rooms.
