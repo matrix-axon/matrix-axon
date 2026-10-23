@@ -3,7 +3,7 @@
 The following open-source components are used in this application.
 
 ## OVERVIEW
-- MIT License (used by 584 crates)
+- MIT License (used by 585 crates)
 - Apache License 2.0 (used by 27 crates)
 - Unicode License v3 (used by 21 crates)
 - Mozilla Public License 2.0 (used by 10 crates)
@@ -9071,6 +9071,7 @@ SOFTWARE.
   - windows-strings 0.1.0
   - windows-strings 0.5.1
   - windows-sys 0.48.0
+  - windows-sys 0.52.0
   - windows-sys 0.59.0
   - windows-sys 0.61.2
   - windows-targets 0.48.5
@@ -9120,7 +9121,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 ### USED BY:
   - tokio-stream 0.1.19
   - tokio-util 0.7.19
-  - tokio 1.53.1
+  - tokio 1.54.1
 ================================================================================
 MIT License
 
