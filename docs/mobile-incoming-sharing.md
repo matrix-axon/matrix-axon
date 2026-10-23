@@ -1,6 +1,6 @@
 # Incoming sharing on iOS and Android
 
-Status: initial design proposal, revised for rich links on 2026-10-23; no implementation or native-device validation yet.
+Status: proposed; no implementation or native-device validation yet.
 Tracking issue: [564](https://github.com/matrix-axon/matrix-axon/issues/564).
 Proposed architecture decision: [ADR 0125](adr/0125-ios-first-incoming-sharing.md).
 Implement iOS first because it serves most current mobile users; Android follows the completed iOS media stage.
@@ -51,8 +51,7 @@ It does not generate previews or render their images; the send DTOs also lack pr
 Do not infer delivery from a later message with matching text or filename.
 The v1 design therefore preserves uncertain results for user resolution instead of promising automatic exactly-once delivery.
 Automatic recovery of uncertain dispatches would require a separately designed, additive server prerequisite PR before dependent client behavior.
-Rich-link delivery now requires separate additive server prerequisites for bundled metadata/image sending and optional preview generation, followed by a separate client image-rendering PR.
-This supersedes the original client-only assessment for plain text and attachments.
+Rich-link delivery requires separate additive server prerequisites for bundled metadata/image sending and optional preview generation, followed by a separate client image-rendering PR.
 
 ## Rich links across both platforms
 
@@ -88,6 +87,12 @@ Use `og:image` for persistent unencrypted Matrix media or `matrix:image:encrypte
 Preview-image uploads are not ordinary chat attachments: the existing `send-media` route cannot be used just to obtain an image URI, because it also sends an event.
 Generated homeserver thumbnails may need reuploading for persistent ownership and encrypted-room protection.
 Keep the generated thumbnail in account-scoped staging until it is used, discarded or expires; do not leave an unbounded server-side preview cache.
+Before marking a preview durably recoverable, copy its thumbnail bytes into the share's protected local staging root, for both source-supplied and generated thumbnails.
+The generation helper must provide bounded authenticated retrieval of staged thumbnail bytes for this purpose.
+Retain the local copy for the unfinished share's lifetime, independently of the server upload's TTL.
+On resume, re-upload that copy when its server handle has expired; do not fetch the linked page again just to recover the image.
+If local bytes are unavailable or corrupt, show that the thumbnail needs replacement and let the user explicitly regenerate it, remove the image, or discard the share; never silently drop it or automatically regenerate it.
+Apply the same quota, ownership, protection, expiry and sign-out cleanup to these local bytes as to other staged files.
 
 Extend the shared `LinkPreviews` renderer to resolve only eligible Matrix preview images through the existing authenticated media/decryption boundary.
 Never put a remote HTTPS `og:image` directly into an image element or fetch the webpage in the timeline renderer.
@@ -99,8 +104,13 @@ Store normalized preview data and thumbnail handles in the durable incoming-shar
 If the user removes/changes that URL, remove or explicitly regenerate the stale preview; editing another portion of the text must not discard a valid card.
 The first file's caption carries link previews for a mixed batch; subsequent files do not repeat them.
 Permit preview removal before sending, and record its delivery with the parent message rather than as an independent send operation.
-Start with at most eight cards, 4096 characters per URL, 300 for title, 1000 for description and 120 for site name, aligned with the current renderer.
-Bound preview metadata to 32 KiB per share and each thumbnail to 2 MiB/4 megapixels; include thumbnail bytes in pending/batch quotas without consuming a user attachment slot.
+Start with at most eight cards, 4096 UTF-16 code units per URL, 300 for title, 1000 for description and 120 for site name, aligned with the current renderer's string-length units.
+Also bound preview metadata to 32 KiB per share; count UTF-8 bytes of the canonical JSON preview array, including keys, escaping, punctuation and resolved image descriptors, but excluding thumbnail file bytes.
+Count, field and aggregate limits all apply; the first exceeded limit rejects the proposed selection with an explanation, rather than silently truncating fields or dropping cards.
+Per-field maxima are ceilings, not a promise that eight maximally sized cards fit: the aggregate byte cap wins, and the final event-size gate below can impose a tighter budget still.
+Keep the draft intact and disable Send until the user edits/removes the excess content; show which limit was exceeded and the measured size/count.
+The server DTO, native normalizer and web adapter must enforce the same units and precedence through shared boundary fixtures, including multibyte Unicode and JSON-escaping cases.
+Bound each thumbnail to 2 MiB/4 megapixels; include thumbnail bytes in pending/batch quotas without consuming a user attachment slot.
 These are proposed limits to validate on supported devices, including bounded image decode and ownership cleanup.
 
 ## Shared contract and ownership
@@ -113,6 +123,9 @@ Never put credentials, shared text, or file paths in URLs, intent callbacks, ana
 Credentials remain in protected credential storage and are never serialized into the manifest.
 
 Ship a schema and fixtures for normalization, limits, item ordering, caption placement and recovery transitions.
+Stage 5's wire DTOs and native fixtures must be generated from, or automatically checked against, the settled stage 2/3 OpenAPI contract; independently handwritten matching shapes are insufficient.
+The versioned local manifest may add private staging/ownership fields, but its wire projection must validate against those OpenAPI DTOs, including optional/empty preview fields, byte budgets and definite error categories.
+Run the same valid/invalid boundary fixtures through the server, Swift native adapter and TypeScript adapter, and fail their relevant checks when a wire-shape or limit changes without a fixture update.
 The iOS app plugin and extension share an extension-safe native module for session access, staging and HTTP operations.
 The extension UI is native and does not embed the complete Tauri runtime or a second copy of the Preact composer.
 The necessary native HTTP adapter remains small, follows OpenAPI, and has contract fixtures rather than reimplementing timeline, gallery, or HTML logic.
@@ -164,14 +177,14 @@ Do not fetch a web URL merely because it was shared; metadata generation follows
 
 Start with these proposed budgets, subject to measurement on supported iPhones:
 
-| Resource                 | Initial limit                                                             |
-| ------------------------ | ------------------------------------------------------------------------- |
-| Attachments              | 10 per share, consistent with current staging                             |
-| File and batch bytes     | 100 MiB per file and 100 MiB total per share; honor lower server limits   |
-| Text                     | 64 KiB UTF-8, rejected with an explanation rather than silently truncated |
-| Pending storage          | 200 MiB total and 20 share records; reserve space while importing         |
-| Retention                | 24 hours for unfinished shares, with visible expiry and explicit discard  |
-| Concurrent import/upload | One file at a time initially; streaming copies and file-backed uploads    |
+| Resource                 | Initial limit                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------------- |
+| Attachments              | 10 per share, consistent with current staging                                                  |
+| File and batch bytes     | 100 MiB per file and 100 MiB total per share; honor lower server limits                        |
+| Text import              | 64 KiB UTF-8 staging ceiling; actual sendability also requires the final event-size gate below |
+| Pending storage          | 200 MiB total and 20 share records; reserve space while importing                              |
+| Retention                | 24 hours for unfinished shares, with visible expiry and explicit discard                       |
+| Concurrent import/upload | One file at a time initially; streaming copies and file-backed uploads                         |
 
 Check limits against measured bytes while copying, not just a provider's advertised size.
 Enforce count/metadata limits before opening files, cap filenames, sanitize paths, and disallow traversal and symbolic-link escape from the staging root.
@@ -184,6 +197,19 @@ Boot/resume reconciliation removes incomplete imports/orphaned temporary files a
 Quota/expiry cleanup never deletes an item actively owned by another process; expired ownership is reconciled after termination.
 Do not silently evict an unexpired user draft to make room for a new share.
 
+### Event-size validation
+
+The [Matrix event limit](https://spec.matrix.org/latest/client-server-api/#size-limits) is 65,536 bytes for the complete canonical JSON federation event, including signatures; it is not a plain-text body allowance.
+The 64 KiB text-import ceiling bounds local work only and never guarantees that imported text can be sent.
+Before upstream event dispatch, stage 2 must enforce a documented conservative serialized-content budget that reserves room for federation envelope/signatures and accounts for encryption expansion in encrypted rooms.
+Include `body`, any `formatted_body`, preview arrays, image descriptors and relation fields in that budget; Unicode and JSON escaping must be measured as serialized bytes, not character counts.
+Finalize the reservation and wire error in the server contract, and check the corresponding native/web preflight against its OpenAPI fixtures before enabling Send.
+An oversized draft stays editable, with a specific explanation and choices to shorten text or remove formatting/cards; never silently truncate it or send only a subset.
+Server preflight rejection must happen before claiming uploads or dispatching the event and return a documented definite size-validation error.
+An explicit homeserver event-too-large rejection is also a definite failure; preserve the draft and return it to review rather than mark it outcome unknown.
+This exception requires evidence that dispatch was rejected: a generic timeout, disconnect or upstream failure after dispatch remains uncertain.
+Stage 2/6 acceptance includes near-limit ASCII, multibyte and heavily escaped text, rich formatting, multiple cards and encrypted-room overhead.
+
 ## Delivery and recovery
 
 Persist user confirmation and the exact destination before dispatch.
@@ -192,17 +218,18 @@ There is no atomic multi-file Matrix album transaction; partial delivery must be
 Every request, provider load and ownership lease has a finite timeout; cancellation releases local resources and preserves honest remote outcomes.
 Use file-backed native uploads and a size-aware upload deadline; the existing web budget is a starting point, not a measured extension lifetime guarantee.
 
-| Persisted state      | Restart or next action                                                                                                     |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Importing            | Remove incomplete temporary data, report incomplete import; never dispatch it                                              |
-| Ready                | Offer review/send; no automatic send without confirmation                                                                  |
-| Uploading            | Preserve local file; interrupted upload may leave an unclaimed server upload until its existing expiry                     |
-| Uploaded             | Preserve upload ID; an expired upload requires a new upload, not loss of local bytes                                       |
-| Dispatching          | On interruption, mark outcome unknown; do not automatically resend                                                         |
-| Sent                 | Persist event ID before cleanup; do not send this item again                                                               |
-| Failed               | Distinguish definite validation failure from uncertain remote outcome; permit explicit retry when safe                     |
-| Outcome unknown      | Explain that delivery could have occurred; offer inspection and an explicit resend choice that acknowledges duplicate risk |
-| Discarded or expired | Release local files and best-effort delete known unclaimed uploads; no dispatch                                            |
+| Persisted state        | Restart or next action                                                                                                     |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Importing              | Remove incomplete temporary data, report incomplete import; never dispatch it                                              |
+| Ready                  | Offer review/send; no automatic send without confirmation                                                                  |
+| Uploading              | Preserve local file; interrupted upload may leave an unclaimed server upload until its existing expiry                     |
+| Uploaded               | Preserve upload ID; an expired upload requires a new upload, not loss of local bytes                                       |
+| Preview upload expired | Re-upload the protected local thumbnail; if unavailable, require a visible replacement/removal choice before sending       |
+| Dispatching            | On interruption, mark outcome unknown; do not automatically resend                                                         |
+| Sent                   | Persist event ID before cleanup; do not send this item again                                                               |
+| Failed                 | Distinguish definite validation failure from uncertain remote outcome; permit explicit retry when safe                     |
+| Outcome unknown        | Explain that delivery could have occurred; offer inspection and an explicit resend choice that acknowledges duplicate risk |
+| Discarded or expired   | Release local files and best-effort delete known unclaimed uploads; no dispatch                                            |
 
 Any timeout, disconnect, or gateway failure after dispatch may have an uncertain outcome, including an API error after upstream acceptance.
 A crash after server success but before the event ID is saved is also uncertain.
@@ -233,16 +260,16 @@ Each row is one PR, merging in order; each behavioral PR includes its own tests,
 Stages 2 and 3 are server-only prerequisites, allowing only mechanical generated-schema synchronization across silos.
 Later implementation stages stay in the web/native-client silo and consume the settled server contract.
 
-| Stage | Sub-issue                                                    | PR boundary and exit criterion                                                                                                                        |
-| ----- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1     | [816](https://github.com/matrix-axon/matrix-axon/issues/816) | This design, indexed documentation, contract/lifecycle decisions and device measurement plan                                                          |
-| 2     | [821](https://github.com/matrix-axon/matrix-axon/issues/821) | Server: typed bundled-preview send support and persistent/protected preview-image media; round-trip encrypted and unencrypted cards                   |
-| 3     | [822](https://github.com/matrix-axon/matrix-axon/issues/822) | Server: bounded opt-in homeserver preview generation and image staging, with unsupported-capability fallback                                          |
-| 4     | [823](https://github.com/matrix-axon/matrix-axon/issues/823) | Client: shared image-card rendering through authenticated media, preserving PR 740's safety and lifecycle rules                                       |
-| 5     | [817](https://github.com/matrix-axon/matrix-axon/issues/817) | Shared contract including preview records, iOS session/staging foundation and app recovery UI; signed App Group/Keychain acceptance                   |
-| 6     | [818](https://github.com/matrix-axon/matrix-axon/issues/818) | iOS Share Extension, native picker/composer and text/rich-link delivery including thumbnails and explicit generation; text/web-URL activation rules   |
-| 7     | [819](https://github.com/matrix-axon/matrix-axon/issues/819) | iOS single/multiple media, captions containing rich links and per-item delivery/recovery; enable media activation rules with signed-device acceptance |
-| 8     | [820](https://github.com/matrix-axon/matrix-axon/issues/820) | Android intent ingestion, shared web picker/composer and equivalent rich-link/text/media delivery                                                     |
+| Stage | Sub-issue                                                    | PR boundary and exit criterion                                                                                                                             |
+| ----- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | [816](https://github.com/matrix-axon/matrix-axon/issues/816) | This design, indexed documentation, contract/lifecycle decisions and device measurement plan                                                               |
+| 2     | [821](https://github.com/matrix-axon/matrix-axon/issues/821) | Server: typed bundled-preview send support and persistent/protected preview-image media; round-trip encrypted and unencrypted cards                        |
+| 3     | [822](https://github.com/matrix-axon/matrix-axon/issues/822) | Server: bounded opt-in homeserver preview generation and image staging, with unsupported-capability fallback                                               |
+| 4     | [823](https://github.com/matrix-axon/matrix-axon/issues/823) | Client: shared image-card rendering through authenticated media, preserving PR 740's safety and lifecycle rules                                            |
+| 5     | [817](https://github.com/matrix-axon/matrix-axon/issues/817) | Manifest wire projections/native fixtures checked against stage 2/3 OpenAPI; iOS session/staging and app recovery UI; signed App Group/Keychain acceptance |
+| 6     | [818](https://github.com/matrix-axon/matrix-axon/issues/818) | iOS Share Extension, native picker/composer and text/rich-link delivery including thumbnails and explicit generation; text/web-URL activation rules        |
+| 7     | [819](https://github.com/matrix-axon/matrix-axon/issues/819) | iOS single/multiple media, captions containing rich links and per-item delivery/recovery; enable media activation rules with signed-device acceptance      |
+| 8     | [820](https://github.com/matrix-axon/matrix-axon/issues/820) | Android intent ingestion, shared web picker/composer and equivalent rich-link/text/media delivery                                                          |
 
 Every implementation PR updates user/build documentation, `docs/client-parity.md` when tracked status changes, and `docs/demo-coverage.md` for changed rendered flows.
 Record rich-link acquisition, bundled sending and image rendering separately; text-card support alone does not complete the end-to-end feature.
@@ -264,6 +291,8 @@ Before native implementation/verification, continue on the available macOS devel
 
 Rich-link acceptance includes actual iOS input representations, Android URL-only/title/thumbnail senders, source metadata versus explicit generation, disabled homeserver previews, URL edits, preview removal and expired provider access.
 Round-trip image cards through real encrypted and unencrypted rooms, including media-caption previews, missing images, hostile metadata and interruption during thumbnail upload.
+Exercise a server thumbnail upload expiring before a retained local share, successful re-upload from local bytes, and the visible missing-local-copy path without automatic webpage fetching.
+Verify aggregate-preview and final-event byte limits with Unicode, JSON escaping and encryption overhead, and distinguish explicit size rejection from ambiguous dispatch failure.
 Verify that opening a timeline does not contact the linked site and that an unrecognized source thumbnail is never silently sent as a separate photo.
 
 Log structured share/item IDs, state transitions, byte counts, duration and error categories, with account/room/event identifiers where applicable.
