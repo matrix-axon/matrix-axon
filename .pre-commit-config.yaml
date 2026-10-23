@@ -241,8 +241,10 @@ repos:
       #     changes the embedded checksums that axon-server reads and that
       #     axon-store's tests assert on. Grepping only for include_str!/
       #     migrate! misses this; check for include_dir! too.
-      # Beyond those: no sqlx::query! macros, no .sqlx offline data, and both
-      # build.rs files read only env vars and git/jj output. If that changes,
+      # Beyond those: no sqlx::query! macros, no .sqlx offline data, and the
+      # build.rs files read only env vars and git/jj output, apart from axon-api's,
+      # which reads clients/web only under `embed-web` and is not a compile input
+      # here (the clippy hook turns its autobuild off). If that changes,
       # widen this in the same commit -- scripts/check-hook-filters.py pins the
       # intended selection, so it will tell you.
       - id: rustfmt
@@ -260,10 +262,14 @@ repos:
       # CI re-types this command rather than running the hook, unlike
       # actionlint/adr-numbers/hook-filters above. Tracked in #200; keep the
       # flag order in lint-and-clippy.yml matching this line until it is.
+      #
+      # AXON_WEB_AUTOBUILD=0: `--all-features` turns on `embed-web`, whose
+      # build.rs would otherwise run `pnpm` on a checkout with no bundle. CI sets
+      # `CI`, which has the same effect there.
       - id: rust-clippy
         name: clippy
         language: system
-        entry: cargo clippy --all-features --all-targets -- -D warnings
+        entry: env AXON_WEB_AUTOBUILD=0 cargo clippy --all-features --all-targets -- -D warnings
         files: *rust_files
         pass_filenames: false
         stages: [pre-push]
