@@ -46,5 +46,6 @@ This page indexes everything else.
 - [Matrix OAuth browser sign-in](matrix-oauth-browser-sign-in.md)
 - [Apple sign-in: browser](apple-oauth-browser.md), [native](apple-oauth-native.md), and the [App Review response](apple-oauth-review-response.md)
 - [Web slow-link measurement](web-slow-link-measurement.md)
+- [Incoming mobile sharing design](mobile-incoming-sharing.md) — iOS-first rich links, multi-file sharing and Android share-target plan
 - [Web client review, 2026-07](reviews/2026-07-web-client-review.md)
 - [Smoke-testing plan](mvp/smoke-testing-plan.md)
