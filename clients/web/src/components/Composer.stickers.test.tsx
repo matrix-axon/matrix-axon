@@ -170,12 +170,17 @@ it('deduplicates pending submits and preserves a newer draft', async () => {
   fireEvent.click(send)
   fireEvent.keyDown(input, { key: 'Enter' })
   fireEvent.input(input, { target: { value: 'Next message' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(screen.getByRole('alert').textContent).toContain(
+    'Wait before sending another message',
+  )
   await act(async () => {
     release()
     await ready
   })
   await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
   expect(input.value).toBe('Next message')
+  expect(screen.queryByRole('alert')).toBeNull()
 })
 
 it('does not send a delayed lookup after the composer is unmounted', async () => {
@@ -287,3 +292,40 @@ it('does not clear a newer draft when an asynchronous reaction command finishes'
   })
   expect(input.value).toBe('next message')
 })
+
+it.each(['sticker', 'text', 'text-async'])(
+  'reports a %s callback failure separately from discovery failure',
+  async (kind) => {
+    server.use(
+      http.get(PACKS, () =>
+        HttpResponse.json({
+          data: {
+            packs: kind === 'sticker' ? [pack(null)] : [],
+            partial: false,
+          },
+        }),
+      ),
+    )
+    const fail = vi.fn(() => {
+      throw new Error('callback failed')
+    })
+    const onSubmit =
+      kind === 'text-async'
+        ? vi.fn(() => Promise.reject(new Error('callback failed')))
+        : fail
+    const { input } = setup({
+      stickers: {
+        api,
+        accountId: 'account',
+        roomId: '!room:hs',
+        onSelect: fail,
+      },
+      onSubmit,
+    })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    const problem = await screen.findByRole('alert')
+    expect(problem.textContent).toContain('Could not send the message')
+    expect(problem.textContent).not.toContain('Could not check sticker packs')
+    if (kind !== 'text-async') expect(input.value).toBe(':adam:')
+  },
+)

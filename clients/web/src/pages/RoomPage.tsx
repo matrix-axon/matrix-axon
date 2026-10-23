@@ -1,3 +1,4 @@
+import { customReactionMxc } from '../custom-reactions'
 import { lookupImageShortcode, stickerFromImage } from '../emoji-packs'
 import { Fragment, type JSX } from 'preact'
 import { useLocation, useRoute } from 'preact-iso'
@@ -1586,7 +1587,7 @@ export function RoomPage() {
       return true
     }
     const sendReaction = (key: string, shortcode?: string) => {
-      settings.recordRecentReaction(key)
+      if (customReactionMxc(key) === null) settings.recordRecentReaction(key)
       void commandTimeline.toggleReaction(target, key, shortcode).then((ok) => {
         if (ok) onMutation()
       })
@@ -1618,17 +1619,22 @@ export function RoomPage() {
       'emoticon',
     )
       .then((image) => {
-        if (controller.signal.aborted) return false
+        if (reactionLookups.current.get(commandTimeline) !== controller)
+          return false
+        if (controller.signal.aborted) {
+          return fallbackKey !== null ? sendReaction(fallbackKey) : false
+        }
         if (image) return sendReaction(image.url, image.shortcode)
         if (fallbackKey !== null) return sendReaction(fallbackKey)
         commandTimeline.error.value = `unknown reaction shortcode: ${command.reaction}`
         return false
       })
       .catch(() => {
-        if (reactionLookups.current.get(commandTimeline) === controller) {
-          commandTimeline.error.value =
-            'Could not check custom emoji packs. Try the reaction again.'
-        }
+        if (reactionLookups.current.get(commandTimeline) !== controller)
+          return false
+        if (fallbackKey !== null) return sendReaction(fallbackKey)
+        commandTimeline.error.value =
+          'Could not check custom emoji packs. Try the reaction again.'
         return false
       })
       .finally(() => {

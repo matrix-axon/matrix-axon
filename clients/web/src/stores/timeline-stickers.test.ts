@@ -133,3 +133,29 @@ it('live confirmations distinguish text, sticker URLs, and reply context', async
     'm.room.message',
   )
 })
+
+it.each([undefined, '$reply'])(
+  'reconciles a live thread sticker with reply target %s and Matrix fallback metadata',
+  async (replyTo) => {
+    server.use(
+      http.post(SEND, () =>
+        HttpResponse.json({ data: { event_id: '$sticker' } }),
+      ),
+      http.get(EVENTS, () => HttpResponse.json({}, { status: 404 })),
+    )
+    const store = makeStore('$root')
+    await store.sendSticker(STICKER, { senderId: '@me:hs', replyTo })
+    expect(store.events.value.filter((e) => e.localEcho)).toHaveLength(1)
+    store.ingestLive({
+      ...event(),
+      relates_to: {
+        rel_type: 'm.thread',
+        event_id: '$root',
+        is_falling_back: replyTo === undefined,
+        'm.in_reply_to': { event_id: replyTo ?? '$root' },
+      },
+    } as unknown as EventDto)
+    expect(store.events.value.map((e) => e.event_id)).toEqual(['$sticker'])
+    expect(store.events.value[0].localEcho).toBeUndefined()
+  },
+)
