@@ -18,6 +18,10 @@ pub const MAX_CONTENT_BYTES: usize = 40 * 1024;
 pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_IMAGE_PIXELS: u64 = 4_000_000;
 pub const MAX_MXC_LENGTH: usize = 1024;
+/// Maximum serialized SDK media source (URI plus encryption metadata).
+pub const MAX_MEDIA_SOURCE_BYTES: usize = 1024;
+pub const IMAGE_RESERVE_BYTES: usize = MAX_MEDIA_SOURCE_BYTES + 256;
+pub const MEDIA_RESERVE_BYTES: usize = 12 * 1024;
 
 /// Public semantic metadata. API DTOs project onto this type after decoding.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +63,7 @@ pub struct PreviewSend<'a> {
     pub body: &'a str,
     pub formatted: Option<Formatted<'a>>,
     pub relation: Relation<'a>,
-    pub previews: &'a [LinkPreview],
+    pub previews: Vec<LinkPreview>,
 }
 
 fn bounded(value: &str, limit: usize) -> bool {
@@ -98,8 +102,7 @@ pub fn validate_metadata(body: &str, previews: &[PreviewMetadata]) -> Result<(),
             return Err(PreviewError::Invalid);
         }
         let url = url::Url::parse(&p.matched_url).map_err(|_| PreviewError::Invalid)?;
-        if !bounded(&p.matched_url, 4096)
-            || !matches!(url.scheme(), "http" | "https")
+        if !matches!(url.scheme(), "http" | "https")
             || !url.username().is_empty()
             || url.password().is_some()
             || !urls.contains(p.matched_url.as_str())
@@ -130,26 +133,31 @@ pub fn entry(metadata: &PreviewMetadata) -> Value {
     value
 }
 
-/// Bounded media lookup for a stored bundled preview. Standard metadata is
+/// Allocation-free lookup across all retained entries, matching SQL containment.
+/// Received events are not constrained by our outgoing card count. Standard metadata is
 /// authoritative even when empty/malformed; never fall through to an alias.
 pub fn preview_for_mxc<'a>(content: &'a Value, mxc: &str) -> Option<&'a Value> {
     let previews = content
         .get("m.url_previews")
         .or_else(|| content.get("com.beeper.linkpreviews"))?
         .as_array()?;
-    previews.iter().take(32).find(|p| {
-        encrypted_preview_file(p)
-            .and_then(|f| f.get("url"))
-            .and_then(Value::as_str)
-            == Some(mxc)
-            || p.get("og:image").and_then(Value::as_str) == Some(mxc)
-    })
+    // Prefer decryption evidence even if an earlier card repeats the same
+    // URI as an ordinary image. A plaintext alias must not hide a known key.
+    previews
+        .iter()
+        .find(|p| encrypted_preview_file_for_mxc(p, mxc).is_some())
+        .or_else(|| {
+            previews
+                .iter()
+                .find(|p| p.get("og:image").and_then(Value::as_str) == Some(mxc))
+        })
 }
 
-pub fn encrypted_preview_file(preview: &Value) -> Option<&Value> {
-    preview
-        .get("matrix:image:encrypted")
-        .or_else(|| preview.get("beeper:image:encryption"))
+pub fn encrypted_preview_file_for_mxc<'a>(preview: &'a Value, mxc: &str) -> Option<&'a Value> {
+    ["matrix:image:encrypted", "beeper:image:encryption"]
+        .into_iter()
+        .filter_map(|key| preview.get(key))
+        .find(|file| file.get("url").and_then(Value::as_str) == Some(mxc))
 }
 
 /// Publish both proposal and deployed compatibility spellings. The actual
@@ -248,14 +256,14 @@ pub fn preflight(
             .map(|(m, image)| {
                 let mut value = entry(m);
                 if *image {
-                    value["matrix:image:encrypted"] = json!("x".repeat(2048));
+                    value["matrix:image:encrypted"] = json!("x".repeat(IMAGE_RESERVE_BYTES));
                 }
                 value
             })
             .collect(),
     );
     if media {
-        content["_reserved_media_fields"] = json!("x".repeat(16 * 1024));
+        content["_reserved_media_fields"] = json!("x".repeat(MEDIA_RESERVE_BYTES));
     }
     check_content(&content)
 }
@@ -263,6 +271,31 @@ pub fn preflight(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eight_image_cards_fit_a_short_caption_with_media_reserve() {
+        let previews = (0..MAX_PREVIEWS)
+            .map(|n| {
+                (
+                    PreviewMetadata {
+                        matched_url: format!("https://example.org/{n}"),
+                        title: Some("Example".into()),
+                        ..Default::default()
+                    },
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+        let body = previews
+            .iter()
+            .map(|(p, _)| p.matched_url.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            preflight(&body, None, Relation::default(), &previews, true),
+            Ok(())
+        );
+    }
 
     #[test]
     fn compatibility_keys_and_standard_authority_are_preserved() {

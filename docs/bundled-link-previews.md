@@ -38,15 +38,17 @@ Omitting `url_previews` or setting it to null retains the original send path; `[
 
 Encryption decisions preserve positive SDK evidence and fetch current authenticated room state before permitting plaintext thumbnail uploads.
 A failed state lookup aborts the send; a room that becomes encrypted during uploads is rejected before event dispatch.
+Metadata-only sends make one fresh lookup when encryption is not already known; only sends that uploaded plaintext media need the second check.
+Media replies use the same SDK reply builder as ordinary attachments, preserving intentional mentions, self-mention suppression and thread behavior, including explicit opt-out.
 The vendored SDK correction in `crates/third-party/encryption-state-monotonic.patch` prevents an older negative state lookup from erasing a known encryption event.
 
 ## Budgets and errors
 
 - At most eight previews, with UTF-16 ceilings of 4096 code units for URL, 300 for title, 1000 for description and 120 for site name.
 - At most 32 KiB of canonical JSON UTF-8 preview metadata, including resolved image descriptors.
-  Preflight reserves 2048 bytes per image for bounded SDK media/encryption metadata; actual content is checked before dispatch too.
+  Preflight reserves 1280 bytes per image for bounded SDK media/encryption metadata; actual content is checked before dispatch too.
 - At most 40 KiB of serialized preview-aware content, counting body, formatting, relations and previews together.
-  Caption sends reserve 16 KiB within this budget for filename and media metadata.
+  Caption sends reserve 12 KiB within this budget for filename and media metadata.
   This conservative content budget leaves room below Matrix's 65,536-byte event cap for Megolm/base64 expansion and federation envelope/signatures.
   It counts both protocol spellings, so compatibility metadata can tighten the effective preview allowance further.
 
@@ -57,12 +59,17 @@ Preflight overflow rejects before any upload claim or event dispatch.
 Preserve the draft for editing on definite validation failure.
 
 An owned task completes or releases its acquired uploads even if the HTTP caller disconnects.
-Four preview-send slots have a five-second acquisition deadline; decoder slots share the upload pool, and SDK work has the configured upstream-upload deadline.
+Each account has four upload-bearing preview-send slots with a five-second acquisition deadline; a slow homeserver cannot consume another account's capacity.
+Metadata-only text sends, including explicit opt-out, bypass these upload slots.
+Decoder slots share the upload pool, and SDK work has the configured upstream-upload deadline for the complete send.
+At most two preview uploads run concurrently per send, preserving card order and consuming their owned bytes without copying them.
+SDK media-source descriptors are capped at 1024 serialized bytes; actual content is checked before dispatch.
+The smaller proven reserves allow eight short image cards on a caption send, while all count, field and aggregate ceilings still apply together.
 Failures release acquired uploads; successful sends consume them.
 A timeout, disconnect or general upstream error does not prove that the event was not sent.
 These APIs have no caller idempotency key: never automatically replay an uncertain send, even if an upload ID becomes available again.
 Uploaded Matrix objects can remain orphaned after failure; local staged bytes retain their existing expiry and boot-reconciliation rules.
-Logs identify account/room/event/upload IDs and counts, never shared URLs, titles, image bytes or encrypted-file keys.
+Logs identify account/room/event/upload IDs, counts, failure status/code and cleanup failure category, never shared URLs, titles, image bytes or encrypted-file keys.
 
 ## Verification and contract fixtures
 
@@ -84,3 +91,23 @@ cargo test -p axon-server preview_claim -- --ignored --test-threads=1
 For real-service verification, send text and caption previews into encrypted and unencrypted test rooms, wait for their sync/REST/WS echo, and fetch each resulting preview MXC through the authenticated proxy.
 Proxy plaintext must match the original thumbnail, and encrypted-room preview metadata must omit `og:image` and carry `matrix:image:encrypted`.
 No extra image message should appear in the timeline.
+
+## Optional manual interoperability check before publication
+
+Run the branch's server against a test homeserver and use dedicated test rooms, one encrypted and one unencrypted.
+Use the API request above to supply preview metadata; the current Axon composer does not yet expose the new send fields.
+Open both rooms in Axon and a second Matrix client.
+
+1. Send a text link with title/description and a staged thumbnail, then send a file with the same preview in its caption.
+   Confirm the fallback text and attachment appear once, and that the thumbnail is attached to its parent rather than appearing as another message.
+   If the second client renders bundled preview images, confirm its card loads the thumbnail in both rooms.
+   Axon's own preview-image UI is a later stage, so its existing text card is expected here.
+2. Reply to a message authored by the second account using `send-media`, with `reply_to` set and either a preview array or `url_previews: []`.
+   Confirm the reply targets the right message and the second account receives the expected mention, subject to its notification settings.
+   Also reply to your own message and check that it does not self-mention.
+3. Edit the request to contain an unrelated `matched_url` or an excessive field.
+   Confirm the API rejects it and no message appears; retain the staged image for an explicit corrected attempt.
+
+The automated tests cover encryption descriptors, raw ciphertext, authenticated proxy decryption, bounds, account isolation and cancellation.
+This manual pass checks client interoperability and notification presentation.
+No iPhone simulator or physical-device test is needed for this server-only stage.

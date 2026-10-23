@@ -706,18 +706,20 @@ fn preview_validation_error(error: axon_core::link_preview::PreviewError) -> Gat
     }
 }
 
-fn preview_with_image(
+fn preview_image_info(
     metadata: &axon_core::link_preview::PreviewMetadata,
     image: &axon_core::link_preview::PreviewImage,
-    source: MediaSource,
-) -> Result<Value, GatewayError> {
-    use axon_core::link_preview;
-    validate_preview_media_source(&source)?;
-    let mut value = link_preview::entry(metadata);
+) -> Value {
+    let mut value = axon_core::link_preview::entry(metadata);
     value["matrix:image:size"] = json!(image.bytes.len());
     value["og:image:type"] = json!(image.mimetype);
     value["og:image:width"] = json!(image.width);
     value["og:image:height"] = json!(image.height);
+    value
+}
+
+fn set_preview_source(mut value: Value, source: MediaSource) -> Result<Value, GatewayError> {
+    validate_preview_media_source(&source)?;
     match source {
         MediaSource::Plain(url) => value["og:image"] = json!(url),
         MediaSource::Encrypted(file) => value["matrix:image:encrypted"] = json!(file),
@@ -733,13 +735,31 @@ fn validate_preview_media_source(source: &MediaSource) -> Result<(), GatewayErro
     };
     if url.len() > MAX_MXC_LENGTH
         || axon_core::media::parse_mxc(url).is_none()
-        || serde_json::to_vec(source).map_or(true, |v| v.len() > 1536)
+        || serde_json::to_vec(source).map_or(true, |v| {
+            v.len() > axon_core::link_preview::MAX_MEDIA_SOURCE_BYTES
+        })
     {
         return Err(GatewayError::Invalid(
             "invalid preview media URI from homeserver; event was not dispatched".into(),
         ));
     }
     Ok(())
+}
+
+async fn media_content_with_relation(
+    room: &Room,
+    mut content: RoomMessageEventContent,
+    relation: Relation<'_>,
+) -> Result<RoomMessageEventContent, GatewayError> {
+    if let Some(reply) = attachment_reply(relation)? {
+        return Box::pin(room.make_reply_event(content.into(), reply))
+            .await
+            .map_err(|_| GatewayError::Upstream("could not prepare media reply".into()));
+    }
+    if let Some(root) = thread_member_root(relation)? {
+        content.relates_to = Some(MessageRelation::Thread(Thread::without_fallback(root)));
+    }
+    Ok(content)
 }
 
 /// Send a media attachment as a thread member (`thread_root` without
@@ -1073,37 +1093,50 @@ impl SdkGateway {
             attachment.is_some(),
         )
         .map_err(preview_validation_error)?;
-        let relation = message_relates_to(message.relation)?;
+        message_relates_to(message.relation)?; // Validate before any upload.
         let room = self.room(account_id, room_id).await?;
         ensure_joined(&room)?;
+        // A cached false state can also expose the message itself. Keep one
+        // fresh lookup even for metadata-only sends, including explicit opt-out.
         let encrypted = fresh_preview_encryption(&room, account_id).await?;
-        let mut entries = Vec::with_capacity(message.previews.len());
-        for preview in message.previews {
-            let entry = if let Some(image) = &preview.image {
-                if image.bytes.len() as u64 > MAX_IMAGE_BYTES
-                    || image.width == 0
-                    || image.height == 0
-                    || u64::from(image.width) * u64::from(image.height) > MAX_IMAGE_PIXELS
-                {
-                    return Err(GatewayError::Invalid("invalid preview image limits".into()));
+        let has_uploads =
+            attachment.is_some() || message.previews.iter().any(|p| p.image.is_some());
+        use futures_util::{FutureExt, StreamExt, TryStreamExt};
+        // At most two uploads per send run at once. Consume the owned bytes;
+        // avoid cloning up to 16 MiB while preserving input card order.
+        let entries = futures_util::stream::iter(message.previews)
+            .map(|preview| {
+                let room = &room;
+                async move {
+                    let Some(image) = preview.image else {
+                        return Ok(link_preview::entry(&preview.metadata));
+                    };
+                    if image.bytes.len() as u64 > MAX_IMAGE_BYTES
+                        || image.width == 0
+                        || image.height == 0
+                        || u64::from(image.width) * u64::from(image.height) > MAX_IMAGE_PIXELS
+                    {
+                        return Err(GatewayError::Invalid("invalid preview image limits".into()));
+                    }
+                    let mimetype = image
+                        .mimetype
+                        .parse()
+                        .map_err(|_| GatewayError::Invalid("invalid preview image MIME".into()))?;
+                    let entry = preview_image_info(&preview.metadata, &image);
+                    let source = upload_media_source_with_encryption(
+                        room,
+                        &mimetype,
+                        image.bytes,
+                        encrypted,
+                    )
+                    .await?;
+                    set_preview_source(entry, source)
                 }
-                let mimetype = image
-                    .mimetype
-                    .parse()
-                    .map_err(|_| GatewayError::Invalid("invalid preview image MIME".into()))?;
-                let source = upload_media_source_with_encryption(
-                    &room,
-                    &mimetype,
-                    image.bytes.clone(),
-                    encrypted,
-                )
-                .await?;
-                preview_with_image(&preview.metadata, image, source)?
-            } else {
-                link_preview::entry(&preview.metadata)
-            };
-            entries.push(entry);
-        }
+                .boxed()
+            })
+            .buffered(2)
+            .try_collect::<Vec<_>>()
+            .await?;
         let mut content = if let Some(attachment) = attachment {
             if attachment.filename.len() > 1024
                 || attachment
@@ -1125,26 +1158,24 @@ impl SdkGateway {
                 Some(f) => TextMessageEventContent::html(message.body, f.body),
                 None => TextMessageEventContent::plain(message.body),
             });
-            serde_json::to_value(RoomMessageEventContent::new(media_message_type(
+            let media = RoomMessageEventContent::new(media_message_type(
                 attachment.kind,
                 attachment.filename,
                 &mime,
                 source,
                 info,
                 caption,
-            )))
-            .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?
+            ));
+            serde_json::to_value(media_content_with_relation(&room, media, message.relation).await?)
+                .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?
         } else {
             link_preview::text_content(message.body, message.formatted, message.relation)
         };
-        if let Some(relation) = relation {
-            content["m.relates_to"] = relation;
-        }
         link_preview::install_previews(&mut content, entries);
         link_preview::check_content(&content).map_err(preview_validation_error)?;
         // Do not send plaintext thumbnail references after a concurrent room
         // encryption upgrade. The next explicit attempt will reupload them.
-        if fresh_preview_encryption(&room, account_id).await? != encrypted {
+        if has_uploads && !encrypted && fresh_preview_encryption(&room, account_id).await? {
             return Err(GatewayError::Invalid(
                 "room encryption changed; review and retry the send".into(),
             ));
@@ -1181,17 +1212,8 @@ impl SdkGateway {
         // A relation is requested: build a raw envelope with `m.relates_to`,
         // mirroring how `edit` constructs its relation by hand. Validate the
         // referenced event ids up front so a bad id is a clean 400, not a 502.
-        let relates_to = message_relates_to(relation)?.expect("relation.is_some() checked above");
-
-        let mut content = json!({
-            "msgtype": "m.text",
-            "body": body,
-            "m.relates_to": relates_to,
-        });
-        if let Some(f) = formatted {
-            content["format"] = json!(f.format);
-            content["formatted_body"] = json!(f.body);
-        }
+        message_relates_to(relation)?;
+        let content = axon_core::link_preview::text_content(body, formatted, relation);
         let resp = room
             .send_raw("m.room.message", content)
             .await
@@ -2736,9 +2758,8 @@ mod tests {
         };
         let encrypted: matrix_sdk::ruma::events::room::EncryptedFile =
             serde_json::from_value(encrypted_file()).unwrap();
-        let value = super::preview_with_image(
-            &metadata,
-            &image,
+        let value = super::set_preview_source(
+            super::preview_image_info(&metadata, &image),
             MediaSource::Encrypted(Box::new(encrypted)),
         )
         .unwrap();
@@ -2749,14 +2770,116 @@ mod tests {
         );
         assert_eq!(value["matrix:image:encrypted"]["key"]["alg"], "A256CTR");
         assert_eq!(value["matrix:image:size"], 3);
-        let plain = super::preview_with_image(
-            &metadata,
-            &image,
+        let plain = super::set_preview_source(
+            super::preview_image_info(&metadata, &image),
             MediaSource::Plain("mxc://example.org/plain".into()),
         )
         .unwrap();
         assert_eq!(plain["og:image"], "mxc://example.org/plain");
         assert!(plain.get("matrix:image:encrypted").is_none());
+    }
+
+    async fn preview_test_room(
+        router: axum::Router,
+    ) -> (matrix_sdk::Room, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = matrix_sdk::Client::builder()
+            .homeserver_url(format!("http://{address}"))
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            .http_client(reqwest::Client::builder().no_proxy().build().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let session = serde_json::from_value::<matrix_sdk::authentication::matrix::MatrixSession>(json!({"user_id":"@preview:localhost","device_id":"PREVIEW","access_token":"test-only"})).unwrap();
+        client
+            .matrix_auth()
+            .restore_session(session, matrix_sdk::store::RoomLoadSettings::default())
+            .await
+            .unwrap();
+        let room = client
+            .join_room_by_id(matrix_sdk::ruma::room_id!("!preview:localhost"))
+            .await
+            .unwrap();
+        (room, server)
+    }
+
+    #[tokio::test]
+    async fn preview_media_replies_keep_sdk_mentions_and_thread_semantics() {
+        use axum::{response::IntoResponse, Json, Router};
+        async fn handler(uri: axum::http::Uri) -> axum::response::Response {
+            if uri.path().contains("/join") {
+                return Json(json!({"room_id":"!preview:localhost"})).into_response();
+            }
+            let own = uri.path().contains("own");
+            let threaded = uri.path().contains("thread");
+            let target = if own {
+                "$own:localhost"
+            } else if threaded {
+                "$thread:localhost"
+            } else {
+                "$reply:localhost"
+            };
+            let mut event = json!({"room_id":"!preview:localhost", "type":"m.room.message", "event_id":target,
+                "sender": if own {"@preview:localhost"} else {"@other:localhost"}, "origin_server_ts":1,
+                "content":{"msgtype":"m.text","body":"original"}});
+            if threaded {
+                event["content"]["m.relates_to"] =
+                    json!({"rel_type":"m.thread","event_id":"$root:localhost"});
+            }
+            Json(event).into_response()
+        }
+        let (room, server) = preview_test_room(Router::new().fallback(handler)).await;
+        for (reply_to, thread_root, expected) in [
+            (Some("$reply:localhost"), None, Some("@other:localhost")),
+            (Some("$own:localhost"), None, None),
+            (
+                Some("$thread:localhost"),
+                Some("$root:localhost"),
+                Some("@other:localhost"),
+            ),
+            (None, Some("$root:localhost"), None),
+        ] {
+            let media = RoomMessageEventContent::new(media_message_type(
+                MediaSendKind::File,
+                "file.txt".into(),
+                &mime::APPLICATION_OCTET_STREAM,
+                plain_media_source(),
+                attachment_info(MediaSendKind::File, 3).unwrap(),
+                Some(TextMessageEventContent::plain("caption")),
+            ));
+            let content = super::media_content_with_relation(
+                &room,
+                media,
+                Relation {
+                    reply_to,
+                    thread_root,
+                },
+            )
+            .await
+            .unwrap();
+            let content = serde_json::to_value(content).unwrap();
+            assert_eq!(content["body"], "caption");
+            if let Some(user) = expected {
+                assert_eq!(content["m.mentions"]["user_ids"], json!([user]));
+            } else {
+                assert!(content["m.mentions"]["user_ids"]
+                    .as_array()
+                    .is_none_or(|users| users.is_empty()));
+            }
+            if let Some(root) = thread_root {
+                assert_eq!(content["m.relates_to"]["event_id"], root);
+            }
+            if let Some(reply) = reply_to {
+                assert_eq!(content["m.relates_to"]["m.in_reply_to"]["event_id"], reply);
+            } else {
+                assert!(content["m.relates_to"].get("m.in_reply_to").is_none());
+            }
+        }
+        server.abort();
     }
 
     #[tokio::test]
@@ -2804,29 +2927,8 @@ mod tests {
             )
                 .into_response()
         }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let router = Router::new().fallback(handler).with_state(state.clone());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        let client = matrix_sdk::Client::builder()
-            .homeserver_url(format!("http://{address}"))
-            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
-            .http_client(reqwest::Client::builder().no_proxy().build().unwrap())
-            .build()
-            .await
-            .unwrap();
-        let session = serde_json::from_value::<matrix_sdk::authentication::matrix::MatrixSession>(json!({"user_id":"@preview:localhost","device_id":"PREVIEW","access_token":"test-only"})).unwrap();
-        client
-            .matrix_auth()
-            .restore_session(session, matrix_sdk::store::RoomLoadSettings::default())
-            .await
-            .unwrap();
-        let room = client
-            .join_room_by_id(matrix_sdk::ruma::room_id!("!preview:localhost"))
-            .await
-            .unwrap();
+        let (room, server) =
+            preview_test_room(Router::new().fallback(handler).with_state(state.clone())).await;
         room.update_room_info(|mut info| {
             info.set_encryption_event(None);
             info.mark_encryption_state_synced();

@@ -59,6 +59,11 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// Secret-safe structured diagnostics; messages can contain private input.
+    pub(crate) fn diagnostics(&self) -> (u16, &str) {
+        (self.status.as_u16(), &self.body.error.code)
+    }
+
     // Only the statuses the current endpoints raise have named constructors
     // below. Others (401/403 with auth, 409, 422, 503, …) slot in as one-line
     // wrappers over this private `new` as the API surface grows — the wire shape

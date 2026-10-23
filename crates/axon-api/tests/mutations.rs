@@ -16,6 +16,51 @@ mod common;
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn saturated_preview_uploads_do_not_block_text_opt_out_or_other_accounts() {
+    let gate = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    let sender = Arc::new(StubSender::ok("$preview").with_preview_gate(gate.clone()));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads);
+    let account = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let mut tasks = Vec::new();
+    for (owner, image, empty) in [
+        (account, true, false),
+        (account, true, false),
+        (account, true, false),
+        (account, true, false),
+        (account, false, true),
+        (account, false, false),
+        (other, true, false),
+    ] {
+        let mut preview = json!({"matched_url":"https://example.org"});
+        if image {
+            preview["image_upload_id"] = json!(Uuid::new_v4());
+        }
+        let body = json!({"body":"https://example.org", "url_previews":if empty {json!([])} else {json!([preview])}});
+        let router = app.clone();
+        tasks.push(tokio::spawn(async move {
+            send(
+                &router,
+                "POST",
+                &format!("/v1/accounts/{owner}/rooms/!room:localhost/send"),
+                Some(body),
+            )
+            .await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(2), gate.0.notified())
+            .await
+            .expect("request reached sender despite occupied slots");
+    }
+    gate.1.notify_waiters();
+    for task in tasks {
+        assert_eq!(task.await.unwrap().0, StatusCode::OK);
+    }
+    assert_eq!(sender.calls().len(), 7);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn later_preview_claim_failure_releases_only_earlier_owned_claims() {
     let sender = Arc::new(StubSender::ok("$must-not-send"));
     let uploads = Arc::new(StubUploads::ok());

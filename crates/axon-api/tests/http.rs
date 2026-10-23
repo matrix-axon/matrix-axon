@@ -1095,6 +1095,57 @@ async fn media_route_preserves_forbidden_and_not_connected_statuses() {
     assert_media_route_preserves_error_statuses("media-errors", "").await;
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn preview_media_after_entry_32_always_reaches_proxy_with_its_encryption_descriptor() {
+    let store = store().await;
+    let owner = store
+        .upsert_account(
+            &format!("@late-preview-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    for array in ["m.url_previews", "com.beeper.linkpreviews"] {
+        for key in ["matrix:image:encrypted", "beeper:image:encryption"] {
+            let id = Uuid::new_v4().simple().to_string();
+            let mxc = format!("mxc://example.org/{id}");
+            let descriptor = json!({"url":mxc,"v":"v2","key":{},"iv":"","hashes":{}});
+            let mut card = json!({"og:image:type":"image/png"});
+            card[key] = descriptor.clone();
+            let mut cards = vec![json!({}); 32];
+            cards.push(card);
+            let mut content = json!({"msgtype":"m.text", "body":"https://example.org"});
+            content[array] = json!(cards);
+            store
+                .upsert_event(&NewEvent {
+                    event_id: &format!("$preview-{}", Uuid::new_v4()),
+                    room_id: "!previews:localhost",
+                    account_id: owner,
+                    sender: "@other:localhost",
+                    origin_ts: 1,
+                    event_type: "m.room.message",
+                    content: Some(content.clone()),
+                    raw_event: json!({"type":"m.room.message","content":content}),
+                    megolm_session_id: None,
+                    redacts: None,
+                    relates_to: None,
+                    decrypted_body_text: None,
+                })
+                .await
+                .unwrap();
+            let media = Arc::new(ConfiguredMediaProxy::ok(b"decrypted preview"));
+            let app = media_app(store.clone(), media.clone());
+            let (status, _, bytes) =
+                get_media_bytes(&app, &format!("/v1/media/{owner}/example.org/{id}"), None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(bytes, b"decrypted preview");
+            assert_eq!(media.calls()[0].encrypted_file, Some(descriptor));
+        }
+    }
+}
+
 /// Insert an event whose primary attachment is *encrypted* (`content.file`
 /// carries the MXC url rather than the plain `content.url`), so
 /// `encrypted_file_for_mxc` matches and the thumbnail route's `400` pre-check
