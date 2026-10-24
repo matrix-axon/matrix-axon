@@ -272,7 +272,9 @@ this table is the orientation copy.
   The `embed-web` cargo feature compiles `clients/web/dist` (or `AXON_WEB_DIST`) into `axon-server`, and the router's fallback serves it unless `[server] web_client` is off.
   The feature is off by default, and the gate's `--all-features` builds on a checkout with no bundle only warn and embed nothing, so cargo and the pre-push gate need no Node.
   With the default `clients/web/dist`, `build.rs` runs `pnpm` itself when the bundle is missing or older than `clients/web` sources, so a local `cargo build --features embed-web` needs no separate `pnpm build`.
-  It does nothing when `AXON_WEB_DIST` is set, when `CI` is set, or when `AXON_WEB_AUTOBUILD=0` (the gate's clippy hook sets it); with no `pnpm`, or a failed build, it warns and embeds what `dist` holds.
+  It does nothing when `AXON_WEB_DIST` is set, when `CI` is set (and not `false`/`0`), or when `AXON_WEB_AUTOBUILD` is `0`, `false`, `no` or `off` (the gate's clippy hook sets it; set it in an IDE's `cargo check --all-features` too); with no `pnpm`, or a failed build, it warns and embeds what `dist` holds.
+  The autobuild is a developer convenience, not a release mechanism: a release lane without `CI` that forgets `AXON_WEB_DIST` would build from the checkout instead of failing, so release lanes still set `AXON_WEB_DIST`.
+  On Windows it runs `pnpm.cmd`. Its staleness check and failure handling are mtime-only (#840), and it takes no lock and has no timeout (#841).
   `AXON_WEB_DIST` is the explicit form: it must be an absolute path, and a directory there with no `index.html` fails the build, which is what release pipelines rely on.
   Every job that ships a server binary builds with `--features embed-web` and `AXON_WEB_DIST` set (the `web-bundle` action exports it), then runs `scripts/assert-web-embedded.sh` on the result; a new release lane must do the same.
   The one exception is the Docker server image (the root `Dockerfile`, `publish-images.yml`), which stays without the web client because the stack's `web` container serves it; do not change that outside #687.

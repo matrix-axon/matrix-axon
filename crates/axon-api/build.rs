@@ -122,6 +122,20 @@ const WEB_INPUTS: &[&str] = &[
     "tsconfig.node.json",
 ];
 
+/// The `pnpm` executable. On Windows it is a `pnpm.cmd` shim, which
+/// `Command::new("pnpm")` does not resolve (this is the host's `cfg`, which is
+/// where the script runs).
+const PNPM: &str = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
+
+/// Whether the environment variable `name` is set to a value that means "on":
+/// anything but empty, `0`, `false`, `no` or `off` (case-insensitive). So
+/// `CI=false` is not CI, and `AXON_WEB_AUTOBUILD=off` is off.
+fn env_on(name: &str) -> bool {
+    env::var(name).is_ok_and(|value| {
+        !["", "0", "false", "no", "off"].contains(&value.to_ascii_lowercase().as_str())
+    })
+}
+
 /// Builds `clients/web` into `dist` when the bundle is missing or older than
 /// its inputs, so a `cargo build --features embed-web` never embeds a stale or
 /// absent client. Only the default location is built: `AXON_WEB_DIST` names a
@@ -136,7 +150,9 @@ fn autobuild(dist: &Path) {
         // Watched even when absent, and recursively for directories.
         println!("cargo:rerun-if-changed={}", web.join(input).display());
     }
-    if env::var_os("CI").is_some() || env::var("AXON_WEB_AUTOBUILD").is_ok_and(|v| v == "0") {
+    // An explicit `AXON_WEB_AUTOBUILD` (any value) wins; otherwise `CI` decides.
+    let opted = env::var_os("AXON_WEB_AUTOBUILD").map(|_| env_on("AXON_WEB_AUTOBUILD"));
+    if !opted.unwrap_or(!env_on("CI")) {
         return;
     }
     let built = fs::metadata(dist.join("index.html")).and_then(|meta| meta.modified());
@@ -157,7 +173,7 @@ fn autobuild(dist: &Path) {
         return;
     }
     let pnpm = |args: &[&str]| {
-        Command::new("pnpm")
+        Command::new(PNPM)
             .arg("--dir")
             .arg(&web)
             .args(args)
@@ -165,7 +181,7 @@ fn autobuild(dist: &Path) {
     };
     // Without pnpm there is nothing to try: the caller's "not built" warning
     // already says how to build by hand.
-    match Command::new("pnpm").arg("--version").output() {
+    match Command::new(PNPM).arg("--version").output() {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(_) => {}

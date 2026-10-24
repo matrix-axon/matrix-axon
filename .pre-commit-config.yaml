@@ -264,8 +264,9 @@ repos:
       # flag order in lint-and-clippy.yml matching this line until it is.
       #
       # AXON_WEB_AUTOBUILD=0: `--all-features` turns on `embed-web`, whose
-      # build.rs would otherwise run `pnpm` on a checkout with no bundle. CI sets
-      # `CI`, which has the same effect there.
+      # build.rs would otherwise run `pnpm` on a checkout with no bundle. CI
+      # runners set `CI`, which has the same effect there; a runner without it
+      # (act, self-hosted) should set AXON_WEB_AUTOBUILD=0 itself.
       - id: rust-clippy
         name: clippy
         language: system
