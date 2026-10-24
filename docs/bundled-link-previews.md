@@ -111,3 +111,97 @@ Open both rooms in Axon and a second Matrix client.
 The automated tests cover encryption descriptors, raw ciphertext, authenticated proxy decryption, bounds, account isolation and cancellation.
 This manual pass checks client interoperability and notification presentation.
 No iPhone simulator or physical-device test is needed for this server-only stage.
+
+### Copy-and-paste curl requests
+
+Save the following block as a local Bash script and run it with `curl` and `jq` installed.
+Set the server URL, account ID and one of your dedicated test room IDs, and choose an existing PNG image no larger than 2 MiB and 4,000,000 pixels.
+Run the sequence once per room, changing `ROOM_ID` between the encrypted and unencrypted test rooms.
+The token is read without echo and passed to curl through standard input rather than a command-line argument.
+Do not enable shell tracing while working with credentials.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+AXON_URL='http://127.0.0.1:8080'
+ACCOUNT_ID='<Axon account UUID>'
+ROOM_ID='<Matrix test room ID>'
+IMAGE_PATH='/absolute/path/to/test-preview.png'
+read -r -s -p 'Axon bearer token: ' AXON_TOKEN </dev/tty
+printf '\n'
+AXON_URL=${AXON_URL%/}
+ROOM_PATH=$(jq -nr --arg room "$ROOM_ID" '$room | @uri')
+ROOM_API="$AXON_URL/v1/accounts/$ACCOUNT_ID/rooms/$ROOM_PATH"
+LINK='https://example.org/axon-preview-check'
+
+axon_curl() {
+  printf 'header = "Authorization: Bearer %s"\n' "$AXON_TOKEN" |
+    curl --config - --silent --show-error --fail-with-body \
+      --connect-timeout 5 --max-time 90 "$@"
+}
+
+stage_preview() {
+  axon_curl -X POST -H 'Content-Type: image/png' \
+    --data-binary "@$IMAGE_PATH" \
+    "$AXON_URL/v1/accounts/$ACCOUNT_ID/media/uploads?kind=image&filename=preview.png" |
+    jq -er '.data.upload_id'
+}
+
+stage_attachment() {
+  axon_curl -X POST -H 'Content-Type: text/plain' \
+    --data-binary 'Ordinary Axon interoperability test attachment.' \
+    "$AXON_URL/v1/accounts/$ACCOUNT_ID/media/uploads?kind=file&filename=interop-check.txt" |
+    jq -er '.data.upload_id'
+}
+
+# Text message with supplied metadata and an image.
+PREVIEW_ID=$(stage_preview)
+JSON=$(jq -n --arg url "$LINK" --arg image "$PREVIEW_ID" '{
+  body: ("[Axon preview check] text " + $url),
+  url_previews: [{matched_url: $url, title: "Axon preview check",
+    description: "Supplied metadata; no webpage fetch", site_name: "Example",
+    image_upload_id: $image}]
+}')
+TEXT_EVENT_ID=$(axon_curl -X POST -H 'Content-Type: application/json' \
+  --data-binary "$JSON" "$ROOM_API/send" | jq -er '.data.event_id')
+printf 'Text event: %s\n' "$TEXT_EVENT_ID"
+
+# A file with its own caption preview. Every send needs fresh upload IDs.
+PREVIEW_ID=$(stage_preview)
+ATTACHMENT_ID=$(stage_attachment)
+JSON=$(jq -n --arg url "$LINK" --arg image "$PREVIEW_ID" \
+  --arg upload "$ATTACHMENT_ID" '{
+  upload_id: $upload, caption: ("[Axon preview check] caption " + $url),
+  url_previews: [{matched_url: $url, title: "Caption preview", image_upload_id: $image}]
+}')
+CAPTION_EVENT_ID=$(axon_curl -X POST -H 'Content-Type: application/json' \
+  --data-binary "$JSON" "$ROOM_API/send-media" | jq -er '.data.event_id')
+printf 'Caption event: %s\n' "$CAPTION_EVENT_ID"
+
+# Default: reply to yourself. Replace REPLY_TO with a second account's
+# message ID in this room to check mentions/notifications for another author.
+REPLY_TO="$TEXT_EVENT_ID"
+ATTACHMENT_ID=$(stage_attachment)
+JSON=$(jq -n --arg upload "$ATTACHMENT_ID" --arg reply "$REPLY_TO" '{
+  upload_id: $upload, caption: "[Axon preview check] media reply, cards disabled",
+  reply_to: $reply, url_previews: []
+}')
+REPLY_EVENT_ID=$(axon_curl -X POST -H 'Content-Type: application/json' \
+  --data-binary "$JSON" "$ROOM_API/send-media" | jq -er '.data.event_id')
+printf 'Reply event: %s\n' "$REPLY_EVENT_ID"
+
+# Inspect the synced event after a short wait. Never print an entire encrypted
+# file descriptor: it includes decryption keys. Show only safe summary fields.
+EVENT_PATH=$(jq -nr --arg event "$CAPTION_EVENT_ID" '$event | @uri')
+axon_curl "$AXON_URL/v1/accounts/$ACCOUNT_ID/events/$EVENT_PATH" |
+  jq '.data | {event_id, msgtype: .content.msgtype,
+    preview_count: (.content["m.url_previews"] | length),
+    encrypted_thumbnail: (.content["m.url_previews"][0] | has("matrix:image:encrypted"))}'
+
+unset AXON_TOKEN
+```
+
+Expected: one text message, one file/caption message, and one media reply in each room, with no separate thumbnail message.
+An encrypted-room preview has `matrix:image:encrypted`; an unencrypted-room preview has `og:image`.
+If an event has not reached sync yet, repeat only the final GET, not the send.
+A timeout or lost response after a POST is outcome-unknown: inspect the timeline before making another attempt.
