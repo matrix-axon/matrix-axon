@@ -41,6 +41,10 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const ROOM_METADATA_LIMIT: usize = 2 * 1024 * 1024;
 /// `/info` and `/upgrade` are a handful of short strings and numbers.
 const ROOM_SUMMARY_READ_LIMIT: usize = 64 * 1024;
+/// `/members` is uncapped on the server. This is the allocation ceiling for
+/// the lazily loaded projection, the same size as `/metadata`. A larger body
+/// fails the read instead of being decoded.
+pub(crate) const ROOM_MEMBERS_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -361,18 +365,40 @@ impl AxonClient {
         self.send_bounded(read_request(request), limit).await
     }
 
+    /// `GET …/members` for display-name seeding and space timelines.
+    /// Uncapped: a large roster must still resolve sender names. `/whereami`
+    /// uses [`Self::room_members_bounded`].
     pub async fn room_members(
         &self,
         account_id: Uuid,
         room_id: &str,
     ) -> Result<Vec<MemberDto>, ApiError> {
-        let request = self.http.get(format!(
+        self.send(read_request(self.members_request(account_id, room_id)))
+            .await
+    }
+
+    /// `/whereami`'s `GET …/members`. The body is capped before decoding so one
+    /// popup cannot allocate an unbounded response. Other callers stay on
+    /// [`Self::room_members`].
+    pub async fn room_members_bounded(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<Vec<MemberDto>, ApiError> {
+        self.send_bounded(
+            read_request(self.members_request(account_id, room_id)),
+            ROOM_MEMBERS_LIMIT,
+        )
+        .await
+    }
+
+    fn members_request(&self, account_id: Uuid, room_id: &str) -> reqwest::RequestBuilder {
+        self.http.get(format!(
             "{}/v1/accounts/{}/rooms/{}/members",
             self.base_url,
             account_id,
             path_segment(room_id)
-        ));
-        self.send(read_request(request)).await
+        ))
     }
 
     pub async fn send_message(
@@ -1576,6 +1602,12 @@ pub enum AccountState {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MemberDto {
     pub user_id: String,
+    /// `join`, `invite`, `leave`, or `ban`, as stored on the membership event.
+    /// Absent becomes empty, which the popup groups as unset. One omitted
+    /// field must not fail the whole list: display-name seeding shares this
+    /// struct.
+    #[serde(default)]
+    pub membership: String,
     #[serde(default)]
     pub display_name: Option<String>,
 }

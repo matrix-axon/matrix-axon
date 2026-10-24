@@ -600,6 +600,7 @@ pub(crate) fn incremental_history_keeps_existing_display_names() {
         &room,
         &[MemberDto {
             user_id: "@alice:example.com".to_owned(),
+            membership: "join".to_owned(),
             display_name: Some("Current Alice".to_owned()),
         }],
     );
@@ -664,6 +665,7 @@ pub(crate) fn members_outcome_resolves_previously_unknown_sender() {
         room_key: RoomKey::from(&room),
         members: Some(vec![MemberDto {
             user_id: "@alice:example.com".to_owned(),
+            membership: "join".to_owned(),
             display_name: Some("Alice".to_owned()),
         }]),
     });
