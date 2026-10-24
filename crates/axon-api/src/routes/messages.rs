@@ -24,6 +24,8 @@ use crate::uploads::StagedUploadService;
 /// The only `format` Matrix defines for `formatted_body`.
 const HTML_FORMAT: &str = "org.matrix.custom.html";
 
+/// Send a sticker
+///
 /// Send an existing MXC image as a standalone Matrix `m.sticker` event.
 /// Info accepts raster MIME types, dimensions 1–16,384, and sizes at most
 /// 100 MiB. Empty info is permitted; bytes are never fetched during a send.
@@ -93,6 +95,8 @@ fn formatted<'a>(
     }
 }
 
+/// Send a message
+///
 /// Send a plain-text message to a room.
 #[utoipa::path(
     post,
@@ -128,6 +132,8 @@ pub async fn send_message(
     Ok(ApiResponse::new(SendResultDto { event_id }))
 }
 
+/// Send media
+///
 /// Send a staged media upload to a room.
 #[utoipa::path(
     post,
@@ -233,6 +239,8 @@ pub async fn send_media(
     }
 }
 
+/// Edit a message
+///
 /// Edit an existing message (sends an `m.replace`).
 #[utoipa::path(
     put,
@@ -265,6 +273,8 @@ pub async fn edit_message(
     Ok(ApiResponse::new(SendResultDto { event_id: new_id }))
 }
 
+/// Redact an event
+///
 /// Redact an event, optionally with a reason (`?reason=`).
 #[utoipa::path(
     delete,
@@ -298,6 +308,8 @@ pub async fn redact_event(
     }))
 }
 
+/// React to an event
+///
 /// React to an event with an emoji/short key.
 #[utoipa::path(
     post,

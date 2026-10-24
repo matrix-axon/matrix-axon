@@ -67,6 +67,8 @@ async fn require_account(store: &Store, account_id: Uuid) -> Result<(), ApiError
     Ok(())
 }
 
+/// Get device state
+///
 /// Read one namespace of per-device state: the last-write-wins **merged view
 /// across all the account's devices** (per key, the newest write wins; deleted
 /// keys are absent). A namespace never written is an empty map, not a `404`.
@@ -101,6 +103,8 @@ pub async fn get_device_state(
     Ok(ApiResponse::new(DeviceStateDto { namespace, entries }))
 }
 
+/// Update device state
+///
 /// Write per-device state: a **merge-upsert** of the supplied entries under the
 /// calling device. Only the keys present are touched; a `null` value deletes
 /// the key (a tombstone, so the deletion wins the cross-device merge).

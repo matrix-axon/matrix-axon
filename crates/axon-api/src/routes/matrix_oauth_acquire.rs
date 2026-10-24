@@ -14,6 +14,8 @@ use crate::{
     response::{ApiError, ApiResponse},
 };
 
+/// Start a QR login
+///
 /// Start a QR login that creates and verifies Axon's Matrix device without a
 /// Matrix password, imported access token, or recovery key.
 #[utoipa::path(
@@ -39,6 +41,8 @@ pub async fn create(
     Ok((StatusCode::CREATED, ApiResponse::new(flow)))
 }
 
+/// Get a QR login flow
+///
 /// Read the current replayable flow stage and only its stage-appropriate data.
 #[utoipa::path(
     get,
@@ -57,6 +61,8 @@ pub async fn get(
     Ok(ApiResponse::new(service.get(flow_id).await?))
 }
 
+/// Submit a scanned QR login payload
+///
 /// Supply one decoded QR payload to a scan-presentation flow.
 #[utoipa::path(
     post,
@@ -82,6 +88,8 @@ pub async fn submit_scan(
     ))
 }
 
+/// Submit a QR login check code
+///
 /// Supply one two-digit check code to a display-presentation flow.
 #[utoipa::path(
     post,
@@ -109,6 +117,8 @@ pub async fn submit_check_code(
     ))
 }
 
+/// Cancel a QR login flow
+///
 /// Cancel a flow idempotently, including an unknown or already-expired id.
 #[utoipa::path(
     delete,

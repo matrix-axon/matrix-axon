@@ -237,6 +237,8 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
         .any(|candidate| candidate == "*" || candidate.trim_start_matches("W/") == etag_quoted)
 }
 
+/// Download media
+///
 /// Proxy an `mxc://` download through the account's homeserver connection.
 ///
 /// The `server_name` and `media_id` path segments form the `mxc://` URI that
@@ -437,6 +439,8 @@ fn log_and_convert_media_error(
     err.into()
 }
 
+/// Download a media thumbnail
+///
 /// Proxy a homeserver-generated thumbnail of an `mxc://` object through the
 /// account's homeserver connection.
 ///

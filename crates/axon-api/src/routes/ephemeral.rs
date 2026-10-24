@@ -27,6 +27,8 @@ use crate::extract::{Json, Path};
 use crate::response::{ApiError, ApiResponse};
 use crate::sender::EphemeralSender;
 
+/// Mark a room read
+///
 /// Mark a room read: sets both the public read receipt and the private
 /// fully-read marker in one homeserver call.
 ///
@@ -90,6 +92,8 @@ pub async fn send_read_receipt(
     }
 }
 
+/// Set the typing indicator
+///
 /// Set (or clear) this account's typing indicator in a room.
 #[utoipa::path(
     put,

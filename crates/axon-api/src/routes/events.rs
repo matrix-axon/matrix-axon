@@ -13,6 +13,8 @@ use crate::extract::Path;
 use crate::response::{ApiError, ApiResponse};
 use crate::trust::SenderTrustService;
 
+/// Get an event
+///
 /// Read a single event by `(account_id, event_id)`. Redacted events come back
 /// masked (`content`/`body` null, `redacted` true); an unknown id is a 404.
 #[utoipa::path(
@@ -39,6 +41,8 @@ pub async fn get_event(
     Ok(ApiResponse::new(EventDto::from_row(account_id, row)))
 }
 
+/// Get an event's verification bundle
+///
 /// Read the per-event verification bundle (M7c): the durable at-decrypt sender-
 /// trust snapshot plus live cross-signing evidence for the sender's device and
 /// identity. An unknown account/event is a 404; a logged-out account is a 409
@@ -69,6 +73,8 @@ pub async fn get_verification_bundle(
     )))
 }
 
+/// Get an event's reactions
+///
 /// Per-emoji reaction tally for an event (M8), resolved over the event's reactions
 /// on disk regardless of where the original message falls in the timeline window —
 /// the fix for the dropped-reaction bug (issue #22). The body is a JSON object
@@ -108,6 +114,8 @@ pub async fn get_reactions(
     Ok(ApiResponse::new(map))
 }
 
+/// Get an event's replies
+///
 /// Direct replies to an event (M8): events whose nested
 /// `m.relates_to.m.in_reply_to.event_id` is this event and which carry no
 /// `rel_type` (a plain reply, not a thread member). Oldest first;
@@ -138,6 +146,8 @@ pub async fn get_replies(
     Ok(ApiResponse::new(replies))
 }
 
+/// Get an event's edit history
+///
 /// The forensic edit history of an event (M8): every `m.replace` targeting it,
 /// oldest first, *unfiltered* by the resolution rules — including edits from a
 /// non-sender or an incompatible `msgtype` — for clients that want to show or

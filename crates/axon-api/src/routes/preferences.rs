@@ -157,6 +157,8 @@ fn validate_value(key: &str, value: &serde_json::Value) -> Result<(), ApiError> 
     }
 }
 
+/// Get a preference
+///
 /// Read one instance preference. An allowlisted key that has never been
 /// written is a `404` so a client can tell "unset" from an empty value
 /// (ADR 0103's one-shot upload of local `spaceOrder`).
@@ -189,6 +191,8 @@ pub async fn get_preference(
     }))
 }
 
+/// Set a preference
+///
 /// Write one instance preference. Last-write-wins on the whole value. A
 /// successful write fans out `preferences.changed` carrying this `device_id`.
 #[utoipa::path(

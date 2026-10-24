@@ -14,6 +14,7 @@ use crate::{
     response::{ApiError, ApiResponse},
 };
 
+/// Start a QR login grant
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/login-grants/qr",
@@ -40,6 +41,7 @@ pub async fn create(
     Ok((StatusCode::CREATED, ApiResponse::new(flow)))
 }
 
+/// Get a QR login grant
 #[utoipa::path(
     get,
     path = "/v1/accounts/{account_id}/login-grants/qr/{flow_id}",
@@ -61,6 +63,7 @@ pub async fn get(
     Ok(ApiResponse::new(service.get(account_id, flow_id).await?))
 }
 
+/// Submit a scanned QR login grant payload
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/login-grants/qr/{flow_id}/scan",
@@ -91,6 +94,7 @@ pub async fn submit_scan(
     ))
 }
 
+/// Submit a QR login grant check code
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/login-grants/qr/{flow_id}/check-code",
@@ -121,6 +125,7 @@ pub async fn submit_check_code(
     ))
 }
 
+/// Cancel a QR login grant
 #[utoipa::path(
     delete,
     path = "/v1/accounts/{account_id}/login-grants/qr/{flow_id}",
