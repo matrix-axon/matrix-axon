@@ -91,6 +91,7 @@ impl MatrixOAuthRegistrationManager {
         validate_config(&self.config)?;
         let timeout = Duration::from_secs(self.config.request_timeout_secs);
         let http = reqwest::Client::builder()
+            .user_agent(crate::client::user_agent())
             .connect_timeout(timeout.min(Duration::from_secs(5)))
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -452,15 +453,23 @@ fn static_client_id(
     Ok(None)
 }
 
+/// Icon MAS shows beside Axon sessions. Must stay publicly fetchable over HTTPS;
+/// repointing it only affects clients registered afterwards.
+const CLIENT_LOGO_URI: &str =
+    "https://github.com/matrix-axon/matrix-axon/blob/main/docs/brand/axon-mark-light.png";
+
 fn client_metadata() -> Result<Raw<ClientMetadata>, SyncError> {
     let client_uri = Url::parse("https://github.com/matrix-axon/matrix-axon")
         .map_err(|err| SyncError::Sdk(format!("invalid built-in OAuth client URI: {err}")))?;
+    let logo_uri = Url::parse(CLIENT_LOGO_URI)
+        .map_err(|err| SyncError::Sdk(format!("invalid built-in OAuth logo URI: {err}")))?;
     let mut metadata = ClientMetadata::new(
         ApplicationType::Native,
         vec![OAuthGrantType::DeviceCode],
         Localized::new(client_uri, None),
     );
     metadata.client_name = Some(Localized::new("Axon".to_owned(), None));
+    metadata.logo_uri = Some(Localized::new(logo_uri, None));
     Raw::new(&metadata)
         .map_err(|err| SyncError::Sdk(format!("serializing OAuth client metadata: {err}")))
 }
@@ -699,6 +708,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(raw.json().get()).unwrap();
         assert_eq!(json["application_type"], "native");
         assert_eq!(json["client_name"], "Axon");
+        assert_eq!(json["logo_uri"], CLIENT_LOGO_URI);
         assert_eq!(
             json["grant_types"],
             serde_json::json!([
@@ -767,6 +777,7 @@ mod tests {
     ) -> Json<serde_json::Value> {
         assert_eq!(metadata["application_type"], "native");
         assert_eq!(metadata["client_name"], "Axon");
+        assert_eq!(metadata["logo_uri"], CLIENT_LOGO_URI);
         state.registration_calls.fetch_add(1, Ordering::SeqCst);
         Json(serde_json::json!({ "client_id": "dynamic-client" }))
     }

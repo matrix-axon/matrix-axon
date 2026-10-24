@@ -55,8 +55,27 @@ fn production_encryption_settings() -> EncryptionSettings {
     }
 }
 
+/// The `User-Agent` Axon sends to every homeserver and authorization server.
+///
+/// Matrix Authentication Service names and classifies a session by parsing this
+/// header; without it (or with the SDK's bare `matrix-rust-sdk`) the session
+/// is listed as "Unknown device" with no device type. The platform token uses
+/// the conventional browser spelling so MAS's parser recognises the OS.
+pub(crate) fn user_agent() -> String {
+    let platform = match std::env::consts::OS {
+        "linux" => "X11; Linux x86_64",
+        "windows" => "Windows NT 10.0; Win64; x64",
+        "macos" => "Macintosh; Intel Mac OS X 10_15_7",
+        "android" => "Linux; Android",
+        "ios" => "iPhone; CPU iPhone OS like Mac OS X",
+        other => other,
+    };
+    format!("Axon/{} ({platform})", env!("CARGO_PKG_VERSION"))
+}
+
 fn configure_client_builder(builder: ClientBuilder, handle_refresh_tokens: bool) -> ClientBuilder {
     let builder = builder
+        .user_agent(user_agent())
         .with_encryption_settings(production_encryption_settings())
         .cross_process_store_config(CrossProcessLockConfig::SingleProcess);
     if handle_refresh_tokens {
@@ -714,9 +733,16 @@ mod tests {
     use super::{
         adopt_matrix_oauth_acquire_staging, client_builder, finish_matrix_oauth_acquire_adoption,
         matrix_oauth_acquire_previous_dir, matrix_oauth_acquire_root,
-        production_encryption_settings, restore, restore_account_client, sqlite_config,
+        production_encryption_settings, restore, restore_account_client, sqlite_config, user_agent,
         with_staged_store_dir,
     };
+
+    #[test]
+    fn user_agent_names_axon_and_version() {
+        let ua = user_agent();
+        assert!(ua.starts_with(&format!("Axon/{} (", env!("CARGO_PKG_VERSION"))));
+        assert!(ua.ends_with(')'));
+    }
     use crate::error::SyncError;
     use axon_core::SyncConfig;
     use axon_store::{Account, AccountAuthKind, AccountState, StoredAccountSession};
