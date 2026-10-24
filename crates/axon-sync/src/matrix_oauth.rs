@@ -453,10 +453,13 @@ fn static_client_id(
     Ok(None)
 }
 
-/// Icon MAS shows beside Axon sessions. Must stay publicly fetchable over HTTPS;
-/// repointing it only affects clients registered afterwards.
+/// Icon MAS shows beside Axon sessions. Must stay publicly fetchable over HTTPS
+/// (`/raw/` redirects to the image bytes; `/blob/` is an HTML page), and on the
+/// same host as the `client_uri` in [`client_metadata`]: MAS refuses
+/// registration with a 400 when the two differ. Repointing it only affects
+/// clients registered afterwards.
 const CLIENT_LOGO_URI: &str =
-    "https://raw.githubusercontent.com/matrix-axon/matrix-axon/main/docs/brand/axon-mark-light.png";
+    "https://github.com/matrix-axon/matrix-axon/raw/main/docs/brand/axon-mark-light.png";
 
 fn client_metadata() -> Result<Raw<ClientMetadata>, SyncError> {
     let client_uri = Url::parse("https://github.com/matrix-axon/matrix-axon")
@@ -709,6 +712,15 @@ mod tests {
         assert_eq!(json["application_type"], "native");
         assert_eq!(json["client_name"], "Axon");
         assert_eq!(json["logo_uri"], CLIENT_LOGO_URI);
+        assert_eq!(
+            Url::parse(json["logo_uri"].as_str().unwrap())
+                .unwrap()
+                .host(),
+            Url::parse(json["client_uri"].as_str().unwrap())
+                .unwrap()
+                .host(),
+            "MAS requires logo_uri and client_uri on the same host"
+        );
         assert_eq!(
             json["grant_types"],
             serde_json::json!([
