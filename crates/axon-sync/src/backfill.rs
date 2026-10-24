@@ -32,6 +32,10 @@
 //! token. A homeserver can keep working on a `/messages` request long after axon
 //! has given up on it, so every retry adds load the client cannot see.
 //!
+//! Every page also waits for a permit from the homeserver's load gate (ADR 0122),
+//! shared with axon's other background callers, so a struggling homeserver
+//! slows backfill down as a whole, not one room at a time.
+//!
 //! A disk-space safety valve ([`BackfillHealth`]) pauses paging when free space on
 //! the guarded filesystem (`sync.backfill_disk_guard_path`, default the sync data
 //! dir) is low — backfill grows storage unbounded ("to room start"), so it must
@@ -55,6 +59,7 @@ use matrix_sdk::Client;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{persist_backfilled_event, PersistContext};
+use crate::homeserver_gate::HomeserverGate;
 
 /// The filesystem the disk-space valve guards: the configured override, else the
 /// sync data dir. Shared by the valve (`disk_ok`) and the live `GET /v1/status`
@@ -363,6 +368,7 @@ pub(crate) async fn run(
     ctx: PersistContext,
     params: BackfillParams,
     health: BackfillHealth,
+    gate: Arc<HomeserverGate>,
     cancel: CancellationToken,
 ) {
     let account_id = ctx.account_id;
@@ -416,7 +422,7 @@ pub(crate) async fn run(
                 break;
             }
 
-            match backfill_room_page(&ctx, &params, &room, state.cloned(), &cancel).await {
+            match backfill_room_page(&ctx, &params, &gate, &room, state.cloned(), &cancel).await {
                 PageOutcome::Paged => {
                     progressed = true;
                     // Throttle *only* after real work, so completed/capped rooms
@@ -498,21 +504,27 @@ enum FetchError {
 ///
 /// `timeout` bounds the request only. Decryption is local work, so a slow decrypt
 /// must not be recorded against the homeserver (ADR 0121); the caller's
-/// cancellation still covers it.
+/// cancellation still covers it. The same goes for the homeserver gate (ADR
+/// 0122): the request waits for a permit first, the timeout starts once it has
+/// one, and the permit is returned before decryption.
 async fn fetch_page(
+    gate: &Arc<HomeserverGate>,
     room: &matrix_sdk::Room,
     request: get_message_events::v3::Request,
     timeout: Duration,
 ) -> Result<(Vec<TimelineEvent>, Option<String>), FetchError> {
     // The SDK's own timeout is the same length and also ends in a retryable
-    // failure, so it does not matter which fires first. This outer one also covers
-    // time the SDK spends before the request is on the wire.
-    let response =
-        match tokio::time::timeout(timeout, send_page(&room.client(), request, timeout)).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(err)) => return Err(FetchError::Homeserver(err)),
-            Err(_elapsed) => return Err(FetchError::TimedOut),
-        };
+    // failure, so it does not matter which fires first. The gate's outer one also
+    // covers time the SDK spends before the request is on the wire.
+    let client = room.client();
+    let response = match gate
+        .call(timeout, send_page(&client, request, timeout))
+        .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(err)) => return Err(FetchError::Homeserver(err)),
+        Err(_elapsed) => return Err(FetchError::TimedOut),
+    };
 
     let mut events = Vec::with_capacity(response.chunk.len());
     for raw in response.chunk {
@@ -547,6 +559,7 @@ async fn send_page(
 async fn backfill_room_page(
     ctx: &PersistContext,
     params: &BackfillParams,
+    gate: &Arc<HomeserverGate>,
     room: &matrix_sdk::Room,
     state: Option<RoomBackfillState>,
     cancel: &CancellationToken,
@@ -597,7 +610,7 @@ async fn backfill_room_page(
     let (events, end) = tokio::select! {
         biased;
         _ = cancel.cancelled() => return PageOutcome::Abandoned,
-        result = fetch_page(room, request, params.page_timeout) => match result {
+        result = fetch_page(gate, room, request, params.page_timeout) => match result {
             Ok(m) => m,
             Err(FetchError::Homeserver(err)) => {
                 let failure = PageFailure::of(&err, had_token);
@@ -852,6 +865,7 @@ mod tests {
         use matrix_sdk::ruma::RoomId;
 
         use super::*;
+        use crate::homeserver_gate::{GateError, Outcome};
 
         const MESSAGES: &str = "/_matrix/client/v3/rooms/{room_id}/messages";
 
@@ -910,6 +924,19 @@ mod tests {
             PageFailure::of(&err, from.is_some())
         }
 
+        /// Page once against `router` and report what the homeserver gate
+        /// (ADR 0122) learns from the failure.
+        async fn gate_outcome(router: Router, timeout: Duration) -> Outcome {
+            let client = client_for(serve(router).await).await;
+            let request = get_message_events::v3::Request::backward(
+                RoomId::parse("!room:localhost").expect("room id"),
+            );
+            send_page(&client, request, timeout)
+                .await
+                .expect_err("the stand-in only fails")
+                .outcome()
+        }
+
         fn answering(status: StatusCode, body: serde_json::Value) -> Router {
             Router::new().route(
                 MESSAGES,
@@ -964,6 +991,72 @@ mod tests {
             .expect("the SDK kept retrying the 502");
             assert_eq!(failure, PageFailure::Retryable);
             assert_eq!(hits.load(Ordering::SeqCst), 1, "the SDK retried the page");
+        }
+
+        #[tokio::test]
+        async fn the_gate_counts_a_5xx_or_429_as_overload_and_another_4xx_as_neither() {
+            let busy = json!({ "errcode": "M_LIMIT_EXCEEDED", "error": "slow down" });
+            for (status, expected) in [
+                (StatusCode::TOO_MANY_REQUESTS, Outcome::Overloaded),
+                (StatusCode::INTERNAL_SERVER_ERROR, Outcome::Overloaded),
+                (StatusCode::BAD_REQUEST, Outcome::Refused),
+                (StatusCode::FORBIDDEN, Outcome::Refused),
+            ] {
+                let outcome =
+                    gate_outcome(answering(status, busy.clone()), Duration::from_secs(5)).await;
+                assert_eq!(outcome, expected, "{status}");
+            }
+        }
+
+        #[tokio::test]
+        async fn the_gate_counts_a_proxy_html_502_as_overload() {
+            let router = Router::new().route(
+                MESSAGES,
+                get(|| async { (StatusCode::BAD_GATEWAY, "<html>502 Bad Gateway</html>") }),
+            );
+            assert_eq!(
+                gate_outcome(router, Duration::from_secs(5)).await,
+                Outcome::Overloaded
+            );
+        }
+
+        fn hung() -> Router {
+            Router::new().route(
+                MESSAGES,
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    StatusCode::OK
+                }),
+            )
+        }
+
+        #[tokio::test]
+        async fn the_gate_counts_the_sdk_timeout_as_a_timeout() {
+            assert_eq!(
+                gate_outcome(hung(), Duration::from_millis(200)).await,
+                Outcome::TimedOut
+            );
+        }
+
+        /// The 2026-10-17 shape (ADR 0122 Consequences): two pages time out
+        /// together, so the limit halves once, but both slots are held and no
+        /// background request of any kind is admitted until the hold expires.
+        #[tokio::test]
+        async fn two_hung_pages_shut_the_gate_for_every_background_caller() {
+            let client = client_for(serve(hung()).await).await;
+            let gate = HomeserverGate::for_test();
+            let page = || {
+                let request = get_message_events::v3::Request::backward(
+                    RoomId::parse("!room:localhost").expect("room id"),
+                );
+                let timeout = Duration::from_millis(200);
+                gate.call(timeout, send_page(&client, request, timeout))
+            };
+            let (a, b) = tokio::join!(page(), page());
+            assert!(matches!(a, Err(_) | Ok(Err(_))) && matches!(b, Err(_) | Ok(Err(_))));
+            let snapshot = gate.snapshot();
+            assert_eq!((snapshot.limit, snapshot.held), (1, 2), "{snapshot:?}");
+            assert!(gate.try_acquire(Duration::from_secs(15)).is_none());
         }
 
         /// The #741 trigger: a homeserver that never answers in time. The SDK's

@@ -43,6 +43,7 @@ use crate::backup::{
 };
 use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
+use crate::homeserver_gate::Caller;
 use crate::manager::ClientManager;
 use crate::matrix_oauth_grant::MatrixOAuthGrantRegistry;
 use crate::redecrypt::{RedecryptSummary, SweepScope};
@@ -521,6 +522,9 @@ impl AccountLifecycle {
         parent: Option<&CancellationToken>,
     ) -> RedecryptSummary {
         let cancel = parent.map(|token| token.child_token()).unwrap_or_default();
+        // A user is waiting on recover and manual re-decryption, so their
+        // backup downloads never wait for the homeserver gate (ADR 0122).
+        let gate = self.manager.homeserver_gate(client);
         let mut sweep = std::pin::pin!(crate::redecrypt::sweep_pending_utds(
             client,
             &self.store,
@@ -528,6 +532,8 @@ impl AccountLifecycle {
             SweepScope::AllPending,
             self.index.as_ref(),
             &cancel,
+            &gate,
+            Caller::Interactive,
         ));
         tokio::select! {
             biased;

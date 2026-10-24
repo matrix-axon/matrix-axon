@@ -18,6 +18,7 @@ mod cursor;
 mod devices;
 mod dto;
 mod extract;
+mod homeserver_status;
 mod lifecycle;
 mod matrix_oauth_acquire;
 mod matrix_oauth_browser;
@@ -47,6 +48,9 @@ pub use backup_state::BackupStateProvider;
 pub use build_info::BuildInfo;
 pub use devices::{DeviceInfo, DeviceList, DeviceListError, DeviceListService};
 pub use dto::{BackupSnapshotDto, BackupStateDto, MediaUploadKindDto, RecoveryStateDto};
+pub use homeserver_status::{
+    HomeserverBreakerSnapshot, HomeserverGateSnapshot, HomeserverStatusProvider,
+};
 pub use lifecycle::{
     AccountLifecycle, BackupAction, DeleteError, LoginError, LogoutError, RecoverError,
     RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,

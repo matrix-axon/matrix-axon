@@ -1803,6 +1803,8 @@ pub struct StatusDto {
     pub build: BuildInfoDto,
     /// Per-account sync-service status.
     pub sync: Vec<AccountSyncStatusDto>,
+    /// Each homeserver's load gate for axon's background requests (ADR 0122).
+    pub homeservers: Vec<HomeserverGateDto>,
     /// The management API's availability (ADR 0109).
     pub management: ManagementStatusDto,
     /// Which push providers loaded key material (ADR 0113).
@@ -2093,6 +2095,68 @@ impl From<crate::sync_status::AccountSyncSnapshot> for AccountSyncStatusDto {
             account_id: s.account_id,
             state: s.state.to_owned(),
             since_ms,
+        }
+    }
+}
+
+/// One homeserver's load gate (ADR 0122): how many of axon's background
+/// requests (backfill, upstream room probes, key-backup downloads, DM
+/// auto-joins) it admits at once, and whether its circuit breaker has stopped
+/// them. In-memory state, reset on restart.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HomeserverGateDto {
+    /// The gate's key: the homeserver's base URL reduced to its origin, with the
+    /// port explicit (`https://matrix.example.org:443`).
+    pub homeserver: String,
+    /// How many background requests may be in flight at once, counting held
+    /// slots. `0` while the breaker is open.
+    pub limit: u32,
+    /// Background requests in flight.
+    pub active: u32,
+    /// Slots held by requests that timed out, which the homeserver may still be
+    /// working on. Each is released 15 minutes after its timeout.
+    pub held: u32,
+    /// Requests waiting for the gate.
+    pub waiting: u32,
+    /// How long the longest-waiting request has waited, in milliseconds, or
+    /// `null` when none is waiting.
+    pub oldest_wait_ms: Option<u64>,
+    /// One of `"closed"`, `"open"`, `"probing"`.
+    pub breaker: String,
+    /// When the breaker left `"closed"`, in epoch milliseconds, or `null` while
+    /// it is closed.
+    pub breaker_opened_at_ms: Option<i64>,
+    /// While the breaker is `"open"`, the earliest time a probe may go out, in
+    /// epoch milliseconds; otherwise `null`.
+    pub next_probe_at_ms: Option<i64>,
+}
+
+impl From<crate::homeserver_status::HomeserverGateSnapshot> for HomeserverGateDto {
+    fn from(s: crate::homeserver_status::HomeserverGateSnapshot) -> Self {
+        use crate::homeserver_status::HomeserverBreakerSnapshot;
+        let epoch_ms = |at: std::time::SystemTime| {
+            at.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
+        };
+        let (breaker, opened_at, next_probe_at) = match s.breaker {
+            HomeserverBreakerSnapshot::Closed => ("closed", None, None),
+            HomeserverBreakerSnapshot::Open {
+                opened_at,
+                next_probe_at,
+            } => ("open", Some(opened_at), Some(next_probe_at)),
+            HomeserverBreakerSnapshot::Probing { opened_at } => ("probing", Some(opened_at), None),
+        };
+        HomeserverGateDto {
+            homeserver: s.homeserver,
+            limit: s.limit,
+            active: s.active,
+            held: s.held,
+            waiting: s.waiting,
+            oldest_wait_ms: s.oldest_wait.map(|wait| wait.as_millis() as u64),
+            breaker: breaker.to_owned(),
+            breaker_opened_at_ms: opened_at.map(epoch_ms),
+            next_probe_at_ms: next_probe_at.map(epoch_ms),
         }
     }
 }

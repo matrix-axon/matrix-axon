@@ -94,7 +94,8 @@ The account run owns, cancels, and joins this worker before restart, preventing 
 Each long poll has a 30-second server wait and 90-second client/outer deadline.
 Successful polls are paced at least one second apart; failures retry with exponential backoff from two to 60 seconds without interrupting message sync.
 Transient failures retain the sync position; only an unknown-position response resets it.
-ADR 0124 records the transport decision and its relationship to the proposed ADR 0122 load gate.
+ADR 0124 records the transport decision.
+Each poll is a long-poll to the ADR 0122 homeserver load gate: it waits while the gate's breaker is open, holds no slot while polling, and leaves a held slot when it times out.
 The connection starts fresh after restart, so existing packs hydrate without a manual re-sync or historical-event backfill.
 Personal pack updates use the existing generic account-data sync path.
 Structured sync diagnostics are available through the normal tracing configuration; no separate developer-mode switch is required.

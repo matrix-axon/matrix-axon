@@ -5442,13 +5442,93 @@ async fn status_degrades_when_progress_pool_is_unavailable() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["data"]["backfill"]["progress_available"], false);
     assert_eq!(json["data"]["backfill"]["accounts"], json!([]));
-    for field in ["build", "sync", "management", "push"] {
+    for field in ["build", "sync", "homeservers", "management", "push"] {
         assert!(json["data"].get(field).is_some(), "missing {field}");
     }
     drop(held);
     let (status, _, json) = request_parts(&app, "GET", "/v1/status", None, Some(&bearer())).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["data"]["backfill"]["progress_available"], true);
+}
+
+/// The homeserver load gates' in-memory state reaches `/v1/status` (ADR 0122),
+/// with each breaker state's timestamps present only where they mean something.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn status_reports_homeserver_gates() {
+    use axon_api::{HomeserverBreakerSnapshot, HomeserverGateSnapshot, HomeserverStatusProvider};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    struct Gates;
+    impl HomeserverStatusProvider for Gates {
+        fn snapshot(&self) -> Vec<HomeserverGateSnapshot> {
+            let at = |ms| UNIX_EPOCH + Duration::from_millis(ms);
+            let gate = |homeserver: &str, breaker| HomeserverGateSnapshot {
+                homeserver: homeserver.to_owned(),
+                limit: 0,
+                active: 0,
+                held: 2,
+                waiting: 3,
+                oldest_wait: Some(Duration::from_millis(1500)),
+                breaker,
+            };
+            vec![
+                gate(
+                    "https://a.example.org:443",
+                    HomeserverBreakerSnapshot::Open {
+                        opened_at: at(1_700_000_000_000),
+                        next_probe_at: at(1_700_000_900_000),
+                    },
+                ),
+                gate(
+                    "https://b.example.org:443",
+                    HomeserverBreakerSnapshot::Probing {
+                        opened_at: at(1_700_000_000_000),
+                    },
+                ),
+                HomeserverGateSnapshot {
+                    limit: 2,
+                    held: 0,
+                    waiting: 0,
+                    oldest_wait: None,
+                    ..gate(
+                        "https://c.example.org:443",
+                        HomeserverBreakerSnapshot::Closed,
+                    )
+                },
+            ]
+        }
+    }
+
+    let app = axon_api::router(read_state(store().await).with_homeserver_status(Arc::new(Gates)));
+    let (status, _, json) = request_parts(&app, "GET", "/v1/status", None, Some(&bearer())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["data"]["homeservers"],
+        json!([
+            {
+                "homeserver": "https://a.example.org:443",
+                "limit": 0, "active": 0, "held": 2, "waiting": 3, "oldest_wait_ms": 1500,
+                "breaker": "open",
+                "breaker_opened_at_ms": 1_700_000_000_000_i64,
+                "next_probe_at_ms": 1_700_000_900_000_i64,
+            },
+            {
+                "homeserver": "https://b.example.org:443",
+                "limit": 0, "active": 0, "held": 2, "waiting": 3, "oldest_wait_ms": 1500,
+                "breaker": "probing",
+                "breaker_opened_at_ms": 1_700_000_000_000_i64,
+                "next_probe_at_ms": null,
+            },
+            {
+                "homeserver": "https://c.example.org:443",
+                "limit": 2, "active": 0, "held": 0, "waiting": 0, "oldest_wait_ms": null,
+                "breaker": "closed",
+                "breaker_opened_at_ms": null,
+                "next_probe_at_ms": null,
+            },
+        ])
+    );
 }
 
 /// The optional label survives both aggregate projections without changing the

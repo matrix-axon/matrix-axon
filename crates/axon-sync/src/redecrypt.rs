@@ -21,6 +21,8 @@
 //! back-fill and must never take down the sync task. See ADR 0014.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use axon_search::IndexHandle;
 use axon_store::{PendingUtd, Store};
@@ -34,6 +36,12 @@ use matrix_sdk::{Client, Room};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::homeserver_gate::{Caller, HomeserverGate};
+
+/// Bound on one room's key-backup download, retries included: the SDK's own
+/// 30 s timeout applies to each attempt, not the call (ADR 0122 decision 1).
+const BACKUP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Which pending rows an account-wide sweep should load.
 #[derive(Debug, Clone, Copy)]
@@ -171,6 +179,11 @@ pub(crate) async fn run(
 /// `cancel` is checked per room so a recover/manual timeout can stop the sweep
 /// and still return the partial summary (ADR 0098). The boot path races this
 /// against the supervised task's cancel token.
+///
+/// Each room's key-backup download goes through `gate` as `caller` (ADR 0122):
+/// the boot sweep waits for a permit, while recover and manual re-decryption,
+/// which a user is waiting on, never wait and only report their outcome.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sweep_pending_utds(
     client: &Client,
     store: &Store,
@@ -178,6 +191,8 @@ pub(crate) async fn sweep_pending_utds(
     scope: SweepScope,
     index: Option<&IndexHandle>,
     cancel: &CancellationToken,
+    gate: &Arc<HomeserverGate>,
+    caller: Caller,
 ) -> RedecryptSummary {
     let rows = match scope {
         SweepScope::StartupUnattempted => store.pending_utds_for_startup_attempt(account_id).await,
@@ -198,8 +213,16 @@ pub(crate) async fn sweep_pending_utds(
     // `from_backup`: recover() imported the backup *decryption key* but not the
     // room keys themselves, so the sweep must pull them from the server backup
     // before decrypting (see redecrypt_rows).
-    let mut summary =
-        redecrypt_rows(client, store, account_id, rows, true, index, Some(cancel)).await;
+    let mut summary = redecrypt_rows(
+        client,
+        store,
+        account_id,
+        rows,
+        Some((gate, caller)),
+        index,
+        Some(cancel),
+    )
+    .await;
     summary.selected = selected;
     summary.still_pending = summary.selected.saturating_sub(summary.decrypted);
     if matches!(scope, SweepScope::StartupUnattempted) {
@@ -247,22 +270,23 @@ async fn redecrypt_session(
         return;
     }
     // The arrival stream's keys are already in the crypto store — no backup fetch.
-    redecrypt_rows(client, store, account_id, rows, false, index, None).await;
+    redecrypt_rows(client, store, account_id, rows, None, index, None).await;
 }
 
 /// Re-decrypt a set of pending rows, fetching each `Room` handle once. Per-row
 /// failures are logged and skipped; this never returns an error.
 ///
-/// When `from_backup` is set (the startup sweep after `recover()`), each room's
+/// When `backup` is set (the startup sweep after `recover()`), each room's
 /// megolm keys are downloaded from the server-side key backup before decrypting:
 /// `recover()` only imports the backup *decryption key*, not the room keys
 /// themselves, so without this the sweep finds the rows but can't decrypt them.
+/// Each download goes through the homeserver gate as the given caller.
 async fn redecrypt_rows(
     client: &Client,
     store: &Store,
     account_id: Uuid,
     rows: Vec<PendingUtd>,
-    from_backup: bool,
+    backup: Option<(&Arc<HomeserverGate>, Caller)>,
     index: Option<&IndexHandle>,
     cancel: Option<&CancellationToken>,
 ) -> RedecryptSummary {
@@ -281,14 +305,24 @@ async fn redecrypt_rows(
             tracing::warn!(%account_id, room_id, "no room handle; skipping re-decryption for room");
             continue;
         };
-        if from_backup {
-            if let Err(err) = client
-                .encryption()
-                .backups()
-                .download_room_keys_for_room(room.room_id())
+        if let Some((gate, caller)) = backup {
+            // Dropping the download at the timeout is safe: matrix-sdk writes the
+            // imported keys in one transaction, so at worst this room's rows stay
+            // UTD until the next sweep, as on any failed download (ADR 0122).
+            let backups = client.encryption().backups();
+            let download = backups.download_room_keys_for_room(room.room_id());
+            match gate
+                .call_as(caller, BACKUP_DOWNLOAD_TIMEOUT, download)
                 .await
             {
-                tracing::warn!(%account_id, room_id, error = %err, "failed to download room keys from backup; rows may stay UTD");
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(%account_id, room_id, error = %err, "failed to download room keys from backup; rows may stay UTD");
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(%account_id, room_id, timeout_secs = BACKUP_DOWNLOAD_TIMEOUT.as_secs(),
+                        "room key backup download timed out; rows may stay UTD");
+                }
             }
         }
         for row in &rows {

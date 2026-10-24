@@ -20,6 +20,7 @@ use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
 use crate::backup_state::{BackupStateProvider, NoBackupState};
 use crate::build_info::BuildInfo;
 use crate::devices::DeviceListService;
+use crate::homeserver_status::{HomeserverStatusProvider, NoHomeserverStatus};
 use crate::lifecycle::AccountLifecycle;
 use crate::matrix_oauth_acquire::{MatrixOAuthQrAcquireService, NoopMatrixOAuthQrAcquire};
 use crate::matrix_oauth_browser::{MatrixOAuthBrowserService, NoopMatrixOAuthBrowser};
@@ -176,6 +177,11 @@ pub struct AppState {
     /// a no-op (no accounts) provider; the binary injects an adapter over the
     /// sync engine's `SyncHealth` via [`with_sync_status`](Self::with_sync_status).
     pub sync_status: Arc<dyn SyncStatusProvider>,
+    /// Homeserver load-gate status port for `GET /v1/status` (ADR 0122).
+    /// Defaults to a no-op (no homeservers) provider; the binary injects an
+    /// adapter over the sync engine's `HomeserverGates` via
+    /// [`with_homeserver_status`](Self::with_homeserver_status).
+    pub homeserver_status: Arc<dyn HomeserverStatusProvider>,
     /// Account sync-readiness port (ADR 0030, issue #241) for
     /// `AccountDto.sync_state` and the `account.sync_state` WS frame. Defaults
     /// to a no-op provider reporting `"connecting"` for every account; the
@@ -408,6 +414,7 @@ impl AppState {
             backfill_status: Arc::new(NoBackfillStatus),
             build_info: BuildInfo::default(),
             sync_status: Arc::new(NoSyncStatus),
+            homeserver_status: Arc::new(NoHomeserverStatus),
             sync_state: Arc::new(NoSyncState),
             backup_state: Arc::new(NoBackupState),
             oauth: None,
@@ -456,6 +463,14 @@ impl AppState {
     /// keep the default no-op (empty) provider.
     pub fn with_sync_status(mut self, provider: Arc<dyn SyncStatusProvider>) -> Self {
         self.sync_status = provider;
+        self
+    }
+
+    /// Inject the homeserver load-gate status provider (`GET /v1/status`, ADR
+    /// 0122). The binary calls this with an adapter over the sync engine's
+    /// `HomeserverGates`; tests that don't care keep the default (empty) one.
+    pub fn with_homeserver_status(mut self, provider: Arc<dyn HomeserverStatusProvider>) -> Self {
+        self.homeserver_status = provider;
         self
     }
 
@@ -1167,6 +1182,12 @@ impl FromRef<AppState> for BuildInfo {
 impl FromRef<AppState> for Arc<dyn SyncStatusProvider> {
     fn from_ref(state: &AppState) -> Arc<dyn SyncStatusProvider> {
         state.sync_status.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn HomeserverStatusProvider> {
+    fn from_ref(state: &AppState) -> Arc<dyn HomeserverStatusProvider> {
+        state.homeserver_status.clone()
     }
 }
 

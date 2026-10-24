@@ -13,8 +13,10 @@ use axum::extract::State;
 use crate::backfill::BackfillStatusProvider;
 use crate::build_info::BuildInfo;
 use crate::dto::{
-    AccountSyncStatusDto, BackfillStatusDto, ManagementStatusDto, PushStatusDto, StatusDto,
+    AccountSyncStatusDto, BackfillStatusDto, HomeserverGateDto, ManagementStatusDto, PushStatusDto,
+    StatusDto,
 };
+use crate::homeserver_status::HomeserverStatusProvider;
 use crate::response::{ApiError, ApiResponse};
 use crate::state::ManagementConfig;
 use crate::sync_status::SyncStatusProvider;
@@ -23,6 +25,7 @@ use crate::sync_status::SyncStatusProvider;
 ///
 /// Report backfill status: the disk-space valve state (live free space, whether
 /// paused) plus per-account backfill progress; per-account sync-service status;
+/// each homeserver's load gate for background requests (ADR 0122);
 /// the running build's identity; whether the management API is served; and
 /// which push providers loaded a key.
 #[utoipa::path(
@@ -37,6 +40,7 @@ pub async fn get_status(
     State(store): State<Store>,
     State(backfill_provider): State<Arc<dyn BackfillStatusProvider>>,
     State(sync_provider): State<Arc<dyn SyncStatusProvider>>,
+    State(homeserver_provider): State<Arc<dyn HomeserverStatusProvider>>,
     State(build_info): State<BuildInfo>,
     State(management): State<ManagementConfig>,
     State(push): State<Arc<PushMaterial>>,
@@ -59,6 +63,11 @@ pub async fn get_status(
             .snapshot()
             .into_iter()
             .map(AccountSyncStatusDto::from)
+            .collect(),
+        homeservers: homeserver_provider
+            .snapshot()
+            .into_iter()
+            .map(HomeserverGateDto::from)
             .collect(),
         build: build_info.into(),
         management: ManagementStatusDto {

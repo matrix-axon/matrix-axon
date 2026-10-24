@@ -2164,6 +2164,7 @@ export interface paths {
          * Get backfill status
          * @description Report backfill status: the disk-space valve state (live free space, whether
          *     paused) plus per-account backfill progress; per-account sync-service status;
+         *     each homeserver's load gate for background requests (ADR 0122);
          *     the running build's identity; whether the management API is served; and
          *     which push providers loaded a key.
          */
@@ -3006,6 +3007,8 @@ export interface components {
                 backfill: components["schemas"]["BackfillStatusDto"];
                 /** @description The running binary's build identity. */
                 build: components["schemas"]["BuildInfoDto"];
+                /** @description Each homeserver's load gate for axon's background requests (ADR 0122). */
+                homeservers: components["schemas"]["HomeserverGateDto"][];
                 /** @description The management API's availability (ADR 0109). */
                 management: components["schemas"]["ManagementStatusDto"];
                 /** @description Which push providers loaded key material (ADR 0113). */
@@ -4258,6 +4261,61 @@ export interface components {
          * @enum {string}
          */
         FlowStageDto: "requested" | "ready" | "keys_exchanged" | "confirmed" | "done" | "cancelled";
+        /**
+         * @description One homeserver's load gate (ADR 0122): how many of axon's background
+         *     requests (backfill, upstream room probes, key-backup downloads, DM
+         *     auto-joins) it admits at once, and whether its circuit breaker has stopped
+         *     them. In-memory state, reset on restart.
+         */
+        HomeserverGateDto: {
+            /**
+             * Format: int32
+             * @description Background requests in flight.
+             */
+            active: number;
+            /** @description One of `"closed"`, `"open"`, `"probing"`. */
+            breaker: string;
+            /**
+             * Format: int64
+             * @description When the breaker left `"closed"`, in epoch milliseconds, or `null` while
+             *     it is closed.
+             */
+            breaker_opened_at_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Slots held by requests that timed out, which the homeserver may still be
+             *     working on. Each is released 15 minutes after its timeout.
+             */
+            held: number;
+            /**
+             * @description The gate's key: the homeserver's base URL reduced to its origin, with the
+             *     port explicit (`https://matrix.example.org:443`).
+             */
+            homeserver: string;
+            /**
+             * Format: int32
+             * @description How many background requests may be in flight at once, counting held
+             *     slots. `0` while the breaker is open.
+             */
+            limit: number;
+            /**
+             * Format: int64
+             * @description While the breaker is `"open"`, the earliest time a probe may go out, in
+             *     epoch milliseconds; otherwise `null`.
+             */
+            next_probe_at_ms?: number | null;
+            /**
+             * Format: int64
+             * @description How long the longest-waiting request has waited, in milliseconds, or
+             *     `null` when none is waiting.
+             */
+            oldest_wait_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Requests waiting for the gate.
+             */
+            waiting: number;
+        };
         /** @enum {string} */
         ImagePackUsage: "emoticon" | "sticker";
         /**
@@ -5517,6 +5575,8 @@ export interface components {
             backfill: components["schemas"]["BackfillStatusDto"];
             /** @description The running binary's build identity. */
             build: components["schemas"]["BuildInfoDto"];
+            /** @description Each homeserver's load gate for axon's background requests (ADR 0122). */
+            homeservers: components["schemas"]["HomeserverGateDto"][];
             /** @description The management API's availability (ADR 0109). */
             management: components["schemas"]["ManagementStatusDto"];
             /** @description Which push providers loaded key material (ADR 0113). */

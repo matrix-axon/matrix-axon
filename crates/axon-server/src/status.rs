@@ -1,17 +1,20 @@
 //! Composition-root adapters: bind `axon-sync`'s [`BackfillHealth`] and
 //! [`SyncHealth`] to `axon-api`'s status ports (M10), so `GET /v1/status`
 //! reports the engine's disk-space health and each account's sync-service
-//! state. Also binds [`BackupHealth`] to `AccountDto.backup` (ADR 0098).
+//! state, and binds [`HomeserverGates`] to the homeserver load-gate port (ADR
+//! 0122). Also binds [`BackupHealth`] to `AccountDto.backup` (ADR 0098).
 //! This binary is the one place that knows both crates; `axon-api` and
 //! `axon-sync` never depend on each other.
 
 use async_trait::async_trait;
 use axon_api::{
     AccountSyncSnapshot, BackfillStatusProvider, BackfillStatusSnapshot, BackupSnapshotDto,
-    BackupStateDto, BackupStateProvider, RecoveryStateDto, SyncStateProvider, SyncStatusProvider,
+    BackupStateDto, BackupStateProvider, HomeserverBreakerSnapshot, HomeserverGateSnapshot,
+    HomeserverStatusProvider, RecoveryStateDto, SyncStateProvider, SyncStatusProvider,
 };
 use axon_sync::{
-    BackfillHealth, BackupHealth, BackupSnapshot, BackupStateView, RecoveryStateView, SyncHealth,
+    BackfillHealth, BackupHealth, BackupSnapshot, BackupStateView, BreakerSnapshot,
+    HomeserverGates, RecoveryStateView, SyncHealth,
 };
 use uuid::Uuid;
 
@@ -41,6 +44,41 @@ impl SyncStatusProvider for SyncStatusAdapter {
                 account_id,
                 state: status.state.as_str(),
                 since: status.since,
+            })
+            .collect()
+    }
+}
+
+/// Wraps the sync engine's [`HomeserverGates`] so they satisfy the API's
+/// [`HomeserverStatusProvider`] port (ADR 0122). The orphan rule requires a
+/// local newtype.
+pub struct HomeserverStatusAdapter(pub HomeserverGates);
+
+impl HomeserverStatusProvider for HomeserverStatusAdapter {
+    fn snapshot(&self) -> Vec<HomeserverGateSnapshot> {
+        self.0
+            .snapshot()
+            .into_iter()
+            .map(|gate| HomeserverGateSnapshot {
+                homeserver: gate.homeserver,
+                limit: gate.limit,
+                active: gate.active,
+                held: gate.held,
+                waiting: gate.waiting,
+                oldest_wait: gate.oldest_wait,
+                breaker: match gate.breaker {
+                    BreakerSnapshot::Closed => HomeserverBreakerSnapshot::Closed,
+                    BreakerSnapshot::Open {
+                        opened_at,
+                        next_probe_at,
+                    } => HomeserverBreakerSnapshot::Open {
+                        opened_at,
+                        next_probe_at,
+                    },
+                    BreakerSnapshot::Probing { opened_at } => {
+                        HomeserverBreakerSnapshot::Probing { opened_at }
+                    }
+                },
             })
             .collect()
     }
