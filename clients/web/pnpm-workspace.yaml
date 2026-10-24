@@ -11,10 +11,10 @@ overrides:
   # generated API client) but still runs on developer machines and in CI. A
   # patch bump within the same major, so nothing else moves.
   'js-yaml@<4.3.2': '^4.3.2'
-  # CVE-2026-109869: fetch() implementation crashes the Node.js process when a 
+  # CVE-2026-109869: fetch() implementation crashes the Node.js process when a
   # malicious server returns a response with more than five content codings
-  # undici is imported only via the jsdom dev dependency and has a CVE in the 
-  # default version. This pin moves undici past the vulnerable version, 
+  # undici is imported only via the jsdom dev dependency and has a CVE in the
+  # default version. This pin moves undici past the vulnerable version,
   # allowing packages to pass pnpm audit.
   'undici': '^7.30.1'
   # CVE-2023-54404: Zod can exhaust memory while validating oversized constrained
