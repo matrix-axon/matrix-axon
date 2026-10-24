@@ -1376,3 +1376,74 @@ async fn events_precede_requires_both_orders_and_known_events() {
         "an unknown anchor"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_finds_bundled_preview_images_per_account() {
+    let store = common::migrated_store().await;
+    let owner = common::test_account(&store, "preview-owner").await;
+    let other = common::test_account(&store, "preview-other").await;
+    for (encrypted_key, legacy) in [
+        (None, false),
+        (None, true),
+        (Some("matrix:image:encrypted"), false),
+        (Some("beeper:image:encryption"), false),
+        (Some("matrix:image:encrypted"), true),
+        (Some("beeper:image:encryption"), true),
+    ] {
+        let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+        let mut preview = json!({"og:title":"Example"});
+        preview[if legacy {
+            "matched_url"
+        } else {
+            "matrix:matched_url"
+        }] = json!("https://example.org");
+        if let Some(key) = encrypted_key {
+            preview[key] = json!({"url":mxc,"v":"v2"});
+        } else {
+            preview["og:image"] = json!(mxc);
+        }
+        let mut content = json!({"msgtype":"m.text","body":"https://example.org"});
+        content[if legacy {
+            "com.beeper.linkpreviews"
+        } else {
+            "m.url_previews"
+        }] = {
+            let mut cards = vec![json!({}); 32];
+            cards.push(preview);
+            json!(cards)
+        };
+        let event_id = insert_image_event(&store, owner, "!previews:localhost", content).await;
+        assert_eq!(
+            store
+                .get_event_by_mxc_url(owner, &mxc)
+                .await
+                .unwrap()
+                .unwrap()
+                .event_id,
+            event_id
+        );
+        assert!(store
+            .get_event_by_mxc_url(other, &mxc)
+            .await
+            .unwrap()
+            .is_none());
+        if legacy {
+            let blocked = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+            insert_image_event(
+                &store,
+                owner,
+                "!previews:localhost",
+                json!({
+                    "m.url_previews": [], "com.beeper.linkpreviews": [{"og:image":blocked}]
+                }),
+            )
+            .await;
+            assert!(store
+                .get_event_by_mxc_url(owner, &blocked)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+}

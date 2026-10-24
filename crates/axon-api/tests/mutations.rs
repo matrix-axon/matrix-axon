@@ -14,6 +14,197 @@
 
 mod common;
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn saturated_preview_uploads_do_not_block_text_opt_out_or_other_accounts() {
+    let gate = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    let sender = Arc::new(StubSender::ok("$preview").with_preview_gate(gate.clone()));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads);
+    let account = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let mut tasks = Vec::new();
+    for (owner, image, empty) in [
+        (account, true, false),
+        (account, true, false),
+        (account, true, false),
+        (account, true, false),
+        (account, false, true),
+        (account, false, false),
+        (other, true, false),
+    ] {
+        let mut preview = json!({"matched_url":"https://example.org"});
+        if image {
+            preview["image_upload_id"] = json!(Uuid::new_v4());
+        }
+        let body = json!({"body":"https://example.org", "url_previews":if empty {json!([])} else {json!([preview])}});
+        let router = app.clone();
+        tasks.push(tokio::spawn(async move {
+            send(
+                &router,
+                "POST",
+                &format!("/v1/accounts/{owner}/rooms/!room:localhost/send"),
+                Some(body),
+            )
+            .await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(2), gate.0.notified())
+            .await
+            .expect("request reached sender despite occupied slots");
+    }
+    gate.1.notify_waiters();
+    for task in tasks {
+        assert_eq!(task.await.unwrap().0, StatusCode::OK);
+    }
+    assert_eq!(sender.calls().len(), 7);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn later_preview_claim_failure_releases_only_earlier_owned_claims() {
+    let sender = Arc::new(StubSender::ok("$must-not-send"));
+    let uploads = Arc::new(StubUploads::ok());
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    uploads.reject_claim_for(second);
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let account = Uuid::new_v4();
+    let (status, _) = send(&app,"POST",&format!("/v1/accounts/{account}/rooms/!room:localhost/send"),Some(json!({"body":"https://example.org/a https://example.org/b","url_previews":[{"matched_url":"https://example.org/a","image_upload_id":first},{"matched_url":"https://example.org/b","image_upload_id":second}]}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(uploads.claims(), vec![(account, first), (account, second)]);
+    assert_eq!(uploads.releases(), vec![(account, first)]);
+    assert!(uploads.completes().is_empty());
+    assert!(sender.calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn bundled_previews_are_explicit_and_consumed_with_the_parent_message() {
+    let sender = Arc::new(StubSender::ok("$preview"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let account = Uuid::new_v4();
+    let image = Uuid::new_v4();
+    let media = Uuid::new_v4();
+    let previews =
+        json!([{"matched_url":"https://example.org", "title":"Example", "image_upload_id":image}]);
+    for (route, body) in [
+        (
+            "send",
+            json!({"body":"https://example.org", "url_previews":previews}),
+        ),
+        (
+            "send-media",
+            json!({"upload_id":media,"caption":"https://example.org","url_previews":previews}),
+        ),
+        ("send", json!({"body":"no card","url_previews":[]})),
+    ] {
+        let (status, _) = send(
+            &app,
+            "POST",
+            &format!("/v1/accounts/{account}/rooms/!room:localhost/{route}"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        matches!(&calls[0], Call::SendPreviews { previews, attachment: None, .. } if previews.len()==1 && previews[0].1)
+    );
+    assert!(matches!(
+        &calls[1],
+        Call::SendPreviews {
+            attachment: Some(_),
+            ..
+        }
+    ));
+    assert!(matches!(&calls[2], Call::SendPreviews { previews, .. } if previews.is_empty()));
+    assert_eq!(
+        uploads.claims(),
+        vec![(account, image), (account, image), (account, media)]
+    );
+    assert_eq!(uploads.completes(), uploads.claims());
+    assert!(uploads.releases().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn invalid_or_oversized_preview_sends_never_claim_or_dispatch() {
+    let sender = Arc::new(StubSender::ok("$must-not-send"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/link-preview-contract.json")).unwrap();
+    for case in fixture["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["status"] != 200)
+    {
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/v1/accounts/00000000-0000-0000-0000-000000000000/rooms/!room:localhost/send",
+            Some(case["request"].clone()),
+        )
+        .await;
+        assert_eq!(
+            status.as_u16() as u64,
+            case["status"].as_u64().unwrap(),
+            "{}",
+            case["name"]
+        );
+    }
+    assert!(sender.calls().is_empty());
+    assert!(uploads.claims().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn failed_preview_send_releases_all_owned_uploads() {
+    let sender = Arc::new(StubSender::failing(Outcome::Upstream(
+        "response lost".into(),
+    )));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let account = Uuid::new_v4();
+    let (status, _) = send(&app,"POST",&format!("/v1/accounts/{account}/rooms/!room:localhost/send"),Some(json!({"body":"https://example.org", "url_previews":[{"matched_url":"https://example.org","image_upload_id":Uuid::new_v4()}]}))).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(uploads.releases(), uploads.claims());
+    assert!(uploads.completes().is_empty());
+    assert_eq!(sender.calls().len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn http_cancellation_does_not_abandon_preview_claim_bookkeeping() {
+    let gate = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    let sender = Arc::new(StubSender::ok("$sent").with_preview_gate(gate.clone()));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let pending = tokio::spawn(async move {
+        send(&app,"POST","/v1/accounts/00000000-0000-0000-0000-000000000000/rooms/!room:localhost/send",Some(json!({"body":"https://example.org","url_previews":[{"matched_url":"https://example.org","image_upload_id":Uuid::new_v4()}]}))).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.0.notified())
+        .await
+        .unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    gate.1.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while uploads.completes().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(uploads.completes(), uploads.claims());
+    assert!(uploads.releases().is_empty());
+    assert_eq!(sender.calls().len(), 1);
+}
+
 use std::sync::Arc;
 
 use axon_api::{AppState, MediaAttachment, MediaSendKind, MessageSender, StagedUploadService};

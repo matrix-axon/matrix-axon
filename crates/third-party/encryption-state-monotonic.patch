@@ -1,0 +1,16 @@
+--- a/src/room/room_info.rs
++++ b/src/room/room_info.rs
+@@ -846,7 +846,12 @@
+         &mut self,
+         event: Option<PossiblyRedactedRoomEncryptionEventContent>,
+     ) {
+-        self.base_info.encryption = event;
++        // Encryption cannot be disabled. An older state lookup can finish
++        // after sync has already supplied an encryption event; its 404 must
++        // not erase that evidence and allow a later plaintext send.
++        if event.is_some() || self.base_info.encryption.is_none() {
++            self.base_info.encryption = event;
++        }
+     }
+ 
+     /// Handle the encryption state.

@@ -5227,6 +5227,26 @@
               }
             }
           },
+          "404": {
+            "description": "Account, room or preview upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Definite validation rejection: event_too_large (40960-byte content budget), preview_too_large (32768-byte preview budget), or payload_too_large (thumbnail bytes). No event dispatched by preflight; preserve the draft. An explicit homeserver M_TOO_LARGE is also event_too_large.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Upstream homeserver error",
             "content": {
@@ -5357,6 +5377,16 @@
               }
             }
           },
+          "413": {
+            "description": "Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. No preflight upload claims or event dispatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Upstream homeserver error",
             "content": {
@@ -5369,6 +5399,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Preview-aware send deadline exceeded: outcome unknown; do not automatically resend",
             "content": {
               "application/json": {
                 "schema": {
@@ -13665,6 +13705,45 @@
           }
         }
       },
+      "LinkPreviewRequest": {
+        "type": "object",
+        "description": "Allow-listed bundled preview input; arbitrary event/OG/image fields are\nrejected. Matched HTTP(S) URL must occur as a complete link in body/caption,\ncontain no credentials, and not duplicate another preview's destination.",
+        "required": [
+          "matched_url"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image_upload_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Account-owned staged image upload; PNG/JPEG/WebP only, <=2 MiB and\n<=4,000,000 decoded pixels. Type/dimensions come from verified bytes.\nNo external URL or preexisting MXC is accepted. Encrypts automatically\nin encrypted rooms. A failed send releases the staged upload for retry;\na lost response remains uncertain and must not be blindly replayed."
+          },
+          "matched_url": {
+            "type": "string"
+          },
+          "site_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "LoginRequest": {
         "type": "object",
         "description": "Request body for runtime login (`POST /v1/accounts/login`). Adds or\nreactivates a Matrix account keyed by its Matrix `username`. The\npassword is used once to authenticate and is never stored or echoed back.",
@@ -15267,6 +15346,17 @@
             "type": "string",
             "format": "uuid",
             "description": "Server-issued staged upload id returned by `POST …/media/uploads`."
+          },
+          "url_previews": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/LinkPreviewRequest"
+            },
+            "description": "Bundled previews for the caption. Same limits/413 behavior as\nSendMessageRequest.url_previews. Nonempty previews require a caption.\nA thumbnail is uploaded as protected preview media, not a chat message.",
+            "maxItems": 8
           }
         }
       },
@@ -15308,6 +15398,17 @@
               "null"
             ],
             "description": "Send into this thread, identified by its root event id\n(`rel_type: m.thread`). Optional; when set with `reply_to`, the reply is\nscoped to the thread. Without `reply_to`, this is a thread member, not a\nreply."
+          },
+          "url_previews": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/LinkPreviewRequest"
+            },
+            "description": "Bundled URL previews (ADR 0125). Omitted/null preserves legacy sending;\n[] explicitly disables previews. At most 8; individual string ceilings\nuse UTF-16 code units (URL 4096, title 300, description 1000, site 120).\nThe entire resolved preview array must fit 32768 canonical JSON UTF-8\nbytes. Preview-aware messages also use a conservative 40960-byte\ncontent budget (including formatting/relations and reserved SDK media\ndescriptors), leaving room for encryption and federation overhead.\nOverflow is a definite 413, before claiming any uploads or dispatch.",
+            "maxItems": 8
           }
         }
       },

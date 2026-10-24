@@ -233,6 +233,7 @@ fn gateway_to_fetch(err: GatewayError) -> FetchError {
         GatewayError::NotConnected(msg) => FetchError::NotConnected(msg),
         GatewayError::Upstream(msg) => FetchError::Upstream(msg),
         GatewayError::Undecryptable(msg) => FetchError::Undecryptable(msg),
+        GatewayError::EventTooLarge => FetchError::Invalid("homeserver rejected media size".into()),
     }
 }
 
