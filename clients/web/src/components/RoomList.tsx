@@ -1594,10 +1594,24 @@ function AccountSelect({
   }
   const label = (text: string, count: number) =>
     count > 0 ? `${text} (${count} unread)` : text
+  // With one account selected, the others' unread would otherwise be invisible.
+  // "All accounts" already covers everything, so it never flags.
+  const elsewhere = value === 'all' ? 0 : total - (byAccount.get(value) ?? 0)
   return (
     <label class="sort-select">
       Account
+      {elsewhere > 0 && (
+        <span
+          class="badge unread-count account-unread-elsewhere"
+          role="img"
+          aria-label={`${elsewhere} unread in other accounts`}
+          title={`${elsewhere} unread in other accounts`}
+        >
+          {elsewhere > 99 ? '99+' : elsewhere}
+        </span>
+      )}
       <select
+        class={elsewhere > 0 ? 'has-unread-elsewhere' : undefined}
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
       >
