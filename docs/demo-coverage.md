@@ -169,8 +169,8 @@ shows it.
   The reaction case is worth distinguishing from the two rows above it:
   `timeline` covers badges that were already in the aggregate at load, and `react` covers this client reacting to itself.
   Neither exercises an `m.reaction` frame arriving over the WS for someone else's reaction, which is a different code path — the frame patches the target message's aggregate rather than being rendered as a row of its own.
-- **Room information in the TUI.** `/whereami` now renders cached room metadata and authoritative member counts (ADR 0114).
-  No pilot scene opens it yet, so the row stays not covered until the remaining steps of #653 settle what the popup shows.
+- **Room information in the TUI.** `/whereami` renders cached room metadata, authoritative member counts, and the loaded `/members` projection (ADR 0114).
+  The list is not a complete roster (#659), and no pilot scene opens the popup, so the row stays not covered.
 - **User information on the web.** Tapping a timeline sender opens the panel.
   No demo scene does that, so both web columns stay not covered.
   The TUI has no such panel.

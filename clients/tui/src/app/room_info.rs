@@ -12,13 +12,13 @@ use unicode_width::UnicodeWidthChar;
 use super::render::format_time;
 use super::{App, RoomKey};
 use crate::api::{
-    ApiError, AxonClient, MetadataSnapshot, RoomCreationContent, RoomDto, RoomInfoDto,
+    ApiError, AxonClient, MemberDto, MetadataSnapshot, RoomCreationContent, RoomDto, RoomInfoDto,
     RoomJoinRulesContent, RoomMetadataDto, RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
 };
 use crate::config::{ColorScheme, TimeFormat};
 
-/// The three reads behind one `/whereami`.
-const ROOM_INFO_READS: u8 = 3;
+/// The four reads behind one `/whereami`: metadata, counts, upgrade, members.
+const ROOM_INFO_READS: u8 = 4;
 
 /// One read's last good value, kept when a later refresh fails so the popup
 /// does not go blank over a transient error.
@@ -77,6 +77,10 @@ pub(crate) struct RoomInfoState {
     pub(crate) metadata: Part<RoomMetadataDto>,
     pub(crate) info: Part<RoomInfoDto>,
     pub(crate) upgrade: Part<RoomUpgradeDto>,
+    pub(crate) members: Part<Vec<MemberDto>>,
+    /// Member section rendered when a read settles. The frame wraps these
+    /// lines; it does not sort or format the roster again.
+    pub(crate) member_lines: Vec<String>,
 }
 
 /// Room information for the one room `/whereami` last showed. Holding a single
@@ -104,10 +108,11 @@ impl RoomInfoCache {
 
 #[derive(Debug)]
 pub(crate) enum RoomInfoPart {
-    /// Boxed: eight snapshots dwarf the other two reads.
+    /// Boxed: eight snapshots dwarf the other reads.
     Metadata(Result<Box<RoomMetadataDto>, ReadFailure>),
     Info(Result<RoomInfoDto, ReadFailure>),
     Upgrade(Result<RoomUpgradeDto, ReadFailure>),
+    Members(Result<Vec<MemberDto>, ReadFailure>),
 }
 
 /// One completed read.
@@ -145,6 +150,7 @@ impl App {
                 state.metadata.failure = None;
                 state.info.failure = None;
                 state.upgrade.failure = None;
+                state.members.failure = None;
             }
             None => {
                 cache.state = Some(RoomInfoState {
@@ -154,6 +160,8 @@ impl App {
                     metadata: Part::default(),
                     info: Part::default(),
                     upgrade: Part::default(),
+                    members: Part::default(),
+                    member_lines: Vec::new(),
                 });
             }
         }
@@ -190,7 +198,18 @@ impl App {
                 RoomInfoPart::Upgrade(read.map_err(ReadFailure::from))
             })
         });
+        spawn_read(|client, key| {
+            Box::pin(async move {
+                let read = client
+                    .room_members_bounded(key.account_id, &key.room_id)
+                    .await;
+                RoomInfoPart::Members(read.map_err(ReadFailure::from))
+            })
+        });
         self.room_info.reads = reads;
+        if let Some(state) = self.room_info.state.as_mut() {
+            store_member_lines(state);
+        }
     }
 
     /// Apply one completed read. A result for a room the popup has moved on
@@ -209,7 +228,9 @@ impl App {
             }
             RoomInfoPart::Info(result) => state.info.settle(result),
             RoomInfoPart::Upgrade(result) => state.upgrade.settle(result),
+            RoomInfoPart::Members(result) => state.members.settle(result),
         }
+        store_member_lines(state);
     }
 
     pub(crate) fn prune_room_info(&mut self, key: &RoomKey) {
@@ -704,7 +725,9 @@ fn server_acl_lines(metadata: &RoomMetadataDto) -> Vec<String> {
 }
 
 /// The lines `/whereami` adds below the room summary: everything read from
-/// `/metadata`, `/info`, and `/upgrade`.
+/// `/metadata`, `/info`, and `/upgrade`. The member projection is
+/// [`member_list_lines`]; a failed refresh is flagged by
+/// [`refresh_failed_with_stale_data`] after both sections.
 pub(crate) fn detail_lines(
     room: &RoomDto,
     state: Option<&RoomInfoState>,
@@ -750,16 +773,223 @@ pub(crate) fn detail_lines(
             lines.extend(upgrade_lines(None, &upgrade));
         }
     }
-    let stale = state.is_some_and(|state| {
-        (state.metadata.failure.is_some() && state.metadata.value.is_some())
-            || (state.info.failure.is_some() && state.info.value.is_some())
-            || (state.upgrade.failure.is_some() && state.upgrade.value.is_some())
-    });
-    if stale {
-        lines.push(String::new());
-        lines.push("Latest refresh failed; some details above may be out of date.".to_owned());
+    lines
+}
+
+fn part_holds_stale<T>(part: &Part<T>) -> bool {
+    part.failure.is_some() && part.value.is_some()
+}
+
+/// A later read failed after an earlier one had data. The popup keeps that
+/// data and says it may be out of date. `state` is already the room on screen.
+pub(crate) fn refresh_failed_with_stale_data(state: Option<&RoomInfoState>) -> bool {
+    let Some(state) = state else {
+        return false;
+    };
+    part_holds_stale(&state.metadata)
+        || part_holds_stale(&state.info)
+        || part_holds_stale(&state.upgrade)
+        || part_holds_stale(&state.members)
+}
+
+fn store_member_lines(state: &mut RoomInfoState) {
+    let lines = render_member_section(state);
+    state.member_lines = lines;
+}
+
+/// The `/members` section. Every loaded row is rendered; the popup scrolls.
+/// The heading never calls the list complete: the projection is lazy, and a
+/// joined count larger than the list is the only proof of a gap.
+#[cfg(test)]
+fn member_list_lines(room: &RoomDto, state: Option<&RoomInfoState>) -> Vec<String> {
+    let Some(state) = state.filter(|state| state.key == RoomKey::from(room)) else {
+        return vec!["Member list: not loaded".to_owned()];
+    };
+    render_member_section(state)
+}
+
+fn render_member_section(state: &RoomInfoState) -> Vec<String> {
+    let state = Some(state);
+    let members = view(state, |state| &state.members);
+    let View::Loaded(members) = members else {
+        return vec![format!("Member list: {}", members.pending_phrase())];
+    };
+    let joined = match view(state, |state| &state.info) {
+        View::Loaded(info) => match &info.member_counts {
+            Some(Some(counts)) => Some(counts.joined),
+            Some(None) | None => None,
+        },
+        _ => None,
+    };
+    let metadata = match view(state, |state| &state.metadata) {
+        View::Loaded(metadata) => Some(metadata),
+        _ => None,
+    };
+    let mut lines = vec![member_heading(joined, members.len())];
+    if members.is_empty() {
+        lines.push("  none loaded".to_owned());
+        return lines;
+    }
+    lines.extend(grouped_member_lines(members, metadata));
+    lines
+}
+
+fn member_heading(joined: Option<i64>, loaded: usize) -> String {
+    let loaded_count = i64::try_from(loaded).unwrap_or(i64::MAX);
+    match joined {
+        Some(joined) if joined > loaded_count => {
+            format!("Members ({loaded} loaded of {joined} joined)")
+        }
+        Some(_) => format!("Members ({loaded} loaded)"),
+        None => format!("Members ({loaded} loaded; joined count unknown)"),
+    }
+}
+
+/// Membership values the server documents, in the order the popup shows them.
+const MEMBER_GROUPS: [(&str, &str); 4] = [
+    ("join", "Joined"),
+    ("invite", "Invited"),
+    ("ban", "Banned"),
+    ("leave", "Left"),
+];
+
+fn grouped_member_lines(members: &[MemberDto], metadata: Option<&RoomMetadataDto>) -> Vec<String> {
+    let mut ordered: Vec<&MemberDto> = members.iter().collect();
+    ordered.sort_by_cached_key(|member| (member_sort_name(member), member.user_id.clone()));
+
+    let mut lines = Vec::new();
+    for (membership, label) in MEMBER_GROUPS {
+        push_member_group(
+            &mut lines,
+            label,
+            ordered
+                .iter()
+                .copied()
+                .filter(|member| member.membership == membership),
+            metadata,
+        );
+    }
+    let mut extras: std::collections::BTreeMap<&str, Vec<&MemberDto>> =
+        std::collections::BTreeMap::new();
+    for member in ordered {
+        if !MEMBER_GROUPS
+            .iter()
+            .any(|(membership, _)| member.membership == *membership)
+        {
+            extras
+                .entry(member.membership.as_str())
+                .or_default()
+                .push(member);
+        }
+    }
+    for (membership, group) in extras {
+        // An empty string would be a blank header. Name it instead of calling
+        // the row `leave`.
+        let label = if membership.is_empty() {
+            "(unset membership)"
+        } else {
+            membership
+        };
+        push_member_group(&mut lines, label, group.into_iter(), metadata);
     }
     lines
+}
+
+fn push_member_group<'a>(
+    lines: &mut Vec<String>,
+    label: &str,
+    members: impl Iterator<Item = &'a MemberDto>,
+    metadata: Option<&RoomMetadataDto>,
+) {
+    let group: Vec<&MemberDto> = members.collect();
+    if group.is_empty() {
+        return;
+    }
+    lines.push(format!("  {label}"));
+    for member in group {
+        lines.push(format!(
+            "    {}  {}  {}",
+            shown_member_name(member),
+            member.user_id,
+            power_phrase(metadata, &member.user_id)
+        ));
+    }
+}
+
+/// Blank names sort by Matrix ID. They still render as `unknown`.
+fn member_sort_name(member: &MemberDto) -> String {
+    member
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(member.user_id.as_str())
+        .to_ascii_lowercase()
+}
+
+fn shown_member_name(member: &MemberDto) -> &str {
+    member
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("unknown")
+}
+
+/// A number only when this user has an entry in the stored `users` map.
+/// `users_default` is not applied: a missing entry is "no per-user power
+/// level", even when the room default is non-zero. A room-v12 creator is
+/// not given a level.
+fn power_phrase(metadata: Option<&RoomMetadataDto>, user_id: &str) -> String {
+    let Some(metadata) = metadata else {
+        return "configured power unknown".to_owned();
+    };
+    if is_privileged_creator(metadata, user_id) {
+        return "creator (power not represented)".to_owned();
+    }
+    let snapshot = &metadata.power_levels;
+    if !matches!(
+        snapshot.status,
+        SnapshotStatus::Available | SnapshotStatus::Partial
+    ) {
+        return "configured power unknown".to_owned();
+    }
+    if withheld(snapshot, "users") || withheld(snapshot, "users.*") {
+        return "configured power unknown".to_owned();
+    }
+    let Some(content) = snapshot.content.as_ref() else {
+        return "configured power unknown".to_owned();
+    };
+    match content.users.as_ref().and_then(|users| users.get(user_id)) {
+        Some(level) => format!("configured power {level}"),
+        None => "no per-user power level".to_owned(),
+    }
+}
+
+fn is_privileged_creator(metadata: &RoomMetadataDto, user_id: &str) -> bool {
+    let snapshot = &metadata.creation;
+    if !matches!(
+        snapshot.status,
+        SnapshotStatus::Available | SnapshotStatus::Partial
+    ) {
+        return false;
+    }
+    let Some(content) = snapshot.content.as_ref() else {
+        return false;
+    };
+    let Some(version) = content.room_version.as_deref() else {
+        return false;
+    };
+    match version.parse::<u32>() {
+        Ok(version) if version >= 12 => {}
+        _ => return false,
+    }
+    let creator = content.creator.as_deref().or(snapshot.sender.as_deref());
+    creator == Some(user_id)
+        || content
+            .additional_creators
+            .as_ref()
+            .is_some_and(|ids| ids.iter().any(|id| id == user_id))
 }
 
 /// Values that report a gap in what Axon knows rather than room data.
@@ -967,6 +1197,8 @@ mod tests {
                 value: upgrade,
                 failure: None,
             },
+            members: Part::default(),
+            member_lines: Vec::new(),
         }
     }
 
@@ -1412,7 +1644,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn whereami_reads_all_three_endpoints_over_http() {
+    async fn whereami_reads_all_four_endpoints_over_http() {
         let (client, server) = stub_axon(usize::from(ROOM_INFO_READS), |endpoint| {
             match endpoint {
                 "metadata" => json!({ "data": {
@@ -1425,6 +1657,11 @@ mod tests {
                     "guest_access": null, "encryption_algorithm": null,
                 }}),
                 "upgrade" => json!({ "data": { "tombstoned_to": null, "upgraded_from": null } }),
+                "members" => json!({ "data": [{
+                    "user_id": "@ada:example.com",
+                    "membership": "join",
+                    "display_name": "Ada",
+                }]}),
                 other => panic!("unexpected endpoint {other}"),
             }
             .to_string()
@@ -1446,7 +1683,7 @@ mod tests {
         let base = format!("/v1/accounts/{}/rooms/%21room%3Aexample.com", Uuid::nil());
         assert_eq!(
             targets,
-            ["info", "metadata", "upgrade"].map(|endpoint| format!("{base}/{endpoint}"))
+            ["info", "members", "metadata", "upgrade"].map(|endpoint| format!("{base}/{endpoint}"))
         );
         let lines = crate::ui::popup_room_info_lines(&app);
         assert_eq!(
@@ -1455,6 +1692,11 @@ mod tests {
         );
         assert_eq!(line(&lines, "Room version:"), "Room version: 11");
         assert!(line(&lines, "Members:").starts_with("Members: 412 joined, 3 invited"));
+        assert_eq!(
+            line(&lines, "Members ("),
+            "Members (1 loaded of 412 joined)"
+        );
+        assert!(lines.iter().any(|line| line.contains("@ada:example.com")));
         assert_eq!(line(&lines, "Replaced by:"), "Replaced by: none known");
         // Snapshots the stub left out are unknown, not unset.
         assert_eq!(
@@ -1476,6 +1718,41 @@ mod tests {
             matches!(&result, Err(err) if err.to_string().contains("size limit")),
             "{result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_member_list_is_refused() {
+        let (client, _server) = stub_axon(1, |_| {
+            format!(
+                r#"{{"data":[{{"user_id":"@a:example.com","membership":"join","display_name":"{}"}}]}}"#,
+                "x".repeat(crate::api::ROOM_MEMBERS_LIMIT)
+            )
+        })
+        .await;
+
+        let result = client
+            .room_members_bounded(Uuid::nil(), "!room:example.com")
+            .await;
+
+        assert!(
+            matches!(&result, Err(err) if err.to_string().contains("size limit")),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sender_name_member_read_accepts_a_body_over_the_whereami_cap() {
+        let (client, _server) = stub_axon(1, |_| {
+            format!(
+                r#"{{"data":[{{"user_id":"@a:example.com","membership":"join","display_name":"{}"}}]}}"#,
+                "x".repeat(crate::api::ROOM_MEMBERS_LIMIT)
+            )
+        })
+        .await;
+
+        let result = client.room_members(Uuid::nil(), "!room:example.com").await;
+
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
@@ -1847,9 +2124,18 @@ mod tests {
         let mut other = key();
         other.room_id = "!other:example.com".to_owned();
         app.apply_room_info_outcome(RoomInfoOutcome {
-            key: other,
+            key: other.clone(),
             generation: 2,
             part: info(),
+        });
+        app.apply_room_info_outcome(RoomInfoOutcome {
+            key: other,
+            generation: 2,
+            part: RoomInfoPart::Members(Ok(vec![listed_member(
+                "join",
+                "@other:example.com",
+                Some("Other"),
+            )])),
         });
         app.apply_room_info_outcome(RoomInfoOutcome {
             key: key(),
@@ -1858,6 +2144,7 @@ mod tests {
         });
         let state = app.room_info.state.as_ref().unwrap();
         assert!(state.info.value.is_none());
+        assert!(state.members.value.is_none());
         assert_eq!(state.in_flight, ROOM_INFO_READS);
 
         app.apply_room_info_outcome(RoomInfoOutcome {
@@ -1884,6 +2171,326 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.starts_with("Latest refresh failed")));
+    }
+
+    fn listed_member(membership: &str, user_id: &str, name: Option<&str>) -> MemberDto {
+        MemberDto {
+            user_id: user_id.to_owned(),
+            membership: membership.to_owned(),
+            display_name: name.map(str::to_owned),
+        }
+    }
+
+    fn with_members(members: Vec<MemberDto>, info: Option<RoomInfoDto>) -> RoomInfoState {
+        let mut state = loaded(None, info, None);
+        state.members.value = Some(members);
+        store_member_lines(&mut state);
+        state
+    }
+
+    fn counts(joined: i64) -> RoomInfoDto {
+        RoomInfoDto {
+            member_counts: Some(Some(RoomMemberCountsDto {
+                joined,
+                invited: 0,
+                observed_at: 5,
+            })),
+        }
+    }
+
+    #[test]
+    fn member_list_says_when_the_joined_count_exceeds_it() {
+        let state = with_members(
+            vec![
+                listed_member("join", "@ada:example.com", Some("Ada")),
+                listed_member("leave", "@old:example.com", Some("Old")),
+            ],
+            Some(counts(412)),
+        );
+
+        let lines = member_list_lines(&room(), Some(&state));
+
+        assert_eq!(lines[0], "Members (2 loaded of 412 joined)");
+        assert!(lines.iter().any(|line| line.contains("@ada:example.com")));
+        assert!(lines.iter().any(|line| line.contains("@old:example.com")));
+        assert!(!lines.iter().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("complete") || lower.contains("all members")
+        }));
+    }
+
+    #[test]
+    fn member_list_does_not_invent_a_joined_count() {
+        let members = vec![listed_member("join", "@ada:example.com", Some("Ada"))];
+        let absent = RoomInfoDto {
+            member_counts: None,
+        };
+        let unknown = RoomInfoDto {
+            member_counts: Some(None),
+        };
+        for info in [Some(absent), Some(unknown), None] {
+            let lines = member_list_lines(&room(), Some(&with_members(members.clone(), info)));
+            assert_eq!(lines[0], "Members (1 loaded; joined count unknown)");
+            assert!(!lines[0].contains(" of "));
+        }
+
+        let equal = with_members(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        );
+        let lines = member_list_lines(&room(), Some(&equal));
+        assert_eq!(lines[0], "Members (1 loaded)");
+
+        let empty = with_members(Vec::new(), Some(counts(0)));
+        assert_eq!(
+            member_list_lines(&room(), Some(&empty)),
+            vec!["Members (0 loaded)".to_owned(), "  none loaded".to_owned()]
+        );
+    }
+
+    #[test]
+    fn member_list_groups_and_orders_every_loaded_row() {
+        let state = with_members(
+            vec![
+                listed_member("leave", "@dan:example.com", Some("Dan")),
+                listed_member("knock", "@erin:example.com", Some("Erin")),
+                listed_member("join", "@zoe:example.com", Some("Zoe")),
+                listed_member("join", "@amz:example.com", Some("amy")),
+                listed_member("join", "@amy:example.com", Some("Amy")),
+                listed_member("join", "@aaron:example.com", Some("   ")),
+                listed_member("ban", "@cara:example.com", Some("Cara")),
+                listed_member("invite", "@bob:example.com", Some("Bob")),
+                listed_member("", "@fay:example.com", Some("Fay")),
+            ],
+            Some(counts(9)),
+        );
+
+        assert_eq!(
+            member_list_lines(&room(), Some(&state)),
+            vec![
+                "Members (9 loaded)".to_owned(),
+                "  Joined".to_owned(),
+                "    unknown  @aaron:example.com  configured power unknown".to_owned(),
+                "    Amy  @amy:example.com  configured power unknown".to_owned(),
+                "    amy  @amz:example.com  configured power unknown".to_owned(),
+                "    Zoe  @zoe:example.com  configured power unknown".to_owned(),
+                "  Invited".to_owned(),
+                "    Bob  @bob:example.com  configured power unknown".to_owned(),
+                "  Banned".to_owned(),
+                "    Cara  @cara:example.com  configured power unknown".to_owned(),
+                "  Left".to_owned(),
+                "    Dan  @dan:example.com  configured power unknown".to_owned(),
+                "  (unset membership)".to_owned(),
+                "    Fay  @fay:example.com  configured power unknown".to_owned(),
+                "  knock".to_owned(),
+                "    Erin  @erin:example.com  configured power unknown".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn member_power_is_the_configured_users_entry_only() {
+        let mut state = with_members(
+            vec![
+                listed_member("join", "@admin:example.com", Some("Admin")),
+                listed_member("join", "@plain:example.com", Some("Plain")),
+            ],
+            Some(counts(2)),
+        );
+        state.metadata.value = Some(full_metadata());
+
+        let lines = member_list_lines(&room(), Some(&state));
+        assert!(lines.contains(&"    Admin  @admin:example.com  configured power 100".to_owned()));
+        assert!(
+            lines.contains(&"    Plain  @plain:example.com  no per-user power level".to_owned())
+        );
+        assert!(!lines.iter().any(|line| line.contains("configured power 0")));
+
+        state.metadata.value.as_mut().unwrap().power_levels = serde_json::from_value(json!({
+            "status": "partial",
+            "invalid_fields": ["users.*"],
+            "content": { "users": { "@admin:example.com": 100 }, "users_default": 0 },
+        }))
+        .unwrap();
+        let withheld = member_list_lines(&room(), Some(&state));
+        assert!(withheld
+            .iter()
+            .filter(
+                |line| line.contains("@admin:example.com") || line.contains("@plain:example.com")
+            )
+            .all(|line| line.contains("configured power unknown")));
+
+        state.metadata.value = Some(all_unknown());
+        let unknown = member_list_lines(&room(), Some(&state));
+        assert!(unknown
+            .iter()
+            .any(|line| line.contains("@admin:example.com  configured power unknown")));
+    }
+
+    #[test]
+    fn v12_creators_are_not_given_a_numeric_power_level() {
+        let mut metadata = full_metadata();
+        metadata.creation.content = Some(RoomCreationContent {
+            room_version: Some("12".to_owned()),
+            additional_creators: Some(vec!["@cofounder:example.com".to_owned()]),
+            ..RoomCreationContent::default()
+        });
+        metadata.creation.sender = Some("@founder:example.com".to_owned());
+        metadata.power_levels.content.as_mut().unwrap().users = Some(
+            [("@founder:example.com", 100), ("@admin:example.com", 50)]
+                .into_iter()
+                .map(|(id, level)| (id.to_owned(), level))
+                .collect(),
+        );
+        let mut state = with_members(
+            vec![
+                listed_member("join", "@founder:example.com", Some("Founder")),
+                listed_member("join", "@cofounder:example.com", Some("Cofounder")),
+                listed_member("join", "@admin:example.com", Some("Admin")),
+                listed_member("join", "@plain:example.com", Some("Plain")),
+            ],
+            Some(counts(4)),
+        );
+        state.metadata.value = Some(metadata);
+
+        let lines = member_list_lines(&room(), Some(&state));
+        assert!(lines.contains(
+            &"    Founder  @founder:example.com  creator (power not represented)".to_owned()
+        ));
+        assert!(lines.contains(
+            &"    Cofounder  @cofounder:example.com  creator (power not represented)".to_owned()
+        ));
+        assert!(lines.contains(&"    Admin  @admin:example.com  configured power 50".to_owned()));
+        assert!(
+            lines.contains(&"    Plain  @plain:example.com  no per-user power level".to_owned())
+        );
+        assert!(!lines.iter().any(|line| {
+            line.contains("@founder:example.com") && line.contains("configured power")
+        }));
+    }
+
+    #[test]
+    fn member_list_ignores_timeline_membership_events() {
+        let mut app = app();
+        let mut state = with_members(
+            vec![listed_member("join", "@bob:example.com", Some("Bob"))],
+            Some(counts(1)),
+        );
+        state.metadata.value = Some(full_metadata());
+        store_member_lines(&mut state);
+        app.room_info.state = Some(state);
+        app.messages.events.insert(
+            key(),
+            vec![crate::api::EventDto {
+                account_id: Uuid::nil(),
+                event_id: "$member:example.com".to_owned(),
+                room_id: "!room:example.com".to_owned(),
+                sender: "@alice:example.com".to_owned(),
+                state_key: Some("@alice:example.com".to_owned()),
+                arrival_order: 0,
+                origin_ts: 0,
+                event_type: "m.room.member".to_owned(),
+                content: Some(json!({
+                    "membership": "join",
+                    "displayname": "Alice"
+                })),
+                body: None,
+                relates_to: None,
+                redacted: false,
+                redaction_event_id: None,
+                reactions: None,
+                sender_trust: None,
+            }],
+        );
+
+        let text = crate::ui::popup_room_info_lines(&app).join("\n");
+
+        assert!(text.contains("Bob  @bob:example.com"));
+        assert!(!text.contains("@alice:example.com"));
+        assert!(!text.contains("loaded timeline"));
+    }
+
+    #[test]
+    fn a_failed_member_read_does_not_fall_back_to_the_timeline() {
+        let mut app = app();
+        let mut state = loaded(None, Some(counts(4)), None);
+        state.members.failure = Some(ReadFailure::Failed);
+        store_member_lines(&mut state);
+        app.room_info.state = Some(state);
+        app.messages.events.insert(
+            key(),
+            vec![crate::api::EventDto {
+                account_id: Uuid::nil(),
+                event_id: "$member:example.com".to_owned(),
+                room_id: "!room:example.com".to_owned(),
+                sender: "@alice:example.com".to_owned(),
+                state_key: Some("@alice:example.com".to_owned()),
+                arrival_order: 0,
+                origin_ts: 0,
+                event_type: "m.room.member".to_owned(),
+                content: Some(json!({ "membership": "join", "displayname": "Alice" })),
+                body: None,
+                relates_to: None,
+                redacted: false,
+                redaction_event_id: None,
+                reactions: None,
+                sender_trust: None,
+            }],
+        );
+
+        let text = crate::ui::popup_room_info_lines(&app).join("\n");
+
+        assert!(text.contains("Member list: unavailable (request failed)"));
+        assert!(!text.contains("@alice:example.com"));
+        assert!(!text.contains("loaded timeline"));
+    }
+
+    #[test]
+    fn failed_member_refresh_keeps_the_loaded_list() {
+        let mut app = app();
+        let mut state = with_members(
+            vec![listed_member("join", "@alice:example.com", Some("Alice"))],
+            Some(counts(1)),
+        );
+        state.generation = 1;
+        app.room_info.state = Some(state);
+
+        app.apply_room_info_outcome(RoomInfoOutcome {
+            key: key(),
+            generation: 1,
+            part: RoomInfoPart::Members(Err(ReadFailure::Failed)),
+        });
+
+        let lines = crate::ui::popup_room_info_lines(&app);
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Alice  @alice:example.com")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("Latest refresh failed")));
+    }
+
+    #[test]
+    fn a_missing_membership_decodes_as_unset() {
+        let missing = serde_json::from_value::<MemberDto>(json!({
+            "user_id": "@ada:example.com",
+            "display_name": "Ada",
+        }))
+        .unwrap();
+        assert_eq!(missing.membership, "");
+        let null_membership = serde_json::from_value::<MemberDto>(json!({
+            "user_id": "@ada:example.com",
+            "membership": null,
+        }));
+        assert!(null_membership.is_err());
+        let present = serde_json::from_value::<MemberDto>(json!({
+            "user_id": "@ada:example.com",
+            "membership": "join",
+            "display_name": "Ada",
+            "avatar_url": "mxc://example/ada",
+        }))
+        .unwrap();
+        assert_eq!(present.membership, "join");
     }
 
     #[test]
