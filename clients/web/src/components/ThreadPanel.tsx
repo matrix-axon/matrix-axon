@@ -1,3 +1,4 @@
+import { stickerFromImage } from '../emoji-packs'
 import {
   useCallback,
   useEffect,
@@ -807,6 +808,24 @@ export function ThreadPanel({
                 )
         }
         roomCompletions={roomCompletions}
+        stickers={
+          action?.kind === 'edit'
+            ? undefined
+            : {
+                api,
+                accountId,
+                roomId,
+                onSelect: (image) => {
+                  const replyTo =
+                    action?.kind === 'reply' ? action.event.event_id : undefined
+                  if (action?.kind === 'reply') setAction(null)
+                  void thread.sendSticker(stickerFromImage(image), {
+                    replyTo,
+                    senderId: ownUserId ?? undefined,
+                  })
+                },
+              }
+        }
         onAttach={attachable ? stage : undefined}
         attachments={{ ...attachments, onRemove: removeAttachment }}
         // The store is thread-scoped, so `thread_root` is already implied.

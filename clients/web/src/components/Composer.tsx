@@ -1,4 +1,13 @@
+import {
+  lookupImageShortcode,
+  standaloneStickerShortcode,
+  type CustomEmoji,
+} from '../emoji-packs'
+import { resolveEmojiShortcode } from '../emoji'
 import type { JSX } from 'preact'
+import { useImagePackCompletions } from './use-image-pack-completions'
+import { ReactionContent } from './ReactionContent'
+import { StickerPickerButton, type StickerPickerOptions } from './StickerPicker'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
@@ -21,6 +30,7 @@ export interface ComposerAutocompleteOption {
   value: string
   label: string
   description: string
+  image?: CustomEmoji
 }
 
 type AutocompleteKind =
@@ -158,6 +168,7 @@ export function Composer({
   onEditLast,
   attachments,
   onAttach,
+  stickers,
   autoFocus = false,
   onFocus,
   focusRequest,
@@ -210,6 +221,7 @@ export function Composer({
    * the edit-mode composer does — an edit replaces text, not media.
    */
   onAttach?(files: FileList | readonly File[]): void
+  stickers?: StickerPickerOptions
   /** Focus this composer when it first mounts. */
   autoFocus?: boolean
   onFocus?(): void
@@ -223,6 +235,10 @@ export function Composer({
   onHeightChange?(height: number | null): void
 }) {
   const [draft, setDraft] = useState(initialValue)
+  const [checkingSticker, setCheckingSticker] = useState(false)
+  const [stickerProblem, setStickerProblem] = useState<string | null>(null)
+  const stickerLookup = useRef<AbortController | null>(null)
+  const stickerScope = useRef(0)
   const [composerHeight, setComposerHeight] = useState<number | null>(null)
   const currentComposerHeight = height === undefined ? composerHeight : height
   const [autocompleteDismissedFor, setAutocompleteDismissedFor] = useState<
@@ -258,6 +274,19 @@ export function Composer({
     },
     [],
   )
+
+  // RoomPage can reuse the composer across rooms. Invalidate its pending
+  // lookup before callbacks from the previous scope can send or change UI.
+  useLayoutEffect(() => {
+    setCheckingSticker(false)
+    setStickerProblem(null)
+    return () => {
+      stickerScope.current++
+      const pending = stickerLookup.current
+      stickerLookup.current = null
+      pending?.abort()
+    }
+  }, [stickers?.api, stickers?.accountId, stickers?.roomId])
 
   useEffect(() => {
     if (!attachMenuOpen) {
@@ -321,10 +350,34 @@ export function Composer({
     roomReferenceCompletions === undefined
       ? []
       : roomReferenceCompletions(referenceQuery.query)
-  const emojiMatches =
+  // A sticker occupies its own event, so suggest one only where its token
+  // would be a complete standalone message (never in captions or /react).
+  const stickerQuery =
+    emojiQuery !== null &&
+    reactionEmojiQuery === null &&
+    (attachments?.items.length ?? 0) === 0 &&
+    draft.slice(0, emojiQuery.start).trim() === '' &&
+    draft.slice(emojiQuery.end).trim() === ''
+      ? emojiQuery.query
+      : null
+  const packMatches = useImagePackCompletions(
+    stickers,
+    reactionEmojiQuery?.query ?? stickerQuery,
+    reactionEmojiQuery !== null ? 'emoticon' : 'sticker',
+  )
+  const packValues = new Set(
+    packMatches.map((match) => match.value.toLowerCase()),
+  )
+  const unicodeMatches =
     emojiQuery === null || emojiCompletions === undefined
       ? []
       : emojiCompletions(emojiQuery.query)
+  const emojiMatches = [
+    ...packMatches,
+    ...unicodeMatches.filter(
+      (match) => !packValues.has(match.value.toLowerCase()),
+    ),
+  ].slice(0, 20)
   // One menu at a time: the command names while the name is still being typed,
   // the room matches once `/room ` has moved on to its argument. Both the open
   // state and the rendered kind come off this single candidate, so an Escape
@@ -601,6 +654,13 @@ export function Composer({
   }
 
   const submit = () => {
+    if (stickerLookup.current !== null) {
+      setStickerProblem(
+        'Still checking sticker packs. Wait before sending another message.',
+      )
+      return
+    }
+    setStickerProblem(null)
     const body = draft.trim()
     // A staged file is itself a message: sending it bare, with no caption, is
     // the common case, so an empty draft is only inert when nothing is attached.
@@ -608,11 +668,12 @@ export function Composer({
       return
     }
     if (commandsEnabled && isSlashCommandDraft(body)) {
+      const submittedDraft = draft
       const result = onCommand?.(body)
       if (isPromiseLike(result)) {
         void result
           .then((handled) => {
-            if (handled) {
+            if (handled && textarea.current?.value === submittedDraft) {
               setDraft('')
               onDraftChange?.('')
             }
@@ -628,6 +689,87 @@ export function Composer({
     // have meant a command. A composer without commands sends both verbatim.
     const message =
       commandsEnabled && body.startsWith('//') ? body.slice(1) : body
+    const shortcode =
+      stickers !== undefined && (attachments?.items.length ?? 0) === 0
+        ? standaloneStickerShortcode(message)
+        : null
+    if (stickers !== undefined && shortcode !== null) {
+      const controller = new AbortController()
+      stickerLookup.current = controller
+      setCheckingSticker(true)
+      // Keep the submitted draft until discovery succeeds. A subsequent edit
+      // belongs to the next message and must survive the pending lookup.
+      const submittedDraft = draft
+      const scope = stickerScope.current
+      const currentScope = () =>
+        stickerScope.current === scope && textarea.current !== null
+      const active = () =>
+        currentScope() && stickerLookup.current === controller
+      let timedOut = false
+      const deadline = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, 10_000)
+      controller.signal.addEventListener(
+        'abort',
+        () => clearTimeout(deadline),
+        { once: true },
+      )
+      const dispatch = (image: CustomEmoji | null) => {
+        if (!active() || (controller.signal.aborted && !timedOut)) return
+        setStickerProblem(null)
+        const sendProblem = () => {
+          if (currentScope()) {
+            setStickerProblem(
+              'Could not send the message. Check the timeline before retrying.',
+            )
+          }
+        }
+        // Callback failures may follow an accepted send; keep them distinct
+        // from discovery errors and never claim that nothing was sent.
+        try {
+          const sent = image ? stickers.onSelect(image) : onSubmit(message)
+          void Promise.resolve(sent).catch(sendProblem)
+          if (currentScope() && textarea.current?.value === submittedDraft) {
+            setDraft('')
+            onDraftChange?.('')
+          }
+        } catch {
+          sendProblem()
+        }
+      }
+      const lookupFailed = () => {
+        if (!active() || (controller.signal.aborted && !timedOut)) return
+        if (resolveEmojiShortcode(message) !== null) {
+          dispatch(null)
+        } else {
+          setStickerProblem(
+            timedOut
+              ? 'Sticker lookup timed out. Your message has not been sent. Try Send again.'
+              : 'Could not check sticker packs. Your message has not been sent. Try Send again.',
+          )
+        }
+      }
+      void lookupImageShortcode(
+        stickers.api,
+        stickers.accountId,
+        stickers.roomId,
+        shortcode,
+        controller.signal,
+      )
+        .then((image) => {
+          if (timedOut) lookupFailed()
+          else dispatch(image)
+        }, lookupFailed)
+        .finally(() => {
+          clearTimeout(deadline)
+          if (stickerLookup.current === controller) {
+            stickerLookup.current = null
+            if (currentScope()) setCheckingSticker(false)
+          }
+        })
+      return
+    }
     setDraft('')
     onDraftChange?.('')
     void onSubmit(message)
@@ -790,7 +932,7 @@ export function Composer({
       {autocompleteOpen && (
         <div
           id={autocompleteId}
-          class="slash-command-menu"
+          class={`slash-command-menu${packMatches.length > 0 ? ' sticker-suggestions' : ''}`}
           role="listbox"
           aria-label={
             autocompleteKind === 'mention'
@@ -852,7 +994,7 @@ export function Composer({
                     type="button"
                     role="option"
                     aria-selected={isSelected}
-                    class={`slash-command-option${isSelected ? ' selected' : ''}`}
+                    class={`slash-command-option${room.image ? ' sticker-completion' : ''}${isSelected ? ' selected' : ''}`}
                     onMouseDown={(event) => {
                       event.preventDefault()
                       if (autocompleteKind === 'room') {
@@ -864,7 +1006,16 @@ export function Composer({
                       }
                     }}
                   >
-                    <span class="slash-command-name">{room.label}</span>
+                    <span class="slash-command-name">
+                      {room.image && stickers && (
+                        <ReactionContent
+                          accountId={stickers.accountId}
+                          reaction={room.image.url}
+                          shortcode={room.image.shortcode}
+                        />
+                      )}
+                      {room.label}
+                    </span>
                     <span class="slash-command-description">
                       {room.description}
                     </span>
@@ -1238,13 +1389,15 @@ export function Composer({
             )}
           </>
         )}
+        {stickers !== undefined && <StickerPickerButton {...stickers} />}
         <button
           type="submit"
           class="composer-send"
           aria-label="Send"
           title="Send"
           disabled={
-            draft.trim() === '' && (attachments?.items.length ?? 0) === 0
+            checkingSticker ||
+            (draft.trim() === '' && (attachments?.items.length ?? 0) === 0)
           }
         >
           <svg
@@ -1264,6 +1417,8 @@ export function Composer({
           <span class="composer-send-label">Send</span>
         </button>
       </form>
+      {checkingSticker && <p role="status">Checking sticker packs…</p>}
+      {stickerProblem && <p role="alert">{stickerProblem}</p>}
     </div>
   )
 }

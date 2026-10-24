@@ -48,6 +48,8 @@ shows it.
 | Reactions (seeded badges render)                        | `timeline`            | `timeline`                                                                                                | `send`          |
 | React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
 | Custom reaction images (MSC4027)                        | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Standalone sticker selection and sending                | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Custom emoji packs and `/react` completion              | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Reaction badge updating live from another user's react  | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Replies                                                 | `timeline`            | `timeline`                                                                                                | `send`          |
 | Edits (`m.replace`, applied in place)                   | `threads`             | `threads`                                                                                                 | **not covered** |
@@ -267,3 +269,13 @@ scene now depends on:
   `scrollBy` rather than pretending to a gesture it is not.
 - **Message actions are hidden until the row is tapped** at phone widths, and
   Enter is not the send affordance a touch-only user has — the Send button is.
+
+The web custom emoji picker is covered by `clients/web/e2e/custom-emoji-picker.spec.ts`, including personal and room packs, image previews, sends, withdrawals, and mobile safe-area and keyboard viewport containment in both room and thread pickers.
+A recorded demo scene for pack selection remains outstanding; the existing `react` scene continues to demonstrate Unicode reactions.
+
+Standalone sticker selection is covered by `clients/web/e2e/stickers.spec.ts`, including personal and room packs, room/thread sends, draft preservation, original image rendering, keyboard dismissal, and narrow viewport containment.
+It is not yet shown in the recorded demo.
+
+Standalone sticker shortcodes and discovery-error Unicode fallback are covered by `clients/web/e2e/sticker-shortcodes.spec.ts` in room and thread composers; the recorded demo does not yet show this path.
+
+Case-insensitive sticker matching and shortcode autocomplete are covered in `clients/web/e2e/sticker-shortcodes.spec.ts`; no recorded demo scene covers them yet.

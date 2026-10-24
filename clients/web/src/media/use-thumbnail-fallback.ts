@@ -44,8 +44,13 @@ export function useThumbnailFallback(
 
   // Only plaintext media can be thumbnailed by the server; for an encrypted
   // object the sender's embedded thumbnail is the only one that can exist.
-  const generatedThumbnailUrl = media.encrypted ? null : media.url
-  const thumbnailUrl = generatedThumbnailUrl ?? media.thumbnailUrl
+  // Stickers use the original bytes so animated images keep their animation.
+  const generatedThumbnailUrl =
+    media.kind === 'sticker' || media.encrypted ? null : media.url
+  const thumbnailUrl =
+    media.kind === 'sticker'
+      ? null
+      : (generatedThumbnailUrl ?? media.thumbnailUrl)
   const usingThumbnail = !thumbnailFailed && thumbnailUrl !== null
 
   useEffect(() => {

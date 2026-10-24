@@ -1,3 +1,5 @@
+import { customReactionMxc } from '../custom-reactions'
+import { lookupImageShortcode, stickerFromImage } from '../emoji-packs'
 import { Fragment, type JSX } from 'preact'
 import { useLocation, useRoute } from 'preact-iso'
 import {
@@ -212,6 +214,7 @@ export function RoomPage() {
   })
   const {
     api,
+    auth,
     rooms,
     activeRoom,
     activeThread,
@@ -236,6 +239,16 @@ export function RoomPage() {
   const timeline = useMemo(
     () => timelines.acquire(accountId, roomId),
     [timelines, accountId, roomId],
+  )
+  const reactionLookups = useRef(new Map<TimelineStore, AbortController>())
+  const signedIn = auth.signedIn.value
+  useLayoutEffect(
+    () => () => {
+      for (const controller of reactionLookups.current.values())
+        controller.abort()
+      reactionLookups.current.clear()
+    },
+    [accountId, roomId, signedIn],
   )
   const redecryptAttempted = useRef(false)
   // RoomPage does not remount on a route change (preact-iso reuses the
@@ -1573,16 +1586,63 @@ export function RoomPage() {
       setCommandReactionPickerEventId(target.event_id)
       return true
     }
-    const key = resolveReactionCommandKey(command.reaction, emojiEntries)
-    if (key === null) {
-      commandTimeline.error.value = `unknown reaction shortcode: ${command.reaction}`
-      return false
+    const sendReaction = (key: string, shortcode?: string) => {
+      if (customReactionMxc(key) === null) settings.recordRecentReaction(key)
+      void commandTimeline.toggleReaction(target, key, shortcode).then((ok) => {
+        if (ok) onMutation()
+      })
+      return true
     }
-    settings.recordRecentReaction(key)
-    void commandTimeline.toggleReaction(target, key).then((ok) => {
-      if (ok) onMutation()
-    })
-    return true
+    const fallbackKey = resolveReactionCommandKey(
+      command.reaction,
+      emojiEntries,
+    )
+    const shortcode = command.reaction
+      .trim()
+      .replace(/^:/, '')
+      .replace(/:$/, '')
+    // Literal Unicode reactions need no discovery. For named reactions, custom
+    // packs take the same precedence over Unicode names as autocomplete.
+    if (fallbackKey !== null && !/^[A-Za-z0-9_+-]+$/.test(shortcode)) {
+      return sendReaction(fallbackKey)
+    }
+    if (reactionLookups.current.has(commandTimeline)) return false
+    const controller = new AbortController()
+    reactionLookups.current.set(commandTimeline, controller)
+    const deadline = setTimeout(() => controller.abort(), 10_000)
+    return lookupImageShortcode(
+      api,
+      accountId,
+      roomId,
+      shortcode,
+      controller.signal,
+      'emoticon',
+    )
+      .then((image) => {
+        if (reactionLookups.current.get(commandTimeline) !== controller)
+          return false
+        if (controller.signal.aborted) {
+          return fallbackKey !== null ? sendReaction(fallbackKey) : false
+        }
+        if (image) return sendReaction(image.url, image.shortcode)
+        if (fallbackKey !== null) return sendReaction(fallbackKey)
+        commandTimeline.error.value = `unknown reaction shortcode: ${command.reaction}`
+        return false
+      })
+      .catch(() => {
+        if (reactionLookups.current.get(commandTimeline) !== controller)
+          return false
+        if (fallbackKey !== null) return sendReaction(fallbackKey)
+        commandTimeline.error.value =
+          'Could not check custom emoji packs. Try the reaction again.'
+        return false
+      })
+      .finally(() => {
+        clearTimeout(deadline)
+        if (reactionLookups.current.get(commandTimeline) === controller) {
+          reactionLookups.current.delete(commandTimeline)
+        }
+      })
   }
 
   const handleComposerCommand = (body: string): boolean | Promise<boolean> =>
@@ -2178,6 +2238,26 @@ export function RoomPage() {
             mentionCompletions={mentionCompletions}
             roomReferenceCompletions={roomReferenceCompletions}
             emojiCompletions={emojiCompletions}
+            stickers={
+              action?.kind === 'edit'
+                ? undefined
+                : {
+                    api,
+                    accountId,
+                    roomId,
+                    onSelect: (image) => {
+                      const replyTo =
+                        action?.kind === 'reply'
+                          ? action.event.event_id
+                          : undefined
+                      if (action?.kind === 'reply') setAction(null)
+                      void timeline.sendSticker(stickerFromImage(image), {
+                        replyTo,
+                        senderId: ownUserId ?? undefined,
+                      })
+                    },
+                  }
+            }
             onAttach={attachable ? stage : undefined}
             attachments={{ ...attachments, onRemove: removeAttachment }}
             onSubmit={submitMessage}
