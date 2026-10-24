@@ -28,19 +28,27 @@ fn golden_path() -> PathBuf {
 #[test]
 fn every_operation_has_a_short_title_summary() {
     let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    const METHODS: [&str; 8] = [
+        "get", "put", "post", "delete", "options", "head", "patch", "trace",
+    ];
     let mut bad = Vec::new();
     for (path, item) in spec["paths"].as_object().unwrap() {
+        // A path item may also carry `parameters`, `summary`, `description` or
+        // `servers`; only the HTTP methods are operations.
         for (method, op) in item.as_object().unwrap() {
+            if !METHODS.contains(&method.as_str()) {
+                continue;
+            }
             match op["summary"].as_str() {
-                Some(s) if s.len() <= 60 && !s.ends_with('.') => {}
+                Some(s) if s.chars().count() <= 60 && !s.ends_with('.') => {}
                 other => bad.push(format!("{} {path}: {other:?}", method.to_uppercase())),
             }
         }
     }
     assert!(
         bad.is_empty(),
-        "operations need a short title as the first doc-comment line (no trailing period, \
-         at most 60 characters), followed by a blank `///` line:\n{}",
+        "operations need a short title (no trailing period, at most 60 characters) as the \
+         first doc-comment paragraph, followed by a blank `///` line before any detail:\n{}",
         bad.join("\n")
     );
 }
