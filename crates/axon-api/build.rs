@@ -11,17 +11,25 @@
 //!   symlink does not count) fails the build. Release pipelines set it, so an artifact cannot quietly ship
 //!   without the web client.
 //! - The default, `clients/web/dist` in this checkout, may simply not have been
-//!   built. That is a warning and an empty table, because the lint gate and CI
-//!   run `cargo clippy --all-features` on checkouts that never ran `pnpm`.
+//!   built, or may be older than the web sources. `build.rs` then runs `pnpm`
+//!   itself (see [`autobuild`]), so `cargo build --features embed-web` needs no
+//!   separate `pnpm build`. Where it cannot or must not (`CI` is set, `pnpm` is
+//!   not installed, `AXON_WEB_AUTOBUILD=0`, or the build fails) a missing
+//!   bundle is a warning and an empty table, because the lint gate and CI run
+//!   `cargo clippy --all-features` on checkouts that never ran `pnpm`.
 
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::SystemTime;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=AXON_WEB_DIST");
+    println!("cargo:rerun-if-env-changed=AXON_WEB_AUTOBUILD");
+    println!("cargo:rerun-if-env-changed=CI");
 
     let mut table = String::from("pub(crate) static EMBEDDED: &[(&str, &[u8])] = &[\n");
     if let Some(dist) = env::var_os("CARGO_FEATURE_EMBED_WEB").and_then(|_| dist_dir()) {
@@ -81,6 +89,7 @@ fn dist_dir() -> Option<PathBuf> {
                 .join("../../clients/web/dist");
             // Watched even when absent, so building the bundle later reruns this.
             println!("cargo:rerun-if-changed={}", dir.display());
+            autobuild(&dir);
             if !has_index(&dir) {
                 println!(
                     "cargo:warning=`embed-web` is on but clients/web/dist is not built, so this \
@@ -96,6 +105,115 @@ fn dist_dir() -> Option<PathBuf> {
         dir.canonicalize()
             .unwrap_or_else(|e| panic!("resolving {}: {e}", dir.display())),
     )
+}
+
+/// Inputs to `pnpm build`, relative to `clients/web`. A change to any of them
+/// makes the bundle stale; `build.rs` also reruns on a change to any of them.
+const WEB_INPUTS: &[&str] = &[
+    "src",
+    "public",
+    "index.html",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "vite.config.ts",
+    "tsconfig.json",
+    "tsconfig.app.json",
+    "tsconfig.node.json",
+];
+
+/// The `pnpm` executable. On Windows it is a `pnpm.cmd` shim, which
+/// `Command::new("pnpm")` does not resolve (this is the host's `cfg`, which is
+/// where the script runs).
+const PNPM: &str = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
+
+/// Whether the environment variable `name` is set to a value that means "on":
+/// anything but empty, `0`, `false`, `no` or `off` (case-insensitive). So
+/// `CI=false` is not CI, and `AXON_WEB_AUTOBUILD=off` is off.
+fn env_on(name: &str) -> bool {
+    env::var(name).is_ok_and(|value| {
+        !["", "0", "false", "no", "off"].contains(&value.to_ascii_lowercase().as_str())
+    })
+}
+
+/// Builds `clients/web` into `dist` when the bundle is missing or older than
+/// its inputs, so a `cargo build --features embed-web` never embeds a stale or
+/// absent client. Only the default location is built: `AXON_WEB_DIST` names a
+/// bundle somebody else is responsible for.
+///
+/// Every way this can fail to build is a warning, not an error. The caller
+/// then embeds whatever `dist` holds (nothing, if it was never built), which is
+/// what a checkout without Node got before this existed.
+fn autobuild(dist: &Path) {
+    let web = dist.parent().expect("dist has a parent").to_path_buf();
+    for input in WEB_INPUTS {
+        // Watched even when absent, and recursively for directories.
+        println!("cargo:rerun-if-changed={}", web.join(input).display());
+    }
+    // An explicit `AXON_WEB_AUTOBUILD` (any value) wins; otherwise `CI` decides.
+    let opted = env::var_os("AXON_WEB_AUTOBUILD").map(|_| env_on("AXON_WEB_AUTOBUILD"));
+    if !opted.unwrap_or(!env_on("CI")) {
+        return;
+    }
+    let built = fs::metadata(dist.join("index.html")).and_then(|meta| meta.modified());
+    let newest = WEB_INPUTS
+        .iter()
+        .filter_map(|input| newest_mtime(&web.join(input)))
+        .max();
+    let stale = match (&built, newest) {
+        (Ok(built), Some(newest)) => newest > *built,
+        // No bundle at all, or nothing to compare against.
+        (Err(_), _) => true,
+        (Ok(_), None) => false,
+    };
+    if !stale {
+        return;
+    }
+    if !web.join("package.json").is_file() {
+        return;
+    }
+    let pnpm = |args: &[&str]| {
+        Command::new(PNPM)
+            .arg("--dir")
+            .arg(&web)
+            .args(args)
+            .status()
+    };
+    // Without pnpm there is nothing to try: the caller's "not built" warning
+    // already says how to build by hand.
+    match Command::new(PNPM).arg("--version").output() {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {}
+    }
+    println!("cargo:warning=building the web client for `embed-web` (pnpm build)");
+    // `pnpm build` fails loudly enough when `node_modules` is out of date, and
+    // an offline install fails slowly, so install only a checkout that has none.
+    let ok = |status: std::io::Result<std::process::ExitStatus>| status.is_ok_and(|s| s.success());
+    if (web.join("node_modules").is_dir() || ok(pnpm(&["install", "--frozen-lockfile"])))
+        && ok(pnpm(&["build"]))
+    {
+        return;
+    }
+    println!(
+        "cargo:warning=building the web client failed, so `embed-web` embeds whatever \
+         clients/web/dist already holds. Build it by hand to see the error \
+         (`pnpm --dir clients/web build`), or set AXON_WEB_AUTOBUILD=0 to stop trying."
+    );
+}
+
+/// The newest modification time of `path`, or of anything under it.
+fn newest_mtime(path: &Path) -> Option<SystemTime> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    let own = meta.modified().ok();
+    if !meta.is_dir() {
+        return own;
+    }
+    let children = fs::read_dir(path).ok()?.filter_map(|entry| {
+        let entry = entry.ok()?;
+        newest_mtime(&entry.path())
+    });
+    children.chain(own).max()
 }
 
 /// Whether `dir` holds an `index.html` that [`collect`] will embed. A symlink
