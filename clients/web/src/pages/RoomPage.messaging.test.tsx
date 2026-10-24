@@ -98,6 +98,14 @@ function event(id: string, ts: number, overrides: object = {}): EventDto {
 }
 
 const server = setupServer(
+  http.get(
+    `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`,
+    () =>
+      HttpResponse.json(
+        { error: { code: 'not_found', message: 'Older server' } },
+        { status: 404 },
+      ),
+  ),
   http.get(`${TEST_BASE_URL}/v1/invites`, () =>
     HttpResponse.json({ data: [] }),
   ),
@@ -284,6 +292,10 @@ describe('sending', () => {
   it('expands emoji shortcodes before sending a composed message', async () => {
     let sendBody: Record<string, unknown> = {}
     server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/emoji-packs`,
+        () => HttpResponse.json({ data: { packs: [], partial: false } }),
+      ),
       http.post(
         `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/send`,
         async ({ request }) => {
@@ -833,6 +845,199 @@ describe('reactions', () => {
     ).toBeNull()
   })
 
+  it('/react resolves a mixed-case pack shortcode and sends its original name', async () => {
+    let posted: unknown
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`,
+        () =>
+          HttpResponse.json({
+            data: {
+              packs: [
+                {
+                  room_id: null,
+                  state_key: null,
+                  event_type: 'im.ponies.user_emotes',
+                  images: [
+                    {
+                      shortcode: 'Adam',
+                      url: 'mxc://hs/adam',
+                      emoticon: true,
+                      sticker: true,
+                    },
+                  ],
+                },
+              ],
+              partial: false,
+            },
+          }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId/reactions`,
+        async ({ request }) => {
+          posted = await request.json()
+          return HttpResponse.json({ data: { event_id: '$custom-reaction' } })
+        },
+      ),
+      http.get(EVENTS_PATH, () =>
+        HttpResponse.json({ data: event('$msg', 100) }),
+      ),
+    )
+    const { services, findByLabelText } = renderRoom([event('$msg', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+    fireEvent.input(textarea, { target: { value: '/react :aDaM:' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() =>
+      expect(posted).toEqual({ key: 'mxc://hs/adam', shortcode: 'Adam' }),
+    )
+    await waitFor(() => expect(textarea.value).toBe(''))
+    expect(services.settings.recentReactions.value).not.toContain(
+      'mxc://hs/adam',
+    )
+  })
+
+  it('does not send a pending custom reaction after leaving the room', async () => {
+    let finish!: () => void
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    let reading = false
+    let discoverySignal: AbortSignal | undefined
+    const posted = vi.fn()
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`,
+        async ({ request }) => {
+          discoverySignal = request.signal
+          reading = true
+          await pending
+          return HttpResponse.json({
+            data: {
+              packs: [
+                {
+                  room_id: null,
+                  state_key: null,
+                  event_type: 'im.ponies.user_emotes',
+                  images: [
+                    { shortcode: 'adam', url: 'mxc://hs/adam', emoticon: true },
+                  ],
+                },
+              ],
+              partial: false,
+            },
+          })
+        },
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId/reactions`,
+        () => {
+          posted()
+          return HttpResponse.json({ data: { event_id: '$reaction' } })
+        },
+      ),
+    )
+    const { findByLabelText, unmount } = renderRoom([event('$msg', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+    fireEvent.input(textarea, { target: { value: '/react :adam:' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(reading).toBe(true))
+    unmount()
+    expect(discoverySignal?.aborted).toBe(true)
+    finish()
+    await pending
+    expect(posted).not.toHaveBeenCalled()
+  })
+
+  it('keeps a failed custom reaction lookup in the draft', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`,
+        () =>
+          HttpResponse.json(
+            { error: { code: 'unavailable', message: 'Retry' } },
+            { status: 503 },
+          ),
+      ),
+    )
+    const { findByLabelText, findByText } = renderRoom([event('$msg', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+    fireEvent.input(textarea, { target: { value: '/react :adam:' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await findByText(
+      'Could not check custom emoji packs. Try the reaction again.',
+    )
+    expect(textarea.value).toBe('/react :adam:')
+  })
+
+  it.each(['http', 'network', 'deadline'])(
+    'keeps Unicode shortcode reactions usable after a pack %s failure',
+    async (failure) => {
+      let posted: unknown
+      const originalSetTimeout = globalThis.setTimeout
+      const timer = vi
+        .spyOn(globalThis, 'setTimeout')
+        .mockImplementation(((
+          callback: TimerHandler,
+          delay?: number,
+          ...args: unknown[]
+        ) =>
+          originalSetTimeout(
+            callback,
+            delay === 10_000 ? 20 : delay,
+            ...args,
+          )) as typeof setTimeout)
+      server.use(
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`,
+          async ({ request }) => {
+            if (failure === 'network') return HttpResponse.error()
+            if (failure === 'deadline') {
+              await new Promise<void>((resolve) => {
+                if (request.signal.aborted) resolve()
+                else
+                  request.signal.addEventListener('abort', () => resolve(), {
+                    once: true,
+                  })
+              })
+            }
+            return HttpResponse.json({}, { status: 503 })
+          },
+        ),
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId/reactions`,
+          async ({ request }) => {
+            posted = await request.json()
+            return HttpResponse.json({
+              data: { event_id: '$fallback-reaction' },
+            })
+          },
+        ),
+        http.get(EVENTS_PATH, () =>
+          HttpResponse.json({ data: event('$msg', 100) }),
+        ),
+      )
+      try {
+        const { services, findByLabelText } = renderRoom([event('$msg', 100)])
+        const textarea = (await findByLabelText(
+          'Message Ops',
+        )) as HTMLTextAreaElement
+        fireEvent.input(textarea, { target: { value: '/react :thumbsup:' } })
+        fireEvent.keyDown(textarea, { key: 'Enter' })
+        await waitFor(() => expect(posted).toEqual({ key: '👍' }))
+        await waitFor(() => expect(textarea.value).toBe(''))
+        expect(services.settings.recentReactions.value).toContain('👍')
+      } finally {
+        timer.mockRestore()
+      }
+    },
+  )
+
   it('/react with an emoji reacts to the latest visible message', async () => {
     let posted: unknown
     let reactedEventId: string | null = null
@@ -861,7 +1066,7 @@ describe('reactions', () => {
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
     await waitFor(() => expect(reactedEventId).toBe('$latest'))
-    expect(posted).toEqual({ key: '🔥' })
+    await waitFor(() => expect(posted).toEqual({ key: '🔥' }))
     expect(textarea.value).toBe('')
   })
 
@@ -914,7 +1119,7 @@ describe('reactions', () => {
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
     await waitFor(() => expect(reactedEventId).toBe('$thread-latest'))
-    expect(posted).toEqual({ key: '🔥' })
+    await waitFor(() => expect(posted).toEqual({ key: '🔥' }))
     expect(textarea.value).toBe('')
   })
 
@@ -946,7 +1151,7 @@ describe('reactions', () => {
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
     await waitFor(() => expect(reactedEventId).toBe('$latest'))
-    expect(posted).toEqual({ key: '🔥' })
+    await waitFor(() => expect(posted).toEqual({ key: '🔥' }))
     expect(textarea.value).toBe('')
   })
 
@@ -1108,7 +1313,7 @@ describe('reactions', () => {
     fireEvent.click(await findByRole('button', { name: 'More reactions' }))
     expect(await findByRole('dialog', { name: 'Emoji picker' })).toBeTruthy()
 
-    fireEvent.click(await findByRole('button', { name: 'Close picker' }))
+    fireEvent.click(await findByRole('button', { name: 'Close' }))
 
     expect(queryByRole('dialog', { name: 'Emoji picker' })).toBeNull()
     expect(queryByRole('group', { name: 'React with' })).toBeNull()

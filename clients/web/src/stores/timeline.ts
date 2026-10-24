@@ -1,3 +1,4 @@
+import { customReactionMxc, reactionShortcode } from '../custom-reactions'
 import {
   computed,
   signal,
@@ -17,6 +18,11 @@ import {
 import { perfMark } from '../perf'
 
 export type EventDto = components['schemas']['EventDto']
+
+export type StickerSend = Pick<
+  components['schemas']['SendStickerRequest'],
+  'body' | 'url' | 'info'
+>
 
 export type LocalEchoStatus = 'pending' | 'failed'
 
@@ -49,6 +55,7 @@ export type TimelineEvent = EventDto & {
      * that happens.
      */
     media?: { file: File; kind: UploadKind; previewUrl: string | null }
+    sticker?: StickerSend
     /**
      * Display-only position within a multi-image send (ADR 0081). `retrySend`
      * drops it: a lone retry claiming "2 of 5" would be a lie about a batch
@@ -56,6 +63,38 @@ export type TimelineEvent = EventDto & {
      */
     batch?: { index: number; total: number }
   }
+}
+
+/** This event's thread root, or `null` — mirrors `threadRootId` locally to
+ *  keep the timeline module below the threads module in the import graph. */
+function liveThreadRoot(event: EventDto): string | null {
+  const relates = event.relates_to as {
+    rel_type?: unknown
+    event_id?: unknown
+  } | null
+  return relates?.rel_type === 'm.thread' &&
+    typeof relates.event_id === 'string'
+    ? relates.event_id
+    : null
+}
+
+/** One live event confirms one matching kind of pending send. */
+function confirmsLocalEcho(
+  pending: TimelineEvent,
+  confirmed: EventDto,
+): boolean {
+  const echo = pending.localEcho
+  return (
+    echo?.status === 'pending' &&
+    pending.sender === confirmed.sender &&
+    pending.type === confirmed.type &&
+    echo.body === (confirmed.body ?? '') &&
+    (echo.sticker === undefined ||
+      ((confirmed.content as Record<string, unknown> | null | undefined)
+        ?.url === echo.sticker.url &&
+        liveThreadRoot(pending) === liveThreadRoot(confirmed) &&
+        inReplyToId(pending) === inReplyToId(confirmed)))
+  )
 }
 
 /** Page size for both the initial page and each scroll-back page. */
@@ -204,11 +243,17 @@ export interface TimelineStore {
   ): Promise<boolean>
   /** Redact an event. */
   redact(eventId: string): Promise<boolean>
+  /** Send an existing pack image as a standalone sticker. */
+  sendSticker(sticker: StickerSend, options?: SendOptions): Promise<boolean>
   /**
    * Toggle my reaction `key` on an event: reacts, or redacts my existing
    * reaction event (`my_event_ids`) when already reacted.
    */
-  toggleReaction(event: EventDto, key: string): Promise<boolean>
+  toggleReaction(
+    event: EventDto,
+    key: string,
+    shortcode?: string,
+  ): Promise<boolean>
 
   /**
    * Merge a live event pushed over `/v1/ws` into the loaded slice (M-W6): an
@@ -716,7 +761,7 @@ export function createTimelineStore(
 
   /**
    * Drop any pending echo the fetched page confirms — matched on sender and
-   * body, the same rule `ingestLive` uses — so a send never shows twice. Both
+   * body and event kind (plus sticker URL/context), the same rule `ingestLive` uses — so a send never shows twice. Both
    * of `refreshHead`'s outcomes need it: an overlapping head and a disjoint one
    * can each carry the confirmation of a send this client is still waiting on.
    */
@@ -726,12 +771,7 @@ export function createTimelineStore(
   ): TimelineEvent[] {
     let rest = list
     for (const fresh of fetched) {
-      const echoIndex = rest.findIndex(
-        (e) =>
-          e.localEcho?.status === 'pending' &&
-          e.sender === fresh.sender &&
-          e.localEcho.body === (fresh.body ?? ''),
-      )
+      const echoIndex = rest.findIndex((e) => confirmsLocalEcho(e, fresh))
       if (echoIndex !== -1) {
         rest = dropEchoes(rest, (_, i) => i === echoIndex)
       }
@@ -1017,19 +1057,6 @@ export function createTimelineStore(
     )
   }
 
-  /** This event's thread root, or `null` — mirrors `threadRootId` locally to
-   *  keep the timeline module below the threads module in the import graph. */
-  function liveThreadRoot(event: EventDto): string | null {
-    const relates = event.relates_to as {
-      rel_type?: unknown
-      event_id?: unknown
-    } | null
-    return relates?.rel_type === 'm.thread' &&
-      typeof relates.event_id === 'string'
-      ? relates.event_id
-      : null
-  }
-
   function ingestLive(event: EventDto): void {
     if (event.account_id !== accountId || event.room_id !== roomId) {
       return
@@ -1106,10 +1133,7 @@ export function createTimelineStore(
     // Only the *first* match: one frame confirms one send, and two quick
     // sends of the same body must keep their second echo for its own frame
     // (or reconcile) to confirm — the bus is lossy (WCR-07).
-    const confirmsEcho = (e: TimelineEvent) =>
-      e.localEcho?.status === 'pending' &&
-      e.sender === event.sender &&
-      e.localEcho.body === (event.body ?? '')
+    const confirmsEcho = (e: TimelineEvent) => confirmsLocalEcho(e, event)
     const echoIndex = list.findIndex(confirmsEcho)
     if (echoIndex !== -1) {
       // Replace the echo *where it stands*, rather than dropping it and
@@ -1337,6 +1361,48 @@ export function createTimelineStore(
     return true
   }
 
+  async function sendSticker(
+    sticker: StickerSend,
+    options: SendOptions = {},
+  ): Promise<boolean> {
+    const localId = `local:${randomId()}`
+    const echo = buildLocalEcho(
+      localId,
+      sticker.body,
+      options,
+      options.senderId,
+    )
+    events.value = [
+      ...events.value,
+      {
+        ...echo,
+        type: 'm.sticker',
+        content: {
+          body: sticker.body,
+          url: sticker.url,
+          info: sticker.info ?? {},
+        },
+        localEcho: { ...echo.localEcho!, sticker },
+      } as unknown as TimelineEvent,
+    ]
+    const result = await mutateWithResult(() =>
+      api.POST('/v1/accounts/{account_id}/rooms/{room_id}/send-sticker', {
+        params: { path: { account_id: accountId, room_id: roomId } },
+        body: {
+          ...sticker,
+          reply_to: options.replyTo ?? null,
+          thread_root: options.threadRoot ?? threadRoot ?? null,
+        },
+      }),
+    )
+    if (!result.ok) {
+      failEcho(localId)
+      return false
+    }
+    await reconcileEcho(localId, result.eventId)
+    return true
+  }
+
   type MediaSendOptions = {
     caption?: string
     replyTo?: string
@@ -1546,6 +1612,7 @@ export function createTimelineStore(
 
     send,
     sendMedia,
+    sendSticker,
     sendMediaBatch,
 
     async retrySend(localId) {
@@ -1553,13 +1620,15 @@ export function createTimelineStore(
       if (failed?.localEcho === undefined) {
         return false
       }
-      const { body, options, media: failedMedia } = failed.localEcho
+      const { body, options, media: failedMedia, sticker } = failed.localEcho
       // Drops the old echo (and its preview url); the retry builds a fresh one.
       events.value = dropEchoes(
         events.value,
         (event) => event.event_id === localId,
       )
       const senderId = failed.sender
+      if (sticker !== undefined)
+        return sendSticker(sticker, { ...options, senderId })
       return failedMedia === undefined
         ? send(body, { ...options, senderId })
         : // The retained `File` is re-uploaded — a failed send never costs the
@@ -1647,8 +1716,12 @@ export function createTimelineStore(
       return ok
     },
 
-    async toggleReaction(event, key) {
+    async toggleReaction(event, key, shortcode) {
       const mine = event.reactions?.[key]
+      const name =
+        customReactionMxc(key) === null
+          ? null
+          : reactionShortcode(shortcode ?? mine?.shortcode)
       const myReactionId =
         mine?.me === true ? mine.my_event_ids?.[0] : undefined
       const ok = await mutate(() =>
@@ -1677,7 +1750,7 @@ export function createTimelineStore(
                     event_id: event.event_id,
                   },
                 },
-                body: { key },
+                body: { key, ...(name === null ? {} : { shortcode: name }) },
               },
             ),
       )

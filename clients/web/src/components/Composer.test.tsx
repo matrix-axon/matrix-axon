@@ -1,6 +1,7 @@
 import {
   act,
   cleanup,
+  createEvent,
   fireEvent,
   render,
   waitFor,
@@ -933,8 +934,9 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
     const { getByLabelText } = renderComposer({ onAttach })
     const input = getByLabelText('Attach a file') as HTMLInputElement
     const file = png()
-
-    fireEvent.change(input, { target: { files: [file] } })
+    // The convenience fireEvent.change incorrectly becomes input under compat.
+    // File controls still use change; construct the native event explicitly.
+    fireEvent(input, createEvent.change(input, { target: { files: [file] } }))
 
     // The whole list goes through; only the staging hook knows the caps.
     expect([...onAttach.mock.calls[0][0]]).toEqual([file])
@@ -1001,12 +1003,18 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
       const photo = png('shot.png')
       const clip = new File(['v'], 'clip.mp4', { type: 'video/mp4' })
 
-      fireEvent.change(getByLabelText('Take a photo'), {
-        target: { files: [photo] },
-      })
-      fireEvent.change(getByLabelText('Record a video'), {
-        target: { files: [clip] },
-      })
+      fireEvent(
+        getByLabelText('Take a photo'),
+        createEvent.change(getByLabelText('Take a photo'), {
+          target: { files: [photo] },
+        }),
+      )
+      fireEvent(
+        getByLabelText('Record a video'),
+        createEvent.change(getByLabelText('Record a video'), {
+          target: { files: [clip] },
+        }),
+      )
 
       expect([...onAttach.mock.calls[0][0]]).toEqual([photo])
       expect([...onAttach.mock.calls[1][0]]).toEqual([clip])
@@ -1154,7 +1162,7 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
     expect(input.multiple).toBe(true)
 
     const files = [png('a.png'), png('b.png'), png('c.png')]
-    fireEvent.change(input, { target: { files } })
+    fireEvent(input, createEvent.change(input, { target: { files } }))
 
     expect([...onAttach.mock.calls[0][0]]).toHaveLength(3)
   })

@@ -3890,9 +3890,15 @@ span.composer-attachment-thumb {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: 28rem;
-  max-width: calc(100vw - 2rem);
+  max-width: calc(
+    var(--app-viewport-width, 100vw) - var(--safe-left) - var(--safe-right) -
+      2rem
+  );
   height: 34rem;
-  max-height: calc(100vh - 2rem);
+  max-height: calc(
+    var(--app-viewport-height, 100vh) - var(--safe-top) - var(--safe-bottom) -
+      2rem
+  );
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 0.9rem;
@@ -3902,7 +3908,10 @@ span.composer-attachment-thumb {
 
 @supports (max-height: 100dvh) {
   .reaction-full-picker {
-    max-height: calc(100dvh - 2rem);
+    max-height: calc(
+      var(--app-viewport-height, 100dvh) - var(--safe-top) -
+        var(--safe-bottom) - 2rem
+    );
   }
 }
 
@@ -6765,4 +6774,133 @@ audio.media-player {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+.reaction-picker-categories {
+  display: flex;
+  gap: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.reaction-picker-categories button[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.custom-emoji-picker {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.custom-emoji-search {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.5rem;
+}
+
+.custom-emoji-search input {
+  min-width: 0;
+  flex: 1;
+}
+
+button.custom-emoji-refresh {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.5rem;
+  border-color: transparent;
+}
+
+.custom-emoji-refresh svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.custom-emoji-packs {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 0.6rem 0.6rem;
+  overflow-wrap: anywhere;
+}
+
+.custom-emoji-packs h3 {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin: 0.5rem 0 0.3rem;
+}
+
+.custom-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(4.5rem, 1fr));
+  gap: 0.35rem;
+}
+
+.custom-emoji-grid button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  min-width: 0;
+  min-height: 3rem;
+  padding: 0.4rem 0.2rem;
+  font-size: 0.75rem;
+  border-color: transparent;
+  background: transparent;
+}
+
+.custom-emoji-grid button:hover:not(:disabled) {
+  background: var(--bg-raised);
+}
+
+.custom-emoji-grid button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.custom-emoji-grid button > span:last-child {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.sticker-picker-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 28rem;
+  height: 34rem;
+  max-width: 100%;
+  max-height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.composer-sticker {
+  flex-shrink: 0;
+}
+
+/* Mixed sticker/Unicode suggestions must fit even a narrow thread pane. */
+.sticker-suggestions {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sticker-suggestions .slash-command-option {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.sticker-suggestions .slash-command-name,
+.sticker-suggestions .slash-command-description {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sticker-completion .reaction-image {
+  margin-inline-end: 0.35rem;
+  vertical-align: middle;
 }

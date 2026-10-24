@@ -121,7 +121,47 @@ Received custom reaction images render in room and thread reaction chips through
 Tooltips and accessible labels use the optional reaction `shortcode` when a server supplies it, and fall back to “Custom reaction” for older servers or missing names.
 Supplied names are rendered as plain text, never interpreted as HTML.
 Loading and failed images retain a compact placeholder; counts and click-to-toggle behavior work as for Unicode reactions.
-Custom-image selection and image-pack browsing are not yet available.
+To select a custom reaction, open React → More reactions → Custom emoji in a room or thread.
+The picker groups personal and current-room packs, supports search, and sends the selected name alongside its image key.
+Pack snapshots refresh whenever this view opens and after a live-connection reconnect; Refresh also checks for packs that finished syncing.
+Loading, partial results, empty results, and failures have explicit states with retry controls.
+Older servers without pack discovery continue to support the Unicode picker and received reaction images.
+Custom selections do not enter the global Unicode recent-reaction or gesture preferences.
+To send a standalone sticker, choose **Send sticker** beside the room or thread composer, search the personal and current-room packs, and select an image.
+You can also type a complete shortcode such as `:adam:` and press Send (or Enter on desktop) to send that sticker.
+Matching is case-insensitive; personal packs take precedence, followed by the server's room-pack order when names repeat.
+Typing a standalone shortcode prefix such as `:ad` includes sticker suggestions, with previews and pack names, in the existing emoji autocomplete menu.
+Choose a suggestion with Tab, Enter, or a pointer to insert the original shortcode, then submit it to send the sticker.
+Duplicate names after case-folding show their effective first match; the picker remains available to choose a specific image from another pack.
+Reaction commands (`/react` and `/+`) complete reaction-capable custom emoji from the same server discovery snapshot used by the reaction picker, alongside Unicode emoji.
+Type a prefix with or without a leading colon, choose its preview with Tab or a pointer, and submit the command to react to the current target message.
+An exact custom shortcode also works without selecting a suggestion; matching is case-insensitive and preserves the pack's original name in the sent reaction metadata.
+Sticker-only entries are excluded from reaction commands, and servers without pack discovery retain Unicode reaction support.
+
+Only a whole-message shortcode becomes a sticker: names in prose, attachment captions, and edits keep their text behavior.
+Unknown names and servers without pack discovery use the existing text/Unicode shortcode handling.
+A sticker discovery failure keeps the draft and offers another Send attempt; changing rooms cancels a pending lookup.
+Sending again during a sticker lookup shows a waiting notice and preserves edits for the next message.
+Known Unicode reaction names still send their Unicode fallback if pack discovery fails or times out; custom image reactions never enter global Unicode recents.
+Only sticker-capable images appear; mixed-use images also remain available in the reaction picker.
+Selecting a sticker preserves any unsent text or staged attachments, and failed sends offer Retry and Discard in the timeline.
+Replies and thread context are preserved, and received stickers display the original image so animated stickers retain their animation.
+Older servers show an unavailable or empty sticker state without affecting text and reaction sends.
+Available packs follow server discovery, including canonical ancestor spaces when supported by the server.
+Shared packs subscribed from other rooms and pack editing remain outside this version.
+
+To test with the companion server changes, run the server from `codex/server-room-emoji` alongside this client.
+Build the web bundle in this workspace and point the embedded-server build at it:
+
+```bash
+pnpm --dir clients/web install --frozen-lockfile
+pnpm --dir clients/web build
+AXON_WEB_DIST="$PWD/clients/web/dist" cargo build -p axon-server --features embed-web
+```
+
+Run that server with your test configuration, open a joined room with a personal or room pack, and use the picker steps above.
+For reactions, both room and thread sends should display the chosen shortcode in their tooltips; selecting an owned chip withdraws it.
+For standalone stickers, use **Send sticker** in each composer and confirm that the selected image appears as its own timeline event while any unsent draft remains in place.
 
 ## Prerequisites
 
