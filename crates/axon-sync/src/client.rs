@@ -58,19 +58,38 @@ fn production_encryption_settings() -> EncryptionSettings {
 /// The `User-Agent` Axon sends to every homeserver and authorization server.
 ///
 /// Matrix Authentication Service names and classifies a session by parsing this
-/// header; without it (or with the SDK's bare `matrix-rust-sdk`) the session
-/// is listed as "Unknown device" with no device type. The platform token uses
-/// the conventional browser spelling so MAS's parser recognises the OS.
+/// header (`mas-data-model`'s `UserAgent::parse`), and the parse has two paths:
+///
+/// - Without `Mozilla/`, a `Name/1.2 (model; os)` string is read as a native app
+///   whose first segment is the device *model*, and only Android/iOS are given a
+///   device type. Axon's earlier `Axon/x (X11; Linux x86_64)` therefore showed
+///   up as a device called "X11" of unknown type.
+/// - With `Mozilla/`, the browser parser classifies the platform (desktop
+///   Chrome is "pc"), and an `Electron/` token makes MAS take the app's name and
+///   version from the first token that is not a browser one.
+///
+/// This string takes the second path, the way Element Desktop does, so the
+/// session reads "Axon" on the right OS as a desktop device. The Chrome and
+/// Electron versions are placeholders MAS never inspects; they are not a claim
+/// about what Axon embeds. The platform fragments are the frozen ones Chrome
+/// itself sends, which MAS special-cases into a clean OS name.
 pub(crate) fn user_agent() -> String {
-    let platform = match std::env::consts::OS {
-        "linux" => "X11; Linux x86_64",
+    user_agent_for(std::env::consts::OS)
+}
+
+/// [`user_agent`] for a given `std::env::consts::OS` value, so every platform's
+/// string can be checked from any host.
+fn user_agent_for(os: &str) -> String {
+    let platform = match os {
         "windows" => "Windows NT 10.0; Win64; x64",
         "macos" => "Macintosh; Intel Mac OS X 10_15_7",
-        "android" => "Linux; Android",
-        "ios" => "iPhone; CPU iPhone OS like Mac OS X",
-        other => other,
+        _ => "X11; Linux x86_64",
     };
-    format!("Axon/{} ({platform})", env!("CARGO_PKG_VERSION"))
+    format!(
+        "Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Axon/{} \
+         Chrome/120.0.0.0 Electron/30.0.0 Safari/537.36",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 fn configure_client_builder(builder: ClientBuilder, handle_refresh_tokens: bool) -> ClientBuilder {
@@ -734,14 +753,43 @@ mod tests {
         adopt_matrix_oauth_acquire_staging, client_builder, finish_matrix_oauth_acquire_adoption,
         matrix_oauth_acquire_previous_dir, matrix_oauth_acquire_root,
         production_encryption_settings, restore, restore_account_client, sqlite_config, user_agent,
-        with_staged_store_dir,
+        user_agent_for, with_staged_store_dir,
     };
 
     #[test]
-    fn user_agent_names_axon_and_version() {
-        let ua = user_agent();
-        assert!(ua.starts_with(&format!("Axon/{} (", env!("CARGO_PKG_VERSION"))));
-        assert!(ua.ends_with(')'));
+    fn user_agent_is_read_by_mas_as_an_electron_app_on_every_platform() {
+        // Mirrors MAS's `UserAgent::parse`: the custom `Name/ver (a; b)` path is
+        // skipped when `Mozilla/` is present, and `parse_electron` picks the
+        // first `\w+/[\w.]+` token outside this omit list as the app.
+        let omit = ["Mozilla", "AppleWebKit", "Chrome", "Electron", "Safari"];
+        // The platform fragment is what MAS maps to its OS name.
+        let platforms = [
+            ("windows", "Windows NT 10.0; Win64; x64"),
+            ("macos", "Macintosh; Intel Mac OS X 10_15_7"),
+            ("linux", "X11; Linux x86_64"),
+            // Any other host falls back to the Linux fragment.
+            ("freebsd", "X11; Linux x86_64"),
+        ];
+        let mut shapes = Vec::new();
+        for (os, fragment) in platforms {
+            let ua = user_agent_for(os);
+            assert!(ua.starts_with("Mozilla/5.0 ("), "{os}: {ua}");
+            assert!(ua.contains(&format!("({fragment})")), "{os}: {ua}");
+            assert!(ua.contains(" Electron/"), "{os}: {ua}");
+            let app = ua
+                .split(' ')
+                .filter_map(|token| token.split_once('/'))
+                .find(|(name, _)| !omit.contains(name))
+                .unwrap();
+            assert_eq!(app, ("Axon", env!("CARGO_PKG_VERSION")), "{os}: {ua}");
+            // Everything but the platform fragment is identical across hosts.
+            shapes.push(ua.replace(fragment, "<platform>"));
+        }
+        assert!(
+            shapes.windows(2).all(|pair| pair[0] == pair[1]),
+            "{shapes:?}"
+        );
+        assert_eq!(user_agent(), user_agent_for(std::env::consts::OS));
     }
     use crate::error::SyncError;
     use axon_core::SyncConfig;
