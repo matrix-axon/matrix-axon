@@ -444,36 +444,36 @@ impl HomeserverGate {
         timeout: Duration,
         request: impl Future<Output = Result<T, E>>,
     ) -> Result<Result<T, E>, Elapsed> {
-        let permit = self.acquire(timeout).await;
-        let result = tokio::time::timeout(timeout, request).await;
-        permit.finish(outcome_of(&result));
-        result
+        self.call_classified(Caller::Background, timeout, request, outcome_of)
+            .await
     }
 
-    /// One interactive request: never waits; a timeout or server error can
-    /// halve the limit, no lower than 1, and nothing else changes.
-    pub(crate) async fn call_interactive<T, E: GateError>(
-        self: &Arc<Self>,
-        timeout: Duration,
-        request: impl Future<Output = Result<T, E>>,
-    ) -> Result<Result<T, E>, Elapsed> {
-        let epoch = self.epoch();
-        let result = tokio::time::timeout(timeout, request).await;
-        self.report_interactive(epoch, outcome_of(&result));
-        result
-    }
-
-    /// [`call`](Self::call) or [`call_interactive`](Self::call_interactive), by
-    /// `caller`.
-    pub(crate) async fn call_as<T, E: GateError>(
+    /// One request as `caller`, with the caller's own reading of the result. A
+    /// background request waits for a permit; an interactive one never waits,
+    /// and its timeout or server error can halve the limit, no lower than 1. For a request
+    /// whose success does not prove it reached the homeserver: classify such a
+    /// success as [`Outcome::Local`], so it can neither grow the limit nor close
+    /// the breaker as its probe.
+    pub(crate) async fn call_classified<T, E>(
         self: &Arc<Self>,
         caller: Caller,
         timeout: Duration,
         request: impl Future<Output = Result<T, E>>,
+        classify: impl FnOnce(&Result<Result<T, E>, Elapsed>) -> Outcome,
     ) -> Result<Result<T, E>, Elapsed> {
         match caller {
-            Caller::Background => self.call(timeout, request).await,
-            Caller::Interactive => self.call_interactive(timeout, request).await,
+            Caller::Background => {
+                let permit = self.acquire(timeout).await;
+                let result = tokio::time::timeout(timeout, request).await;
+                permit.finish(classify(&result));
+                result
+            }
+            Caller::Interactive => {
+                let epoch = self.epoch();
+                let result = tokio::time::timeout(timeout, request).await;
+                self.report_interactive(epoch, classify(&result));
+                result
+            }
         }
     }
 
@@ -1031,6 +1031,29 @@ mod tests {
         assert_eq!(Instant::now(), start);
         assert!(probe.probe);
         probe.finish(Outcome::Success);
+    }
+
+    /// A success the caller cannot vouch for (a request the SDK may never have
+    /// sent) must not close the breaker: the probe passes to the next waiter.
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_that_learns_nothing_leaves_the_breaker_to_the_next_waiter() {
+        let gate = HomeserverGate::for_test();
+        open_on_overload(&gate).await;
+        let unconfirmed = |result: &Result<Result<(), HttpError>, Elapsed>| match result {
+            Ok(Ok(())) => Outcome::Local,
+            other => outcome_of(other),
+        };
+        gate.call_classified(Caller::Background, T, async { Ok(()) }, unconfirmed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(is_open(&gate), "a no-op probe closed the breaker");
+        let start = Instant::now();
+        let probe = gate.acquire(T).await;
+        assert_eq!(Instant::now(), start, "the next waiter probes at once");
+        assert!(probe.probe);
+        probe.finish(Outcome::Success);
+        assert_eq!(state(&gate), (1, 0, 0, Breaker::Closed));
     }
 
     #[tokio::test(start_paused = true)]

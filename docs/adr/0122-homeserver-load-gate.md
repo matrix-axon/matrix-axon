@@ -342,6 +342,18 @@ decision 1's cap. All three put the 30 s outer timeout around each room's
 download, so a call that used to retry under the SDK for minutes now stops at
 30 s and leaves that room's rows undecryptable until the next sweep.
 
+A download can also be a no-op. matrix-sdk's `download_room_keys_for_room`
+returns success without sending anything when the crypto store has no backup
+decryption key or version, and does not say which happened. Read as fast
+successes, such no-ops raised the shared limit without contacting the
+homeserver, and a no-op probe could close the breaker on a false recovery
+signal. So a download's success teaches the gate nothing: it neither counts
+toward growth nor closes the breaker, and a probe that ends that way passes to
+the next waiter. While backups are not enabled (the usual reason for the
+no-op), the boot sweep's downloads do not wait for a permit either, and are
+reported like interactive requests. Timeouts and server errors still count,
+since only a request that was sent can end in one.
+
 ### No caller blocks the account's sync loop on the gate
 
 - **The boot re-decryption sweep** used to run inline in the account run,
