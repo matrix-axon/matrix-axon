@@ -329,3 +329,134 @@ it.each(['sticker', 'text', 'text-async'])(
     if (kind !== 'text-async') expect(input.value).toBe(':adam:')
   },
 )
+
+it.each(['room', 'account'])(
+  'cancels pending sticker discovery and resets its UI on %s change',
+  async (changed) => {
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let signal: AbortSignal | undefined
+    server.use(
+      http.get(PACKS, async ({ request }) => {
+        signal = request.signal
+        await pending
+        return HttpResponse.json({
+          data: { packs: [pack(null)], partial: false },
+        })
+      }),
+    )
+    const view = setup()
+    fireEvent.click(view.send)
+    await waitFor(() => expect(signal).toBeDefined())
+    fireEvent.keyDown(view.input, { key: 'Enter' })
+    const nextSubmit = vi.fn(async () => true)
+    const nextSelect = vi.fn()
+    view.rerender(
+      <Composer
+        placeholder="Message"
+        initialValue=""
+        onSubmit={nextSubmit}
+        stickers={{
+          api,
+          accountId: changed === 'account' ? 'next' : 'account',
+          roomId: changed === 'room' ? '!next:hs' : '!room:hs',
+          onSelect: nextSelect,
+        }}
+      />,
+    )
+    expect(signal?.aborted).toBe(true)
+    fireEvent.input(view.input, { target: { value: 'New room text' } })
+    await waitFor(() => expect(view.send.hasAttribute('disabled')).toBe(false))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText('Checking sticker packs…')).toBeNull()
+    fireEvent.click(view.send)
+    await waitFor(() =>
+      expect(nextSubmit).toHaveBeenCalledWith('New room text'),
+    )
+    await act(async () => {
+      release()
+      await pending
+    })
+    expect(view.onSubmit).not.toHaveBeenCalled()
+    expect(view.onSelect).not.toHaveBeenCalled()
+    expect(nextSelect).not.toHaveBeenCalled()
+  },
+)
+
+it.each([':adam:', ':smile:'])(
+  'bounds sticker discovery for %s and enables subsequent sends',
+  async (initialValue) => {
+    const nativeTimeout = globalThis.setTimeout
+    const timer = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation(((
+        callback: TimerHandler,
+        delay?: number,
+        ...args: unknown[]
+      ) =>
+        nativeTimeout(
+          callback,
+          delay === 10_000 ? 20 : delay,
+          ...args,
+        )) as typeof setTimeout)
+    let aborted = false
+    server.use(
+      http.get(PACKS, async ({ request }) => {
+        await new Promise<void>((resolve) => {
+          const stop = () => {
+            aborted = true
+            resolve()
+          }
+          if (request.signal.aborted) stop()
+          else request.signal.addEventListener('abort', stop, { once: true })
+        })
+        return HttpResponse.json({
+          data: { packs: [pack(null)], partial: false },
+        })
+      }),
+    )
+    try {
+      const view = setup({ initialValue })
+      fireEvent.click(view.send)
+      if (initialValue === ':smile:') {
+        await waitFor(() =>
+          expect(view.onSubmit).toHaveBeenCalledWith(initialValue),
+        )
+        expect(view.input.value).toBe('')
+        expect(screen.queryByRole('alert')).toBeNull()
+      } else {
+        expect((await screen.findByRole('alert')).textContent).toContain(
+          'timed out',
+        )
+        expect(view.input.value).toBe(':adam:')
+        expect(view.onSubmit).not.toHaveBeenCalled()
+        await waitFor(() =>
+          expect(view.send.hasAttribute('disabled')).toBe(false),
+        )
+        servePacks()
+        fireEvent.click(view.send)
+        await waitFor(() => expect(view.onSelect).toHaveBeenCalledWith(image))
+      }
+      expect(aborted).toBe(true)
+    } finally {
+      timer.mockRestore()
+    }
+  },
+)
+
+it.each([':smile:', ':+1:'])(
+  'sends known Unicode shortcode %s as text after a discovery error',
+  async (initialValue) => {
+    server.use(http.get(PACKS, () => HttpResponse.json({}, { status: 503 })))
+    const view = setup({ initialValue })
+    fireEvent.click(view.send)
+    await waitFor(() =>
+      expect(view.onSubmit).toHaveBeenCalledWith(initialValue),
+    )
+    expect(view.input.value).toBe('')
+    expect(view.onSelect).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).toBeNull()
+  },
+)

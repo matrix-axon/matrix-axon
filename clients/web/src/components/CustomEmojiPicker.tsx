@@ -54,7 +54,10 @@ export function ImagePackPicker({
     searchRef.current?.focus({ preventScroll: true })
   }, [])
   useEffect(() => {
-    if (!signedIn) return
+    if (!signedIn) {
+      setLoad(null)
+      return
+    }
     const controller = new AbortController()
     let cancelled = false
     void (async () => {
@@ -120,7 +123,7 @@ export function ImagePackPicker({
           aria-label="Refresh"
           title="Refresh"
           onClick={() => setRetry((value) => value + 1)}
-          disabled={current === null}
+          disabled={!signedIn || current === null}
         >
           <svg
             viewBox="0 0 24 24"
@@ -142,7 +145,11 @@ export function ImagePackPicker({
           usage === 'sticker' ? 'Sticker packs' : 'Custom emoji packs'
         }
       >
-        {current === null && <p role="status">Loading {label}…</p>}
+        {!signedIn ? (
+          <p role="status">Sign in to browse {label}.</p>
+        ) : current === null ? (
+          <p role="status">Loading {label}…</p>
+        ) : null}
         {current?.error && (
           <p role="status">
             {current.error}{' '}

@@ -202,7 +202,7 @@ for (const thread of [false, true]) {
   })
 }
 
-test('failed sticker discovery keeps the draft and send controls visible on a phone', async ({
+test('failed sticker discovery retains custom drafts and permits Unicode text on a phone', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 320, height: 568 })
@@ -213,8 +213,10 @@ test('failed sticker discovery keeps the draft and send controls visible on a ph
     }),
   )
   const sent: string[] = []
+  const bodies: unknown[] = []
   await page.route('**/send*', (route) => {
     sent.push(route.request().url())
+    bodies.push(route.request().postDataJSON())
     return route.fulfill({ status: 500, json: {} })
   })
   await signIn(page)
@@ -235,4 +237,10 @@ test('failed sticker discovery keeps the draft and send controls visible on a ph
   expect(box.x + box.width).toBeLessThanOrEqual(320)
   expect(box.y + box.height).toBeLessThanOrEqual(568)
   expect(sent).toEqual([])
+  await draft.fill(':+1:')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => bodies.length).toBe(1)
+  expect(bodies[0]).toMatchObject({ body: '👍' })
+  await expect(draft).toHaveValue('')
+  await expect(composer.getByRole('alert')).toHaveCount(0)
 })

@@ -139,8 +139,10 @@ An exact custom shortcode also works without selecting a suggestion; matching is
 Sticker-only entries are excluded from reaction commands, and servers without pack discovery retain Unicode reaction support.
 
 Only a whole-message shortcode becomes a sticker: names in prose, attachment captions, and edits keep their text behavior.
-Unknown names and servers without pack discovery use the existing text/Unicode shortcode handling.
-A sticker discovery failure keeps the draft and offers another Send attempt; changing rooms cancels a pending lookup.
+Names absent from a successful discovery response, and servers without pack discovery, use the existing text/Unicode shortcode handling.
+Sticker discovery has a ten-second deadline; recognized Unicode names still send as text if discovery fails or times out.
+Unknown custom names retain their draft for retry on discovery failure or timeout.
+Changing accounts, rooms, or API clients cancels pending sticker discovery and resets its status; signed-out pickers show a sign-in message.
 Sending again during a sticker lookup shows a waiting notice and preserves edits for the next message.
 Known Unicode reaction names still send their Unicode fallback if pack discovery fails or times out; custom image reactions never enter global Unicode recents.
 Only sticker-capable images appear; mixed-use images also remain available in the reaction picker.

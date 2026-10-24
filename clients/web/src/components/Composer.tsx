@@ -3,6 +3,7 @@ import {
   standaloneStickerShortcode,
   type CustomEmoji,
 } from '../emoji-packs'
+import { resolveEmojiShortcode } from '../emoji'
 import type { JSX } from 'preact'
 import { useImagePackCompletions } from './use-image-pack-completions'
 import { ReactionContent } from './ReactionContent'
@@ -237,6 +238,7 @@ export function Composer({
   const [checkingSticker, setCheckingSticker] = useState(false)
   const [stickerProblem, setStickerProblem] = useState<string | null>(null)
   const stickerLookup = useRef<AbortController | null>(null)
+  const stickerScope = useRef(0)
   const [composerHeight, setComposerHeight] = useState<number | null>(null)
   const currentComposerHeight = height === undefined ? composerHeight : height
   const [autocompleteDismissedFor, setAutocompleteDismissedFor] = useState<
@@ -269,10 +271,22 @@ export function Composer({
   useEffect(
     () => () => {
       clearAttachHold()
-      stickerLookup.current?.abort()
     },
     [],
   )
+
+  // RoomPage can reuse the composer across rooms. Invalidate its pending
+  // lookup before callbacks from the previous scope can send or change UI.
+  useLayoutEffect(() => {
+    setCheckingSticker(false)
+    setStickerProblem(null)
+    return () => {
+      stickerScope.current++
+      const pending = stickerLookup.current
+      stickerLookup.current = null
+      pending?.abort()
+    }
+  }, [stickers?.api, stickers?.accountId, stickers?.roomId])
 
   useEffect(() => {
     if (!attachMenuOpen) {
@@ -686,6 +700,56 @@ export function Composer({
       // Keep the submitted draft until discovery succeeds. A subsequent edit
       // belongs to the next message and must survive the pending lookup.
       const submittedDraft = draft
+      const scope = stickerScope.current
+      const currentScope = () =>
+        stickerScope.current === scope && textarea.current !== null
+      const active = () =>
+        currentScope() && stickerLookup.current === controller
+      let timedOut = false
+      const deadline = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, 10_000)
+      controller.signal.addEventListener(
+        'abort',
+        () => clearTimeout(deadline),
+        { once: true },
+      )
+      const dispatch = (image: CustomEmoji | null) => {
+        if (!active() || (controller.signal.aborted && !timedOut)) return
+        setStickerProblem(null)
+        const sendProblem = () => {
+          if (currentScope()) {
+            setStickerProblem(
+              'Could not send the message. Check the timeline before retrying.',
+            )
+          }
+        }
+        // Callback failures may follow an accepted send; keep them distinct
+        // from discovery errors and never claim that nothing was sent.
+        try {
+          const sent = image ? stickers.onSelect(image) : onSubmit(message)
+          void Promise.resolve(sent).catch(sendProblem)
+          if (currentScope() && textarea.current?.value === submittedDraft) {
+            setDraft('')
+            onDraftChange?.('')
+          }
+        } catch {
+          sendProblem()
+        }
+      }
+      const lookupFailed = () => {
+        if (!active() || (controller.signal.aborted && !timedOut)) return
+        if (resolveEmojiShortcode(message) !== null) {
+          dispatch(null)
+        } else {
+          setStickerProblem(
+            timedOut
+              ? 'Sticker lookup timed out. Your message has not been sent. Try Send again.'
+              : 'Could not check sticker packs. Your message has not been sent. Try Send again.',
+          )
+        }
+      }
       void lookupImageShortcode(
         stickers.api,
         stickers.accountId,
@@ -693,42 +757,16 @@ export function Composer({
         shortcode,
         controller.signal,
       )
-        .then(
-          (image) => {
-            if (controller.signal.aborted || textarea.current === null) return
-            setStickerProblem(null)
-            const sendProblem = () => {
-              if (!controller.signal.aborted) {
-                setStickerProblem(
-                  'Could not send the message. Check the timeline before retrying.',
-                )
-              }
-            }
-            // Lookup failures are handled by the rejection callback below.
-            // A callback may already have started a send before it throws, so
-            // never describe a callback failure as an unsent lookup failure.
-            try {
-              const sent = image ? stickers.onSelect(image) : onSubmit(message)
-              void Promise.resolve(sent).catch(sendProblem)
-              if (textarea.current.value === submittedDraft) {
-                setDraft('')
-                onDraftChange?.('')
-              }
-            } catch {
-              sendProblem()
-            }
-          },
-          () => {
-            if (!controller.signal.aborted) {
-              setStickerProblem(
-                'Could not check sticker packs. Your message has not been sent. Try Send again.',
-              )
-            }
-          },
-        )
+        .then((image) => {
+          if (timedOut) lookupFailed()
+          else dispatch(image)
+        }, lookupFailed)
         .finally(() => {
-          if (stickerLookup.current === controller) stickerLookup.current = null
-          if (!controller.signal.aborted) setCheckingSticker(false)
+          clearTimeout(deadline)
+          if (stickerLookup.current === controller) {
+            stickerLookup.current = null
+            if (currentScope()) setCheckingSticker(false)
+          }
         })
       return
     }

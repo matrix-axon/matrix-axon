@@ -54,8 +54,10 @@ function data(name = 'wave') {
     },
   }
 }
-function setup() {
-  const services = testServices({ token: 'picker-token' })
+function setup(signedIn = true) {
+  const services = testServices({
+    token: signedIn ? 'picker-token' : null,
+  })
   const reconnects = signal(0)
   services.live = { ...services.live, reconnects }
   // Test media ownership without relying on jsdom decoding image bytes.
@@ -176,4 +178,32 @@ it('discards a pending response when the account changes', async () => {
   expect(
     view.getAllByRole('button', { name: 'React with :fresh:' }),
   ).toHaveLength(2)
+})
+
+it('shows a signed-out message instead of indefinite loading', async () => {
+  const read = vi.fn(() => HttpResponse.json(data()))
+  server.use(http.get(PATH, read))
+  const view = setup(false)
+  await waitFor(() =>
+    expect(view.getByRole('status').textContent).toContain('Sign in'),
+  )
+  expect(view.queryByText('Loading custom emoji…')).toBeNull()
+  expect(
+    view.getByRole('button', { name: 'Refresh' }).hasAttribute('disabled'),
+  ).toBe(true)
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull()
+  expect(read).not.toHaveBeenCalled()
+})
+
+it('clears visible packs and shows a signed-out message on session expiry', async () => {
+  server.use(http.get(PATH, () => HttpResponse.json(data())))
+  const view = setup()
+  await view.findAllByRole('button', { name: 'React with :wave:' })
+  await act(async () => {
+    await view.services.auth.clearToken()
+  })
+  await waitFor(() =>
+    expect(view.getByRole('status').textContent).toContain('Sign in'),
+  )
+  expect(view.queryByRole('button', { name: 'React with :wave:' })).toBeNull()
 })
