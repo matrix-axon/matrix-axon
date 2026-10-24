@@ -456,7 +456,7 @@ fn static_client_id(
 /// Icon MAS shows beside Axon sessions. Must stay publicly fetchable over HTTPS;
 /// repointing it only affects clients registered afterwards.
 const CLIENT_LOGO_URI: &str =
-    "https://github.com/matrix-axon/matrix-axon/blob/main/docs/brand/axon-mark-light.png";
+    "https://raw.githubusercontent.com/matrix-axon/matrix-axon/main/docs/brand/axon-mark-light.png";
 
 fn client_metadata() -> Result<Raw<ClientMetadata>, SyncError> {
     let client_uri = Url::parse("https://github.com/matrix-axon/matrix-axon")
