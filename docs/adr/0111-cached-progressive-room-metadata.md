@@ -2,6 +2,7 @@
 
 **Status:** Accepted; implementation proceeds through [issue 618](https://github.com/matrix-axon/matrix-axon/issues/618).
 Typed cached state reads and authoritative SDK member-count observations are implemented; acquisition, discovery, and client consumption are follow-up work.
+[ADR 0126](0126-room-detail-acquisition-and-coverage.md) records the concrete acquisition limits, state coverage, and change notification.
 
 ## Context
 
