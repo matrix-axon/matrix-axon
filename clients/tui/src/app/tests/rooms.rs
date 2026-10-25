@@ -983,6 +983,7 @@ async fn loading_and_scrolling_unnamed_rooms_do_not_schedule_title_member_reads(
         room_key: RoomKey::from(&listed),
         members: Some(vec![MemberDto {
             user_id: "@alice:x".to_owned(),
+            membership: "join".to_owned(),
             display_name: Some("Alice".to_owned()),
         }]),
     });

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::ops::Range;
 
 use ratatui::buffer::CellDiffOption;
@@ -2691,77 +2690,26 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
         format!("Last event: {last_event}"),
         "".to_owned(),
     ];
+    let info = app
+        .room_info
+        .state
+        .as_ref()
+        .filter(|state| state.key == crate::app::RoomKey::from(room));
     lines.extend(crate::app::room_info::detail_lines(
         room,
-        app.room_info.state.as_ref(),
+        info,
         app.display.time_format,
     ));
-    lines.push("".to_owned());
-    lines.push("Members from loaded timeline:".to_owned());
-
-    let members = known_room_members(app);
-    if members.is_empty() {
-        lines.push("  none in the loaded timeline".to_owned());
-    } else {
-        lines.extend(members.into_iter().map(|member| {
-            let display_name = member
-                .display_name
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| "unknown".to_owned());
-            format!(
-                "  {display_name}  {}  ({})",
-                member.user_id, member.membership
-            )
-        }));
-        lines.push("".to_owned());
-        lines.push(
-            "This list only reflects loaded timeline events; the count above is authoritative."
-                .to_owned(),
-        );
+    lines.push(String::new());
+    lines.extend(match info {
+        Some(state) => state.member_lines.clone(),
+        None => vec!["Member list: not loaded".to_owned()],
+    });
+    if crate::app::room_info::refresh_failed_with_stale_data(info) {
+        lines.push(String::new());
+        lines.push("Latest refresh failed; some details above may be out of date.".to_owned());
     }
     lines
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct KnownRoomMember {
-    user_id: String,
-    display_name: Option<String>,
-    membership: String,
-}
-
-fn known_room_members(app: &App) -> Vec<KnownRoomMember> {
-    let mut by_user = HashMap::<String, KnownRoomMember>::new();
-    for member in app
-        .selected_raw_events()
-        .iter()
-        .filter(|event| event.event_type == "m.room.member")
-        .filter_map(|event| {
-            let user_id = event.state_key().unwrap_or(&event.sender);
-            let membership = event.membership_change()?;
-            Some(KnownRoomMember {
-                user_id: user_id.to_owned(),
-                display_name: event.membership_display_name().map(str::to_owned),
-                membership,
-            })
-        })
-    {
-        by_user.insert(member.user_id.clone(), member);
-    }
-    let mut members = by_user.into_values().collect::<Vec<_>>();
-    members.sort_by(|left, right| {
-        left.display_name
-            .as_deref()
-            .unwrap_or(left.user_id.as_str())
-            .to_ascii_lowercase()
-            .cmp(
-                &right
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(right.user_id.as_str())
-                    .to_ascii_lowercase(),
-            )
-    });
-    members
 }
 
 /// Honest `/status` lines for `AccountDto.backup` (ADR 0098).
@@ -4477,7 +4425,7 @@ mod tests {
     }
 
     #[test]
-    fn room_info_popup_lists_summary_and_known_members() {
+    fn room_info_popup_lists_the_summary_before_members_load() {
         let mut app = App::new(
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
@@ -4533,9 +4481,12 @@ mod tests {
         assert!(text.contains("Matrix ID: !room:example.com"));
         assert!(text.contains("Canonical alias: #ops:example.com"));
         assert!(text.contains("Topic: Daily operations"));
-        assert!(text.contains("Alice  @alice:example.com  (join)"));
+        // A membership event in the loaded timeline is not the member list.
+        assert!(!text.contains("@alice:example.com"));
+        assert!(!text.contains("loaded timeline"));
         // Nothing has been fetched in this test: the summary still renders.
         assert!(text.contains("Advertised aliases: not loaded"));
         assert!(text.contains("Members: not loaded"));
+        assert!(text.contains("Member list: not loaded"));
     }
 }
