@@ -59,6 +59,11 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// Secret-safe structured diagnostics; messages can contain private input.
+    pub(crate) fn diagnostics(&self) -> (u16, &str) {
+        (self.status.as_u16(), &self.body.error.code)
+    }
+
     // Only the statuses the current endpoints raise have named constructors
     // below. Others (401/403 with auth, 409, 422, 503, …) slot in as one-line
     // wrappers over this private `new` as the API surface grows — the wire shape
@@ -213,6 +218,14 @@ impl ApiError {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message)
     }
 
+    pub(crate) fn preview_too_large() -> Self {
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "preview_too_large",
+            "preview metadata exceeds the 32768-byte aggregate limit",
+        )
+    }
+
     /// `416 Range Not Satisfiable` — the requested `Range` falls entirely
     /// outside the resource's length. The caller still needs to attach a
     /// `Content-Range: bytes */<len>` header (and the usual media headers) to
@@ -270,6 +283,11 @@ impl From<crate::sender::SendError> for ApiError {
     fn from(err: crate::sender::SendError) -> Self {
         use crate::sender::SendError;
         match err {
+            SendError::EventTooLarge => ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "event_too_large",
+                "message exceeds the event size budget; shorten text or remove formatting/previews",
+            ),
             SendError::NotFound(msg) => ApiError::not_found(msg),
             SendError::Forbidden(msg) => ApiError::forbidden(msg),
             SendError::Unavailable(msg) => ApiError::service_unavailable(msg),

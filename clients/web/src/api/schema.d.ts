@@ -4355,6 +4355,26 @@ export interface components {
             server_names?: string[];
         };
         /**
+         * @description Allow-listed bundled preview input; arbitrary event/OG/image fields are
+         *     rejected. Matched HTTP(S) URL must occur as a complete link in body/caption,
+         *     contain no credentials, and not duplicate another preview's destination.
+         */
+        LinkPreviewRequest: {
+            description?: string | null;
+            /**
+             * Format: uuid
+             * @description Account-owned staged image upload; PNG/JPEG/WebP only, <=2 MiB and
+             *     <=4,000,000 decoded pixels. Type/dimensions come from verified bytes.
+             *     No external URL or preexisting MXC is accepted. Encrypts automatically
+             *     in encrypted rooms. A failed send releases the staged upload for retry;
+             *     a lost response remains uncertain and must not be blindly replayed.
+             */
+            image_upload_id?: string | null;
+            matched_url: string;
+            site_name?: string | null;
+            title?: string | null;
+        };
+        /**
          * @description Request body for runtime login (`POST /v1/accounts/login`). Adds or
          *     reactivates a Matrix account keyed by its Matrix `username`. The
          *     password is used once to authenticate and is never stored or echoed back.
@@ -5243,6 +5263,12 @@ export interface components {
              * @description Server-issued staged upload id returned by `POST …/media/uploads`.
              */
             upload_id: string;
+            /**
+             * @description Bundled previews for the caption. Same limits/413 behavior as
+             *     SendMessageRequest.url_previews. Nonempty previews require a caption.
+             *     A thumbnail is uploaded as protected preview media, not a chat message.
+             */
+            url_previews?: components["schemas"]["LinkPreviewRequest"][] | null;
         };
         /**
          * @description Request body for sending a message (`POST …/rooms/{room_id}/send`). Sent as an
@@ -5273,6 +5299,17 @@ export interface components {
              *     reply.
              */
             thread_root?: string | null;
+            /**
+             * @description Bundled URL previews (ADR 0125). Omitted/null preserves legacy sending;
+             *     [] explicitly disables previews. At most 8; individual string ceilings
+             *     use UTF-16 code units (URL 4096, title 300, description 1000, site 120).
+             *     The entire resolved preview array must fit 32768 canonical JSON UTF-8
+             *     bytes. Preview-aware messages also use a conservative 40960-byte
+             *     content budget (including formatting/relations and reserved SDK media
+             *     descriptors), leaving room for encryption and federation overhead.
+             *     Overflow is a definite 413, before claiming any uploads or dispatch.
+             */
+            url_previews?: components["schemas"]["LinkPreviewRequest"][] | null;
         };
         /**
          * @description Result of a successful mutation: the id of the event the homeserver created
@@ -9331,6 +9368,24 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description Account, room or preview upload not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Definite validation rejection: event_too_large (40960-byte content budget), preview_too_large (32768-byte preview budget), or payload_too_large (thumbnail bytes). No event dispatched by preflight; preserve the draft. An explicit homeserver M_TOO_LARGE is also event_too_large. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Upstream homeserver error */
             502: {
                 headers: {
@@ -9425,6 +9480,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. No preflight upload claims or event dispatch. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Upstream homeserver error */
             502: {
                 headers: {
@@ -9436,6 +9500,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Preview-aware send deadline exceeded: outcome unknown; do not automatically resend */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };

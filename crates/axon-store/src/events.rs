@@ -1273,7 +1273,8 @@ impl Store {
     /// reaction references; missing membership data follows get_event_if_joined.
     /// Each JSON path is a separate branch so PostgreSQL can use the matching
     /// partial expression index rather than filtering every event for an
-    /// account through one multi-way `OR`.
+    /// account through one multi-way `OR`. The preview candidates share one
+    /// redaction filter outside their indexed UNION branches.
     pub async fn get_event_by_mxc_url(
         &self,
         account_id: Uuid,
@@ -1331,6 +1332,38 @@ impl Store {
                        SELECT id, 2 AS priority FROM events \
                        WHERE account_id = $1 \
                          AND content->'info'->'thumbnail_file'->>'url' = $2 \
+                       UNION ALL \
+                       SELECT preview.id, 3 AS priority FROM ( \
+                       SELECT id, event_id FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'m.url_previews' @> $3::jsonb \
+                       UNION ALL \
+                       SELECT id, event_id FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'m.url_previews' @> $4::jsonb \
+                       UNION ALL \
+                       SELECT id, event_id FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'m.url_previews' @> $5::jsonb \
+                       UNION ALL \
+                       SELECT id, event_id FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'com.beeper.linkpreviews' @> $3::jsonb \
+                         AND NOT (content ? 'm.url_previews') \
+                       UNION ALL \
+                       SELECT id, event_id FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'com.beeper.linkpreviews' @> $4::jsonb \
+                         AND NOT (content ? 'm.url_previews') \
+                       UNION ALL \
+                       SELECT id, event_id FROM events \
+                       WHERE account_id = $1 AND event_type = 'm.room.message' \
+                         AND content->'com.beeper.linkpreviews' @> $5::jsonb \
+                         AND NOT (content ? 'm.url_previews') \
+                       ) preview \
+                       WHERE NOT EXISTS (SELECT 1 FROM events rr \
+                           WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
+                             AND rr.redacts = preview.event_id) \
                    ) media_matches \
                    ORDER BY priority ASC, id ASC \
                    LIMIT 1 \
@@ -1340,6 +1373,9 @@ impl Store {
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(mxc_url)
+            .bind(serde_json::json!([{"og:image": mxc_url}]))
+            .bind(serde_json::json!([{"matrix:image:encrypted": {"url": mxc_url}}]))
+            .bind(serde_json::json!([{"beeper:image:encryption": {"url": mxc_url}}]))
             .fetch_optional(&self.read_pool)
             .await?;
         Ok(row)

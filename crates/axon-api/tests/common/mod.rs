@@ -171,6 +171,13 @@ where
 /// One recorded call to the stub, with the arguments the handler passed through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {
+    SendPreviews {
+        account_id: Uuid,
+        room_id: String,
+        body: String,
+        previews: Vec<(axon_core::link_preview::PreviewMetadata, bool)>,
+        attachment: Option<MediaAttachment>,
+    },
     Sticker {
         account_id: Uuid,
         room_id: String,
@@ -252,6 +259,7 @@ impl Outcome {
 pub struct StubSender {
     outcome: Outcome,
     calls: Mutex<Vec<Call>>,
+    preview_gate: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
 }
 
 /// One staged-upload call recorded by [`StubUploads`].
@@ -279,6 +287,7 @@ pub enum UploadOutcome {
 /// In-memory staged-upload service for route tests.
 pub struct StubUploads {
     outcome: UploadOutcome,
+    reject_claim: Mutex<Option<Uuid>>,
     calls: Mutex<Vec<UploadCall>>,
     deletes: Mutex<Vec<(Uuid, Uuid)>>,
     claims: Mutex<Vec<(Uuid, Uuid)>>,
@@ -291,6 +300,7 @@ impl StubUploads {
         Self {
             outcome: UploadOutcome::Ok,
             calls: Mutex::new(Vec::new()),
+            reject_claim: Mutex::new(None),
             deletes: Mutex::new(Vec::new()),
             claims: Mutex::new(Vec::new()),
             completes: Mutex::new(Vec::new()),
@@ -302,11 +312,16 @@ impl StubUploads {
         Self {
             outcome,
             calls: Mutex::new(Vec::new()),
+            reject_claim: Mutex::new(None),
             deletes: Mutex::new(Vec::new()),
             claims: Mutex::new(Vec::new()),
             completes: Mutex::new(Vec::new()),
             releases: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn reject_claim_for(&self, id: Uuid) {
+        *self.reject_claim.lock().unwrap() = Some(id);
     }
 
     pub fn calls(&self) -> Vec<UploadCall> {
@@ -336,6 +351,7 @@ impl StubSender {
         Self {
             outcome: Outcome::Ok(event_id.to_owned()),
             calls: Mutex::new(Vec::new()),
+            preview_gate: None,
         }
     }
 
@@ -344,12 +360,20 @@ impl StubSender {
         Self {
             outcome,
             calls: Mutex::new(Vec::new()),
+            preview_gate: None,
         }
     }
 
     /// The calls recorded so far, in order.
     pub fn calls(&self) -> Vec<Call> {
         self.calls.lock().unwrap().clone()
+    }
+    pub fn with_preview_gate(
+        mut self,
+        gate: Arc<(tokio::sync::Notify, tokio::sync::Notify)>,
+    ) -> Self {
+        self.preview_gate = Some(gate);
+        self
     }
 }
 
@@ -2053,6 +2077,20 @@ impl MediaProxy for ConfiguredMediaProxy {
 
 #[async_trait]
 impl StagedUploadService for StubUploads {
+    async fn claim_preview_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<axon_core::link_preview::PreviewImage, StageUploadError> {
+        let upload = self.claim_upload(account_id, upload_id).await?;
+        Ok(axon_core::link_preview::PreviewImage {
+            bytes: upload.bytes,
+            mimetype: "image/png".into(),
+            width: 1,
+            height: 1,
+        })
+    }
+
     async fn stage_upload(
         &self,
         request: StageUploadRequest,
@@ -2118,6 +2156,9 @@ impl StagedUploadService for StubUploads {
         upload_id: Uuid,
     ) -> Result<axon_api::ClaimedUpload, StageUploadError> {
         self.claims.lock().unwrap().push((account_id, upload_id));
+        if *self.reject_claim.lock().unwrap() == Some(upload_id) {
+            return Err(StageUploadError::NotFound("upload not found".into()));
+        }
         match &self.outcome {
             UploadOutcome::Ok => Ok(axon_api::ClaimedUpload {
                 upload_id,
@@ -2173,6 +2214,31 @@ impl StagedUploadService for StubUploads {
 
 #[async_trait]
 impl MessageSender for StubSender {
+    async fn send_with_previews(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        message: axon_core::link_preview::PreviewSend<'_>,
+        attachment: Option<MediaAttachment>,
+    ) -> Result<String, SendError> {
+        if let Some(gate) = &self.preview_gate {
+            gate.0.notify_one();
+            gate.1.notified().await;
+        }
+        self.calls.lock().unwrap().push(Call::SendPreviews {
+            account_id,
+            room_id: room_id.into(),
+            body: message.body.into(),
+            previews: message
+                .previews
+                .iter()
+                .map(|p| (p.metadata.clone(), p.image.is_some()))
+                .collect(),
+            attachment,
+        });
+        self.outcome.to_result()
+    }
+
     async fn send_sticker(
         &self,
         account_id: Uuid,

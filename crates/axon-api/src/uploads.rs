@@ -91,6 +91,18 @@ pub enum StageUploadError {
 /// Stages and deletes client-originated upload bytes.
 #[async_trait]
 pub trait StagedUploadService: Send + Sync {
+    /// Claim a thumbnail with a 2 MiB read cap and verified raster metadata.
+    /// Implementations must reject before allocating from the ordinary upload
+    /// size. On validation/read failure, release their own acquired claim.
+    async fn claim_preview_upload(
+        &self,
+        _account_id: Uuid,
+        _upload_id: Uuid,
+    ) -> Result<axon_core::link_preview::PreviewImage, StageUploadError> {
+        Err(StageUploadError::Invalid(
+            "preview images unavailable".into(),
+        ))
+    }
     async fn stage_upload(
         &self,
         request: StageUploadRequest,

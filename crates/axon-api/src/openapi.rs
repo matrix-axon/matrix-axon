@@ -257,6 +257,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::RecoverRequest,
         crate::dto::RedecryptUtdsResponse,
         crate::dto::SendMessageRequest,
+        crate::dto::LinkPreviewRequest,
         crate::dto::SendMediaRequest,
         crate::dto::SendStickerRequest,
         crate::dto::StickerInfoDto,

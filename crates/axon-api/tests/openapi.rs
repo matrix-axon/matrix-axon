@@ -16,6 +16,32 @@ use std::path::PathBuf;
 use axon_api::ApiDoc;
 use utoipa::OpenApi;
 
+#[test]
+fn bundled_preview_contract_is_additive_and_rejects_arbitrary_metadata() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &spec["components"]["schemas"];
+    assert_eq!(schemas["LinkPreviewRequest"]["additionalProperties"], false);
+    assert_eq!(
+        schemas["LinkPreviewRequest"]["required"],
+        serde_json::json!(["matched_url"])
+    );
+    for (dto, required) in [
+        ("SendMessageRequest", "body"),
+        ("SendMediaRequest", "upload_id"),
+    ] {
+        assert_eq!(schemas[dto]["required"], serde_json::json!([required]));
+        assert_eq!(schemas[dto]["properties"]["url_previews"]["maxItems"], 8);
+    }
+    for path in [
+        "/v1/accounts/{account_id}/rooms/{room_id}/send",
+        "/v1/accounts/{account_id}/rooms/{room_id}/send-media",
+    ] {
+        assert!(spec["paths"][path]["post"]["responses"]
+            .get("413")
+            .is_some());
+    }
+}
+
 fn golden_path() -> PathBuf {
     // CARGO_MANIFEST_DIR is crates/axon-api; the spec lives at the repo root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openapi/openapi.json")

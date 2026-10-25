@@ -118,6 +118,7 @@ fn mutation_timed_out(verb: &str, timeout: Duration) -> SendError {
 /// unavailable, bad input → invalid, a homeserver failure → upstream.
 fn map_err(err: GatewayError) -> SendError {
     match err {
+        GatewayError::EventTooLarge => SendError::EventTooLarge,
         GatewayError::UnknownAccount(id) => SendError::NotFound(format!("no such account: {id}")),
         GatewayError::AccountNotActive(id) => {
             SendError::Forbidden(format!("account not active: {id}"))
@@ -141,6 +142,22 @@ fn map_err(err: GatewayError) -> SendError {
 
 #[async_trait]
 impl MessageSender for GatewayAdapter {
+    async fn send_with_previews(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        message: axon_core::link_preview::PreviewSend<'_>,
+        attachment: Option<MediaAttachment>,
+    ) -> Result<String, SendError> {
+        tokio::time::timeout(
+            self.upstream_upload_timeout,
+            self.gateway
+                .send_with_previews(account_id, room_id, message, attachment),
+        )
+        .await
+        .map_err(|_| mutation_timed_out("preview send", self.upstream_upload_timeout))?
+        .map_err(map_err)
+    }
     async fn send_message(
         &self,
         account_id: Uuid,
