@@ -1172,6 +1172,10 @@ impl SdkGateway {
             link_preview::text_content(message.body, message.formatted, message.relation)
         };
         link_preview::install_previews(&mut content, entries);
+        // Preflight reserves are conservative, but validate actual SDK fields
+        // too. If they exceed the reserve, reject the parent event and accept
+        // that already-uploaded Matrix objects can remain orphaned; staged
+        // originals are released for explicit correction/retry by the caller.
         link_preview::check_content(&content).map_err(preview_validation_error)?;
         // Do not send plaintext thumbnail references after a concurrent room
         // encryption upgrade. The next explicit attempt will reupload them.

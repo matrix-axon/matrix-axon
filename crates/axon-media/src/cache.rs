@@ -40,6 +40,9 @@ use axon_core::media::ThumbnailSpec;
 /// `MediaError` with the same translation it uses for other backend errors.
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
+    /// An internal adapter invariant failed. → `500`.
+    #[error("internal media fetch error: {0}")]
+    Internal(String),
     /// The account does not exist or is not active. → `404`.
     #[error("account not found: {0}")]
     AccountNotFound(String),

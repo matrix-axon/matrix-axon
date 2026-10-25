@@ -43,6 +43,7 @@ fn to_api_resource(resource: axon_media::MediaResource) -> MediaResource {
 fn map_err(err: MediaCacheError) -> MediaError {
     match err {
         MediaCacheError::Fetch(fetch) => match fetch {
+            FetchError::Internal(msg) => MediaError::Internal(msg),
             FetchError::AccountNotFound(msg) => MediaError::AccountNotFound(msg),
             FetchError::NotFound(msg) => MediaError::NotFound(msg),
             FetchError::Invalid(msg) => MediaError::Invalid(msg),
@@ -92,5 +93,27 @@ impl MediaProxy for CachingMediaProxy {
 
     fn etag_thumbnail(&self, mxc_url: &str, spec: axon_core::media::ThumbnailSpec) -> String {
         axon_media::etag_for_thumbnail(mxc_url, spec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn unexpected_fetch_adapter_error_is_a_sanitized_500() {
+        let error = map_err(MediaCacheError::Fetch(FetchError::Internal(
+            "private adapter detail".into(),
+        )));
+        let response = axon_api::ApiError::from(error).into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("private adapter detail"));
     }
 }

@@ -233,7 +233,11 @@ fn gateway_to_fetch(err: GatewayError) -> FetchError {
         GatewayError::NotConnected(msg) => FetchError::NotConnected(msg),
         GatewayError::Upstream(msg) => FetchError::Upstream(msg),
         GatewayError::Undecryptable(msg) => FetchError::Undecryptable(msg),
-        GatewayError::EventTooLarge => FetchError::Invalid("homeserver rejected media size".into()),
+        // Only message-send code constructs this variant. Treat a future
+        // routing mistake as internal, not a media-size rejection or a panic.
+        GatewayError::EventTooLarge => {
+            FetchError::Internal("send-only gateway error reached media fetch adapter".into())
+        }
     }
 }
 
@@ -243,6 +247,14 @@ mod tests {
     use matrix_sdk::encryption::DecryptorError;
 
     const MXC: &str = "mxc://example.org/abc";
+
+    #[test]
+    fn send_only_size_error_is_an_internal_adapter_failure() {
+        assert!(matches!(
+            gateway_to_fetch(GatewayError::EventTooLarge),
+            FetchError::Internal(_)
+        ));
+    }
 
     #[test]
     fn hash_mismatch_on_the_encrypted_path_is_undecryptable() {

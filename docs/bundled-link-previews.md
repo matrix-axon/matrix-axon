@@ -71,6 +71,13 @@ These APIs have no caller idempotency key: never automatically replay an uncerta
 Uploaded Matrix objects can remain orphaned after failure; local staged bytes retain their existing expiry and boot-reconciliation rules.
 Logs identify account/room/event/upload IDs, counts, failure status/code and cleanup failure category, never shared URLs, titles, image bytes or encrypted-file keys.
 
+## Upgrade behavior
+
+The bundled-preview migration builds two ordinary GIN indexes on `events` inside the normal migration transaction.
+These builds can block writes for their duration on large event stores; plan an appropriate maintenance window.
+[Issue 843](https://github.com/matrix-axon/matrix-axon/issues/843) tracks a safe concurrent/prebuild procedure, including interrupted builds and coordination with the migration ledger.
+Do not simply precreate these index names: the current migration uses plain `CREATE INDEX` and would reject an existing name.
+
 ## Verification and contract fixtures
 
 The portable [contract fixtures](../crates/axon-api/tests/fixtures/link-preview-contract.json) run through the production DTO and preflight in API unit tests.

@@ -1428,6 +1428,29 @@ async fn get_event_by_mxc_url_finds_bundled_preview_images_per_account() {
             .await
             .unwrap()
             .is_none());
+        let redaction_id = format!("$preview-redaction-{}", Uuid::new_v4());
+        store
+            .upsert_event(&NewEvent {
+                event_id: &redaction_id,
+                room_id: "!previews:localhost",
+                account_id: owner,
+                sender: "@alice:localhost",
+                origin_ts: 1_700_000_000_500,
+                event_type: "m.room.redaction",
+                content: Some(json!({})),
+                raw_event: json!({"type":"m.room.redaction", "redacts":event_id}),
+                megolm_session_id: None,
+                redacts: Some(&event_id),
+                relates_to: None,
+                decrypted_body_text: None,
+            })
+            .await
+            .unwrap();
+        assert!(store
+            .get_event_by_mxc_url(owner, &mxc)
+            .await
+            .unwrap()
+            .is_none());
         if legacy {
             let blocked = format!("mxc://example.org/{}", Uuid::new_v4().simple());
             insert_image_event(
