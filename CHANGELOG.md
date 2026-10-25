@@ -3,6 +3,30 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.16 - 2026-10-25
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* minor version bump on ctutils to resolve security vulnerability RUSTSEC-2026-0385 and RUSTSEC-2026-0381 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/814
+* update zod and undici to address dependency alerts by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/830
+#### Features
+* feat(server): discover image packs and send standalone stickers by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/812
+* feat(web): select custom emoji and send stickers from image packs by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/813
+* feat(tui): list /whereami members from the server projection by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/835
+* feat(server): send bundled link previews with protected thumbnails by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/833
+#### Documentation
+* docs(server): give every OpenAPI operation a short title by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/831
+#### Build and CI
+* feat(api): build the web client when embed-web finds it missing or stale by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/829
+#### Other Changes
+* Chore/update ctutils by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/828
+* manual tweak broke prettier--quick fix to restore CI by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/839
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.15...v0.1.16
+
 ## v0.1.15 - 2026-10-22
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
