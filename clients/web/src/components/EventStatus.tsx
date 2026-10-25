@@ -5,6 +5,11 @@ import type { TimeFormat } from '../stores/settings'
 import type { TimelineEvent, TimelineStore } from '../stores/timeline'
 
 const DESKTOP_DOUBLE_CLICK_MS = 300
+/**
+ * How long a completed hold waits, after release, for the click that WebKit
+ * counts as a user activation before copying without one.
+ */
+const HOLD_CLICK_WAIT_MS = 400
 
 /**
  * The per-row send-state fragments shared by the main timeline and the
@@ -48,6 +53,7 @@ export function EventTime({
   const clearCopyStatus = useRef<number | null>(null)
   const linkClickTimer = useRef<number | null>(null)
   const holdTimer = useRef<number | null>(null)
+  const holdCopyTimer = useRef<number | null>(null)
   const holdPointer = useRef<{
     id: number
     x: number
@@ -65,6 +71,9 @@ export function EventTime({
         window.clearTimeout(linkClickTimer.current)
       }
       if (holdTimer.current !== null) window.clearTimeout(holdTimer.current)
+      if (holdCopyTimer.current !== null) {
+        window.clearTimeout(holdCopyTimer.current)
+      }
     }
   }, [])
   if (event.localEcho?.status === 'pending') {
@@ -111,6 +120,26 @@ export function EventTime({
       window.clearTimeout(linkClickTimer.current)
       linkClickTimer.current = null
     }
+  }
+  const clearHoldCopy = () => {
+    if (holdCopyTimer.current !== null) {
+      window.clearTimeout(holdCopyTimer.current)
+      holdCopyTimer.current = null
+    }
+  }
+  /**
+   * A completed hold's copy. Prefer the click that follows release: in
+   * WKWebView `pointerup` is not an activating event (a device log showed
+   * `activation=false` there, and both `writeText` and `execCommand` were
+   * refused), while `click` is. If no click arrives — iOS drops it when the
+   * callout takes the gesture — copy anyway after a short wait.
+   */
+  const scheduleHoldCopy = (source: CopySource) => {
+    clearHoldCopy()
+    holdCopyTimer.current = window.setTimeout(() => {
+      holdCopyTimer.current = null
+      void copyBody(source)
+    }, HOLD_CLICK_WAIT_MS)
   }
   const clearHold = () => {
     if (holdTimer.current !== null) {
@@ -184,7 +213,7 @@ export function EventTime({
           holdPointer.current = null
           if (completed) {
             pointerEvent.preventDefault()
-            void copyBody('body-hold-release')
+            scheduleHoldCopy('body-hold-release')
           }
         }}
         onPointerCancel={(pointerEvent) => {
@@ -194,7 +223,7 @@ export function EventTime({
           holdPointer.current = null
           // The browser took the gesture over (iOS selection callout) after
           // the hold had already completed: copy anyway, without activation.
-          if (pointer.completed) void copyBody('body-hold-cancel')
+          if (pointer.completed) scheduleHoldCopy('body-hold-cancel')
         }}
         onContextMenu={(contextMenu) => {
           if (touchHoldEnabled && holdPointer.current !== null)
@@ -204,6 +233,10 @@ export function EventTime({
           if (suppressNextClick.current) {
             suppressNextClick.current = false
             click.preventDefault()
+            if (holdCopyTimer.current !== null) {
+              clearHoldCopy()
+              void copyBody('body-hold-click')
+            }
             return
           }
           if (lastPointerType.current === 'mouse' && click.detail === 1) {

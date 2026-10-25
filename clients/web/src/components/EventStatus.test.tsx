@@ -135,6 +135,41 @@ describe('EventTime event permalink copy', () => {
     })
     expect(writeText).not.toHaveBeenCalled()
     fireEvent.pointerUp(timestamp, touch)
+    // Release alone is not an activating event in WKWebView; the click is.
+    expect(writeText).not.toHaveBeenCalled()
+    fireEvent.click(timestamp)
+    expect(writeText).toHaveBeenCalledOnce()
+    await act(async () => {
+      vi.advanceTimersByTime(1000)
+      await Promise.resolve()
+    })
+    expect(writeText).toHaveBeenCalledOnce()
+  })
+
+  it('copies after release when no click follows', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole } = render(<EventTime event={event()} touchHoldEnabled />)
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    fireEvent.pointerUp(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+      await Promise.resolve()
+    })
     expect(writeText).toHaveBeenCalledOnce()
   })
 
@@ -158,6 +193,10 @@ describe('EventTime event permalink copy', () => {
       await Promise.resolve()
     })
     fireEvent.pointerCancel(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+      await Promise.resolve()
+    })
     expect(writeText).toHaveBeenCalledWith('hello')
   })
 
