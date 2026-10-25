@@ -1,8 +1,9 @@
 # Sending bundled link previews
 
 The server accepts optional `url_previews` on text and media-caption sends, following [ADR 0125](https://github.com/matrix-axon/matrix-axon/blob/a09f547ce18b333c87fcfbc6a1ce1b437f16669c/docs/adr/0125-ios-first-incoming-sharing.md).
-Native share intake, image-card rendering and preview generation remain separate stages in [the approved plan](https://github.com/matrix-axon/matrix-axon/blob/a09f547ce18b333c87fcfbc6a1ce1b437f16669c/docs/mobile-incoming-sharing.md).
-This API never fetches the linked webpage or an external preview image.
+Native share intake and image-card rendering remain separate stages in [the approved plan](https://github.com/matrix-axon/matrix-axon/blob/a09f547ce18b333c87fcfbc6a1ce1b437f16669c/docs/mobile-incoming-sharing.md).
+Sending never fetches the linked webpage or an external preview image.
+The explicit [generation helper](#opt-in-homeserver-generation) delegates acquisition to the homeserver.
 
 ## Request shape
 
@@ -212,3 +213,112 @@ Expected: one text message, one file/caption message, and one media reply in eac
 An encrypted-room preview has `matrix:image:encrypted`; an unencrypted-room preview has `og:image`.
 If an event has not reached sync yet, repeat only the final GET, not the send.
 A timeout or lost response after a POST is outcome-unknown: inspect the timeline before making another attempt.
+
+## Opt-in homeserver generation
+
+`POST /v1/accounts/{account_id}/link-previews/generate` accepts `{"url":"https://example.org/page"}` under the existing Axon bearer authentication.
+Invoke it only after the user requests or has enabled generation, explaining that it discloses the URL to the selected account's homeserver, including for an encrypted destination room.
+Receiving a share, rendering a timeline, and sending a message never invoke generation automatically.
+Prefer valid source-supplied metadata when available.
+This server capability does not add a client preference or UI.
+
+Axon calls the configured homeserver's capabilities and authenticated Matrix v1 media `preview_url` endpoints, preserving any configured URL path prefix.
+An explicit disabled `m.preview_url` capability stops before URL submission; an absent capability or unsupported capabilities endpoint permits the preview request for compatibility.
+Homeservers must implement the authenticated media endpoints introduced in Matrix 1.11; Axon does not fall back to unauthenticated media or crawl arbitrary websites.
+The homeserver owns DNS resolution, webpage redirects and origin-fetch SSRF protection, including private-address DNS answers and rebinding.
+Axon rejects non-HTTP(S), credential-bearing, oversized, local-name and nonpublic literal-IP input before calling the homeserver.
+Axon's requests follow no redirects, carry only the selected account's Matrix credentials, and never forward the incoming Axon bearer token.
+Only eligible `mxc://` thumbnail references from that response are downloaded, through the same configured homeserver's authenticated media endpoint.
+Remote HTTP image references and arbitrary metadata/HTML/image dimensions are ignored.
+
+Successful responses use the usual `data` envelope with these fields:
+
+| Field              | Meaning                                                                                      |
+| ------------------ | -------------------------------------------------------------------------------------------- |
+| `status`           | `ready`, `unsupported`, `disabled`, `timeout`, `unavailable`, `busy`, or `no_metadata`       |
+| `preview`          | A settled `LinkPreviewRequest` ready for one entry of `url_previews`, or null for a fallback |
+| `thumbnail_status` | `ready`, `absent`, or `unavailable`; thumbnail failure can still produce a useful text card  |
+| `image_expires_at` | Server staging expiry when an image is ready, otherwise null                                 |
+
+Fallback outcomes are HTTP 200 and do not modify or dispatch a draft.
+Malformed/nonpublic URL input is HTTP 400 `bad_request`; a missing account is HTTP 404 `not_found` and an inactive account is HTTP 403 `forbidden`.
+Keep the original link sendable, and offer an explicit retry if desired.
+Do not assume every webpage has metadata or a supported raster image.
+Text normalization retains only nonempty title/description/site-name strings within the send contract's UTF-16 limits; invalid/oversized optional fields are omitted.
+The exact input URL remains the matched URL; sending still validates its membership in the final body/caption.
+
+Generation admits four concurrent operations without queuing; excess calls return `busy`.
+Each upstream request has an eight-second deadline, and connection establishment plus all acquisition has a 25-second deadline.
+Generation request bodies are capped at 32 KiB before JSON decoding.
+Capability/preview responses are capped at 64 KiB, thumbnails at 2 MiB, and raster decoding at four million pixels with bounded allocation.
+Existing PNG/JPEG/WebP validation derives MIME type and dimensions from bytes before durable staging.
+Staging (including its capacity wait) has a 15-second deadline, honors lower configured upload-byte limits, and uses the ordinary upload expiry and cleanup policies.
+A disconnected HTTP caller's owned task finishes staging; abandoned handles expire rather than sending anything.
+Logs contain account IDs and stable outcome categories, without URLs, metadata, credentials or free-form upstream errors.
+
+### Durable thumbnail recovery
+
+A generated thumbnail is a normal account-owned staged upload, consumed with its parent message under the existing encrypted/unencrypted send contract.
+Before marking an incoming share durably recoverable, retrieve its image with authenticated `GET /v1/accounts/{account_id}/media/uploads/{upload_id}/preview` and retain a protected local copy.
+The endpoint also supports eligible source-supplied staged thumbnails, verifies the same byte/pixel/type limits, returns raster bytes with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and does not consume, claim or extend the upload.
+Retrieve before dispatch: a sending, consumed, expired, missing or wrong-account handle returns HTTP 404 with `{"error":{"code":"not_found","message":"..."}}`.
+The message is explanatory text; adapters must branch on the stable status/code.
+A retrieval 404 does not prove that a parent send failed: sending and consumed handles share this response.
+Preserve an outcome-unknown send for user resolution, and never use thumbnail recovery to replay its parent automatically.
+Oversized bytes return HTTP 413 `payload_too_large`, invalid rasters HTTP 400 `bad_request`, and exhausted retrieval capacity HTTP 503 `service_unavailable`.
+All errors use the existing `ErrorResponse` envelope, including HTTP 401 for missing/invalid Axon authentication.
+
+Server upload expiry is independent of the planned 24-hour local-share retention.
+When a handle expires, re-upload the retained bytes and replace only the image upload ID; never automatically regenerate the webpage preview.
+If local bytes are missing or corrupt, require a visible explicit replacement, image-removal or discard choice.
+The native adapter contract examples live in `crates/axon-api/tests/fixtures/preview-generation-contract.json`; the test checks DTO round trips and the OpenAPI outcome enum.
+
+To verify a supporting homeserver, request generation explicitly, retrieve the staged thumbnail, then use the returned `preview` as a `url_previews` entry in the text and media-caption curl requests above, once per room encryption mode.
+Read the synced parent events and compare authenticated thumbnail bytes with the retrieved source.
+Confirm persistent MXC references for plaintext rooms and encrypted descriptors for encrypted rooms, without an extra thumbnail message.
+On a preview-disabled homeserver, verify a nonfatal fallback and send the original plain link.
+
+Using the `axon_curl`, `AXON_URL` and `ACCOUNT_ID` variables from the script above, opt in explicitly:
+
+```bash
+# This request discloses LINK to the selected account's homeserver.
+LINK='https://matrix.org/'
+GENERATION_REQUEST=$(jq -n --arg url "$LINK" '{url:$url}')
+GENERATED=$(axon_curl -X POST -H 'Content-Type: application/json' \
+  --data-raw "$GENERATION_REQUEST" \
+  "$AXON_URL/v1/accounts/$ACCOUNT_ID/link-previews/generate")
+printf '%s\n' "$GENERATED" | jq '.data | {status, thumbnail_status, image_expires_at}'
+IMAGE_ID=$(printf '%s' "$GENERATED" | jq -r '.data.preview.image_upload_id // empty')
+if [ -n "$IMAGE_ID" ]; then
+  umask 077
+  axon_curl "$AXON_URL/v1/accounts/$ACCOUNT_ID/media/uploads/$IMAGE_ID/preview" \
+    --output "${IMAGE_PATH}.generated"
+fi
+# Only when status is ready, preserve this preview with the original link.
+if printf '%s' "$GENERATED" | jq -e '.data.status == "ready"' >/dev/null; then
+  SEND_REQUEST=$(printf '%s' "$GENERATED" | jq --arg body "$LINK" \
+    '{body:$body,url_previews:[.data.preview]}')
+  axon_curl -X POST -H 'Content-Type: application/json' \
+    --data-raw "$SEND_REQUEST" "$ROOM_API/send"
+fi
+```
+
+Run `cargo test -p axon-sync --lib preview_generation` for adversarial upstream boundaries, `cargo test -p axon-api --test preview_generation` for the native contract fixture, and the ignored tests in that API target and `cargo test -p axon-server preview_recovery -- --ignored --test-threads=1` against an isolated PostgreSQL database for router/ownership/expiry checks.
+
+### Stage 3 validation record
+
+Verified on October 25, 2026 against disposable Synapse v1.163.0 with URL previews enabled, using `https://matrix.org/` as the public source.
+Explicit generation produced a verified 12,170-byte raster thumbnail in each room encryption mode.
+Authenticated staging retrieval was repeatable before dispatch and returned the documented private/no-sniff headers; consumed handles returned HTTP 404 afterward.
+Text and file-caption sends passed in plaintext and encrypted rooms, with four authenticated media-proxy downloads matching the retained thumbnail bytes.
+Plaintext events carried persistent `og:image` MXC references; encrypted events carried `matrix:image:encrypted` without a plaintext `og:image`.
+Caption sends reuploaded retained local bytes without generating the page preview again, and no separate thumbnail message appeared.
+After disabling Synapse previews, generation returned `unsupported` (its unavailable endpoint response), and the original plain link still sent successfully.
+An explicitly false capability and forbidden preview response are separately covered by the mocked homeserver tests, including stopping before URL submission for a false capability.
+The same boundary suite exercises all three acquisition requests under a configured homeserver path prefix, including encoded prefix segments and trailing-slash variants.
+IPv4 eligibility tests also cover the exact reserved-subnet boundaries and adjacent accepted addresses.
+After these corrections, `cargo fmt --all -- --check`, workspace Clippy with all features/targets and warnings denied, and `cargo test --all` passed (1,406 tests passed; PostgreSQL-only cases remain separately gated).
+The focused PostgreSQL/raster/capacity checks passed five tests, and the router/OpenAPI/native-contract run passed ten tests.
+The server smoke gate passed all ten scenarios against a fresh real stack.
+Generated-schema drift/compatibility checks and web lint/tests/build passed, with 2,645 web tests passing and one pre-existing ESLint warning in unchanged `Composer.tsx`.
+This records server/API behavior; native sharing and third-party card rendering are not covered by this stage.

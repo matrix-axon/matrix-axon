@@ -29,7 +29,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-fn validate_preview_image(
+pub(crate) fn validate_preview_image(
     upload: ClaimedUpload,
 ) -> Result<axon_core::link_preview::PreviewImage, StageUploadError> {
     use axon_core::link_preview::{PreviewImage, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS};
@@ -106,40 +106,7 @@ impl FilesystemStagedUploads {
             .await
             .map_err(internal)?
             .ok_or_else(|| StageUploadError::NotFound("upload not found".into()))?;
-        let result = async {
-            if row.size_bytes < 0 || row.size_bytes as u64 > cap {
-                return Err(StageUploadError::TooLarge { cap });
-            }
-            let file = tokio::fs::File::open(&row.path).await.map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    StageUploadError::NotFound("upload file not found".into())
-                } else {
-                    internal(e)
-                }
-            })?;
-            let mut bytes = Vec::new();
-            file.take(cap.saturating_add(1))
-                .read_to_end(&mut bytes)
-                .await
-                .map_err(internal)?;
-            if bytes.len() as u64 > cap {
-                return Err(StageUploadError::TooLarge { cap });
-            }
-            if bytes.len() as i64 != row.size_bytes {
-                return Err(StageUploadError::Invalid(
-                    "staged upload size mismatch".into(),
-                ));
-            }
-            Ok(ClaimedUpload {
-                upload_id,
-                kind: Self::to_api_kind(row.kind),
-                filename: row.filename,
-                content_type: row.content_type,
-                size_bytes: bytes.len() as u64,
-                bytes,
-            })
-        }
-        .await;
+        let result = Self::read_bounded(row, cap).await;
         if result.is_err()
             && self
                 .store
@@ -150,6 +117,43 @@ impl FilesystemStagedUploads {
             tracing::warn!(%account_id, %upload_id, "failed to release unreadable or over-limit staged upload");
         }
         result
+    }
+    async fn read_bounded(
+        row: axon_store::MediaUpload,
+        cap: u64,
+    ) -> Result<ClaimedUpload, StageUploadError> {
+        let upload_id = row.upload_id;
+        if row.size_bytes < 0 || row.size_bytes as u64 > cap {
+            return Err(StageUploadError::TooLarge { cap });
+        }
+        let file = tokio::fs::File::open(&row.path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StageUploadError::NotFound("upload file not found".into())
+            } else {
+                internal(e)
+            }
+        })?;
+        let mut bytes = Vec::new();
+        file.take(cap.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(internal)?;
+        if bytes.len() as u64 > cap {
+            return Err(StageUploadError::TooLarge { cap });
+        }
+        if bytes.len() as i64 != row.size_bytes {
+            return Err(StageUploadError::Invalid(
+                "staged upload size mismatch".into(),
+            ));
+        }
+        Ok(ClaimedUpload {
+            upload_id,
+            kind: Self::to_api_kind(row.kind),
+            filename: row.filename,
+            content_type: row.content_type,
+            size_bytes: bytes.len() as u64,
+            bytes,
+        })
     }
     pub fn new(store: Store, config: &MediaConfig) -> anyhow::Result<Self> {
         anyhow::ensure!(
@@ -474,6 +478,45 @@ async fn prune_orphan_files_in_account_dir(
 
 #[async_trait]
 impl StagedUploadService for FilesystemStagedUploads {
+    async fn read_preview_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<axon_core::link_preview::PreviewImage, StageUploadError> {
+        let permit = tokio::time::timeout(
+            self.upload_timeout,
+            self.concurrent_uploads.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| StageUploadError::Timeout("thumbnail capacity timed out".into()))?
+        .map_err(|_| StageUploadError::Internal("thumbnail capacity closed".into()))?;
+        if !self
+            .store
+            .get_account(account_id)
+            .await
+            .map_err(internal)?
+            .is_some_and(|account| account.state == AccountState::Active)
+        {
+            return Err(StageUploadError::NotFound("thumbnail not found".into()));
+        }
+        let row = self
+            .store
+            .get_media_upload(account_id, upload_id)
+            .await
+            .map_err(internal)?
+            .filter(|r| {
+                r.state == axon_store::MediaUploadState::Staged && r.expires_at > Utc::now()
+            })
+            .ok_or_else(|| StageUploadError::NotFound("thumbnail not found".into()))?;
+        let upload = Self::read_bounded(row, axon_core::link_preview::MAX_IMAGE_BYTES).await?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            validate_preview_image(upload)
+        })
+        .await
+        .map_err(|_| StageUploadError::Internal("thumbnail decoder failed".into()))?
+    }
+
     async fn claim_preview_upload(
         &self,
         account_id: Uuid,
@@ -908,6 +951,75 @@ mod tests {
                 .state,
             axon_store::MediaUploadState::Staged
         );
+    }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn preview_recovery_is_bounded_account_owned_nonconsuming_and_expiring() {
+        use axon_api::StagedUploadService;
+        let store = connect_store().await;
+        let owner = test_account(&store).await;
+        let other = test_account(&store).await;
+        let dir = tempfile::tempdir().unwrap();
+        let service = uploads(store.clone(), dir.path().into());
+        let staged = service
+            .stage_upload(
+                axon_api::StageUploadRequest {
+                    account_id: owner,
+                    kind: axon_api::MediaUploadKindDto::Image,
+                    filename: "preview.png".into(),
+                    content_type: Some("image/png".into()),
+                },
+                Box::pin(futures_util::stream::once(async {
+                    Ok(preview_png().into())
+                })),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.read_preview_upload(other, staged.upload_id).await,
+            Err(axon_api::StageUploadError::NotFound(_))
+        ));
+        for _ in 0..2 {
+            let image = service
+                .read_preview_upload(owner, staged.upload_id)
+                .await
+                .unwrap();
+            assert_eq!(image.bytes, preview_png());
+            assert_eq!((image.width, image.height), (2, 2));
+        }
+        // Recovery does not claim, extend TTL, or consume the eventual send.
+        let row = store
+            .get_media_upload(owner, staged.upload_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, axon_store::MediaUploadState::Staged);
+        assert_eq!(row.expires_at.to_rfc3339(), staged.expires_at);
+        service
+            .claim_preview_upload(owner, staged.upload_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.read_preview_upload(owner, staged.upload_id).await,
+            Err(axon_api::StageUploadError::NotFound(_))
+        ));
+        service
+            .release_upload(owner, staged.upload_id)
+            .await
+            .unwrap();
+        sqlx_core::query::query("UPDATE media_uploads SET expires_at = now() - interval '1 second' WHERE upload_id = $1").bind(staged.upload_id).execute(store.pool()).await.unwrap();
+        assert!(matches!(
+            service.read_preview_upload(owner, staged.upload_id).await,
+            Err(axon_api::StageUploadError::NotFound(_))
+        ));
+        // The sweeper may already have removed the row: identical public error.
+        service.sweep_expired().await;
+        assert!(matches!(
+            service.read_preview_upload(owner, staged.upload_id).await,
+            Err(axon_api::StageUploadError::NotFound(_))
+        ));
+        store.delete_account_row(owner).await.unwrap();
+        store.delete_account_row(other).await.unwrap();
     }
     use std::io::Write;
     use std::path::{Path, PathBuf};

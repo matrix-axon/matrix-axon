@@ -43,7 +43,7 @@ This page indexes everything else.
 ## Operator and platform notes
 
 - [Custom emoji and sticker packs](custom-emoji.md)
-- [Sending bundled link previews](bundled-link-previews.md) — server request contract, protected thumbnails, budgets and recovery
+- [Sending bundled link previews](bundled-link-previews.md) — server send/generation contracts, protected thumbnail retrieval, budgets and recovery
 - [Matrix OAuth browser sign-in](matrix-oauth-browser-sign-in.md)
 - [Apple sign-in: browser](apple-oauth-browser.md), [native](apple-oauth-native.md), and the [App Review response](apple-oauth-review-response.md)
 - [Web slow-link measurement](web-slow-link-measurement.md)

@@ -14,6 +14,7 @@ pub mod live;
 pub mod media;
 pub mod message;
 pub mod power_levels;
+pub mod preview_generation;
 pub mod push;
 pub mod room_entry;
 pub mod secret;

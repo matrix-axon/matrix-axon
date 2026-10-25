@@ -1617,6 +1617,97 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/link-previews/generate": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Generate an opt-in homeserver link preview",
+        "description": "Explicitly discloses the URL to the selected account's homeserver.",
+        "operationId": "generate",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GeneratePreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ready preview or nonfatal fallback; original link remains sendable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_GeneratedPreviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or nonpublic HTTP(S) URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Inactive account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/login-grants/qr": {
       "post": {
         "tags": [
@@ -2357,6 +2448,122 @@
           },
           "500": {
             "description": "Internal upload cleanup failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/media/uploads/{upload_id}/preview": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Retrieve a staged preview thumbnail",
+        "description": "Bounded authenticated bytes for protected local recovery, without consuming the handle.",
+        "operationId": "thumbnail",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified PNG/JPEG/WebP bytes, at most 2 MiB; Cache-Control: no-store",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewThumbnailBytes"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewThumbnailBytes"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewThumbnailBytes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid raster thumbnail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found: wrong account, absent, expired, consumed, sending or missing bytes; explicitly reupload retained local bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "not_found",
+                    "message": "thumbnail not found"
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "payload_too_large: thumbnail exceeds 2 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "service_unavailable: bounded thumbnail capacity unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -10050,6 +10257,48 @@
           }
         }
       },
+      "ApiResponse_GeneratedPreviewDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Nonfatal generation outcomes retain the caller's original draft/link.\n`preview` is directly usable as one entry in the settled send contract.",
+            "required": [
+              "status",
+              "thumbnail_status"
+            ],
+            "properties": {
+              "image_expires_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Server staging expiry, independent of the local share's retention.\nDownload the authenticated thumbnail before declaring local recovery."
+              },
+              "preview": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/LinkPreviewRequest"
+                  }
+                ]
+              },
+              "status": {
+                "$ref": "#/components/schemas/PreviewGenerationStatus"
+              },
+              "thumbnail_status": {
+                "$ref": "#/components/schemas/PreviewThumbnailStatus"
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_MatrixOAuthBrowserFlowDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -13607,6 +13856,52 @@
           "cancelled"
         ]
       },
+      "GeneratePreviewRequest": {
+        "type": "object",
+        "description": "Calling this endpoint is explicit consent to disclose the URL to the\nselected account's homeserver. No generation occurs on share arrival.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GeneratedPreviewDto": {
+        "type": "object",
+        "description": "Nonfatal generation outcomes retain the caller's original draft/link.\n`preview` is directly usable as one entry in the settled send contract.",
+        "required": [
+          "status",
+          "thumbnail_status"
+        ],
+        "properties": {
+          "image_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Server staging expiry, independent of the local share's retention.\nDownload the authenticated thumbnail before declaring local recovery."
+          },
+          "preview": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LinkPreviewRequest"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/PreviewGenerationStatus"
+          },
+          "thumbnail_status": {
+            "$ref": "#/components/schemas/PreviewThumbnailStatus"
+          }
+        }
+      },
       "HomeserverBreakerDto": {
         "type": "string",
         "description": "A homeserver gate's circuit breaker on the wire (ADR 0122).",
@@ -14659,6 +14954,31 @@
             "description": "The stored JSON value."
           }
         }
+      },
+      "PreviewGenerationStatus": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "unsupported",
+          "disabled",
+          "timeout",
+          "unavailable",
+          "busy",
+          "no_metadata"
+        ]
+      },
+      "PreviewThumbnailBytes": {
+        "type": "string",
+        "format": "binary",
+        "description": "Binary raster response; this schema describes bytes rather than a JSON array."
+      },
+      "PreviewThumbnailStatus": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "absent",
+          "unavailable"
+        ]
       },
       "PublicRoomSummaryDto": {
         "type": "object",

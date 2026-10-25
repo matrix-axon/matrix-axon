@@ -21,6 +21,7 @@ mod media;
 mod member_profiles;
 mod oauth;
 mod pem;
+mod preview_generation;
 mod push;
 mod search;
 mod status;
@@ -381,6 +382,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         rustc_version: env!("AXON_RUSTC_VERSION").to_owned(),
     })
     .with_member_profiles(member_profiles)
+    .with_preview_generator(Arc::new(preview_generation::PreviewGenerationService::new(
+        sync_engine
+            .preview_generator()
+            .context("configuring preview generation")?,
+        uploads.clone(),
+    )))
     .with_staged_uploads(uploads)
     .with_ephemeral(ephemeral)
     .with_membership(membership)
