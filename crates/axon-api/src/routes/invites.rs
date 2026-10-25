@@ -21,6 +21,8 @@ pub struct InvitesQuery {
     pub account_id: Option<Uuid>,
 }
 
+/// List invites
+///
 /// List pending room invites across accounts, newest first.
 #[utoipa::path(
     get,

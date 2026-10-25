@@ -12,9 +12,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the accounts this Axon manages, oldest first — the **client-visible**
+         * List accounts
+         * @description List the accounts this Axon manages, oldest first — the **client-visible**
          *     set: `active` and `deactivated`.
-         * @description Logged-out (`deactivated`) accounts are included so a client that has lost the
+         *
+         *     Logged-out (`deactivated`) accounts are included so a client that has lost the
          *     `account_id` can still discover one to offer re-login (the login verb both
          *     produces and reactivates them). The transient `deleting` teardown state is
          *     excluded — a row mid-removal isn't something to act on — but any account, in
@@ -39,7 +41,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Adopt an existing Matrix access token as a runtime account, then return the
+         * Import an access token as an account
+         * @description Adopt an existing Matrix access token as a runtime account, then return the
          *     resulting active account — the runtime replacement for the retired
          *     `sync.account.access_token` boot-provisioning path: restore a session axon
          *     didn't mint itself (issued by another client, or an SSO-only account with no
@@ -49,7 +52,8 @@ export interface paths {
          *     `homeserver_url` is only consulted for a new identity), and an already-`active`
          *     account is returned unchanged (the token isn't consulted). An account
          *     mid-deletion (`deleting`) is a `409`.
-         * @description Unlike `login`, no homeserver call confirms the token before this returns —
+         *
+         *     Unlike `login`, no homeserver call confirms the token before this returns —
          *     session restore is a purely local SDK operation — so the token (and, if the
          *     homeserver reports one, the device id) is validated with a `whoami`
          *     round-trip before the account is activated; a mismatched or revoked token is
@@ -75,7 +79,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Add or reactivate a Matrix account at runtime, then return the resulting
+         * Log in a Matrix account
+         * @description Add or reactivate a Matrix account at runtime, then return the resulting
          *     active account. Idempotent by Matrix `username`: a new identity is minted, a
          *     logged-out (`deactivated`) account is reactivated using its stored endpoint,
          *     and an already-`active` account is returned **unchanged** (a no-op — the desired end
@@ -83,7 +88,8 @@ export interface paths {
          *     An account mid-deletion (`deleting`) is a `409`. `username` must be a full
          *     Matrix user ID (a malformed one is a `400`); bad credentials are a `401`. The
          *     password is used once and never stored.
-         * @description `homeserver_url` is optional: when omitted, the server discovers the
+         *
+         *     `homeserver_url` is optional: when omitted, the server discovers the
          *     canonical homeserver from the user ID's server name (`.well-known/matrix/client`,
          *     falling back to the server name itself) — so clients need only username +
          *     password. The URL is a connection endpoint; the Matrix ID keys identity.
@@ -114,9 +120,11 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Start a browser sign-in for a homeserver that delegates authentication to
+         * Start a browser sign-in
+         * @description Start a browser sign-in for a homeserver that delegates authentication to
          *     an OAuth 2.0 authorization server.
-         * @description The flow yields a link and a short code. The user opens the link in any
+         *
+         *     The flow yields a link and a short code. The user opens the link in any
          *     browser, on any device, signs in, and approves; meanwhile the client polls
          *     this flow. No second Matrix client is needed. The account that results is
          *     signed in but its device is **not** verified.
@@ -136,13 +144,18 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read the current replayable flow stage and only its stage-appropriate data.
-         * @description The link and user code are returned only in `waiting_for_authorization`.
+         * Get a browser sign-in flow
+         * @description Read the current replayable flow stage and only its stage-appropriate data.
+         *
+         *     The link and user code are returned only in `waiting_for_authorization`.
          */
         get: operations["get_matrix_oauth_browser"];
         put?: never;
         post?: never;
-        /** Cancel a flow idempotently, including an unknown or already-expired id. */
+        /**
+         * Cancel a browser sign-in flow
+         * @description Cancel a flow idempotently, including an unknown or already-expired id.
+         */
         delete: operations["cancel_matrix_oauth_browser"];
         options?: never;
         head?: never;
@@ -159,7 +172,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Start a QR login that creates and verifies Axon's Matrix device without a
+         * Start a QR login
+         * @description Start a QR login that creates and verifies Axon's Matrix device without a
          *     Matrix password, imported access token, or recovery key.
          */
         post: operations["create"];
@@ -176,11 +190,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read the current replayable flow stage and only its stage-appropriate data. */
+        /**
+         * Get a QR login flow
+         * @description Read the current replayable flow stage and only its stage-appropriate data.
+         */
         get: operations["get"];
         put?: never;
         post?: never;
-        /** Cancel a flow idempotently, including an unknown or already-expired id. */
+        /**
+         * Cancel a QR login flow
+         * @description Cancel a flow idempotently, including an unknown or already-expired id.
+         */
         delete: operations["cancel"];
         options?: never;
         head?: never;
@@ -196,7 +216,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Supply one two-digit check code to a display-presentation flow. */
+        /**
+         * Submit a QR login check code
+         * @description Supply one two-digit check code to a display-presentation flow.
+         */
         post: operations["submit_check_code"];
         delete?: never;
         options?: never;
@@ -213,7 +236,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Supply one decoded QR payload to a scan-presentation flow. */
+        /**
+         * Submit a scanned QR login payload
+         * @description Supply one decoded QR payload to a scan-presentation flow.
+         */
         post: operations["submit_scan"];
         delete?: never;
         options?: never;
@@ -229,7 +255,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read a single account by id, in whatever lifecycle state it is — unlike the
+         * Get an account
+         * @description Read a single account by id, in whatever lifecycle state it is — unlike the
          *     list, a direct by-id read is not filtered to `active` (so a client can poll
          *     an account it knows and watch it transition). An unknown id is a 404.
          */
@@ -237,11 +264,13 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Permanently delete an account and every trace of it: stops syncing it,
+         * Delete an account
+         * @description Permanently delete an account and every trace of it: stops syncing it,
          *     invalidates its device token upstream, removes its on-disk SDK store, and drops
          *     its row (cascading away its archived events, room state, and account data).
          *     Returns `204 No Content` — the resource is gone, so there is nothing to return.
-         * @description Unlike [`logout`] this is **not** reversible: re-adding the same Matrix account
+         *
+         *     Unlike [`logout`] this is **not** reversible: re-adding the same Matrix account
          *     later is a fresh login with a new `account_id`. Idempotent and crash-safe — a
          *     delete of an account already mid-teardown resumes it, and an interrupted delete
          *     is finished by the next boot's reconcile. An unknown id is a `404`. A `409` means
@@ -268,10 +297,12 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Originate megolm key backup, export `m.megolm_backup.v1` into existing 4S,
+         * Enable key backup
+         * @description Originate megolm key backup, export `m.megolm_backup.v1` into existing 4S,
          *     resume a crashed create, or kick an already-enabled upload (ADR 0098).
          *     Never mints a new recovery key. Never deletes someone else's backup.
-         * @description `recovery_key` is required for create, export-only, and crash-resume
+         *
+         *     `recovery_key` is required for create, export-only, and crash-resume
          *     replace. Omitting it is kick-upload only. Unverified device or a
          *     homeserver backup this device is not connected to (and did not sign with
          *     intent) is a `409`.
@@ -291,7 +322,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List a Matrix user's devices — the account's own by default, or an
+         * List devices
+         * @description List a Matrix user's devices — the account's own by default, or an
          *     arbitrary user via `?user_id=`. Reads the SDK's local crypto-store cache
          *     on every call (kept current by the account's background sync, not by a
          *     homeserver call this endpoint makes itself); no device roster is
@@ -314,7 +346,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Search a homeserver's public-room directory. */
+        /**
+         * Search the public room directory
+         * @description Search a homeserver's public-room directory.
+         */
         get: operations["search_public_rooms"];
         put?: never;
         post?: never;
@@ -332,7 +367,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read a single event by `(account_id, event_id)`. Redacted events come back
+         * Get an event
+         * @description Read a single event by `(account_id, event_id)`. Redacted events come back
          *     masked (`content`/`body` null, `redacted` true); an unknown id is a 404.
          */
         get: operations["get_event"];
@@ -352,7 +388,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * The forensic edit history of an event (M8): every `m.replace` targeting it,
+         * Get an event's edit history
+         * @description The forensic edit history of an event (M8): every `m.replace` targeting it,
          *     oldest first, *unfiltered* by the resolution rules — including edits from a
          *     non-sender or an incompatible `msgtype` — for clients that want to show or
          *     audit the edit trail. The collapsed timeline (and `EventDto.edited` /
@@ -377,7 +414,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Per-emoji reaction tally for an event (M8), resolved over the event's reactions
+         * Get an event's reactions
+         * @description Per-emoji reaction tally for an event (M8), resolved over the event's reactions
          *     on disk regardless of where the original message falls in the timeline window —
          *     the fix for the dropped-reaction bug (issue #22). The body is a JSON object
          *     keyed by emoji:
@@ -410,7 +448,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Direct replies to an event (M8): events whose nested
+         * Get an event's replies
+         * @description Direct replies to an event (M8): events whose nested
          *     `m.relates_to.m.in_reply_to.event_id` is this event and which carry no
          *     `rel_type` (a plain reply, not a thread member). Oldest first;
          *     redaction-masked. An event with no replies (or an unknown event) yields an
@@ -434,7 +473,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read the per-event verification bundle (M7c): the durable at-decrypt sender-
+         * Get an event's verification bundle
+         * @description Read the per-event verification bundle (M7c): the durable at-decrypt sender-
          *     trust snapshot plus live cross-signing evidence for the sender's device and
          *     identity. An unknown account/event is a 404; a logged-out account is a 409
          *     (no live client to read evidence from). Gated by the bearer-token auth layer
@@ -458,6 +498,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Start a QR login grant */
         post: operations["create_matrix_oauth_qr_grant"];
         delete?: never;
         options?: never;
@@ -472,9 +513,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** Get a QR login grant */
         get: operations["get_matrix_oauth_qr_grant"];
         put?: never;
         post?: never;
+        /** Cancel a QR login grant */
         delete: operations["cancel_matrix_oauth_qr_grant"];
         options?: never;
         head?: never;
@@ -490,6 +533,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Submit a QR login grant check code */
         post: operations["submit_matrix_oauth_qr_grant_check_code"];
         delete?: never;
         options?: never;
@@ -506,6 +550,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Submit a scanned QR login grant payload */
         post: operations["submit_matrix_oauth_qr_grant_scan"];
         delete?: never;
         options?: never;
@@ -523,14 +568,16 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Log a Matrix account out, then return the resulting (now `deactivated`)
+         * Log out an account
+         * @description Log a Matrix account out, then return the resulting (now `deactivated`)
          *     account. Stops syncing it, invalidates its device token upstream (best-effort
          *     — an unreachable homeserver never fails the logout), and moves it to a
          *     logged-out state, **retaining all of its data** (archive, search, media) so a
          *     later login reactivates the same `account_id`. Idempotent: logging out an
          *     already-logged-out account is a `200` no-op. An account mid-deletion
          *     (`deleting`) is a `409`; an unknown id is a `404`.
-         * @description Secret-bearing / destructive; gated by the bearer-token auth layer like every
+         *
+         *     Secret-bearing / destructive; gated by the bearer-token auth layer like every
          *     `/v1/` route (M7b, ADR 0029).
          */
         post: operations["logout"];
@@ -549,7 +596,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Stage raw upload bytes for a later room-aware media send. */
+        /**
+         * Stage a media upload
+         * @description Stage raw upload bytes for a later room-aware media send.
+         */
         post: operations["stage_upload"];
         delete?: never;
         options?: never;
@@ -567,7 +617,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete an unsent staged upload. */
+        /**
+         * Delete a staged upload
+         * @description Delete an unsent staged upload.
+         */
         delete: operations["delete_upload"];
         options?: never;
         head?: never;
@@ -582,10 +635,16 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set this account's avatar from an already-staged upload. */
+        /**
+         * Set the account avatar
+         * @description Set this account's avatar from an already-staged upload.
+         */
         put: operations["set_account_avatar"];
         post?: never;
-        /** Clear this account's avatar. */
+        /**
+         * Clear the account avatar
+         * @description Clear this account's avatar.
+         */
         delete: operations["remove_account_avatar"];
         options?: never;
         head?: never;
@@ -600,7 +659,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set this account's own display name. An empty `display_name` clears it. */
+        /**
+         * Set the account display name
+         * @description Set this account's own display name. An empty `display_name` clears it.
+         */
         put: operations["set_display_name"];
         post?: never;
         delete?: never;
@@ -619,14 +681,16 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Acquire E2EE keys for an **active** account from its Secure-Storage (4S)
+         * Recover E2EE keys
+         * @description Acquire E2EE keys for an **active** account from its Secure-Storage (4S)
          *     recovery key, then return the account with its `verified` flag re-derived
          *     and an honest megolm-backup action (ADR 0098). Cross-signing is imported
          *     from 4S; if the homeserver has no megolm backup, recover auto-enables one
          *     using this same key (it does not mint a new recovery key). Stored UTDs the
          *     imported keys unlock are back-filled under a 30s cap. The recovery key is
          *     used once and never persisted.
-         * @description A `200` means **4S import succeeded**, not that history keys downloaded and
+         *
+         *     A `200` means **4S import succeeded**, not that history keys downloaded and
          *     not that backup enabled. The flattened body keeps `account_id` / `verified`
          *     at the top level for existing clients; `backup_action` and `redecrypt` are
          *     additive siblings. `verified` is a derived observation of cross-signing.
@@ -657,8 +721,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Create a new room.
-         * @description **Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,
+         * Create a room
+         * @description Create a new room.
+         *
+         *     **Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,
          *     so retrying this call after a client-side timeout can create a second
          *     room upstream if the first attempt actually succeeded after Axon's own
          *     timeout fired (see `SdkGateway::create_room`).
@@ -680,8 +746,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Create a DM with another user.
-         * @description **Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,
+         * Create a direct message
+         * @description Create a DM with another user.
+         *
+         *     **Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,
          *     so retrying this call after a client-side timeout can create a second DM
          *     room upstream if the first attempt actually succeeded after Axon's own
          *     timeout fired (see `SdkGateway::create_dm`). This route always creates a
@@ -704,7 +772,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Join a room by id or alias. */
+        /**
+         * Join a room
+         * @description Join a room by id or alias.
+         */
         post: operations["join_room"];
         delete?: never;
         options?: never;
@@ -721,7 +792,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Knock on a room, optionally with a reason. */
+        /**
+         * Knock on a room
+         * @description Knock on a room, optionally with a reason.
+         */
         post: operations["knock_room"];
         delete?: never;
         options?: never;
@@ -737,10 +811,16 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set this room's avatar from an already-staged upload. */
+        /**
+         * Set the room avatar
+         * @description Set this room's avatar from an already-staged upload.
+         */
         put: operations["set_room_avatar"];
         post?: never;
-        /** Clear this room's avatar. */
+        /**
+         * Clear the room avatar
+         * @description Clear this room's avatar.
+         */
         delete: operations["remove_room_avatar"];
         options?: never;
         head?: never;
@@ -756,7 +836,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Ban a user from this room, optionally with a reason. */
+        /**
+         * Ban a user
+         * @description Ban a user from this room, optionally with a reason.
+         */
         post: operations["ban_user"];
         delete?: never;
         options?: never;
@@ -772,7 +855,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List custom emoji available from the current room, canonical ancestor spaces, and personal pack.
+         * List custom emoji packs
+         * @description List custom emoji available from the current room, canonical ancestor spaces, and personal pack.
          *     Supports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal
          *     `im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with
          *     the same state key. Personal packs precede room packs, then nearest ancestors; names are not merged.
@@ -803,10 +887,16 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Edit an existing message (sends an `m.replace`). */
+        /**
+         * Edit a message
+         * @description Edit an existing message (sends an `m.replace`).
+         */
         put: operations["edit_message"];
         post?: never;
-        /** Redact an event, optionally with a reason (`?reason=`). */
+        /**
+         * Redact an event
+         * @description Redact an event, optionally with a reason (`?reason=`).
+         */
         delete: operations["redact_event"];
         options?: never;
         head?: never;
@@ -822,7 +912,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** React to an event with an emoji/short key. */
+        /**
+         * React to an event
+         * @description React to an event with an emoji/short key.
+         */
         post: operations["react"];
         delete?: never;
         options?: never;
@@ -839,7 +932,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Forget a left or banned-from room. */
+        /**
+         * Forget a room
+         * @description Forget a left or banned-from room.
+         */
         post: operations["forget_room"];
         delete?: never;
         options?: never;
@@ -855,7 +951,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Bundle of small "what kind of room is this" reads: join rule, history
+         * Get room info
+         * @description Bundle of small "what kind of room is this" reads: join rule, history
          *     visibility, guest access, and encryption algorithm (issue #404, ADR 0084).
          *     Each is an independent singleton `room_state` lookup — fanned out
          *     concurrently rather than four sequential round trips, since none depends
@@ -880,7 +977,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Invite a user to this room. */
+        /**
+         * Invite a user
+         * @description Invite a user to this room.
+         */
         post: operations["invite_user"];
         delete?: never;
         options?: never;
@@ -897,7 +997,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Kick a user from this room, optionally with a reason. */
+        /**
+         * Kick a user
+         * @description Kick a user from this room, optionally with a reason.
+         */
         post: operations["kick_user"];
         delete?: never;
         options?: never;
@@ -914,7 +1017,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Leave this room. */
+        /**
+         * Leave a room
+         * @description Leave this room.
+         */
         post: operations["leave_room"];
         delete?: never;
         options?: never;
@@ -930,7 +1036,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the current members of a room — the resolved `m.room.member` state,
+         * List room members
+         * @description List the current members of a room — the resolved `m.room.member` state,
          *     one entry per user. Useful for seeding a display-name map without requiring
          *     membership events to appear in the loaded timeline. An unknown
          *     `account_id`/`room_id` yields an empty list (200), not a 404.
@@ -952,7 +1059,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read typed room metadata from account-scoped cached state.
+         * Get room metadata
+         * @description Read typed room metadata from account-scoped cached state.
          *     No upstream requests or membership aggregation occur on this route.
          *     Missing snapshots remain unknown, including for unjoined/unknown rooms.
          *     Content is limited to 128 KiB per state tuple before transfer and decoding.
@@ -977,7 +1085,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set this room's name. An empty `name` clears it. */
+        /**
+         * Set the room name
+         * @description Set this room's name. An empty `name` clears it.
+         */
         put: operations["set_room_name"];
         post?: never;
         delete?: never;
@@ -994,7 +1105,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the room's currently pinned messages (`m.room.pinned_events`),
+         * List pinned messages
+         * @description List the room's currently pinned messages (`m.room.pinned_events`),
          *     resolved and hydrated exactly like any other timeline read (redaction
          *     masking, edit collapse, reaction tally) rather than a raw event-id list
          *     (issue #404, ADR 0084). Order follows the pinned list's own array order. An
@@ -1017,10 +1129,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read this room's fully resolved power levels (defaults filled in). */
+        /**
+         * Get power levels
+         * @description Read this room's fully resolved power levels (defaults filled in).
+         */
         get: operations["get_power_levels"];
         /**
-         * Apply a power-level change: role thresholds and/or per-user levels,
+         * Set power levels
+         * @description Apply a power-level change: role thresholds and/or per-user levels,
          *     merged into one `m.room.power_levels` write.
          */
         put: operations["set_power_levels"];
@@ -1041,9 +1157,11 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Mark a room read: sets both the public read receipt and the private
+         * Mark a room read
+         * @description Mark a room read: sets both the public read receipt and the private
          *     fully-read marker in one homeserver call.
-         * @description `event_id` is sent to the homeserver **verbatim**. A receipt is interpreted
+         *
+         *     `event_id` is sent to the homeserver **verbatim**. A receipt is interpreted
          *     in arrival order while every axon read surface sorts by `origin_ts`, and the
          *     two disagree for backfilled events — so the client must name the event with
          *     the greatest `arrival_order` among those it has displayed (ADR 0089). Only
@@ -1066,7 +1184,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send a plain-text message to a room. */
+        /**
+         * Send a message
+         * @description Send a plain-text message to a room.
+         */
         post: operations["send_message"];
         delete?: never;
         options?: never;
@@ -1083,7 +1204,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send a staged media upload to a room. */
+        /**
+         * Send media
+         * @description Send a staged media upload to a room.
+         */
         post: operations["send_media"];
         delete?: never;
         options?: never;
@@ -1101,7 +1225,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Send an existing MXC image as a standalone Matrix `m.sticker` event.
+         * Send a sticker
+         * @description Send an existing MXC image as a standalone Matrix `m.sticker` event.
          *     Info accepts raster MIME types, dimensions 1–16,384, and sizes at most
          *     100 MiB. Empty info is permitted; bytes are never fetched during a send.
          */
@@ -1120,7 +1245,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List a space's children (`m.space.child`, MSC1772-ordered: `order` string
+         * List a space's children
+         * @description List a space's children (`m.space.child`, MSC1772-ordered: `order` string
          *     ascending, absent sorts last, then `origin_ts`, then `room_id`), each
          *     enriched with the child room's own cached name/avatar/room_type where Axon
          *     knows that room too (issue #404, ADR 0084). An unknown `account_id`/
@@ -1146,7 +1272,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the spaces a room belongs to (`m.space.parent`) — the reverse lookup
+         * List a room's parent spaces
+         * @description List the spaces a room belongs to (`m.space.parent`) — the reverse lookup
          *     of [`space_children`]. An unknown `account_id`/`room_id`, or a room with no
          *     parents, yields an empty list (200), not a 404. Same row cap as
          *     `space_children`.
@@ -1168,10 +1295,16 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Add or update a tag on this room (room account data, not a state event). */
+        /**
+         * Set a room tag
+         * @description Add or update a tag on this room (room account data, not a state event).
+         */
         put: operations["set_room_tag"];
         post?: never;
-        /** Remove a tag from this room. */
+        /**
+         * Remove a room tag
+         * @description Remove a tag from this room.
+         */
         delete: operations["remove_room_tag"];
         options?: never;
         head?: never;
@@ -1186,7 +1319,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the threads in a room (M8): one summary per distinct `m.thread` root,
+         * List threads
+         * @description List the threads in a room (M8): one summary per distinct `m.thread` root,
          *     most-recently-active first, each with its reply count and latest reply. The
          *     root events themselves are read via the single-event endpoint; a thread's
          *     members are paged via [`thread_timeline`]. An unknown `account_id`/`room_id`
@@ -1210,7 +1344,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read a thread's timeline (M8): the `m.thread` members whose root is
+         * Get a thread timeline
+         * @description Read a thread's timeline (M8): the `m.thread` members whose root is
          *     `root_id`, newest first, with the same cursor pagination as the room
          *     timeline. The thread root itself is not included (fetch it via the
          *     single-event endpoint). Reactions and edits on thread members are aggregated
@@ -1234,8 +1369,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read a room's timeline, newest first, with cursor pagination.
-         * @description An unknown `account_id`/`room_id` yields an empty page (200), not a 404 — an
+         * Get a room timeline
+         * @description Read a room's timeline, newest first, with cursor pagination.
+         *
+         *     An unknown `account_id`/`room_id` yields an empty page (200), not a 404 — an
          *     empty timeline and a non-existent room are indistinguishable here and an
          *     empty page is the natural answer.
          */
@@ -1256,7 +1393,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set this room's topic. An empty `topic` clears it. */
+        /**
+         * Set the room topic
+         * @description Set this room's topic. An empty `topic` clears it.
+         */
         put: operations["set_room_topic"];
         post?: never;
         delete?: never;
@@ -1273,7 +1413,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set (or clear) this account's typing indicator in a room. */
+        /**
+         * Set the typing indicator
+         * @description Set (or clear) this account's typing indicator in a room.
+         */
         put: operations["send_typing_notice"];
         post?: never;
         delete?: never;
@@ -1291,7 +1434,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Unban a user from this room, optionally with a reason. */
+        /**
+         * Unban a user
+         * @description Unban a user from this room, optionally with a reason.
+         */
         post: operations["unban_user"];
         delete?: never;
         options?: never;
@@ -1307,7 +1453,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Where a tombstoned room's replacement lives, and/or where this room was
+         * Get room upgrade links
+         * @description Where a tombstoned room's replacement lives, and/or where this room was
          *     upgraded from (issue #404, ADR 0084). The two reads are independent, so
          *     they're fanned out concurrently rather than run one after the other. An
          *     unknown room, or one with neither event, reads as all-`null` (200), not a
@@ -1331,10 +1478,16 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Add `user_id` to this account's ignore list. */
+        /**
+         * Ignore a user
+         * @description Add `user_id` to this account's ignore list.
+         */
         put: operations["ignore_user"];
         post?: never;
-        /** Remove `user_id` from this account's ignore list. */
+        /**
+         * Stop ignoring a user
+         * @description Remove `user_id` from this account's ignore list.
+         */
         delete: operations["unignore_user"];
         options?: never;
         head?: never;
@@ -1349,7 +1502,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read a Matrix user's profile (display name + avatar). `user_id` may be
+         * Get a user profile
+         * @description Read a Matrix user's profile (display name + avatar). `user_id` may be
          *     this account's own user id or any other user's.
          */
         get: operations["get_user_profile"];
@@ -1371,12 +1525,14 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Explicitly retry every pending UTD for an active account. The default startup
+         * Retry undecryptable events
+         * @description Explicitly retry every pending UTD for an active account. The default startup
          *     policy attempts each stored UTD once, then waits for fresh room-key arrivals;
          *     this endpoint is the authenticated operator escape hatch for rows whose keys
          *     are already in the crypto store or whose initial startup attempt predated key
          *     acquisition.
-         * @description The identity lock is held only for the active check and client lookup;
+         *
+         *     The identity lock is held only for the active check and client lookup;
          *     logout can proceed and cancels this retry. The HTTP cap is 10 minutes
          *     (a reverse proxy may cut it earlier). A cap or cancel returns 200 with
          *     partial counts and `timed_out=true`, not 504.
@@ -1396,18 +1552,21 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the account's currently-tracked verification flows (live, plus
+         * List verification flows
+         * @description List the account's currently-tracked verification flows (live, plus
          *     recently-terminal ones still within their grace window).
          */
         get: operations["list_flows"];
         put?: never;
         /**
-         * Start a SAS verification — against one of the account's own trusted devices
+         * Start a verification
+         * @description Start a SAS verification — against one of the account's own trusted devices
          *     (`device_id`, self-verification) or against another user's identity
          *     (`user_id`, cross-user verification; ADR 0040) — returning the new flow's
          *     `flow_id`. The exchange then proceeds asynchronously: watch `verification.*`
          *     frames over `/v1/ws`, or poll `GET …/verify/{flow_id}`.
-         * @description Trust-bearing; gated by the bearer-token auth layer like every `/v1/` route
+         *
+         *     Trust-bearing; gated by the bearer-token auth layer like every `/v1/` route
          *     (M7b, ADR 0029).
          */
         post: operations["start_verification"];
@@ -1425,7 +1584,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read one verification flow's replayable state — the endpoint a reconnecting
+         * Get a verification flow
+         * @description Read one verification flow's replayable state — the endpoint a reconnecting
          *     client reads to resume (current stage, target device, and the SAS
          *     emoji/decimals once they're available).
          */
@@ -1448,7 +1608,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal
+         * Cancel a verification
+         * @description Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal
          *     flow succeeds. Trust-bearing; gated by the bearer-token auth layer (M7b).
          */
         post: operations["cancel"];
@@ -1468,7 +1629,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Confirm that the SAS matches, sending this side's MAC. Returns `204` once the
+         * Confirm a verification
+         * @description Confirm that the SAS matches, sending this side's MAC. Returns `204` once the
          *     confirm is sent; completion (`verification.done`) arrives asynchronously.
          *     Idempotent. Trust-bearing; gated by the bearer-token auth layer (M7b).
          */
@@ -1487,14 +1649,16 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read one namespace of per-device state: the last-write-wins **merged view
+         * Get device state
+         * @description Read one namespace of per-device state: the last-write-wins **merged view
          *     across all the account's devices** (per key, the newest write wins; deleted
          *     keys are absent). A namespace never written is an empty map, not a `404`.
          *     The `device_id` names the calling device; the merge is account-wide.
          */
         get: operations["get_device_state"];
         /**
-         * Write per-device state: a **merge-upsert** of the supplied entries under the
+         * Update device state
+         * @description Write per-device state: a **merge-upsert** of the supplied entries under the
          *     calling device. Only the keys present are touched; a `null` value deletes
          *     the key (a tombstone, so the deletion wins the cross-device merge).
          *     Last-write-wins on the server clock — the returned `updated_at` is the
@@ -1517,7 +1681,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List pending room invites across accounts, newest first. */
+        /**
+         * List invites
+         * @description List pending room invites across accounts, newest first.
+         */
         get: operations["list_invites"];
         put?: never;
         post?: never;
@@ -1537,8 +1704,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Start binding a new sign-in identity to this instance's owner.
-         * @description Returns a `url` to open in a browser. Signing in there with the provider
+         * Start an identity bind
+         * @description Start binding a new sign-in identity to this instance's owner.
+         *
+         *     Returns a `url` to open in a browser. Signing in there with the provider
          *     binds that identity; poll the bind by its `id` to learn when. The bind
          *     lapses after ten minutes.
          *
@@ -1561,8 +1730,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read where an identity bind stands: `pending`, `completed` or `expired`.
-         * @description A bind that did not complete is removed once it lapses, so a `404` for an
+         * Get an identity bind
+         * @description Read where an identity bind stands: `pending`, `completed` or `expired`.
+         *
+         *     A bind that did not complete is removed once it lapses, so a `404` for an
          *     id this server issued means the same as `expired`. A completed bind stays
          *     readable for a day after that, so a client that polls late still learns it
          *     succeeded.
@@ -1584,8 +1755,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the upstream sign-in identities bound to this instance's owner.
-         * @description Each carries `current`, set on the identity the calling session signed in
+         * List bound identities
+         * @description List the upstream sign-in identities bound to this instance's owner.
+         *
+         *     Each carries `current`, set on the identity the calling session signed in
          *     with, and `sign_in_available`, false when its provider is switched off and
          *     the identity therefore cannot produce a session.
          */
@@ -1609,8 +1782,10 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Unbind a sign-in identity and end every session it was used to start.
-         * @description Axon forgets the identity: its access tokens are revoked and its refresh
+         * Unbind an identity
+         * @description Unbind a sign-in identity and end every session it was used to start.
+         *
+         *     Axon forgets the identity: its access tokens are revoked and its refresh
          *     tokens deleted, atomically. So are the non-expiring tokens its sessions
          *     minted through this API, and any those minted in turn; a token minted from
          *     the command line or by another identity's session is not affected. This does **not** revoke the upstream
@@ -1635,8 +1810,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List this instance's bearer tokens, without their secrets.
-         * @description Revoked and expired tokens are included, so an entry the owner does not
+         * List tokens
+         * @description List this instance's bearer tokens, without their secrets.
+         *
+         *     Revoked and expired tokens are included, so an entry the owner does not
          *     recognize stays visible after it stops working. The tokens that still work
          *     come first, then the rest, newest first within each; at most 500 are
          *     returned, which only ever drops the oldest dead ones. `current` marks the
@@ -1645,8 +1822,10 @@ export interface paths {
         get: operations["list_tokens"];
         put?: never;
         /**
-         * Mint a bearer token that never expires.
-         * @description The response is the only time the token's secret is available: Axon keeps
+         * Mint a token
+         * @description Mint a bearer token that never expires.
+         *
+         *     The response is the only time the token's secret is available: Axon keeps
          *     its hash and cannot show it again. It is sent with `Cache-Control:
          *     no-store`.
          *
@@ -1673,8 +1852,10 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Revoke a token. It stops working at once and stays in the list.
-         * @description Revoking a sign-in session's access token also ends the session's ability
+         * Revoke a token
+         * @description Revoke a token. It stops working at once and stays in the list.
+         *
+         *     Revoking a sign-in session's access token also ends the session's ability
          *     to renew itself. Axon cannot tell one session of a client from another,
          *     so this signs out every session that client holds for that identity,
          *     the caller's included if it is one of them. Access tokens those other
@@ -1704,8 +1885,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Proxy an `mxc://` download through the account's homeserver connection.
-         * @description The `server_name` and `media_id` path segments form the `mxc://` URI that
+         * Download media
+         * @description Proxy an `mxc://` download through the account's homeserver connection.
+         *
+         *     The `server_name` and `media_id` path segments form the `mxc://` URI that
          *     was embedded in a Matrix event's media descriptor, member avatar, or
          *     MSC4027 custom reaction key.
          *     The response body is the raw media bytes, streamed from the on-disk cache
@@ -1728,9 +1911,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Proxy a homeserver-generated thumbnail of an `mxc://` object through the
+         * Download a media thumbnail
+         * @description Proxy a homeserver-generated thumbnail of an `mxc://` object through the
          *     account's homeserver connection.
-         * @description Shares [`get_media`]'s event lookup (via [`resolve_media_content`]) and
+         *
+         *     Shares [`get_media`]'s event lookup (via [`resolve_media_content`]) and
          *     conditional-GET/range-serving machinery, but resolves a resized variant
          *     via [`MediaProxy::get_thumbnail`] instead of the full original, and
          *     corrects `Content-Type` by sniffing the returned bytes (see
@@ -1757,6 +1942,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Request an Apple sign-in challenge */
         post: operations["challenge"];
         delete?: never;
         options?: never;
@@ -1773,6 +1959,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Exchange an Apple identity token */
         post: operations["token"];
         delete?: never;
         options?: never;
@@ -1788,8 +1975,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /v1/oauth/providers`: which sign-in providers this instance offers.
-         * @description A client cannot know this by configuration. Which providers exist is a
+         * List sign-in providers
+         * @description `GET /v1/oauth/providers`: which sign-in providers this instance offers.
+         *
+         *     A client cannot know this by configuration. Which providers exist is a
          *     property of the *server*, and a client that is distributed as a binary —
          *     the desktop and mobile shells of ADR 0102 — is pointed at a server it has
          *     never seen and cannot have been built against. Baking the list in at build
@@ -1823,10 +2012,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Query callback adapter; both methods share the same validation and completion. */
+        /**
+         * Complete a sign-in (redirect)
+         * @description Query callback adapter; both methods share the same validation and completion.
+         */
         get: operations["callback_get"];
         put?: never;
-        /** Complete either GET or bounded form POST through the same validated flow. */
+        /**
+         * Complete a sign-in (form post)
+         * @description Complete either GET or bounded form POST through the same validated flow.
+         */
         post: operations["callback"];
         delete?: never;
         options?: never;
@@ -1842,13 +2037,15 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read one instance preference. An allowlisted key that has never been
+         * Get a preference
+         * @description Read one instance preference. An allowlisted key that has never been
          *     written is a `404` so a client can tell "unset" from an empty value
          *     (ADR 0103's one-shot upload of local `spaceOrder`).
          */
         get: operations["get_preference"];
         /**
-         * Write one instance preference. Last-write-wins on the whole value. A
+         * Set a preference
+         * @description Write one instance preference. Last-write-wins on the whole value. A
          *     successful write fans out `preferences.changed` carrying this `device_id`.
          */
         put: operations["put_preference"];
@@ -1868,8 +2065,10 @@ export interface paths {
         };
         get?: never;
         /**
-         * Register or re-home a device token.
-         * @description Upsert on `(provider, token)`. The same session updates disclosure,
+         * Register a push token
+         * @description Register or re-home a device token.
+         *
+         *     Upsert on `(provider, token)`. The same session updates disclosure,
          *     environment, and the access token that last wrote the row. A different
          *     session becomes the owner and keeps the same id. The response does not
          *     include the token.
@@ -1893,8 +2092,10 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Delete the registration when this session owns it.
-         * @description An unknown id, or another session's id, is also `204`. The route is
+         * Delete a push registration
+         * @description Delete the registration when this session owns it.
+         *
+         *     An unknown id, or another session's id, is also `204`. The route is
          *     idempotent and does not reveal whether some other device has that id.
          */
         delete: operations["delete_registration"];
@@ -1910,7 +2111,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List rooms across accounts, most-recent-activity first. */
+        /**
+         * List rooms
+         * @description List rooms across accounts, most-recent-activity first.
+         */
         get: operations["list_rooms"];
         put?: never;
         post?: never;
@@ -1928,11 +2132,13 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Search across the index, BM25-ranked when a full-text query is present,
+         * Search messages
+         * @description Search across the index, BM25-ranked when a full-text query is present,
          *     or timestamp-ordered when `sort=newest` or `sort=oldest`, then paginated.
          *     Keep the query filters and sort unchanged while following cursors.
          *     Changing the sort requires starting again without a cursor.
-         * @description `503` when search is disabled (`search.enabled = false`). A missing/empty `q`
+         *
+         *     `503` when search is disabled (`search.enabled = false`). A missing/empty `q`
          *     is allowed only with at least one narrowing filter (`account_id`, `room_id`,
          *     `sender`, `from`, or `to`); an unbounded empty query or malformed `cursor` is
          *     a `400`. Results are the resolved read-API event view (latest edited body,
@@ -1955,7 +2161,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Report backfill status: the disk-space valve state (live free space, whether
+         * Get backfill status
+         * @description Report backfill status: the disk-space valve state (live free space, whether
          *     paused) plus per-account backfill progress; per-account sync-service status;
          *     the running build's identity; whether the management API is served; and
          *     which push providers loaded a key.

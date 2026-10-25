@@ -18,6 +18,8 @@ use crate::extract::{Json, Path};
 use crate::response::{ApiError, ApiResponse};
 use crate::verification::VerificationService;
 
+/// Start a verification
+///
 /// Start a SAS verification — against one of the account's own trusted devices
 /// (`device_id`, self-verification) or against another user's identity
 /// (`user_id`, cross-user verification; ADR 0040) — returning the new flow's
@@ -63,6 +65,8 @@ pub async fn start_verification(
     Ok(ApiResponse::new(StartVerifyResponse { flow_id }))
 }
 
+/// List verification flows
+///
 /// List the account's currently-tracked verification flows (live, plus
 /// recently-terminal ones still within their grace window).
 #[utoipa::path(
@@ -85,6 +89,8 @@ pub async fn list_flows(
     ))
 }
 
+/// Get a verification flow
+///
 /// Read one verification flow's replayable state — the endpoint a reconnecting
 /// client reads to resume (current stage, target device, and the SAS
 /// emoji/decimals once they're available).
@@ -109,6 +115,8 @@ pub async fn get_flow(
     Ok(ApiResponse::new(FlowDto::from(flow)))
 }
 
+/// Confirm a verification
+///
 /// Confirm that the SAS matches, sending this side's MAC. Returns `204` once the
 /// confirm is sent; completion (`verification.done`) arrives asynchronously.
 /// Idempotent. Trust-bearing; gated by the bearer-token auth layer (M7b).
@@ -135,6 +143,8 @@ pub async fn confirm(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Cancel a verification
+///
 /// Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal
 /// flow succeeds. Trust-bearing; gated by the bearer-token auth layer (M7b).
 #[utoipa::path(

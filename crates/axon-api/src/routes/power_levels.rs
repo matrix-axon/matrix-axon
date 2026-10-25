@@ -23,6 +23,8 @@ use crate::extract::{Json, Path};
 use crate::response::{ApiError, ApiResponse};
 use crate::sender::PowerLevelsSender;
 
+/// Set power levels
+///
 /// Apply a power-level change: role thresholds and/or per-user levels,
 /// merged into one `m.room.power_levels` write.
 #[utoipa::path(
@@ -75,6 +77,8 @@ pub async fn set_power_levels(
     }
 }
 
+/// Get power levels
+///
 /// Read this room's fully resolved power levels (defaults filled in).
 #[utoipa::path(
     get,

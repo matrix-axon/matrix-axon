@@ -33,6 +33,8 @@ pub struct RoomsQuery {
     pub account_id: Option<Uuid>,
 }
 
+/// List rooms
+///
 /// List rooms across accounts, most-recent-activity first.
 #[utoipa::path(
     get,
@@ -67,6 +69,8 @@ pub struct TimelineQuery {
     pub at_ts: Option<i64>,
 }
 
+/// Get a room timeline
+///
 /// Read a room's timeline, newest first, with cursor pagination.
 ///
 /// An unknown `account_id`/`room_id` yields an empty page (200), not a 404 — an
@@ -123,6 +127,8 @@ pub async fn room_timeline(
     }))
 }
 
+/// List room members
+///
 /// List the current members of a room — the resolved `m.room.member` state,
 /// one entry per user. Useful for seeding a display-name map without requiring
 /// membership events to appear in the loaded timeline. An unknown
@@ -237,6 +243,8 @@ mod tests {
     }
 }
 
+/// List threads
+///
 /// List the threads in a room (M8): one summary per distinct `m.thread` root,
 /// most-recently-active first, each with its reply count and latest reply. The
 /// root events themselves are read via the single-event endpoint; a thread's
@@ -277,6 +285,8 @@ pub struct TimelineCursorQuery {
     pub limit: Option<i64>,
 }
 
+/// Get a thread timeline
+///
 /// Read a thread's timeline (M8): the `m.thread` members whose root is
 /// `root_id`, newest first, with the same cursor pagination as the room
 /// timeline. The thread root itself is not included (fetch it via the
@@ -327,6 +337,8 @@ pub async fn thread_timeline(
     }))
 }
 
+/// List a space's children
+///
 /// List a space's children (`m.space.child`, MSC1772-ordered: `order` string
 /// ascending, absent sorts last, then `origin_ts`, then `room_id`), each
 /// enriched with the child room's own cached name/avatar/room_type where Axon
@@ -357,6 +369,8 @@ pub async fn space_children(
     ))
 }
 
+/// List a room's parent spaces
+///
 /// List the spaces a room belongs to (`m.space.parent`) — the reverse lookup
 /// of [`space_children`]. An unknown `account_id`/`room_id`, or a room with no
 /// parents, yields an empty list (200), not a 404. Same row cap as
@@ -383,6 +397,8 @@ pub async fn space_parents(
     ))
 }
 
+/// List pinned messages
+///
 /// List the room's currently pinned messages (`m.room.pinned_events`),
 /// resolved and hydrated exactly like any other timeline read (redaction
 /// masking, edit collapse, reaction tally) rather than a raw event-id list
@@ -451,6 +467,8 @@ async fn singleton_state_field(
         .and_then(|content| str_field(&content, field)))
 }
 
+/// Get room info
+///
 /// Bundle of small "what kind of room is this" reads: join rule, history
 /// visibility, guest access, and encryption algorithm (issue #404, ADR 0084).
 /// Each is an independent singleton `room_state` lookup — fanned out
@@ -526,6 +544,8 @@ pub async fn room_info(
     }))
 }
 
+/// Get room upgrade links
+///
 /// Where a tombstoned room's replacement lives, and/or where this room was
 /// upgraded from (issue #404, ADR 0084). The two reads are independent, so
 /// they're fanned out concurrently rather than run one after the other. An

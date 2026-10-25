@@ -19,6 +19,8 @@ use crate::response::{ApiError, ApiResponse};
 use crate::state::ManagementConfig;
 use crate::sync_status::SyncStatusProvider;
 
+/// Get backfill status
+///
 /// Report backfill status: the disk-space valve state (live free space, whether
 /// paused) plus per-account backfill progress; per-account sync-service status;
 /// the running build's identity; whether the management API is served; and

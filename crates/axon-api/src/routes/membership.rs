@@ -29,6 +29,8 @@ use crate::extract::{Json, Path};
 use crate::response::{ApiError, ApiResponse};
 use crate::sender::{LeaveOutcome, MembershipSender};
 
+/// Leave a room
+///
 /// Leave this room.
 #[utoipa::path(
     post,
@@ -114,6 +116,8 @@ pub async fn leave_room(
     }
 }
 
+/// Forget a room
+///
 /// Forget a left or banned-from room.
 #[utoipa::path(
     post,
@@ -160,6 +164,8 @@ pub async fn forget_room(
     }
 }
 
+/// Invite a user
+///
 /// Invite a user to this room.
 #[utoipa::path(
     post,
@@ -210,6 +216,8 @@ pub async fn invite_user(
     }
 }
 
+/// Kick a user
+///
 /// Kick a user from this room, optionally with a reason.
 #[utoipa::path(
     post,
@@ -263,6 +271,8 @@ pub async fn kick_user(
     }
 }
 
+/// Ban a user
+///
 /// Ban a user from this room, optionally with a reason.
 #[utoipa::path(
     post,
@@ -316,6 +326,8 @@ pub async fn ban_user(
     }
 }
 
+/// Unban a user
+///
 /// Unban a user from this room, optionally with a reason.
 #[utoipa::path(
     post,

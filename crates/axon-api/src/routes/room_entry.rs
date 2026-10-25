@@ -24,6 +24,8 @@ use crate::extract::{Json, Path};
 use crate::response::{ApiError, ApiResponse};
 use crate::sender::RoomEntrySender;
 
+/// Join a room
+///
 /// Join a room by id or alias.
 #[utoipa::path(
     post,
@@ -74,6 +76,8 @@ pub async fn join_room(
     }
 }
 
+/// Knock on a room
+///
 /// Knock on a room, optionally with a reason.
 #[utoipa::path(
     post,
@@ -129,6 +133,8 @@ pub async fn knock_room(
     }
 }
 
+/// Create a direct message
+///
 /// Create a DM with another user.
 ///
 /// **Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,
@@ -184,6 +190,8 @@ pub async fn create_dm(
     }
 }
 
+/// Create a room
+///
 /// Create a new room.
 ///
 /// **Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,

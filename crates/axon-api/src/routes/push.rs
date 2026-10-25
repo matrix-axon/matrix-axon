@@ -46,6 +46,8 @@ fn unacceptable_token(token: &str) -> Option<&'static str> {
 /// quotes is about twice that, plus the other fields.
 pub(crate) const MAX_BODY_BYTES: usize = 16 * 1024;
 
+/// Register a push token
+///
 /// Register or re-home a device token.
 ///
 /// Upsert on `(provider, token)`. The same session updates disclosure,
@@ -157,6 +159,8 @@ pub async fn put_registration(
     }))
 }
 
+/// Delete a push registration
+///
 /// Delete the registration when this session owns it.
 ///
 /// An unknown id, or another session's id, is also `204`. The route is

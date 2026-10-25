@@ -25,6 +25,8 @@ pub struct DevicesQuery {
     pub user_id: Option<String>,
 }
 
+/// List devices
+///
 /// List a Matrix user's devices — the account's own by default, or an
 /// arbitrary user via `?user_id=`. Reads the SDK's local crypto-store cache
 /// on every call (kept current by the account's background sync, not by a

@@ -64,6 +64,8 @@ pub struct CustomEmojiDto {
     pub info: Option<StickerInfoDto>,
 }
 
+/// List custom emoji packs
+///
 /// List custom emoji available from the current room, canonical ancestor spaces, and personal pack.
 /// Supports `m.room.image_pack`, legacy `im.ponies.room_emotes`, and personal
 /// `im.ponies.user_emotes`. Stable room tuples supersede legacy tuples with
