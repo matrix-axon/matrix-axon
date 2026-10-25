@@ -129,6 +129,12 @@ impl App {
                 Mode::DateJump => self.handle_date_jump_key(key).await,
             }
         }
+        // A prompt that is no longer on this room must not eat the next paste.
+        if !matches!(self.mode, Mode::Popup(PopupKind::RoomInfo))
+            || self.room_info_for_selected().is_none()
+        {
+            self.end_member_filter_prompt();
+        }
         self.should_quit
     }
 
@@ -175,9 +181,15 @@ impl App {
     }
 
     async fn handle_popup_key(&mut self, key: KeyEvent, kind: PopupKind) {
+        if kind == PopupKind::RoomInfo && self.handle_room_info_filter_key(key) {
+            return;
+        }
         if self.shortcuts.clear_input.matches(key) {
             let was_search_help = kind == PopupKind::CommandResponse
                 && self.pending_command_response.as_deref() == Some(SEARCH_HELP_TEXT);
+            if kind == PopupKind::RoomInfo {
+                self.clear_member_filter();
+            }
             if kind == PopupKind::MediaPreview {
                 self.mode = Mode::MessageList;
                 // Signal draw() to clear the former popup area.  Sixel/iTerm2
@@ -209,6 +221,57 @@ impl App {
         } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
             self.popup_scroll = self.popup_scroll.saturating_add(8);
         }
+    }
+
+    /// Member filter inside `/whereami`. Returns true when the key was consumed.
+    /// Scroll keys, including a letter bound to page up or page down, return
+    /// false so the popup handler keeps moving `popup_scroll`.
+    fn handle_room_info_filter_key(&mut self, key: KeyEvent) -> bool {
+        // The cached room is not the one on screen. Do not swallow the key.
+        if self.room_info_for_selected().is_none() {
+            self.end_member_filter_prompt();
+            return false;
+        }
+        let editing = self.member_filter_is_editing();
+        let active = self
+            .room_info_for_selected()
+            .is_some_and(|state| !state.member_filter.is_empty());
+        if editing {
+            if self.shortcuts.submit.matches(key) {
+                self.finish_member_filter_edit();
+                return true;
+            }
+            if self.shortcuts.backspace.matches(key) {
+                self.pop_member_filter_char();
+                return true;
+            }
+            if self.room_info_scroll_key(key) {
+                return false;
+            }
+            if let KeyCode::Char(ch) = key.code {
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                    // A plain letter bound to `find` still has to be typeable.
+                    self.push_member_filter_char(ch);
+                    return true;
+                }
+            }
+        } else if self.shortcuts.find.matches(key) {
+            return self.begin_member_filter();
+        }
+        if active && self.shortcuts.clear_input.matches(key) {
+            self.clear_member_filter();
+            return true;
+        }
+        false
+    }
+
+    /// Keys that scroll the room-info popup, including configured page bindings.
+    fn room_info_scroll_key(&self, key: KeyEvent) -> bool {
+        matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+        ) || self.shortcuts.message_page_up.matches(key)
+            || self.shortcuts.message_page_down.matches(key)
     }
 
     async fn handle_unread_threads_popup_key(&mut self, key: KeyEvent) {

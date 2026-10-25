@@ -76,7 +76,7 @@ pub(crate) struct FrameState {
 /// which is the only reason the unclamped value a key handler can leave behind
 /// is never painted.
 pub(crate) struct PopupView {
-    pub(crate) title: &'static str,
+    pub(crate) title: String,
     pub(crate) area: Rect,
     pub(crate) lines: Vec<Line<'static>>,
     /// Rows of [`Self::lines`] visible at once: `area` less its borders.

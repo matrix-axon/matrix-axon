@@ -10,7 +10,7 @@ use tokio::task::AbortHandle;
 use unicode_width::UnicodeWidthChar;
 
 use super::render::format_time;
-use super::{App, RoomKey};
+use super::{App, Mode, PopupKind, RoomKey};
 use crate::api::{
     ApiError, AxonClient, MemberDto, MetadataSnapshot, RoomCreationContent, RoomDto, RoomInfoDto,
     RoomJoinRulesContent, RoomMetadataDto, RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
@@ -19,6 +19,10 @@ use crate::config::{ColorScheme, TimeFormat};
 
 /// The four reads behind one `/whereami`: metadata, counts, upgrade, members.
 const ROOM_INFO_READS: u8 = 4;
+
+/// A pasted Matrix ID or display name fits. Anything longer cannot be a
+/// substring of a field this short, and a huge paste must not be stored.
+const MEMBER_FILTER_MAX_CHARS: usize = 1024;
 
 /// One read's last good value, kept when a later refresh fails so the popup
 /// does not go blank over a transient error.
@@ -81,6 +85,11 @@ pub(crate) struct RoomInfoState {
     /// Member section rendered when a read settles. The frame wraps these
     /// lines; it does not sort or format the roster again.
     pub(crate) member_lines: Vec<String>,
+    /// Local substring filter over loaded members. Empty shows the full list.
+    /// Kept across a same-room refresh so a later poll does not drop it.
+    pub(crate) member_filter: String,
+    /// The filter prompt is taking keystrokes. Scroll keys still move the popup.
+    pub(crate) member_filter_editing: bool,
 }
 
 /// Room information for the one room `/whereami` last showed. Holding a single
@@ -162,6 +171,8 @@ impl App {
                     upgrade: Part::default(),
                     members: Part::default(),
                     member_lines: Vec::new(),
+                    member_filter: String::new(),
+                    member_filter_editing: false,
                 });
             }
         }
@@ -231,6 +242,153 @@ impl App {
             RoomInfoPart::Members(result) => state.members.settle(result),
         }
         store_member_lines(state);
+    }
+
+    fn selected_room_key(&self) -> Option<RoomKey> {
+        self.selected_room().map(RoomKey::from)
+    }
+
+    /// Room information for the room on screen, when it is the cached room.
+    pub(crate) fn room_info_for_selected(&self) -> Option<&RoomInfoState> {
+        let key = self.selected_room_key()?;
+        self.room_info
+            .state
+            .as_ref()
+            .filter(|state| state.key == key)
+    }
+
+    fn room_info_for_selected_mut(&mut self) -> Option<&mut RoomInfoState> {
+        let key = self.selected_room_key()?;
+        self.room_info
+            .state
+            .as_mut()
+            .filter(|state| state.key == key)
+    }
+
+    /// The prompt is only live inside the room-info popup for the selected room.
+    fn member_filter_prompt_is_live(&self) -> bool {
+        matches!(self.mode, Mode::Popup(PopupKind::RoomInfo)) && self.member_filter_is_editing()
+    }
+
+    /// Stop taking keystrokes. The query stays, so the list stays narrowed.
+    pub(crate) fn end_member_filter_prompt(&mut self) {
+        if let Some(state) = self.room_info.state.as_mut() {
+            state.member_filter_editing = false;
+        }
+    }
+
+    /// Run `f` only while the prompt is on screen for the selected room.
+    /// Any other situation clears a leftover editing flag and returns `None`.
+    fn with_live_member_filter<T>(&mut self, f: impl FnOnce(&mut RoomInfoState) -> T) -> Option<T> {
+        if !self.member_filter_prompt_is_live() {
+            self.end_member_filter_prompt();
+            return None;
+        }
+        let state = self.room_info_for_selected_mut()?;
+        Some(f(state))
+    }
+
+    /// Open the member filter prompt. Returns false when this popup is not
+    /// showing the selected room, so the key is not swallowed.
+    pub(crate) fn begin_member_filter(&mut self) -> bool {
+        if !matches!(self.mode, Mode::Popup(PopupKind::RoomInfo)) {
+            return false;
+        }
+        let Some(state) = self.room_info_for_selected_mut() else {
+            self.end_member_filter_prompt();
+            return false;
+        };
+        state.member_filter_editing = true;
+        true
+    }
+
+    pub(crate) fn member_filter_is_editing(&self) -> bool {
+        self.room_info_for_selected()
+            .is_some_and(|state| state.member_filter_editing)
+    }
+
+    pub(crate) fn push_member_filter_char(&mut self, ch: char) {
+        let changed = self.with_live_member_filter(|state| {
+            let before = state.member_filter.len();
+            append_member_filter(state, std::iter::once(ch));
+            state.member_filter.len() != before
+        });
+        if changed == Some(true) {
+            self.reveal_room_info_members = true;
+        }
+    }
+
+    pub(crate) fn pop_member_filter_char(&mut self) {
+        let changed = self.with_live_member_filter(|state| {
+            let before = state.member_filter.len();
+            state.member_filter.pop();
+            if state.member_filter.len() != before {
+                store_member_lines(state);
+                true
+            } else {
+                false
+            }
+        });
+        if changed == Some(true) {
+            self.reveal_room_info_members = true;
+        }
+    }
+
+    /// Append pasted text while the room-info prompt is open.
+    /// Returns false when it is not, so the caller can try another buffer.
+    pub(crate) fn paste_member_filter(&mut self, text: &str) -> bool {
+        let changed = self.with_live_member_filter(|state| {
+            let before = state.member_filter.len();
+            append_member_filter(state, text.chars());
+            state.member_filter.len() != before
+        });
+        if changed == Some(true) {
+            self.reveal_room_info_members = true;
+        }
+        changed.is_some()
+    }
+
+    /// Leave the prompt. A query that is only whitespace is cleared.
+    /// A real query stays, including its surrounding spaces.
+    pub(crate) fn finish_member_filter_edit(&mut self) {
+        let reveal = {
+            let Some(state) = self.room_info_for_selected_mut() else {
+                return;
+            };
+            if !state.member_filter_editing {
+                return;
+            }
+            state.member_filter_editing = false;
+            if state.member_filter.trim().is_empty() {
+                state.member_filter.clear();
+                store_member_lines(state);
+                true
+            } else {
+                false
+            }
+        };
+        if reveal {
+            self.reveal_room_info_members = true;
+        }
+    }
+
+    /// Drop the filter and show every loaded member again.
+    pub(crate) fn clear_member_filter(&mut self) {
+        let cleared = {
+            let Some(state) = self.room_info_for_selected_mut() else {
+                return;
+            };
+            if state.member_filter.is_empty() && !state.member_filter_editing {
+                return;
+            }
+            state.member_filter.clear();
+            state.member_filter_editing = false;
+            store_member_lines(state);
+            true
+        };
+        if cleared {
+            self.reveal_room_info_members = true;
+        }
     }
 
     pub(crate) fn prune_room_info(&mut self, key: &RoomKey) {
@@ -797,6 +955,22 @@ fn store_member_lines(state: &mut RoomInfoState) {
     state.member_lines = lines;
 }
 
+/// Keep control characters out of the prompt and stop at the cap.
+fn append_member_filter(state: &mut RoomInfoState, chars: impl IntoIterator<Item = char>) {
+    let mut count = state.member_filter.chars().count();
+    for ch in chars {
+        if ch.is_control() {
+            continue;
+        }
+        if count >= MEMBER_FILTER_MAX_CHARS {
+            break;
+        }
+        state.member_filter.push(ch);
+        count += 1;
+    }
+    store_member_lines(state);
+}
+
 /// The `/members` section. Every loaded row is rendered; the popup scrolls.
 /// The heading never calls the list complete: the projection is lazy, and a
 /// joined count larger than the list is the only proof of a gap.
@@ -809,6 +983,8 @@ fn member_list_lines(room: &RoomDto, state: Option<&RoomInfoState>) -> Vec<Strin
 }
 
 fn render_member_section(state: &RoomInfoState) -> Vec<String> {
+    let query = state.member_filter.trim();
+    let filtering = !query.is_empty();
     let state = Some(state);
     let members = view(state, |state| &state.members);
     let View::Loaded(members) = members else {
@@ -825,13 +1001,115 @@ fn render_member_section(state: &RoomInfoState) -> Vec<String> {
         View::Loaded(metadata) => Some(metadata),
         _ => None,
     };
+    let matched: Vec<&MemberDto> = if filtering {
+        members
+            .iter()
+            .filter(|member| member_matches(member, query))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut lines = vec![member_heading(joined, members.len())];
+    // An empty projection has nobody to match. "none loaded" is the whole story.
     if members.is_empty() {
         lines.push("  none loaded".to_owned());
         return lines;
     }
-    lines.extend(grouped_member_lines(members, metadata));
+    if filtering {
+        lines.push(member_match_line(matched.len(), members.len(), joined));
+    }
+    if filtering {
+        if matched.is_empty() {
+            lines.push("  none match".to_owned());
+            return lines;
+        }
+        lines.extend(grouped_member_lines(matched, metadata));
+        return lines;
+    }
+    lines.extend(grouped_member_lines(members.iter(), metadata));
     lines
+}
+
+/// `K of N loaded members match`, plus the partial-list warning only when the
+/// joined count proves the loaded roster is short.
+fn member_match_line(matches: usize, loaded: usize, joined: Option<i64>) -> String {
+    let loaded_count = i64::try_from(loaded).unwrap_or(i64::MAX);
+    match joined {
+        Some(joined) if joined > loaded_count => format!(
+            "{matches} of {loaded} loaded members match (room has more members than are loaded)"
+        ),
+        _ => format!("{matches} of {loaded} loaded members match"),
+    }
+}
+
+/// Case-insensitive substring of the display name or Matrix ID.
+/// A blank name is not the on-screen word "unknown", and power text is not a field.
+fn member_matches(member: &MemberDto, query: &str) -> bool {
+    let folded_query = fold_match_key(query);
+    if folded_query.is_empty() {
+        return false;
+    }
+    let name_matches = member
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .is_some_and(|name| fold_match_key(name).contains(&folded_query));
+    name_matches || fold_match_key(&member.user_id).contains(&folded_query)
+}
+
+/// Unicode lowercase, then Latin accents folded to their base letter, so
+/// "ärger" matches "Ärger" and "jose" matches "José".
+/// Combining marks produced by lowercase (Turkish İ) are dropped.
+fn fold_match_key(value: &str) -> String {
+    let mut folded = String::new();
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if is_combining_mark(ch) {
+            continue;
+        }
+        push_folded_letter(&mut folded, ch);
+    }
+    folded
+}
+
+fn is_combining_mark(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0300}'..='\u{036f}'
+            | '\u{1ab0}'..='\u{1aff}'
+            | '\u{1dc0}'..='\u{1dff}'
+            | '\u{20d0}'..='\u{20ff}'
+            | '\u{fe20}'..='\u{fe2f}'
+    )
+}
+
+fn push_folded_letter(out: &mut String, ch: char) {
+    match ch {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => out.push('a'),
+        'æ' => out.push_str("ae"),
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => out.push('c'),
+        'ď' | 'đ' | 'ð' => out.push('d'),
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => out.push('e'),
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => out.push('g'),
+        'ĥ' | 'ħ' => out.push('h'),
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => out.push('i'),
+        'ĵ' => out.push('j'),
+        'ķ' => out.push('k'),
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => out.push('l'),
+        'ñ' | 'ń' | 'ņ' | 'ň' | 'ŋ' => out.push('n'),
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ō' | 'ŏ' | 'ő' | 'ø' => out.push('o'),
+        'œ' => out.push_str("oe"),
+        'ŕ' | 'ŗ' | 'ř' => out.push('r'),
+        'ś' | 'ŝ' | 'ş' | 'š' | 'ș' => out.push('s'),
+        'ß' => out.push_str("ss"),
+        'ţ' | 'ť' | 'ŧ' | 'ț' => out.push('t'),
+        'þ' => out.push_str("th"),
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => out.push('u'),
+        'ŵ' => out.push('w'),
+        'ý' | 'ÿ' | 'ŷ' => out.push('y'),
+        'ź' | 'ż' | 'ž' => out.push('z'),
+        other => out.push(other),
+    }
 }
 
 fn member_heading(joined: Option<i64>, loaded: usize) -> String {
@@ -853,8 +1131,11 @@ const MEMBER_GROUPS: [(&str, &str); 4] = [
     ("leave", "Left"),
 ];
 
-fn grouped_member_lines(members: &[MemberDto], metadata: Option<&RoomMetadataDto>) -> Vec<String> {
-    let mut ordered: Vec<&MemberDto> = members.iter().collect();
+fn grouped_member_lines<'a>(
+    members: impl IntoIterator<Item = &'a MemberDto>,
+    metadata: Option<&RoomMetadataDto>,
+) -> Vec<String> {
+    let mut ordered: Vec<&MemberDto> = members.into_iter().collect();
     ordered.sort_by_cached_key(|member| (member_sort_name(member), member.user_id.clone()));
 
     let mut lines = Vec::new();
@@ -1134,7 +1415,10 @@ pub(crate) fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'s
 mod tests {
     use super::*;
     use crate::api::{RoomMemberCountsDto, RoomPredecessorContent};
-    use crate::config::TuiConfig;
+    use crate::app::{Mode, PopupKind};
+    use crate::config::{KeyBinding, TuiConfig};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -1199,6 +1483,8 @@ mod tests {
             },
             members: Part::default(),
             member_lines: Vec::new(),
+            member_filter: String::new(),
+            member_filter_editing: false,
         }
     }
 
@@ -2181,6 +2467,13 @@ mod tests {
         }
     }
 
+    fn room_info_with(members: Vec<MemberDto>, info: Option<RoomInfoDto>) -> RoomInfoState {
+        let mut state = with_members(members, info);
+        state.metadata.value = Some(full_metadata());
+        store_member_lines(&mut state);
+        state
+    }
+
     fn with_members(members: Vec<MemberDto>, info: Option<RoomInfoDto>) -> RoomInfoState {
         let mut state = loaded(None, info, None);
         state.members.value = Some(members);
@@ -2504,5 +2797,665 @@ mod tests {
         assert!(app.room_info.state.is_some());
         app.prune_room_info(&key());
         assert!(app.room_info.state.is_none());
+    }
+
+    fn filtered_lines(
+        members: Vec<MemberDto>,
+        info: Option<RoomInfoDto>,
+        query: &str,
+    ) -> Vec<String> {
+        let mut state = room_info_with(members, info);
+        state.member_filter = query.to_owned();
+        store_member_lines(&mut state);
+        member_list_lines(&room(), Some(&state))
+    }
+
+    #[test]
+    fn member_filter_matches_display_name_or_matrix_id() {
+        let members = vec![
+            listed_member("join", "@ada:example.com", Some("Ada Lovelace")),
+            listed_member("invite", "@bob:example.com", Some("Robert")),
+        ];
+        let by_name = filtered_lines(members.clone(), Some(counts(2)), "ada");
+        assert!(by_name.iter().any(|line| line.contains("Ada Lovelace")));
+        assert!(!by_name.iter().any(|line| line.contains("@bob")));
+        assert!(by_name.contains(&"1 of 2 loaded members match".to_owned()));
+        assert!(!by_name.iter().any(|line| line.contains("Invited")));
+
+        let by_id = filtered_lines(members, Some(counts(2)), "bob:example");
+        assert!(by_id.iter().any(|line| line.contains("@bob:example.com")));
+        assert!(!by_id.iter().any(|line| line.contains("Ada Lovelace")));
+    }
+
+    #[test]
+    fn member_filter_ignores_the_unknown_placeholder_and_power_text() {
+        let mut state = room_info_with(
+            vec![
+                listed_member("join", "@aaron:example.com", Some("   ")),
+                listed_member("join", "@admin:example.com", Some("Admin")),
+                listed_member("join", "@ada:example.com", Some("Ärger")),
+                listed_member("join", "@jose:example.com", Some("José")),
+            ],
+            Some(counts(4)),
+        );
+
+        state.member_filter = "unknown".to_owned();
+        store_member_lines(&mut state);
+        let unknown = member_list_lines(&room(), Some(&state));
+        assert!(!unknown.iter().any(|line| line.contains("@aaron")));
+        assert!(unknown
+            .iter()
+            .any(|line| line.contains("0 of 4 loaded members match")));
+
+        state.member_filter = "aaron".to_owned();
+        store_member_lines(&mut state);
+        assert!(member_list_lines(&room(), Some(&state))
+            .iter()
+            .any(|line| line.contains("@aaron:example.com")));
+
+        state.member_filter = "100".to_owned();
+        store_member_lines(&mut state);
+        let power = member_list_lines(&room(), Some(&state));
+        assert!(!power.iter().any(|line| line.contains("@admin")));
+        assert!(power.iter().any(|line| line.contains("none match")));
+
+        state.member_filter = "ärger".to_owned();
+        store_member_lines(&mut state);
+        assert!(member_list_lines(&room(), Some(&state))
+            .iter()
+            .any(|line| line.contains("@ada:example.com")));
+
+        state.member_filter = "jose".to_owned();
+        store_member_lines(&mut state);
+        let jose = member_list_lines(&room(), Some(&state));
+        assert!(jose.iter().any(|line| line.contains("@jose:example.com")));
+        assert!(!jose.iter().any(|line| line.contains("@ada")));
+
+        state.member_filter = "strasse".to_owned();
+        state.members.value = Some(vec![listed_member(
+            "join",
+            "@s:example.com",
+            Some("Straße"),
+        )]);
+        store_member_lines(&mut state);
+        assert!(member_list_lines(&room(), Some(&state))
+            .iter()
+            .any(|line| line.contains("@s:example.com")));
+    }
+
+    #[test]
+    fn member_filter_with_no_matches_leaves_the_rest_of_the_popup() {
+        let mut app = app();
+        let mut state = room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        );
+        state.member_filter = "zzz".to_owned();
+        store_member_lines(&mut state);
+        app.room_info.state = Some(state);
+
+        let lines = crate::ui::popup_room_info_lines(&app);
+        assert!(lines.iter().any(|line| line == "Name: Ops"));
+        assert!(lines.iter().any(|line| line == "Room version: 11"));
+        assert!(lines.contains(&"0 of 1 loaded members match".to_owned()));
+        assert!(lines.contains(&"  none match".to_owned()));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("@ada:example.com") && line.starts_with("    ")));
+    }
+
+    #[test]
+    fn member_filter_names_a_partial_roster_and_stays_quiet_without_a_joined_count() {
+        let members = vec![
+            listed_member("join", "@ada:example.com", Some("Ada")),
+            listed_member("join", "@bob:example.com", Some("Bob")),
+        ];
+        let partial = filtered_lines(members.clone(), Some(counts(412)), "ada");
+        assert_eq!(partial[0], "Members (2 loaded of 412 joined)");
+        assert_eq!(
+            partial[1],
+            "1 of 2 loaded members match (room has more members than are loaded)"
+        );
+
+        let unknown = filtered_lines(members, None, "ada");
+        assert_eq!(unknown[0], "Members (2 loaded; joined count unknown)");
+        assert_eq!(unknown[1], "1 of 2 loaded members match");
+        assert!(!unknown[1].contains("more members"));
+    }
+
+    #[test]
+    fn a_blank_member_filter_shows_the_full_list() {
+        let lines = filtered_lines(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+            "   ",
+        );
+        assert_eq!(lines[0], "Members (1 loaded)");
+        assert!(lines.iter().any(|line| line.contains("@ada")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("loaded members match")));
+    }
+
+    #[test]
+    fn same_room_member_refresh_keeps_and_reapplies_the_filter() {
+        let mut app = app();
+        let mut state = room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        );
+        state.generation = 1;
+        state.member_filter = "ada".to_owned();
+        state.member_filter_editing = true;
+        store_member_lines(&mut state);
+        app.room_info.state = Some(state);
+
+        app.apply_room_info_outcome(RoomInfoOutcome {
+            key: key(),
+            generation: 1,
+            part: RoomInfoPart::Members(Ok(vec![
+                listed_member("join", "@ada:example.com", Some("Ada")),
+                listed_member("join", "@zoe:example.com", Some("Zoe")),
+            ])),
+        });
+
+        let state = app.room_info.state.as_ref().unwrap();
+        assert_eq!(state.member_filter, "ada");
+        assert!(state.member_filter_editing);
+        let lines = member_list_lines(&room(), Some(state));
+        assert!(lines.contains(&"1 of 2 loaded members match".to_owned()));
+        assert!(lines.iter().any(|line| line.contains("@ada")));
+        assert!(!lines.iter().any(|line| line.contains("@zoe")));
+    }
+
+    #[test]
+    fn a_member_result_for_another_room_does_not_change_the_filter() {
+        let mut app = app();
+        let mut state = room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        );
+        state.generation = 1;
+        state.member_filter = "ada".to_owned();
+        store_member_lines(&mut state);
+        app.room_info.state = Some(state);
+        let mut other = key();
+        other.room_id = "!other:example.com".to_owned();
+
+        app.apply_room_info_outcome(RoomInfoOutcome {
+            key: other,
+            generation: 1,
+            part: RoomInfoPart::Members(Ok(vec![listed_member(
+                "join",
+                "@zoe:example.com",
+                Some("Zoe"),
+            )])),
+        });
+
+        let state = app.room_info.state.as_ref().unwrap();
+        assert_eq!(state.member_filter, "ada");
+        assert!(member_list_lines(&room(), Some(state))
+            .iter()
+            .any(|line| line.contains("@ada")));
+        assert!(!member_list_lines(&room(), Some(state))
+            .iter()
+            .any(|line| line.contains("@zoe")));
+    }
+
+    #[tokio::test]
+    async fn switching_the_cached_room_clears_the_member_filter() {
+        let mut app = app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.room_info.tx = Some(tx);
+        let mut state = room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        );
+        state.member_filter = "ada".to_owned();
+        state.member_filter_editing = true;
+        app.room_info.state = Some(state);
+        let mut other = key();
+        other.room_id = "!other:example.com".to_owned();
+
+        app.request_room_info(other.clone());
+
+        let fresh = app.room_info.state.as_ref().unwrap();
+        assert_eq!(fresh.key, other);
+        assert!(fresh.member_filter.is_empty());
+        assert!(!fresh.member_filter_editing);
+    }
+
+    fn ctrl(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    #[tokio::test]
+    async fn find_filters_members_and_esc_clears_before_it_closes() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![
+                listed_member("join", "@ada:example.com", Some("Ada")),
+                listed_member("join", "@bob:example.com", Some("Bob")),
+            ],
+            Some(counts(2)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.popup_scroll = 4;
+
+        app.handle_key(ctrl('f')).await;
+        assert!(app.member_filter_is_editing());
+        assert_eq!(app.popup_scroll, 4);
+
+        for ch in ['a', 'd', 'a'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()))
+                .await;
+        }
+        let lines = member_list_lines(&room(), app.room_info.state.as_ref());
+        assert!(lines.iter().any(|line| line.contains("@ada")));
+        assert!(!lines.iter().any(|line| line.contains("@bob")));
+        crate::ui::prepare(&mut app, Rect::new(0, 0, 120, 30));
+        let popup = app.frame.popup.as_ref().expect("room info popup");
+        let heading = popup
+            .lines
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .starts_with("Members (")
+            })
+            .expect("member heading");
+        assert!(
+            (app.popup_scroll..app.popup_scroll + popup.page_size).contains(&heading),
+            "typing should bring the member section on screen"
+        );
+        let at_members = app.popup_scroll;
+
+        app.handle_key(KeyEvent::from(KeyCode::Down)).await;
+        assert_eq!(app.popup_scroll, at_members + 1);
+        assert!(app.member_filter_is_editing());
+        app.handle_key(KeyEvent::from(KeyCode::PageDown)).await;
+        assert_eq!(app.popup_scroll, at_members + 9);
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+        assert!(!app.member_filter_is_editing());
+        assert_eq!(app.mode, Mode::Popup(PopupKind::RoomInfo));
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "ada");
+        app.handle_key(KeyEvent::from(KeyCode::Down)).await;
+        assert_eq!(app.popup_scroll, at_members + 10);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        assert_eq!(app.mode, Mode::Popup(PopupKind::RoomInfo));
+        let lines = member_list_lines(&room(), app.room_info.state.as_ref());
+        assert!(lines.iter().any(|line| line.contains("@bob")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("loaded members match")));
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .member_filter
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_empty_member_filter_prompt_closes_on_esc() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+
+        app.handle_key(ctrl('f')).await;
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(!app.member_filter_is_editing());
+    }
+
+    #[tokio::test]
+    async fn member_filter_follows_the_configured_find_binding() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.shortcuts.find = KeyBinding::from_spec("ctrl-g");
+
+        app.handle_key(ctrl('f')).await;
+        assert!(!app.member_filter_is_editing());
+
+        app.handle_key(ctrl('g')).await;
+        assert!(app.member_filter_is_editing());
+    }
+
+    #[tokio::test]
+    async fn a_letter_bound_to_find_can_still_be_typed_into_the_filter() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.shortcuts.find = KeyBinding::from_spec("x");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()))
+            .await;
+        assert!(app.member_filter_is_editing());
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .member_filter
+            .is_empty());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()))
+            .await;
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "x");
+    }
+
+    #[tokio::test]
+    async fn paste_fills_an_open_member_filter_and_leaves_the_composer_alone() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@bob:example.com", Some("Bob"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.input.buffer = "keep".to_owned();
+
+        app.handle_paste("Bob\n".to_owned());
+        assert_eq!(app.input.buffer, "keep");
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .member_filter
+            .is_empty());
+
+        app.handle_key(ctrl('f')).await;
+        app.handle_paste("Bo\nb".to_owned());
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "Bob");
+        assert_eq!(app.input.buffer, "keep");
+        assert!(member_list_lines(&room(), app.room_info.state.as_ref())
+            .iter()
+            .any(|line| line.contains("@bob")));
+
+        app.handle_paste("y".repeat(2_000));
+        assert_eq!(
+            app.room_info
+                .state
+                .as_ref()
+                .unwrap()
+                .member_filter
+                .chars()
+                .count(),
+            MEMBER_FILTER_MAX_CHARS
+        );
+    }
+
+    #[tokio::test]
+    async fn the_shortcuts_popup_does_not_open_the_member_filter() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::Shortcuts);
+
+        app.handle_key(ctrl('f')).await;
+
+        assert_eq!(app.mode, Mode::Popup(PopupKind::Shortcuts));
+        assert!(!app.member_filter_is_editing());
+    }
+
+    #[tokio::test]
+    async fn whitespace_around_a_member_filter_still_matches() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.handle_key(ctrl('f')).await;
+        for ch in [' ', 'a', 'd', 'a'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()))
+                .await;
+        }
+        assert!(member_list_lines(&room(), app.room_info.state.as_ref())
+            .iter()
+            .any(|line| line.contains("1 of 1 loaded members match")));
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, " ada");
+        assert!(!app.member_filter_is_editing());
+    }
+
+    #[test]
+    fn filtering_clamps_popup_scroll_and_leaves_a_fitting_offset() {
+        let members: Vec<_> = (0..30)
+            .map(|i| {
+                listed_member(
+                    "join",
+                    &format!("@p{i}:example.com"),
+                    Some(&format!("Person{i}")),
+                )
+            })
+            .collect();
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(members, Some(counts(30))));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let area = Rect::new(0, 0, 120, 30);
+
+        app.popup_scroll = 10_000;
+        crate::ui::prepare(&mut app, area);
+        let full_max = app.popup_scroll;
+        assert!(
+            full_max > 1,
+            "the unfiltered popup has to be able to scroll"
+        );
+
+        app.popup_scroll = 10_000;
+        app.room_info.state.as_mut().unwrap().member_filter = "Person0".to_owned();
+        store_member_lines(app.room_info.state.as_mut().unwrap());
+        crate::ui::prepare(&mut app, area);
+        let filtered_max = app.popup_scroll;
+        assert!(filtered_max < full_max);
+
+        app.popup_scroll = 1;
+        crate::ui::prepare(&mut app, area);
+        assert_eq!(app.popup_scroll, 1);
+
+        let title = app.frame.popup.as_ref().unwrap().title.clone();
+        assert!(title.starts_with("Room Info  filter: Person0"));
+    }
+
+    #[test]
+    fn a_long_member_filter_is_truncated_in_the_title_only() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let query = "a".repeat(400);
+        {
+            let state = app.room_info.state.as_mut().unwrap();
+            state.member_filter = query.clone();
+            state.member_filter_editing = true;
+            store_member_lines(state);
+        }
+        crate::ui::prepare(&mut app, Rect::new(0, 0, 120, 30));
+        let title = &app.frame.popup.as_ref().unwrap().title;
+        assert!(title.contains("..."));
+        assert!(!title.contains(&query));
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, query);
+    }
+
+    #[test]
+    fn an_empty_roster_does_not_claim_zero_matches() {
+        let mut state = room_info_with(Vec::new(), Some(counts(0)));
+        state.member_filter = "ada".to_owned();
+        store_member_lines(&mut state);
+        let lines = member_list_lines(&room(), Some(&state));
+        assert!(lines.iter().any(|line| line.contains("none loaded")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("loaded members match")));
+    }
+
+    #[test]
+    fn room_info_titles_fit_the_inner_width() {
+        use unicode_width::UnicodeWidthChar;
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        for (query, editing) in [
+            (String::new(), true),
+            ("a".repeat(80), true),
+            ("ada".to_owned(), false),
+        ] {
+            {
+                let state = app.room_info.state.as_mut().unwrap();
+                state.member_filter.clone_from(&query);
+                state.member_filter_editing = editing;
+            }
+            for width in [0, 1, 8, 24, 80] {
+                let title = crate::ui::room_info_popup_title(&app, width);
+                let columns: usize = title.chars().map(|ch| ch.width_cjk().unwrap_or(1)).sum();
+                assert!(
+                    columns <= width,
+                    "{title:?} is {columns} columns in a width of {width}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paste_outside_the_room_info_popup_reaches_the_composer() {
+        let mut app = app();
+        let mut state = room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        );
+        state.member_filter_editing = true;
+        app.room_info.state = Some(state);
+        app.mode = Mode::Compose;
+        app.input.buffer.clear();
+
+        app.handle_paste("hi".to_owned());
+
+        assert_eq!(app.input.buffer, "hi");
+        assert!(!app.member_filter_is_editing());
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .member_filter
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn reopening_whereami_does_not_resume_the_filter_prompt() {
+        let mut app = app();
+        let mut state = room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        );
+        state.member_filter = "ada".to_owned();
+        state.member_filter_editing = true;
+        app.room_info.state = Some(state);
+
+        app.handle_command(crate::command::Command::Whereami).await;
+
+        assert_eq!(app.mode, Mode::Popup(PopupKind::RoomInfo));
+        assert!(!app.member_filter_is_editing());
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "ada");
+    }
+
+    #[tokio::test]
+    async fn changing_rooms_while_the_popup_is_open_drops_the_prompt() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.room_info.state.as_mut().unwrap().member_filter_editing = true;
+        let mut other = room();
+        other.room_id = "!other:example.com".to_owned();
+        other.name = Some("Other".to_owned());
+        app.rooms.rooms.push(other);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+
+        assert!(!app.room_info.state.as_ref().unwrap().member_filter_editing);
+        app.handle_key(ctrl('f')).await;
+        assert!(!app.member_filter_is_editing());
+        assert_eq!(app.mode, Mode::Popup(PopupKind::RoomInfo));
+    }
+
+    #[tokio::test]
+    async fn a_configured_page_key_scrolls_while_the_filter_prompt_is_open() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.shortcuts.message_page_down = KeyBinding::from_spec("j");
+        app.handle_key(ctrl('f')).await;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.popup_scroll, 8);
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .member_filter
+            .is_empty());
+        assert!(app.member_filter_is_editing());
+    }
+
+    #[tokio::test]
+    async fn delete_does_not_bypass_the_backspace_shortcut() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.handle_key(ctrl('f')).await;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()))
+            .await;
+
+        app.handle_key(KeyEvent::from(KeyCode::Delete)).await;
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "a");
+
+        app.handle_key(KeyEvent::from(KeyCode::Backspace)).await;
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .member_filter
+            .is_empty());
     }
 }

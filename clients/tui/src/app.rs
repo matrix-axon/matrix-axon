@@ -780,6 +780,9 @@ pub(crate) struct App {
     pub(crate) connection_state: ConnectionState,
     pub(crate) mode: Mode,
     pub(crate) popup_scroll: usize,
+    /// The next room-info frame should bring the member heading into view.
+    /// Set when the user changes the filter, not when a refresh rewrites the list.
+    pub(crate) reveal_room_info_members: bool,
     pub(crate) help_selection: usize,
     pub(crate) last_search: Option<String>,
     pub(crate) last_jump_ts: Option<i64>,
@@ -1201,6 +1204,7 @@ impl App {
             connection_state: ConnectionState::Unknown,
             mode: Mode::Compose,
             popup_scroll: 0,
+            reveal_room_info_members: false,
             help_selection: 0,
             last_search: None,
             last_jump_ts: None,
@@ -1756,6 +1760,9 @@ impl App {
         if text.is_empty() {
             return;
         }
+        if self.paste_member_filter(&text) {
+            return;
+        }
         let accepts_free_text = matches!(
             self.mode,
             Mode::Compose
@@ -2096,6 +2103,8 @@ impl App {
             self.status = Status::Info("select a room before using /whereami".to_owned());
             return;
         };
+        // Reopening must not resume a prompt left over from the previous visit.
+        self.end_member_filter_prompt();
         self.request_room_info(key);
         self.open_popup(PopupKind::RoomInfo);
     }

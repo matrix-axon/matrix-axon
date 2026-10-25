@@ -12,7 +12,7 @@
 
 - Treat the entry line like a small readline-style prompt: visible cursor, editable text, Tab completion, familiar terminal shortcuts (`Ctrl-A`, `Ctrl-E`, `Ctrl-U`), and `Up`/`Down` navigation through timeline messages for quick editing.
 - Treat every multi-step TUI process as one uninterrupted interaction. From the first prompt until completion or cancellation, unrelated asynchronous updates must not replace its entry-line instructions, progress, validation errors, confirmation text, or user input. Background WebSocket, refresh, and timeline statuses may update their underlying state, but must defer visible entry-line status changes until the process ends; only outcomes belonging to the active process may advance its message.
-- The layout uses an explicit `Mode` state machine for Accounts (when multiple accounts are active), Room List, Message List, and Input. Ctrl-Tab cycles focus; the focused pane border is highlighted. In list modes, arrow keys navigate items, `/` enters a search sub-mode, and `n`/`N` move to adjacent matches after the search is committed. Editing, reacting, unreacting, search, and popup interactions each have explicit modes.
+- The layout uses an explicit `Mode` state machine for Accounts (when multiple accounts are active), Room List, Message List, and Input. Ctrl-Tab cycles focus; the focused pane border is highlighted. In list modes, arrow keys navigate items, the `find` shortcut (Ctrl-F by default) enters a search sub-mode, and `n`/`N` move to adjacent matches after the search is committed. Editing, reacting, unreacting, search, and popup interactions each have explicit modes.
 - Keep keyboard shortcuts configurable through the config layer. When adding a new shortcut: add a default key to `RawConfig::default_values()` and all related structs (`RawShortcuts`, `PartialRawShortcuts`, `Shortcuts`), wire it through `into_shortcuts()`, `merge()`, and `to_toml()`, add it to the `DEFAULT_CONFIG` constant, include it in `popup_shortcuts_lines()`, and write a test.
 - Keep slash commands discoverable through `/help`, `/?`, and Tab completion, including commands the TUI knows about but the current Axon API does not support yet. A text entry beginning with `//` sends a message beginning with a literal `/` instead of running a command, and this escape must remain documented in `/help`. `/help` and `/shortcuts` open popup overlays dismissed with `Esc`. `/shortcuts` does not need to document system-universal keyboard shortcuts like `enter` to send or `left-arrow` to move left.
 - Keep short slash-command responses in the entry box. When a completed response would exceed the configured entry-box height at the current terminal width, show the full response in a scrollable popup dismissed with `Esc`.
@@ -25,6 +25,14 @@
   Say when the joined count exceeds that list, and never present the list as complete (#659).
   Cap only that popup read. Timeline display-name seeding and space timeline reads of `/members` stay uncapped, so a large roster can still resolve sender names.
   Cache the rendered member lines when a read settles. A frame only wraps those lines to the terminal width.
+  `shortcuts.find` (Ctrl-F by default) filters that loaded list inside the popup.
+  The match is a case-insensitive substring of the display name or Matrix ID, with Latin accents folded to their base letter, and the section reports how many loaded members match.
+  Say that the room has more members than are loaded only when the joined count is larger than the loaded list.
+  Typing brings the member heading into view. Configured page up and page down still scroll while the prompt is open.
+  Esc clears an active filter before it closes the popup.
+  The prompt ends when the popup closes or the selected room changes, so a later paste reaches the composer.
+  A later refresh of the same room must keep the filter text and must not jump the scroll on its own.
+  Paste is accepted only while that prompt is open inside the room-info popup.
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.
 - Room titles follow ADR 0118: nonblank `name`, then `canonical_alias`, then the server's `display_name`, then room ID.
   Never derive room titles from `/members`; those reads still hydrate timeline sender names.
