@@ -82,7 +82,7 @@ describe('EventTime event permalink copy', () => {
     vi.useFakeTimers()
     const writeText = vi.fn().mockResolvedValue(undefined)
     vi.stubGlobal('navigator', { clipboard: { writeText } })
-    const { getByRole, getByText } = render(
+    const { getByRole, findByText } = render(
       <EventTime event={event()} touchHoldEnabled />,
     )
     const timestamp = getByRole('button', {
@@ -109,9 +109,56 @@ describe('EventTime event permalink copy', () => {
     })
     fireEvent.click(timestamp)
 
+    expect(await findByText('Text copied')).toBeTruthy()
     expect(writeText).toHaveBeenCalledOnce()
     expect(writeText).toHaveBeenCalledWith('hello')
-    expect(getByText('Text copied')).toBeTruthy()
+  })
+
+  it('defers the hold copy to release, where the gesture grants clipboard access', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole } = render(<EventTime event={event()} touchHoldEnabled />)
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    expect(writeText).not.toHaveBeenCalled()
+    fireEvent.pointerUp(timestamp, touch)
+    expect(writeText).toHaveBeenCalledOnce()
+  })
+
+  it('still copies when the browser cancels a completed hold', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole } = render(<EventTime event={event()} touchHoldEnabled />)
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    fireEvent.pointerCancel(timestamp, touch)
+    expect(writeText).toHaveBeenCalledWith('hello')
   })
 
   it('keeps the primary timestamp hold active through a second touch', async () => {

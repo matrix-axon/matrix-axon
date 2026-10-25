@@ -1045,7 +1045,11 @@ export function createTimelineStore(
         '/v1/accounts/{account_id}/events/{event_id}',
         { params: { path: { account_id: accountId, event_id: eventId } } },
       ))
-    } catch {
+    } catch (err) {
+      perfMark('timeline:refresh-event:failed', {
+        stage: 'refresh',
+        error: err instanceof Error ? err.name : typeof err,
+      })
       return
     }
     if (data === undefined) {
@@ -1299,7 +1303,11 @@ export function createTimelineStore(
         '/v1/accounts/{account_id}/events/{event_id}',
         { params: { path: { account_id: accountId, event_id: eventId } } },
       ))
-    } catch {
+    } catch (err) {
+      perfMark('timeline:refresh-event:failed', {
+        stage: 'reconcile-echo',
+        error: err instanceof Error ? err.name : typeof err,
+      })
       return
     }
     if (data === undefined) {

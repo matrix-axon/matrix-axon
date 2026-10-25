@@ -74,6 +74,8 @@ const OVERLAY_PREFIXES = [
   // the middle one is rate-limited (`markFailure`); all three are the reading
   // a stuck placeholder or an error banner needs.
   'api:',
+  // A clipboard write that failed — the readout is the only console on a phone.
+  'copy:',
 ]
 
 /**

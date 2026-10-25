@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { copyText } from '../copy-text'
+import { copyText, type CopySource } from '../copy-text'
 import { matrixToEventLink } from '../matrix-to'
 import type { TimeFormat } from '../stores/settings'
 import type { TimelineEvent, TimelineStore } from '../stores/timeline'
@@ -92,15 +92,18 @@ export function EventTime({
     }, 1800)
   }
   const copyLink = async () => {
-    const ok = await copyText(matrixToEventLink(event.room_id, event.event_id))
+    const ok = await copyText(
+      matrixToEventLink(event.room_id, event.event_id),
+      'link-click',
+    )
     reportCopy(ok ? 'link-copied' : 'failed')
   }
-  const copyBody = async () => {
+  const copyBody = async (source: CopySource) => {
     if (event.body === null || event.body === undefined) {
       reportCopy('no-text')
       return
     }
-    const ok = await copyText(event.body)
+    const ok = await copyText(event.body, source)
     reportCopy(ok ? 'text-copied' : 'failed')
   }
   const clearLinkClick = () => {
@@ -151,9 +154,12 @@ export function EventTime({
           }
           holdTimer.current = window.setTimeout(() => {
             if (holdPointer.current === null) return
+            // Only arm the copy here. WebKit grants clipboard access to a
+            // gesture's *end* (pointerup / click), not its start, so a write
+            // from this timer — 550 ms into a press — is rejected at random.
+            // The copy happens on release instead.
             holdPointer.current.completed = true
             suppressNextClick.current = true
-            void copyBody()
           }, 550)
         }}
         onPointerMove={(pointerEvent) => {
@@ -176,12 +182,19 @@ export function EventTime({
           const completed = pointer.completed
           clearHold()
           holdPointer.current = null
-          if (completed) pointerEvent.preventDefault()
+          if (completed) {
+            pointerEvent.preventDefault()
+            void copyBody('body-hold-release')
+          }
         }}
         onPointerCancel={(pointerEvent) => {
-          if (holdPointer.current?.id !== pointerEvent.pointerId) return
+          const pointer = holdPointer.current
+          if (pointer?.id !== pointerEvent.pointerId) return
           clearHold()
           holdPointer.current = null
+          // The browser took the gesture over (iOS selection callout) after
+          // the hold had already completed: copy anyway, without activation.
+          if (pointer.completed) void copyBody('body-hold-cancel')
         }}
         onContextMenu={(contextMenu) => {
           if (touchHoldEnabled && holdPointer.current !== null)
@@ -208,7 +221,7 @@ export function EventTime({
           if (lastPointerType.current !== 'mouse') return
           clearLinkClick()
           click.preventDefault()
-          void copyBody()
+          void copyBody('body-dblclick')
         }}
       >
         <time dateTime={new Date(event.origin_ts).toISOString()}>
