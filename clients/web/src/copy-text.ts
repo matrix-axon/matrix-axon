@@ -10,6 +10,9 @@ export type CopySource =
   | 'body-hold-cancel'
   | 'other'
 
+/** Caller-supplied context for the marks; numbers and flags only. */
+export type CopyDetail = Record<string, string | number | boolean | null>
+
 /**
  * Why a copy failed, as a `copy:failed` mark. The mark is the only trace of a
  * rejection — the UI says "Copy failed" and nothing else — and the reason
@@ -21,6 +24,7 @@ function markCopyFailure(
   source: CopySource,
   reason: string,
   err: unknown,
+  extra?: CopyDetail,
 ): void {
   const activation = (
     navigator as {
@@ -28,6 +32,7 @@ function markCopyFailure(
     }
   ).userActivation
   perfMark('copy:failed', {
+    ...extra,
     source,
     reason,
     error: err instanceof Error ? err.name : typeof err,
@@ -72,9 +77,10 @@ function execCommandCopy(text: string): boolean {
 export async function copyText(
   text: string,
   source: CopySource = 'other',
+  extra?: CopyDetail,
 ): Promise<boolean> {
   if (navigator.clipboard?.writeText === undefined) {
-    markCopyFailure(source, 'no-api', null)
+    markCopyFailure(source, 'no-api', null, extra)
     return execCommandCopy(text)
   }
   // Read before the await: this is the state the browser judged the write by.
@@ -83,10 +89,10 @@ export async function copyText(
     await navigator.clipboard.writeText(text)
     // Successes are marked too, or a log of failures cannot say which source
     // wins and how often.
-    perfMark('copy:ok', { source, activation })
+    perfMark('copy:ok', { ...extra, source, activation })
     return true
   } catch (err) {
-    markCopyFailure(source, 'rejected', err)
+    markCopyFailure(source, 'rejected', err, extra)
     // The failure is marked either way; `fallback` says whether it mattered.
     const recovered = execCommandCopy(text)
     perfMark('copy:fallback', { source, recovered })

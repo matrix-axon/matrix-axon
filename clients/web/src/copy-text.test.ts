@@ -76,6 +76,22 @@ describe('copyText', () => {
     expect(JSON.stringify(detail)).not.toContain('secret')
   })
 
+  it('merges caller context into the marks', async () => {
+    const writeText = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('no'))
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    await copyText('a', 'body-hold-touchend', { heldMs: 640 })
+    await copyText('b', 'body-hold-touchend', { heldMs: 910 })
+    const marks = vi.mocked(perfMark).mock.calls
+    expect(marks[0]![1]).toMatchObject({
+      heldMs: 640,
+      source: 'body-hold-touchend',
+    })
+    expect(marks[1]![1]).toMatchObject({ heldMs: 910, reason: 'rejected' })
+  })
+
   it('marks a missing clipboard API', async () => {
     vi.stubGlobal('navigator', {})
     await copyText('hello', 'link-click')

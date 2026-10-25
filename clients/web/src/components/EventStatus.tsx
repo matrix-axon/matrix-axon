@@ -55,6 +55,14 @@ export function EventTime({
   const holdTimer = useRef<number | null>(null)
   const holdCopyTimer = useRef<number | null>(null)
   const copiedOnTouchEnd = useRef(false)
+  // Timing for the copy marks only: what separates a hold the browser counted
+  // as a gesture from one it did not.
+  const holdStats = useRef({
+    downAt: 0,
+    doneAt: null as number | null,
+    maxMove: 0,
+    contextMenu: false,
+  })
   const holdPointer = useRef<{
     id: number
     x: number
@@ -108,12 +116,26 @@ export function EventTime({
     )
     reportCopy(ok ? 'link-copied' : 'failed')
   }
-  const copyBody = async (source: CopySource) => {
+  const holdDetail = (touchEnd?: TouchEvent) => {
+    const stats = holdStats.current
+    const now = performance.now()
+    return {
+      heldMs: Math.round(now - stats.downAt),
+      sinceDoneMs:
+        stats.doneAt === null ? null : Math.round(now - stats.doneAt),
+      moved: Math.round(stats.maxMove),
+      contextMenu: stats.contextMenu,
+      selection: document.getSelection()?.type ?? null,
+      cancelable: touchEnd?.cancelable ?? null,
+      touches: touchEnd?.touches.length ?? null,
+    }
+  }
+  const copyBody = async (source: CopySource, touchEnd?: TouchEvent) => {
     if (event.body === null || event.body === undefined) {
       reportCopy('no-text')
       return
     }
-    const ok = await copyText(event.body, source)
+    const ok = await copyText(event.body, source, holdDetail(touchEnd))
     reportCopy(ok ? 'text-copied' : 'failed')
   }
   const clearLinkClick = () => {
@@ -170,6 +192,12 @@ export function EventTime({
           lastPointerType.current = pointerEvent.pointerType
           suppressNextClick.current = false
           copiedOnTouchEnd.current = false
+          holdStats.current = {
+            downAt: performance.now(),
+            doneAt: null,
+            maxMove: 0,
+            contextMenu: false,
+          }
           if (!touchHoldEnabled || pointerEvent.pointerType === 'mouse') {
             clearHold()
             holdPointer.current = null
@@ -190,11 +218,21 @@ export function EventTime({
             // from this timer — 550 ms into a press — is rejected at random.
             // The copy happens on release instead.
             holdPointer.current.completed = true
+            holdStats.current.doneAt = performance.now()
             suppressNextClick.current = true
           }, 550)
         }}
         onPointerMove={(pointerEvent) => {
           const pointer = holdPointer.current
+          if (pointer !== null) {
+            holdStats.current.maxMove = Math.max(
+              holdStats.current.maxMove,
+              Math.hypot(
+                pointerEvent.clientX - pointer.x,
+                pointerEvent.clientY - pointer.y,
+              ),
+            )
+          }
           if (
             pointer !== null &&
             pointer.id === pointerEvent.pointerId &&
@@ -222,17 +260,17 @@ export function EventTime({
             }
           }
         }}
-        onTouchEnd={() => {
+        onTouchEnd={(touchEnd) => {
           // The activating event in WebKit. Normally it follows `pointerup`,
           // which has armed the delayed copy; take that over and copy now. If
           // it comes first, the hold is still open — copy and tell
           // `pointerup` not to copy again.
           if (holdCopyTimer.current !== null) {
             clearHoldCopy()
-            void copyBody('body-hold-touchend')
+            void copyBody('body-hold-touchend', touchEnd)
           } else if (holdPointer.current?.completed === true) {
             copiedOnTouchEnd.current = true
-            void copyBody('body-hold-touchend')
+            void copyBody('body-hold-touchend', touchEnd)
           }
         }}
         onPointerCancel={(pointerEvent) => {
@@ -245,6 +283,7 @@ export function EventTime({
           if (pointer.completed) scheduleHoldCopy('body-hold-cancel')
         }}
         onContextMenu={(contextMenu) => {
+          holdStats.current.contextMenu = true
           if (touchHoldEnabled && holdPointer.current !== null)
             contextMenu.preventDefault()
         }}
