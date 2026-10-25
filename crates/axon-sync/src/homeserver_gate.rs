@@ -109,6 +109,16 @@ impl GateError for HttpError {
     fn outcome(&self) -> Outcome {
         match self {
             HttpError::Reqwest(error) if error.is_timeout() => Outcome::TimedOut,
+            // A request axon could not build never left it.
+            HttpError::Reqwest(error) if error.is_builder() => Outcome::Local,
+            // A redirect loop, or a body axon could not decode, is an answer it
+            // could not read.
+            HttpError::Reqwest(error) if error.is_redirect() || error.is_decode() => {
+                Outcome::Refused
+            }
+            // A connection refused, reset or cut off mid-body: what an overloaded
+            // homeserver or its proxy produces. Axon's own network failing looks
+            // the same from here; a short blip costs at most the first cooldown.
             HttpError::Reqwest(_) => Outcome::Overloaded,
             // Ruma keeps the status of a non-JSON body too, so a proxy's HTML 502
             // is a 5xx here.
@@ -419,8 +429,25 @@ impl HomeserverGate {
         }
     }
 
-    /// A permit if one can be had without waiting and nobody is queued, for a
-    /// caller that must not wait (it runs inside a loop that has other work).
+    /// A permit for a caller inside a loop that has other work, which must not
+    /// wait out a shut gate. While the breaker is closed it takes a place in the
+    /// FIFO for at most `wait`: a gate that is merely busy admits it in turn,
+    /// behind the background requests already queued, and one whose slots stay
+    /// full for `wait` (held by timeouts, say) defers it. Otherwise it never
+    /// waits, but can still be the breaker's probe when one is due and nobody is
+    /// queued, so a gate with no other traffic left can close again.
+    pub(crate) async fn acquire_briefly(
+        self: &Arc<Self>,
+        timeout: Duration,
+        wait: Duration,
+    ) -> Option<Permit> {
+        if self.lock().breaker != Breaker::Closed {
+            return self.try_acquire(timeout);
+        }
+        tokio::time::timeout(wait, self.acquire(timeout)).await.ok()
+    }
+
+    /// A permit if one can be had without waiting and nobody is queued.
     pub(crate) fn try_acquire(self: &Arc<Self>, timeout: Duration) -> Option<Permit> {
         let mut state = self.lock();
         if !state.queue.is_empty() {
@@ -872,6 +899,33 @@ mod tests {
         assert!(is_open(gate));
     }
 
+    /// How a reqwest error the SDK passes through is classified.
+    fn reqwest_outcome(error: reqwest::Error) -> Outcome {
+        HttpError::Reqwest(error).outcome()
+    }
+
+    #[tokio::test]
+    async fn a_request_that_never_left_is_local_and_a_refused_connection_is_overload() {
+        let client = reqwest::Client::new();
+        let builder = client.get("http://[::1").send().await.unwrap_err();
+        assert!(builder.is_builder());
+        assert_eq!(reqwest_outcome(builder), Outcome::Local);
+
+        // A port nothing listens on: the connection is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let refused = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(refused.is_connect());
+        assert_eq!(reqwest_outcome(refused), Outcome::Overloaded);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn the_limit_grows_by_one_after_ten_fast_successes_up_to_the_ceiling() {
         let gate = HomeserverGate::for_test();
@@ -1169,6 +1223,70 @@ mod tests {
         second.await.unwrap();
         b.finish(Outcome::Success);
         assert_eq!(gate.snapshot().waiting, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_brief_acquire_is_admitted_in_turn_while_background_work_keeps_the_gate_full() {
+        let gate = HomeserverGate::for_test();
+        // Three slow backfill-like loops at a limit of 2: a slot is always in
+        // use and a waiter always queued, so `try_acquire` would never succeed.
+        let loops: Vec<_> = (0..3)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                tokio::spawn(async move {
+                    loop {
+                        let permit = gate.acquire(T).await;
+                        tokio::time::sleep(Duration::from_secs(20)).await;
+                        permit.finish(Outcome::Success);
+                    }
+                })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(gate.try_acquire(T).is_none(), "the gate is busy");
+        let start = Instant::now();
+        let permit = gate.acquire_briefly(T, Duration::from_secs(60)).await;
+        assert!(permit.is_some(), "admitted in turn, not starved");
+        assert!(start.elapsed() <= Duration::from_secs(40));
+        for handle in loops {
+            handle.abort();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_brief_acquire_never_waits_on_an_open_breaker_but_can_probe() {
+        let gate = HomeserverGate::for_test();
+        open_on_overload(&gate).await;
+        let start = Instant::now();
+        assert!(gate
+            .acquire_briefly(T, Duration::from_secs(10))
+            .await
+            .is_none());
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(gate.snapshot().waiting, 0);
+
+        tokio::time::advance(COOLDOWN).await;
+        let probe = gate.acquire_briefly(T, Duration::from_secs(10)).await;
+        assert!(matches!(state(&gate).3, Breaker::Probing { .. }));
+        probe.unwrap().finish(Outcome::Success);
+        assert_eq!(state(&gate).3, Breaker::Closed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_brief_acquire_gives_up_while_held_slots_fill_the_gate() {
+        let gate = HomeserverGate::for_test();
+        let a = gate.acquire(T).await;
+        let b = gate.acquire(T).await;
+        a.finish(Outcome::TimedOut);
+        b.finish(Outcome::TimedOut);
+        assert_eq!(state(&gate), (1, 0, 2, Breaker::Closed));
+        let start = Instant::now();
+        assert!(gate
+            .acquire_briefly(T, Duration::from_secs(10))
+            .await
+            .is_none());
+        assert_eq!(start.elapsed(), Duration::from_secs(10));
+        assert_eq!(gate.snapshot().waiting, 0, "it left the queue");
     }
 
     #[tokio::test(start_paused = true)]

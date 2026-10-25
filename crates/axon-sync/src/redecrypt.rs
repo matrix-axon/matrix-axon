@@ -181,10 +181,9 @@ pub(crate) async fn run(
 /// and still return the partial summary (ADR 0098). The boot path races this
 /// against the supervised task's cancel token.
 ///
-/// Each room's key-backup download goes through `gate` as `caller` (ADR 0122):
-/// the boot sweep waits for a permit, while recover and manual re-decryption,
-/// which a user is waiting on, never wait and only report their outcome.
-#[allow(clippy::too_many_arguments)]
+/// Each room's key-backup download goes through `backup` (ADR 0122): the boot
+/// sweep waits for a permit, while recover and manual re-decryption, which a
+/// user is waiting on, never wait and only report their outcome.
 pub(crate) async fn sweep_pending_utds(
     client: &Client,
     store: &Store,
@@ -192,8 +191,7 @@ pub(crate) async fn sweep_pending_utds(
     scope: SweepScope,
     index: Option<&IndexHandle>,
     cancel: &CancellationToken,
-    gate: &Arc<HomeserverGate>,
-    caller: Caller,
+    backup: BackupSource<'_>,
 ) -> RedecryptSummary {
     let rows = match scope {
         SweepScope::StartupUnattempted => store.pending_utds_for_startup_attempt(account_id).await,
@@ -219,7 +217,7 @@ pub(crate) async fn sweep_pending_utds(
         store,
         account_id,
         rows,
-        Some((gate, caller)),
+        Some(backup),
         index,
         Some(cancel),
     )
@@ -274,6 +272,14 @@ async fn redecrypt_session(
     redecrypt_rows(client, store, account_id, rows, None, index, None).await;
 }
 
+/// How a sweep's key-backup downloads reach the homeserver: through its gate,
+/// as a background or an interactive caller (ADR 0122).
+#[derive(Clone, Copy)]
+pub(crate) struct BackupSource<'a> {
+    pub(crate) gate: &'a Arc<HomeserverGate>,
+    pub(crate) caller: Caller,
+}
+
 /// Download `room_id`'s megolm keys from the server-side key backup through the
 /// homeserver gate (ADR 0122), bounded by [`BACKUP_DOWNLOAD_TIMEOUT`].
 ///
@@ -284,31 +290,39 @@ async fn redecrypt_session(
 /// enabled, the usual reason for the no-op, the download does not wait for a
 /// permit either; whatever it sends is reported like an interactive request.
 ///
+/// `are_enabled` is a proxy: the SDK enables backups whenever it stores the key
+/// and version together (`recover()`, a received recovery key) and when it
+/// resumes them from the store at client start. The one gap is that resume
+/// window at boot: a download sent before it finishes goes out without a
+/// permit, one per room, reported like an interactive request. The crypto store
+/// that holds the exact precondition is not public API.
+///
 /// Dropping the download at the timeout is safe: matrix-sdk writes the imported
 /// keys in one transaction, so at worst this room's rows stay UTD until the
 /// next sweep, as on any failed download.
 async fn download_backup_keys(
     client: &Client,
-    gate: &Arc<HomeserverGate>,
-    caller: Caller,
+    backup: BackupSource<'_>,
     room_id: &RoomId,
 ) -> Result<Result<(), matrix_sdk::Error>, Elapsed> {
     let backups = client.encryption().backups();
     let caller = if backups.are_enabled().await {
-        caller
+        backup.caller
     } else {
         Caller::Interactive
     };
-    gate.call_classified(
-        caller,
-        BACKUP_DOWNLOAD_TIMEOUT,
-        backups.download_room_keys_for_room(room_id),
-        |result| match result {
-            Ok(Ok(())) => Outcome::Local,
-            other => outcome_of(other),
-        },
-    )
-    .await
+    backup
+        .gate
+        .call_classified(
+            caller,
+            BACKUP_DOWNLOAD_TIMEOUT,
+            backups.download_room_keys_for_room(room_id),
+            |result| match result {
+                Ok(Ok(())) => Outcome::Local,
+                other => outcome_of(other),
+            },
+        )
+        .await
 }
 
 /// Re-decrypt a set of pending rows, fetching each `Room` handle once. Per-row
@@ -324,7 +338,7 @@ async fn redecrypt_rows(
     store: &Store,
     account_id: Uuid,
     rows: Vec<PendingUtd>,
-    backup: Option<(&Arc<HomeserverGate>, Caller)>,
+    backup: Option<BackupSource<'_>>,
     index: Option<&IndexHandle>,
     cancel: Option<&CancellationToken>,
 ) -> RedecryptSummary {
@@ -343,8 +357,8 @@ async fn redecrypt_rows(
             tracing::warn!(%account_id, room_id, "no room handle; skipping re-decryption for room");
             continue;
         };
-        if let Some((gate, caller)) = backup {
-            match download_backup_keys(client, gate, caller, room.room_id()).await {
+        if let Some(backup) = backup {
+            match download_backup_keys(client, backup, room.room_id()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
                     tracing::warn!(%account_id, room_id, error = %err, "failed to download room keys from backup; rows may stay UTD");
@@ -544,6 +558,13 @@ mod backup_gate_tests {
         client
     }
 
+    fn background(gate: &Arc<HomeserverGate>) -> BackupSource<'_> {
+        BackupSource {
+            gate,
+            caller: Caller::Background,
+        }
+    }
+
     fn room() -> &'static RoomId {
         <&RoomId>::try_from("!room:localhost").unwrap()
     }
@@ -556,7 +577,7 @@ mod backup_gate_tests {
         let client = client_without_backup_keys(Arc::clone(&requests)).await;
         let gate = HomeserverGate::for_test();
         for _ in 0..GROW_AFTER * 2 {
-            download_backup_keys(&client, &gate, Caller::Background, room())
+            download_backup_keys(&client, background(&gate), room())
                 .await
                 .unwrap()
                 .unwrap();
@@ -579,7 +600,7 @@ mod backup_gate_tests {
         gate.open_for_test();
         tokio::time::timeout(
             Duration::from_secs(5),
-            download_backup_keys(&client, &gate, Caller::Background, room()),
+            download_backup_keys(&client, background(&gate), room()),
         )
         .await
         .expect("a download that cannot be sent waited for the gate")

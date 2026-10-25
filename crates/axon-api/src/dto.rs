@@ -2121,14 +2121,27 @@ pub struct HomeserverGateDto {
     /// How long the longest-waiting request has waited, in milliseconds, or
     /// `null` when none is waiting.
     pub oldest_wait_ms: Option<u64>,
-    /// One of `"closed"`, `"open"`, `"probing"`.
-    pub breaker: String,
+    /// Whether the circuit breaker is letting background requests through.
+    pub breaker: HomeserverBreakerDto,
     /// When the breaker left `"closed"`, in epoch milliseconds, or `null` while
     /// it is closed.
     pub breaker_opened_at_ms: Option<i64>,
     /// While the breaker is `"open"`, the earliest time a probe may go out, in
     /// epoch milliseconds; otherwise `null`.
     pub next_probe_at_ms: Option<i64>,
+}
+
+/// A homeserver gate's circuit breaker on the wire (ADR 0122).
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeserverBreakerDto {
+    /// Background requests are admitted up to the limit.
+    Closed,
+    /// No background request is admitted until the cooldown has passed and no
+    /// held slots remain.
+    Open,
+    /// One probe is in flight; its outcome closes or reopens the breaker.
+    Probing,
 }
 
 impl From<crate::homeserver_status::HomeserverGateSnapshot> for HomeserverGateDto {
@@ -2140,12 +2153,18 @@ impl From<crate::homeserver_status::HomeserverGateSnapshot> for HomeserverGateDt
                 .unwrap_or(0)
         };
         let (breaker, opened_at, next_probe_at) = match s.breaker {
-            HomeserverBreakerSnapshot::Closed => ("closed", None, None),
+            HomeserverBreakerSnapshot::Closed => (HomeserverBreakerDto::Closed, None, None),
             HomeserverBreakerSnapshot::Open {
                 opened_at,
                 next_probe_at,
-            } => ("open", Some(opened_at), Some(next_probe_at)),
-            HomeserverBreakerSnapshot::Probing { opened_at } => ("probing", Some(opened_at), None),
+            } => (
+                HomeserverBreakerDto::Open,
+                Some(opened_at),
+                Some(next_probe_at),
+            ),
+            HomeserverBreakerSnapshot::Probing { opened_at } => {
+                (HomeserverBreakerDto::Probing, Some(opened_at), None)
+            }
         };
         HomeserverGateDto {
             homeserver: s.homeserver,
@@ -2154,7 +2173,7 @@ impl From<crate::homeserver_status::HomeserverGateSnapshot> for HomeserverGateDt
             held: s.held,
             waiting: s.waiting,
             oldest_wait_ms: s.oldest_wait.map(|wait| wait.as_millis() as u64),
-            breaker: breaker.to_owned(),
+            breaker,
             breaker_opened_at_ms: opened_at.map(epoch_ms),
             next_probe_at_ms: next_probe_at.map(epoch_ms),
         }

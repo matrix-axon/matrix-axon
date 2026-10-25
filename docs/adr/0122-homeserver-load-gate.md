@@ -352,7 +352,10 @@ toward growth nor closes the breaker, and a probe that ends that way passes to
 the next waiter. While backups are not enabled (the usual reason for the
 no-op), the boot sweep's downloads do not wait for a permit either, and are
 reported like interactive requests. Timeouts and server errors still count,
-since only a request that was sent can end in one.
+since only a request that was sent can end in one. `are_enabled` matches the
+SDK's precondition except at boot, before matrix-sdk has resumed backups from
+the store: a download sent in that window goes out without a permit. The exact
+precondition sits in the crypto store, which is not public API.
 
 ### No caller blocks the account's sync loop on the gate
 
@@ -361,14 +364,31 @@ since only a request that was sent can end in one.
   back verification, invites and unread counts for as long as the gate stayed
   shut, so the sweep now runs as its own task, drained with the re-decryption
   queue.
-- **DM auto-join** runs inside the sync loop's `select!`, so it takes a permit
-  only if one is free at once and nobody is queued. Otherwise it leaves the
-  invite for the next verification poll, five seconds later.
+- **DM auto-join** runs inside the account's `select!` loop, so it waits for a
+  permit only briefly: while the breaker is closed it queues for up to 10 s,
+  and a busy gate admits it in turn behind the background requests already
+  queued. A breaker that is not closed, or slots that stay full for those
+  10 s, leave the invite for the next verification poll, five seconds later. A
+  join that times out is still tracked as a verification candidate, since the
+  homeserver may complete it.
 - **The upstream room probe** runs on the unread-count watcher's five-minute
   resweep. Waiting there would freeze unread counts while the gate is shut, so
-  it takes permits the same way, and a pass that finds the gate shut leaves its
-  remaining rooms suspect for the next one. Such a pass can still be the
-  breaker's probe, when the breaker is due one and nothing is queued.
+  it takes permits the same way, and a pass that cannot get one leaves its
+  remaining rooms suspect for the next one. While the breaker is open, either
+  caller can still be its probe, when one is due and nothing is queued.
+
+A first cut gave these two callers a permit only when one was free at once and
+nobody was queued. Backfill keeps the queue non-empty for as long as it runs,
+which on a large account is hours, so they would have starved behind it.
+
+### Transport errors
+
+A reqwest error is classified by kind. A connection refused or reset, or a
+body cut off, is overload, as the decisions above say. A request axon could
+not build teaches nothing, and a redirect loop or a body axon could not decode
+is refused. Axon's own network failing reads as overload too, since a refused
+connection looks the same from axon either way; a short blip opens the
+breaker for at most the first one-minute cooldown.
 
 `GET /v1/status` reports long-polls waiting at the gate in `waiting`, beside
 background requests.

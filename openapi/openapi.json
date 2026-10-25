@@ -13607,6 +13607,15 @@
           "cancelled"
         ]
       },
+      "HomeserverBreakerDto": {
+        "type": "string",
+        "description": "A homeserver gate's circuit breaker on the wire (ADR 0122).",
+        "enum": [
+          "closed",
+          "open",
+          "probing"
+        ]
+      },
       "HomeserverGateDto": {
         "type": "object",
         "description": "One homeserver's load gate (ADR 0122): how many of axon's background\nrequests (backfill, upstream room probes, key-backup downloads, DM\nauto-joins) it admits at once, and whether its circuit breaker has stopped\nthem. In-memory state, reset on restart.",
@@ -13626,8 +13635,8 @@
             "minimum": 0
           },
           "breaker": {
-            "type": "string",
-            "description": "One of `\"closed\"`, `\"open\"`, `\"probing\"`."
+            "$ref": "#/components/schemas/HomeserverBreakerDto",
+            "description": "Whether the circuit breaker is letting background requests through."
           },
           "breaker_opened_at_ms": {
             "type": [

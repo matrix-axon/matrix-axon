@@ -4262,6 +4262,11 @@ export interface components {
          */
         FlowStageDto: "requested" | "ready" | "keys_exchanged" | "confirmed" | "done" | "cancelled";
         /**
+         * @description A homeserver gate's circuit breaker on the wire (ADR 0122).
+         * @enum {string}
+         */
+        HomeserverBreakerDto: "closed" | "open" | "probing";
+        /**
          * @description One homeserver's load gate (ADR 0122): how many of axon's background
          *     requests (backfill, upstream room probes, key-backup downloads, DM
          *     auto-joins) it admits at once, and whether its circuit breaker has stopped
@@ -4273,8 +4278,8 @@ export interface components {
              * @description Background requests in flight.
              */
             active: number;
-            /** @description One of `"closed"`, `"open"`, `"probing"`. */
-            breaker: string;
+            /** @description Whether the circuit breaker is letting background requests through. */
+            breaker: components["schemas"]["HomeserverBreakerDto"];
             /**
              * Format: int64
              * @description When the breaker left `"closed"`, in epoch milliseconds, or `null` while

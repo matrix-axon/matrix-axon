@@ -46,7 +46,7 @@ use crate::error::{GatewayError, SyncError};
 use crate::homeserver_gate::Caller;
 use crate::manager::ClientManager;
 use crate::matrix_oauth_grant::MatrixOAuthGrantRegistry;
-use crate::redecrypt::{RedecryptSummary, SweepScope};
+use crate::redecrypt::{BackupSource, RedecryptSummary, SweepScope};
 use crate::sync_health::SyncHealth;
 use crate::verification::{FlowRegistry, VerificationRooms};
 
@@ -532,8 +532,10 @@ impl AccountLifecycle {
             SweepScope::AllPending,
             self.index.as_ref(),
             &cancel,
-            &gate,
-            Caller::Interactive,
+            BackupSource {
+                gate: &gate,
+                caller: Caller::Interactive,
+            },
         ));
         tokio::select! {
             biased;

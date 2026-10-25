@@ -1356,6 +1356,11 @@ const UNREAD_COUNTS_SWEEP_CONCURRENCY: usize = 8;
 /// generous — but it is a background sweep, and nothing waits on it.
 const UPSTREAM_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a homeserver-gate caller inside a loop with other work (the DM
+/// auto-join and the upstream room probe) waits its turn at a busy gate before
+/// deferring to its next pass (ADR 0122). A shut gate defers it at once.
+const GATE_TURN_WAIT: Duration = Duration::from_secs(10);
+
 /// Bound on one known-contact DM auto-join in [`join_candidate_invites`]. The
 /// SDK's own 30 s timeout is per attempt and it retries a 5xx, so without this
 /// the join could hold its gate permit (and the sync loop) for many minutes.
@@ -1731,9 +1736,13 @@ async fn join_candidate_invites(
             rooms.mark_rejected(account_id, room_id);
             continue;
         }
-        // This runs inside the sync loop, so it never waits for the homeserver
-        // gate (ADR 0122): a shut gate defers the invite to a later poll.
-        let Some(permit) = gate.try_acquire(CANDIDATE_JOIN_TIMEOUT) else {
+        // This runs inside the account's select loop, so it waits for the
+        // homeserver gate (ADR 0122) only briefly: a busy gate admits it in
+        // turn, and a shut one defers the invite to a later poll.
+        let Some(permit) = gate
+            .acquire_briefly(CANDIDATE_JOIN_TIMEOUT, GATE_TURN_WAIT)
+            .await
+        else {
             tracing::debug!(%account_id, %room_id,
                 "homeserver gate shut; deferring verification candidate invite");
             break;
@@ -1748,8 +1757,14 @@ async fn join_candidate_invites(
                 continue;
             }
             Err(_elapsed) => {
+                // The homeserver may still complete the join, and the room then
+                // leaves `invited_rooms()`, so this poll is the last chance to
+                // track it. A candidate that never joined is harmless: it only
+                // widens the subscription set until it expires, and a still
+                // standing invite is retried next poll.
                 tracing::warn!(%account_id, %room_id, timeout_secs = CANDIDATE_JOIN_TIMEOUT.as_secs(),
-                    "joining verification candidate invite timed out");
+                    "joining verification candidate invite timed out; tracking it in case the join completes");
+                rooms.add_candidate(account_id, room_id);
                 continue;
             }
         }
@@ -2013,7 +2028,14 @@ async fn run_account(
     // (or the room-key arrival stream). Spawned, not awaited here: each room's
     // key-backup download waits on the homeserver gate (ADR 0122), which can
     // stay shut for many minutes, and the watchers below must not wait with it.
-    // It shares the re-decryption queue's token and is drained with it.
+    // So backfill and the watchers no longer start after it; it runs beside
+    // them, as it always ran beside the re-decryption queue spawned above. Both
+    // may decrypt the same row: only the sweep downloads from the backup, and
+    // `update_decrypted_event` writes only a row that is still UTD, so the
+    // second write (and its search-outbox entry) is a no-op. While the gate is
+    // shut the sweep just waits; the gate logs that at warn, and `/v1/status`
+    // shows it under `waiting`. It shares the re-decryption queue's token and
+    // is drained with it.
     let scope = if config.always_redecrypt_utds_on_startup {
         redecrypt::SweepScope::AllPending
     } else {
@@ -2036,8 +2058,10 @@ async fn run_account(
                     scope,
                     index.as_ref(),
                     &cancel,
-                    &gate,
-                    Caller::Background,
+                    redecrypt::BackupSource {
+                        gate: &gate,
+                        caller: Caller::Background,
+                    },
                 ) => {
                     if summary.selected > 0 {
                         tracing::info!(
@@ -2898,13 +2922,19 @@ async fn reconcile_upstream_rooms(
             StateEventType::RoomCreate,
             String::new(),
         );
-        // This pass runs on the unread watcher's resweep tick, so it never waits
-        // for the homeserver gate (ADR 0122): a shut gate leaves the remaining
-        // rooms suspect for the next pass, as cancellation does.
-        let Some(permit) = gate.try_acquire(UPSTREAM_PROBE_TIMEOUT) else {
+        // This pass runs on the unread watcher's resweep tick, so it waits for
+        // the homeserver gate (ADR 0122) only briefly: a busy gate admits it in
+        // turn, and a shut one leaves the remaining rooms suspect for the next
+        // pass, as cancellation does.
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            permit = gate.acquire_briefly(UPSTREAM_PROBE_TIMEOUT, GATE_TURN_WAIT) => permit,
+        };
+        let Some(permit) = permit else {
             tracing::debug!(
                 %account_id,
-                "homeserver gate shut; unprobed rooms stay suspect for the next pass"
+                "homeserver gate shut or cancelled; unprobed rooms stay suspect for the next pass"
             );
             return;
         };
