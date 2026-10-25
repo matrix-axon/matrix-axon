@@ -1,4 +1,5 @@
 import { perfMark } from './perf'
+import { isTauriRuntime } from './platform'
 
 /** Where a copy was triggered from; a closed set, since it is persisted. */
 export type CopySource =
@@ -73,6 +74,27 @@ function execCommandCopy(text: string): boolean {
   }
 }
 
+/**
+ * The shell's clipboard plugin, which has no user-activation rule. Imported on
+ * demand so the browser build never loads it, and `null` outside the shell or
+ * when the write fails — the caller then falls back to the web path, so a
+ * missing capability degrades to the old behaviour instead of losing the copy.
+ */
+async function nativeCopy(text: string, source: CopySource): Promise<boolean> {
+  try {
+    const { writeText } = await import('@tauri-apps/plugin-clipboard-manager')
+    await writeText(text)
+    perfMark('copy:ok', { source, native: true })
+    return true
+  } catch (err) {
+    perfMark('copy:native-failed', {
+      source,
+      error: err instanceof Error ? err.name : typeof err,
+    })
+    return false
+  }
+}
+
 /** Write `text` to the system clipboard. False when the write is rejected and
  *  the `execCommand` fallback fails too (permissions, insecure context). */
 export async function copyText(
@@ -80,6 +102,11 @@ export async function copyText(
   source: CopySource = 'other',
   extra?: CopyDetail,
 ): Promise<boolean> {
+  // Only the shell awaits before the web write. A browser must reach
+  // `writeText` synchronously, inside the gesture that called us.
+  if (isTauriRuntime() && (await nativeCopy(text, source))) {
+    return true
+  }
   if (navigator.clipboard?.writeText === undefined) {
     markCopyFailure(source, 'no-api', null, extra)
     const recovered = execCommandCopy(text)

@@ -80,6 +80,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         // External links, opened in the user's browser rather than in place.
         .plugin(tauri_plugin_opener::init())
+        // Copying text. The webview's own clipboard API is refused whenever
+        // WKWebView does not count the end of a long touch as a user gesture
+        // (the timestamp hold), so `copy-text.ts` writes through this instead.
+        // Write only; the capability file grants nothing else.
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Local notifications while this process is running. One plugin for
         // every OS the shell ships; the capability file grants the check, the
         // request, the post, the click listener and the Android channel, and

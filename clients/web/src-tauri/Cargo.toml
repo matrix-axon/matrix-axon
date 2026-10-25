@@ -66,6 +66,11 @@ tauri-plugin-native-auth = { path = "native-auth" }
 # In-repo: APNs and FCM device tokens on iOS, iPadOS, and Android (ADR 0113).
 tauri-plugin-remote-push = { path = "remote-push" }
 tauri-plugin-opener = "2"
+# Writes text without the web user-activation rule, which WKWebView applies to
+# `navigator.clipboard` and fails about a third of iPad timestamp holds. Pinned
+# like the notification plugin so the crate and `@tauri-apps/plugin-clipboard-manager`
+# agree on major.minor.
+tauri-plugin-clipboard-manager = "~2.5"
 tauri-plugin-websocket = "2"
 
 [dev-dependencies]
