@@ -182,6 +182,43 @@ describe('EventTime event permalink copy', () => {
     }
   })
 
+  it('offers a tap-to-copy retry after a refused hold copy, and keeps it up', async () => {
+    vi.useFakeTimers()
+    const writeText = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('NotAllowedError'))
+      .mockResolvedValueOnce(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole, findByRole, findByText } = render(
+      <EventTime event={event()} touchHoldEnabled />,
+    )
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    fireEvent.pointerUp(timestamp, touch)
+    fireEvent.touchEnd(timestamp)
+    await act(async () => {
+      vi.advanceTimersByTime(5000)
+      await Promise.resolve()
+    })
+
+    const retry = await findByRole('button', { name: 'Tap to copy' })
+    fireEvent.click(retry)
+    expect(await findByText('Text copied')).toBeTruthy()
+    expect(writeText).toHaveBeenCalledTimes(2)
+    expect(writeText).toHaveBeenLastCalledWith('hello')
+  })
+
   it('copies after release when no click follows', async () => {
     vi.useFakeTimers()
     const writeText = vi.fn().mockResolvedValue(undefined)

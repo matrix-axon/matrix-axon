@@ -4,6 +4,7 @@ import { perfMark } from './perf'
 export type CopySource =
   | 'link-click'
   | 'body-dblclick'
+  | 'body-retry-click'
   | 'body-hold-touchend'
   | 'body-hold-click'
   | 'body-hold-release'

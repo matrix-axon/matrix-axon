@@ -10,6 +10,8 @@ const DESKTOP_DOUBLE_CLICK_MS = 300
  * counts as a user activation before copying without one.
  */
 const HOLD_CLICK_WAIT_MS = 400
+/** Long enough to find and tap the retry button, unlike the 1.8 s toasts. */
+const RETRY_VISIBLE_MS = 8000
 
 /**
  * The per-row send-state fragments shared by the main timeline and the
@@ -48,7 +50,7 @@ export function EventTime({
   touchHoldEnabled?: boolean
 }) {
   const [copyStatus, setCopyStatus] = useState<
-    'idle' | 'link-copied' | 'text-copied' | 'no-text' | 'failed'
+    'idle' | 'link-copied' | 'text-copied' | 'no-text' | 'failed' | 'retry'
   >('idle')
   const clearCopyStatus = useRef<number | null>(null)
   const linkClickTimer = useRef<number | null>(null)
@@ -97,17 +99,20 @@ export function EventTime({
     )
   }
   const reportCopy = (
-    status: 'link-copied' | 'text-copied' | 'no-text' | 'failed',
+    status: 'link-copied' | 'text-copied' | 'no-text' | 'failed' | 'retry',
   ) => {
     if (clearCopyStatus.current !== null) {
       window.clearTimeout(clearCopyStatus.current)
       clearCopyStatus.current = null
     }
     setCopyStatus(status)
-    clearCopyStatus.current = window.setTimeout(() => {
-      setCopyStatus('idle')
-      clearCopyStatus.current = null
-    }, 1800)
+    clearCopyStatus.current = window.setTimeout(
+      () => {
+        setCopyStatus('idle')
+        clearCopyStatus.current = null
+      },
+      status === 'retry' ? RETRY_VISIBLE_MS : 1800,
+    )
   }
   const copyLink = async () => {
     const ok = await copyText(
@@ -136,6 +141,13 @@ export function EventTime({
       return
     }
     const ok = await copyText(event.body, source, holdDetail(touchEnd))
+    // A refusal is usually the browser not counting the gesture, which a real
+    // tap always carries: offer one.
+    reportCopy(ok ? 'text-copied' : 'retry')
+  }
+  const retryBody = async () => {
+    if (event.body === null || event.body === undefined) return
+    const ok = await copyText(event.body, 'body-retry-click')
     reportCopy(ok ? 'text-copied' : 'failed')
   }
   const clearLinkClick = () => {
@@ -177,14 +189,14 @@ export function EventTime({
         ? 'Message text copied'
         : copyStatus === 'no-text'
           ? 'No message text to copy'
-          : copyStatus === 'failed'
+          : copyStatus === 'failed' || copyStatus === 'retry'
             ? 'Could not copy'
             : 'Click to copy link; double-click to copy message text'
   return (
     <>
       <button
         type="button"
-        class={`event-time-copy muted${copyStatus === 'failed' ? ' failed' : ''}`}
+        class={`event-time-copy muted${copyStatus === 'failed' || copyStatus === 'retry' ? ' failed' : ''}`}
         title={title}
         aria-label="Copy link"
         onPointerDown={(pointerEvent) => {
@@ -321,16 +333,30 @@ export function EventTime({
       </button>
       {copyStatus !== 'idle' && (
         <span
-          class={`event-copy-status${copyStatus === 'failed' ? ' error' : ''}`}
+          class={`event-copy-status${copyStatus === 'failed' || copyStatus === 'retry' ? ' error' : ''}`}
           role="status"
         >
-          {copyStatus === 'link-copied'
-            ? 'Copied'
-            : copyStatus === 'text-copied'
-              ? 'Text copied'
-              : copyStatus === 'no-text'
-                ? 'No message text'
-                : 'Copy failed'}
+          {copyStatus === 'link-copied' ? (
+            'Copied'
+          ) : copyStatus === 'text-copied' ? (
+            'Text copied'
+          ) : copyStatus === 'no-text' ? (
+            'No message text'
+          ) : copyStatus === 'retry' ? (
+            <>
+              Copy failed
+              {' · '}
+              <button
+                type="button"
+                class="event-copy-retry"
+                onClick={() => void retryBody()}
+              >
+                Tap to copy
+              </button>
+            </>
+          ) : (
+            'Copy failed'
+          )}
         </span>
       )}
     </>
