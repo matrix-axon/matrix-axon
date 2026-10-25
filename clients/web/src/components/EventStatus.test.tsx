@@ -146,6 +146,42 @@ describe('EventTime event permalink copy', () => {
     expect(writeText).toHaveBeenCalledOnce()
   })
 
+  it('copies on touchend, once, whichever of it and pointerup comes first', async () => {
+    for (const touchEndFirst of [false, true]) {
+      vi.useFakeTimers()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      vi.stubGlobal('navigator', { clipboard: { writeText } })
+      const { getByRole, unmount } = render(
+        <EventTime event={event()} touchHoldEnabled />,
+      )
+      const timestamp = getByRole('button', { name: 'Copy link' })
+      const touch = {
+        pointerId: 1,
+        pointerType: 'touch',
+        isPrimary: true,
+        clientX: 20,
+        clientY: 20,
+      }
+
+      fireEvent.pointerDown(timestamp, touch)
+      await act(async () => {
+        vi.advanceTimersByTime(550)
+        await Promise.resolve()
+      })
+      if (touchEndFirst) fireEvent.touchEnd(timestamp)
+      fireEvent.pointerUp(timestamp, touch)
+      if (!touchEndFirst) fireEvent.touchEnd(timestamp)
+      expect(writeText).toHaveBeenCalledOnce()
+      await act(async () => {
+        vi.advanceTimersByTime(1000)
+        await Promise.resolve()
+      })
+      expect(writeText).toHaveBeenCalledOnce()
+      unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it('copies after release when no click follows', async () => {
     vi.useFakeTimers()
     const writeText = vi.fn().mockResolvedValue(undefined)

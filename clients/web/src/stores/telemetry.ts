@@ -49,6 +49,7 @@ export const PERSISTED_MARKS: readonly string[] = [
   'api:late',
   // A clipboard write that failed: source, reason, error name and the page's
   // activation/focus state. No text, no ids.
+  'copy:ok',
   'copy:failed',
   'copy:fallback',
   // The socket's lifecycle, with no detail beyond `reconnect`. Next to an

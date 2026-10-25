@@ -4,6 +4,7 @@ import { perfMark } from './perf'
 export type CopySource =
   | 'link-click'
   | 'body-dblclick'
+  | 'body-hold-touchend'
   | 'body-hold-click'
   | 'body-hold-release'
   | 'body-hold-cancel'
@@ -76,8 +77,13 @@ export async function copyText(
     markCopyFailure(source, 'no-api', null)
     return execCommandCopy(text)
   }
+  // Read before the await: this is the state the browser judged the write by.
+  const activation = navigator.userActivation?.isActive ?? null
   try {
     await navigator.clipboard.writeText(text)
+    // Successes are marked too, or a log of failures cannot say which source
+    // wins and how often.
+    perfMark('copy:ok', { source, activation })
     return true
   } catch (err) {
     markCopyFailure(source, 'rejected', err)

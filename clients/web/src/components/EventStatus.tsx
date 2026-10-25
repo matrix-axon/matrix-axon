@@ -54,6 +54,7 @@ export function EventTime({
   const linkClickTimer = useRef<number | null>(null)
   const holdTimer = useRef<number | null>(null)
   const holdCopyTimer = useRef<number | null>(null)
+  const copiedOnTouchEnd = useRef(false)
   const holdPointer = useRef<{
     id: number
     x: number
@@ -168,6 +169,7 @@ export function EventTime({
           if (pointerEvent.isPrimary === false) return
           lastPointerType.current = pointerEvent.pointerType
           suppressNextClick.current = false
+          copiedOnTouchEnd.current = false
           if (!touchHoldEnabled || pointerEvent.pointerType === 'mouse') {
             clearHold()
             holdPointer.current = null
@@ -213,7 +215,24 @@ export function EventTime({
           holdPointer.current = null
           if (completed) {
             pointerEvent.preventDefault()
-            scheduleHoldCopy('body-hold-release')
+            if (copiedOnTouchEnd.current) {
+              copiedOnTouchEnd.current = false
+            } else {
+              scheduleHoldCopy('body-hold-release')
+            }
+          }
+        }}
+        onTouchEnd={() => {
+          // The activating event in WebKit. Normally it follows `pointerup`,
+          // which has armed the delayed copy; take that over and copy now. If
+          // it comes first, the hold is still open — copy and tell
+          // `pointerup` not to copy again.
+          if (holdCopyTimer.current !== null) {
+            clearHoldCopy()
+            void copyBody('body-hold-touchend')
+          } else if (holdPointer.current?.completed === true) {
+            copiedOnTouchEnd.current = true
+            void copyBody('body-hold-touchend')
           }
         }}
         onPointerCancel={(pointerEvent) => {

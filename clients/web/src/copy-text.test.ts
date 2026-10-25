@@ -16,8 +16,12 @@ describe('copyText', () => {
   it('writes through the clipboard API', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     vi.stubGlobal('navigator', { clipboard: { writeText } })
-    expect(await copyText('hello')).toBe(true)
+    expect(await copyText('hello', 'body-hold-touchend')).toBe(true)
     expect(writeText).toHaveBeenCalledWith('hello')
+    expect(perfMark).toHaveBeenCalledWith('copy:ok', {
+      source: 'body-hold-touchend',
+      activation: null,
+    })
   })
 
   it('returns false when the clipboard API is missing', async () => {
