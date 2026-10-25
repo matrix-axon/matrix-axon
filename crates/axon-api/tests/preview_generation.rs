@@ -1,4 +1,5 @@
 //! Explicit generation, account isolation and native recovery wire contracts.
+use axon_core::preview_generation::PreviewUrl;
 mod common;
 use axon_api::{
     ApiError, AppState, GeneratedPreviewDto, PreviewGenerationStatus, PreviewGenerator,
@@ -22,7 +23,7 @@ use uuid::Uuid;
 struct Generator(AtomicUsize);
 #[async_trait::async_trait]
 impl PreviewGenerator for Generator {
-    async fn generate(&self, _: Uuid, _: String) -> Result<GeneratedPreviewDto, ApiError> {
+    async fn generate(&self, _: Uuid, _: PreviewUrl) -> Result<GeneratedPreviewDto, ApiError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(GeneratedPreviewDto::fallback(
             PreviewGenerationStatus::Disabled,
@@ -118,6 +119,24 @@ async fn generation_requires_explicit_authenticated_valid_account_request() {
         ),
     ] {
         assert_eq!(send(&router, method, &uri, body, auth).await.0, expected);
+    }
+    for url in [
+        "https://en.wikipedia.org/wiki/Foo_(bar)",
+        "https://example.org/?",
+        "https://example.org/<foo>",
+    ] {
+        assert_eq!(
+            send(
+                &router,
+                "POST",
+                &path,
+                &serde_json::json!({"url":url}).to_string(),
+                true
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
     }
     assert_eq!(generator.0.load(Ordering::SeqCst), 0);
     let (status, body) = send(

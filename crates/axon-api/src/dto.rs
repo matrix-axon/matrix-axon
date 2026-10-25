@@ -116,6 +116,8 @@ pub struct PreviewThumbnailBytes(pub Vec<u8>);
 /// `preview` is directly usable as one entry in the settled send contract.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GeneratedPreviewDto {
+    /// Busy is transient per-account capacity or homeserver rate limiting.
+    /// Disabled requires an explicitly false homeserver preview capability.
     pub status: PreviewGenerationStatus,
     pub preview: Option<LinkPreviewRequest>,
     pub thumbnail_status: PreviewThumbnailStatus,

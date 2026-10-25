@@ -3,8 +3,8 @@
 //! response is still uncertain, never an invitation to replay the operation.
 
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, LazyLock, Mutex, Weak},
+    collections::HashSet,
+    sync::{Arc, LazyLock},
 };
 
 use axon_core::{
@@ -22,28 +22,7 @@ use crate::{
 
 use super::messages::formatted;
 
-// Weak entries are pruned under the registry lock; only active sends/waiters
-// keep capacity alive. A slow homeserver cannot consume another account's slots.
-#[derive(Default)]
-struct SendSlots(Mutex<HashMap<Uuid, Weak<tokio::sync::Semaphore>>>);
-
-impl SendSlots {
-    fn for_account(&self, account: Uuid) -> Arc<tokio::sync::Semaphore> {
-        let mut slots = self.0.lock().expect("preview capacity registry poisoned");
-        slots.retain(|_, value| value.strong_count() > 0);
-        slots
-            .entry(account)
-            .or_default()
-            .upgrade()
-            .unwrap_or_else(|| {
-                let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
-                slots.insert(account, Arc::downgrade(&semaphore));
-                semaphore
-            })
-    }
-}
-
-static SEND_SLOTS: LazyLock<SendSlots> = LazyLock::new(SendSlots::default);
+static SEND_SLOTS: LazyLock<crate::AccountSlots> = LazyLock::new(crate::AccountSlots::default);
 
 pub(super) struct Request {
     body: String,
@@ -189,14 +168,7 @@ pub(super) async fn send(
             let cleanup = if result.is_ok() { uploads.complete_upload(account_id, id).await } else { uploads.release_upload(account_id, id).await };
             if let Err(error) = cleanup {
                 // Never format error detail: it can contain private input.
-                let kind = match error {
-                    crate::uploads::StageUploadError::Invalid(_) => "invalid",
-                    crate::uploads::StageUploadError::NotFound(_) => "not_found",
-                    crate::uploads::StageUploadError::Forbidden(_) => "forbidden",
-                    crate::uploads::StageUploadError::TooLarge { .. } => "too_large",
-                    crate::uploads::StageUploadError::Timeout(_) => "timeout",
-                    crate::uploads::StageUploadError::Internal(_) => "internal",
-                };
+                let kind = error.diagnostic_kind();
                 tracing::warn!(%account_id, %room_id, upload_id = %id, sent = result.is_ok(), error_kind = kind, "preview send upload bookkeeping failed; boot reconciliation/expiry will recover");
             }
         }
@@ -218,28 +190,6 @@ pub(super) async fn send(
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
-
-    #[test]
-    fn upload_capacity_is_isolated_by_account_and_idle_entries_expire() {
-        let slots = SendSlots::default();
-        let account = Uuid::new_v4();
-        let first = slots.for_account(account);
-        let held = (0..4)
-            .map(|_| first.clone().try_acquire_owned().unwrap())
-            .collect::<Vec<_>>();
-        assert!(slots.for_account(account).try_acquire_owned().is_err());
-        let other = slots
-            .for_account(Uuid::new_v4())
-            .try_acquire_owned()
-            .unwrap();
-        assert_eq!(slots.0.lock().unwrap().len(), 2);
-        drop(held);
-        drop(first);
-        drop(other);
-        let current = slots.for_account(Uuid::new_v4());
-        assert_eq!(slots.0.lock().unwrap().len(), 1);
-        assert_eq!(current.available_permits(), 4);
-    }
 
     #[tokio::test]
     async fn portable_contract_fixtures_match_the_production_dto_and_preflight() {

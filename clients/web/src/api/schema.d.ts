@@ -2638,6 +2638,10 @@ export interface components {
                  */
                 image_expires_at?: string | null;
                 preview?: null | components["schemas"]["LinkPreviewRequest"];
+                /**
+                 * @description Busy is transient per-account capacity or homeserver rate limiting.
+                 *     Disabled requires an explicitly false homeserver preview capability.
+                 */
                 status: components["schemas"]["PreviewGenerationStatus"];
                 thumbnail_status: components["schemas"]["PreviewThumbnailStatus"];
             };
@@ -4336,6 +4340,10 @@ export interface components {
              */
             image_expires_at?: string | null;
             preview?: null | components["schemas"]["LinkPreviewRequest"];
+            /**
+             * @description Busy is transient per-account capacity or homeserver rate limiting.
+             *     Disabled requires an explicitly false homeserver preview capability.
+             */
             status: components["schemas"]["PreviewGenerationStatus"];
             thumbnail_status: components["schemas"]["PreviewThumbnailStatus"];
         };
@@ -6985,7 +6993,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiResponse_GeneratedPreviewDto"];
                 };
             };
-            /** @description Invalid or nonpublic HTTP(S) URL */
+            /** @description Invalid, nonpublic or unsendable matched HTTP(S) URL */
             400: {
                 headers: {
                     [name: string]: unknown;

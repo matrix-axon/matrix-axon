@@ -1658,7 +1658,7 @@
             }
           },
           "400": {
-            "description": "Invalid or nonpublic HTTP(S) URL",
+            "description": "Invalid, nonpublic or unsendable matched HTTP(S) URL",
             "content": {
               "application/json": {
                 "schema": {
@@ -10290,7 +10290,8 @@
                 ]
               },
               "status": {
-                "$ref": "#/components/schemas/PreviewGenerationStatus"
+                "$ref": "#/components/schemas/PreviewGenerationStatus",
+                "description": "Busy is transient per-account capacity or homeserver rate limiting.\nDisabled requires an explicitly false homeserver preview capability."
               },
               "thumbnail_status": {
                 "$ref": "#/components/schemas/PreviewThumbnailStatus"
@@ -13895,7 +13896,8 @@
             ]
           },
           "status": {
-            "$ref": "#/components/schemas/PreviewGenerationStatus"
+            "$ref": "#/components/schemas/PreviewGenerationStatus",
+            "description": "Busy is transient per-account capacity or homeserver rate limiting.\nDisabled requires an explicitly false homeserver preview capability."
           },
           "thumbnail_status": {
             "$ref": "#/components/schemas/PreviewThumbnailStatus"

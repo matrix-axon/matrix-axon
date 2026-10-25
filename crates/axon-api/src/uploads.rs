@@ -84,8 +84,24 @@ pub enum StageUploadError {
     TooLarge { cap: u64 },
     /// The client upload timed out. -> `503`.
     Timeout(String),
+    /// A bounded generated-upload quota is full. -> `503`.
+    Capacity,
     /// Local filesystem/database failure. Logged and returned as a generic `500`.
     Internal(String),
+}
+
+impl StageUploadError {
+    pub fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Invalid(_) => "invalid",
+            Self::NotFound(_) => "not_found",
+            Self::Forbidden(_) => "forbidden",
+            Self::TooLarge { .. } => "too_large",
+            Self::Timeout(_) => "timeout",
+            Self::Capacity => "quota",
+            Self::Internal(_) => "internal",
+        }
+    }
 }
 
 /// Stages and deletes client-originated upload bytes.

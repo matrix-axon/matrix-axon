@@ -18,7 +18,7 @@ use uuid::Uuid;
 #[utoipa::path(post, path = "/v1/accounts/{account_id}/link-previews/generate",
     params(("account_id" = Uuid, Path)), request_body = GeneratePreviewRequest,
     responses((status = 200, body = ApiResponse<GeneratedPreviewDto>, description = "Ready preview or nonfatal fallback; original link remains sendable"),
-    (status = 400, body = crate::response::ErrorResponse, description = "Invalid or nonpublic HTTP(S) URL"),
+    (status = 400, body = crate::response::ErrorResponse, description = "Invalid, nonpublic or unsendable matched HTTP(S) URL"),
     (status = 403, body = crate::response::ErrorResponse, description = "Inactive account"),
     (status = 404, body = crate::response::ErrorResponse, description = "Account not found")), tag = "media")]
 pub async fn generate(
@@ -27,9 +27,8 @@ pub async fn generate(
     Path(account_id): Path<Uuid>,
     Json(request): Json<GeneratePreviewRequest>,
 ) -> Result<ApiResponse<GeneratedPreviewDto>, ApiError> {
-    if !axon_core::preview_generation::eligible_url(&request.url) {
-        return Err(ApiError::bad_request("preview requires a public HTTP(S) URL of at most 4096 UTF-16 units without credentials"));
-    }
+    let url = axon_core::preview_generation::PreviewUrl::parse(request.url)
+        .map_err(|_| ApiError::bad_request("preview requires a public HTTP(S) URL of at most 4096 UTF-16 units without credentials, matching a complete sendable body link"))?;
     let account = store
         .get_account(account_id)
         .await?
@@ -39,7 +38,7 @@ pub async fn generate(
     }
     // Owned task finishes staging even after HTTP disconnect; unsent bytes use
     // the existing upload TTL/sweeper and never dispatch a Matrix message.
-    tokio::spawn(async move { generator.generate(account_id, request.url).await })
+    tokio::spawn(async move { generator.generate(account_id, url).await })
         .await
         .map_err(|_| ApiError::internal())?
         .map(ApiResponse::new)

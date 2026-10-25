@@ -241,27 +241,37 @@ Successful responses use the usual `data` envelope with these fields:
 | `image_expires_at` | Server staging expiry when an image is ready, otherwise null                                 |
 
 Fallback outcomes are HTTP 200 and do not modify or dispatch a draft.
-Malformed/nonpublic URL input is HTTP 400 `bad_request`; a missing account is HTTP 404 `not_found` and an inactive account is HTTP 403 `forbidden`.
+Malformed/nonpublic URL input or a URL that cannot satisfy the settled exact body-link matching rule is HTTP 400 `bad_request`, before any homeserver request; a missing account is HTTP 404 `not_found` and an inactive account is HTTP 403 `forbidden`.
 Keep the original link sendable, and offer an explicit retry if desired.
 Do not assume every webpage has metadata or a supported raster image.
 Text normalization retains only nonempty title/description/site-name strings within the send contract's UTF-16 limits; invalid/oversized optional fields are omitted.
 The exact input URL remains the matched URL; sending still validates its membership in the final body/caption.
 
-Generation admits four concurrent operations without queuing; excess calls return `busy`.
+Generation admits four concurrent operations per account without queuing; excess calls for that account return `busy`.
+Another account retains its own slots.
+A separate four-slot decoder pool bounds total generation CPU work; decoder saturation preserves a metadata card with an unavailable thumbnail.
 Each upstream request has an eight-second deadline, and connection establishment plus all acquisition has a 25-second deadline.
 Generation request bodies are capped at 32 KiB before JSON decoding.
 Capability/preview responses are capped at 64 KiB, thumbnails at 2 MiB, and raster decoding at four million pixels with bounded allocation.
 Existing PNG/JPEG/WebP validation derives MIME type and dimensions from bytes before durable staging.
 Staging (including its capacity wait) has a 15-second deadline, honors lower configured upload-byte limits, and uses the ordinary upload expiry and cleanup policies.
 A disconnected HTTP caller's owned task finishes staging; abandoned handles expire rather than sending anything.
-Logs contain account IDs and stable outcome categories, without URLs, metadata, credentials or free-form upstream errors.
+Generated thumbnails have an independent, persistent per-account ceiling of 160 pending handles and 64 MiB.
+A transaction-scoped account lock makes quota checks and insertion atomic, and expired rows continue to count until cleanup releases their files.
+Quota exhaustion retains useful text metadata with `thumbnail_status: unavailable`; it does not remove the original link or silently replace another thumbnail.
+Only an explicit false `m.preview_url.enabled` capability produces `disabled`; a URL-specific HTTP 403 produces `unavailable`, and a homeserver HTTP 429 produces transient `busy`.
+Unknown-token responses can refresh and retry once through the SDK, which owns rotation, locking, and persistence notifications.
+SDK refresh runs in an owned task bounded to 30 seconds, so a shorter preview deadline does not discard an accepted token rotation.
+The preview transport retains streaming byte caps and disables redirects; the normal SDK send/media helpers buffer the full response before exposing it.
+Its TLS minimum, user agent and system proxy behavior match the active production SDK defaults; Axon exposes no separate per-account proxy or custom TLS configuration.
+Logs contain account IDs, request phases, HTTP status and stable outcome categories, without URLs, metadata, credentials or free-form upstream errors.
 
 ### Durable thumbnail recovery
 
 A generated thumbnail is a normal account-owned staged upload, consumed with its parent message under the existing encrypted/unencrypted send contract.
 Before marking an incoming share durably recoverable, retrieve its image with authenticated `GET /v1/accounts/{account_id}/media/uploads/{upload_id}/preview` and retain a protected local copy.
-The endpoint also supports eligible source-supplied staged thumbnails, verifies the same byte/pixel/type limits, returns raster bytes with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and does not consume, claim or extend the upload.
-Retrieve before dispatch: a sending, consumed, expired, missing or wrong-account handle returns HTTP 404 with `{"error":{"code":"not_found","message":"..."}}`.
+The endpoint also supports eligible source-supplied staged thumbnails, verifies the same byte/pixel/type limits under a dedicated four-slot recovery pool, returns raster bytes with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and does not consume, claim or extend the upload.
+Retrieve before dispatch: a sending, consumed, expired, missing, truncated, size-mismatched or wrong-account handle returns HTTP 404 with `{"error":{"code":"not_found","message":"..."}}`.
 The message is explanatory text; adapters must branch on the stable status/code.
 A retrieval 404 does not prove that a parent send failed: sending and consumed handles share this response.
 Preserve an outcome-unknown send for user resolution, and never use thumbnail recovery to replay its parent automatically.
@@ -307,7 +317,7 @@ Run `cargo test -p axon-sync --lib preview_generation` for adversarial upstream 
 
 ### Stage 3 validation record
 
-Verified on October 25, 2026 against disposable Synapse v1.163.0 with URL previews enabled, using `https://matrix.org/` as the public source.
+Verified initially and again after review on October 25, 2026 against disposable Synapse v1.163.0 with URL previews enabled, using `https://matrix.org/` as the public source.
 Explicit generation produced a verified 12,170-byte raster thumbnail in each room encryption mode.
 Authenticated staging retrieval was repeatable before dispatch and returned the documented private/no-sniff headers; consumed handles returned HTTP 404 afterward.
 Text and file-caption sends passed in plaintext and encrypted rooms, with four authenticated media-proxy downloads matching the retained thumbnail bytes.
@@ -317,8 +327,11 @@ After disabling Synapse previews, generation returned `unsupported` (its unavail
 An explicitly false capability and forbidden preview response are separately covered by the mocked homeserver tests, including stopping before URL submission for a false capability.
 The same boundary suite exercises all three acquisition requests under a configured homeserver path prefix, including encoded prefix segments and trailing-slash variants.
 IPv4 eligibility tests also cover the exact reserved-subnet boundaries and adjacent accepted addresses.
-After these corrections, `cargo fmt --all -- --check`, workspace Clippy with all features/targets and warnings denied, and `cargo test --all` passed (1,406 tests passed; PostgreSQL-only cases remain separately gated).
-The focused PostgreSQL/raster/capacity checks passed five tests, and the router/OpenAPI/native-contract run passed ten tests.
+After these corrections, `cargo fmt --all -- --check`, workspace Clippy with all features/targets and warnings denied, and `cargo test --all` passed (1,408 tests passed; PostgreSQL-only cases remain separately gated).
+The focused PostgreSQL media-upload run passed nine tests, server raster/capacity/recovery/quota checks passed six, and the router/OpenAPI/native-contract run passed ten tests.
+Actual SDK OAuth fixtures passed for refresh during all three acquisition phases, denied/rejected refresh, missing refresh credentials and ownership after waiter cancellation.
+The PostgreSQL encrypted OAuth rotation/persistence test also passed.
 The server smoke gate passed all ten scenarios against a fresh real stack.
 Generated-schema drift/compatibility checks and web lint/tests/build passed, with 2,645 web tests passing and one pre-existing ESLint warning in unchanged `Composer.tsx`.
+A real MAS-backed expired-token → preview generation → restart sequence remains a recommended additional deployment interoperability check; the automated SDK OAuth fixture uses a local authorization-server stub.
 This records server/API behavior; native sharing and third-party card rendering are not covered by this stage.

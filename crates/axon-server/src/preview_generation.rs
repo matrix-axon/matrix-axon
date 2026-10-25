@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use axon_api::{
     ApiError, GeneratedPreviewDto, LinkPreviewRequest, MediaUploadKindDto,
     PreviewGenerationStatus as Status, PreviewGenerator, PreviewThumbnailStatus as Thumbnail,
-    StagedUploadService,
 };
+use axon_core::preview_generation::PreviewUrl;
 use axon_sync::{HomeserverPreviewGenerator, PreviewFailure};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -16,7 +16,7 @@ trait PreviewSource: Send + Sync {
     async fn acquire(
         &self,
         account_id: Uuid,
-        url: &str,
+        url: &PreviewUrl,
     ) -> Result<axon_sync::AcquiredPreview, PreviewFailure>;
 }
 #[async_trait]
@@ -24,7 +24,7 @@ impl PreviewSource for HomeserverPreviewGenerator {
     async fn acquire(
         &self,
         account_id: Uuid,
-        url: &str,
+        url: &PreviewUrl,
     ) -> Result<axon_sync::AcquiredPreview, PreviewFailure> {
         HomeserverPreviewGenerator::acquire(self, account_id, url).await
     }
@@ -35,14 +35,16 @@ pub struct PreviewGenerationService {
     uploads: Arc<FilesystemStagedUploads>,
     // No unbounded work queue. The owned decode task holds its permit until
     // completion, including when its HTTP caller disappears.
-    capacity: Arc<Semaphore>,
+    capacity: axon_api::AccountSlots,
+    decoder: Arc<Semaphore>,
 }
 impl PreviewGenerationService {
     pub fn new(source: HomeserverPreviewGenerator, uploads: Arc<FilesystemStagedUploads>) -> Self {
         Self {
             source: Arc::new(source),
             uploads,
-            capacity: Arc::new(Semaphore::new(4)),
+            capacity: Default::default(),
+            decoder: Arc::new(Semaphore::new(4)),
         }
     }
 }
@@ -51,9 +53,9 @@ impl PreviewGenerator for PreviewGenerationService {
     async fn generate(
         &self,
         account_id: Uuid,
-        url: String,
+        url: PreviewUrl,
     ) -> Result<GeneratedPreviewDto, ApiError> {
-        let Ok(permit) = self.capacity.clone().try_acquire_owned() else {
+        let Ok(permit) = self.capacity.for_account(account_id).try_acquire_owned() else {
             return Ok(GeneratedPreviewDto::fallback(Status::Busy));
         };
         let acquired = match self.source.acquire(account_id, &url).await {
@@ -63,6 +65,7 @@ impl PreviewGenerator for PreviewGenerationService {
                     PreviewFailure::Unsupported => Status::Unsupported,
                     PreviewFailure::Disabled => Status::Disabled,
                     PreviewFailure::Timeout => Status::Timeout,
+                    PreviewFailure::RateLimited => Status::Busy,
                     PreviewFailure::Unavailable => Status::Unavailable,
                 };
                 tracing::debug!(%account_id, ?status, "homeserver preview generation fallback");
@@ -77,45 +80,57 @@ impl PreviewGenerator for PreviewGenerationService {
         let mut image_upload_id = None;
         let mut image_expires_at = None;
         if let Some(bytes) = acquired.image {
-            let (_permit, image) = tokio::task::spawn_blocking(move || {
-                let image = validate_preview_image(axon_api::ClaimedUpload {
-                    upload_id: Uuid::nil(),
-                    kind: MediaUploadKindDto::Image,
-                    filename: "preview".into(),
-                    content_type: None,
-                    size_bytes: bytes.len() as u64,
-                    bytes,
-                });
-                (permit, image)
-            })
-            .await
-            .map_err(|_| ApiError::internal())?;
             thumbnail_status = Thumbnail::Unavailable;
-            if let Ok(image) = image {
-                let mime = image.mimetype;
-                let request = axon_api::StageUploadRequest {
-                    account_id,
-                    kind: MediaUploadKindDto::Image,
-                    filename: "preview".into(),
-                    content_type: Some(mime),
-                };
-                let body = Box::pin(futures_util::stream::once(async { Ok(image.bytes.into()) }));
-                // Also bound the existing staging semaphore's queue wait.
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
-                    self.uploads.stage_upload(request, body),
-                )
+            if let Ok(decode_permit) = self.decoder.clone().try_acquire_owned() {
+                let (_permit, image) = tokio::task::spawn_blocking(move || {
+                    let _decode_permit = decode_permit;
+                    let image = validate_preview_image(axon_api::ClaimedUpload {
+                        upload_id: Uuid::nil(),
+                        kind: MediaUploadKindDto::Image,
+                        filename: "preview".into(),
+                        content_type: None,
+                        size_bytes: bytes.len() as u64,
+                        bytes,
+                    });
+                    (permit, image)
+                })
                 .await
-                {
-                    Ok(Ok(staged)) => {
-                        image_upload_id = Some(staged.upload_id);
-                        image_expires_at = Some(staged.expires_at);
-                        thumbnail_status = Thumbnail::Ready;
-                    }
-                    _ => {
-                        tracing::warn!(%account_id, "generated preview thumbnail staging unavailable")
+                .map_err(|_| ApiError::internal())?;
+                thumbnail_status = Thumbnail::Unavailable;
+                if let Ok(image) = image.inspect_err(|error| {
+                    tracing::debug!(%account_id, error_kind = error.diagnostic_kind(), "generated thumbnail validation failed");
+                }) {
+                    let mime = image.mimetype;
+                    let request = axon_api::StageUploadRequest {
+                        account_id,
+                        kind: MediaUploadKindDto::Image,
+                        filename: "preview".into(),
+                        content_type: Some(mime),
+                    };
+                    let body =
+                        Box::pin(futures_util::stream::once(async { Ok(image.bytes.into()) }));
+                    // Also bound the existing staging semaphore's queue wait.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        self.uploads.stage_generated_preview(request, body),
+                    )
+                    .await
+                    {
+                        Ok(Ok(staged)) => {
+                            image_upload_id = Some(staged.upload_id);
+                            image_expires_at = Some(staged.expires_at);
+                            thumbnail_status = Thumbnail::Ready;
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(%account_id, error_kind = error.diagnostic_kind(), "generated preview thumbnail staging unavailable")
+                        }
+                        Err(_) => {
+                            tracing::warn!(%account_id, error_kind = "deadline", "generated preview thumbnail staging unavailable")
+                        }
                     }
                 }
+            } else {
+                tracing::debug!(%account_id, error_kind = "decoder_capacity", "generated thumbnail unavailable");
             }
         }
         let p = acquired.metadata;
@@ -156,13 +171,13 @@ mod tests {
         async fn acquire(
             &self,
             _: Uuid,
-            url: &str,
+            url: &PreviewUrl,
         ) -> Result<axon_sync::AcquiredPreview, PreviewFailure> {
             self.entered.send(()).await.unwrap();
             let _permit = self.release.acquire().await.unwrap();
             Ok(axon_sync::AcquiredPreview {
                 metadata: axon_core::link_preview::PreviewMetadata {
-                    matched_url: url.into(),
+                    matched_url: url.as_str().into(),
                     title: Some("Generated title".into()),
                     description: None,
                     site_name: None,
@@ -197,14 +212,18 @@ mod tests {
         let service = Arc::new(PreviewGenerationService {
             source: source.clone(),
             uploads,
-            capacity: Arc::new(Semaphore::new(4)),
+            capacity: Default::default(),
+            decoder: Arc::new(Semaphore::new(4)),
         });
         let mut tasks = Vec::new();
         for _ in 0..4 {
             let service = service.clone();
             tasks.push(tokio::spawn(async move {
                 service
-                    .generate(Uuid::nil(), "https://example.org".into())
+                    .generate(
+                        Uuid::nil(),
+                        PreviewUrl::parse("https://example.org".into()).unwrap(),
+                    )
                     .await
                     .unwrap()
             }));
@@ -214,12 +233,29 @@ mod tests {
                 .unwrap();
         }
         let busy = service
-            .generate(Uuid::nil(), "https://example.org".into())
+            .generate(
+                Uuid::nil(),
+                PreviewUrl::parse("https://example.org".into()).unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(busy.status, Status::Busy);
         assert!(busy.preview.is_none());
-        source.release.add_permits(4);
+        let other_service = service.clone();
+        let other = tokio::spawn(async move {
+            other_service
+                .generate(
+                    Uuid::new_v4(),
+                    PreviewUrl::parse("https://example.org".into()).unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        source.release.add_permits(5);
         for task in tasks {
             let result = task.await.unwrap();
             assert_eq!(result.status, Status::Ready);
@@ -229,14 +265,126 @@ mod tests {
                 Some("Generated title")
             );
         }
-        assert_eq!(service.capacity.available_permits(), 4);
+        assert_eq!(other.await.unwrap().status, Status::Ready);
         assert_eq!(
             service
-                .generate(Uuid::nil(), "https://example.org".into())
+                .capacity
+                .for_account(Uuid::nil())
+                .available_permits(),
+            4
+        );
+        assert_eq!(
+            service
+                .generate(
+                    Uuid::nil(),
+                    PreviewUrl::parse("https://example.org".into()).unwrap()
+                )
                 .await
                 .unwrap()
                 .status,
             Status::Ready
         );
+    }
+    struct ImageSource(Vec<u8>);
+    #[async_trait]
+    impl PreviewSource for ImageSource {
+        async fn acquire(
+            &self,
+            _: Uuid,
+            url: &PreviewUrl,
+        ) -> Result<axon_sync::AcquiredPreview, PreviewFailure> {
+            Ok(axon_sync::AcquiredPreview {
+                metadata: axon_core::link_preview::PreviewMetadata {
+                    matched_url: url.as_str().into(),
+                    title: Some("Retained title".into()),
+                    description: None,
+                    site_name: None,
+                },
+                image: Some(self.0.clone()),
+                image_unavailable: false,
+            })
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn preview_generation_quota_retains_text_and_cleans_unadmitted_bytes() {
+        let store = axon_store::Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+            .await
+            .unwrap();
+        let owner = store
+            .upsert_account(
+                &format!("@quota-cleanup-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .unwrap()
+            .account_id;
+        for _ in 0..160 {
+            assert!(store
+                .insert_generated_preview_upload(
+                    &axon_store::NewMediaUpload {
+                        upload_id: Uuid::new_v4(),
+                        account_id: owner,
+                        kind: axon_store::MediaUploadKind::Image,
+                        filename: "preview",
+                        content_type: Some("image/png"),
+                        size_bytes: 0,
+                        path: "/unused",
+                        expires_at: chrono::Utc::now() + chrono::Duration::hours(1)
+                    },
+                    160,
+                    64 * 1024 * 1024
+                )
+                .await
+                .unwrap()
+                .is_some());
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let service = PreviewGenerationService {
+            source: Arc::new(ImageSource(png.into_inner())),
+            uploads: Arc::new(
+                FilesystemStagedUploads::new(
+                    store.clone(),
+                    &axon_core::MediaConfig {
+                        uploads_dir: dir.path().into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            ),
+            capacity: Default::default(),
+            decoder: Arc::new(Semaphore::new(4)),
+        };
+        let result = service
+            .generate(
+                owner,
+                PreviewUrl::parse("https://example.org".into()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, Status::Ready);
+        assert_eq!(result.thumbnail_status, Thumbnail::Unavailable);
+        let preview = result.preview.unwrap();
+        assert_eq!(preview.title.as_deref(), Some("Retained title"));
+        assert!(preview.image_upload_id.is_none());
+        assert!(result.image_expires_at.is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let mut files = tokio::fs::read_dir(dir.path().join(owner.to_string()))
+                    .await
+                    .unwrap();
+                if files.next_entry().await.unwrap().is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("unadmitted file was reclaimed");
+        store.delete_account_row(owner).await.unwrap();
     }
 }

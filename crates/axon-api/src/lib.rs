@@ -10,6 +10,8 @@
 //! an unversioned operational liveness probe. The response envelope (`{data}` /
 //! `{error}`) lives in [`response`]; the OpenAPI document is [`ApiDoc`].
 
+mod account_slots;
+pub use account_slots::AccountSlots;
 mod auth;
 mod backfill;
 mod backup_state;

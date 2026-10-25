@@ -4,6 +4,31 @@ use serde_json::Value;
 use std::net::{IpAddr, Ipv4Addr};
 use url::{Host, Url};
 
+/// A generation destination that already satisfies public-URL eligibility and
+/// the settled send contract's exact body-link membership rules.
+#[derive(Clone)]
+pub struct PreviewUrl(String);
+impl PreviewUrl {
+    pub fn parse(input: String) -> Result<Self, crate::link_preview::PreviewError> {
+        if !eligible_url(&input) {
+            return Err(crate::link_preview::PreviewError::Invalid);
+        }
+        validate_metadata(
+            &input,
+            &[PreviewMetadata {
+                matched_url: input.clone(),
+                title: None,
+                description: None,
+                site_name: None,
+            }],
+        )?;
+        Ok(Self(input))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Public HTTP(S) destinations only. DNS resolution and origin-fetch SSRF
 /// protection belong to the homeserver, which alone contacts the webpage.
 /// Preserve the exact matched input for the settled send contract.
@@ -75,8 +100,8 @@ fn public_v4(ip: Ipv4Addr) -> bool {
 
 /// Retain only bounded, plain text fields. Never copy HTML or arbitrary OG
 /// keys, trust declared image dimensions, or replace the requested URL.
-pub fn normalize(url: &str, value: &Value) -> Option<PreviewMetadata> {
-    if !eligible_url(url) || !value.is_object() {
+pub fn normalize(url: &PreviewUrl, value: &Value) -> Option<PreviewMetadata> {
+    if !value.is_object() {
         return None;
     }
     let text = |key, limit| {
@@ -92,18 +117,29 @@ pub fn normalize(url: &str, value: &Value) -> Option<PreviewMetadata> {
             .map(str::to_owned)
     };
     let p = PreviewMetadata {
-        matched_url: url.into(),
+        matched_url: url.as_str().into(),
         title: text("og:title", 300),
         description: text("og:description", 1000),
         site_name: text("og:site_name", 120),
     };
-    validate_metadata(url, std::slice::from_ref(&p)).ok()?;
     Some(p)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsendable_matched_urls_are_rejected_before_acquisition() {
+        for url in [
+            "https://en.wikipedia.org/wiki/Foo_(bar)",
+            "https://example.org/?",
+            "https://example.org/<foo>",
+        ] {
+            assert!(eligible_url(url));
+            assert!(PreviewUrl::parse(url.into()).is_err());
+        }
+        assert!(PreviewUrl::parse("https://example.org/Foo_%28bar%29".into()).is_ok());
+    }
     #[test]
     fn public_urls_and_normalized_allow_list() {
         for url in [
@@ -141,12 +177,16 @@ mod tests {
         ] {
             assert!(!eligible_url(url), "{url}");
         }
-        let p = normalize("https://example.org", &serde_json::json!({"og:title":"  title  ", "og:description":false, "og:site_name":"x".repeat(121), "og:url":"https://evil.org", "html":"<script>"})).unwrap();
+        let p = normalize(&PreviewUrl::parse("https://example.org".into()).unwrap(), &serde_json::json!({"og:title":"  title  ", "og:description":false, "og:site_name":"x".repeat(121), "og:url":"https://evil.org", "html":"<script>"})).unwrap();
         assert_eq!(p.title.as_deref(), Some("title"));
         assert_eq!(p.description, None);
         assert_eq!(p.site_name, None);
         assert_eq!(p.matched_url, "https://example.org");
-        assert!(normalize("https://example.org", &serde_json::json!([])).is_none());
+        assert!(normalize(
+            &PreviewUrl::parse("https://example.org".into()).unwrap(),
+            &serde_json::json!([])
+        )
+        .is_none());
         assert!(!eligible_url(&format!(
             "https://example.org/{}",
             "a".repeat(4096)
