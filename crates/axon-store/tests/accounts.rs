@@ -220,6 +220,7 @@ async fn oauth_registration_is_shared_by_issuer() {
         issuer_url: issuer.clone(),
         homeserver_url: "https://hs.example.org/".to_owned(),
         client_id: "public-client".to_owned(),
+        metadata_hash: Some("abc123".to_owned()),
     };
     store
         .upsert_matrix_oauth_registration(&registration)

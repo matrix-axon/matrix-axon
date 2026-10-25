@@ -72,6 +72,10 @@ pub struct MatrixOAuthRegistration {
     pub homeserver_url: String,
     /// Public OAuth client identifier (never a client secret).
     pub client_id: String,
+    /// Fingerprint of the client metadata a dynamic registration was made
+    /// with. `None` for operator-provided static registrations and for rows
+    /// that predate the column; either way the metadata is unknown.
+    pub metadata_hash: Option<String>,
 }
 
 /// An account's lifecycle state, kept orthogonal to verification (ADR 0022).
@@ -553,7 +557,7 @@ impl Store {
         issuer_url: &str,
     ) -> Result<Option<MatrixOAuthRegistration>, StoreError> {
         let row = sqlx_core::query::query(
-            "SELECT issuer_url, homeserver_url, client_id \
+            "SELECT issuer_url, homeserver_url, client_id, metadata_hash \
              FROM matrix_oauth_registrations WHERE issuer_url = $1",
         )
         .bind(issuer_url)
@@ -563,6 +567,7 @@ impl Store {
             issuer_url: row.get("issuer_url"),
             homeserver_url: row.get("homeserver_url"),
             client_id: row.get("client_id"),
+            metadata_hash: row.get("metadata_hash"),
         }))
     }
 
@@ -573,15 +578,17 @@ impl Store {
     ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "INSERT INTO matrix_oauth_registrations \
-                 (issuer_url, homeserver_url, client_id) \
-             VALUES ($1, $2, $3) \
+                 (issuer_url, homeserver_url, client_id, metadata_hash) \
+             VALUES ($1, $2, $3, $4) \
              ON CONFLICT (issuer_url) DO UPDATE \
              SET homeserver_url = EXCLUDED.homeserver_url, \
-                 client_id = EXCLUDED.client_id",
+                 client_id = EXCLUDED.client_id, \
+                 metadata_hash = EXCLUDED.metadata_hash",
         )
         .bind(&registration.issuer_url)
         .bind(&registration.homeserver_url)
         .bind(&registration.client_id)
+        .bind(&registration.metadata_hash)
         .execute(&self.pool)
         .await?;
         Ok(())
