@@ -1874,6 +1874,12 @@ select {
 select:hover:not(:disabled) {
   border-color: var(--muted);
 }
+/* Unread in an account the selection hides; the badge beside the label says how
+   many. Hover keeps the accent so the cue does not vanish under the pointer. */
+select.has-unread-elsewhere,
+select.has-unread-elsewhere:hover:not(:disabled) {
+  border-color: var(--accent);
+}
 select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;

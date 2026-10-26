@@ -1138,6 +1138,57 @@ describe('RoomList account labels', () => {
     ])
   })
 
+  it('flags unread in the other accounts when one account is selected', async () => {
+    const { findByText, getByLabelText, getByRole, container, queryByRole } =
+      renderPage([
+        { ...OPS, notification_count: 2 },
+        makeRoom({
+          account_id: OTHER_ACCOUNT,
+          account_user_id: '@work:example.org',
+          room_id: '!work:hs',
+          name: 'Work',
+          notification_count: 4,
+        }),
+      ])
+    await findByText('Work')
+    const select = getByLabelText('Account') as HTMLSelectElement
+
+    // "All accounts" already shows everything.
+    expect(container.querySelector('.account-unread-elsewhere')).toBeNull()
+    expect(select.classList.contains('has-unread-elsewhere')).toBe(false)
+
+    fireEvent.change(select, { target: { value: ACCOUNT } })
+    const badge = await waitFor(() => {
+      const el = container.querySelector('.account-unread-elsewhere')
+      expect(el).not.toBeNull()
+      return el as HTMLElement
+    })
+    expect(badge.textContent).toBe('4')
+    expect(
+      queryByRole('img', { name: '4 unread in other account' }),
+    ).not.toBeNull()
+    // The caption keeps the select's accessible name clean; the count is its
+    // description.
+    expect(select.getAttribute('aria-describedby')).toBe(badge.id)
+    expect(getByRole('combobox', { name: 'Account' })).toBe(select)
+    expect(select.classList.contains('has-unread-elsewhere')).toBe(true)
+
+    // Switching accounts flips which side counts as "elsewhere".
+    fireEvent.change(select, { target: { value: OTHER_ACCOUNT } })
+    await waitFor(() => {
+      expect(
+        container.querySelector('.account-unread-elsewhere')?.textContent,
+      ).toBe('2')
+    })
+
+    // Back to "All accounts", which already covers everything.
+    fireEvent.change(select, { target: { value: 'all' } })
+    await waitFor(() => {
+      expect(container.querySelector('.account-unread-elsewhere')).toBeNull()
+    })
+    expect(select.classList.contains('has-unread-elsewhere')).toBe(false)
+  })
+
   it('omits the account entirely when only one account has rooms', async () => {
     const { findByText, container } = renderPage([OPS, LOUNGE])
     await findByText('Ops')
