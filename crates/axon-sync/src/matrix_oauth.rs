@@ -19,6 +19,7 @@ use matrix_sdk::{
     },
     Client, SessionChange,
 };
+use sha2::Digest;
 use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -91,6 +92,7 @@ impl MatrixOAuthRegistrationManager {
         validate_config(&self.config)?;
         let timeout = Duration::from_secs(self.config.request_timeout_secs);
         let http = reqwest::Client::builder()
+            .user_agent(crate::client::user_agent())
             .connect_timeout(timeout.min(Duration::from_secs(5)))
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -116,12 +118,7 @@ impl MatrixOAuthRegistrationManager {
         homeserver: &Url,
         server: &DiscoveredMatrixOAuthServer,
     ) -> Result<ClientId, SyncError> {
-        let DiscoveredMatrixOAuthServer {
-            metadata,
-            http,
-            timeout,
-        } = server;
-        let timeout = *timeout;
+        let metadata = &server.metadata;
         let issuer = metadata.issuer.clone();
         let issuer_url = issuer.as_str();
         if issuer_url.len() > MAX_SERVER_URL_BYTES
@@ -138,17 +135,64 @@ impl MatrixOAuthRegistrationManager {
         if let Some(registration) = self.store.matrix_oauth_registration(issuer_url).await? {
             validate_client_id(&registration.client_id)
                 .map_err(|_| SyncError::MatrixOAuthLocalState)?;
-            let client_id = ClientId::new(registration.client_id);
-            tracing::debug!("restored persisted Matrix OAuth client registration");
-            return Ok(client_id);
+            let client_id = ClientId::new(registration.client_id.clone());
+            // An operator-provided registration, or a server that cannot
+            // register us again, has metadata Axon cannot refresh. A stored
+            // row left over from a static registration the operator has since
+            // removed has no fingerprint either, so it is refreshed here: with
+            // no static entry for this server any more, a dynamic registration
+            // is what the configuration asks for.
+            let refreshable = static_client_id(&self.config, homeserver, &issuer)?.is_none()
+                && metadata.registration_endpoint.is_some();
+            let current =
+                registration.metadata_hash.as_deref() == Some(client_metadata_hash()?.as_str());
+            if !refreshable || current {
+                tracing::debug!("restored persisted Matrix OAuth client registration");
+                return Ok(client_id);
+            }
+            // The stored client was registered with different metadata (a new
+            // logo, say), and the server shows what it holds. Register again,
+            // but never let a failed refresh block a sign-in the stored client
+            // can still serve. The old client stays valid for sessions that
+            // already use it. A refresh the server keeps rejecting is retried
+            // on every sign-in for now (#857).
+            tracing::info!("persisted Matrix OAuth client registration predates the current client metadata; registering again");
+            return match self.register_dynamic(&issuer, homeserver, server).await {
+                Ok(fresh) => Ok(fresh),
+                Err(error) => {
+                    tracing::warn!(
+                        phase = "oauth_registration",
+                        %error,
+                        "could not refresh the Matrix OAuth client registration; keeping the stored client"
+                    );
+                    Ok(client_id)
+                }
+            };
         }
 
         if let Some(client_id) = static_client_id(&self.config, homeserver, &issuer)? {
-            self.persist(&issuer, homeserver, &client_id).await?;
+            self.persist(&issuer, homeserver, &client_id, None).await?;
             tracing::info!("restored operator-provided Matrix OAuth client registration");
             return Ok(client_id);
         }
 
+        self.register_dynamic(&issuer, homeserver, server).await
+    }
+
+    /// Register Axon with the server's dynamic registration endpoint and
+    /// persist the result with the metadata fingerprint it was made with.
+    async fn register_dynamic(
+        &self,
+        issuer: &Url,
+        homeserver: &Url,
+        server: &DiscoveredMatrixOAuthServer,
+    ) -> Result<ClientId, SyncError> {
+        let DiscoveredMatrixOAuthServer {
+            metadata,
+            http,
+            timeout,
+        } = server;
+        let timeout = *timeout;
         let registration_endpoint = metadata.registration_endpoint.clone().ok_or_else(|| {
             SyncError::Sdk(
                 "Matrix OAuth server does not advertise dynamic client registration and no static client ID matches"
@@ -195,8 +239,13 @@ impl MatrixOAuthRegistrationManager {
                 "Matrix OAuth dynamic registration returned an invalid client ID"
             );
         })?;
-        self.persist(&issuer, homeserver, &response.client_id)
-            .await?;
+        self.persist(
+            issuer,
+            homeserver,
+            &response.client_id,
+            Some(client_metadata_hash()?),
+        )
+        .await?;
         tracing::info!("dynamically registered Matrix OAuth client");
         Ok(response.client_id)
     }
@@ -206,6 +255,7 @@ impl MatrixOAuthRegistrationManager {
         issuer: &Url,
         homeserver: &Url,
         client_id: &ClientId,
+        metadata_hash: Option<String>,
     ) -> Result<(), SyncError> {
         validate_client_id(client_id.as_str()).map_err(|_| SyncError::MatrixOAuthLocalState)?;
         self.store
@@ -213,6 +263,7 @@ impl MatrixOAuthRegistrationManager {
                 issuer_url: issuer.to_string(),
                 homeserver_url: homeserver.to_string(),
                 client_id: client_id.as_str().to_owned(),
+                metadata_hash,
             })
             .await?;
         Ok(())
@@ -452,17 +503,48 @@ fn static_client_id(
     Ok(None)
 }
 
+/// Icon MAS shows beside Axon sessions. Must stay publicly fetchable over HTTPS
+/// (`/raw/` redirects to the image bytes; `/blob/` is an HTML page), and on the
+/// same host as the `client_uri` in [`client_metadata`]: MAS refuses
+/// registration with a 400 when the two differ. Repointing it only affects
+/// clients registered afterwards. Moving it off the `main` branch layout, to a
+/// stable Pages URL, is tracked in #858.
+const CLIENT_LOGO_URI: &str =
+    "https://github.com/matrix-axon/matrix-axon/raw/main/docs/brand/axon-mark-light.png";
+
 fn client_metadata() -> Result<Raw<ClientMetadata>, SyncError> {
     let client_uri = Url::parse("https://github.com/matrix-axon/matrix-axon")
         .map_err(|err| SyncError::Sdk(format!("invalid built-in OAuth client URI: {err}")))?;
+    let logo_uri = Url::parse(CLIENT_LOGO_URI)
+        .map_err(|err| SyncError::Sdk(format!("invalid built-in OAuth logo URI: {err}")))?;
     let mut metadata = ClientMetadata::new(
         ApplicationType::Native,
         vec![OAuthGrantType::DeviceCode],
         Localized::new(client_uri, None),
     );
     metadata.client_name = Some(Localized::new("Axon".to_owned(), None));
+    metadata.logo_uri = Some(Localized::new(logo_uri, None));
     Raw::new(&metadata)
         .map_err(|err| SyncError::Sdk(format!("serializing OAuth client metadata: {err}")))
+}
+
+/// Fingerprint of [`client_metadata`], stored beside a dynamic registration so
+/// a later build that registers different metadata can tell the stored client
+/// is out of date. See [`fingerprint_metadata_json`] for what it covers.
+fn client_metadata_hash() -> Result<String, SyncError> {
+    let metadata = client_metadata().map_err(|_| SyncError::MatrixOAuthLocalState)?;
+    fingerprint_metadata_json(metadata.json().get())
+}
+
+/// SHA-256, lowercase hex, of a metadata JSON object with its top-level keys in
+/// sorted order. The order the SDK's serializer emits fields in is not part of
+/// the metadata, so a matrix-sdk bump that reorders them must not make every
+/// install register again; a field that is added, removed or changed still does.
+fn fingerprint_metadata_json(json: &str) -> Result<String, SyncError> {
+    let fields: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(json).map_err(|_| SyncError::MatrixOAuthLocalState)?;
+    let canonical = serde_json::to_vec(&fields).map_err(|_| SyncError::MatrixOAuthLocalState)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(canonical)))
 }
 
 /// Persist the newest OAuth session after every SDK refresh notification.
@@ -636,7 +718,7 @@ mod tests {
         Json, Router,
     };
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
 
@@ -699,6 +781,16 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(raw.json().get()).unwrap();
         assert_eq!(json["application_type"], "native");
         assert_eq!(json["client_name"], "Axon");
+        assert_eq!(json["logo_uri"], CLIENT_LOGO_URI);
+        assert_eq!(
+            Url::parse(json["logo_uri"].as_str().unwrap())
+                .unwrap()
+                .host(),
+            Url::parse(json["client_uri"].as_str().unwrap())
+                .unwrap()
+                .host(),
+            "MAS requires logo_uri and client_uri on the same host"
+        );
         assert_eq!(
             json["grant_types"],
             serde_json::json!([
@@ -736,6 +828,8 @@ mod tests {
     struct OAuthMockState {
         base_url: String,
         registration_calls: Arc<AtomicUsize>,
+        /// Answer registration requests with a 500 while set.
+        fail_registration: Arc<AtomicBool>,
     }
 
     async fn versions() -> Json<serde_json::Value> {
@@ -764,11 +858,21 @@ mod tests {
     async fn register_client(
         State(state): State<OAuthMockState>,
         Json(metadata): Json<serde_json::Value>,
-    ) -> Json<serde_json::Value> {
+    ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
         assert_eq!(metadata["application_type"], "native");
         assert_eq!(metadata["client_name"], "Axon");
-        state.registration_calls.fetch_add(1, Ordering::SeqCst);
-        Json(serde_json::json!({ "client_id": "dynamic-client" }))
+        assert_eq!(metadata["logo_uri"], CLIENT_LOGO_URI);
+        let call = state.registration_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if state.fail_registration.load(Ordering::SeqCst) {
+            return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        // A distinct ID per call, so a test can tell which registration it got.
+        let client_id = if call == 1 {
+            "dynamic-client".to_owned()
+        } else {
+            format!("dynamic-client-{call}")
+        };
+        Ok(Json(serde_json::json!({ "client_id": client_id })))
     }
 
     async fn refresh_token() -> Json<serde_json::Value> {
@@ -867,6 +971,168 @@ mod tests {
         );
     }
 
+    #[test]
+    fn metadata_fingerprint_ignores_field_order_but_not_content() {
+        let fingerprint = |json| fingerprint_metadata_json(json).unwrap();
+        assert_eq!(
+            fingerprint(r#"{"client_name":"Axon","logo_uri":"https://a.example/l.png"}"#),
+            fingerprint(r#"{"logo_uri":"https://a.example/l.png","client_name":"Axon"}"#),
+        );
+        assert_ne!(
+            fingerprint(r#"{"client_name":"Axon","logo_uri":"https://a.example/l.png"}"#),
+            fingerprint(r#"{"client_name":"Axon","logo_uri":"https://a.example/m.png"}"#),
+        );
+        assert_ne!(
+            fingerprint(r#"{"client_name":"Axon"}"#),
+            fingerprint(r#"{"client_name":"Axon","logo_uri":"https://a.example/l.png"}"#),
+        );
+        assert!(fingerprint_metadata_json("not json").is_err());
+    }
+
+    #[test]
+    fn client_metadata_hash_is_a_stable_sha256_hex_digest() {
+        let hash = client_metadata_hash().unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(hash, client_metadata_hash().unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_dynamic_registration_is_refreshed_without_blocking_sign_in() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/", listener.local_addr().unwrap());
+        let registration_calls = Arc::new(AtomicUsize::new(0));
+        let fail_registration = Arc::new(AtomicBool::new(false));
+        let state = OAuthMockState {
+            base_url: base_url.clone(),
+            registration_calls: registration_calls.clone(),
+            fail_registration: fail_registration.clone(),
+        };
+        let app = Router::new()
+            .route("/_matrix/client/versions", get(versions))
+            .route("/_matrix/client/v1/auth_metadata", get(auth_metadata))
+            .route(
+                "/_matrix/client/unstable/org.matrix.msc2965/auth_metadata",
+                get(auth_metadata),
+            )
+            .route("/register", post(register_client))
+            .with_state(state);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let store = Store::connect(&database_url, 5).await.unwrap();
+        let clear = || async {
+            sqlx_core::query::query("DELETE FROM matrix_oauth_registrations WHERE issuer_url = $1")
+                .bind(&base_url)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        };
+        let prepare = |config: MatrixOAuthConfig| {
+            let store = store.clone();
+            let base_url = base_url.clone();
+            async move {
+                let client = Client::builder()
+                    .homeserver_url(&base_url)
+                    .handle_refresh_tokens()
+                    .build()
+                    .await
+                    .unwrap();
+                MatrixOAuthRegistrationManager::new(store, config)
+                    .prepare(&client)
+                    .await
+                    .unwrap()
+                    .as_str()
+                    .to_owned()
+            }
+        };
+        let stored = || async {
+            store
+                .matrix_oauth_registration(&base_url)
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        clear().await;
+
+        // A fresh registration records the metadata it was made with, and a
+        // matching one is reused without another request.
+        assert_eq!(
+            prepare(MatrixOAuthConfig::default()).await,
+            "dynamic-client"
+        );
+        assert_eq!(
+            stored().await.metadata_hash.as_deref(),
+            Some(client_metadata_hash().unwrap().as_str())
+        );
+        assert_eq!(
+            prepare(MatrixOAuthConfig::default()).await,
+            "dynamic-client"
+        );
+        assert_eq!(registration_calls.load(Ordering::SeqCst), 1);
+
+        // A row from before the fingerprint existed is stale. If the server
+        // refuses the refresh, sign-in carries on with the stored client and
+        // the row is untouched, so the next sign-in tries again.
+        sqlx_core::query::query(
+            "UPDATE matrix_oauth_registrations SET metadata_hash = NULL WHERE issuer_url = $1",
+        )
+        .bind(&base_url)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        fail_registration.store(true, Ordering::SeqCst);
+        assert_eq!(
+            prepare(MatrixOAuthConfig::default()).await,
+            "dynamic-client"
+        );
+        assert_eq!(registration_calls.load(Ordering::SeqCst), 2);
+        let unchanged = stored().await;
+        assert_eq!(unchanged.client_id, "dynamic-client");
+        assert_eq!(unchanged.metadata_hash, None);
+
+        // Once the server cooperates the stale row is replaced.
+        fail_registration.store(false, Ordering::SeqCst);
+        assert_eq!(
+            prepare(MatrixOAuthConfig::default()).await,
+            "dynamic-client-3"
+        );
+        assert_eq!(registration_calls.load(Ordering::SeqCst), 3);
+        let refreshed = stored().await;
+        assert_eq!(refreshed.client_id, "dynamic-client-3");
+        assert_eq!(
+            refreshed.metadata_hash.as_deref(),
+            Some(client_metadata_hash().unwrap().as_str())
+        );
+
+        // An operator-provided registration has metadata Axon does not own, so
+        // it is never registered again, whatever its stored fingerprint.
+        sqlx_core::query::query(
+            "UPDATE matrix_oauth_registrations SET client_id = 'static-client', \
+             metadata_hash = NULL WHERE issuer_url = $1",
+        )
+        .bind(&base_url)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        let static_config = MatrixOAuthConfig {
+            static_registrations: std::collections::BTreeMap::from([(
+                "test-mas".to_owned(),
+                MatrixOAuthStaticRegistration {
+                    server_url: base_url.clone(),
+                    client_id: "static-client".to_owned(),
+                },
+            )]),
+            ..MatrixOAuthConfig::default()
+        };
+        assert_eq!(prepare(static_config).await, "static-client");
+        assert_eq!(registration_calls.load(Ordering::SeqCst), 3);
+
+        clear().await;
+        server.abort();
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn dynamic_registration_is_persisted_and_reused_by_issuer() {
@@ -876,6 +1142,7 @@ mod tests {
         let state = OAuthMockState {
             base_url: base_url.clone(),
             registration_calls: registration_calls.clone(),
+            fail_registration: Arc::new(AtomicBool::new(false)),
         };
         let app = Router::new()
             .route("/_matrix/client/versions", get(versions))

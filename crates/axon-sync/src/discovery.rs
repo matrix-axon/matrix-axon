@@ -66,6 +66,7 @@ pub(crate) enum DiscoveryError {
 /// Built once by the lifecycle and reused across logins.
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .user_agent(crate::client::user_agent())
         .timeout(DISCOVERY_HTTP_TIMEOUT)
         .build()
         .expect("discovery HTTP client must build")
