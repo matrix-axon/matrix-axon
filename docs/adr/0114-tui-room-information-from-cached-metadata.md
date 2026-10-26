@@ -68,8 +68,8 @@ The TUI does not compute resolved power, and does not call a v12 creator's level
 
 ### Search members inside the popup
 
-`/` in the room-information popup opens a filter prompt, the same key the list panes use for search.
-Typing narrows the member section to case-insensitive substring matches on display name or Matrix ID and reports how many loaded members match.
+`shortcuts.find` (Ctrl-F by default) in the room-information popup opens a filter prompt, the same key the list panes use for search.
+Typing narrows the member section to case-insensitive substring matches on display name or Matrix ID, folding Latin accents, and reports how many loaded members match.
 The filter is local and covers loaded members only, which the popup states when the room has more members than are loaded.
 `Esc` clears an active filter first and closes the popup second.
 The key is configurable and listed in `/shortcuts`.

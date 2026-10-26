@@ -478,6 +478,11 @@ pub struct KeyBinding {
 }
 
 impl KeyBinding {
+    #[cfg(test)]
+    pub(crate) fn from_spec(value: &str) -> Self {
+        parse_key_binding("test", value).expect("test key binding")
+    }
+
     pub fn matches(&self, key: KeyEvent) -> bool {
         self.code == key.code && self.modifiers == key.modifiers
     }
