@@ -19,6 +19,27 @@ test('a rendered binary QR image scans back to the exact original bytes', async 
   await page.getByRole('button', { name: 'Start QR sign-in' }).click()
   const canvas = page.getByRole('img', { name: 'Matrix sign-in QR code' })
   await expect(canvas).toBeVisible()
+  // The canvas is in the page before it is drawn: the renderer loads its
+  // library lazily. `toBeVisible` passes on the blank 300x150 default, so wait
+  // for the first painted pixel or the screenshot can be of nothing.
+  await expect
+    .poll(() =>
+      canvas.evaluate((element) => {
+        const { width, height } = element as HTMLCanvasElement
+        const context = (element as HTMLCanvasElement).getContext('2d')
+        if (context === null || width === 0 || height === 0) {
+          return false
+        }
+        const pixels = context.getImageData(0, 0, width, height).data
+        for (let alpha = 3; alpha < pixels.length; alpha += 4) {
+          if (pixels[alpha] !== 0) {
+            return true
+          }
+        }
+        return false
+      }),
+    )
+    .toBe(true)
   const image = await canvas.screenshot()
 
   await page.getByRole('button', { name: 'Cancel QR sign-in' }).click()
