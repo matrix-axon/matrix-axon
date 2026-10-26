@@ -58,11 +58,14 @@ ignore = [
   # matrix-sdk depends on anymap2, need to wait for new sdk release that updates to anymap3
   # tracked in https://github.com/matrix-org/matrix-rust-sdk/issues/7184
   { id = "RUSTSEC-2026-0319", reason = "matrix-sdk; no upgrade exists" },
-  # webpki-roots 0.26.11 trusts emSign intermediates; only >= 1.0.10 is fixed and
-  # 0.26 gets no patch. It is held there by sqlx-core/sqlx-postgres 0.8.2 (exact
-  # pin, ADR 0006; sqlx 0.9 moves to ^1) and by axon-tui's tokio-tungstenite
-  # `rustls-tls-webpki-roots` feature (every tokio-tungstenite up to 0.30 wants
-  # ^0.26). Exit: migrate sqlx and switch the feature, then delete this entry
-  # (#781).
-  { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26, via sqlx-core 0.8.2 and tokio-tungstenite; exit tracked in #781" },
+  # zstd 0.13.3; fixed only in >= 0.14.3. Still held at ^0.13 by tantivy-sstable
+  # (the tower-http path moved to zstd 0.14 via compression-codecs 0.4.46). Only
+  # `stream::raw::{Encoder,Decoder}::with_context` is affected, and tantivy never
+  # calls it. Exit: delete this entry once tantivy moves to zstd 0.14.
+  { id = "RUSTSEC-2026-0391", reason = "zstd 0.13, via tantivy-sstable; with_context is never called" },
+  # zstd-safe 7.2.4 (fixed in >= 8.x), same tantivy hold. 0398 needs zstd's
+  # `seekable` feature, which is off. 0403 is in `stream::write::Decoder`;
+  # tantivy uses only the bulk API (documented as unaffected).
+  { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7.2.4, via tantivy; seekable feature is off" },
+  { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7.2.4, via tantivy; only the stream write Decoder is affected and tantivy uses the bulk API" },
 ]
