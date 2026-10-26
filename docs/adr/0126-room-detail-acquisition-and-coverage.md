@@ -1,4 +1,4 @@
-# ADR 0126 — Room detail acquisition, state coverage, and change notification
+# ADR 0126 — Room detail acquisition, confirmed state absence, and change notification
 
 **Status:** Proposed; tracked in [issue 621](https://github.com/matrix-axon/matrix-axon/issues/621), part of [issue 618](https://github.com/matrix-axon/matrix-axon/issues/618).
 Records the concrete acquisition policy that [ADR 0111](0111-cached-progressive-room-metadata.md) deferred to the implementation, and amends [ADR 0124](0124-isolated-image-pack-sync.md)'s transport scope.
@@ -15,8 +15,11 @@ Those two `/metadata` snapshots stay `unknown` unless an unrelated timeline even
 The primary service exposes no supported way to add required state (ADR 0124's context).
 
 **`unknown` cannot become "absent".**
-Matrix state is never deleted, only replaced, so a room that never had an `m.room.server_acl` event has no ACL.
-Axon cannot say so today: a missing tuple means either "the room has none" or "Axon has not been told", and ADR 0111 forbids guessing between them.
+A room that never had an `m.room.server_acl` event has no ACL, but Axon cannot say so: a missing tuple means either "the room has none" or "Axon has not been told", and ADR 0111 forbids guessing between them.
+Sync cannot settle it.
+A Sliding Sync response gives no completeness guarantee for `required_state` (ADR 0124's consequences), and a server or proxy can cap or ignore entries without saying so.
+matrix-sdk 0.19.1 reaches the same conclusion for encryption: `Room::request_encryption_state` does not trust sync's silence, and asks the room-state endpoint, treating only `404 M_NOT_FOUND` as absent.
+A false "absent" for encryption is security-relevant, because a client would present an encrypted room as unencrypted.
 
 **Two values exist only on the account's homeserver.**
 The aliases the homeserver maintains for a room ([`GET /rooms/{roomId}/aliases`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3roomsroomidaliases)) and whether it publishes the room in its directory ([`GET /directory/list/room/{roomId}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3directorylistroomroomid)) are not room state.
@@ -32,10 +35,9 @@ ADR 0122's `HomeserverGate` (PR 836, not yet merged) is the one place background
 
 ## Decision
 
-### 1. The supplementary transport requests all eight metadata types
+### 1. The supplementary transport also requests guest access and server ACL
 
-Extend the ADR 0124 transport's allowlist to every singleton state type `/metadata` reports: canonical alias, creation, join rules, encryption, power levels, server ACL, history visibility, and guest access.
-Creation and power levels are already on the list; guest access and server ACL close the coverage gap; the remaining four are requested so that coverage (decision 2) is uniform across all eight snapshots.
+Add `m.room.guest_access` and `m.room.server_acl` (state key `""`) to the ADR 0124 transport's allowlist.
 The transport becomes a general supplementary-state transport rather than an image-pack transport: rename the module and use connection ID `axon-state`.
 Its position is in memory only (ADR 0124), so the rename costs one fresh connection, which every process restart already starts.
 
@@ -44,52 +46,64 @@ The primary `SyncService` remains the sole owner of SDK room state.
 
 This is preferred over repairing each room with `GET /rooms/{roomId}/state/{type}`.
 Per-room repair is one upstream request per room per type, needs its own refresh schedule, and still misses later changes, whereas the transport delivers cold-start state in its existing paged range and later changes live.
-The added content is a few small singletons per room on a connection that already carries power levels, which is usually the largest of them.
+The added content is two small singletons per room on a connection that already carries power levels.
 
-### 2. Coverage records what the homeserver has answered for
+What the transport delivers is positive evidence only.
+A type it does not deliver remains `unknown`; the transport never establishes absence (decision 2).
 
-A room that appears in a transport response with `initial: true` carries the room's full current state for every requested type ([MSC4186](https://github.com/matrix-org/matrix-spec-proposals/pull/4186)).
-After that room's batch is processed, Axon records a coverage row for each of the eight types, keyed by account, room, and type, with `covered_at` from the PostgreSQL clock.
-A type is not covered from a batch in which an event of that type was malformed, failed to persist, or was skipped by the departed-room rule; a skipped or broken event must never read as absence.
-Later non-initial responses keep covered state current through ordinary deltas, and a restart re-covers each room as its fresh connection reaches it.
+### 2. Known absence is confirmed by the room-state endpoint
 
-`/metadata` gains a nullable `coverage` object on each snapshot, `{ "covered_at": <Unix ms> }`, or `null` when the type has not been covered.
+A missing tuple becomes known absent only when the account's homeserver answers `GET /rooms/{roomId}/state/{type}/` with `404 M_NOT_FOUND`.
+For a joined member that response is the specification's statement that the room has no such state, unlike sync's silence.
+
+- **When:** a `/metadata` read schedules a confirmation for each of the eight types that has no tuple, subject to the cache below; the read itself returns immediately.
+  A type with a tuple is never confirmed: its status comes from the tuple.
+- **Where:** confirmations are acquisition jobs on the account's worker (decision 4), so they share its queue, gate permits, pacing, and freshness guard.
+- **Outcomes:**
+  - `404 M_NOT_FOUND` records the confirmation, with `confirmed_at` from the PostgreSQL clock.
+  - `200` means the state exists but has not reached `room_state`; no confirmation is recorded, the body is not read or stored, and Axon logs a warning naming the account, room, and type as a sync coverage gap.
+    The endpoint's content-only response lacks the event ID, sender, and timestamp a `room_state` row needs, and ADR 0111 keeps acquired data out of synced state.
+  - `403` records nothing, because the account may no longer be joined; the job takes the conclusive-denial expiration so it is not retried on every read.
+  - Every other outcome is a failure and takes the failure backoff.
+- **Lifetime:** a confirmation stays valid until a tuple of that type arrives, the account leaves the room, the room is purged, or the account is removed, which delete it.
+  It is also re-confirmed on read after `ABSENCE_TTL`, which bounds the effect of a state event sync failed to deliver.
+- **Cost:** only absent types are confirmed, once per room per `ABSENCE_TTL`; a typical room lacks two or three of the eight.
+
+`/metadata` gains a nullable `absence_confirmed_at` (Unix ms) on each snapshot.
 The snapshot `status` enum is unchanged, so existing clients keep working.
 
-| `status`  | `coverage` | Meaning                                                                         |
-| --------- | ---------- | ------------------------------------------------------------------------------- |
-| `unknown` | `null`     | Axon has not been told; as today, nothing can be inferred.                      |
-| `unknown` | present    | The homeserver reported no such state as of `covered_at`: known absent.         |
-| any other | either     | A tuple exists; coverage only says the transport has answered for it as well.   |
+| `status`  | `absence_confirmed_at` | Meaning                                                                       |
+| --------- | ---------------------- | ----------------------------------------------------------------------------- |
+| `unknown` | `null`                 | Axon has not been told; as today, nothing can be inferred.                    |
+| `unknown` | present                | The homeserver confirmed the room has no such state as of that time.          |
+| any other | `null`                 | A tuple exists; its status describes it, and no confirmation is ever shown.   |
 
 Known absent is a statement about the room's current state, not a manufactured value: the API still returns no content.
 A client may apply a Matrix default only where the specification defines what the absent state means, such as no `m.room.encryption` meaning the room is not encrypted, or no `m.room.server_acl` meaning no servers are denied.
-`covered_at` is the time of the last initial answer, not a freshness guarantee; it is not advanced by deltas, and the transport's health, like sync health for member counts, bounds how current an absence is.
 
-Coverage rows are deleted on a local leave, in the same `room_summaries.hidden_left` transition the member-count trigger fences on, and on room purge and account removal.
-A rejoin starts uncovered until its next initial answer.
-Existing installations start with no coverage and fill as the transport's first range sweep reaches each room.
+`/metadata` keeps its contract of no upstream request on the read path; scheduling a job is local, and the route never waits for it.
 
 ### 3. Homeserver details are a separate account-scoped cache
 
-A new table holds one row per account, room, and detail kind (`local_aliases`, `directory_visibility`).
+One acquisition table holds one row per account, room, and kind: `local_aliases`, `directory_visibility`, and the absence confirmations of decision 2, one kind per state type.
 It is never merged into `room_state`, so homeserver-local aliases stay distinct from the advertised aliases in `m.room.canonical_alias`, and synced state stays authoritative for everything it covers.
-Rows are deleted on account removal (foreign-key cascade), room purge, and local leave (the same transition as decision 2), so a removal is never served from cache.
-The table is bounded by the account's room count times two; it needs no separate eviction.
+Rows are deleted on account removal (foreign-key cascade), room purge, and local leave (the `room_summaries.hidden_left` transition), so a removal is never served from cache.
+The table is bounded by the account's room count times ten kinds; it needs no separate eviction.
 
-`GET /v1/accounts/{account_id}/rooms/{room_id}/homeserver_details` returns the cached rows immediately and never waits for the homeserver.
+`GET /v1/accounts/{account_id}/rooms/{room_id}/homeserver_details` returns the cached `local_aliases` and `directory_visibility` rows immediately and never waits for the homeserver.
 Each detail separates the last conclusive answer from the state of attempts to refresh it, as ADR 0111 requires, so a failed refresh leaves usable stale data visible.
 
 - **Value status:** `unknown` (never answered), `available`, `partial` (some aliases failed validation and were withheld), `too_large`, `forbidden` (403), `not_found` (404 `M_NOT_FOUND`), or `unsupported` (404/405 `M_UNRECOGNIZED`).
 - **Value timing:** `fetched_at` and `expires_at`, both server clock; a past `expires_at` means stale.
-- **Refresh:** `idle`, `queued`, or `running`, with the last failure's category (`timeout`, `server_error`, `rate_limited`, `transport`, `unauthorized`, `gated`) and `next_attempt_at`.
+- **Refresh:** `idle`, `queued`, or `running`, with the last failure's category (`timeout`, `server_error`, `rate_limited`, `transport`, `unauthorized`) and `next_attempt_at`.
+  A job waiting for a gate permit is `queued`; the gate's own state is in `GET /v1/status` (ADR 0122 decision 6), and waiting is never a failure.
 
 A transient failure updates only the refresh fields.
 A conclusive answer replaces the value, including `forbidden` after a previous `available`, so lost permission removes the cached list.
 
 The read schedules a refresh when a detail is unknown or expired and its `next_attempt_at` has passed; otherwise it is a pure read.
 Repeated reads and client polling therefore cannot amplify upstream traffic beyond the expiration and backoff schedule.
-Acquisition is limited to rooms the account has joined; any other room, including retained rooms after a leave and unknown room IDs, returns `unknown` with no request, so this endpoint cannot be used to probe arbitrary rooms through the homeserver.
+Acquisition, including absence confirmation, is limited to rooms the account has joined; any other room, including retained rooms after a leave and unknown room IDs, returns `unknown` with no request, so neither endpoint can be used to probe arbitrary rooms through the homeserver.
 Issue 622 decides whether discovered unjoined rooms are added.
 
 ### 4. One paced acquisition worker per account, behind the homeserver gate
@@ -97,30 +111,38 @@ Issue 622 decides whether discovered unjoined rooms are added.
 Each account run owns one acquisition worker, canceled and joined with the run like the member-count and redaction workers.
 The API reaches it through a consumer-owned port in `axon-api` with an `axon-server` adapter (ADR 0021), so `axon-api` does not depend on `axon-sync`.
 
-- **Queue:** a bounded per-account queue keyed by (room, kind), which coalesces duplicates; a full queue drops the new request, leaves the row as it was, and lets a later read request it again.
+- **Queue:** a bounded per-account queue keyed by (room, kind), which coalesces duplicates.
+  When it is full, the oldest queued job is dropped to admit the new one, because the newest request is the panel a user is looking at now.
+  A dropped job leaves its row unchanged and no backoff, so the next read of that room requests it again; nothing can be starved while it is still being read.
 - **Concurrency:** one request at a time per account, with a minimum interval between jobs, so one account's large room list cannot crowd out another account's work.
 - **Gate:** every request takes a `HomeserverGate` permit as background work; waiting for a permit is not part of the request's timeout and is never recorded as a failure.
   Gate timeouts hold their slot (ADR 0122 decision 4), which is what keeps a slow peer from accumulating abandoned work.
 - **Request:** sent with reqwest and the account's current access token rather than the SDK's `send`, because the SDK buffers and parses the whole body.
-  The body is read through the bounded reader the Matrix OAuth path already uses, moved to a shared module, and refused past the byte limit before parsing.
+  The body is read through the bounded reader the Matrix OAuth path already uses, moved to a shared module, and refused past the byte limit before parsing; a successful absence-confirmation response is never read.
   A 401 is recorded as `unauthorized` and retried on backoff; token refresh stays with the account's sync.
 - **Validation:** aliases that do not parse as room aliases are withheld and reported as `partial`; a list longer than the entry limit is `too_large`.
-- **Freshness guard:** a job records the database clock when it starts, and its completion commits only if the account still exists and no leave transition is newer than that start.
-  A late result therefore cannot resurrect a removed account, a left room, or a deleted row.
+- **Freshness guard:** `room_summaries` gains a `membership_epoch` counter that its leave and rejoin transitions increment, in the same trigger that fences member counts.
+  A job records the epoch when it starts, and its completion commits only if the account still exists and the epoch is unchanged.
+  A leave during the request therefore rejects the result even if a rejoin follows before it completes, so neither confirmations nor details survive into a new membership.
+  An absence confirmation also commits only if no tuple of its type exists at commit time, so state that sync delivers during the request wins.
   No lock is held across the request.
 - **Restart:** values, expiration, and `next_attempt_at` persist; queue membership and `queued`/`running` are in memory only, so a crash cannot leave a permanent pending state, and backoff survives a restart.
+
+A change made elsewhere to a room's local aliases or directory publication while it is cached is not observed until the entry expires, so `AVAILABLE_TTL` is the staleness bound for those two details.
+If Axon later adds alias or directory writes, they invalidate the entry.
 
 In keeping with ADR 0121 decision 3, the limits are constants:
 
 | Constant                | Value       | Why                                                                                        |
 | ----------------------- | ----------- | ------------------------------------------------------------------------------------------ |
-| `QUEUE_CAPACITY`        | 32          | Matches the member-count and redaction hint queues; a panel needs two jobs per room        |
+| `QUEUE_CAPACITY`        | 32          | Matches the member-count and redaction hint queues; a panel needs at most ten jobs         |
 | `JOB_INTERVAL`          | 250 ms      | Paces a burst of panel opens without delaying a single one noticeably                      |
-| `REQUEST_TIMEOUT`       | 10 s        | Both responses are tiny; a slower answer is load, and ADR 0122 counts under 5 s as fast    |
+| `REQUEST_TIMEOUT`       | 10 s        | These responses are tiny; a slower answer is load, and ADR 0122 counts under 5 s as fast   |
 | `MAX_RESPONSE_BYTES`    | 64 KiB      | Far above any plausible answer, small enough to buffer per account                         |
 | `MAX_LOCAL_ALIASES`     | 256         | A homeserver-local list beyond this is pathological; withheld as `too_large`, not cut      |
 | `AVAILABLE_TTL`         | 15 min      | Alias and directory changes are rare and usually made from the same client that reads them |
 | `CONCLUSIVE_DENIAL_TTL` | 1 h         | `forbidden` and `not_found` change only with permissions or publication                    |
+| `ABSENCE_TTL`           | 24 h        | Sync delivers a later state event live; re-confirmation only bounds a delivery failure     |
 | `UNSUPPORTED_TTL`       | 24 h        | A homeserver gains an endpoint only on upgrade                                             |
 | `FAILURE_BACKOFF`       | 1 to 30 min | Doubles per consecutive failure, at least any `Retry-After`; matches ADR 0122's cooldown   |
 
@@ -128,55 +150,61 @@ In keeping with ADR 0121 decision 3, the limits are constants:
 
 A new live frame, `room_details.changed`, carries `account_id`, `room_id`, and `sources`, a set naming what to re-read:
 
-- `metadata`: a projection row for one of the eight types was inserted, replaced, or changed its redaction evidence, from either sync connection or from redaction repair; or a type's coverage was first established or removed.
+- `metadata`: a projection row for one of the eight types was inserted, replaced, or changed its redaction evidence, from either sync connection or from redaction repair; or an absence confirmation was recorded or removed.
 - `member_counts`: the member-count worker changed the persisted pair or cleared it.
 - `homeserver_details`: a detail's value or status changed.
 
 The frame is a signal to re-read the named endpoint, not a payload; clients never apply a diff from it.
-The store's upserts report whether they changed a row, so identical rewrites, a restart's re-coverage that only advances `covered_at`, and refreshes that confirm the same value publish nothing.
+The store's upserts report whether they changed a row, so identical rewrites, re-confirmations that only advance `confirmed_at`, and refreshes that confirm the same value publish nothing.
 Each room's processing step publishes at most one frame, with the union of its sources, so a sync batch touching several types of a room sends one frame.
-The first sweep after an upgrade publishes about one frame per room as guest-access and server-ACL tuples and coverage arrive, paced by the transport's range growth; this matches the display-name fill in ADR 0118.
+The first sweep after an upgrade publishes about one frame per room that has guest-access or server-ACL state, paced by the transport's range growth; this matches the display-name fill in ADR 0118.
 
 With this frame, a client keeps a panel fresh by re-reading on the frame, on reconnect, and on reopen, and drops its polling.
 Bus lag is handled as for every other frame: a lagged client re-reads on its reconnect.
 
 ### 6. Diagnostics
 
-The acquisition worker logs under `axon_sync::acquisition` with `account_id`, `room_id`, `kind`, `outcome`, `elapsed_ms`, and queue depth, at debug for each job and warn for repeated failures.
-The supplementary transport adds per-batch counts of covered types and skipped types to its existing debug line.
-Neither logs alias values, response bodies, or tokens; failure categories are allowlisted, as for the member-count worker.
+The acquisition worker logs under `axon_sync::acquisition` with `account_id`, `room_id`, `kind`, `outcome`, `elapsed_ms`, and queue depth, at debug for each job and warn for repeated failures and for a `200` absence-confirmation response (a sync coverage gap).
+The supplementary transport's existing debug line gains per-batch counts of guest-access and server-ACL events.
+Neither logs alias values, state content, response bodies, or tokens; failure categories are allowlisted, as for the member-count worker.
 Existing tracing controls suffice; no developer option is added.
 
 ## Alternatives considered
 
 - **Per-room `GET /state/{type}` repair for guest access and server ACL.** Rejected in decision 1: request count grows with rooms and types, and changes after the repair are missed.
+- **Infer absence from a transport response with `initial: true`.** Free, and complete on Synapse in practice, but Sliding Sync does not guarantee complete `required_state`, so a capped or filtering server would produce a false "absent", including "unencrypted".
+- **Confirm only security-relevant types and infer the rest from sync.** Fewer requests, but two rules for one field, and the cost saved is a few requests per opened room.
 - **A new `absent` value in the snapshot `status` enum.** Simpler for clients to read, but changes an enum existing clients switch over; a separate field is additive.
-- **Coverage only for the four types the transport already requested.** Leaves four snapshots without an absence signal and gives clients two rules; requesting four more small singletons is cheaper than that inconsistency.
+- **Store the state-endpoint response in `room_state` when it returns `200`.** It lacks the event provenance a row needs and would make acquisition a writer of synced state.
 - **Fetch homeserver details for every joined room in the background.** Keeps panels warm but spends upstream requests on rooms nobody opens.
 - **Acquire through the SDK's `send`.** Handles token refresh, but cannot bound the response before the SDK buffers and parses it.
+- **Drop new requests when the queue is full.** A client reading many rooms would keep re-requesting the earliest while later rooms never get in.
+- **Fence late results with the leave time.** A clock comparison needs its own leave watermark, and the member-count watermark also advances on ordinary observations; an epoch has neither problem.
 - **A separate `POST …/refresh` endpoint.** An explicit trigger costs clients a second round trip; expiration and backoff already make refresh-on-read safe to repeat.
 - **One frame per source.** Several frames for one room change multiply re-reads for no gain.
 
 ## Consequences
 
-- Guest access and server ACL become available for every joined room after the transport's first sweep, and all eight snapshots can report known absence.
-- Each account's supplementary connection carries four more state types; the transport's existing bounds still apply.
+- Guest access and server ACL become available for every joined room after the transport's first sweep.
+- Known absence costs a few upstream requests the first time a room's metadata is opened, then one per absent type per day while it is read; it rests on the homeserver's authoritative answer, not on sync's silence.
+- Each account's supplementary connection carries two more singleton state types; the transport's existing bounds still apply.
 - Homeserver-local aliases and directory publication are visible within one request of a panel opening, and stay visible when stale, with their staleness and failures explicit.
 - A slow or failing homeserver delays acquisition through the gate rather than accumulating work, and other accounts' homeservers are unaffected.
 - Clients can drop 30-second polling of `/metadata` and `/info` once they consume `room_details.changed`; issue 657 and issue 623 can rely on it.
-- `room_state` gains a second writer for six more types; it already accepts transport writes for creation and power levels under the same ordering rules.
-- New schema: a coverage table, the homeserver-details table, and a leave-transition cleanup; all are forward-only migrations with no backfill.
+- New schema: the acquisition table, `membership_epoch`, and the leave-transition cleanup; all are forward-only migrations with no backfill.
 
 ## Delivery
 
 Each step is one server-silo PR, with OpenAPI, the regenerated web schema, `docs/room-metadata.md`, and `docs/client-parity.md` updated in the same PR:
 
-1. **Supplementary state, coverage, and `room_details.changed`:** decisions 1, 2, and 5, including the `member_counts` source.
-2. **Homeserver details:** decisions 3, 4, and 6. Starts after PR 836 (ADR 0122) merges, so its requests use the real gate.
+1. **Supplementary state and `room_details.changed`:** decisions 1 and 5, with the `metadata` and `member_counts` sources.
+2. **Acquisition:** decisions 2, 3, 4, and 6, the `homeserver_details` source, and `absence_confirmed_at`. Starts after PR 836 (ADR 0122) merges, so its requests use the real gate.
 
 ## Verification
 
-- **Transport:** request shape lists all eight types; an initial batch records coverage; a malformed, failed, or departed-room-skipped event leaves its type uncovered; deltas keep state current without moving `covered_at`; leave, purge, and account removal delete coverage; restart re-covers.
-- **Frames:** each source fires on a real change and stays silent on identical rewrites and re-coverage; one frame per room batch.
-- **Acquisition, under paused tokio time against a mock homeserver:** a hung peer holds one account's worker without affecting another account; a full queue drops without blocking the API; concurrent reads produce one request; each status and its expiration; `Retry-After`; an oversized body is refused before parsing; invalid aliases give `partial`; a leave or account removal during a request discards its result; values and backoff survive a restart while `queued` does not; unjoined and unknown rooms make no request.
-- **Live, on a disposable Synapse stack:** add and remove a local alias and directory publication and observe the frame and the re-read; set and replace server ACL and guest access; confirm a room without them reads as known absent.
+- **Transport:** request shape lists both new types; their events reach `room_state` under the existing ingestion rules; a type the response omits stays `unknown` with no confirmation.
+- **Frames:** each source fires on a real change and stays silent on identical rewrites and re-confirmations; one frame per room batch.
+- **Absence confirmation, against a mock homeserver:** `404 M_NOT_FOUND` confirms; `200` confirms nothing, stores nothing, and warns; `403` confirms nothing and is not retried on the next read; a tuple arriving during the request wins; a later tuple deletes the confirmation; re-confirmation after `ABSENCE_TTL`; types with a tuple are never requested.
+- **Acquisition, under paused tokio time against a mock homeserver:** a hung peer holds one account's worker without affecting another account; a full queue drops its oldest job and still admits the newest; concurrent reads produce one request; each status and its expiration; `Retry-After`; an oversized body is refused before parsing; invalid aliases give `partial`; values and backoff survive a restart while `queued` does not; unjoined and unknown rooms make no request.
+- **Membership races:** a job that starts before a leave and completes after it commits nothing, including when a rejoin happens before it completes, and the rejoined room starts with no confirmation or details; account removal during a request likewise commits nothing.
+- **Live, on a disposable Synapse stack:** add and remove a local alias and directory publication and observe the frame and the re-read; set and replace server ACL and guest access; confirm a room without them reads as known absent only after the confirmation request.
