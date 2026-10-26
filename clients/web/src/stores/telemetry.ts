@@ -52,6 +52,7 @@ export const PERSISTED_MARKS: readonly string[] = [
   // activation/focus state and hold timing. No text, no ids.
   'copy:ok',
   'copy:failed',
+  'copy:native-failed',
   'copy:fallback',
   // The socket's lifecycle, with no detail beyond `reconnect`. Next to an
   // `api:failed` line these say whether the link itself went away or one

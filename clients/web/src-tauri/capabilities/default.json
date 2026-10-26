@@ -42,6 +42,10 @@
       ]
     },
     {
+      "identifier": "clipboard-manager:allow-write-text",
+      "comment": "Copy a message's text or an event link when the page's own clipboard write would be refused for lack of a user gesture (the timestamp hold on iOS). Write only: `clipboard-manager:default` also grants read, and nothing here reads the clipboard."
+    },
+    {
       "identifier": "core:webview:allow-set-webview-zoom",
       "comment": "Page zoom on Ctrl/Cmd +, - and 0 (ADR 0107). The client drives it through `Platform.setZoom` rather than Tauri's `zoomHotkeysEnabled`, whose macOS/Linux script also zooms 20% per Ctrl-wheel event and so turns one trackpad pinch into a jump to the 20% or 1000% limit."
     },

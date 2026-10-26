@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { copyText } from './copy-text'
+import { writeText as nativeWriteText } from '@tauri-apps/plugin-clipboard-manager'
 import { perfMark } from './perf'
+import { isTauriRuntime } from './platform'
 
 vi.mock('./perf', () => ({ perfMark: vi.fn() }))
+vi.mock('./platform', () => ({ isTauriRuntime: vi.fn(() => false) }))
+vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: vi.fn() }))
 
 afterEach(() => {
   // jsdom has no `execCommand`; the fallback test installs one.
@@ -10,6 +14,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.mocked(perfMark).mockClear()
+  vi.mocked(isTauriRuntime).mockReturnValue(false)
 })
 
 describe('copyText', () => {
@@ -90,6 +95,60 @@ describe('copyText', () => {
       source: 'body-hold-touchend',
     })
     expect(marks[1]![1]).toMatchObject({ heldMs: 910, reason: 'rejected' })
+  })
+
+  describe('in the Tauri shell', () => {
+    it('writes through the native plugin, not the webview', async () => {
+      vi.mocked(isTauriRuntime).mockReturnValue(true)
+      vi.mocked(nativeWriteText).mockResolvedValue(undefined)
+      const writeText = vi.fn()
+      vi.stubGlobal('navigator', { clipboard: { writeText } })
+      expect(await copyText('hello', 'body-hold-touchend')).toBe(true)
+      expect(nativeWriteText).toHaveBeenCalledWith('hello')
+      expect(writeText).not.toHaveBeenCalled()
+      expect(perfMark).toHaveBeenCalledWith('copy:ok', {
+        source: 'body-hold-touchend',
+        native: true,
+        activation: null,
+      })
+    })
+
+    it('passes the hold detail and entry-time activation to the native marks', async () => {
+      vi.mocked(isTauriRuntime).mockReturnValue(true)
+      // The activation lapses while the native attempt is in flight; the
+      // marks must still report what it was when the gesture asked.
+      const userActivation = { isActive: true, hasBeenActive: true }
+      const writeText = vi.fn().mockImplementation(() => {
+        userActivation.isActive = false
+        return Promise.resolve()
+      })
+      vi.stubGlobal('navigator', { clipboard: { writeText }, userActivation })
+      vi.mocked(nativeWriteText).mockImplementationOnce(() => {
+        userActivation.isActive = false
+        return Promise.reject(new Error('denied'))
+      })
+      await copyText('hello', 'body-hold-touchend', { heldMs: 640 })
+      expect(perfMark).toHaveBeenCalledWith('copy:native-failed', {
+        heldMs: 640,
+        source: 'body-hold-touchend',
+        stage: 'write',
+        error: 'Error',
+        activation: true,
+      })
+    })
+
+    it('falls back to the web clipboard when the plugin refuses', async () => {
+      vi.mocked(isTauriRuntime).mockReturnValue(true)
+      vi.mocked(nativeWriteText).mockRejectedValue(new Error('not allowed'))
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      vi.stubGlobal('navigator', { clipboard: { writeText } })
+      expect(await copyText('hello')).toBe(true)
+      expect(writeText).toHaveBeenCalledWith('hello')
+      expect(perfMark).toHaveBeenCalledWith(
+        'copy:native-failed',
+        expect.objectContaining({ error: 'Error' }),
+      )
+    })
   })
 
   it('marks a missing clipboard API, and whether the fallback saved it', async () => {
