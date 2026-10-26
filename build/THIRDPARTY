@@ -3,11 +3,11 @@ Open Source License Attributions
 The following open-source components are used in this application.
 
 OVERVIEW
-- MIT License (used by 585 crates)
+- MIT License (used by 583 crates)
 - Apache License 2.0 (used by 27 crates)
 - Unicode License v3 (used by 21 crates)
+- BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (used by 14 crates)
 - Mozilla Public License 2.0 (used by 10 crates)
-- BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (used by 9 crates)
 - ISC License (used by 6 crates)
 - BSD 2-Clause &quot;Simplified&quot; License (used by 5 crates)
 - zlib License (used by 4 crates)
@@ -1885,8 +1885,86 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 USED BY:
-  - alloc-no-stdlib 2.0.4
-  - brotli 8.0.4
+  - zstd-safe 8.2.0
+  - zstd-sys 2.1.2+zstd.1.5.7
+  - zstd 0.14.3
+================================================================================
+BSD 3-Clause License
+
+Copyright (c) 2026, Alexandre Bury
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+--------------------------------------------------------------------------------
+
+================================================================================
+LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
+USED BY:
+  - zstd-sys 2.1.2+zstd.1.5.7
+================================================================================
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot; AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+--------------------------------------------------------------------------------
+
+================================================================================
+LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
+USED BY:
+  - alloc-no-stdlib 3.0.0
+  - brotli 9.1.0
 ================================================================================
 Copyright (c) 2016 Dropbox, Inc.
 All rights reserved.
@@ -2058,7 +2136,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 USED BY:
-  - alloc-stdlib 0.2.4
+  - alloc-stdlib 0.3.0
   - aws-lc-sys 0.45.0
 ================================================================================
 Copyright (c) &lt;year&gt; &lt;owner&gt;. 
@@ -2072,6 +2150,47 @@ Redistribution and use in source and binary forms, with or without modification,
 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+--------------------------------------------------------------------------------
+
+================================================================================
+LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
+USED BY:
+  - zstd-sys 2.1.2+zstd.1.5.7
+================================================================================
+The auto-generated bindings are under the 3-clause BSD license:
+
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot; AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 --------------------------------------------------------------------------------
@@ -2521,7 +2640,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 LICENSE: MIT License (SPDX ID: MIT)
 USED BY:
-  - brotli 8.0.4
+  - brotli 9.1.0
 ================================================================================
 Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
 
@@ -8780,7 +8899,7 @@ USED BY:
   - async-stream-impl 0.3.6
   - async-stream 0.3.6
   - base64-simd 0.8.0
-  - brotli-decompressor 5.0.3
+  - brotli-decompressor 6.2.0
   - chrono 0.4.45
   - decancer 3.3.3
   - gloo-timers 0.3.0
@@ -8840,7 +8959,6 @@ USED BY:
   - windows-strings 0.1.0
   - windows-strings 0.5.1
   - windows-sys 0.48.0
-  - windows-sys 0.52.0
   - windows-sys 0.59.0
   - windows-sys 0.61.2
   - windows-targets 0.48.5
@@ -10313,9 +10431,9 @@ SOFTWARE.
 ================================================================================
 LICENSE: MIT License (SPDX ID: MIT)
 USED BY:
-  - async-compression 0.4.42
-  - compression-codecs 0.4.38
-  - compression-core 0.4.32
+  - async-compression 0.4.51
+  - compression-codecs 0.4.46
+  - compression-core 0.4.34
 ================================================================================
 The MIT License (MIT)
 
@@ -10697,7 +10815,6 @@ THE SOFTWARE.
 LICENSE: MIT License (SPDX ID: MIT)
 USED BY:
   - zstd-safe 7.2.4
-  - zstd-sys 2.0.16+zstd.1.5.7
   - zstd 0.13.3
 ================================================================================
 The MIT License (MIT)
