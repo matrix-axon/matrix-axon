@@ -4,6 +4,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useId,
   useRef,
   useState,
 } from 'preact/hooks'
@@ -1595,22 +1596,35 @@ function AccountSelect({
   const label = (text: string, count: number) =>
     count > 0 ? `${text} (${count} unread)` : text
   // With one account selected, the others' unread would otherwise be invisible.
-  // "All accounts" already covers everything, so it never flags.
-  const elsewhere = value === 'all' ? 0 : total - (byAccount.get(value) ?? 0)
+  // "All accounts" already covers everything, so it never flags. A value that
+  // names no listed account (the filter resets a render later) flags nothing.
+  const elsewhere =
+    value !== 'all' && entries.some(([id]) => id === value)
+      ? total - (byAccount.get(value) ?? 0)
+      : 0
+  const selectId = useId()
+  const badgeId = `${selectId}-elsewhere`
+  const others = entries.length - 1 === 1 ? 'account' : 'accounts'
+  const elsewhereText = `${elsewhere} unread in other ${others}`
+  // The badge sits beside the caption, not inside the <label>, so the select's
+  // accessible name stays "Account"; `aria-describedby` announces the count.
   return (
-    <label class="sort-select">
-      Account
+    <span class="sort-select">
+      <label for={selectId}>Account</label>
       {elsewhere > 0 && (
         <span
+          id={badgeId}
           class="badge unread-count account-unread-elsewhere"
           role="img"
-          aria-label={`${elsewhere} unread in other accounts`}
-          title={`${elsewhere} unread in other accounts`}
+          aria-label={elsewhereText}
+          title={elsewhereText}
         >
           {elsewhere > 99 ? '99+' : elsewhere}
         </span>
       )}
       <select
+        id={selectId}
+        aria-describedby={elsewhere > 0 ? badgeId : undefined}
         class={elsewhere > 0 ? 'has-unread-elsewhere' : undefined}
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
@@ -1622,6 +1636,6 @@ function AccountSelect({
           </option>
         ))}
       </select>
-    </label>
+    </span>
   )
 }

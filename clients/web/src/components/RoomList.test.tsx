@@ -1139,16 +1139,17 @@ describe('RoomList account labels', () => {
   })
 
   it('flags unread in the other accounts when one account is selected', async () => {
-    const { findByText, getByLabelText, container, queryByRole } = renderPage([
-      { ...OPS, notification_count: 2 },
-      makeRoom({
-        account_id: OTHER_ACCOUNT,
-        account_user_id: '@work:example.org',
-        room_id: '!work:hs',
-        name: 'Work',
-        notification_count: 4,
-      }),
-    ])
+    const { findByText, getByLabelText, getByRole, container, queryByRole } =
+      renderPage([
+        { ...OPS, notification_count: 2 },
+        makeRoom({
+          account_id: OTHER_ACCOUNT,
+          account_user_id: '@work:example.org',
+          room_id: '!work:hs',
+          name: 'Work',
+          notification_count: 4,
+        }),
+      ])
     await findByText('Work')
     const select = getByLabelText('Account') as HTMLSelectElement
 
@@ -1164,8 +1165,12 @@ describe('RoomList account labels', () => {
     })
     expect(badge.textContent).toBe('4')
     expect(
-      queryByRole('img', { name: '4 unread in other accounts' }),
+      queryByRole('img', { name: '4 unread in other account' }),
     ).not.toBeNull()
+    // The caption keeps the select's accessible name clean; the count is its
+    // description.
+    expect(select.getAttribute('aria-describedby')).toBe(badge.id)
+    expect(getByRole('combobox', { name: 'Account' })).toBe(select)
     expect(select.classList.contains('has-unread-elsewhere')).toBe(true)
 
     // Switching accounts flips which side counts as "elsewhere".
