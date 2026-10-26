@@ -257,9 +257,11 @@ Existing PNG/JPEG/WebP validation derives MIME type and dimensions from bytes be
 Staging (including its capacity wait) has a 15-second deadline, honors lower configured upload-byte limits, and uses the ordinary upload expiry and cleanup policies.
 A disconnected HTTP caller's owned task finishes staging; abandoned handles expire rather than sending anything.
 Generated thumbnails have an independent, persistent per-account ceiling of 160 pending handles and 64 MiB.
+The count limit bounds many small thumbnails; the byte limit bounds fewer large thumbnails.
 A transaction-scoped account lock makes quota checks and insertion atomic, and expired rows continue to count until cleanup releases their files.
 Quota exhaustion retains useful text metadata with `thumbnail_status: unavailable`; it does not remove the original link or silently replace another thumbnail.
 Only an explicit false `m.preview_url.enabled` capability produces `disabled`; a URL-specific HTTP 403 produces `unavailable`, and a homeserver HTTP 429 produces transient `busy`.
+The capabilities probe is optional: failures (including 403, 429, timeout or malformed JSON) still allow a bounded attempt at `preview_url`.
 Unknown-token responses can refresh and retry once through the SDK, which owns rotation, locking, and persistence notifications.
 SDK refresh runs in an owned task bounded to 30 seconds, so a shorter preview deadline does not discard an accepted token rotation.
 The preview transport retains streaming byte caps and disables redirects; the normal SDK send/media helpers buffer the full response before exposing it.

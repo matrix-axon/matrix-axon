@@ -1624,7 +1624,7 @@
         ],
         "summary": "Generate an opt-in homeserver link preview",
         "description": "Explicitly discloses the URL to the selected account's homeserver.",
-        "operationId": "generate",
+        "operationId": "generate_link_preview",
         "parameters": [
           {
             "name": "account_id",
@@ -2466,7 +2466,7 @@
         ],
         "summary": "Retrieve a staged preview thumbnail",
         "description": "Bounded authenticated bytes for protected local recovery, without consuming the handle.",
-        "operationId": "thumbnail",
+        "operationId": "get_staged_preview_thumbnail",
         "parameters": [
           {
             "name": "account_id",

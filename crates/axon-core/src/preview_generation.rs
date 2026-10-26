@@ -1,7 +1,7 @@
 //! Untrusted homeserver preview normalization; no network activity.
 use crate::link_preview::{validate_metadata, PreviewMetadata};
 use serde_json::Value;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use url::{Host, Url};
 
 /// A generation destination that already satisfies public-URL eligibility and
@@ -66,17 +66,21 @@ pub fn eligible_url(input: &str) -> bool {
                 && ![
                     "localhost",
                     "local",
+                    "localdomain",
                     "internal",
+                    "intranet",
+                    "corp",
+                    "private",
                     "home",
                     "lan",
                     "test",
                     "invalid",
+                    "example",
                     "onion",
                     "arpa",
                 ]
                 .iter()
                 .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
-                && host.parse::<IpAddr>().is_err()
         }
         None => false,
     }
@@ -148,6 +152,8 @@ mod tests {
             "http://192.0.73.2/",
             "http://192.2.1.1/",
             "https://[2606:4700:4700::1111]/",
+            "https://corp.example.org/",
+            "https://localdomain.example.org/",
         ] {
             assert!(eligible_url(url), "{url}");
         }
@@ -171,6 +177,13 @@ mod tests {
             "https://[2002:7f00:1::]",
             "https://LOCALHOST.",
             "https://foo.local",
+            "https://nas.localdomain",
+            "https://x.corp",
+            "https://x.intranet",
+            "https://x.private",
+            "https://x.example",
+            "https://NAS.LOCALDOMAIN./",
+            "https://x.home.arpa",
             "http://intranet",
             " https://example.org",
             "https://example.org/\n",

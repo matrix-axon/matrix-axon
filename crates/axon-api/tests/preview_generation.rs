@@ -185,6 +185,10 @@ fn native_preview_generation_contract_fixture_matches_dtos_and_openapi() {
     use utoipa::OpenApi;
     let spec = serde_json::to_value(axon_api::ApiDoc::openapi()).unwrap();
     assert_eq!(
+        spec["paths"]["/v1/accounts/{account_id}/link-previews/generate"]["post"]["operationId"],
+        "generate_link_preview"
+    );
+    assert_eq!(
         fixture["thumbnail_recovery"]["max_bytes"],
         axon_core::link_preview::MAX_IMAGE_BYTES
     );
@@ -193,6 +197,7 @@ fn native_preview_generation_contract_fixture_matches_dtos_and_openapi() {
         axon_core::link_preview::MAX_IMAGE_PIXELS
     );
     let recovery = &spec["paths"][fixture["thumbnail_recovery"]["path"].as_str().unwrap()]["get"];
+    assert_eq!(recovery["operationId"], "get_staged_preview_thumbnail");
     for code in ["200", "400", "404", "413", "503"] {
         assert!(recovery["responses"].get(code).is_some());
     }

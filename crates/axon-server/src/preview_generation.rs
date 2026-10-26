@@ -82,6 +82,8 @@ impl PreviewGenerator for PreviewGenerationService {
         if let Some(bytes) = acquired.image {
             thumbnail_status = Thumbnail::Unavailable;
             if let Ok(decode_permit) = self.decoder.clone().try_acquire_owned() {
+                // Keep account capacity owned by the uncancellable decoder if
+                // its waiter disappears, then retain it through staging.
                 let (_permit, image) = tokio::task::spawn_blocking(move || {
                     let _decode_permit = decode_permit;
                     let image = validate_preview_image(axon_api::ClaimedUpload {
@@ -96,7 +98,6 @@ impl PreviewGenerator for PreviewGenerationService {
                 })
                 .await
                 .map_err(|_| ApiError::internal())?;
-                thumbnail_status = Thumbnail::Unavailable;
                 if let Ok(image) = image.inspect_err(|error| {
                     tracing::debug!(%account_id, error_kind = error.diagnostic_kind(), "generated thumbnail validation failed");
                 }) {

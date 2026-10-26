@@ -29,6 +29,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+// Recovery validates bounded rasters on a separate CPU/memory budget. Raising
+// the configured upload-writer count must not increase concurrent decodes.
+const MAX_CONCURRENT_PREVIEW_RECOVERY: usize = 4;
+
 pub(crate) fn validate_preview_image(
     upload: ClaimedUpload,
 ) -> Result<axon_core::link_preview::PreviewImage, StageUploadError> {
@@ -172,7 +176,7 @@ impl FilesystemStagedUploads {
             upload_timeout: Duration::from_secs(config.upload_request_timeout_secs),
             ttl: Duration::from_secs(config.staged_upload_ttl_secs),
             concurrent_uploads: Arc::new(Semaphore::new(config.max_concurrent_uploads)),
-            recovery_reads: Arc::new(Semaphore::new(4)),
+            recovery_reads: Arc::new(Semaphore::new(MAX_CONCURRENT_PREVIEW_RECOVERY)),
             concurrent_uploads_total: config.max_concurrent_uploads,
         })
     }
@@ -530,6 +534,8 @@ impl StagedUploadService for FilesystemStagedUploads {
             .await
             .map_err(internal)?
             .filter(|r| {
+                // Both source-supplied and generated thumbnails are recoverable.
+                // generated_preview attributes quota usage, not read access.
                 r.state == axon_store::MediaUploadState::Staged && r.expires_at > Utc::now()
             })
             .ok_or_else(|| StageUploadError::NotFound("thumbnail not found".into()))?;

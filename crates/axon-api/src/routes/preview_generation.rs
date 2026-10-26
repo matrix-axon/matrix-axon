@@ -16,6 +16,7 @@ use uuid::Uuid;
 ///
 /// Explicitly discloses the URL to the selected account's homeserver.
 #[utoipa::path(post, path = "/v1/accounts/{account_id}/link-previews/generate",
+    operation_id = "generate_link_preview",
     params(("account_id" = Uuid, Path)), request_body = GeneratePreviewRequest,
     responses((status = 200, body = ApiResponse<GeneratedPreviewDto>, description = "Ready preview or nonfatal fallback; original link remains sendable"),
     (status = 400, body = crate::response::ErrorResponse, description = "Invalid, nonpublic or unsendable matched HTTP(S) URL"),
@@ -48,6 +49,7 @@ pub async fn generate(
 ///
 /// Bounded authenticated bytes for protected local recovery, without consuming the handle.
 #[utoipa::path(get, path = "/v1/accounts/{account_id}/media/uploads/{upload_id}/preview",
+    operation_id = "get_staged_preview_thumbnail",
     params(("account_id" = Uuid, Path), ("upload_id" = Uuid, Path)),
     responses((status = 200, content((PreviewThumbnailBytes = "image/png"), (PreviewThumbnailBytes = "image/jpeg"), (PreviewThumbnailBytes = "image/webp")), description = "Verified PNG/JPEG/WebP bytes, at most 2 MiB; Cache-Control: no-store"),
     (status = 400, body = crate::response::ErrorResponse, description = "Invalid raster thumbnail"),

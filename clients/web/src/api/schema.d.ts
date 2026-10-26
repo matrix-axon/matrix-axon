@@ -502,7 +502,7 @@ export interface paths {
          * Generate an opt-in homeserver link preview
          * @description Explicitly discloses the URL to the selected account's homeserver.
          */
-        post: operations["generate"];
+        post: operations["generate_link_preview"];
         delete?: never;
         options?: never;
         head?: never;
@@ -658,7 +658,7 @@ export interface paths {
          * Retrieve a staged preview thumbnail
          * @description Bounded authenticated bytes for protected local recovery, without consuming the handle.
          */
-        get: operations["thumbnail"];
+        get: operations["get_staged_preview_thumbnail"];
         put?: never;
         post?: never;
         delete?: never;
@@ -6969,7 +6969,7 @@ export interface operations {
             };
         };
     };
-    generate: {
+    generate_link_preview: {
         parameters: {
             query?: never;
             header?: never;
@@ -7554,7 +7554,7 @@ export interface operations {
             };
         };
     };
-    thumbnail: {
+    get_staged_preview_thumbnail: {
         parameters: {
             query?: never;
             header?: never;

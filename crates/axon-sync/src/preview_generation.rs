@@ -232,25 +232,39 @@ async fn acquire_from(
     url: &PreviewUrl,
 ) -> Result<AcquiredPreview, PreviewFailure> {
     // New capability is optional on older servers. An explicit false stops
-    // before preview_url; absent/unsupported capabilities retain compatibility.
+    // before preview_url; every other probe outcome retains compatibility.
     let caps = endpoint(hs, &["_matrix", "client", "v3", "capabilities"])?;
     match request(http, caps, auth, RESPONSE_CAP, "capabilities").await {
-        Ok(bytes) => {
-            let value: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| unavailable("capabilities", "capability_json"))?;
-            if !value.get("capabilities").is_some_and(Value::is_object)
-                || value
-                    .pointer("/capabilities/m.preview_url/enabled")
-                    .is_some_and(|v| !v.is_boolean())
-            {
-                return Err(unavailable("capabilities", "capability_shape"));
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => {
+                if value.pointer("/capabilities/m.preview_url/enabled") == Some(&Value::Bool(false))
+                {
+                    return Err(PreviewFailure::Disabled);
+                }
+                if !value.get("capabilities").is_some_and(Value::is_object)
+                    || value
+                        .pointer("/capabilities/m.preview_url/enabled")
+                        .is_some_and(|v| !v.is_boolean())
+                {
+                    tracing::debug!(
+                        phase = "capabilities",
+                        error_kind = "capability_shape",
+                        "ignoring malformed optional preview capabilities"
+                    );
+                }
             }
-            if value.pointer("/capabilities/m.preview_url/enabled") == Some(&Value::Bool(false)) {
-                return Err(PreviewFailure::Disabled);
+            Err(_) => {
+                tracing::debug!(
+                    phase = "capabilities",
+                    error_kind = "capability_json",
+                    "ignoring malformed optional preview capabilities"
+                );
             }
-        }
-        Err(PreviewFailure::Unsupported) => (),
-        Err(e) => return Err(e),
+        },
+        Err(_) => tracing::debug!(
+            phase = "capabilities",
+            "optional preview capability probe failed; continuing"
+        ),
     }
     let mut target = endpoint(hs, &["_matrix", "client", "v1", "media", "preview_url"])?;
     target.query_pairs_mut().append_pair("url", url.as_str());
@@ -333,10 +347,41 @@ mod tests {
     }
     async fn capabilities(State(f): State<Fixture>, headers: HeaderMap) -> Response {
         assert_eq!(headers[header::AUTHORIZATION], "Bearer matrix-test-token");
+        if f.mode == "production_http" {
+            assert_eq!(headers[header::USER_AGENT], crate::client::user_agent());
+        }
         f.calls.lock().unwrap().push("capabilities".into());
         if f.mode == "disabled" {
             Json(serde_json::json!({"capabilities":{"m.preview_url":{"enabled":false}}}))
                 .into_response()
+        } else if let Some(mode) = f.mode.strip_prefix("caps_") {
+            match mode {
+                "forbidden" => StatusCode::FORBIDDEN.into_response(),
+                "limited" => StatusCode::TOO_MANY_REQUESTS.into_response(),
+                "unsupported" => StatusCode::NOT_FOUND.into_response(),
+                "unimplemented" => StatusCode::NOT_IMPLEMENTED.into_response(),
+                "fail" => StatusCode::BAD_GATEWAY.into_response(),
+                "auth" => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"errcode":"M_UNKNOWN_TOKEN"})),
+                )
+                    .into_response(),
+                "malformed" => Body::from("not json").into_response(),
+                "shape" => {
+                    Json(serde_json::json!({"capabilities":{"m.preview_url":{"enabled":"false"}}}))
+                        .into_response()
+                }
+                "absent" => Json(serde_json::json!({})).into_response(),
+                "large" => Body::from("x".repeat(RESPONSE_CAP + 1)).into_response(),
+                "redirect" => {
+                    (StatusCode::FOUND, [(header::LOCATION, "/must-not-follow")]).into_response()
+                }
+                "timeout" => {
+                    tokio::time::sleep(Duration::from_secs(9)).await;
+                    Json(serde_json::json!({})).into_response()
+                }
+                _ => panic!("unknown capabilities fixture"),
+            }
         } else {
             Json(serde_json::json!({"capabilities":{}})).into_response()
         }
@@ -432,6 +477,63 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn preview_generation_transport_uses_the_production_user_agent() {
+        let (hs, f, task) = fixture("production_http").await;
+        let result = acquire_from(
+            &crate::client::preview_http_client().unwrap(),
+            &hs,
+            &FixedCredentials,
+            &preview_url(),
+        )
+        .await
+        .unwrap();
+        assert!(result.image.is_some());
+        assert_eq!(
+            *f.calls.lock().unwrap(),
+            vec!["capabilities", "preview", "image"]
+        );
+        task.abort();
+    }
+    #[tokio::test]
+    async fn preview_generation_optional_capabilities_fail_open_except_explicit_false() {
+        for mode in [
+            "caps_forbidden",
+            "caps_limited",
+            "caps_unsupported",
+            "caps_unimplemented",
+            "caps_fail",
+            "caps_auth",
+            "caps_malformed",
+            "caps_shape",
+            "caps_absent",
+            "caps_large",
+            "caps_redirect",
+            "caps_timeout",
+        ] {
+            let (hs, f, task) = fixture(mode).await;
+            let http = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_millis(150))
+                .build()
+                .unwrap();
+            let result = acquire_from(&http, &hs, &FixedCredentials, &preview_url())
+                .await
+                .unwrap();
+            assert_eq!(
+                result.metadata.title.as_deref(),
+                Some("Useful title"),
+                "{mode}"
+            );
+            assert!(result.image.is_some(), "{mode}");
+            assert_eq!(
+                *f.calls.lock().unwrap(),
+                vec!["capabilities", "preview", "image"],
+                "{mode}"
+            );
+            task.abort();
+        }
+    }
     #[tokio::test]
     async fn preview_generation_boundaries_and_capability_policy() {
         for (mode, expected) in [
@@ -556,7 +658,7 @@ mod refresh_tests {
             .get("authorization")
             .is_some_and(|v| v == "Bearer old-access");
         if (f.phase == phase && old)
-            || (phase == "capabilities"
+            || (phase == "preview_url"
                 && matches!(
                     f.phase,
                     "refresh_denied" | "retry_rejected" | "generic401" | "legacy"
