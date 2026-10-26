@@ -30,7 +30,9 @@
   Say that the room has more members than are loaded only when the joined count is larger than the loaded list.
   Typing brings the member heading into view. Configured page up and page down still scroll while the prompt is open.
   Esc clears an active filter before it closes the popup.
+  Opening `/whereami` again starts from the full loaded list, including when the previous close was not Esc.
   The prompt ends when the popup closes or the selected room changes, so a later paste reaches the composer.
+  Alt and Ctrl-Alt characters are typed into the prompt. Plain Ctrl stays a shortcut.
   A later refresh of the same room must keep the filter text and must not jump the scroll on its own.
   Paste is accepted only while that prompt is open inside the room-info popup.
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.

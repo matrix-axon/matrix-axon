@@ -270,6 +270,28 @@ impl App {
         matches!(self.mode, Mode::Popup(PopupKind::RoomInfo)) && self.member_filter_is_editing()
     }
 
+    /// Drop a committed filter and its prompt before `/whereami` opens again.
+    /// Does not scroll the member section into view.
+    pub(crate) fn discard_member_filter(&mut self) {
+        let Some(key) = self.selected_room_key() else {
+            return;
+        };
+        let Some(state) = self
+            .room_info
+            .state
+            .as_mut()
+            .filter(|state| state.key == key)
+        else {
+            return;
+        };
+        if state.member_filter.is_empty() && !state.member_filter_editing {
+            return;
+        }
+        state.member_filter.clear();
+        state.member_filter_editing = false;
+        store_member_lines(state);
+    }
+
     /// Stop taking keystrokes. The query stays, so the list stays narrowed.
     pub(crate) fn end_member_filter_prompt(&mut self) {
         if let Some(state) = self.room_info.state.as_mut() {
@@ -985,6 +1007,8 @@ fn member_list_lines(room: &RoomDto, state: Option<&RoomInfoState>) -> Vec<Strin
 fn render_member_section(state: &RoomInfoState) -> Vec<String> {
     let query = state.member_filter.trim();
     let filtering = !query.is_empty();
+    // Fold once for the whole list, not once per member.
+    let folded_query = fold_match_key(query);
     let state = Some(state);
     let members = view(state, |state| &state.members);
     let View::Loaded(members) = members else {
@@ -1004,7 +1028,7 @@ fn render_member_section(state: &RoomInfoState) -> Vec<String> {
     let matched: Vec<&MemberDto> = if filtering {
         members
             .iter()
-            .filter(|member| member_matches(member, query))
+            .filter(|member| member_matches(member, &folded_query))
             .collect()
     } else {
         Vec::new()
@@ -1044,8 +1068,7 @@ fn member_match_line(matches: usize, loaded: usize, joined: Option<i64>) -> Stri
 
 /// Case-insensitive substring of the display name or Matrix ID.
 /// A blank name is not the on-screen word "unknown", and power text is not a field.
-fn member_matches(member: &MemberDto, query: &str) -> bool {
-    let folded_query = fold_match_key(query);
+fn member_matches(member: &MemberDto, folded_query: &str) -> bool {
     if folded_query.is_empty() {
         return false;
     }
@@ -1054,8 +1077,8 @@ fn member_matches(member: &MemberDto, query: &str) -> bool {
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .is_some_and(|name| fold_match_key(name).contains(&folded_query));
-    name_matches || fold_match_key(&member.user_id).contains(&folded_query)
+        .is_some_and(|name| fold_match_key(name).contains(folded_query));
+    name_matches || fold_match_key(&member.user_id).contains(folded_query)
 }
 
 /// Unicode lowercase, then Latin accents folded to their base letter, so
@@ -3383,7 +3406,52 @@ mod tests {
 
         assert_eq!(app.mode, Mode::Popup(PopupKind::RoomInfo));
         assert!(!app.member_filter_is_editing());
-        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "ada");
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .member_filter
+            .is_empty());
+        assert!(member_list_lines(&room(), app.room_info.state.as_ref())
+            .iter()
+            .any(|line| line.contains("@ada:example.com")));
+    }
+
+    #[tokio::test]
+    async fn altgr_characters_are_typed_into_the_member_filter() {
+        let mut app = app();
+        app.room_info.state = Some(room_info_with(
+            vec![listed_member("join", "@ada:example.com", Some("Ada"))],
+            Some(counts(1)),
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.shortcuts.message_page_down = KeyBinding::from_spec("alt-j");
+        app.handle_key(ctrl('f')).await;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('ą'), KeyModifiers::ALT))
+            .await;
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ))
+        .await;
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('Ą'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ))
+        .await;
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "ą@Ą");
+
+        let before = app.popup_scroll;
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))
+            .await;
+        assert_eq!(app.popup_scroll, before + 8);
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "ą@Ą");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "ą@Ą");
     }
 
     #[tokio::test]

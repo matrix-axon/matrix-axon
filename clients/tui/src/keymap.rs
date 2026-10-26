@@ -10,6 +10,26 @@ use crate::command;
 use crate::command::HELP_COMMANDS;
 use crate::search::{SearchFormField, SEARCH_HELP_TEXT};
 
+/// A character to insert into the member filter.
+///
+/// Empty and Shift are ordinary typing. Alt, and Ctrl-Alt, are how terminals
+/// report AltGr (a composed letter such as `ą`, or `@`). Plain Ctrl stays a
+/// shortcut and is not inserted. The caller rejects scroll bindings first.
+fn member_filter_text_char(key: KeyEvent) -> Option<char> {
+    let KeyCode::Char(ch) = key.code else {
+        return None;
+    };
+    let mods = key.modifiers - KeyModifiers::SHIFT;
+    if mods.is_empty()
+        || mods == KeyModifiers::ALT
+        || mods == KeyModifiers::ALT | KeyModifiers::CONTROL
+    {
+        Some(ch)
+    } else {
+        None
+    }
+}
+
 impl App {
     pub(crate) async fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.shortcuts.quit.matches(key) {
@@ -248,12 +268,11 @@ impl App {
             if self.room_info_scroll_key(key) {
                 return false;
             }
-            if let KeyCode::Char(ch) = key.code {
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    // A plain letter bound to `find` still has to be typeable.
-                    self.push_member_filter_char(ch);
-                    return true;
-                }
+            if let Some(ch) = member_filter_text_char(key) {
+                // A letter bound to `find` is still typeable. Alt and Ctrl-Alt
+                // are too: AltGr reports composed characters with those modifiers.
+                self.push_member_filter_char(ch);
+                return true;
             }
         } else if self.shortcuts.find.matches(key) {
             return self.begin_member_filter();

@@ -2103,8 +2103,10 @@ impl App {
             self.status = Status::Info("select a room before using /whereami".to_owned());
             return;
         };
-        // Reopening must not resume a prompt left over from the previous visit.
-        self.end_member_filter_prompt();
+        // A fresh open is the full loaded list, even when the last close was
+        // not Esc and the previous query was still committed.
+        self.discard_member_filter();
+        self.reveal_room_info_members = false;
         self.request_room_info(key);
         self.open_popup(PopupKind::RoomInfo);
     }
