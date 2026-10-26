@@ -109,6 +109,31 @@ describe('copyText', () => {
       expect(perfMark).toHaveBeenCalledWith('copy:ok', {
         source: 'body-hold-touchend',
         native: true,
+        activation: null,
+      })
+    })
+
+    it('passes the hold detail and entry-time activation to the native marks', async () => {
+      vi.mocked(isTauriRuntime).mockReturnValue(true)
+      // The activation lapses while the native attempt is in flight; the
+      // marks must still report what it was when the gesture asked.
+      const userActivation = { isActive: true, hasBeenActive: true }
+      const writeText = vi.fn().mockImplementation(() => {
+        userActivation.isActive = false
+        return Promise.resolve()
+      })
+      vi.stubGlobal('navigator', { clipboard: { writeText }, userActivation })
+      vi.mocked(nativeWriteText).mockImplementationOnce(() => {
+        userActivation.isActive = false
+        return Promise.reject(new Error('denied'))
+      })
+      await copyText('hello', 'body-hold-touchend', { heldMs: 640 })
+      expect(perfMark).toHaveBeenCalledWith('copy:native-failed', {
+        heldMs: 640,
+        source: 'body-hold-touchend',
+        stage: 'write',
+        error: 'Error',
+        activation: true,
       })
     })
 

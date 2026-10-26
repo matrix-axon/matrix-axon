@@ -15,6 +15,29 @@ export type CopySource =
 /** Caller-supplied context for the marks; numbers and flags only. */
 export type CopyDetail = Record<string, string | number | boolean | null>
 
+/** The page's user-activation state, as `copyText` found it on entry. */
+interface Activation {
+  isActive: boolean | null
+  hasBeenActive: boolean | null
+}
+
+/**
+ * Snapshot before anything is awaited. After the shell's dynamic import and
+ * IPC round trip the activation has usually lapsed, so reading it later would
+ * report the wrong state for the gesture that asked for the copy.
+ */
+function readActivation(): Activation {
+  const state = (
+    navigator as {
+      userActivation?: { isActive: boolean; hasBeenActive: boolean }
+    }
+  ).userActivation
+  return {
+    isActive: state?.isActive ?? null,
+    hasBeenActive: state?.hasBeenActive ?? null,
+  }
+}
+
 /**
  * Why a copy failed, as a `copy:failed` mark. The mark is the only trace of a
  * rejection — the UI says "Copy failed" and nothing else — and the reason
@@ -26,20 +49,16 @@ function markCopyFailure(
   source: CopySource,
   reason: string,
   err: unknown,
+  activation: Activation,
   extra?: CopyDetail,
 ): void {
-  const activation = (
-    navigator as {
-      userActivation?: { isActive: boolean; hasBeenActive: boolean }
-    }
-  ).userActivation
   perfMark('copy:failed', {
     ...extra,
     source,
     reason,
     error: err instanceof Error ? err.name : typeof err,
-    activation: activation?.isActive ?? null,
-    everActive: activation?.hasBeenActive ?? null,
+    activation: activation.isActive,
+    everActive: activation.hasBeenActive,
     focused: document.hasFocus(),
     visible: document.visibilityState,
     secure: window.isSecureContext,
@@ -76,20 +95,38 @@ function execCommandCopy(text: string): boolean {
 
 /**
  * The shell's clipboard plugin, which has no user-activation rule. Imported on
- * demand so the browser build never loads it, and `null` outside the shell or
- * when the write fails — the caller then falls back to the web path, so a
- * missing capability degrades to the old behaviour instead of losing the copy.
+ * demand so the browser build never loads it. Resolves false, never throws,
+ * when the plugin cannot be loaded or refuses the write; `copyText` then tries
+ * the web path.
+ *
+ * `stage` in the failure mark separates a chunk that did not load from a write
+ * the plugin refused (a missing capability, say), which want different fixes.
  */
-async function nativeCopy(text: string, source: CopySource): Promise<boolean> {
+async function nativeCopy(
+  text: string,
+  source: CopySource,
+  activation: Activation,
+  extra?: CopyDetail,
+): Promise<boolean> {
+  let stage: 'load' | 'write' = 'load'
   try {
     const { writeText } = await import('@tauri-apps/plugin-clipboard-manager')
+    stage = 'write'
     await writeText(text)
-    perfMark('copy:ok', { source, native: true })
+    perfMark('copy:ok', {
+      ...extra,
+      source,
+      native: true,
+      activation: activation.isActive,
+    })
     return true
   } catch (err) {
     perfMark('copy:native-failed', {
+      ...extra,
       source,
+      stage,
       error: err instanceof Error ? err.name : typeof err,
+      activation: activation.isActive,
     })
     return false
   }
@@ -102,27 +139,32 @@ export async function copyText(
   source: CopySource = 'other',
   extra?: CopyDetail,
 ): Promise<boolean> {
+  const activation = readActivation()
   // Only the shell awaits before the web write. A browser must reach
-  // `writeText` synchronously, inside the gesture that called us.
-  if (isTauriRuntime() && (await nativeCopy(text, source))) {
+  // `writeText` synchronously, inside the gesture that called us. After a
+  // failed native attempt the web write runs later than that and WKWebView
+  // will often refuse it, so the fallback is a last chance, not a guarantee.
+  if (isTauriRuntime() && (await nativeCopy(text, source, activation, extra))) {
     return true
   }
   if (navigator.clipboard?.writeText === undefined) {
-    markCopyFailure(source, 'no-api', null, extra)
+    markCopyFailure(source, 'no-api', null, activation, extra)
     const recovered = execCommandCopy(text)
     perfMark('copy:fallback', { source, recovered })
     return recovered
   }
-  // Read before the await: this is the state the browser judged the write by.
-  const activation = navigator.userActivation?.isActive ?? null
   try {
     await navigator.clipboard.writeText(text)
     // Successes are marked too, or a log of failures cannot say which source
     // wins and how often.
-    perfMark('copy:ok', { ...extra, source, activation })
+    perfMark('copy:ok', {
+      ...extra,
+      source,
+      activation: activation.isActive,
+    })
     return true
   } catch (err) {
-    markCopyFailure(source, 'rejected', err, extra)
+    markCopyFailure(source, 'rejected', err, activation, extra)
     // The failure is marked either way; `fallback` says whether it mattered.
     const recovered = execCommandCopy(text)
     perfMark('copy:fallback', { source, recovered })
