@@ -47,6 +47,12 @@ export const PERSISTED_MARKS: readonly string[] = [
   'api:deadline',
   'api:failed',
   'api:late',
+  // Clipboard writes, successes included: a log of failures alone cannot say
+  // which source wins or how often. Source, reason, error name, the page's
+  // activation/focus state and hold timing. No text, no ids.
+  'copy:ok',
+  'copy:failed',
+  'copy:fallback',
   // The socket's lifecycle, with no detail beyond `reconnect`. Next to an
   // `api:failed` line these say whether the link itself went away or one
   // request failed on a connection that was otherwise up.

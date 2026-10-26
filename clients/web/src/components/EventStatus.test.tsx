@@ -82,7 +82,7 @@ describe('EventTime event permalink copy', () => {
     vi.useFakeTimers()
     const writeText = vi.fn().mockResolvedValue(undefined)
     vi.stubGlobal('navigator', { clipboard: { writeText } })
-    const { getByRole, getByText } = render(
+    const { getByRole, findByText } = render(
       <EventTime event={event()} touchHoldEnabled />,
     )
     const timestamp = getByRole('button', {
@@ -109,9 +109,198 @@ describe('EventTime event permalink copy', () => {
     })
     fireEvent.click(timestamp)
 
+    expect(await findByText('Text copied')).toBeTruthy()
     expect(writeText).toHaveBeenCalledOnce()
     expect(writeText).toHaveBeenCalledWith('hello')
-    expect(getByText('Text copied')).toBeTruthy()
+  })
+
+  it('defers the hold copy to release, where the gesture grants clipboard access', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole } = render(<EventTime event={event()} touchHoldEnabled />)
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    expect(writeText).not.toHaveBeenCalled()
+    fireEvent.pointerUp(timestamp, touch)
+    // Release alone is not an activating event in WKWebView; the click is.
+    expect(writeText).not.toHaveBeenCalled()
+    fireEvent.click(timestamp)
+    expect(writeText).toHaveBeenCalledOnce()
+    await act(async () => {
+      vi.advanceTimersByTime(1000)
+      await Promise.resolve()
+    })
+    expect(writeText).toHaveBeenCalledOnce()
+  })
+
+  it('copies on touchend, once, whichever of it and pointerup comes first', async () => {
+    for (const touchEndFirst of [false, true]) {
+      vi.useFakeTimers()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      vi.stubGlobal('navigator', { clipboard: { writeText } })
+      const { getByRole, unmount } = render(
+        <EventTime event={event()} touchHoldEnabled />,
+      )
+      const timestamp = getByRole('button', { name: 'Copy link' })
+      const touch = {
+        pointerId: 1,
+        pointerType: 'touch',
+        isPrimary: true,
+        clientX: 20,
+        clientY: 20,
+      }
+
+      fireEvent.pointerDown(timestamp, touch)
+      await act(async () => {
+        vi.advanceTimersByTime(550)
+        await Promise.resolve()
+      })
+      if (touchEndFirst) fireEvent.touchEnd(timestamp)
+      fireEvent.pointerUp(timestamp, touch)
+      if (!touchEndFirst) fireEvent.touchEnd(timestamp)
+      expect(writeText).toHaveBeenCalledOnce()
+      await act(async () => {
+        vi.advanceTimersByTime(1000)
+        await Promise.resolve()
+      })
+      expect(writeText).toHaveBeenCalledOnce()
+      unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('offers a tap-to-copy retry after a refused hold copy, and keeps it up', async () => {
+    vi.useFakeTimers()
+    const writeText = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('NotAllowedError'))
+      .mockResolvedValueOnce(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole, findByRole, findByText } = render(
+      <EventTime event={event()} touchHoldEnabled />,
+    )
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    fireEvent.pointerUp(timestamp, touch)
+    fireEvent.touchEnd(timestamp)
+    await act(async () => {
+      vi.advanceTimersByTime(5000)
+      await Promise.resolve()
+    })
+
+    const retry = await findByRole('button', { name: 'Tap to copy' })
+    fireEvent.click(retry)
+    expect(await findByText('Text copied')).toBeTruthy()
+    expect(writeText).toHaveBeenCalledTimes(2)
+    expect(writeText).toHaveBeenLastCalledWith('hello')
+  })
+
+  it('drops a pending hold copy when a new press starts', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole } = render(<EventTime event={event()} touchHoldEnabled />)
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    fireEvent.pointerUp(timestamp, touch)
+    // Pressed again inside the 400 ms wait, then released as a short tap.
+    fireEvent.pointerDown(timestamp, { ...touch, pointerId: 2 })
+    fireEvent.touchEnd(timestamp)
+    await act(async () => {
+      vi.advanceTimersByTime(1000)
+      await Promise.resolve()
+    })
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it('copies after release when no click follows', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole } = render(<EventTime event={event()} touchHoldEnabled />)
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    fireEvent.pointerUp(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+      await Promise.resolve()
+    })
+    expect(writeText).toHaveBeenCalledOnce()
+  })
+
+  it('still copies when the browser cancels a completed hold', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole } = render(<EventTime event={event()} touchHoldEnabled />)
+    const timestamp = getByRole('button', { name: 'Copy link' })
+    const touch = {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    }
+
+    fireEvent.pointerDown(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    fireEvent.pointerCancel(timestamp, touch)
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+      await Promise.resolve()
+    })
+    expect(writeText).toHaveBeenCalledWith('hello')
   })
 
   it('keeps the primary timestamp hold active through a second touch', async () => {
