@@ -1,10 +1,10 @@
 # Incoming sharing on iOS and Android
 
-Status: proposed; no implementation or native-device validation yet.
+Status: native sharing proposed; server send/generation prerequisites implemented separately, with no native-device validation yet.
 Tracking issue: [564](https://github.com/matrix-axon/matrix-axon/issues/564).
 Proposed architecture decision: [ADR 0125](adr/0125-ios-first-incoming-sharing.md).
 Implement iOS first because it serves most current mobile users; Android follows the completed iOS media stage.
-This document describes planned behavior, not a currently available feature.
+This document describes the planned native experience; implemented server prerequisites are linked below.
 
 ## Experience and scope
 
@@ -45,7 +45,10 @@ Its browser `navigator.share()` path is outbound sharing and does not register t
 
 Existing `/v1/accounts/{account_id}/rooms/{room_id}/send`, media upload and `send-media` endpoints provide the basic send capability.
 Merged PR [740](https://github.com/matrix-axon/matrix-axon/pull/740) added text-only bundled link-card rendering in `clients/web/src/link-previews.ts` and `components/LinkPreviews.tsx`.
-It does not generate previews or render their images; the send DTOs also lack preview fields, so receiving metadata locally is not sufficient to deliver a rich card to recipients.
+It does not generate previews or render their images.
+Merged PR [833](https://github.com/matrix-axon/matrix-axon/pull/833) added the server-only typed send contract and persistent/encrypted staged thumbnails.
+The opt-in homeserver generation helper and authenticated staged-thumbnail retrieval are documented in [bundled link previews](bundled-link-previews.md#opt-in-homeserver-generation).
+Native sharing and client image rendering remain separate stages.
 `SendMessageRequest` and `SendMediaRequest` currently expose no caller idempotency key or operation-status lookup.
 `crates/axon-api/src/routes/messages.rs` claims a staged upload before dispatch and returns the resulting event ID; this does not make a lost HTTP response safely replayable.
 Do not infer delivery from a later message with matching text or filename.
@@ -78,17 +81,17 @@ Explain that generating missing metadata discloses the URL to the homeserver; re
 Apple's `LPMetadataProvider` can fetch metadata, but v1 does not add a separate automatic iOS acquisition policy alongside the common service.
 If homeserver previews are disabled, generation times out, or no useful metadata is returned, preserve the URL and offer plain-link sending; do not promise every webpage can produce a card.
 
-Extend text and media-caption send requests with typed, bounded optional previews, not an unrestricted event-content blob.
-The proposed input contains a matched URL, allow-listed text fields, and an optional account-owned staged thumbnail reference; settle exact DTO names in the server PR.
+The settled [server send contract](bundled-link-previews.md) carries typed, bounded optional `url_previews` on text and media-caption sends.
+Each entry contains `matched_url`, optional allow-listed `title`, `description` and `site_name` fields, and an optional account-owned `image_upload_id`.
 An absent field preserves old callers' behavior; an explicit empty list means no bundled preview.
 The server verifies that each matched URL occurs in the outgoing body/caption and converts accepted preview-image bytes into persistent Matrix media.
 Emit MSC4095-style `m.url_previews` metadata using its documented field names, checking the proposal/compatibility status at implementation time.
 Use `og:image` for persistent unencrypted Matrix media or `matrix:image:encrypted` for encrypted preview files, with byte count/type/dimensions; encryption belongs in `axon-sync`, not the client or reserved `axon-crypto` stub.
 Preview-image uploads are not ordinary chat attachments: the existing `send-media` route cannot be used just to obtain an image URI, because it also sends an event.
-Generated homeserver thumbnails may need reuploading for persistent ownership and encrypted-room protection.
+Generated homeserver thumbnails are staged under the selected account and reuploaded on send for persistent ownership and encrypted-room protection.
 Keep the generated thumbnail in account-scoped staging until it is used, discarded or expires; do not leave an unbounded server-side preview cache.
 Before marking a preview durably recoverable, copy its thumbnail bytes into the share's protected local staging root, for both source-supplied and generated thumbnails.
-The generation helper must provide bounded authenticated retrieval of staged thumbnail bytes for this purpose.
+The implemented generation helper provides bounded authenticated retrieval of staged thumbnail bytes for this purpose; see the [recovery contract](bundled-link-previews.md#durable-thumbnail-recovery).
 Retain the local copy for the unfinished share's lifetime, independently of the server upload's TTL.
 On resume, re-upload that copy when its server handle has expired; do not fetch the linked page again just to recover the image.
 If local bytes are unavailable or corrupt, show that the thumbnail needs replacement and let the user explicitly regenerate it, remove the image, or discard the share; never silently drop it or automatically regenerate it.
@@ -104,14 +107,14 @@ Store normalized preview data and thumbnail handles in the durable incoming-shar
 If the user removes/changes that URL, remove or explicitly regenerate the stale preview; editing another portion of the text must not discard a valid card.
 The first file's caption carries link previews for a mixed batch; subsequent files do not repeat them.
 Permit preview removal before sending, and record its delivery with the parent message rather than as an independent send operation.
-Start with at most eight cards, 4096 UTF-16 code units per URL, 300 for title, 1000 for description and 120 for site name, aligned with the current renderer's string-length units.
+The settled server limits are eight cards, 4096 UTF-16 code units per URL, 300 for title, 1000 for description and 120 for site name, aligned with the current renderer's string-length units.
 Also bound preview metadata to 32 KiB per share; count UTF-8 bytes of the canonical JSON preview array, including keys, escaping, punctuation and resolved image descriptors, but excluding thumbnail file bytes.
 Count, field and aggregate limits all apply; the first exceeded limit rejects the proposed selection with an explanation, rather than silently truncating fields or dropping cards.
 Per-field maxima are ceilings, not a promise that eight maximally sized cards fit: the aggregate byte cap wins, and the final event-size gate below can impose a tighter budget still.
 Keep the draft intact and disable Send until the user edits/removes the excess content; show which limit was exceeded and the measured size/count.
 The server DTO, native normalizer and web adapter must enforce the same units and precedence through shared boundary fixtures, including multibyte Unicode and JSON-escaping cases.
 Bound each thumbnail to 2 MiB/4 megapixels; include thumbnail bytes in pending/batch quotas without consuming a user attachment slot.
-These are proposed limits to validate on supported devices, including bounded image decode and ownership cleanup.
+These are server ceilings; validate bounded image decode and ownership cleanup on supported devices, and impose lower native budgets where needed.
 
 ## Shared contract and ownership
 

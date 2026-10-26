@@ -130,24 +130,33 @@ impl Store {
         &self,
         upload: &NewMediaUpload<'_>,
     ) -> Result<MediaUpload, StoreError> {
-        let sql = format!(
-            "INSERT INTO media_uploads \
-               (upload_id, account_id, kind, filename, content_type, size_bytes, path, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-             RETURNING {MEDIA_UPLOAD_COLUMNS}"
-        );
-        let row = sqlx_core::query_as::query_as::<Postgres, MediaUpload>(&sql)
-            .bind(upload.upload_id)
-            .bind(upload.account_id)
-            .bind(upload.kind.as_str())
-            .bind(upload.filename)
-            .bind(upload.content_type)
-            .bind(upload.size_bytes)
-            .bind(upload.path)
-            .bind(upload.expires_at)
-            .fetch_one(&self.pool)
+        let mut connection = self.pool.acquire().await?;
+        insert_upload(&mut connection, upload, false).await
+    }
+
+    /// A transaction-scoped account lock makes quota check + insertion atomic
+    /// across every server task/process, including restart. Expired rows count
+    /// until the sweeper removes their disk obligations.
+    pub async fn insert_generated_preview_upload(
+        &self,
+        upload: &NewMediaUpload<'_>,
+        max_count: i64,
+        max_bytes: i64,
+    ) -> Result<Option<MediaUpload>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx_core::query::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 822))")
+            .bind(upload.account_id.to_string())
+            .execute(&mut *tx)
             .await?;
-        Ok(row)
+        let (count, bytes): (i64,i64) = sqlx_core::query_as::query_as("SELECT count(*), COALESCE(sum(size_bytes), 0)::bigint FROM media_uploads WHERE account_id = $1 AND generated_preview")
+            .bind(upload.account_id).fetch_one(&mut *tx).await?;
+        if count >= max_count || upload.size_bytes > max_bytes.saturating_sub(bytes) {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let row = insert_upload(&mut tx, upload, true).await?;
+        tx.commit().await?;
+        Ok(Some(row))
     }
 
     /// Fetch an account-scoped upload by id.
@@ -319,4 +328,30 @@ impl Store {
             .await?;
         Ok(ids)
     }
+}
+
+async fn insert_upload(
+    connection: &mut sqlx_postgres::PgConnection,
+    upload: &NewMediaUpload<'_>,
+    generated: bool,
+) -> Result<MediaUpload, StoreError> {
+    let sql = format!(
+            "INSERT INTO media_uploads \
+               (upload_id, account_id, kind, filename, content_type, size_bytes, path, expires_at, generated_preview) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             RETURNING {MEDIA_UPLOAD_COLUMNS}"
+        );
+    let row = sqlx_core::query_as::query_as::<Postgres, MediaUpload>(&sql)
+        .bind(upload.upload_id)
+        .bind(upload.account_id)
+        .bind(upload.kind.as_str())
+        .bind(upload.filename)
+        .bind(upload.content_type)
+        .bind(upload.size_bytes)
+        .bind(upload.path)
+        .bind(upload.expires_at)
+        .bind(generated)
+        .fetch_one(connection)
+        .await?;
+    Ok(row)
 }

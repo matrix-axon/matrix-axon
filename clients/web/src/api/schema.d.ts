@@ -489,6 +489,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/link-previews/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate an opt-in homeserver link preview
+         * @description Explicitly discloses the URL to the selected account's homeserver.
+         */
+        post: operations["generate_link_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/login-grants/qr": {
         parameters: {
             query?: never;
@@ -622,6 +642,26 @@ export interface paths {
          * @description Delete an unsent staged upload.
          */
         delete: operations["delete_upload"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/media/uploads/{upload_id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Retrieve a staged preview thumbnail
+         * @description Bounded authenticated bytes for protected local recovery, without consuming the handle.
+         */
+        get: operations["get_staged_preview_thumbnail"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2586,6 +2626,27 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_GeneratedPreviewDto: {
+            /**
+             * @description Nonfatal generation outcomes retain the caller's original draft/link.
+             *     `preview` is directly usable as one entry in the settled send contract.
+             */
+            data: {
+                /**
+                 * @description Server staging expiry, independent of the local share's retention.
+                 *     Download the authenticated thumbnail before declaring local recovery.
+                 */
+                image_expires_at?: string | null;
+                preview?: null | components["schemas"]["LinkPreviewRequest"];
+                /**
+                 * @description Busy is transient per-account capacity or homeserver rate limiting.
+                 *     Disabled requires an explicitly false homeserver preview capability.
+                 */
+                status: components["schemas"]["PreviewGenerationStatus"];
+                thumbnail_status: components["schemas"]["PreviewThumbnailStatus"];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_MatrixOAuthBrowserFlowDto: {
             /**
              * @description Replayable, presentation-safe state of one browser sign-in. Optional
@@ -4262,6 +4323,31 @@ export interface components {
          */
         FlowStageDto: "requested" | "ready" | "keys_exchanged" | "confirmed" | "done" | "cancelled";
         /**
+         * @description Calling this endpoint is explicit consent to disclose the URL to the
+         *     selected account's homeserver. No generation occurs on share arrival.
+         */
+        GeneratePreviewRequest: {
+            url: string;
+        };
+        /**
+         * @description Nonfatal generation outcomes retain the caller's original draft/link.
+         *     `preview` is directly usable as one entry in the settled send contract.
+         */
+        GeneratedPreviewDto: {
+            /**
+             * @description Server staging expiry, independent of the local share's retention.
+             *     Download the authenticated thumbnail before declaring local recovery.
+             */
+            image_expires_at?: string | null;
+            preview?: null | components["schemas"]["LinkPreviewRequest"];
+            /**
+             * @description Busy is transient per-account capacity or homeserver rate limiting.
+             *     Disabled requires an explicitly false homeserver preview capability.
+             */
+            status: components["schemas"]["PreviewGenerationStatus"];
+            thumbnail_status: components["schemas"]["PreviewThumbnailStatus"];
+        };
+        /**
          * @description A homeserver gate's circuit breaker on the wire (ADR 0122).
          * @enum {string}
          */
@@ -4832,6 +4918,15 @@ export interface components {
             /** @description The stored JSON value. */
             value: unknown;
         };
+        /** @enum {string} */
+        PreviewGenerationStatus: "ready" | "unsupported" | "disabled" | "timeout" | "unavailable" | "busy" | "no_metadata";
+        /**
+         * Format: binary
+         * @description Binary raster response; this schema describes bytes rather than a JSON array.
+         */
+        PreviewThumbnailBytes: string;
+        /** @enum {string} */
+        PreviewThumbnailStatus: "ready" | "absent" | "unavailable";
         /** @description One room in a [`PublicRoomsPageDto`]. */
         PublicRoomSummaryDto: {
             avatar_url?: string | null;
@@ -6874,6 +6969,70 @@ export interface operations {
             };
         };
     };
+    generate_link_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GeneratePreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Ready preview or nonfatal fallback; original link remains sendable */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_GeneratedPreviewDto"];
+                };
+            };
+            /** @description Invalid, nonpublic or unsendable matched HTTP(S) URL */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Inactive account */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     create_matrix_oauth_qr_grant: {
         parameters: {
             query?: never;
@@ -7386,6 +7545,86 @@ export interface operations {
             };
             /** @description Internal upload cleanup failure */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_staged_preview_thumbnail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+                upload_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Verified PNG/JPEG/WebP bytes, at most 2 MiB; Cache-Control: no-store */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": components["schemas"]["PreviewThumbnailBytes"];
+                    "image/jpeg": components["schemas"]["PreviewThumbnailBytes"];
+                    "image/webp": components["schemas"]["PreviewThumbnailBytes"];
+                };
+            };
+            /** @description Invalid raster thumbnail */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description not_found: wrong account, absent, expired, consumed, sending or missing bytes; explicitly reupload retained local bytes */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": {
+                     *         "code": "not_found",
+                     *         "message": "thumbnail not found"
+                     *       }
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description payload_too_large: thumbnail exceeds 2 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description service_unavailable: bounded thumbnail capacity unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

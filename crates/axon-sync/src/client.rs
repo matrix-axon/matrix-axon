@@ -96,6 +96,18 @@ fn user_agent_for(os: &str) -> String {
     )
 }
 
+// Match the SDK's production HTTP defaults. The preview transport alone adds
+// streamed byte limits and no redirects; the SDK still owns authentication.
+pub(crate) fn preview_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .user_agent(user_agent())
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(4))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+}
+
 fn configure_client_builder(builder: ClientBuilder, handle_refresh_tokens: bool) -> ClientBuilder {
     let builder = builder
         .user_agent(user_agent())

@@ -364,6 +364,11 @@ impl SyncEngine {
         )
     }
 
+    /// Explicit bounded homeserver preview acquisition for API composition.
+    pub fn preview_generator(&self) -> Result<crate::HomeserverPreviewGenerator, reqwest::Error> {
+        crate::HomeserverPreviewGenerator::new(self.manager.clone())
+    }
+
     /// An authenticated media fetcher over the per-account clients, for the API
     /// layer's `GET /v1/media/{account_id}/…` route. `axon-server` composes this
     /// behind the `axon-media` disk cache and adapts the pair onto its

@@ -10,6 +10,8 @@
 //! an unversioned operational liveness probe. The response envelope (`{data}` /
 //! `{error}`) lives in [`response`]; the OpenAPI document is [`ApiDoc`].
 
+mod account_slots;
+pub use account_slots::AccountSlots;
 mod auth;
 mod backfill;
 mod backup_state;
@@ -27,6 +29,7 @@ mod media;
 mod member_profiles;
 mod oauth;
 mod openapi;
+mod preview_generation;
 mod response;
 mod room_metadata;
 mod routes;
@@ -47,7 +50,11 @@ pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use backup_state::BackupStateProvider;
 pub use build_info::BuildInfo;
 pub use devices::{DeviceInfo, DeviceList, DeviceListError, DeviceListService};
-pub use dto::{BackupSnapshotDto, BackupStateDto, MediaUploadKindDto, RecoveryStateDto};
+pub use dto::{
+    BackupSnapshotDto, BackupStateDto, GeneratePreviewRequest, GeneratedPreviewDto,
+    LinkPreviewRequest, MediaUploadKindDto, PreviewGenerationStatus, PreviewThumbnailBytes,
+    PreviewThumbnailStatus, RecoveryStateDto,
+};
 pub use homeserver_status::{
     HomeserverBreakerSnapshot, HomeserverGateSnapshot, HomeserverStatusProvider,
 };
@@ -79,6 +86,7 @@ pub use oauth::{
     HANDSHAKE_TTL as OAUTH_HANDSHAKE_TTL,
 };
 pub use openapi::ApiDoc;
+pub use preview_generation::PreviewGenerator;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{
     SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SearchSort,
@@ -500,6 +508,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/directory/public_rooms",
             get(routes::account_actions::search_public_rooms),
+        )
+        .route(
+            "/v1/accounts/{account_id}/link-previews/generate",
+            post(routes::preview_generation::generate).layer(DefaultBodyLimit::max(32 * 1024)),
+        )
+        .route(
+            "/v1/accounts/{account_id}/media/uploads/{upload_id}/preview",
+            get(routes::preview_generation::thumbnail),
         )
         // Staged media uploads (M15a): client bytes are accepted and stored
         // before the later room-aware send-media mutation consumes them.
