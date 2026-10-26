@@ -92,11 +92,18 @@ describe('copyText', () => {
     expect(marks[1]![1]).toMatchObject({ heldMs: 910, reason: 'rejected' })
   })
 
-  it('marks a missing clipboard API', async () => {
-    vi.stubGlobal('navigator', {})
-    await copyText('hello', 'link-click')
-    expect(vi.mocked(perfMark).mock.calls[0]![1]).toMatchObject({
-      reason: 'no-api',
+  it('marks a missing clipboard API, and whether the fallback saved it', async () => {
+    Object.defineProperty(document, 'execCommand', {
+      value: vi.fn().mockReturnValue(true),
+      configurable: true,
     })
+    vi.stubGlobal('navigator', {})
+    expect(await copyText('hello', 'link-click')).toBe(true)
+    const marks = vi.mocked(perfMark).mock.calls
+    expect(marks[0]![1]).toMatchObject({ reason: 'no-api' })
+    expect(marks[1]).toEqual([
+      'copy:fallback',
+      { source: 'link-click', recovered: true },
+    ])
   })
 })

@@ -47,8 +47,9 @@ export const PERSISTED_MARKS: readonly string[] = [
   'api:deadline',
   'api:failed',
   'api:late',
-  // A clipboard write that failed: source, reason, error name and the page's
-  // activation/focus state. No text, no ids.
+  // Clipboard writes, successes included: a log of failures alone cannot say
+  // which source wins or how often. Source, reason, error name, the page's
+  // activation/focus state and hold timing. No text, no ids.
   'copy:ok',
   'copy:failed',
   'copy:fallback',

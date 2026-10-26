@@ -201,6 +201,10 @@ export function EventTime({
         aria-label="Copy link"
         onPointerDown={(pointerEvent) => {
           if (pointerEvent.isPrimary === false) return
+          // A new press supersedes a previous hold's pending copy; left
+          // alone, this press's touchend would take it over and copy with
+          // the new press's timing.
+          clearHoldCopy()
           lastPointerType.current = pointerEvent.pointerType
           suppressNextClick.current = false
           copiedOnTouchEnd.current = false

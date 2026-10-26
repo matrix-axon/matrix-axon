@@ -82,7 +82,9 @@ export async function copyText(
 ): Promise<boolean> {
   if (navigator.clipboard?.writeText === undefined) {
     markCopyFailure(source, 'no-api', null, extra)
-    return execCommandCopy(text)
+    const recovered = execCommandCopy(text)
+    perfMark('copy:fallback', { source, recovered })
+    return recovered
   }
   // Read before the await: this is the state the browser judged the write by.
   const activation = navigator.userActivation?.isActive ?? null
