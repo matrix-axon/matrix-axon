@@ -61,11 +61,11 @@ ignore = [
   # zstd 0.13.3; fixed only in >= 0.14.3. Still held at ^0.13 by tantivy-sstable
   # (the tower-http path moved to zstd 0.14 via compression-codecs 0.4.46). Only
   # `stream::raw::{Encoder,Decoder}::with_context` is affected, and tantivy never
-  # calls it. Exit: delete this entry once tantivy moves to zstd 0.14.
+  # calls it. Exit: delete this entry once tantivy moves to zstd 0.14 (#853).
   { id = "RUSTSEC-2026-0391", reason = "zstd 0.13, via tantivy-sstable; with_context is never called" },
   # zstd-safe 7.2.4 (fixed in >= 8.x), same tantivy hold. 0398 needs zstd's
   # `seekable` feature, which is off. 0403 is in `stream::write::Decoder`;
-  # tantivy uses only the bulk API (documented as unaffected).
+  # tantivy uses only the bulk API (documented as unaffected). Same exit (#853).
   { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7.2.4, via tantivy; seekable feature is off" },
   { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7.2.4, via tantivy; only the stream write Decoder is affected and tantivy uses the bulk API" },
 ]
