@@ -37,6 +37,7 @@ This PR therefore cannot integrate with an existing gate.
 Its inventory exempts SDK sync long polls; the additional pack transport is explicitly documented here rather than silently treated as unrelated SDK traffic.
 When that gate is implemented, include this transport in the integration decision: ordinary long-poll latency must not be counted as a slow background read, and request timeouts must retain the gate's abandoned-work protection.
 The local bounds above do not claim to replace a shared homeserver load gate.
+Update (2026-10-24): ADR 0122's step 1 integrates this transport as a long-poll caller; see that ADR's amendment.
 
 ## Alternatives
 

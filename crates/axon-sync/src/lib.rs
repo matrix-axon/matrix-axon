@@ -27,6 +27,7 @@ mod display_names;
 mod engine;
 mod error;
 mod gateway;
+mod homeserver_gate;
 mod image_packs;
 mod lifecycle;
 mod manager;
@@ -56,6 +57,7 @@ pub use devices::{DeviceInfo, DeviceList, DeviceListEngine, DeviceListError};
 pub use engine::SyncEngine;
 pub use error::{GatewayError, SyncError};
 pub use gateway::{LeaveOutcome as GatewayLeaveOutcome, SdkGateway};
+pub use homeserver_gate::{BreakerSnapshot, GateSnapshot, HomeserverGates};
 pub use lifecycle::{AccountLifecycle, LifecycleError};
 pub use matrix_oauth::MatrixOAuthRegistrationManager;
 pub use matrix_oauth_acquire::{

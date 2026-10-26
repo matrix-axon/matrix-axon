@@ -30,6 +30,7 @@ use crate::client::{
     import_token_new_device, login_new_device,
 };
 use crate::error::{GatewayError, SyncError};
+use crate::homeserver_gate::{HomeserverGate, HomeserverGates};
 
 /// A per-account connection slot. The slot's [`AsyncMutex`] is what makes a
 /// connect single-flight: the first caller holds it across the (awaiting)
@@ -82,6 +83,8 @@ pub struct ClientManager {
     pending_adoption_cleanup: Arc<Mutex<HashSet<Uuid>>>,
     /// Rooms the homeserver says it does not know. See [`DeadRooms`].
     dead_rooms: DeadRooms,
+    /// One load gate per homeserver, shared by every account using it (ADR 0122).
+    gates: HomeserverGates,
 }
 
 impl ClientManager {
@@ -95,7 +98,18 @@ impl ClientManager {
             slots: Arc::new(Mutex::new(HashMap::new())),
             pending_adoption_cleanup: Arc::new(Mutex::new(HashSet::new())),
             dead_rooms: Arc::new(Mutex::new(HashMap::new())),
+            gates: HomeserverGates::default(),
         }
+    }
+
+    /// The load gate for the homeserver `client` uses (ADR 0122).
+    pub(crate) fn homeserver_gate(&self, client: &Client) -> Arc<HomeserverGate> {
+        self.gates.for_client(client)
+    }
+
+    /// Every homeserver's load gate, for `GET /v1/status`.
+    pub(crate) fn homeserver_gates(&self) -> HomeserverGates {
+        self.gates.clone()
     }
 
     async fn finish_adoption_cleanup(&self, account_id: Uuid) {

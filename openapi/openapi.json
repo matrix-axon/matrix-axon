@@ -9402,7 +9402,7 @@
           "status"
         ],
         "summary": "Get backfill status",
-        "description": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
+        "description": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\neach homeserver's load gate for background requests (ADR 0122);\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
         "operationId": "get_status",
         "responses": {
           "200": {
@@ -10973,6 +10973,7 @@
               "backfill",
               "build",
               "sync",
+              "homeservers",
               "management",
               "push"
             ],
@@ -10984,6 +10985,13 @@
               "build": {
                 "$ref": "#/components/schemas/BuildInfoDto",
                 "description": "The running binary's build identity."
+              },
+              "homeservers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HomeserverGateDto"
+                },
+                "description": "Each homeserver's load gate for axon's background requests (ADR 0122)."
               },
               "management": {
                 "$ref": "#/components/schemas/ManagementStatusDto",
@@ -13599,6 +13607,86 @@
           "cancelled"
         ]
       },
+      "HomeserverBreakerDto": {
+        "type": "string",
+        "description": "A homeserver gate's circuit breaker on the wire (ADR 0122).",
+        "enum": [
+          "closed",
+          "open",
+          "probing"
+        ]
+      },
+      "HomeserverGateDto": {
+        "type": "object",
+        "description": "One homeserver's load gate (ADR 0122): how many of axon's background\nrequests (backfill, upstream room probes, key-backup downloads, DM\nauto-joins) it admits at once, and whether its circuit breaker has stopped\nthem. In-memory state, reset on restart.",
+        "required": [
+          "homeserver",
+          "limit",
+          "active",
+          "held",
+          "waiting",
+          "breaker"
+        ],
+        "properties": {
+          "active": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Background requests in flight.",
+            "minimum": 0
+          },
+          "breaker": {
+            "$ref": "#/components/schemas/HomeserverBreakerDto",
+            "description": "Whether the circuit breaker is letting background requests through."
+          },
+          "breaker_opened_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the breaker left `\"closed\"`, in epoch milliseconds, or `null` while\nit is closed."
+          },
+          "held": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Slots held by requests that timed out, which the homeserver may still be\nworking on. Each is released 15 minutes after its timeout.",
+            "minimum": 0
+          },
+          "homeserver": {
+            "type": "string",
+            "description": "The gate's key: the homeserver's base URL reduced to its origin, with the\nport explicit (`https://matrix.example.org:443`)."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many background requests may be in flight at once, counting held\nslots. `0` while the breaker is open.",
+            "minimum": 0
+          },
+          "next_probe_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "While the breaker is `\"open\"`, the earliest time a probe may go out, in\nepoch milliseconds; otherwise `null`."
+          },
+          "oldest_wait_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long the longest-waiting request has waited, in milliseconds, or\n`null` when none is waiting.",
+            "minimum": 0
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Requests waiting for the gate.",
+            "minimum": 0
+          }
+        }
+      },
       "ImagePackUsage": {
         "type": "string",
         "enum": [
@@ -15835,6 +15923,7 @@
           "backfill",
           "build",
           "sync",
+          "homeservers",
           "management",
           "push"
         ],
@@ -15846,6 +15935,13 @@
           "build": {
             "$ref": "#/components/schemas/BuildInfoDto",
             "description": "The running binary's build identity."
+          },
+          "homeservers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HomeserverGateDto"
+            },
+            "description": "Each homeserver's load gate for axon's background requests (ADR 0122)."
           },
           "management": {
             "$ref": "#/components/schemas/ManagementStatusDto",

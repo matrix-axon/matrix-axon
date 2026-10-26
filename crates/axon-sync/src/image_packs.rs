@@ -3,6 +3,7 @@
 //! Never submit these responses to SDK sync processing: a second SDK connection
 //! can otherwise overwrite room summaries and pagination owned by SyncService.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use matrix_sdk::ruma::api::client::sync::sync_events::v5::{self, request};
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::engine::{persist_room_state_value, PersistContext};
+use crate::homeserver_gate::{outcome_of, HomeserverGate};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -101,9 +103,14 @@ async fn poll(
 /// One worker per account run, canceled and joined before restart.
 /// Only allowlisted required_state is projected; all summaries, timelines,
 /// account data and extensions in this transport's responses are ignored.
-pub(crate) async fn run(client: Client, ctx: PersistContext, cancel: CancellationToken) {
+pub(crate) async fn run(
+    client: Client,
+    ctx: PersistContext,
+    gate: Arc<HomeserverGate>,
+    cancel: CancellationToken,
+) {
     let account_id = ctx.account_id;
-    transport(client.clone(), account_id, cancel, |response| {
+    transport(client.clone(), account_id, gate, cancel, |response| {
         let ctx = ctx.clone();
         let client = client.clone();
         async move {
@@ -147,9 +154,14 @@ pub(crate) async fn run(client: Client, ctx: PersistContext, cancel: Cancellatio
     tracing::debug!(%account_id, "image pack sync stopped");
 }
 
+/// Polls are long-polls to the homeserver gate (ADR 0122): each waits while the
+/// gate's breaker is not closed and holds no slot, since it is meant to sit at
+/// the homeserver for its server-side timeout. Hard failures still feed the
+/// gate, and an outer timeout leaves a held slot for the abandoned poll.
 async fn transport<F, Fut>(
     client: Client,
     account_id: Uuid,
+    gate: Arc<HomeserverGate>,
     cancel: CancellationToken,
     mut consume: F,
 ) where
@@ -161,12 +173,17 @@ async fn transport<F, Fut>(
     let mut range_end = 99u32;
     let mut backoff = Duration::from_secs(2);
     loop {
+        let clearance = tokio::select! {
+            _ = cancel.cancelled() => return,
+            clearance = gate.long_poll() => clearance,
+        };
         let started = std::time::Instant::now();
         let initial = pos.is_none();
         let result = tokio::select! {
             _ = cancel.cancelled() => return,
             result = tokio::time::timeout(REQUEST_TIMEOUT, poll(&client, request(pos.clone(), range_end))) => result,
         };
+        clearance.finish(outcome_of(&result));
         let delay = match result {
             Ok(Ok(response)) => {
                 let request_elapsed_ms = started.elapsed().as_millis() as u64;
@@ -372,7 +389,12 @@ mod tests {
             state_redaction_tx,
         };
         let cancel = CancellationToken::new();
-        let worker = tokio::spawn(run(client.clone(), ctx, cancel.clone()));
+        let worker = tokio::spawn(run(
+            client.clone(),
+            ctx,
+            HomeserverGate::for_test(),
+            cancel.clone(),
+        ));
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let mut cleared = true;
@@ -566,6 +588,83 @@ mod tests {
         server.abort();
     }
 
+    /// A breaker opened by any caller's failures stops the pack poll too (ADR
+    /// 0122): nothing reaches the homeserver while it is open.
+    #[tokio::test]
+    async fn no_poll_is_sent_while_the_gate_breaker_is_open() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().fallback({
+            let hits = hits.clone();
+            // `restore_session` makes requests of its own; count only polls.
+            move |uri: axum::http::Uri| {
+                if uri.path().ends_with("/sync") {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                }
+                async { Json(json!({ "pos": "1" })) }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let gate = HomeserverGate::for_test();
+        gate.open_for_test();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(transport(
+            client(address).await,
+            Uuid::new_v4(),
+            Arc::clone(&gate),
+            cancel.clone(),
+            |_| async {},
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "a poll went out past an open breaker"
+        );
+        assert_eq!(gate.snapshot().waiting, 1, "the poll waits at the gate");
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+    }
+
+    /// A poll abandoned at the outer timeout may still be running at the
+    /// homeserver, so it leaves a held slot and halves the limit (ADR 0122).
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_poll_holds_a_gate_slot() {
+        let app = Router::new().fallback(|| async {
+            std::future::pending::<()>().await;
+            Json(json!({}))
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let gate = HomeserverGate::for_test();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(transport(
+            client(address).await,
+            Uuid::new_v4(),
+            Arc::clone(&gate),
+            cancel.clone(),
+            |_| async {},
+        ));
+        let mut snapshot = gate.snapshot();
+        for _ in 0..(REQUEST_TIMEOUT.as_secs() * 2) {
+            if snapshot.held > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            snapshot = gate.snapshot();
+        }
+        assert_eq!((snapshot.held, snapshot.limit), (1, 1), "{snapshot:?}");
+        cancel.cancel();
+        task.await.unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn worker_cancels_a_hung_request() {
         let seen = Arc::new(tokio::sync::Notify::new());
@@ -587,6 +686,7 @@ mod tests {
         let task = tokio::spawn(transport(
             client(address).await,
             Uuid::new_v4(),
+            HomeserverGate::for_test(),
             cancel.clone(),
             |_| async {},
         ));

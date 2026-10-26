@@ -332,6 +332,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     crate::uploads::spawn_expiry_sweeper(uploads.clone());
     let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
     let sync_status = Arc::new(status::SyncStatusAdapter(sync_engine.sync_health()));
+    let homeserver_status = Arc::new(status::HomeserverStatusAdapter(
+        sync_engine.homeserver_gates(),
+    ));
     let sync_state = Arc::new(status::SyncStateAdapter(sync_engine.sync_health()));
     let backup_state = Arc::new(status::BackupStateAdapter(sync_engine.backup_health()));
 
@@ -364,6 +367,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     )
     .with_backfill_status(backfill_status)
     .with_sync_status(sync_status)
+    .with_homeserver_status(homeserver_status)
     .with_sync_state(sync_state)
     .with_backup_state(backup_state)
     .with_matrix_oauth_acquire(matrix_oauth_acquire)

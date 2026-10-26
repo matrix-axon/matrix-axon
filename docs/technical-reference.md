@@ -121,6 +121,18 @@ Transaction-mode poolers are unsupported: session deadlines and session advisory
 See [ADR 0112](adr/0112-bounded-database-work-and-pool-isolation.md) for the pool topology, transaction audit, and remaining maintenance tradeoffs.
 Query and pool timeout failures use existing API error responses and request-error logging; cleanup failures log a redacted diagnostic category and retry on later activity.
 
+## Homeserver load gate
+
+Axon's background requests to a homeserver pass a load gate first ([ADR 0122](adr/0122-homeserver-load-gate.md)): history backfill pages, upstream room probes, key-backup downloads, DM auto-joins, and the image-pack long-poll.
+Each homeserver origin has one gate, shared by every account on the server.
+It admits two background requests at once to start, grows to four after fast successes, and halves on a timeout, 5xx, 429 or transport error.
+A timed-out request keeps its slot for 15 minutes, because the homeserver may still be working on it.
+At a limit of zero a circuit breaker stops all background requests, then sends one probe after a cooldown of 1 to 30 minutes, once no held slots remain.
+Requests a user is waiting on, such as sends, joins, recovery and manual re-decryption, never wait on the gate.
+`GET /v1/status` lists each gate under `homeservers`: its limit, active and held slots, waiting requests, and breaker state.
+The gate's state is in memory and starts fresh on restart.
+Its constants are not configurable.
+
 ## Environment variables
 
 Two kinds of `AXON_`-prefixed environment variables exist:

@@ -1,6 +1,6 @@
 # ADR 0122 — A load gate between axon's background work and the homeserver
 
-Status: proposed (#749)
+Status: accepted (#749); step 1 implemented, as amended below
 
 ## Context
 
@@ -308,3 +308,87 @@ Each step is one PR in one silo, after #746 merges:
 2. **server:** the gateway's interactive timeouts and 5xx feed the gate. This
    lands after ADR 0121's server step, which changes the same `timed_out()`
    sites.
+
+## Amendment — step 1 as built (2026-10-24)
+
+Building step 1 settled three things the decision above left open.
+
+### A third kind of caller: long-polls
+
+ADR 0124 added a background caller after this ADR: the image-pack transport, a
+state-only Sliding Sync long-poll (30 s server-side, 90 s outer timeout). It
+cannot take a permit. A poll is meant to sit at the homeserver for its whole
+server-side timeout, so it would occupy one of the two starting slots all the
+time and would never count as a fast success. It is a long-poll caller instead:
+
+- before each poll it waits while the breaker is not closed, and only then;
+- it holds no slot while polling, and its latency is never classified, so a
+  poll never grows the limit;
+- a 5xx, 429 or transport error halves the limit like any background request,
+  and can open the breaker;
+- an outer timeout halves the limit and leaves a held slot, because the
+  homeserver may still be working on the abandoned poll;
+- when the breaker may probe and no background request is waiting, the poll is
+  the probe, and its outcome follows the probe table. Without this, a gate whose
+  only remaining traffic is the long-poll (backfill complete, nothing to probe)
+  would stay open for good.
+
+### Recover and manual re-decryption are interactive
+
+The key-backup download runs in the boot re-decryption sweep, and also in the
+recover and manual re-decrypt sweeps, which a user is waiting on. Those two are
+interactive: they never wait for the gate, and report a timeout or 5xx under
+decision 1's cap. All three put the 30 s outer timeout around each room's
+download, so a call that used to retry under the SDK for minutes now stops at
+30 s and leaves that room's rows undecryptable until the next sweep.
+
+A download can also be a no-op. matrix-sdk's `download_room_keys_for_room`
+returns success without sending anything when the crypto store has no backup
+decryption key or version, and does not say which happened. Read as fast
+successes, such no-ops raised the shared limit without contacting the
+homeserver, and a no-op probe could close the breaker on a false recovery
+signal. So a download's success teaches the gate nothing: it neither counts
+toward growth nor closes the breaker, and a probe that ends that way passes to
+the next waiter. While backups are not enabled (the usual reason for the
+no-op), the boot sweep's downloads do not wait for a permit either, and are
+reported like interactive requests. Timeouts and server errors still count,
+since only a request that was sent can end in one. `are_enabled` matches the
+SDK's precondition except at boot, before matrix-sdk has resumed backups from
+the store: a download sent in that window goes out without a permit. The exact
+precondition sits in the crypto store, which is not public API.
+
+### No caller blocks the account's sync loop on the gate
+
+- **The boot re-decryption sweep** used to run inline in the account run,
+  before the watchers started. Waiting there on a shut gate would have held
+  back verification, invites and unread counts for as long as the gate stayed
+  shut, so the sweep now runs as its own task, drained with the re-decryption
+  queue.
+- **DM auto-join** runs inside the account's `select!` loop, so it waits for a
+  permit only briefly: while the breaker is closed it queues for up to 10 s,
+  and a busy gate admits it in turn behind the background requests already
+  queued. A breaker that is not closed, or slots that stay full for those
+  10 s, leave the invite for the next verification poll, five seconds later. A
+  join that times out is still tracked as a verification candidate, since the
+  homeserver may complete it.
+- **The upstream room probe** runs on the unread-count watcher's five-minute
+  resweep. Waiting there would freeze unread counts while the gate is shut, so
+  it takes permits the same way, and a pass that cannot get one leaves its
+  remaining rooms suspect for the next one. While the breaker is open, either
+  caller can still be its probe, when one is due and nothing is queued.
+
+A first cut gave these two callers a permit only when one was free at once and
+nobody was queued. Backfill keeps the queue non-empty for as long as it runs,
+which on a large account is hours, so they would have starved behind it.
+
+### Transport errors
+
+A reqwest error is classified by kind. A connection refused or reset, or a
+body cut off, is overload, as the decisions above say. A request axon could
+not build teaches nothing, and a redirect loop or a body axon could not decode
+is refused. Axon's own network failing reads as overload too, since a refused
+connection looks the same from axon either way; a short blip opens the
+breaker for at most the first one-minute cooldown.
+
+`GET /v1/status` reports long-polls waiting at the gate in `waiting`, beside
+background requests.

@@ -23,6 +23,7 @@ use axon_store::{
     Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, NewEvent, RoomInviteSnapshot,
     RoomStateRedaction, RoomStateUpsert, Store,
 };
+use matrix_sdk::config::RequestConfig;
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
 use matrix_sdk::ruma::events::room::member::MembershipState;
@@ -43,6 +44,7 @@ use uuid::Uuid;
 use crate::backfill::{self, BackfillHealth, BackfillParams};
 use crate::error::{sdk_err, SyncError};
 use crate::gateway::SdkGateway;
+use crate::homeserver_gate::{outcome_of, Caller, HomeserverGate, HomeserverGates};
 use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
 use crate::manager::ClientManager;
 use crate::matrix_oauth;
@@ -419,6 +421,12 @@ impl SyncEngine {
     /// (`GET /v1/status`). Cheap to clone (an `Arc` internally).
     pub fn backfill_health(&self) -> BackfillHealth {
         self.backfill_health.clone()
+    }
+
+    /// Every homeserver's load gate (ADR 0122), for the API status surface
+    /// (`GET /v1/status`). Cheap to clone (an `Arc` internally).
+    pub fn homeserver_gates(&self) -> HomeserverGates {
+        self.manager.homeserver_gates()
     }
 
     /// Per-account sync-service state, for the API status surface
@@ -1348,6 +1356,16 @@ const UNREAD_COUNTS_SWEEP_CONCURRENCY: usize = 8;
 /// generous — but it is a background sweep, and nothing waits on it.
 const UPSTREAM_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a homeserver-gate caller inside a loop with other work (the DM
+/// auto-join and the upstream room probe) waits its turn at a busy gate before
+/// deferring to its next pass (ADR 0122). A shut gate defers it at once.
+const GATE_TURN_WAIT: Duration = Duration::from_secs(10);
+
+/// Bound on one known-contact DM auto-join in [`join_candidate_invites`]. The
+/// SDK's own 30 s timeout is per attempt and it retries a 5xx, so without this
+/// the join could hold its gate permit (and the sync loop) for many minutes.
+const CANDIDATE_JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How many suspect rooms one reconcile pass probes. Each probe is an upstream
 /// round trip, and suspicion accrues only from a *failed* room-scoped call, so
 /// the queue is normally empty; a backlog drains a few rooms per
@@ -1679,7 +1697,12 @@ async fn shares_joined_room(client: &Client, user_id: &UserId) -> bool {
 /// after rather than being parked there forever. An invite that fails the
 /// direct/known-contact gates is memoized as rejected, so a standing non-candidate
 /// invite doesn't re-run the same checks every poll.
-async fn join_candidate_invites(client: &Client, account_id: Uuid, rooms: &VerificationRooms) {
+async fn join_candidate_invites(
+    client: &Client,
+    gate: &Arc<HomeserverGate>,
+    account_id: Uuid,
+    rooms: &VerificationRooms,
+) {
     let mut joined = 0usize;
     for room in client.invited_rooms() {
         if joined >= MAX_CANDIDATE_JOINS_PER_POLL {
@@ -1713,9 +1736,37 @@ async fn join_candidate_invites(client: &Client, account_id: Uuid, rooms: &Verif
             rooms.mark_rejected(account_id, room_id);
             continue;
         }
-        if let Err(err) = client.join_room_by_id(&room_id).await {
-            tracing::warn!(%account_id, %room_id, error = %err, "failed to join verification candidate invite");
-            continue;
+        // This runs inside the account's select loop, so it waits for the
+        // homeserver gate (ADR 0122) only briefly: a busy gate admits it in
+        // turn, and a shut one defers the invite to a later poll.
+        let Some(permit) = gate
+            .acquire_briefly(CANDIDATE_JOIN_TIMEOUT, GATE_TURN_WAIT)
+            .await
+        else {
+            tracing::debug!(%account_id, %room_id,
+                "homeserver gate shut; deferring verification candidate invite");
+            break;
+        };
+        let result =
+            tokio::time::timeout(CANDIDATE_JOIN_TIMEOUT, client.join_room_by_id(&room_id)).await;
+        permit.finish(outcome_of(&result));
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(%account_id, %room_id, error = %err, "failed to join verification candidate invite");
+                continue;
+            }
+            Err(_elapsed) => {
+                // The homeserver may still complete the join, and the room then
+                // leaves `invited_rooms()`, so this poll is the last chance to
+                // track it. A candidate that never joined is harmless: it only
+                // widens the subscription set until it expires, and a still
+                // standing invite is retried next poll.
+                tracing::warn!(%account_id, %room_id, timeout_secs = CANDIDATE_JOIN_TIMEOUT.as_secs(),
+                    "joining verification candidate invite timed out; tracking it in case the join completes");
+                rooms.add_candidate(account_id, room_id);
+                continue;
+            }
         }
         joined += 1;
         tracing::info!(%account_id, %room_id, %inviter_id,
@@ -1786,6 +1837,8 @@ async fn run_account(
     // gateway, which may have connected this account already). A connect failure
     // surfaces as a SyncError so the supervisor's backoff/retry is unchanged.
     let client = manager.get_or_connect(account.account_id).await?;
+    // Every background request below takes a permit from this (ADR 0122).
+    let gate = manager.homeserver_gate(&client);
     // Subscribe before sync can make an authenticated request and trigger token
     // refresh. The watcher's initial full snapshot also heals a refresh made by
     // a gateway that lazily connected this client before the supervisor arrived.
@@ -1946,6 +1999,7 @@ async fn run_account(
     let image_packs_handle = tokio::spawn(crate::image_packs::run(
         client.clone(),
         backfill_ctx.clone(),
+        Arc::clone(&gate),
         image_packs_cancel.clone(),
     ));
     sync_service.start().await;
@@ -1971,35 +2025,59 @@ async fn run_account(
     // select still lets a shutdown abandon that await rather than blocking until
     // the call returns (or the engine's hard drain timeout). Safe to abandon
     // mid-row — rows stay `pending` and are retried on the next boot's sweep
-    // (or the room-key arrival stream).
+    // (or the room-key arrival stream). Spawned, not awaited here: each room's
+    // key-backup download waits on the homeserver gate (ADR 0122), which can
+    // stay shut for many minutes, and the watchers below must not wait with it.
+    // So backfill and the watchers no longer start after it; it runs beside
+    // them, as it always ran beside the re-decryption queue spawned above. Both
+    // may decrypt the same row: only the sweep downloads from the backup, and
+    // `update_decrypted_event` writes only a row that is still UTD, so the
+    // second write (and its search-outbox entry) is a no-op. While the gate is
+    // shut the sweep just waits; the gate logs that at warn, and `/v1/status`
+    // shows it under `waiting`. It shares the re-decryption queue's token and
+    // is drained with it.
     let scope = if config.always_redecrypt_utds_on_startup {
         redecrypt::SweepScope::AllPending
     } else {
         redecrypt::SweepScope::StartupUnattempted
     };
-    tokio::select! {
-        _ = cancel.cancelled() => {}
-        summary = redecrypt::sweep_pending_utds(
-            &client,
-            store,
-            account.account_id,
-            scope,
-            index,
-            cancel,
-        ) => {
-            if summary.selected > 0 {
-                tracing::info!(
-                    account_id = %account.account_id,
-                    selected = summary.selected,
-                    attempted = summary.attempted,
-                    decrypted = summary.decrypted,
-                    still_pending = summary.still_pending,
-                    startup_marked = summary.startup_marked,
-                    "startup UTD re-decryption sweep completed"
-                );
+    let startup_sweep_handle = tokio::spawn({
+        let client = client.clone();
+        let store = store.clone();
+        let account_id = account.account_id;
+        let index = index.cloned();
+        let gate = Arc::clone(&gate);
+        let cancel = redecrypt_cancel.clone();
+        async move {
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                summary = redecrypt::sweep_pending_utds(
+                    &client,
+                    &store,
+                    account_id,
+                    scope,
+                    index.as_ref(),
+                    &cancel,
+                    redecrypt::BackupSource {
+                        gate: &gate,
+                        caller: Caller::Background,
+                    },
+                ) => {
+                    if summary.selected > 0 {
+                        tracing::info!(
+                            account_id = %account_id,
+                            selected = summary.selected,
+                            attempted = summary.attempted,
+                            decrypted = summary.decrypted,
+                            still_pending = summary.still_pending,
+                            startup_marked = summary.startup_marked,
+                            "startup UTD re-decryption sweep completed"
+                        );
+                    }
+                }
             }
         }
-    }
+    });
 
     // History backfill (M10): a continuous, throttled background task that pages
     // each joined room's pre-existing history backward through the shared ingestion
@@ -2013,6 +2091,7 @@ async fn run_account(
             backfill_ctx.clone(),
             BackfillParams::from_config(config),
             backfill_health.clone(),
+            Arc::clone(&gate),
             backfill_cancel.clone(),
         )))
     } else {
@@ -2065,6 +2144,7 @@ async fn run_account(
     let unread_cancel = cancel.child_token();
     let unread_handle = tokio::spawn(watch_unread_counts(
         client.clone(),
+        Arc::clone(&gate),
         store.clone(),
         account.account_id,
         live_tx.clone(),
@@ -2156,7 +2236,7 @@ async fn run_account(
             // Periodically join fresh verification-DM invites and expire stale
             // candidates from the subscription set.
             _ = verification_poll.tick() => {
-                join_candidate_invites(&client, account.account_id, verification_rooms).await;
+                join_candidate_invites(&client, &gate, account.account_id, verification_rooms).await;
                 maybe_resubscribe_verification_rooms(
                     &rls, verifications, verification_rooms, account.account_id, &mut subscribed,
                 ).await;
@@ -2245,6 +2325,13 @@ async fn run_account(
             account_id = %account.account_id,
             error = %err,
             "re-decryption task did not shut down cleanly"
+        );
+    }
+    if let Err(err) = startup_sweep_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "startup re-decryption sweep did not shut down cleanly"
         );
     }
     backfill_cancel.cancel();
@@ -2798,6 +2885,7 @@ fn apply_gone_upstream_refresh(
 /// left unprobed are still `suspect` for the next boot.
 async fn reconcile_upstream_rooms(
     client: &Client,
+    gate: &Arc<HomeserverGate>,
     store: &Store,
     account_id: Uuid,
     cancel: &CancellationToken,
@@ -2834,10 +2922,27 @@ async fn reconcile_upstream_rooms(
             StateEventType::RoomCreate,
             String::new(),
         );
+        // This pass runs on the unread watcher's resweep tick, so it waits for
+        // the homeserver gate (ADR 0122) only briefly: a busy gate admits it in
+        // turn, and a shut one leaves the remaining rooms suspect for the next
+        // pass, as cancellation does.
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            permit = gate.acquire_briefly(UPSTREAM_PROBE_TIMEOUT, GATE_TURN_WAIT) => permit,
+        };
+        let Some(permit) = permit else {
+            tracing::debug!(
+                %account_id,
+                "homeserver gate shut or cancelled; unprobed rooms stay suspect for the next pass"
+            );
+            return;
+        };
         // Races cancellation rather than only checking between probes: an
         // in-flight probe can sit for `UPSTREAM_PROBE_TIMEOUT`, and shutdown
         // should not have to wait it out. `biased` so a token already cancelled
-        // wins without starting another round trip.
+        // wins without starting another round trip. Cancelling drops the permit,
+        // which frees its slot.
         let outcome = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -2847,8 +2952,18 @@ async fn reconcile_upstream_rooms(
                 );
                 return;
             }
-            outcome = tokio::time::timeout(UPSTREAM_PROBE_TIMEOUT, client.send(request)) => outcome,
+            // One permit covers one attempt: with SDK retry on, a 5xx would be
+            // re-sent until the timeout.
+            outcome = tokio::time::timeout(
+                UPSTREAM_PROBE_TIMEOUT,
+                client.send(request).with_request_config(
+                    RequestConfig::new()
+                        .disable_retry()
+                        .timeout(UPSTREAM_PROBE_TIMEOUT),
+                ),
+            ) => outcome,
         };
+        permit.finish(outcome_of(&outcome));
         let (verdict, detail) = match outcome {
             Ok(result) => {
                 let status = result
@@ -2960,6 +3075,7 @@ async fn reconcile_upstream_rooms(
 /// fires or the update stream closes.
 async fn watch_unread_counts(
     client: Client,
+    gate: Arc<HomeserverGate>,
     store: Store,
     account_id: Uuid,
     live_tx: broadcast::Sender<LiveFrame>,
@@ -3004,7 +3120,7 @@ async fn watch_unread_counts(
                 // follows rather than waiting five more minutes, and a room
                 // whose row was cleared since the last pass stops being
                 // suppressed in the same window.
-                reconcile_upstream_rooms(&client, &store, account_id, &cancel).await;
+                reconcile_upstream_rooms(&client, &gate, &store, account_id, &cancel).await;
                 // `reconcile_upstream_rooms` returns on cancellation rather than
                 // finishing its backlog, so re-check before starting the two
                 // steps that follow: a store read plus a full sweep of up to
@@ -3867,6 +3983,67 @@ mod reconcile_loop_tests {
         Store::connect(&url, 5).await.expect("connect + migrate")
     }
 
+    /// The probe honours the homeserver gate (ADR 0122) without waiting on it,
+    /// since it runs on the unread watcher's tick: with the breaker open, a
+    /// reconcile pass returns at once, sends nothing, and the room stays suspect.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_shut_homeserver_gate_sends_no_probe() {
+        let store = test_store().await;
+        let account = store
+            .upsert_account(
+                &format!("@probe-gate-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .expect("account");
+        let account_id = account.account_id;
+        let room_id = format!("!gated-{}:localhost", Uuid::new_v4());
+        store
+            .flag_room_upstream_suspect(account_id, &room_id, "M_FORBIDDEN")
+            .await
+            .expect("flag suspect");
+
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&probes);
+        let router = state_router(
+            StatusCode::NOT_FOUND,
+            json!({ "errcode": "M_NOT_FOUND", "error": "unknown room" }),
+        )
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                if request.uri().path().contains("/state/") {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                next.run(request)
+            },
+        ));
+        let client = client_for(serve(router).await).await;
+        let gate = HomeserverGate::for_test();
+        gate.open_for_test();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reconcile_upstream_rooms(
+                &client,
+                &gate,
+                &store,
+                account_id,
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("the pass must not wait for the gate");
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            store
+                .suspect_upstream_rooms(account_id)
+                .await
+                .expect("suspects"),
+            vec![room_id],
+        );
+    }
+
     /// A homeserver that fails rather than answers must **delay** a verdict, not
     /// erase the suspicion.
     ///
@@ -3901,6 +4078,7 @@ mod reconcile_loop_tests {
         .await;
         reconcile_upstream_rooms(
             &client_for(addr).await,
+            &HomeserverGate::for_test(),
             &store,
             account_id,
             &CancellationToken::new(),
@@ -3952,6 +4130,7 @@ mod reconcile_loop_tests {
         .await;
         reconcile_upstream_rooms(
             &client_for(addr).await,
+            &HomeserverGate::for_test(),
             &store,
             account_id,
             &CancellationToken::new(),
@@ -3995,6 +4174,7 @@ mod reconcile_loop_tests {
         .await;
         reconcile_upstream_rooms(
             &client_for(addr).await,
+            &HomeserverGate::for_test(),
             &store,
             account_id,
             &CancellationToken::new(),
