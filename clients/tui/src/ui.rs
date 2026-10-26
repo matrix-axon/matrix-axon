@@ -484,6 +484,51 @@ fn promote_command_response(app: &mut App, areas: &PaneAreas) {
     }
 }
 
+/// Title for `/whereami`. The query stays in the title so it is visible at any
+/// scroll position. The member section below it is the only body that changes.
+/// The result never exceeds `inner_width` columns.
+pub(crate) fn room_info_popup_title(app: &App, inner_width: usize) -> String {
+    let idle = format!(
+        "Room Info  ({} filter, Esc to close, Up/Down scroll)",
+        app.shortcuts.find.label()
+    );
+    let Some(state) = app.room_info_for_selected() else {
+        return fit_popup_title(&idle, inner_width);
+    };
+    if !state.member_filter_editing && state.member_filter.is_empty() {
+        return fit_popup_title(&idle, inner_width);
+    }
+    let prefix = "Room Info  filter: ";
+    let suffix = " (Esc clears, Up/Down scroll)";
+    let full = format!("{prefix}{}{suffix}", state.member_filter);
+    if display_width(&full) <= inner_width {
+        return full;
+    }
+    let fixed = display_width(prefix) + display_width(suffix);
+    // Keep the hint when the query is what overflows. Otherwise shorten the
+    // whole title, including the empty-prompt form on a narrow terminal.
+    if fixed + 3 < inner_width && !state.member_filter.is_empty() {
+        let budget = inner_width - fixed - 3;
+        let shown = format!("{}...", take_display_width(&state.member_filter, budget));
+        return fit_popup_title(&format!("{prefix}{shown}{suffix}"), inner_width);
+    }
+    fit_popup_title(&full, inner_width)
+}
+
+fn fit_popup_title(text: &str, inner_width: usize) -> String {
+    if inner_width == 0 || display_width(text) <= inner_width {
+        return if inner_width == 0 {
+            String::new()
+        } else {
+            text.to_owned()
+        };
+    }
+    if inner_width <= 3 {
+        return take_display_width(text, inner_width);
+    }
+    format!("{}...", take_display_width(text, inner_width - 3))
+}
+
 /// Build the open popup's body and settle its scroll against it.
 ///
 /// The clamp at the end is load-bearing: the popup scroll keys add and
@@ -492,6 +537,7 @@ fn promote_command_response(app: &mut App, areas: &PaneAreas) {
 fn prepare_popup(app: &mut App, screen: Rect) {
     let Mode::Popup(kind) = app.mode else {
         app.frame.popup = None;
+        app.reveal_room_info_members = false;
         return;
     };
     if kind == PopupKind::MediaPreview {
@@ -510,10 +556,10 @@ fn prepare_popup(app: &mut App, screen: Rect) {
             } else if sel_line >= app.popup_scroll.saturating_add(page_size) {
                 app.popup_scroll = sel_line.saturating_add(1).saturating_sub(page_size);
             }
-            ("Help  (Enter to select, Esc to close)", lines)
+            ("Help  (Enter to select, Esc to close)".to_owned(), lines)
         }
         PopupKind::Shortcuts => (
-            "Shortcuts  (Esc to close)",
+            "Shortcuts  (Esc to close)".to_owned(),
             popup_shortcuts_lines(&app.shortcuts),
         ),
         PopupKind::UnreadThreads => {
@@ -535,10 +581,13 @@ fn prepare_popup(app: &mut App, screen: Rect) {
                     app.popup_scroll = range.end.saturating_sub(page_size);
                 }
             }
-            ("Unread Threads  (Enter to open, Esc to close)", lines)
+            (
+                "Unread Threads  (Enter to open, Esc to close)".to_owned(),
+                lines,
+            )
         }
         PopupKind::RoomInfo => (
-            "Room Info  (Esc to close, Up/Down scroll)",
+            room_info_popup_title(app, usize::from(area.width.saturating_sub(2))),
             // Wrapped here rather than by the widget: scrolling counts rows,
             // so a field that wraps must already be the rows it will occupy.
             popup_room_info_lines(app)
@@ -552,7 +601,7 @@ fn prepare_popup(app: &mut App, screen: Rect) {
                 .collect(),
         ),
         PopupKind::Status => (
-            "Status  (Esc to close)",
+            "Status  (Esc to close)".to_owned(),
             popup_status_lines(app)
                 .into_iter()
                 .map(Line::from)
@@ -563,7 +612,7 @@ fn prepare_popup(app: &mut App, screen: Rect) {
             // match cannot hold a reference into it across all of them.
             let response = app.pending_command_response.clone().unwrap_or_default();
             (
-                "Command Response  (Esc to close)",
+                "Command Response  (Esc to close)".to_owned(),
                 wrap_command_response(&response, area.width.saturating_sub(2))
                     .into_iter()
                     .map(Line::from)
@@ -572,6 +621,23 @@ fn prepare_popup(app: &mut App, screen: Rect) {
         }
         PopupKind::MediaPreview => unreachable!("media preview returned above"),
     };
+    if kind == PopupKind::RoomInfo && app.reveal_room_info_members {
+        app.reveal_room_info_members = false;
+        if let Some(index) = lines.iter().position(|line| {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            text.starts_with("Members (") || text.starts_with("Member list:")
+        }) {
+            // The heading is the first row of the member section, so the match
+            // count and the first hits sit at the top of the popup.
+            app.popup_scroll = index;
+        }
+    } else if kind != PopupKind::RoomInfo {
+        app.reveal_room_info_members = false;
+    }
     let max_scroll = lines.len().saturating_sub(page_size);
     app.popup_scroll = app.popup_scroll.min(max_scroll);
     app.frame.popup = Some(PopupView {
@@ -1411,7 +1477,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .block(
                 Block::default()
                     .style(Style::default().bg(app.colors.popup_background))
-                    .title(popup_view.title)
+                    .title(popup_view.title.as_str())
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(app.colors.selected_room)),
             )
@@ -3088,6 +3154,16 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
             "move focused space down (saved across clients)",
         ),
         Row::Blank,
+        Row::Section("Room information:"),
+        Row::Kv(
+            shortcuts.find.label(),
+            "filter loaded members in room info by name or Matrix ID",
+        ),
+        Row::Kv(
+            shortcuts.clear_input.label(),
+            "clear that filter, then close the popup",
+        ),
+        Row::Blank,
         Row::Section("Message actions (select a message first with Ctrl-J/K):"),
         Row::Kv(shortcuts.edit_message.label(), "edit message"),
         Row::Kv(shortcuts.redact_message.label(), "redact message"),
@@ -3572,6 +3648,13 @@ mod tests {
                 .any(|l| l.contains("start search") && l.contains(&find_label)),
             "start-search line should display the configured find binding {find_label:?}"
         );
+        assert!(
+            text.lines().any(|l| {
+                l.contains("filter loaded members in room info") && l.contains(&find_label)
+            }),
+            "room-info filter should display the configured find binding {find_label:?}"
+        );
+        assert!(text.contains("clear that filter, then close the popup"));
     }
 
     #[test]
