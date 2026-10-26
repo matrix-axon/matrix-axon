@@ -73,6 +73,10 @@ fn production_encryption_settings() -> EncryptionSettings {
 /// Electron versions are placeholders MAS never inspects; they are not a claim
 /// about what Axon embeds. The platform fragments are the frozen ones Chrome
 /// itself sends, which MAS special-cases into a clean OS name.
+///
+/// The version is this crate's `CARGO_PKG_VERSION`, which is the shipped app's
+/// version: every workspace crate inherits `version.workspace = true`, and
+/// `scripts/bundle-version.sh` derives the bundle versions from the same field.
 pub(crate) fn user_agent() -> String {
     user_agent_for(std::env::consts::OS)
 }

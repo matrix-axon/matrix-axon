@@ -137,7 +137,11 @@ impl MatrixOAuthRegistrationManager {
                 .map_err(|_| SyncError::MatrixOAuthLocalState)?;
             let client_id = ClientId::new(registration.client_id.clone());
             // An operator-provided registration, or a server that cannot
-            // register us again, has metadata Axon cannot refresh.
+            // register us again, has metadata Axon cannot refresh. A stored
+            // row left over from a static registration the operator has since
+            // removed has no fingerprint either, so it is refreshed here: with
+            // no static entry for this server any more, a dynamic registration
+            // is what the configuration asks for.
             let refreshable = static_client_id(&self.config, homeserver, &issuer)?.is_none()
                 && metadata.registration_endpoint.is_some();
             let current =
@@ -150,7 +154,8 @@ impl MatrixOAuthRegistrationManager {
             // logo, say), and the server shows what it holds. Register again,
             // but never let a failed refresh block a sign-in the stored client
             // can still serve. The old client stays valid for sessions that
-            // already use it.
+            // already use it. A refresh the server keeps rejecting is retried
+            // on every sign-in for now (#857).
             tracing::info!("persisted Matrix OAuth client registration predates the current client metadata; registering again");
             return match self.register_dynamic(&issuer, homeserver, server).await {
                 Ok(fresh) => Ok(fresh),
@@ -502,7 +507,8 @@ fn static_client_id(
 /// (`/raw/` redirects to the image bytes; `/blob/` is an HTML page), and on the
 /// same host as the `client_uri` in [`client_metadata`]: MAS refuses
 /// registration with a 400 when the two differ. Repointing it only affects
-/// clients registered afterwards.
+/// clients registered afterwards. Moving it off the `main` branch layout, to a
+/// stable Pages URL, is tracked in #858.
 const CLIENT_LOGO_URI: &str =
     "https://github.com/matrix-axon/matrix-axon/raw/main/docs/brand/axon-mark-light.png";
 
@@ -524,15 +530,21 @@ fn client_metadata() -> Result<Raw<ClientMetadata>, SyncError> {
 
 /// Fingerprint of [`client_metadata`], stored beside a dynamic registration so
 /// a later build that registers different metadata can tell the stored client
-/// is out of date. SHA-256 of the serialized JSON, lowercase hex; the
-/// serialization is deterministic for a given matrix-sdk, and a dependency bump
-/// that reorders fields costs at most one extra registration.
+/// is out of date. See [`fingerprint_metadata_json`] for what it covers.
 fn client_metadata_hash() -> Result<String, SyncError> {
     let metadata = client_metadata().map_err(|_| SyncError::MatrixOAuthLocalState)?;
-    Ok(format!(
-        "{:x}",
-        sha2::Sha256::digest(metadata.json().get().as_bytes())
-    ))
+    fingerprint_metadata_json(metadata.json().get())
+}
+
+/// SHA-256, lowercase hex, of a metadata JSON object with its top-level keys in
+/// sorted order. The order the SDK's serializer emits fields in is not part of
+/// the metadata, so a matrix-sdk bump that reorders them must not make every
+/// install register again; a field that is added, removed or changed still does.
+fn fingerprint_metadata_json(json: &str) -> Result<String, SyncError> {
+    let fields: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(json).map_err(|_| SyncError::MatrixOAuthLocalState)?;
+    let canonical = serde_json::to_vec(&fields).map_err(|_| SyncError::MatrixOAuthLocalState)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(canonical)))
 }
 
 /// Persist the newest OAuth session after every SDK refresh notification.
@@ -957,6 +969,24 @@ mod tests {
             client.oauth().client_id().unwrap().as_str(),
             client_id.as_str()
         );
+    }
+
+    #[test]
+    fn metadata_fingerprint_ignores_field_order_but_not_content() {
+        let fingerprint = |json| fingerprint_metadata_json(json).unwrap();
+        assert_eq!(
+            fingerprint(r#"{"client_name":"Axon","logo_uri":"https://a.example/l.png"}"#),
+            fingerprint(r#"{"logo_uri":"https://a.example/l.png","client_name":"Axon"}"#),
+        );
+        assert_ne!(
+            fingerprint(r#"{"client_name":"Axon","logo_uri":"https://a.example/l.png"}"#),
+            fingerprint(r#"{"client_name":"Axon","logo_uri":"https://a.example/m.png"}"#),
+        );
+        assert_ne!(
+            fingerprint(r#"{"client_name":"Axon"}"#),
+            fingerprint(r#"{"client_name":"Axon","logo_uri":"https://a.example/l.png"}"#),
+        );
+        assert!(fingerprint_metadata_json("not json").is_err());
     }
 
     #[test]
