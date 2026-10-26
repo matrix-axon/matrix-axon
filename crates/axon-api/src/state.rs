@@ -74,6 +74,8 @@ const DEFAULT_WS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 /// are all handles).
 #[derive(Clone)]
 pub struct AppState {
+    /// Explicit homeserver preview generation; defaults to unsupported.
+    pub preview_generator: Arc<dyn crate::PreviewGenerator>,
     /// Database handle.
     pub store: Store,
     /// Producer end of the live-event bus, owned by the sync engine. The
@@ -410,6 +412,7 @@ impl AppState {
             media,
             member_profiles: Arc::new(NoopMemberProfileService),
             uploads: Arc::new(DisabledStagedUploads),
+            preview_generator: Arc::new(crate::preview_generation::DisabledPreviewGenerator),
             search,
             backfill_status: Arc::new(NoBackfillStatus),
             build_info: BuildInfo::default(),
@@ -512,6 +515,12 @@ impl AppState {
     /// Inject the account-scoped Matrix OAuth QR login-grant driver.
     pub fn with_matrix_oauth_grant(mut self, service: Arc<dyn MatrixOAuthQrGrantService>) -> Self {
         self.matrix_oauth_grant = service;
+        self
+    }
+
+    /// Inject the opt-in homeserver preview generator.
+    pub fn with_preview_generator(mut self, generator: Arc<dyn crate::PreviewGenerator>) -> Self {
+        self.preview_generator = generator;
         self
     }
 
@@ -1152,6 +1161,12 @@ impl FromRef<AppState> for Arc<dyn MediaProxy> {
 impl FromRef<AppState> for Arc<dyn MemberProfileService> {
     fn from_ref(state: &AppState) -> Arc<dyn MemberProfileService> {
         state.member_profiles.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn crate::PreviewGenerator> {
+    fn from_ref(state: &AppState) -> Self {
+        state.preview_generator.clone()
     }
 }
 

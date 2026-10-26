@@ -79,6 +79,63 @@ fn deserialize_previews<'de, D: serde::Deserializer<'de>>(
     Option::<Bounded>::deserialize(deserializer).map(|value| value.map(|v| v.0))
 }
 
+/// Calling this endpoint is explicit consent to disclose the URL to the
+/// selected account's homeserver. No generation occurs on share arrival.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratePreviewRequest {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewGenerationStatus {
+    Ready,
+    Unsupported,
+    Disabled,
+    Timeout,
+    Unavailable,
+    Busy,
+    NoMetadata,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewThumbnailStatus {
+    Ready,
+    Absent,
+    Unavailable,
+}
+
+/// Binary raster response; this schema describes bytes rather than a JSON array.
+#[derive(ToSchema)]
+#[schema(value_type = String, format = Binary)]
+pub struct PreviewThumbnailBytes(pub Vec<u8>);
+
+/// Nonfatal generation outcomes retain the caller's original draft/link.
+/// `preview` is directly usable as one entry in the settled send contract.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GeneratedPreviewDto {
+    /// Busy is transient per-account capacity or homeserver rate limiting.
+    /// Disabled requires an explicitly false homeserver preview capability.
+    pub status: PreviewGenerationStatus,
+    pub preview: Option<LinkPreviewRequest>,
+    pub thumbnail_status: PreviewThumbnailStatus,
+    /// Server staging expiry, independent of the local share's retention.
+    /// Download the authenticated thumbnail before declaring local recovery.
+    pub image_expires_at: Option<String>,
+}
+impl GeneratedPreviewDto {
+    pub fn fallback(status: PreviewGenerationStatus) -> Self {
+        Self {
+            status,
+            preview: None,
+            thumbnail_status: PreviewThumbnailStatus::Absent,
+            image_expires_at: None,
+        }
+    }
+}
+
 /// A room in the cross-account list (`GET /v1/rooms`). Identity is
 /// `(account_id, room_id)` — a room joined by two accounts appears twice.
 #[derive(Debug, Serialize, ToSchema)]

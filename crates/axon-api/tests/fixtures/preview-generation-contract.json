@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "generation_path": "/v1/accounts/{account_id}/link-previews/generate",
+  "request": {
+    "url": "https://example.org/page"
+  },
+  "outcomes": [
+    {
+      "data": {
+        "status": "ready",
+        "preview": {
+          "matched_url": "https://example.org/page",
+          "title": "Example",
+          "description": null,
+          "site_name": "Example",
+          "image_upload_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "thumbnail_status": "ready",
+        "image_expires_at": "2026-10-26T12:00:00+00:00"
+      }
+    },
+    {
+      "data": {
+        "status": "unsupported",
+        "preview": null,
+        "thumbnail_status": "absent",
+        "image_expires_at": null
+      }
+    },
+    {
+      "data": {
+        "status": "disabled",
+        "preview": null,
+        "thumbnail_status": "absent",
+        "image_expires_at": null
+      }
+    },
+    {
+      "data": {
+        "status": "timeout",
+        "preview": null,
+        "thumbnail_status": "absent",
+        "image_expires_at": null
+      }
+    },
+    {
+      "data": {
+        "status": "unavailable",
+        "preview": null,
+        "thumbnail_status": "absent",
+        "image_expires_at": null
+      }
+    },
+    {
+      "data": {
+        "status": "busy",
+        "preview": null,
+        "thumbnail_status": "absent",
+        "image_expires_at": null
+      }
+    },
+    {
+      "data": {
+        "status": "no_metadata",
+        "preview": null,
+        "thumbnail_status": "absent",
+        "image_expires_at": null
+      }
+    },
+    {
+      "data": {
+        "status": "ready",
+        "preview": {
+          "matched_url": "https://example.org/page",
+          "title": "Example",
+          "description": null,
+          "site_name": "Example",
+          "image_upload_id": null
+        },
+        "thumbnail_status": "absent",
+        "image_expires_at": null
+      }
+    },
+    {
+      "data": {
+        "status": "ready",
+        "preview": {
+          "matched_url": "https://example.org/page",
+          "title": "Example",
+          "description": null,
+          "site_name": "Example",
+          "image_upload_id": null
+        },
+        "thumbnail_status": "unavailable",
+        "image_expires_at": null
+      }
+    }
+  ],
+  "thumbnail_recovery": {
+    "method": "GET",
+    "path": "/v1/accounts/{account_id}/media/uploads/{upload_id}/preview",
+    "max_bytes": 2097152,
+    "max_pixels": 4000000,
+    "success_headers": {
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "unavailable": {
+      "status": 404,
+      "body": {
+        "error": {
+          "code": "not_found",
+          "message": "thumbnail not found"
+        }
+      }
+    },
+    "expired_handle_action": "reupload_retained_local_bytes",
+    "missing_local_bytes_action": "explicit_replace_remove_or_discard",
+    "automatic_regeneration": false
+  }
+}

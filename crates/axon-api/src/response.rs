@@ -309,6 +309,9 @@ impl From<crate::uploads::StageUploadError> for ApiError {
                 "upload exceeds configured limit of {cap} bytes"
             )),
             StageUploadError::Timeout(msg) => ApiError::service_unavailable(msg),
+            StageUploadError::Capacity => {
+                ApiError::service_unavailable("generated thumbnail staging quota reached")
+            }
             StageUploadError::Internal(msg) => {
                 tracing::error!(error = %msg, "staged upload error serving request");
                 ApiError::internal()

@@ -461,3 +461,110 @@ async fn list_media_upload_ids_includes_every_state() {
 
     common::cleanup_account(&pool, account_id).await;
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn generated_preview_quota_is_atomic_account_scoped_and_durable_until_cleanup() {
+    use axon_store::{MediaUploadKind, NewMediaUpload, Store};
+    let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+        .await
+        .unwrap();
+    let owner = store
+        .upsert_account(
+            &format!("@quota-{}:localhost", uuid::Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let other = store
+        .upsert_account(
+            &format!("@quota-{}:localhost", uuid::Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    async fn insert(store: Store, account_id: uuid::Uuid) -> Option<uuid::Uuid> {
+        let id = uuid::Uuid::new_v4();
+        store
+            .insert_generated_preview_upload(
+                &NewMediaUpload {
+                    upload_id: id,
+                    account_id,
+                    kind: MediaUploadKind::Image,
+                    filename: "preview",
+                    content_type: Some("image/png"),
+                    size_bytes: 3,
+                    path: "/unused",
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                },
+                2,
+                8,
+            )
+            .await
+            .unwrap()
+            .map(|r| r.upload_id)
+    }
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        tasks.push(tokio::spawn(insert(store.clone(), owner)));
+    }
+    let mut ids = Vec::new();
+    for task in tasks {
+        if let Some(id) = task.await.unwrap() {
+            ids.push(id);
+        }
+    }
+    assert_eq!(ids.len(), 2);
+    assert!(insert(store.clone(), other).await.is_some());
+    sqlx_core::query::query(
+        "UPDATE media_uploads SET expires_at = now()-interval '1 second' WHERE account_id = $1",
+    )
+    .bind(owner)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert!(
+        insert(store.clone(), owner).await.is_none(),
+        "unswept files still count"
+    );
+    let reopened = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+        .await
+        .unwrap();
+    assert!(
+        insert(reopened.clone(), owner).await.is_none(),
+        "quota survives restart"
+    );
+    reopened.delete_expired_media_uploads().await.unwrap();
+    assert!(insert(reopened.clone(), owner).await.is_some());
+    // Count and byte ceilings are independent, and ordinary staging is unaffected.
+    let account = store
+        .upsert_account(
+            &format!("@quota-byte-{}:localhost", uuid::Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let id = uuid::Uuid::new_v4();
+    let input = NewMediaUpload {
+        upload_id: id,
+        account_id: account,
+        kind: MediaUploadKind::Image,
+        filename: "preview",
+        content_type: None,
+        size_bytes: 9,
+        path: "/unused",
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+    };
+    assert!(store
+        .insert_generated_preview_upload(&input, 100, 8)
+        .await
+        .unwrap()
+        .is_none());
+    store.insert_media_upload(&input).await.unwrap();
+    for account in [owner, other, account] {
+        store.delete_account_row(account).await.unwrap();
+    }
+}
