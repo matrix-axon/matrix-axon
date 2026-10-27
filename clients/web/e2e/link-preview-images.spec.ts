@@ -202,6 +202,12 @@ for (const thread of [false, true]) {
       for (let i = 0; i < 8; i++) {
         const card = cards.nth(i)
         await card.scrollIntoViewIfNeeded()
+        // The pinned thread root can cover a card the driver considers visible.
+        // Center replies explicitly before checking the actual pointer target.
+        if (thread)
+          await card.evaluate((element) =>
+            element.scrollIntoView({ block: 'center' }),
+          )
         const bounds = (await card.boundingBox())!
         const viewport = page.viewportSize()!
         expect(bounds.x).toBeGreaterThanOrEqual(0)
