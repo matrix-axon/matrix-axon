@@ -165,10 +165,10 @@ for (const thread of [false, true]) {
     const code = dialog.locator('code').first()
     await activate(code, testInfo.project.name === 'webkit-iphone')
     await expect(dialog).toBeVisible()
+    // Use the viewer interior: Firefox hits the backdrop at its rounded corner.
     await activate(
       dialog.locator('.media-text-preview'),
       testInfo.project.name === 'webkit-iphone',
-      { x: 1, y: 1 },
     )
     await expect(dialog).toBeVisible()
     await page.screenshot({
