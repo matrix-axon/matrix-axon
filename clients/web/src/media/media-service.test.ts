@@ -828,3 +828,134 @@ describe('createMediaService blob types', () => {
     expect(result.ok && result.blob.type).toBe('image/png')
   })
 })
+
+describe('bounded preview responses and reader isolation', () => {
+  it('rejects oversized declared and streamed bytes before creating an object URL', async () => {
+    const auth = stubAuth()
+    const media = createMediaService({ auth, baseUrl: BASE_URL })
+    for (const declared of [true, false]) {
+      server.use(
+        http.get(
+          `${BASE_URL}/v1/media/:account/:server/:media`,
+          () =>
+            new HttpResponse(new Uint8Array(17), {
+              headers: {
+                'content-type': 'image/png',
+                ...(declared ? { 'content-length': '17' } : {}),
+              },
+            }),
+        ),
+      )
+      const handle = await media.acquire(
+        ACCOUNT,
+        `mxc://hs/large-${declared}`,
+        { maxBytes: 16 },
+      )
+      expect(handle.result).toEqual({ ok: false, error: { kind: 'too_large' } })
+      handle.release()
+    }
+    expect(created).toEqual([])
+  })
+
+  it('separates bounded requests from unrestricted cached media', async () => {
+    const requests = serveBytes()
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const full = await media.acquire(ACCOUNT, 'mxc://hs/image')
+    const bounded = await media.acquire(ACCOUNT, 'mxc://hs/image', {
+      maxBytes: 1,
+    })
+    expect(full.result.ok).toBe(true)
+    expect(bounded.result.ok).toBe(false)
+    expect(requests.fetches).toBe(2)
+    full.release()
+    bounded.release()
+  })
+
+  it('does not reuse a previous reader blob or in-flight download after token replacement', async () => {
+    let token = 'first'
+    let finish!: () => void
+    let started!: () => void
+    const began = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const credentials: string[] = []
+    server.use(
+      http.get(
+        `${BASE_URL}/v1/media/:account/:server/:media`,
+        async ({ request }) => {
+          const credential = request.headers.get('authorization')!
+          credentials.push(credential)
+          if (credential === 'Bearer first') {
+            started()
+            await new Promise<void>((resolve) => {
+              finish = resolve
+            })
+          }
+          return new HttpResponse(REAL_PNG, {
+            headers: { 'content-type': 'image/png' },
+          })
+        },
+      ),
+    )
+    const media = createMediaService({
+      auth: { ...stubAuth(), getToken: () => token },
+      baseUrl: BASE_URL,
+    })
+    const old = media.acquire(ACCOUNT, 'mxc://hs/image')
+    await began
+    token = 'second'
+    const current = await media.acquire(ACCOUNT, 'mxc://hs/image')
+    finish()
+    const previous = await old
+    expect(previous.result).not.toEqual(current.result)
+    const cached = await media.acquire(ACCOUNT, 'mxc://hs/image')
+    expect(cached.result).toEqual(current.result)
+    expect(credentials).toEqual(['Bearer first', 'Bearer second'])
+    previous.release()
+    current.release()
+    cached.release()
+  })
+})
+
+it('turns credential acquisition failure into a media result rather than rejecting the hook', async () => {
+  const media = createMediaService({
+    auth: {
+      ...stubAuth(),
+      getToken: async () => {
+        throw new Error('credential unavailable')
+      },
+    },
+    baseUrl: BASE_URL,
+  })
+  const handle = await media.acquire(ACCOUNT, 'mxc://hs/image')
+  expect(handle.result).toEqual({ ok: false, error: { kind: 'auth' } })
+})
+
+it('does not let a late previous-token 401 clear the current session', async () => {
+  let token = 'old'
+  let finish!: () => void
+  let started!: () => void
+  const began = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const auth = { ...stubAuth(), getToken: () => token, onAuthFailure: vi.fn() }
+  server.use(
+    http.get(`${BASE_URL}/v1/media/:account/:server/:media`, async () => {
+      started()
+      await new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      return new HttpResponse(null, { status: 401 })
+    }),
+  )
+  const media = createMediaService({ auth, baseUrl: BASE_URL })
+  const pending = media.acquire(ACCOUNT, 'mxc://hs/image')
+  await began
+  token = 'new'
+  finish()
+  expect((await pending).result).toEqual({
+    ok: false,
+    error: { kind: 'auth', status: 401 },
+  })
+  expect(auth.onAuthFailure).not.toHaveBeenCalled()
+})

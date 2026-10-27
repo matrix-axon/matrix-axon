@@ -48,13 +48,14 @@ Merged PR [740](https://github.com/matrix-axon/matrix-axon/pull/740) added text-
 It does not generate previews or render their images.
 Merged PR [833](https://github.com/matrix-axon/matrix-axon/pull/833) added the server-only typed send contract and persistent/encrypted staged thumbnails.
 The opt-in homeserver generation helper and authenticated staged-thumbnail retrieval are documented in [bundled link previews](bundled-link-previews.md#opt-in-homeserver-generation).
-Native sharing and client image rendering remain separate stages.
+Stage 4 adds shared web image-card rendering through authenticated media, including encrypted previews, with fixed layout, bounded downloads, and text fallback.
+Native sharing remains a later stage; web rendering does not register an OS share target or expose generation in the composer.
 `SendMessageRequest` and `SendMediaRequest` currently expose no caller idempotency key or operation-status lookup.
 `crates/axon-api/src/routes/messages.rs` claims a staged upload before dispatch and returns the resulting event ID; this does not make a lost HTTP response safely replayable.
 Do not infer delivery from a later message with matching text or filename.
 The v1 design therefore preserves uncertain results for user resolution instead of promising automatic exactly-once delivery.
 Automatic recovery of uncertain dispatches would require a separately designed, additive server prerequisite PR before dependent client behavior.
-Rich-link delivery requires separate additive server prerequisites for bundled metadata/image sending and optional preview generation, followed by a separate client image-rendering PR.
+The server prerequisites and web image-card renderer are available for the later native sharing stages; those adapters must consume the settled contracts.
 
 ## Rich links across both platforms
 

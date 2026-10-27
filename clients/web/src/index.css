@@ -2760,6 +2760,27 @@ button.event-person:focus-visible {
   font-size: 0.8rem;
 }
 
+/* The card owns this fixed slot: loading, failure, and sender dimensions must
+ * not move surrounding messages or stretch the narrow thread/mobile pane. */
+.link-preview-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 10rem;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg);
+  font-size: 0.8rem;
+}
+
+.link-preview-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .link-preview-description {
   color: var(--fg);
   font-weight: 400;

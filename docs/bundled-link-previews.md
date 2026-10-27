@@ -1,7 +1,7 @@
 # Sending bundled link previews
 
 The server accepts optional `url_previews` on text and media-caption sends, following [ADR 0125](https://github.com/matrix-axon/matrix-axon/blob/a09f547ce18b333c87fcfbc6a1ce1b437f16669c/docs/adr/0125-ios-first-incoming-sharing.md).
-Native share intake and image-card rendering remain separate stages in [the approved plan](https://github.com/matrix-axon/matrix-axon/blob/a09f547ce18b333c87fcfbc6a1ce1b437f16669c/docs/mobile-incoming-sharing.md).
+Native share intake follows the server prerequisites and web image-card renderer in [the approved plan](https://github.com/matrix-axon/matrix-axon/blob/a09f547ce18b333c87fcfbc6a1ce1b437f16669c/docs/mobile-incoming-sharing.md).
 Sending never fetches the linked webpage or an external preview image.
 The explicit [generation helper](#opt-in-homeserver-generation) delegates acquisition to the homeserver.
 
@@ -109,7 +109,8 @@ Open both rooms in Axon and a second Matrix client.
 1. Send a text link with title/description and a staged thumbnail, then send a file with the same preview in its caption.
    Confirm the fallback text and attachment appear once, and that the thumbnail is attached to its parent rather than appearing as another message.
    If the second client renders bundled preview images, confirm its card loads the thumbnail in both rooms.
-   Axon's own preview-image UI is a later stage, so its existing text card is expected here.
+   Axon's web room/thread cards render eligible plain and encrypted preview images through authenticated media, with text fallback when an image is unavailable.
+   The web composer does not yet author previews or invoke generation.
 2. Reply to a message authored by the second account using `send-media`, with `reply_to` set and either a preview array or `url_previews: []`.
    Confirm the reply targets the right message and the second account receives the expected mention, subject to its notification settings.
    Also reply to your own message and check that it does not self-mention.

@@ -46,11 +46,15 @@ function requestOptions(
   height: number | undefined,
   method: ThumbnailMethod | undefined,
   contentType: string | undefined,
+  maxBytes: number | undefined,
 ): MediaRequestOptions | undefined {
+  const bounds = maxBytes === undefined ? {} : { maxBytes }
   if (width !== undefined && height !== undefined) {
-    return { thumbnail: { width, height, method }, contentType }
+    return { thumbnail: { width, height, method }, contentType, ...bounds }
   }
-  return contentType !== undefined ? { contentType } : undefined
+  return contentType !== undefined || maxBytes !== undefined
+    ? { contentType, ...bounds }
+    : undefined
 }
 
 export function useMediaBlob<T extends HTMLElement = HTMLElement>(
@@ -61,6 +65,7 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     thumbnail?: ThumbnailRequest
     /** See `MediaRequestOptions.contentType` — allowlisted types only. */
     contentType?: string
+    maxBytes?: number
     /**
      * Bump to re-acquire. Purely an effect trigger — it is deliberately *not*
      * part of the media cache key, since a component-local counter restarts at
@@ -84,7 +89,7 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
   const { media } = useServices()
   const ref = useRef<T>(null)
   const [state, setState] = useState<MediaBlobState>({ status: 'idle' })
-  const { eager = false, thumbnail, contentType, attempt } = options
+  const { eager = false, thumbnail, contentType, maxBytes, attempt } = options
   const thumbnailWidth = thumbnail?.width
   const thumbnailHeight = thumbnail?.height
   const thumbnailMethod = thumbnail?.method
@@ -121,6 +126,7 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
             thumbnailHeight,
             thumbnailMethod,
             contentType,
+            maxBytes,
           ),
         )
         .then((acquired) => {
@@ -179,6 +185,7 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     thumbnailHeight,
     thumbnailMethod,
     contentType,
+    maxBytes,
     attempt,
   ])
 
@@ -194,6 +201,7 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
         thumbnailHeight,
         thumbnailMethod,
         contentType,
+        maxBytes,
       ),
     )
   }

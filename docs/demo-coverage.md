@@ -44,7 +44,7 @@ shows it.
 | DM title derived from the other member                  | `rooms`               | `rooms`                                                                                                   | `rooms`         |
 | Timeline text, sender names, day separators             | `timeline`            | `timeline`                                                                                                | `timeline`      |
 | Formatted (HTML) messages with links                    | `timeline`            | `timeline`                                                                                                | `timeline`      |
-| Bundled URL preview text cards (MSC4095)                | **n/a**               | **not covered** — demo corpus has no bundled preview metadata                                             | **not covered** |
+| Bundled URL preview text/image cards (MSC4095)          | **n/a**               | **not covered** — demo corpus has no bundled preview metadata                                             | **not covered** |
 | Reactions (seeded badges render)                        | `timeline`            | `timeline`                                                                                                | `send`          |
 | React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
 | Custom reaction images (MSC4027)                        | **not covered**       | **not covered**                                                                                           | **not covered** |
@@ -280,3 +280,7 @@ It is not yet shown in the recorded demo.
 Standalone sticker shortcodes and discovery-error Unicode fallback are covered by `clients/web/e2e/sticker-shortcodes.spec.ts` in room and thread composers; the recorded demo does not yet show this path.
 
 Case-insensitive sticker matching and shortcode autocomplete are covered in `clients/web/e2e/sticker-shortcodes.spec.ts`; no recorded demo scene covers them yet.
+
+Bundled link images are covered by `clients/web/e2e/link-preview-images.spec.ts` in room and thread/caption timelines, with plain and encrypted descriptors, authenticated downloads, stable loading geometry, text/error fallback, and hostile URL/dimension rejection.
+Run the `chromium` and `webkit-iphone` projects for desktop and phone geometry evidence.
+The recorded demo remains uncovered because the corpus has no bundled-preview events; image cards do not imply preview authoring, automatic generation, or native sharing support.

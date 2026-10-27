@@ -91,6 +91,8 @@ export interface ThumbnailRequest {
 
 export interface MediaRequestOptions {
   thumbnail?: ThumbnailRequest
+  /** Optional hard response-byte ceiling for small bundled preview images. */
+  maxBytes?: number
   /**
    * Re-type the fetched bytes before the object URL is minted (ADR 0072). The
    * proxy downgrades everything that is not image/audio/video to
@@ -413,6 +415,8 @@ export function createMediaService(deps: {
   const zeroRef = new Map<string, true>()
   // In-flight fetches, so concurrent acquires of one key share one download.
   const inflight = new Map<string, Promise<MediaResult>>()
+  let reader: string | null | undefined
+  let readerGeneration = 0
 
   const keyOf = (
     accountId: string,
@@ -422,7 +426,7 @@ export function createMediaService(deps: {
     const thumbnail = options?.thumbnail
     // A re-typed fetch yields a different blob than the raw one, so it needs
     // its own cache slot even though it hits the same proxy URL.
-    const type = options?.contentType ?? ''
+    const type = `${readerGeneration}\0${options?.maxBytes ?? ''}\0${options?.contentType ?? ''}`
     if (thumbnail === undefined) {
       return `${accountId}\0full\0${type}\0${mxc}`
     }
@@ -485,6 +489,7 @@ export function createMediaService(deps: {
     accountId: string,
     mxcUrl: string,
     options?: MediaRequestOptions,
+    credential?: string | null,
   ): Promise<BlobResult> {
     const url = mediaUrl(accountId, mxcUrl, options)
     if (url === null) {
@@ -493,7 +498,8 @@ export function createMediaService(deps: {
 
     return gate.run(async () => {
       try {
-        const token = await deps.auth.getToken()
+        const token =
+          credential === undefined ? await deps.auth.getToken() : credential
         const headers = new Headers()
         if (token !== null) {
           headers.set('authorization', `Bearer ${token}`)
@@ -503,7 +509,39 @@ export function createMediaService(deps: {
           signal: AbortSignal.timeout(transferTimeoutMs),
         })
         if (res.ok) {
-          const raw = await res.blob()
+          let raw: Blob
+          if (options?.maxBytes !== undefined) {
+            const limit = options.maxBytes
+            const length = Number(res.headers.get('content-length'))
+            if (length > limit) {
+              void res.body?.cancel().catch(() => {})
+              return { ok: false, error: { kind: 'too_large' } }
+            }
+            const stream = res.body?.getReader()
+            const chunks: Uint8Array<ArrayBuffer>[] = []
+            let total = 0
+            if (stream !== undefined) {
+              try {
+                while (true) {
+                  const { done, value } = await stream.read()
+                  if (done) break
+                  if (value.byteLength > limit - total) {
+                    void stream.cancel().catch(() => {})
+                    return { ok: false, error: { kind: 'too_large' } }
+                  }
+                  total += value.byteLength
+                  chunks.push(new Uint8Array(value))
+                }
+              } finally {
+                stream.releaseLock()
+              }
+            }
+            raw = new Blob(chunks, {
+              type: res.headers.get('content-type') ?? '',
+            })
+          } else {
+            raw = await res.blob()
+          }
           // The shell's fetch (`@tauri-apps/plugin-http`) builds its
           // `Response` without headers and attaches them afterwards, so
           // `blob()` comes back untyped though `Content-Type` is readable.
@@ -523,7 +561,9 @@ export function createMediaService(deps: {
         if (res.status === 401) {
           // Let the provider drop the revoked token, exactly as the API client
           // does — the failure still flows back to the caller.
-          deps.auth.onAuthFailure()
+          if ((await deps.auth.getToken()) === token) {
+            deps.auth.onAuthFailure()
+          }
           return { ok: false, error: { kind: 'auth', status: 401 } }
         }
         if (res.status === 404) {
@@ -550,8 +590,9 @@ export function createMediaService(deps: {
     accountId: string,
     mxcUrl: string,
     options?: MediaRequestOptions,
+    credential?: string | null,
   ): Promise<MediaResult> {
-    const result = await fetchBlob(accountId, mxcUrl, options)
+    const result = await fetchBlob(accountId, mxcUrl, options, credential)
     return result.ok
       ? {
           ok: true,
@@ -664,6 +705,18 @@ export function createMediaService(deps: {
     mxcUrl: string,
     options?: MediaRequestOptions,
   ): Promise<MediaHandle> {
+    // Bind cache lookup and the eventual network request to the same reader.
+    // Token replacement must not reuse another session's cached/in-flight blob.
+    let token: string | null
+    try {
+      token = await deps.auth.getToken()
+    } catch {
+      return failedHandle({ ok: false, error: { kind: 'auth' } })
+    }
+    if (reader !== token) {
+      reader = token
+      readerGeneration += 1
+    }
     const key = keyOf(accountId, mxcUrl, options)
 
     const cached = cache.get(key)
@@ -680,7 +733,7 @@ export function createMediaService(deps: {
     let pending = inflight.get(key)
     if (pending === undefined) {
       pending = (async () => {
-        const result = await download(accountId, mxcUrl, options)
+        const result = await download(accountId, mxcUrl, options, token)
         if (result.ok) {
           // Seed a zero-ref entry; each awaiter registers its own ref below.
           cache.set(key, { url: result.url, refs: 0, format: result.format })
