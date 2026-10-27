@@ -23,9 +23,14 @@ runs:
     # finished and resumes a partial one, so a retry carries on where the last
     # attempt stopped, and a fresh connection is usually not the stalled one.
     # Three attempts of four minutes bound the step at about twelve, where an
-    # unbounded stall costs the whole job. `timeout` signals the whole process
-    # group, and the wait below lets a straggling apt-get release its lock before
-    # the next attempt wants it.
+    # unbounded stall costs the whole job.
+    #
+    # `timeout` ends pnpm, node and sudo but not apt-get: in CI the apt-get
+    # outlived the timeout, kept downloading, and held the dpkg lock against the
+    # cleanup. So the loop stops it by name, as root, and waits for it and any
+    # dpkg to exit before the next attempt wants the lock. `dpkg --configure -a`
+    # heals an install that was cut off mid-way; it is best effort and must not
+    # end the loop, because `bash -e` would turn its failure into the step's.
     - name: Install Playwright system packages
       shell: bash
       working-directory: clients/web
@@ -38,11 +43,12 @@ runs:
             exit 0
           fi
           echo "::warning title=Playwright system packages::attempt $attempt of $attempts failed or ran past 4 minutes"
+          sudo pkill -x apt-get || true
           for _ in $(seq 1 30); do
             pgrep -x apt-get > /dev/null || pgrep -x dpkg > /dev/null || break
             sleep 2
           done
-          sudo dpkg --configure -a
+          sudo dpkg --configure -a || true
         done
         echo "::error title=Playwright system packages::all $attempts attempts failed"
         exit 1
