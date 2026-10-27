@@ -60,7 +60,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::error::GatewayError;
-use crate::homeserver_gate::{GateError, Outcome};
+use crate::homeserver_gate::{GateError, InteractiveCall, Outcome};
 use crate::manager::ClientManager;
 
 /// Map an SDK error from a send/fetch into a [`GatewayError`]. A homeserver
@@ -72,16 +72,19 @@ use crate::manager::ClientManager;
 /// upstream `502`. The SDK's own request timeout (30 s by default) becomes
 /// [`GatewayError::Timeout`], a `504` like the adapter's outer deadline (ADR
 /// 0121 decision 5): the homeserver never answered, so it may still complete
-/// the call. Everything else is an upstream failure.
+/// the call. Everything else is an upstream failure, and one the homeserver
+/// gate counts as load is [`GatewayError::Overloaded`] (ADR 0122).
 fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
     // The homeserver gate's classification (ADR 0122), so the two cannot
-    // disagree about what counts as a timeout.
-    if err.outcome() == Outcome::TimedOut {
+    // disagree about what counts as a timeout or as load.
+    let outcome = err.outcome();
+    if outcome == Outcome::TimedOut {
         return GatewayError::Timeout(err.to_string());
     }
     match err.client_api_error_kind() {
         Some(ErrorKind::Forbidden) => GatewayError::Forbidden(err.to_string()),
         Some(ErrorKind::BadState) => GatewayError::Invalid(err.to_string()),
+        _ if outcome == Outcome::Overloaded => GatewayError::Overloaded(err.to_string()),
         _ => GatewayError::Upstream(err.to_string()),
     }
 }
@@ -1047,6 +1050,22 @@ impl SdkGateway {
             store,
             live_tx,
             power_level_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Start a call a user is waiting on for `account_id` (ADR 0122 decision
+    /// 1). The API adapter bounds it with its own timeout and finishes it with
+    /// the result, so a homeserver that stops answering, or fails under load,
+    /// slows axon's background requests first. Reads only the cached client,
+    /// so it never connects or waits: a call that connects the client itself
+    /// is not reported.
+    pub fn interactive_call(&self, account_id: Uuid) -> InteractiveCall {
+        match self.manager.cached(account_id) {
+            Some(client) => self
+                .manager
+                .homeserver_gates()
+                .interactive_call(&client.homeserver()),
+            None => InteractiveCall::default(),
         }
     }
 
@@ -3922,14 +3941,21 @@ mod disowned_room_tests {
         .await;
         let (gateway, manager) = gateway_for(addr, account_id).await;
 
+        let call = gateway.interactive_call(account_id);
         let outcome = gateway.leave(account_id, DEAD_ROOM).await;
         assert!(
-            matches!(outcome, Err(GatewayError::Upstream(_))),
+            matches!(outcome, Err(GatewayError::Overloaded(_))),
             "an unclassified failure must stay retryable, got {outcome:?}"
         );
         assert!(
             !manager.is_room_dead(account_id, &dead_room_id()),
             "a failure must not mark the room dead"
         );
+        // A 503 is load, so the interactive call halves the account's gate
+        // (ADR 0122 decision 1).
+        call.finish(&Ok(outcome));
+        let gates = manager.homeserver_gates().snapshot();
+        assert_eq!(gates.len(), 1, "{gates:?}");
+        assert_eq!(gates[0].limit, 1, "{gates:?}");
     }
 }

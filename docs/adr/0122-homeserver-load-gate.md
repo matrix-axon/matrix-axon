@@ -1,6 +1,6 @@
 # ADR 0122 — A load gate between axon's background work and the homeserver
 
-Status: accepted (#749); step 1 implemented, as amended below
+Status: accepted (#749); steps 1 and 2 implemented, as amended below
 
 ## Context
 
@@ -392,3 +392,23 @@ breaker for at most the first one-minute cooldown.
 
 `GET /v1/status` reports long-polls waiting at the gate in `waiting`, beside
 background requests.
+
+## Amendment — step 2 as built (2026-10-27)
+
+- **Every call through the API's gateway reports,** not only the ones ADR
+  0121 added timeouts to: sends and uploads, receipts and typing, membership,
+  room entry, room settings, power levels and account actions. They all pass
+  through one bounded helper in the server's adapter, which reports each
+  call's outcome to the account's gate. The media proxy is not part of the
+  gateway and still reports nothing.
+- **Started means when the adapter starts the call.** The adapter reads the
+  gate's decrease epoch then, so a burst of user calls that time out together
+  halves the limit once, the rule background requests follow.
+- **A call that connects the account's client reports nothing.** The gate is
+  found from the account's cached client without waiting, so a call made
+  before the client is connected (or while a connect is in flight) has no gate
+  to report to. Clients are connected at boot, so this is rare.
+- **Load is a gateway error of its own.** A 5xx, 429 or transport error from
+  the SDK becomes `GatewayError::Overloaded`, classified by the gate's own rule
+  so the two cannot disagree. It is still a `502`, with the same message as
+  any other upstream failure; only the gate tells them apart.

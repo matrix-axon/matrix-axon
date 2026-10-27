@@ -50,6 +50,13 @@ pub enum GatewayError {
     #[error("upstream homeserver error: {0}")]
     Upstream(String),
 
+    /// The homeserver failed the operation the way an overloaded one does: a
+    /// 5xx, a 429 or a transport error. A `502` like
+    /// [`Upstream`](Self::Upstream), kept apart so an interactive call's
+    /// failure can slow axon's background requests (ADR 0122 decision 1).
+    #[error("upstream homeserver error: {0}")]
+    Overloaded(String),
+
     /// The SDK's own request timeout ran out before the homeserver answered.
     /// Deliberately *not* [`Upstream`](Self::Upstream), for the reason the
     /// adapter's outer deadline is a `504` (ADR 0121 decision 5): giving up
