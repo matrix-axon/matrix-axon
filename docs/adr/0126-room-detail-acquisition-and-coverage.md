@@ -56,20 +56,25 @@ A type it does not deliver remains `unknown`; the transport never establishes ab
 A missing tuple becomes known absent only when the account's homeserver answers `GET /rooms/{roomId}/state/{type}/` with `404 M_NOT_FOUND`.
 For a joined member that response is the specification's statement that the room has no such state, unlike sync's silence.
 
-- **When:** a `/metadata` read schedules a confirmation for each of the eight types that has no tuple, subject to the cache below; the read itself returns immediately.
+- **When:** a `/metadata` read schedules confirmation for the types that have no tuple and are due, under the same rule as decision 3: a type is due when it has no acquisition row, its confirmation has expired, or its `next_attempt_at` has passed.
+  The read itself returns immediately.
   A type with a tuple is never confirmed: its status comes from the tuple.
-- **Where:** confirmations are acquisition jobs on the account's worker (decision 4), so they share its queue, gate permits, pacing, and freshness guard.
+- **Where:** a room's due types form one `absence` job on the account's worker (decision 4), not one job per type, so they share one queue slot and the worker's gate permits, pacing, and freshness guard.
+  The job confirms types in a fixed order with encryption first, because a false "unencrypted" is the costliest mistake, then server ACL, join rules, history visibility, guest access, power levels, canonical alias, and creation.
+  It publishes one frame when it finishes (decision 5).
+- **Rows:** each type keeps its own acquisition row (decision 3) with the same refresh fields as the homeserver details, so a row can exist without a confirmation, for example after a `403` or while failures back off.
 - **Outcomes:**
   - `404 M_NOT_FOUND` records the confirmation, with `confirmed_at` from the PostgreSQL clock.
   - `200` means the state exists but has not reached `room_state`; no confirmation is recorded, the body is not read or stored, and Axon logs a warning naming the account, room, and type as a sync coverage gap.
     The endpoint's content-only response lacks the event ID, sender, and timestamp a `room_state` row needs, and ADR 0111 keeps acquired data out of synced state.
-  - `403` records nothing, because the account may no longer be joined; the job takes the conclusive-denial expiration so it is not retried on every read.
-  - Every other outcome is a failure and takes the failure backoff.
+  - `403` records no confirmation, because the account may no longer be joined; the row's value becomes `forbidden` with the conclusive-denial expiration, so the type is not due again on the next read.
+  - Every other outcome is a failure: it updates only the refresh fields and takes the failure backoff.
 - **Lifetime:** a confirmation stays valid until a tuple of that type arrives, the account leaves the room, the room is purged, or the account is removed, which delete it.
   It is also re-confirmed on read after `ABSENCE_TTL`, which bounds the effect of a state event sync failed to deliver.
 - **Cost:** only absent types are confirmed, once per room per `ABSENCE_TTL`; a typical room lacks two or three of the eight.
 
-`/metadata` gains a nullable `absence_confirmed_at` (Unix ms) on each snapshot.
+`/metadata` gains two nullable fields on each snapshot: `absence_confirmed_at` (Unix ms) and `absence_check`, which is decision 3's refresh object (`idle`, `queued`, or `running`, the last failure's category, and `next_attempt_at`).
+Both are `null` for a type with a tuple, and `absence_check` is also `null` when the type has never been attempted, so a client can tell "no confirmation yet, but one is coming" (`queued` or `running`) from "confirmation failed or was denied" (`idle` with a failure or a future `next_attempt_at`).
 The snapshot `status` enum is unchanged, so existing clients keep working.
 
 | `status`  | `absence_confirmed_at` | Meaning                                                                       |
@@ -111,7 +116,7 @@ Issue 622 decides whether discovered unjoined rooms are added.
 Each account run owns one acquisition worker, canceled and joined with the run like the member-count and redaction workers.
 The API reaches it through a consumer-owned port in `axon-api` with an `axon-server` adapter (ADR 0021), so `axon-api` does not depend on `axon-sync`.
 
-- **Queue:** a bounded per-account queue keyed by (room, kind), which coalesces duplicates.
+- **Queue:** a bounded per-account queue keyed by (room, kind), which coalesces duplicates; the kinds are `local_aliases`, `directory_visibility`, and `absence`, so a panel needs at most three entries.
   When it is full, the oldest queued job is dropped to admit the new one, because the newest request is the panel a user is looking at now.
   A dropped job leaves its row unchanged and no backoff, so the next read of that room requests it again; nothing can be starved while it is still being read.
 - **Concurrency:** one request at a time per account, with a minimum interval between jobs, so one account's large room list cannot crowd out another account's work.
@@ -131,11 +136,14 @@ The API reaches it through a consumer-owned port in `axon-api` with an `axon-ser
 A change made elsewhere to a room's local aliases or directory publication while it is cached is not observed until the entry expires, so `AVAILABLE_TTL` is the staleness bound for those two details.
 If Axon later adds alias or directory writes, they invalidate the entry.
 
+A room's jobs drain at `JOB_INTERVAL` per request, so a room with all eight types absent takes about 2.5 seconds to fill completely, and a typical room with two or three absent types about one second; this is accepted because the panel opens immediately from local data and each job's frame updates it.
+Opening more than about ten rooms in quick succession evicts the first rooms' entries; they are requested again if those panels are read again.
+
 In keeping with ADR 0121 decision 3, the limits are constants:
 
 | Constant                | Value       | Why                                                                                        |
 | ----------------------- | ----------- | ------------------------------------------------------------------------------------------ |
-| `QUEUE_CAPACITY`        | 32          | Matches the member-count and redaction hint queues; a panel needs at most ten jobs         |
+| `QUEUE_CAPACITY`        | 32          | Matches the member-count and redaction hint queues; holds about ten rooms' panels          |
 | `JOB_INTERVAL`          | 250 ms      | Paces a burst of panel opens without delaying a single one noticeably                      |
 | `REQUEST_TIMEOUT`       | 10 s        | These responses are tiny; a slower answer is load, and ADR 0122 counts under 5 s as fast   |
 | `MAX_RESPONSE_BYTES`    | 64 KiB      | Far above any plausible answer, small enough to buffer per account                         |
@@ -204,7 +212,7 @@ Each step is one server-silo PR, with OpenAPI, the regenerated web schema, `docs
 
 - **Transport:** request shape lists both new types; their events reach `room_state` under the existing ingestion rules; a type the response omits stays `unknown` with no confirmation.
 - **Frames:** each source fires on a real change and stays silent on identical rewrites and re-confirmations; one frame per room batch.
-- **Absence confirmation, against a mock homeserver:** `404 M_NOT_FOUND` confirms; `200` confirms nothing, stores nothing, and warns; `403` confirms nothing and is not retried on the next read; a tuple arriving during the request wins; a later tuple deletes the confirmation; re-confirmation after `ABSENCE_TTL`; types with a tuple are never requested.
+- **Absence confirmation, against a mock homeserver:** `404 M_NOT_FOUND` confirms; `200` confirms nothing, stores nothing, and warns; `403` confirms nothing, records `forbidden`, and schedules nothing on the next read; a failing type backs off and repeated reads schedule nothing until `next_attempt_at`; `absence_check` reports `queued`, `running`, and `idle` with the failure; one read of a room with several absent types queues one `absence` job in the documented order and publishes one frame; a tuple arriving during the request wins; a later tuple deletes the confirmation; re-confirmation after `ABSENCE_TTL`; types with a tuple are never requested.
 - **Acquisition, under paused tokio time against a mock homeserver:** a hung peer holds one account's worker without affecting another account; a full queue drops its oldest job and still admits the newest; concurrent reads produce one request; each status and its expiration; `Retry-After`; an oversized body is refused before parsing; invalid aliases give `partial`; values and backoff survive a restart while `queued` does not; unjoined and unknown rooms make no request.
 - **Membership races:** a job that starts before a leave and completes after it commits nothing, including when a rejoin happens before it completes, and the rejoined room starts with no confirmation or details; account removal during a request likewise commits nothing.
 - **Live, on a disposable Synapse stack:** add and remove a local alias and directory publication and observe the frame and the re-read; set and replace server ACL and guest access; confirm a room without them reads as known absent only after the confirmation request.
