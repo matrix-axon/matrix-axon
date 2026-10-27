@@ -29,8 +29,8 @@ display, UTD/redaction placeholders, `?event=` highlighting, plain-text URL
 linkification), media (M-W8, ADR 0064: inline images and stickers with a
 full-size lightbox, download cards for files/audio/video, all fetched through
 the authenticated media proxy as blob URLs; inline `<img>` re-admitted to the
-sanitizer for `mxc://` only), an inline preview for audio/video/PDF/text
-attachments (ADR 0072) and syntax-highlighted code blocks and text attachments
+sanitizer for `mxc://` only), on-demand audio/video/PDF/text previews
+(ADR 0072) and syntax-highlighted code blocks and text attachments
 (ADR 0073, highlight.js), media _send_ (M-W8.5, ADR 0065: attach by
 paperclip, drag-and-drop onto the room or thread pane, or paste; the composer's
 text becomes the caption and renders with the same markdown as a message body;
@@ -73,6 +73,13 @@ that paints before `/v1/rooms` answers and reconciles in place, marked
 "Updating…" until it does — room metadata only, no message bodies; on by
 default and switchable off under Settings → Room list, which also erases what
 was stored).
+
+Attachment cards show captions across their full width, with an icon-only Download control at the top right.
+Click or tap a previewable card, or activate its filename with Enter or Space, to open the shared media viewer; there is no separate Preview button.
+Text and audio previews use the same viewer as PDF and video, with Escape, Close, or the backdrop returning to the card.
+Caption links and spoilers keep their own actions, and selecting caption text does not open a preview.
+The card owns its tap area; message gestures and actions remain available elsewhere on the message row.
+Unsupported or oversized attachments remain download-only, and preview bytes load only after opening the card.
 
 Messages with bundled URL previews (`m.url_previews` or Beeper's `com.beeper.linkpreviews`) show cards beneath the body in room and thread timelines, including attachment captions.
 Compact pinned thread headers omit the cards; the full root message retains them.

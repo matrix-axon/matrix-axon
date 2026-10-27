@@ -12,18 +12,19 @@ import { useServices } from '../services'
 import { Lightbox } from './Lightbox'
 import { MediaCaption } from './MediaCaption'
 import { PdfViewer } from './PdfViewer'
+import { MediaDownloadButton } from './MediaDownloadButton'
 
 /** The longest side an inline video is allowed, in CSS px (matches MediaImage). */
 const VIDEO_MAX = 480
 
 /**
- * The expanded body of an inline preview (ADR 0072): a native player for
+ * The on-demand body of an attachment preview (ADR 0072): a native player for
  * audio/video, the browser's own viewer for a PDF, or the decoded text of a
  * text file. Rendered only after the user asks — `MediaAttachment` mounts this
- * on expand, so nothing is fetched by merely scrolling past the card.
+ * when opened, so nothing is fetched by merely scrolling past the card.
  *
  * The bytes come through `useMediaBlob`, so the object URL is refcounted and
- * released when this unmounts (collapsing the card). `fetchBlobUrl` would be
+ * released when the viewer closes and this unmounts. `fetchBlobUrl` would be
  * wrong here: it is uncached and caller-revoked, which suits the transient
  * Download anchor and not a player that may be re-opened.
  */
@@ -33,6 +34,9 @@ export function MediaPreview({
   plan,
   content,
   onClose,
+  onDownload,
+  downloading,
+  downloadError,
 }: {
   accountId: string
   media: ParsedMedia
@@ -41,25 +45,57 @@ export function MediaPreview({
   content?: unknown
   /** Present in the lightbox and dismiss with this, instead of inline. */
   onClose?: () => void
+  onDownload?: () => void
+  downloading?: boolean
+  downloadError?: string | null
 }) {
   // Text wants a string, not an object URL, and takes a different service call
   // — so it is a sibling component rather than a branch below, keeping the
   // hooks of each path unconditional.
-  return plan.kind === 'text' ? (
-    <TextPreview
-      accountId={accountId}
-      mxcUrl={media.url!}
-      filename={media.filename}
-    />
+  const body =
+    plan.kind === 'text' ? (
+      <TextPreview
+        accountId={accountId}
+        mxcUrl={media.url!}
+        filename={media.filename}
+      />
+    ) : (
+      <BlobPreview
+        accountId={accountId}
+        media={media}
+        kind={plan.kind}
+        contentType={plan.contentType}
+        framed={onClose !== undefined}
+      />
+    )
+  return onClose === undefined ? (
+    body
   ) : (
-    <BlobPreview
-      accountId={accountId}
-      media={media}
-      kind={plan.kind}
-      contentType={plan.contentType}
-      content={content}
+    <Lightbox
+      label={media.caption ?? media.filename}
+      caption={
+        media.caption === null ? null : (
+          <MediaCaption
+            accountId={accountId}
+            caption={media.caption}
+            content={content}
+          />
+        )
+      }
       onClose={onClose}
-    />
+      actions={
+        onDownload === undefined ? undefined : (
+          <MediaDownloadButton
+            className="lightbox-save"
+            onClick={onDownload}
+            downloading={downloading}
+          />
+        )
+      }
+      saveError={downloadError}
+    >
+      {body}
+    </Lightbox>
   )
 }
 
@@ -68,15 +104,13 @@ function BlobPreview({
   media,
   kind,
   contentType,
-  content,
-  onClose,
+  framed,
 }: {
   accountId: string
   media: ParsedMedia
   kind: Exclude<PreviewKind, 'text'>
   contentType: string | null
-  content?: unknown
-  onClose?: () => void
+  framed: boolean
 }) {
   const [unplayable, setUnplayable] = useState(false)
   const { ref, state } = useMediaBlob<HTMLDivElement>(accountId, media.url, {
@@ -93,7 +127,6 @@ function BlobPreview({
   )
 
   const label = media.caption ?? media.filename
-  const framed = onClose !== undefined
 
   let body
   if (state.status === 'error') {
@@ -157,33 +190,8 @@ function BlobPreview({
     )
   }
 
-  // The `ref` is what `useMediaBlob` observes for visibility. It is `eager`
-  // here so nothing depends on it being on-screen, but it must stay mounted
-  // across every branch — including inside the lightbox, whose portal moves it
-  // out of the timeline.
-  if (framed) {
-    return (
-      <Lightbox
-        label={label}
-        caption={
-          media.caption === null ? null : (
-            <MediaCaption
-              accountId={accountId}
-              caption={media.caption}
-              content={content}
-            />
-          )
-        }
-        onClose={onClose}
-      >
-        <div ref={ref} class="lightbox-media">
-          {body}
-        </div>
-      </Lightbox>
-    )
-  }
   return (
-    <div ref={ref} class="media-preview">
+    <div ref={ref} class={framed ? 'lightbox-media' : 'media-preview'}>
       {body}
     </div>
   )
@@ -259,20 +267,20 @@ function TextPreview({
 
   if (failed) {
     return (
-      <div class="media-preview">
+      <div class="media-preview media-text-preview">
         <p class="local-echo-status error">Could not load text</p>
       </div>
     )
   }
   if (text === null) {
     return (
-      <div class="media-preview">
+      <div class="media-preview media-text-preview">
         <div class="media-skeleton" aria-hidden="true" />
       </div>
     )
   }
   return (
-    <div class="media-preview">
+    <div class="media-preview media-text-preview">
       <pre class="media-text">
         {html === null ? (
           <code>{text}</code>

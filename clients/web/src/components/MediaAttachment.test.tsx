@@ -37,15 +37,21 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()
   server.resetHandlers()
+  window.getSelection()?.removeAllRanges()
+  vi.restoreAllMocks()
 })
 afterAll(() => server.close())
 
-function renderAttachment(media: ParsedMedia) {
-  return render(
-    <ServicesContext.Provider value={testServices()}>
-      <MediaAttachment accountId={ACCOUNT} media={media} />
-    </ServicesContext.Provider>,
-  )
+function renderAttachment(media: ParsedMedia, content?: unknown) {
+  const services = testServices()
+  return {
+    ...render(
+      <ServicesContext.Provider value={services}>
+        <MediaAttachment accountId={ACCOUNT} media={media} content={content} />
+      </ServicesContext.Provider>,
+    ),
+    services,
+  }
 }
 
 describe('MediaAttachment', () => {
@@ -85,6 +91,7 @@ describe('MediaAttachment', () => {
 
     fireEvent.click(getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(click).toHaveBeenCalledOnce())
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
 
   it('offers no Download button when the media has no mxc url', () => {
@@ -102,4 +109,71 @@ describe('MediaAttachment', () => {
     fireEvent.click(getByRole('button', { name: 'Download' }))
     expect(await findByText('Download failed')).toBeTruthy()
   })
+})
+
+it('opens the preview from caption text but preserves embedded links and spoilers', async () => {
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/media/:account/:server/:media`,
+      () => new HttpResponse('Preview text'),
+    ),
+  )
+  const view = renderAttachment(
+    file({
+      filename: 'notes.txt',
+      mimetype: 'text/plain',
+      caption: 'Caption https://example.org/ hidden',
+    }),
+    {
+      format: 'org.matrix.custom.html',
+      formatted_body:
+        'Caption <a href="https://example.org/">site</a> <span data-mx-spoiler>hidden</span>',
+    },
+  )
+  const fetchText = vi.spyOn(view.services.media, 'fetchText')
+  const caption = view.container.querySelector<HTMLElement>(
+    '.media-attachment-caption',
+  )!
+  fireEvent.click(caption.querySelector('a')!)
+  expect(document.querySelector('.lightbox')).toBeNull()
+  const spoiler = caption.querySelector<HTMLElement>('.spoiler')!
+  fireEvent.click(spoiler)
+  expect(spoiler.classList.contains('spoiler-revealed')).toBe(true)
+  expect(document.querySelector('.lightbox')).toBeNull()
+  expect(fetchText).not.toHaveBeenCalled()
+  fireEvent.click(caption, { detail: 1 })
+  expect(await view.findByText('Preview text')).toBeTruthy()
+  expect(view.getByRole('dialog')).toBeTruthy()
+  expect(fetchText).toHaveBeenCalledOnce()
+  fireEvent.click(view.getByRole('dialog').querySelector('code')!)
+  expect(view.getByRole('dialog')).toBeTruthy()
+})
+
+it('keeps selected caption text from opening the viewer', () => {
+  const view = renderAttachment(
+    file({
+      filename: 'notes.txt',
+      mimetype: 'text/plain',
+      caption: 'Select this caption',
+    }),
+  )
+  const caption = view.container.querySelector('.media-attachment-caption')!
+  const range = document.createRange()
+  range.selectNodeContents(caption)
+  window.getSelection()!.addRange(range)
+  fireEvent.click(caption, { detail: 1 })
+  expect(document.querySelector('.lightbox')).toBeNull()
+})
+
+it.each([
+  { filename: 'archive.zip', mimetype: 'application/zip' },
+  { filename: 'large.txt', mimetype: 'text/plain', size: 512 * 1024 + 1 },
+])('keeps unsupported/oversized $filename download-only', (descriptor) => {
+  const view = renderAttachment(file(descriptor))
+  const card = view.container.querySelector('.media-attachment')!
+  expect(card.hasAttribute('data-media-preview-card')).toBe(false)
+  fireEvent.click(card)
+  expect(document.querySelector('.lightbox')).toBeNull()
+  expect(view.getByRole('button', { name: 'Download' })).toBeTruthy()
+  expect(view.container.querySelector('[aria-haspopup="dialog"]')).toBeNull()
 })

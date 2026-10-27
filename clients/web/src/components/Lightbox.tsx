@@ -25,6 +25,7 @@ import { useShortcuts } from '../shortcuts'
 import { BodyPortal } from './BodyPortal'
 import { useSwipePaging } from '../media/use-swipe-paging'
 import { useModalFocus } from './use-modal-focus'
+import { MediaDownloadButton } from './MediaDownloadButton'
 
 /**
  * Elements a click must *not* dismiss on: the media being viewed, its caption,
@@ -36,7 +37,7 @@ import { useModalFocus } from './use-modal-focus'
  * them the lightbox would dismiss itself out from under the file dialog.
  */
 const DISMISS_EXEMPT =
-  'video, audio, img, iframe, figcaption, button, a, label, input'
+  'video, audio, img, iframe, figcaption, button, a, label, input, .media-text'
 
 /**
  * How long after toggling immersive mode a further tap on the image is
@@ -640,15 +641,12 @@ export function Lightbox({
         <div class="lightbox-toolbar">
           {actions}
           {onSave !== undefined && (
-            <button
-              type="button"
-              class="ghost lightbox-save"
-              aria-label="Save image to device"
-              disabled={saving === true}
+            <MediaDownloadButton
+              className="lightbox-save"
+              label="Save image to device"
+              downloading={saving}
               onClick={onSave}
-            >
-              {saving === true ? '…' : '⤓'}
-            </button>
+            />
           )}
           <button
             ref={closeRef}

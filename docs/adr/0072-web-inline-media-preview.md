@@ -19,7 +19,7 @@ The constraint that shaped ADR 0064's choice is real and unchanged: `/v1/media`
 is bearer-guarded, a browser cannot put an `Authorization` header on
 `<video src>`, and so every object is `fetch()`ed with the token and handed to
 the DOM as a `blob:` URL — which means the whole object lands in memory before
-anything can play. What was over-broad was applying that to *mounting*: the
+anything can play. What was over-broad was applying that to _mounting_: the
 memory cost is only incurred if the player mounts unasked.
 
 ## Decision
@@ -33,48 +33,39 @@ a player. Collapsing unmounts it and drops the reference.
 
 The bytes come through the existing `useMediaBlob` → `MediaService.acquire()`
 path, so the object URL is refcounted, LRU-governed, and released on unmount
-exactly like an image. `fetchBlobUrl` is deliberately *not* used: it is uncached
+exactly like an image. `fetchBlobUrl` is deliberately _not_ used: it is uncached
 and caller-revoked, which suits the transient Download anchor and not a player
 that can be re-opened.
 
-### Video and PDF take the lightbox; audio and text stay inline
+### All attachment previews use the shared lightbox
 
-Not everything previewable wants the same surface. A PDF page in a timeline
-column is unreadable and a video shown small is a video you squint at — and both
-are things you look at once and then leave. Those open in `Lightbox`, the
-full-viewport shell images already use (ADR 0064), which on a phone *is* the
-full screen once the overlay's padding is dropped at the narrow breakpoint. No
-Fullscreen API call is involved: the overlay already covers the viewport, and
-iOS promotes a playing `<video>` on its own.
+Updated October 27, 2026: the compact attachment-card redesign supersedes the initial inline audio/text presentation.
+A row of Preview/Download buttons squeezed caption text into a narrow column on phones.
+The card now has a compact filename header with a top-right download icon, followed by a full-width caption and size.
+Tapping its noninteractive area or activating its filename opens the existing `Lightbox` for text, audio, PDF, and video.
+There is no separate Preview/Hide disclosure control.
 
-An audio player is a control strip, not a view; covering the timeline to show
-one would be theft. Text reads fine in place. Both stay inline, where the
-expand button remains a true disclosure toggle that reads `Hide` when open.
+The viewer is dismissed with Escape, Close, or a backdrop click, using the shared modal focus contract.
+Text selection and clicks inside the text preview do not dismiss it, and dismissal restores focus to the filename/tile opener.
+Download uses the same icon and platform save path as the image viewer; the download button and caption links/spoilers keep independent actions.
+Previewable cards own their tap area, so message gestures are available on the surrounding row rather than competing with attachment activation.
+Unsupported or oversized media remains download-only.
+No attachment bytes are fetched merely by scrolling past a card.
 
-The lightbox is dismissed three ways — Escape (capture-phase, so it beats the
-timeline's own handlers), the ✕, and a backdrop click — which is the shared
-modal contract, not something new. Because it is dismissed from inside, the
-card's button is not a toggle for those kinds: it never reads `Hide`, and
-carries `aria-haspopup="dialog"` instead of `aria-expanded`.
-
-This split is why `Lightbox` is now a presentation shell taking `children`,
-with loading left to the caller (`LightboxImage` for the image case): an image,
-a video and a PDF want different elements and different failure text.
-
-### The card for a lightbox kind is a tile, and the tile is a placeholder
+### Video and PDF keep visual tiles, and those tiles are placeholders
 
 Video and PDF cards are tiles — an aspect-correct surface with a play/document
 glyph, duration and size, the whole thing clickable — rather than a row of text
 with a verb beside it. The thing you want is the media, so the media is the
 affordance.
 
-What the tile is *not* is a rendered frame, and that is a constraint rather than
+What the tile is _not_ is a rendered frame, and that is a constraint rather than
 a choice. There is no poster to fetch: our upload path attaches no
 `info.thumbnail_*`, and because the media is encrypted the homeserver cannot
 generate one either — it cannot decrypt the bytes. The only way to a real first
 frame is to download the whole object and draw it to a canvas, which is exactly
 the scroll-past cost this ADR exists to avoid. So the tile is an honest
-placeholder: dark stage for video, paper for a document. When a sender *did*
+placeholder: dark stage for video, paper for a document. When a sender _did_
 attach a thumbnail (Element does for video), it is used as the poster, fetched
 lazily like any other thumbnail.
 
@@ -89,9 +80,11 @@ contact with real events. A phone video sent through our own web client arrives
 as:
 
 ```json
-{ "msgtype": "m.file",
+{
+  "msgtype": "m.file",
   "filename": "IMG_9306.mov",
-  "info": { "mimetype": "application/octet-stream", "size": 2360866 } }
+  "info": { "mimetype": "application/octet-stream", "size": 2360866 }
+}
 ```
 
 No `m.video`, no media type. `uploadKind()` (`media-service.ts`) maps anything
@@ -132,7 +125,7 @@ Two separate reasons the served `Content-Type` is unusable:
   a `<video>`/`<audio>` element will not play a blob typed that way either.
 
 Rather than widen the server's allowlist — which would weaken a defence that
-protects *every* client, present and future — the web client re-types the blob
+protects _every_ client, present and future — the web client re-types the blob
 locally via a new `MediaRequestOptions.contentType`, from `previewPlan()`'s
 resolved type. The re-typed fetch gets its own cache key so it cannot collide
 with the raw one.
@@ -154,7 +147,7 @@ the same class of problem — a framed PDF is the browser's document, not ours:
    `allow-scripts`) would hand back exactly the privileges the sandbox existed
    to remove, so the attribute bought nothing.
 2. **An unsandboxed `<iframe>`** works on desktop and is unusable on a phone:
-   iOS Safari renders only the *first page*, with no scrolling and no page
+   iOS Safari renders only the _first page_, with no scrolling and no page
    controls. A WebKit restriction on framed PDFs; no sizing or CSS reaches it.
    A one-page-only viewer for a multi-page document is not a viewer.
 
@@ -168,8 +161,8 @@ path, one set of behaviors.
 The cost is real and paid only on use: a ~425 KB viewer chunk (127 KB gzipped)
 and a ~1.25 MB worker, fetched the first time someone opens a PDF and never
 during ordinary use of the app. This reverses the "no pdf.js" call taken
-earlier in this ADR's life, and it should: that call was made about *card
-thumbnails*, where the objection was having to download a whole document to
+earlier in this ADR's life, and it should: that call was made about _card
+thumbnails_, where the objection was having to download a whole document to
 draw a postage stamp. Here the document is already downloaded and the user has
 asked to read it.
 
@@ -197,7 +190,7 @@ Generating a thumbnail during upload (ADR 0065's path) and attaching it as
 download the object to invent one. That is the upload silo, and it only helps
 messages sent after it lands — existing media stays placeholder-only.
 
-A PDF *card thumbnail* (first page rendered onto the tile) is now cheap to build
+A PDF _card thumbnail_ (first page rendered onto the tile) is now cheap to build
 — pdf.js is already here — but is still declined: it would download the whole
 document merely to scroll past the card, which is the cost this ADR exists to
 avoid. The distinction is consent, not capability.

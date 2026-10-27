@@ -49,7 +49,7 @@ function renderAttachment(parsed: ParsedMedia) {
   )
 }
 
-describe('inline media preview', () => {
+describe('attachment media preview', () => {
   it('fetches nothing until the user expands', () => {
     // No msw handler is registered, and `onUnhandledRequest: 'error'` would
     // fail the test if the card fetched on mount.
@@ -76,7 +76,7 @@ describe('inline media preview', () => {
       media({ filename: 'notes.txt', mimetype: 'text/plain' }),
     )
 
-    fireEvent.click(getByRole('button', { name: 'Preview' }))
+    fireEvent.click(getByRole('button', { name: 'Preview notes.txt' }))
     const code = await findByText('<b>not markup</b>')
     // A `<code>` inside the `<pre>` since ADR 0073 — the text is still a Preact
     // text child, so the markup in it stays inert.
@@ -87,16 +87,16 @@ describe('inline media preview', () => {
 
   it('syntax-highlights a source file from its extension', async () => {
     serveMedia('def f():\n    return 1\n', 'application/octet-stream')
-    const { getByRole, container } = renderAttachment(
+    const { getByRole } = renderAttachment(
       media({ filename: 'deploy.py', mimetype: 'text/plain' }),
     )
 
-    fireEvent.click(getByRole('button', { name: 'Preview' }))
+    fireEvent.click(getByRole('button', { name: 'Preview deploy.py' }))
     await waitFor(() =>
-      expect(container.querySelector('.hljs-keyword')).toBeTruthy(),
+      expect(getByRole('dialog').querySelector('.hljs-keyword')).toBeTruthy(),
     )
     // The text is intact — highlighting decorates, it does not rewrite.
-    expect(container.querySelector('pre')!.textContent).toBe(
+    expect(getByRole('dialog').querySelector('pre')!.textContent).toBe(
       'def f():\n    return 1\n',
     )
   })
@@ -106,25 +106,25 @@ describe('inline media preview', () => {
       '#!/usr/bin/env python3\nimport os\n',
       'application/octet-stream',
     )
-    const { getByRole, container } = renderAttachment(
+    const { getByRole } = renderAttachment(
       media({ filename: 'deploy', mimetype: 'text/plain' }),
     )
 
-    fireEvent.click(getByRole('button', { name: 'Preview' }))
+    fireEvent.click(getByRole('button', { name: 'Preview deploy' }))
     await waitFor(() =>
-      expect(container.querySelector('.hljs-keyword')).toBeTruthy(),
+      expect(getByRole('dialog').querySelector('.hljs-keyword')).toBeTruthy(),
     )
   })
 
   it('shows plain text for a language it cannot identify', async () => {
     serveMedia('just some notes\n', 'application/octet-stream')
-    const { getByRole, findByText, container } = renderAttachment(
+    const { getByRole, findByText } = renderAttachment(
       media({ filename: 'notes.txt', mimetype: 'text/plain' }),
     )
 
-    fireEvent.click(getByRole('button', { name: 'Preview' }))
+    fireEvent.click(getByRole('button', { name: 'Preview notes.txt' }))
     expect(await findByText('just some notes')).toBeTruthy()
-    expect(container.querySelector('.hljs')).toBeNull()
+    expect(getByRole('dialog').querySelector('.hljs')).toBeNull()
   })
 
   it('opens a video in the lightbox', async () => {
@@ -139,18 +139,17 @@ describe('inline media preview', () => {
     )
   })
 
-  it('keeps audio inline rather than taking over the viewport', async () => {
+  it('opens audio in the shared preview dialog and releases it on close', async () => {
     serveMedia('ID3', 'audio/mpeg')
-    const { getByRole, container } = renderAttachment(
+    const { getByRole } = renderAttachment(
       media({ kind: 'audio', filename: 'voice.mp3', mimetype: 'audio/mpeg' }),
     )
-
-    fireEvent.click(getByRole('button', { name: 'Play' }))
-    await waitFor(() => expect(container.querySelector('audio')).toBeTruthy())
-    expect(document.querySelector('.lightbox')).toBeNull()
-    // …and it collapses from the same button.
-    fireEvent.click(getByRole('button', { name: 'Hide' }))
-    expect(container.querySelector('audio')).toBeNull()
+    fireEvent.click(getByRole('button', { name: 'Play voice.mp3' }))
+    await waitFor(() =>
+      expect(getByRole('dialog').querySelector('audio')).toBeTruthy(),
+    )
+    fireEvent.click(getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(document.querySelector('.lightbox')).toBeNull())
   })
 
   it('closes the lightbox with Escape', async () => {
@@ -237,7 +236,9 @@ describe('inline media preview', () => {
 
     fireEvent.click(getByRole('button', { name: 'Open report.pdf' }))
     expect(await findByText('Could not load pdf')).toBeTruthy()
-    expect(getByRole('button', { name: 'Download' })).toBeTruthy()
+    expect(
+      getByRole('dialog').querySelector('[aria-label="Download"]'),
+    ).toBeTruthy()
   })
 
   it('offers no preview for a kind with no inline renderer', () => {

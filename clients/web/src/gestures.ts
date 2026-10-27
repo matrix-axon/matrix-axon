@@ -108,12 +108,18 @@ export interface SwipeStart {
 
 /** Whether a gesture began on an interactive control that owns the input. */
 export function isGestureControlTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
-    ) !== null
-  )
+  return closestGestureControl(target) !== null
+}
+
+/** Card taps belong to preview; nested links/controls keep their own action. */
+export function closestGestureControl(
+  target: EventTarget | null,
+): Element | null {
+  return target instanceof Element
+    ? target.closest(
+        'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker, [data-media-preview-card]',
+      )
+    : null
 }
 
 /**

@@ -57,6 +57,7 @@ shows it.
 | In-timeline find (Ctrl-F, n/N)                          | `threads`             | **n/a**                                                                                                   | **n/a**         |
 | Threads: open panel, read replies                       | `threads`             | `threads`                                                                                                 | `threads`       |
 | Inline images (Sixel / Kitty / iTerm2)                  | `media`               | **n/a**                                                                                                   | **n/a**         |
+| Attachment card previews and downloads                  | **n/a**               | **not covered** — no recorded attachment-preview scene                                                    | **not covered** |
 | Full-size image preview                                 | `media`               | `media`                                                                                                   | `media`         |
 | Image galleries (adjacency grouping, ADR 0081)          | **n/a**               | `media`                                                                                                   | `media`         |
 | Lightbox paging across a gallery run                    | **n/a**               | `media`                                                                                                   | `media`         |
@@ -285,3 +286,7 @@ Case-insensitive sticker matching and shortcode autocomplete are covered in `cli
 Bundled link images are covered by `clients/web/e2e/link-preview-images.spec.ts` in room and thread/caption timelines, with plain and encrypted descriptors, authenticated downloads, stable loading geometry, text/error fallback, transient-failure retry/reconnect, large plain-source thumbnails, and hostile URL/encrypted-dimension rejection.
 Run the `chromium` and `webkit-iphone` projects for desktop and phone geometry evidence.
 The recorded demo remains uncovered because the corpus has no bundled-preview events; image cards do not imply preview authoring, automatic generation, or native sharing support.
+
+Attachment card layout and activation are covered by `clients/web/e2e/attachment-cards.spec.ts` in room and thread timelines on desktop Chromium and iPhone/WebKit.
+The checks cover full-width caption geometry, top-right 44-pixel download targets, on-demand preview dialogs, keyboard dismissal/focus restoration, independent caption links/downloads/spoilers, and desktop text selection.
+The existing `media` recording still demonstrates image galleries; a recorded audio/text/PDF/video attachment-card scene remains outstanding.

@@ -2,13 +2,13 @@ import { MAX_UPLOAD_BYTES } from './media-service'
 import type { ParsedMedia } from './parse-media'
 
 /**
- * How a non-image attachment can be previewed inline (ADR 0072), or `null`
+ * How a non-image attachment can be previewed on demand (ADR 0072), or `null`
  * when it stays a plain download card.
  */
 export type PreviewKind = 'audio' | 'video' | 'pdf' | 'text'
 
 /**
- * Largest object each kind will load inline, in bytes. The preview is
+ * Largest object each kind will load for preview, in bytes. The preview is
  * blob-backed — the whole object lands in memory before playback starts (there
  * is no `Range` streaming until the media service worker of ADR 0072's
  * follow-up) — so these are memory ceilings, not policy. Above them the card
@@ -150,7 +150,7 @@ function fromFilename(
 }
 
 /**
- * Whether an attachment can be previewed inline, how, and as what type.
+ * Whether an attachment can be previewed on demand, how, and as what type.
  *
  * A declared `info.mimetype` is the authority — including a declaration we
  * refuse, which refuses the whole preview rather than falling through to the
@@ -213,21 +213,6 @@ export function previewPlan(media: ParsedMedia): PreviewPlan | null {
     return null
   }
   return { kind, contentType }
-}
-
-/**
- * Where a kind's preview renders. Video and PDF open in the lightbox: both want
- * the whole viewport (a PDF page is unreadable in a timeline column, and a
- * video shown small is a video you squint at), and both are things you look at
- * and then leave. On a phone the lightbox is the full screen, which is the
- * behaviour you would otherwise have to ask for.
- *
- * Audio and text stay inline — an audio player is a control strip, not a view,
- * and covering the timeline to show one would be theft; a short text file reads
- * fine in place.
- */
-export function previewPresentation(kind: PreviewKind): 'inline' | 'lightbox' {
-  return kind === 'video' || kind === 'pdf' ? 'lightbox' : 'inline'
 }
 
 /** The byte ceiling for a kind — exported for the text reader's own cap. */
