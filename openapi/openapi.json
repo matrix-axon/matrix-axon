@@ -1268,6 +1268,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -2673,6 +2683,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -2756,6 +2776,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -2858,6 +2888,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -3069,6 +3109,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -3174,6 +3224,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -3293,6 +3353,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -3398,6 +3468,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -3526,6 +3606,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -3628,6 +3718,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -3749,6 +3849,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -4336,6 +4446,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -4518,6 +4638,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -4639,6 +4769,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -4743,6 +4883,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -4995,6 +5145,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -5157,6 +5317,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -5276,6 +5446,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -5380,6 +5560,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -6042,6 +6232,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -6153,6 +6353,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -6541,6 +6751,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -6645,6 +6865,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -6766,6 +6996,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -6935,6 +7175,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -7027,6 +7277,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121); a write may still take effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -7128,6 +7388,16 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time (ADR 0121)",
             "content": {
               "application/json": {
                 "schema": {

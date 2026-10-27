@@ -60,6 +60,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::error::GatewayError;
+use crate::homeserver_gate::{GateError, Outcome};
 use crate::manager::ClientManager;
 
 /// Map an SDK error from a send/fetch into a [`GatewayError`]. A homeserver
@@ -68,8 +69,16 @@ use crate::manager::ClientManager;
 /// unbanning a user who isn't banned, ADR 0068 M19b's `kick`/`ban`/`unban`) is
 /// a caller mistake, not a homeserver fault, so it becomes
 /// [`GatewayError::Invalid`] (`400`) rather than falling into the generic
-/// upstream `502`; everything else is an upstream failure.
+/// upstream `502`. The SDK's own request timeout (30 s by default) becomes
+/// [`GatewayError::Timeout`], a `504` like the adapter's outer deadline (ADR
+/// 0121 decision 5): the homeserver never answered, so it may still complete
+/// the call. Everything else is an upstream failure.
 fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
+    // The homeserver gate's classification (ADR 0122), so the two cannot
+    // disagree about what counts as a timeout.
+    if err.outcome() == Outcome::TimedOut {
+        return GatewayError::Timeout(err.to_string());
+    }
     match err.client_api_error_kind() {
         Some(ErrorKind::Forbidden) => GatewayError::Forbidden(err.to_string()),
         Some(ErrorKind::BadState) => GatewayError::Invalid(err.to_string()),
@@ -1443,7 +1452,7 @@ impl SdkGateway {
     /// is scoped to the *event*, so it cannot be told apart from "that one event
     /// is unknown" here, and a transient failure looks the same again. The
     /// watcher's own bounded probe decides, which also keeps this call's latency
-    /// budget (`sync.ephemeral_send_timeout_secs`) free of an extra round trip.
+    /// budget (`sync.read_receipt_timeout_secs`) free of an extra round trip.
     ///
     /// A success clears any row unconditionally rather than reading first: it is
     /// one indexed delete that matches nothing in the normal case, and it is how
@@ -3722,6 +3731,23 @@ mod disowned_room_tests {
     /// rooms from the SDK's map, so `leave` takes the raw client-server
     /// fallback.
     async fn gateway_for(addr: SocketAddr, account_id: Uuid) -> (SdkGateway, ClientManager) {
+        // Without retry disabled the SDK retries a 5xx for the whole default
+        // retry window, so the tests below that answer 5xx would spend it
+        // before asserting anything.
+        gateway_with(
+            addr,
+            account_id,
+            matrix_sdk::config::RequestConfig::new().disable_retry(),
+        )
+        .await
+    }
+
+    /// [`gateway_for`] with the client's request config spelled out.
+    async fn gateway_with(
+        addr: SocketAddr,
+        account_id: Uuid,
+        request_config: matrix_sdk::config::RequestConfig,
+    ) -> (SdkGateway, ClientManager) {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for these tests");
         let store = Store::connect(&url, 5).await.expect("connect + migrate");
         let manager = ClientManager::new(store.clone(), axon_core::SyncConfig::default());
@@ -3729,10 +3755,7 @@ mod disowned_room_tests {
         let client = Client::builder()
             .homeserver_url(format!("http://{addr}"))
             .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
-            // Without this the SDK retries a 5xx for the whole default retry
-            // window, so the two tests below that answer 5xx would spend it
-            // before asserting anything.
-            .request_config(matrix_sdk::config::RequestConfig::new().disable_retry())
+            .request_config(request_config)
             .build()
             .await
             .expect("client against the stand-in homeserver");
@@ -3845,6 +3868,44 @@ mod disowned_room_tests {
         assert!(
             !manager.is_room_dead(account_id, &dead_room_id()),
             "an outage must not mark the room dead"
+        );
+    }
+
+    /// A homeserver that never answers within the SDK's own request timeout
+    /// (30 s by default, shortened here). That timeout fires before the
+    /// adapter's outer deadline whenever the deadline is longer, so it must be
+    /// a timeout too, not an upstream failure: Synapse may still complete the
+    /// leave (ADR 0121 decision 5). It used to fall through to `Upstream`, a
+    /// `502`, since a timeout carries no errcode.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_leave_the_sdk_gives_up_on_is_a_timeout() {
+        let account_id = Uuid::new_v4();
+        let addr = serve(Router::new().route(
+            "/_matrix/client/v3/rooms/{room_id}/leave",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                StatusCode::OK
+            }),
+        ))
+        .await;
+        let (gateway, manager) = gateway_with(
+            addr,
+            account_id,
+            matrix_sdk::config::RequestConfig::new()
+                .disable_retry()
+                .timeout(std::time::Duration::from_millis(200)),
+        )
+        .await;
+
+        let outcome = gateway.leave(account_id, DEAD_ROOM).await;
+        assert!(
+            matches!(outcome, Err(GatewayError::Timeout(_))),
+            "a homeserver that never answered gave no verdict, got {outcome:?}"
+        );
+        assert!(
+            !manager.is_room_dead(account_id, &dead_room_id()),
+            "a timeout must not mark the room dead"
         );
     }
 

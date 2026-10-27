@@ -37,11 +37,11 @@ pub enum SendError {
     Invalid(String),
     /// The upstream homeserver rejected or failed the operation. → `502`.
     Upstream(String),
-    /// The call didn't complete within its configured timeout — the
-    /// send-mutation defense-in-depth timeout (ADR 0030 decision #4, issue
-    /// #241), distinct from [`SendError::Upstream`] because a caller should be
+    /// The call didn't complete within its configured timeout (ADR 0030
+    /// decision #4 for sends, ADR 0121 decision 5 for every other upstream
+    /// call), distinct from [`SendError::Upstream`] because a caller should be
     /// able to tell "the homeserver answered with an error" apart from "we
-    /// gave up waiting". → `504`.
+    /// gave up waiting" — the homeserver may still complete the call. → `504`.
     Timeout(String),
 }
 

@@ -6751,6 +6751,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121) */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     get_event: {
@@ -7706,6 +7715,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     remove_account_avatar: {
@@ -7769,6 +7787,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7843,6 +7870,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7998,6 +8034,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     create_dm: {
@@ -8074,6 +8119,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8164,6 +8218,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     knock_room: {
@@ -8240,6 +8303,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8332,6 +8404,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     remove_room_avatar: {
@@ -8406,6 +8487,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8491,6 +8581,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8894,6 +8993,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     room_info: {
@@ -9015,6 +9123,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     kick_user: {
@@ -9100,6 +9217,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     leave_room: {
@@ -9174,6 +9300,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9345,6 +9480,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     room_pinned: {
@@ -9453,6 +9597,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121) */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     set_power_levels: {
@@ -9538,6 +9691,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     send_read_receipt: {
@@ -9607,6 +9769,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10069,6 +10240,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     remove_room_tag: {
@@ -10145,6 +10325,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10381,6 +10570,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     send_typing_notice: {
@@ -10450,6 +10648,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10535,6 +10742,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10650,6 +10866,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     unignore_user: {
@@ -10722,6 +10947,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     get_user_profile: {
@@ -10787,6 +11021,15 @@ export interface operations {
             };
             /** @description Account not reachable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time (ADR 0121) */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };

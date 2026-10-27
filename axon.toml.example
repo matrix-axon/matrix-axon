@@ -123,20 +123,32 @@ live_event_buffer = 1024
 # lag-domain question still being open. Adding it here anyway logs a boot
 # warning rather than silently forwarding nothing.
 ephemeral_event_types = ["m.typing", "m.receipt"]
-# Per-call timeout for an outbound ephemeral send (read receipt / typing), in
-# seconds. Default 10.
-# ephemeral_send_timeout_secs = 10
-# Per-call timeout for an outbound room-membership mutation (leave/forget/
-# invite/kick/ban/unban) or room-settings mutation (name/topic/remove_avatar/
-# tags), in seconds. Both share this one timeout: local-room state/account-
-# data writes, no federation resolution involved. Avatar-set reuses media's
+# Per-call timeout for an outbound read receipt, in seconds. A receipt that
+# times out leaves the room's unread badge where it was, so this is longer
+# than the typing timeout. A reverse proxy in front of axon needs a read
+# timeout at least this long, and a client's own request deadline still
+# applies: the web client gives up after 20 s. Default 30.
+# read_receipt_timeout_secs = 30
+# Per-call timeout for an outbound typing notice, in seconds. Default 10.
+# typing_timeout_secs = 10
+# The deprecated ephemeral_send_timeout_secs, which both used to share, still
+# applies to whichever of the two above is unset, with a warning at boot.
+# Per-call timeout for an outbound room-membership mutation (invite/kick/ban/
+# unban) or room-settings mutation (name/topic/remove_avatar/tags), in
+# seconds. Both share this one timeout: local-room state/account-data writes,
+# no federation resolution involved. Avatar-set reuses media's
 # upstream_upload_timeout_secs instead, since it does a real media upload.
 # Default 15.
 # membership_mutation_timeout_secs = 15
 # Per-call timeout for an outbound room-entry mutation (join/knock/
-# create_room/create_dm), in seconds. Longer than the membership timeout
-# above since these can involve federation resolution. Default 30.
+# create_room/create_dm) and for leave/forget, in seconds. Longer than the
+# membership timeout above since these can involve federation resolution, and
+# leaving a large room needs state resolution. Default 30.
 # room_entry_timeout_secs = 30
+#
+# When any of these timeouts (or a send's) runs out, axon answers 504
+# gateway_timeout: it stopped waiting, but the homeserver may still complete
+# the request. A 502 means the homeserver answered with an error.
 # By default, each pending UTD is retried once by the startup sweep; later room-key
 # arrivals and explicit retries still back-fill rows. Set true to retry every
 # pending UTD on every process start (legacy behavior, expensive on large
