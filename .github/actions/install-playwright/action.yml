@@ -1,0 +1,55 @@
+name: Install Playwright
+description: >-
+  Installs one Playwright browser and the system packages it needs, retrying
+  the package download when the Ubuntu mirror stalls. Run it from a job whose
+  checkout already has clients/web installed.
+
+inputs:
+  browser:
+    description: "The Playwright browser to install: chromium, firefox or webkit"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    # `playwright install --with-deps` is two things, and only one of them
+    # stalls. The apt half (`install-deps`) pulls fonts and codec libraries from
+    # the runner's Ubuntu mirror, which has crawled at 50-110 kB/s on single
+    # files, taking 7 to 40 minutes where a healthy run takes seconds. The
+    # browser half comes from cdn.playwright.dev and took 3-4 seconds in every
+    # log inspected, slow apt runs included, so caching it saves nothing.
+    #
+    # Each attempt is cut off and started again. apt keeps the packages it has
+    # finished and resumes a partial one, so a retry carries on where the last
+    # attempt stopped, and a fresh connection is usually not the stalled one.
+    # Three attempts of four minutes bound the step at about twelve, where an
+    # unbounded stall costs the whole job. `timeout` signals the whole process
+    # group, and the wait below lets a straggling apt-get release its lock before
+    # the next attempt wants it.
+    - name: Install Playwright system packages
+      shell: bash
+      working-directory: clients/web
+      env:
+        BROWSER: ${{ inputs.browser }}
+      run: |
+        attempts=3
+        for attempt in $(seq 1 "$attempts"); do
+          if timeout 240 pnpm exec playwright install-deps "$BROWSER"; then
+            exit 0
+          fi
+          echo "::warning title=Playwright system packages::attempt $attempt of $attempts failed or ran past 4 minutes"
+          for _ in $(seq 1 30); do
+            pgrep -x apt-get > /dev/null || pgrep -x dpkg > /dev/null || break
+            sleep 2
+          done
+          sudo dpkg --configure -a
+        done
+        echo "::error title=Playwright system packages::all $attempts attempts failed"
+        exit 1
+
+    - name: Install Playwright browser
+      shell: bash
+      working-directory: clients/web
+      env:
+        BROWSER: ${{ inputs.browser }}
+      run: pnpm exec playwright install "$BROWSER"
