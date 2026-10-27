@@ -3,6 +3,21 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.18 - 2026-10-27
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Bug Fixes
+* fix(server): report an upstream timeout as a 504 and split the receipt and typing timeouts by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/870
+#### Documentation
+* docs(adr): room detail acquisition, state coverage, and change notification (ADR 0126) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/847
+#### Build and CI
+* ci(web): retry the Playwright system package install when the mirror stalls by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/869
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.17...v0.1.18
+
 ## v0.1.17 - 2026-10-27
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
