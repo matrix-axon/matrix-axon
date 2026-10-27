@@ -47,8 +47,14 @@ function imageMxc(value: unknown): string | null {
 }
 
 function previewImage(entry: Record<string, unknown>): LinkPreviewImage | null {
-  // Sender dimensions never size the DOM. Reject implausible metadata before
-  // starting media work; missing dimensions still use the fixed preview slot.
+  const encryptedKey = Object.hasOwn(entry, 'matrix:image:encrypted')
+    ? 'matrix:image:encrypted'
+    : Object.hasOwn(entry, 'beeper:image:encryption')
+      ? 'beeper:image:encryption'
+      : null
+  // Plain sources can be large: only their bounded server thumbnail is needed.
+  // Encrypted images require originals, so their declared budgets apply here.
+  // No sender dimensions ever size the DOM.
   const width = entry['og:image:width']
   const height = entry['og:image:height']
   for (const dimension of [width, height]) {
@@ -57,11 +63,12 @@ function previewImage(entry: Record<string, unknown>): LinkPreviewImage | null {
       (typeof dimension !== 'number' ||
         !Number.isSafeInteger(dimension) ||
         dimension <= 0 ||
-        dimension > 4096)
+        (encryptedKey !== null && dimension > 4096))
     )
       return null
   }
   if (
+    encryptedKey !== null &&
     typeof width === 'number' &&
     typeof height === 'number' &&
     width * height > 4_000_000
@@ -73,7 +80,7 @@ function previewImage(entry: Record<string, unknown>): LinkPreviewImage | null {
     (typeof size !== 'number' ||
       !Number.isSafeInteger(size) ||
       size <= 0 ||
-      size > MAX_PREVIEW_IMAGE_BYTES)
+      (encryptedKey !== null && size > MAX_PREVIEW_IMAGE_BYTES))
   )
     return null
   const type = entry['og:image:type']
@@ -85,11 +92,6 @@ function previewImage(entry: Record<string, unknown>): LinkPreviewImage | null {
 
   // Descriptor presence is authoritative: a malformed encrypted descriptor
   // must not fall back to a plaintext alias. Decryption stays on the server.
-  const encryptedKey = Object.hasOwn(entry, 'matrix:image:encrypted')
-    ? 'matrix:image:encrypted'
-    : Object.hasOwn(entry, 'beeper:image:encryption')
-      ? 'beeper:image:encryption'
-      : null
   if (encryptedKey !== null) {
     const file = object(entry[encryptedKey])
     const key = object(file?.key)

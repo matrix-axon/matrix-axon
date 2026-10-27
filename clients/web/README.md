@@ -80,6 +80,8 @@ Cards show the destination hostname, site name, title, and description when supp
 Two cards appear initially, with an expansion control for additional previews (up to eight).
 PNG, JPEG, and WebP preview images use a fixed thumbnail slot and Axon's authenticated media proxy, including server decryption for encrypted images.
 Images load as their cards approach the viewport, with a 2 MiB download ceiling; missing, invalid, or unsupported images leave the text and destination usable.
+Temporary media failures offer **Retry image** and retry after reconnect without navigating to the article.
+Large plain source images can still use bounded server thumbnails; encrypted originals retain their stricter metadata limits.
 Cards never fetch the linked webpage or an external image URL.
 Preview authoring and opt-in generation are not yet exposed in the web composer; the server [send and generation APIs](../../docs/bundled-link-previews.md) are available to other callers.
 Formatted messages containing spoilers omit preview cards, even after the spoiler is revealed.

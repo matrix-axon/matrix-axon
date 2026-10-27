@@ -1,3 +1,4 @@
+import { signal } from '@preact/signals'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import {
@@ -871,8 +872,9 @@ describe('bounded preview responses and reader isolation', () => {
     bounded.release()
   })
 
-  it('does not reuse a previous reader blob or in-flight download after token replacement', async () => {
+  it('does not reuse a previous reader blob or in-flight download after session replacement', async () => {
     let token = 'first'
+    const sessionId = signal('first-session')
     let finish!: () => void
     let started!: () => void
     const began = new Promise<void>((resolve) => {
@@ -898,12 +900,13 @@ describe('bounded preview responses and reader isolation', () => {
       ),
     )
     const media = createMediaService({
-      auth: { ...stubAuth(), getToken: () => token },
+      auth: { ...stubAuth(), getToken: () => token, sessionId },
       baseUrl: BASE_URL,
     })
     const old = media.acquire(ACCOUNT, 'mxc://hs/image')
     await began
     token = 'second'
+    sessionId.value = 'second-session'
     const current = await media.acquire(ACCOUNT, 'mxc://hs/image')
     finish()
     const previous = await old
@@ -938,7 +941,12 @@ it('does not let a late previous-token 401 clear the current session', async () 
   const began = new Promise<void>((resolve) => {
     started = resolve
   })
-  const auth = { ...stubAuth(), getToken: () => token, onAuthFailure: vi.fn() }
+  const auth = {
+    ...stubAuth(),
+    getToken: () => token,
+    peekToken: () => token,
+    onAuthFailure: vi.fn(),
+  }
   server.use(
     http.get(`${BASE_URL}/v1/media/:account/:server/:media`, async () => {
       started()
@@ -958,4 +966,191 @@ it('does not let a late previous-token 401 clear the current session', async () 
     error: { kind: 'auth', status: 401 },
   })
   expect(auth.onAuthFailure).not.toHaveBeenCalled()
+})
+
+describe('preview review regressions', () => {
+  it('serves cached media without consulting a stalled or failing credential refresh', async () => {
+    const requests = serveBytes()
+    const auth = stubAuth()
+    const media = createMediaService({ auth, baseUrl: BASE_URL })
+    const first = await media.acquire(ACCOUNT, 'mxc://hs/warm')
+    const refresh = vi
+      .spyOn(auth, 'getToken')
+      .mockRejectedValue(new Error('temporary refresh failure'))
+    const cached = await media.acquire(ACCOUNT, 'mxc://hs/warm')
+    expect(cached.result).toEqual(first.result)
+    expect(refresh).not.toHaveBeenCalled()
+    expect(requests.fetches).toBe(1)
+    first.release()
+    cached.release()
+  })
+
+  it('keeps cached media through access-token rotation', async () => {
+    const requests = serveBytes()
+    let token = 'old'
+    const auth = { ...stubAuth(), getToken: () => token }
+    const media = createMediaService({ auth, baseUrl: BASE_URL })
+    const first = await media.acquire(ACCOUNT, 'mxc://hs/rotation')
+    token = 'refreshed'
+    const cached = await media.acquire(ACCOUNT, 'mxc://hs/rotation')
+    expect(cached.result).toEqual(first.result)
+    expect(requests.fetches).toBe(1)
+    first.release()
+    cached.release()
+  })
+
+  it('reads queued credentials only after a media permit is available', async () => {
+    let token = 'old'
+    const release: (() => void)[] = []
+    const seen: (string | null)[] = []
+    const media = createMediaService({
+      auth: { ...stubAuth(), getToken: () => token },
+      baseUrl: BASE_URL,
+      platform: {
+        fetch: vi.fn(async (_input, init) => {
+          seen.push(new Headers(init?.headers).get('authorization'))
+          if (seen.length <= 6)
+            await new Promise<void>((resolve) => release.push(resolve))
+          return new Response(REAL_PNG, {
+            headers: { 'content-type': 'image/png' },
+          })
+        }),
+      },
+    })
+    const running = Array.from({ length: 6 }, (_, i) =>
+      media.acquire(ACCOUNT, `mxc://hs/queue-${i}`),
+    )
+    await vi.waitFor(() => expect(seen).toHaveLength(6))
+    const queued = media.acquire(ACCOUNT, 'mxc://hs/queued')
+    token = 'refreshed'
+    release.forEach((finish) => finish())
+    const handles = await Promise.all([...running, queued])
+    expect(seen[6]).toBe('Bearer refreshed')
+    handles.forEach((handle) => handle.release())
+  })
+
+  it('reads a bounded buffered body when the transport exposes no stream', async () => {
+    const bytes = new Uint8Array(REAL_PNG)
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      platform: {
+        fetch: async () =>
+          ({
+            ok: true,
+            status: 200,
+            body: null,
+            headers: new Headers({ 'content-type': 'image/png' }),
+            arrayBuffer: async () => bytes.buffer,
+          }) as Response,
+      },
+    })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/buffered', {
+      maxBytes: 16,
+    })
+    expect(handle.result).toMatchObject({ ok: true, format: 'PNG' })
+    handle.release()
+  })
+})
+
+it('does not send an unauthenticated request when refresh temporarily yields no token', async () => {
+  const fetch = vi.fn()
+  const media = createMediaService({
+    auth: { ...stubAuth(), getToken: () => null },
+    baseUrl: BASE_URL,
+    platform: { fetch },
+  })
+  expect(
+    (await media.acquire(ACCOUNT, 'mxc://hs/no-credential')).result,
+  ).toEqual({ ok: false, error: { kind: 'auth' } })
+  expect(fetch).not.toHaveBeenCalled()
+})
+
+it('classifies a 401 without a second asynchronous credential lookup', async () => {
+  const auth = {
+    ...stubAuth(),
+    getToken: vi
+      .fn()
+      .mockResolvedValueOnce('current')
+      .mockRejectedValue(new Error('refresh rejected')),
+    peekToken: () => 'current',
+    onAuthFailure: vi.fn(),
+  }
+  const media = createMediaService({
+    auth,
+    baseUrl: BASE_URL,
+    platform: { fetch: async () => new Response(null, { status: 401 }) },
+  })
+  expect((await media.acquire(ACCOUNT, 'mxc://hs/401')).result).toEqual({
+    ok: false,
+    error: { kind: 'auth', status: 401 },
+  })
+  expect(auth.getToken).toHaveBeenCalledOnce()
+  expect(auth.onAuthFailure).toHaveBeenCalledOnce()
+})
+
+it('does not let an old session completion remove the new in-flight download', async () => {
+  const sessionId = signal('old')
+  const complete: (() => void)[] = []
+  const fetch = vi.fn(async () => {
+    await new Promise<void>((resolve) => complete.push(resolve))
+    return new Response(REAL_PNG, { headers: { 'content-type': 'image/png' } })
+  })
+  const media = createMediaService({
+    auth: { ...stubAuth(), sessionId },
+    baseUrl: BASE_URL,
+    platform: { fetch },
+  })
+  const old = media.acquire(ACCOUNT, 'mxc://hs/shared')
+  await vi.waitFor(() => expect(complete).toHaveLength(1))
+  sessionId.value = 'new'
+  const current = media.acquire(ACCOUNT, 'mxc://hs/shared')
+  await vi.waitFor(() => expect(complete).toHaveLength(2))
+  complete[0]!()
+  expect((await old).result.ok).toBe(false)
+  const joined = media.acquire(ACCOUNT, 'mxc://hs/shared')
+  expect(fetch).toHaveBeenCalledTimes(2)
+  complete[1]!()
+  const [first, second] = await Promise.all([current, joined])
+  expect(first.result.ok).toBe(true)
+  expect(second.result).toEqual(first.result)
+  expect(fetch).toHaveBeenCalledTimes(2)
+  first.release()
+  second.release()
+})
+
+it('enforces byte limits and error-envelope parsing on buffered transports', async () => {
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({
+      error: { code: 'media_undecryptable', message: 'Unavailable' },
+    }),
+  )
+  const fetch = async () =>
+    ({
+      ok: false,
+      status: 422,
+      body: null,
+      headers: new Headers(),
+      arrayBuffer: async () => bytes.buffer,
+    }) as Response
+  const media = createMediaService({
+    auth: stubAuth(),
+    baseUrl: BASE_URL,
+    platform: { fetch },
+  })
+  expect((await media.acquire(ACCOUNT, 'mxc://hs/error')).result).toMatchObject(
+    { ok: false, error: { kind: 'undecryptable' } },
+  )
+  const buffered = createMediaService({
+    auth: stubAuth(),
+    baseUrl: BASE_URL,
+    platform: {
+      fetch: async () =>
+        ({ ...(await fetch()), ok: true, status: 200 }) as Response,
+    },
+  })
+  expect(
+    (await buffered.acquire(ACCOUNT, 'mxc://hs/too-big', { maxBytes: 4 }))
+      .result,
+  ).toMatchObject({ ok: false, error: { kind: 'too_large' } })
 })

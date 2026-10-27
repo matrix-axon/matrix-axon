@@ -1,3 +1,5 @@
+import { effect } from '@preact/signals'
+import type { ComponentChildren } from 'preact'
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks'
 import type { MediaFailure } from '../media/media-service'
 import {
@@ -9,46 +11,57 @@ import {
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 
-let nextReader = 0
-
 function PreviewImage({
   accountId,
   image,
+  preview,
 }: {
   accountId: string
   image: LinkPreviewImage
+  preview: LinkPreview
 }) {
   const { auth } = useServices()
-  const credential = auth.peekToken()
-  // Track the reactive credential without putting a token in a DOM/cache key.
-  const reader = useMemo(() => ({ credential, id: ++nextReader }), [credential])
-  return credential === null ? null : (
+  return !auth.signedIn.value ? (
+    <PreviewLink preview={preview} />
+  ) : (
     <PreviewImageMedia
-      key={`${reader.id}\0${accountId}\0${image.mxc}\0${image.encrypted}`}
+      key={`${auth.sessionId.value}\0${accountId}\0${image.mxc}\0${image.encrypted}`}
       accountId={accountId}
       image={image}
+      preview={preview}
     />
   )
 }
 
-type ImageAttempt = 'thumbnail' | 'original' | 'retry' | 'failed'
+type ImageAttempt = 'thumbnail' | 'original' | 'retry'
 type ImageFailure = MediaFailure['kind'] | 'decode' | 'unsupported'
 
 function PreviewImageMedia({
   accountId,
   image,
+  preview,
 }: {
   accountId: string
   image: LinkPreviewImage
+  preview: LinkPreview
 }) {
-  const [attempt, setAttempt] = useState<ImageAttempt>(
-    image.encrypted ? 'original' : 'thumbnail',
-  )
+  const { auth, live } = useServices()
+  const initial = image.encrypted ? 'original' : 'thumbnail'
+  const [attempt, setAttempt] = useState<ImageAttempt>(initial)
+  const [failure, setFailure] = useState<{
+    kind: ImageFailure
+    reconnect: number
+  } | null>(null)
+  const retryable = failure?.kind === 'auth' || failure?.kind === 'network'
+  const retry = useCallback(() => {
+    setAttempt(initial)
+    setFailure(null)
+  }, [initial])
   const fail = useCallback(
     (kind: ImageFailure) => {
       if (
         attempt === 'thumbnail' &&
-        !['auth', 'undecryptable', 'too_large', 'unsupported'].includes(kind)
+        (kind === 'not_found' || kind === 'decode')
       ) {
         setAttempt('original')
       } else if (
@@ -57,25 +70,51 @@ function PreviewImageMedia({
         kind === 'decode'
       ) {
         setAttempt('retry')
-      } else setAttempt('failed')
+      } else setFailure({ kind, reconnect: live.reconnects.peek() })
     },
-    [attempt, image.encrypted],
+    [attempt, image.encrypted, live],
   )
-  return attempt === 'failed' ? (
-    <span class="link-preview-image">
-      <span class="muted">Preview image unavailable</span>
-    </span>
-  ) : (
-    // The hook retains its old result until its effect runs. A keyed request
-    // makes each fallback start idle, releasing the previous handle and never
-    // interpreting a thumbnail's old error as an original's new failure.
-    <PreviewImageRequest
-      key={attempt}
-      accountId={accountId}
-      image={image}
-      thumbnail={attempt === 'thumbnail'}
-      fail={fail}
-    />
+  useEffect(
+    () =>
+      effect(() => {
+        const reconnect = live.reconnects.value
+        if (retryable && failure !== null && reconnect > failure.reconnect)
+          retry()
+      }),
+    [live, retryable, failure, retry],
+  )
+  useEffect(
+    () =>
+      auth.onAccessTokenRefreshed(() => {
+        if (failure?.kind === 'auth') retry()
+      }),
+    [auth, failure, retry],
+  )
+  return (
+    <div class="link-preview">
+      <PreviewLink preview={preview}>
+        {failure !== null ? (
+          <span class="link-preview-image">
+            <span class="muted">Preview image unavailable</span>
+          </span>
+        ) : (
+          // Each fallback starts idle and releases the old handle. The hook's
+          // previous result cannot masquerade as this request's new failure.
+          <PreviewImageRequest
+            key={attempt}
+            accountId={accountId}
+            image={image}
+            thumbnail={attempt === 'thumbnail'}
+            fail={fail}
+          />
+        )}
+      </PreviewLink>
+      {retryable && (
+        <button type="button" class="link-preview-retry" onClick={retry}>
+          Retry image
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -135,6 +174,24 @@ export function LinkPreviewCard({
   accountId: string
   preview: LinkPreview
 }) {
+  return preview.image === null ? (
+    <PreviewLink preview={preview} />
+  ) : (
+    <PreviewImage
+      accountId={accountId}
+      image={preview.image}
+      preview={preview}
+    />
+  )
+}
+
+function PreviewLink({
+  preview,
+  children,
+}: {
+  preview: LinkPreview
+  children?: ComponentChildren
+}) {
   return (
     <a
       class="link-preview-card"
@@ -142,9 +199,7 @@ export function LinkPreviewCard({
       target="_blank"
       rel="noopener noreferrer"
     >
-      {preview.image !== null && (
-        <PreviewImage accountId={accountId} image={preview.image} />
-      )}
+      {children}
       <span class="link-preview-host">{preview.hostname}</span>
       {preview.siteName !== null && (
         <span class="link-preview-site">{preview.siteName}</span>

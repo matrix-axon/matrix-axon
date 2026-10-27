@@ -12,6 +12,10 @@ import type { ComponentType } from 'preact'
  * later without touching consumers.
  */
 export interface AuthProvider {
+  /** Opaque reader identity. Changes on sign-in/sign-out, never token renewal. */
+  sessionId?: ReadonlySignal<string>
+  /** Current credential without refresh or I/O; used to classify late 401s. */
+  peekToken?(): string | null
   /**
    * The bearer token to authenticate the next request with, or `null` when
    * signed out. May be async so providers that refresh (OAuth) fit the same

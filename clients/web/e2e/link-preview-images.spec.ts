@@ -1,7 +1,7 @@
 import { expect, test, type Locator } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
-import { ACCOUNT_ID, ROOM_ID, ROOM_URL, signIn } from './helpers'
+import { ACCOUNT_ID, ROOM_ID, ROOM_URL, expectLive, signIn } from './helpers'
 
 // Deterministic 480×270 landscape raster, generated locally for this fixture.
 const PNG = readFileSync(
@@ -60,8 +60,9 @@ for (const thread of [false, true]) {
       { 'og:image': 'https://tracking.test/pixel' },
       {
         'og:image': 'mxc://preview.test/huge',
-        'og:image:width': 1e12,
-        'og:image:height': 1e12,
+        'og:image:width': 5000,
+        'og:image:height': 3000,
+        'matrix:image:size': 3 * 1024 * 1024,
       },
       { 'og:image': 'mxc://preview.test/missing' },
       { 'og:image': 'mxc://preview.test/corrupt' },
@@ -151,8 +152,25 @@ for (const thread of [false, true]) {
       await first.scrollIntoViewIfNeeded()
       const slot = first.locator('.link-preview-image')
       await expect(slot).toBeVisible()
-      const before = await first.boundingBox()
-      const slotBefore = await slot.boundingBox()
+      // The thread fixture rejects the thumbnail before holding its original.
+      // Wait for that keyed fallback to mount; a locator handle obtained during
+      // the replacement can detach before boundingBox reads it.
+      await expect
+        .poll(() =>
+          media.some((url) =>
+            thread ? url.endsWith('/plain') : url.includes('/plain/thumbnail?'),
+          ),
+        )
+        .toBe(true)
+      const measured = await first.evaluate((card) => {
+        const image = card.querySelector('.link-preview-image')!
+        return {
+          card: card.getBoundingClientRect().toJSON(),
+          slot: image.getBoundingClientRect().toJSON(),
+        }
+      })
+      const before = measured.card
+      const slotBefore = measured.slot
       release()
       await decoded(slot.locator('img'))
       const after = await first.boundingBox()
@@ -203,14 +221,21 @@ for (const thread of [false, true]) {
           }),
         ).toBe(true)
         await expect(card).toHaveAttribute('href', urls[i]!)
-        if ([2, 3, 4, 7].includes(i))
+        if ([2, 3, 7].includes(i))
           await expect(card.locator('.link-preview-image')).toHaveCount(0)
         if ([5, 6].includes(i)) {
           await expect(card).toContainText('Preview image unavailable')
           await expect(card.locator('img')).toHaveCount(0)
         }
       }
-      expect(media.some((url) => url.includes('/huge'))).toBe(false)
+      await cards.nth(4).scrollIntoViewIfNeeded()
+      await decoded(cards.nth(4).locator('img'))
+      expect(
+        media.some((url) =>
+          url.includes('/huge/thumbnail?width=480&height=270'),
+        ),
+      ).toBe(true)
+      expect(media.some((url) => url.endsWith('/huge'))).toBe(false)
       // Full thread roots and replies can both own the same image. Each owner
       // gets at most two decode attempts; shared invalidation may refetch it.
       expect(
@@ -241,5 +266,96 @@ for (const thread of [false, true]) {
     } finally {
       release()
     }
+  })
+}
+
+for (const recovery of ['button', 'reconnect']) {
+  test(`transient preview failures recover by ${recovery} without navigation or layout shift`, async ({
+    page,
+    request,
+  }, testInfo) => {
+    let available = false
+    const requests: string[] = []
+    const url = 'https://destination.test/retry'
+    await page.route(/\/rooms\/[^/]+\/timeline(\?|$)/, (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            events: [
+              {
+                account_id: ACCOUNT_ID,
+                room_id: ROOM_ID,
+                event_id: '$retry-preview',
+                sender: '@alice:hs',
+                origin_ts: Date.now(),
+                arrival_order: 1,
+                type: 'm.room.message',
+                state_key: null,
+                body: url,
+                content: {
+                  msgtype: 'm.text',
+                  body: url,
+                  'm.url_previews': [
+                    {
+                      'matrix:matched_url': url,
+                      'og:title': 'Recoverable preview',
+                      'og:image': 'mxc://preview.test/retry',
+                    },
+                  ],
+                },
+                redacted: false,
+                edited: false,
+                edit_count: 0,
+                relates_to: null,
+                reactions: null,
+              },
+            ],
+            next_cursor: null,
+          },
+        },
+      }),
+    )
+    await page.route(/\/v1\/media\/[^/]+\/preview\.test\/retry/, (route) => {
+      requests.push(route.request().url())
+      expect(route.request().headers().authorization).toBe('Bearer e2e-token')
+      return available
+        ? route.fulfill({ contentType: 'image/png', body: PNG })
+        : route.fulfill({ status: 503, body: '' })
+    })
+    await signIn(page)
+    if (testInfo.project.name === 'chromium')
+      await page.setViewportSize({ width: 1400, height: 900 })
+    await page.goto(ROOM_URL)
+    const card = page.locator(
+      '[data-event-id="$retry-preview"] .link-preview-card',
+    )
+    const retry = page.getByRole('button', { name: 'Retry image' })
+    await expect(retry).toBeVisible()
+    expect(requests).toHaveLength(1)
+    const before = (await card.boundingBox())!
+    const button = (await retry.boundingBox())!
+    const slot = (await card.locator('.link-preview-image').boundingBox())!
+    expect(button.x).toBeGreaterThanOrEqual(slot.x)
+    expect(button.x + button.width).toBeLessThanOrEqual(slot.x + slot.width)
+    expect(button.y).toBeGreaterThanOrEqual(slot.y)
+    expect(button.y + button.height).toBeLessThanOrEqual(slot.y + slot.height)
+    expect(await retry.evaluate((element) => element.closest('a'))).toBeNull()
+    available = true
+    if (recovery === 'button') await retry.click()
+    else {
+      await expectLive(page)
+      await request.post('/__e2e/drop-sockets')
+    }
+    await decoded(card.locator('img'))
+    await expect(retry).toHaveCount(0)
+    const after = (await card.boundingBox())!
+    expect(after.width).toBeCloseTo(before.width, 1)
+    expect(after.height).toBeCloseTo(before.height, 1)
+    expect(requests).toHaveLength(2)
+    expect(
+      requests.every((requestUrl) => requestUrl.includes('/thumbnail?')),
+    ).toBe(true)
+    await expect(page).toHaveURL(new RegExp('/rooms/'))
+    await expect(card).toHaveAttribute('href', url)
   })
 }

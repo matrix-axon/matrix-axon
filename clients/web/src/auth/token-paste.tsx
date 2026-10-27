@@ -1,4 +1,4 @@
-import { computed, signal, type ReadonlySignal } from '@preact/signals'
+import { batch, computed, signal, type ReadonlySignal } from '@preact/signals'
 import { useState } from 'preact/hooks'
 import {
   createAuthPersistence,
@@ -16,6 +16,7 @@ export const STORAGE_KEY = 'axon.token'
 
 /** The token-paste [`AuthProvider`], with the mutations the paste UI needs. */
 export interface TokenPasteProvider extends AuthProvider {
+  sessionId: ReadonlySignal<string>
   /** Store a pasted token (trimmed) and switch to the signed-in state. */
   setToken(token: string): void
   /** Discard the stored token — explicit sign-out. */
@@ -45,13 +46,19 @@ export function createTokenPasteProvider(
   const token = signal<string | null>(
     persistence.read(STORAGE_KEY)?.value ?? null,
   )
+  const sessionGeneration = signal(0)
 
   const discard = () => {
     persistence.remove(STORAGE_KEY)
-    token.value = null
+    batch(() => {
+      if (token.peek() !== null) sessionGeneration.value += 1
+      token.value = null
+    })
   }
 
   const provider: TokenPasteProvider = {
+    sessionId: computed(() => String(sessionGeneration.value)),
+    peekToken: () => token.value,
     getToken: () => token.value,
     onAuthFailure: discard,
     clearToken: discard,
@@ -61,7 +68,10 @@ export function createTokenPasteProvider(
         return
       }
       persistence.write(STORAGE_KEY, trimmed)
-      token.value = trimmed
+      batch(() => {
+        if (token.peek() !== trimmed) sessionGeneration.value += 1
+        token.value = trimmed
+      })
     },
     signedIn: computed(() => token.value !== null),
     LoginBootstrap: () => <TokenPasteForm provider={provider} />,

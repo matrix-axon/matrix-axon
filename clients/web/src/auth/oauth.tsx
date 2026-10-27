@@ -1,4 +1,4 @@
-import { computed, signal, type ReadonlySignal } from '@preact/signals'
+import { batch, computed, signal, type ReadonlySignal } from '@preact/signals'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import {
   browserPlatform,
@@ -192,6 +192,7 @@ interface TokenSuccessBody {
 }
 
 export interface OAuthAuthProvider extends AuthProvider {
+  sessionId: ReadonlySignal<string>
   signedIn: ReadonlySignal<boolean>
   /**
    * The sign-in buttons to offer. Reactive because the authoritative list
@@ -474,12 +475,17 @@ export function createOAuthAuthProvider({
     session.value === null ? null : (storedSession?.mode ?? 'persistent'),
   )
   const lastSignInAt = signal<number | null>(null)
+  const sessionGeneration = signal(0)
   let refreshInFlight: Promise<string | null> | null = null
   let notifyRefreshListeners = false
   const refreshListeners = new Set<() => void>()
   let lastAuthFailureRefreshAt = 0
 
-  function persist(next: OAuthSession | null, mode = sessionMode.value): void {
+  function persist(
+    next: OAuthSession | null,
+    mode = sessionMode.value,
+    renewal = false,
+  ): void {
     if (next === null) {
       persistence.remove(SESSION_KEY)
       sessionMode.value = null
@@ -489,7 +495,11 @@ export function createOAuthAuthProvider({
       persistence.write(SESSION_KEY, JSON.stringify(next), target)
       sessionMode.value = target
     }
-    session.value = next
+    batch(() => {
+      if (!renewal && (next !== null || session.peek() !== null))
+        sessionGeneration.value += 1
+      session.value = next
+    })
   }
 
   /**
@@ -608,6 +618,7 @@ export function createOAuthAuthProvider({
     }
     refreshInFlight = (async () => {
       const current = session.value
+      const generation = sessionGeneration.peek()
       if (current === null) {
         return null
       }
@@ -618,7 +629,8 @@ export function createOAuthAuthProvider({
             refresh_token: current.refreshToken,
           }),
         )
-        persist({ ...next, provider: current.provider })
+        if (sessionGeneration.peek() !== generation) return null
+        persist({ ...next, provider: current.provider }, undefined, true)
         if (notifyRefreshListeners) {
           for (const listener of [...refreshListeners]) {
             try {
@@ -634,7 +646,10 @@ export function createOAuthAuthProvider({
         // away a refresh token that is good for thirty days — the caller gets
         // `null` and no token, the request it wanted fails, and the next
         // attempt (a retry, a reconnect, the user acting again) tries afresh.
-        if (error instanceof OAuthRejectedError) {
+        if (
+          error instanceof OAuthRejectedError &&
+          sessionGeneration.peek() === generation
+        ) {
           persist(null)
         }
         return null
@@ -647,6 +662,7 @@ export function createOAuthAuthProvider({
   }
 
   const provider: OAuthAuthProvider = {
+    sessionId: computed(() => String(sessionGeneration.value)),
     getToken() {
       const current = session.value
       if (current === null) {

@@ -281,6 +281,6 @@ Standalone sticker shortcodes and discovery-error Unicode fallback are covered b
 
 Case-insensitive sticker matching and shortcode autocomplete are covered in `clients/web/e2e/sticker-shortcodes.spec.ts`; no recorded demo scene covers them yet.
 
-Bundled link images are covered by `clients/web/e2e/link-preview-images.spec.ts` in room and thread/caption timelines, with plain and encrypted descriptors, authenticated downloads, stable loading geometry, text/error fallback, and hostile URL/dimension rejection.
+Bundled link images are covered by `clients/web/e2e/link-preview-images.spec.ts` in room and thread/caption timelines, with plain and encrypted descriptors, authenticated downloads, stable loading geometry, text/error fallback, transient-failure retry/reconnect, large plain-source thumbnails, and hostile URL/encrypted-dimension rejection.
 Run the `chromium` and `webkit-iphone` projects for desktop and phone geometry evidence.
 The recorded demo remains uncovered because the corpus has no bundled-preview events; image cards do not imply preview authoring, automatic generation, or native sharing support.

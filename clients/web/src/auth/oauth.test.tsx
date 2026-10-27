@@ -1028,3 +1028,45 @@ describe('handing a sign-in to an external browser', () => {
     await waitFor(() => expect(button.disabled).toBe(false))
   })
 })
+
+it('does not restore a signed-out session when an older refresh completes', async () => {
+  let finish!: () => void
+  let started!: () => void
+  const began = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const auth = createOAuthAuthProvider({
+    baseUrl: BASE_URL,
+    providers: [],
+    pendingStorage: memoryStorage(),
+    storage: memoryStorage({
+      'axon.oauth.session': JSON.stringify({
+        accessToken: 'old',
+        refreshToken: 'old-refresh',
+        expiresAt: Date.now() - 1,
+        provider: 'google',
+      }),
+    }),
+  })
+  server.use(
+    http.post(TOKEN_URL, async () => {
+      started()
+      await new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      return HttpResponse.json({
+        access_token: 'renewed',
+        refresh_token: 'renewed-refresh',
+        token_type: 'Bearer',
+        expires_in: 3600,
+      })
+    }),
+  )
+  const refresh = auth.getToken()
+  await began
+  auth.clearToken()
+  finish()
+  expect(await refresh).toBeNull()
+  expect(auth.signedIn.value).toBe(false)
+  expect(auth.peekToken()).toBeNull()
+})

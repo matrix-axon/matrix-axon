@@ -1,3 +1,4 @@
+import { signal } from '@preact/signals'
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { options } from 'preact'
@@ -6,6 +7,7 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { MAX_PREVIEW_IMAGE_BYTES } from '../link-previews'
 import { ServicesContext } from '../services'
 import type { TimelineEvent } from '../stores/timeline'
+import { memoryStorage } from '../test/memory-storage'
 import { encryptedPreviewFile } from '../test/link-preview'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { EventBody } from './EventBody'
@@ -58,8 +60,9 @@ function event(fields: Record<string, unknown> = {}): TimelineEvent {
 function view(
   initial = event(),
   configure?: (services: ReturnType<typeof testServices>) => void,
+  options?: Parameters<typeof testServices>[0],
 ) {
-  const services = testServices({ token: 'first-token' })
+  const services = testServices({ token: 'first-token', ...options })
   const acquire = vi.spyOn(services.media, 'acquire')
   configure?.(services)
   const element = (value: TimelineEvent, compact = false) => (
@@ -285,4 +288,93 @@ it('renders a successful original after a failed plain thumbnail request', async
   expect(
     rendered.container.querySelector('.link-preview-image')!.textContent,
   ).not.toContain('unavailable')
+})
+
+it('retains the same preview and cache entry through a real OAuth token refresh', async () => {
+  const requests = serve()
+  const storage = memoryStorage({
+    'axon.oauth.session': JSON.stringify({
+      accessToken: 'first-token',
+      refreshToken: 'refresh',
+      provider: 'google',
+      expiresAt: Date.now() + 3600_000,
+    }),
+  })
+  server.use(
+    http.post(`${TEST_BASE_URL}/v1/oauth/token`, () =>
+      HttpResponse.json({
+        access_token: 'second-token',
+        refresh_token: 'next-refresh',
+        token_type: 'Bearer',
+        expires_in: 3600,
+      }),
+    ),
+  )
+  const rendered = view(event(), undefined, { storage })
+  await ready(rendered.container)
+  const before = rendered.container.querySelector('img')!.src
+  const session = rendered.services.auth.sessionId.peek()
+  expect(await rendered.services.auth.refreshNow()).toBe('refreshed')
+  expect(rendered.services.auth.peekToken()).toBe('second-token')
+  expect(rendered.services.auth.sessionId.peek()).toBe(session)
+  const cached = await rendered.services.media.acquire(
+    'first',
+    'mxc://hs/preview',
+    {
+      thumbnail: { width: 480, height: 270, method: 'scale' },
+      maxBytes: MAX_PREVIEW_IMAGE_BYTES,
+    },
+  )
+  expect(cached.result).toMatchObject({ ok: true, url: before })
+  cached.release()
+  expect(rendered.container.querySelector('img')!.src).toBe(before)
+  expect(requests).toHaveLength(1)
+})
+
+it.each(['click', 'reconnect'])(
+  'recovers a transient network failure by %s without burning an original attempt',
+  async (recovery) => {
+    let available = false
+    const reconnects = signal(0)
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/media/*`, () =>
+        available
+          ? new HttpResponse(PNG, { headers: { 'content-type': 'image/png' } })
+          : HttpResponse.error(),
+      ),
+    )
+    const rendered = view(event(), (services) => {
+      services.live.reconnects = reconnects
+    })
+    await waitFor(() =>
+      expect(
+        rendered.getByRole('button', { name: 'Retry image' }),
+      ).toBeTruthy(),
+    )
+    expect(rendered.acquire).toHaveBeenCalledOnce()
+    const button = rendered.getByRole('button', { name: 'Retry image' })
+    expect(button.closest('a')).toBeNull()
+    available = true
+    if (recovery === 'click') fireEvent.click(button)
+    else reconnects.value += 1
+    await ready(rendered.container)
+    expect(rendered.acquire).toHaveBeenCalledTimes(2)
+    expect(rendered.queryByRole('button', { name: 'Retry image' })).toBeNull()
+  },
+)
+
+it('offers an explicit retry after a transient auth failure', async () => {
+  serve()
+  const rendered = view(event(), (services) => {
+    vi.mocked(services.media.acquire).mockResolvedValueOnce({
+      result: { ok: false, error: { kind: 'auth' } },
+      release() {},
+    })
+  })
+  await waitFor(() =>
+    expect(rendered.getByRole('button', { name: 'Retry image' })).toBeTruthy(),
+  )
+  fireEvent.click(rendered.getByRole('button', { name: 'Retry image' }))
+  await ready(rendered.container)
+  expect(rendered.acquire).toHaveBeenCalledTimes(2)
 })

@@ -168,9 +168,31 @@ describe('preview image validation', () => {
     { 'og:image:width': 4000, 'og:image:height': 4000 },
     { 'matrix:image:size': 2 * 1024 * 1024 + 1 },
     { 'og:image:type': 'image/svg+xml' },
-  ])('rejects unbounded/active image metadata %j', (fields) => {
-    expect(parse({ 'og:image': 'mxc://hs/image', ...fields })).toBeNull()
+  ])('rejects unbounded/active encrypted metadata %j', (fields) => {
+    expect(
+      parse({ 'matrix:image:encrypted': encryptedPreviewFile, ...fields }),
+    ).toBeNull()
   })
+
+  it('allows large plain source images to use bounded server thumbnails', () => {
+    expect(
+      parse({
+        'og:image': 'mxc://hs/hero',
+        'og:image:width': 5000,
+        'og:image:height': 3000,
+        'matrix:image:size': 3 * 1024 * 1024,
+      }),
+    ).toEqual({ mxc: 'mxc://hs/hero', encrypted: false })
+  })
+
+  it.each([-1, NaN, '300'])(
+    'rejects malformed dimensions for plain images: %s',
+    (width) => {
+      expect(
+        parse({ 'og:image': 'mxc://hs/image', 'og:image:width': width }),
+      ).toBeNull()
+    },
+  )
 
   it.each([
     null,
