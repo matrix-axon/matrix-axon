@@ -13,8 +13,12 @@
 //! crates (`axon-sync` produces, `axon-api` consumes) share them without either
 //! depending on the other.
 
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use uuid::Uuid;
+
+use crate::room_details::RoomDetailSource;
 
 /// Everything the live-event bus carries. A single
 /// [`tokio::sync::broadcast`](https://docs.rs/tokio/latest/tokio/sync/broadcast)
@@ -48,6 +52,9 @@ pub enum LiveFrame {
     UnreadCountsChanged(UnreadCountsFrame),
     /// A room's SDK-calculated display name changed (ADR 0118).
     RoomDisplayNameChanged(RoomDisplayNameFrame),
+    /// Cached details of a room changed (ADR 0126): a signal naming what to
+    /// re-read, never a payload to apply.
+    RoomDetailsChanged(RoomDetailsFrame),
     /// An account's sync-engine readiness transitioned (ADR 0030, issue
     /// #241) — `"connecting"` / `"syncing"` / `"ready"` / `"offline"`. Lets a
     /// connected client update its per-account status without polling
@@ -107,6 +114,12 @@ impl From<UnreadCountsFrame> for LiveFrame {
 impl From<RoomDisplayNameFrame> for LiveFrame {
     fn from(frame: RoomDisplayNameFrame) -> Self {
         LiveFrame::RoomDisplayNameChanged(frame)
+    }
+}
+
+impl From<RoomDetailsFrame> for LiveFrame {
+    fn from(frame: RoomDetailsFrame) -> Self {
+        LiveFrame::RoomDetailsChanged(frame)
     }
 }
 
@@ -216,6 +229,20 @@ pub struct RoomDisplayNameFrame {
     pub room_id: String,
     /// The newly persisted display name.
     pub display_name: String,
+}
+
+/// Cached details of one room changed (ADR 0126 decision 5), ready to fan
+/// out over the live-event bus. It carries no values: a client re-reads each
+/// endpoint `sources` names. Producers publish only on a real change and
+/// coalesce one room's changes into one frame.
+#[derive(Debug, Clone)]
+pub struct RoomDetailsFrame {
+    /// Axon account this room belongs to.
+    pub account_id: Uuid,
+    /// Matrix room ID.
+    pub room_id: String,
+    /// What changed; never empty.
+    pub sources: BTreeSet<RoomDetailSource>,
 }
 
 /// An account's sync-engine readiness transition (ADR 0030, issue #241), ready

@@ -4971,7 +4971,7 @@
           "rooms"
         ],
         "summary": "Get room metadata",
-        "description": "Read typed room metadata from account-scoped cached state.\nNo upstream requests or membership aggregation occur on this route.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nContent is limited to 128 KiB per state tuple before transfer and decoding.\nRe-read on reopen/reconnect. Until state invalidation covers required-state\nupdates, open panels need bounded polling to detect changes without a live\nframe. Event `origin_ts` is provenance, not a sync-freshness timestamp.",
+        "description": "Read typed room metadata from account-scoped cached state.\nNo upstream requests or membership aggregation occur on this route.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nContent is limited to 128 KiB per state tuple before transfer and decoding.\nRe-read on reopen, on reconnect, and on a `room_details.changed` WebSocket\nframe whose `sources` include `metadata`, which follows every change to a\nstored snapshot; open panels need no polling.\nEvent `origin_ts` is provenance, not a sync-freshness timestamp.",
         "operationId": "room_metadata",
         "parameters": [
           {
@@ -11230,7 +11230,7 @@
                   },
                   {
                     "$ref": "#/components/schemas/RoomMemberCountsDto",
-                    "description": "SDK summary counts; null before observation or after loss of membership."
+                    "description": "SDK summary counts; null before observation or after loss of membership.\nA `room_details.changed` frame naming `member_counts` follows each\nchange the reconciler stores or clears."
                   }
                 ]
               }
@@ -15818,7 +15818,7 @@
               },
               {
                 "$ref": "#/components/schemas/RoomMemberCountsDto",
-                "description": "SDK summary counts; null before observation or after loss of membership."
+                "description": "SDK summary counts; null before observation or after loss of membership.\nA `room_details.changed` frame naming `member_counts` follows each\nchange the reconciler stores or clears."
               }
             ]
           }

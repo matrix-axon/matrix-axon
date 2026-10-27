@@ -503,6 +503,17 @@ mod tests {
     use axon_store::RoomStateRow;
     use serde_json::json;
 
+    /// `room_details.changed` announces `metadata` for exactly the types this
+    /// read serves (ADR 0126).
+    #[test]
+    fn served_types_are_the_announced_metadata_types() {
+        let served: BTreeSet<_> = RoomMetadataDto::EVENT_TYPES.iter().copied().collect();
+        let announced: BTreeSet<_> = axon_core::room_details::METADATA_STATE_TYPES
+            .into_iter()
+            .collect();
+        assert_eq!(served, announced);
+    }
+
     fn state_row(event_type: &str, content: Value) -> RoomMetadataStateRow {
         RoomMetadataStateRow {
             state: RoomStateRow {

@@ -1,4 +1,6 @@
-//! Isolated state-only Sliding Sync transport for room image packs.
+//! Isolated state-only Sliding Sync transport for state the primary
+//! `SyncService` does not request: room image packs and their hierarchy
+//! (ADR 0124), and guest access and server ACL (ADR 0126).
 //!
 //! Never submit these responses to SDK sync processing: a second SDK connection
 //! can otherwise overwrite room summaries and pagination owned by SyncService.
@@ -19,7 +21,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 // Parent claims and their reciprocal/permission evidence must hydrate on cold
 // start as well as update live. Do not request all room members: unverifiable
-// non-reciprocal claims are conservatively omitted by discovery.
+// non-reciprocal claims are conservatively omitted by discovery. Guest access
+// and server ACL are `/metadata` snapshots the primary sync never requests;
+// what this delivers is positive evidence only, never proof of absence.
 const REQUIRED_STATE: &[(&str, &str)] = &[
     (axon_core::image_pack::ROOM_PACK_TYPES[0], "*"),
     (axon_core::image_pack::ROOM_PACK_TYPES[1], "*"),
@@ -28,7 +32,14 @@ const REQUIRED_STATE: &[(&str, &str)] = &[
     ("m.room.create", ""),
     ("m.room.power_levels", ""),
     ("m.room.member", "$ME"),
+    ("m.room.guest_access", ""),
+    ("m.room.server_acl", ""),
 ];
+
+/// The connection and list names. The position lives in memory only, so a
+/// rename costs one fresh connection, as every restart already does.
+const CONN_ID: &str = "axon-state";
+const LIST: &str = "state";
 
 fn allowed_state(kind: &str, key: &str, local_user: &str) -> bool {
     REQUIRED_STATE.iter().any(|(allowed, state_key)| {
@@ -69,7 +80,7 @@ fn decode_state_event(raw: &str) -> serde_json::Result<(AnySyncStateEvent, serde
 
 fn request(pos: Option<String>, range_end: u32) -> v5::Request {
     let mut request = v5::Request::new();
-    request.conn_id = Some("axon-packs".into());
+    request.conn_id = Some(CONN_ID.into());
     request.pos = pos;
     request.timeout = Some(Duration::from_secs(30));
     let mut list = request::List::default();
@@ -82,7 +93,7 @@ fn request(pos: Option<String>, range_end: u32) -> v5::Request {
     let mut filters = request::ListFilters::default();
     filters.is_invite = Some(false);
     list.filters = Some(filters);
-    request.lists.insert("packs".into(), list);
+    request.lists.insert(LIST.into(), list);
     request
 }
 
@@ -118,40 +129,45 @@ pub(crate) async fn run(
                 let mut projection_attempts = 0;
                 let mut malformed_events = 0;
                 let mut ignored_events = 0;
+                let mut guest_access_events = 0;
+                let mut server_acl_events = 0;
                 for raw in room.required_state {
                     let Ok((event, value)) = decode_state_event(raw.json().get()) else {
                         malformed_events += 1;
                         continue;
                     };
-                    if !value
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|kind| {
-                            allowed_state(
-                                kind,
-                                value
-                                    .get("state_key")
-                                    .and_then(serde_json::Value::as_str)
-                                    .unwrap_or(""),
-                                ctx.local_user_id.as_ref(),
-                            )
-                        })
-                    {
+                    let kind = value.get("type").and_then(serde_json::Value::as_str);
+                    if !kind.is_some_and(|kind| {
+                        allowed_state(
+                            kind,
+                            value
+                                .get("state_key")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or(""),
+                            ctx.local_user_id.as_ref(),
+                        )
+                    }) {
                         ignored_events += 1;
                         continue;
+                    }
+                    match kind {
+                        Some("m.room.guest_access") => guest_access_events += 1,
+                        Some("m.room.server_acl") => server_acl_events += 1,
+                        _ => {}
                     }
                     projection_attempts += 1;
                     persist_room_state_value(event, &value, &room_id, &client, &ctx).await;
                 }
                 if projection_attempts + malformed_events + ignored_events > 0 {
                     tracing::debug!(%account_id, %room_id, projection_attempts, malformed_events,
-                        ignored_events, "processed image pack state batch");
+                        ignored_events, guest_access_events, server_acl_events,
+                        "processed supplementary state batch");
                 }
             }
         }
     })
     .await;
-    tracing::debug!(%account_id, "image pack sync stopped");
+    tracing::debug!(%account_id, "supplementary state sync stopped");
 }
 
 /// Polls are long-polls to the homeserver gate (ADR 0122): each waits while the
@@ -168,7 +184,7 @@ async fn transport<F, Fut>(
     F: FnMut(v5::Response) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    tracing::debug!(%account_id, "image pack sync started");
+    tracing::debug!(%account_id, "supplementary state sync started");
     let mut pos = None;
     let mut range_end = 99u32;
     let mut backoff = Duration::from_secs(2);
@@ -194,12 +210,9 @@ async fn transport<F, Fut>(
                     .map(|room| room.required_state.len())
                     .sum();
                 let previous_range_end = range_end;
-                let listed_room_count = response
-                    .lists
-                    .get("packs")
-                    .map(|list| u64::from(list.count));
+                let listed_room_count = response.lists.get(LIST).map(|list| u64::from(list.count));
                 pos = Some(response.pos.clone());
-                if let Some(list) = response.lists.get("packs") {
+                if let Some(list) = response.lists.get(LIST) {
                     let count = u64::from(list.count).min(u64::from(u32::MAX)) as u32;
                     range_end = range_end.saturating_add(100).min(count.saturating_sub(1));
                 }
@@ -214,7 +227,7 @@ async fn transport<F, Fut>(
                     tracing::debug!(%account_id, initial, recovered, room_count, state_event_count,
                         listed_room_count, requested_range_end = previous_range_end, next_range_end = range_end,
                         request_elapsed_ms, processing_elapsed_ms = consume_started.elapsed().as_millis() as u64,
-                        "image pack sync progressed");
+                        "supplementary state sync progressed");
                 }
                 backoff = Duration::from_secs(2);
                 // A server returning immediately cannot create a busy poll loop.
@@ -241,7 +254,7 @@ async fn transport<F, Fut>(
                 // connection on every timeout would repeatedly rehydrate rooms.
                 tracing::warn!(%account_id, failure_kind, http_status, position_reset,
                     request_elapsed_ms = started.elapsed().as_millis() as u64,
-                    retry_secs = backoff.as_secs(), "image pack sync interrupted; retrying");
+                    retry_secs = backoff.as_secs(), "supplementary state sync interrupted; retrying");
                 let delay = backoff;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
                 delay
@@ -364,7 +377,7 @@ mod tests {
         let app = Router::new().fallback(move || {
             let sender = sender.clone();
             async move {
-                Json(json!({"pos":"1","lists":{"packs":{"count":1}},
+                Json(json!({"pos":"1","lists":{"state":{"count":1}},
                 "rooms":{"!pack:localhost":{"required_state":[
                     {"type":"m.space.parent","state_key":"!parent:localhost","sender":sender,
                         "event_id":"$clear-parent","origin_server_ts":2,"content":{}},
@@ -379,6 +392,8 @@ mod tests {
         let client = client(address).await;
         let (state_redaction_tx, _) = tokio::sync::mpsc::channel(32);
         let (live_tx, _) = tokio::sync::broadcast::channel(8);
+        let room_details =
+            crate::room_details::RoomDetailsChanges::new(account.account_id, live_tx.clone());
         let ctx = PersistContext {
             store: store.clone(),
             account_id: account.account_id,
@@ -387,6 +402,7 @@ mod tests {
             local_user_id: Arc::from(account.user_id.as_str()),
             purge_on_leave: false,
             state_redaction_tx,
+            room_details,
         };
         let cancel = CancellationToken::new();
         let worker = tokio::spawn(run(
@@ -428,6 +444,125 @@ mod tests {
         assert!(client
             .get_room(matrix_sdk::ruma::room_id!("!pack:localhost"))
             .is_none());
+        store.delete_account_row(account.account_id).await.unwrap();
+    }
+
+    /// Guest access and server ACL reach `room_state` through this connection
+    /// and announce one `metadata` change for the room; the same state
+    /// delivered again announces nothing (ADR 0126).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn guest_access_and_server_acl_are_stored_and_announced_once() {
+        use axon_core::RoomDetailSource;
+        use axon_store::Store;
+        let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+            .await
+            .unwrap();
+        let account = store
+            .upsert_account(
+                &format!("@details-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .unwrap();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let sender = account.user_id.clone();
+        let app = Router::new().fallback({
+            let polls = polls.clone();
+            move |uri: axum::http::Uri| {
+                let sender = sender.clone();
+                if uri.path().ends_with("/sync") {
+                    polls.fetch_add(1, Ordering::SeqCst);
+                }
+                async move {
+                    Json(json!({"pos":"1","lists":{"state":{"count":1}},
+                    "rooms":{"!details:localhost":{"required_state":[
+                        {"type":"m.room.guest_access","state_key":"","sender":sender,
+                            "event_id":"$guest","origin_server_ts":2,
+                            "content":{"guest_access":"can_join"}},
+                        {"type":"m.room.server_acl","state_key":"","sender":sender,
+                            "event_id":"$acl","origin_server_ts":2,
+                            "content":{"allow":["*"],"deny":["evil.example"],
+                                "allow_ip_literals":false}}
+                    ]}}}))
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = client(address).await;
+        let (state_redaction_tx, _) = tokio::sync::mpsc::channel(32);
+        let (live_tx, _) = tokio::sync::broadcast::channel(8);
+        let room_details =
+            crate::room_details::RoomDetailsChanges::new(account.account_id, live_tx.clone());
+        let ctx = PersistContext {
+            store: store.clone(),
+            account_id: account.account_id,
+            live_tx,
+            index: None,
+            local_user_id: Arc::from(account.user_id.as_str()),
+            purge_on_leave: false,
+            state_redaction_tx,
+            room_details: room_details.clone(),
+        };
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(run(
+            client,
+            ctx,
+            HomeserverGate::for_test(),
+            cancel.clone(),
+        ));
+        let stored = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let rows = store
+                    .room_metadata_states(
+                        account.account_id,
+                        "!details:localhost",
+                        &["m.room.guest_access", "m.room.server_acl"],
+                    )
+                    .await
+                    .unwrap();
+                if rows.len() == 2 {
+                    break rows;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both types reach room_state");
+        assert_eq!(
+            stored
+                .iter()
+                .map(|row| row.state.event_id.as_str())
+                .collect::<Vec<_>>(),
+            ["$guest", "$acl"]
+        );
+        let first = room_details.take_pending();
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(
+            first["!details:localhost"]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [RoomDetailSource::Metadata]
+        );
+        // Let the next poll deliver the same state again.
+        let after = polls.load(Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while polls.load(Ordering::SeqCst) < after + 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the transport keeps polling");
+        assert!(
+            room_details.take_pending().is_empty(),
+            "an identical delivery is not a change"
+        );
+        cancel.cancel();
+        worker.await.unwrap();
+        server.abort();
         store.delete_account_row(account.account_id).await.unwrap();
     }
 
@@ -479,7 +614,7 @@ mod tests {
                     requests.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
                     let n = count.fetch_add(1, Ordering::SeqCst);
                     let kind = if n == 0 { "im.ponies.room_emotes" } else { "m.room.image_pack" };
-                    Json(json!({"pos": (n+1).to_string(), "lists": {"packs": {"count": 1, "ops": [{"op":"SYNC", "range":[0,0], "room_ids":["!pack:localhost"]}]}},
+                    Json(json!({"pos": (n+1).to_string(), "lists": {"state": {"count": 1, "ops": [{"op":"SYNC", "range":[0,0], "room_ids":["!pack:localhost"]}]}},
                         "rooms": {"!pack:localhost": {"initial": n == 0, "name": "must not overwrite", "prev_batch": "foreign-page", "required_state": [{
                             "type": kind, "state_key": "custom", "event_id": format!("$pack{n}"),
                             "sender": "@packs:localhost", "origin_server_ts": n+1,
@@ -515,8 +650,8 @@ mod tests {
             .get_room(matrix_sdk::ruma::room_id!("!pack:localhost"))
             .is_none());
         let requests = requests.lock().unwrap();
-        let list = &requests[0]["lists"]["packs"];
-        assert_eq!(requests[0]["conn_id"], "axon-packs");
+        let list = &requests[0]["lists"]["state"];
+        assert_eq!(requests[0]["conn_id"], "axon-state");
         assert_eq!(list["timeline_limit"], 0);
         assert_eq!(list["filters"]["is_invite"], false);
         assert_eq!(
@@ -528,7 +663,9 @@ mod tests {
                 ["m.space.child", "*"],
                 ["m.room.create", ""],
                 ["m.room.power_levels", ""],
-                ["m.room.member", "$ME"]
+                ["m.room.member", "$ME"],
+                ["m.room.guest_access", ""],
+                ["m.room.server_acl", ""]
             ])
         );
         assert_eq!(events.len(), 2);
@@ -549,7 +686,7 @@ mod tests {
             let body: Value = serde_json::from_slice(&body).unwrap();
             let primary = body["conn_id"] == "primary";
             let name = if primary { "Primary" } else { "Foreign" };
-            let list = if primary { "main" } else { "packs" };
+            let list = if primary { "main" } else { "state" };
             Json(json!({"pos":"1", "lists": {list: {"count":1}},
                 "rooms":{"!pack:localhost":{
                     "initial":true,"name":name,"prev_batch":name,

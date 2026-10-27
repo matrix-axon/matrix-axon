@@ -16,6 +16,7 @@ pub mod message;
 pub mod power_levels;
 pub mod preview_generation;
 pub mod push;
+pub mod room_details;
 pub mod room_entry;
 pub mod secret;
 
@@ -28,8 +29,8 @@ pub use config::{
 pub use error::{ConfigError, Error, Result};
 pub use live::{
     AccountDataFrame, DeviceStateFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame,
-    LiveEvent, LiveFrame, PreferencesFrame, RoomDisplayNameFrame, SenderTrustFrame, SyncStateFrame,
-    UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
+    LiveEvent, LiveFrame, PreferencesFrame, RoomDetailsFrame, RoomDisplayNameFrame,
+    SenderTrustFrame, SyncStateFrame, UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
 };
 pub use media::{ThumbnailMethod, ThumbnailSpec};
 pub use message::{Formatted, MediaAttachment, MediaSendKind, Relation};
@@ -38,5 +39,6 @@ pub use push::{
     ApnsPushConfig, FcmPushConfig, LoadedApns, LoadedFcm, PushConfig, PushKeySource, PushMaterial,
     ResolvedApns, ResolvedFcm,
 };
+pub use room_details::RoomDetailSource;
 pub use room_entry::{CreateRoomRequest, RoomPreset};
 pub use secret::{generate_opaque_secret, hash_secret};

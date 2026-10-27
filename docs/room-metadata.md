@@ -90,12 +90,8 @@ Same-event replays cannot clear positive evidence or restore original content; a
 Startup sweeps repair a crash between the SDK cache commit and Axon's projection update without a cold resync or re-dispatched state event.
 The nullable evidence columns are added by a forward-only migration; older rows are not guessed or rewritten in a bulk backfill.
 
-A client should re-read when reopening the panel, on reconnect, after relevant timeline state events, and after timeline redactions.
-Redaction repair is asynchronous, so the first read after a redaction frame may precede reconciliation; bounded visible-panel polling also covers that interval.
-Required-state-only updates are persisted without a live invalidation frame, so timeline events and reconnect alone cannot keep an open panel fresh.
-Until that gap is closed, clients displaying this endpoint need bounded polling while the panel is visible (for example, one request every 30 seconds, canceled when hidden, with one request in flight and backoff after failures).
-This endpoint does not add a metadata-specific live frame.
-State invalidation covering required-state updates is a prerequisite for replacing that polling, tracked with the acquisition and client follow-ups below.
+A client should re-read when reopening the panel, on reconnect, and on a `room_details.changed` frame naming `metadata` (see [Change notification](#change-notification)).
+That frame follows every change to a stored snapshot, from either sync connection and from redaction repair, so an open panel needs no polling.
 Unknown account/room IDs return unknown snapshots with HTTP 200, matching existing cached state-read conventions.
 Cached state from a room the account has left remains historical cached state according to the existing retention policy; this endpoint does not assert current membership or upstream access.
 
@@ -148,8 +144,8 @@ Set `RUST_LOG=warn,axon_sync::room_sweep=debug` to see `local SDK reconciliation
 Completion includes the number of room-summary rows visited, elapsed seconds, and whether another pass was requested during traversal.
 Completion means every page was traversed; rooms whose SDK counts remain unknown can still have no observation.
 
-Counts have no new live frame.
-Clients can re-read `/info` on reconnect and use bounded visible-panel polling, as for cached state details.
+Each stored or cleared pair publishes a `room_details.changed` frame naming `member_counts`; clients re-read `/info` on that frame, on reconnect, and on reopen.
+A local leave clears counts in the database without the worker, so it publishes no `member_counts` frame; clients learn of the leave from its own membership events.
 Server counts complete [issue 620](https://github.com/matrix-axon/matrix-axon/issues/620); web and TUI presentation remain separate follow-ups.
 
 Two maintenance improvements remain deferred: sharing each account's traversal between the count and redaction workers to reduce database round trips, and automatically checking that the documented SDK patch reproduces the vendored source from the pinned release archive.
@@ -172,6 +168,40 @@ That includes the first fill after the upgrade, one frame per room at the sweep'
 Clients should title a room `name`, then `canonical_alias`, then `display_name`, then its room ID: the state fields change as soon as their events arrive, while the calculated name follows the reconciler.
 Warnings carry `source = "sdk_display_name"`; set `RUST_LOG=warn,axon_sync::display_names=trace` to see each stored value's account and room, never the name itself.
 
+## Change notification
+
+A `room_details.changed` WebSocket frame tells a client which of a room's reads to repeat ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 5).
+
+```json
+{
+  "type": "room_details.changed",
+  "account_id": "…",
+  "payload": {
+    "room_id": "!room:example.org",
+    "sources": ["metadata", "member_counts"]
+  }
+}
+```
+
+| Source          | Re-read          | Published when                                                                                        |
+| --------------- | ---------------- | ----------------------------------------------------------------------------------------------------- |
+| `metadata`      | `GET …/metadata` | A tuple of one of the eight types is inserted, replaced, or changes its content or redaction evidence |
+| `member_counts` | `GET …/info`     | The member-count worker stores a different pair or clears one                                         |
+
+`sources` is never empty and lists sources in the order above; clients must ignore values they do not know, because later steps of issue 621 add `homeserver_details`.
+The frame is a signal, not a payload: a client never applies a diff from it.
+The store reports whether each write changed the stored row, so identical rewrites, redeliveries after a restart, and writes the freshness guard refuses publish nothing.
+Two concurrent writes of the same tuple can both report a change; that costs one extra re-read.
+
+Each account has one coalescer.
+The primary sync hands state to Axon one event at a time with no end-of-room signal, so producers record changes and the coalescer publishes one frame per room, with the union of its sources, once the account has had no change for 100 ms.
+Under continuous changes it publishes no later than one second after the first pending change, and at once when 256 rooms are pending, so neither a busy account nor a large first sync can grow the queue without bound.
+A room whose changes straddle a flush receives two frames.
+The coalescer is canceled and joined with the account run, after the workers that feed it, and publishes what is pending when it stops.
+The bus is lossy like every other frame, so a lagged or reconnecting client re-reads.
+
+After the upgrade that added the frame, the first sweep of the supplementary connection publishes one frame per room that has guest-access or server-ACL state, at the pace of its 100-room range growth.
+
 ## Alias scope
 
 Advertised aliases are the canonical `alias` and `alt_aliases` in `m.room.canonical_alias`.
@@ -185,10 +215,13 @@ See the [Matrix alias API](https://spec.matrix.org/v1.19/client-server-api/#get_
 
 Axon uses matrix-sdk-ui 0.19.1's `SyncService` room-list required-state defaults.
 Those request canonical-alias, creation, join-rule, encryption, power-level, and history-visibility state, including their full content.
-The defaults do not request guest-access or server-ACL state; those snapshots can remain unknown until an event is observed.
+The defaults do not request guest-access or server-ACL state.
+Axon's supplementary state-only connection (`axon-state`, the [custom emoji](custom-emoji.md) transport from ADR 0124) requests both for every non-invite room, in its existing 100-room pages, and delivers later changes live.
+It feeds the same state projection, so these two snapshots fill after its first sweep and change like the others.
+What either connection delivers is positive evidence only: a type it does not deliver stays `unknown`, because Sliding Sync does not guarantee complete required state.
 Even a requested state type can be unknown before room hydration or if no tuple was supplied.
 The API deliberately does not hide these gaps with default values or perform a remote fetch on every detail read.
-[Issue 621](https://github.com/matrix-axon/matrix-axon/issues/621) tracks bounded missing-state acquisition and homeserver-only metadata.
+[Issue 621](https://github.com/matrix-axon/matrix-axon/issues/621) tracks the rest of ADR 0126: confirming known absence through the room-state endpoint, and acquiring homeserver-local aliases and directory publication.
 
 Authoritative member counts are cached separately as described above; the lazily loaded member list is not an authoritative count.
 Paginated unjoined-room discovery and summary enrichment are [issue 622](https://github.com/matrix-axon/matrix-axon/issues/622).
@@ -209,6 +242,10 @@ DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sy
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test member_counts -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib member_counts -- --include-ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib display_names -- --include-ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib supplementary_state -- --include-ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test state room_state_upsert_reports_only_real_changes -- --ignored
+cargo test -p axon-sync --lib room_details
+cargo test -p axon-api --lib room_details_changed
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_state_read_endpoints -- --ignored
 cargo test -p axon-sync --lib room_sweep
 cargo test -p axon-api --test openapi

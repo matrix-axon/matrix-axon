@@ -194,7 +194,11 @@ async fn reconcile_room(ctx: &PersistContext, client: &Client, room_id: &OwnedRo
             .await
         {
             Ok(true) => {
-                tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, event_id = %ev.event_id(), "reconciled redacted room state from SDK cache")
+                tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, event_id = %ev.event_id(), "reconciled redacted room state from SDK cache");
+                if axon_core::room_details::is_metadata_state(event_type, "") {
+                    ctx.room_details
+                        .mark(room_id.as_str(), axon_core::RoomDetailSource::Metadata);
+                }
             }
             Ok(false) => {}
             Err(_) => {
@@ -211,6 +215,14 @@ mod tests {
     use matrix_sdk::{RoomInfo, StateChanges};
     use serde_json::json;
     use uuid::Uuid;
+
+    /// Repair announces `metadata` only if it covers every metadata type.
+    #[test]
+    fn repair_covers_every_metadata_type() {
+        for event_type in axon_core::room_details::METADATA_STATE_TYPES {
+            assert!(STATE_TYPES.contains(&event_type), "{event_type}");
+        }
+    }
 
     #[test]
     fn hint_burst_preserves_tail_and_coalesces_duplicates() {
@@ -288,6 +300,8 @@ mod tests {
         store.upsert_room_state(&state).await.unwrap();
         let (state_redaction_tx, mut state_redaction_rx) = mpsc::channel(32);
         let (live_tx, _) = tokio::sync::broadcast::channel(8);
+        let room_details =
+            crate::room_details::RoomDetailsChanges::new(account.account_id, live_tx.clone());
         let ctx = PersistContext {
             store: store.clone(),
             account_id: account.account_id,
@@ -296,6 +310,7 @@ mod tests {
             local_user_id: std::sync::Arc::from(account.user_id.as_str()),
             purge_on_leave: false,
             state_redaction_tx,
+            room_details: room_details.clone(),
         };
         // Ordinary message redactions and normal initial state do not enqueue
         // a full room scan. A current singleton target does enqueue one.
@@ -327,6 +342,7 @@ mod tests {
                 .redacted,
             None
         );
+        assert!(room_details.take_pending().is_empty());
         let mut changes = StateChanges::default();
         changes.add_redaction(
             &room_id,
@@ -389,8 +405,17 @@ mod tests {
         };
         let sdk_value: serde_json::Value = serde_json::from_str(raw.json().get()).unwrap();
         assert_eq!(row.content, Some(sdk_value["content"].clone()));
+        // Applied redaction evidence is a metadata change (ADR 0126).
+        assert_eq!(
+            room_details.take_pending()[room_id.as_str()]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [axon_core::RoomDetailSource::Metadata]
+        );
         // Repeated repair is idempotent; it cannot recreate purged state.
         reconcile_room(&ctx, &client, &room_id).await;
+        assert!(room_details.take_pending().is_empty());
         // The SDK cache still holds the old redacted event. Even though its
         // content differs, it must not touch a newer Axon current-state event.
         let replacement = RoomStateUpsert {

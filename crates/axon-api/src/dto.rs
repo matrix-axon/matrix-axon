@@ -705,6 +705,8 @@ impl From<SpaceParentRow> for SpaceParentDto {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RoomInfoDto {
     /// SDK summary counts; null before observation or after loss of membership.
+    /// A `room_details.changed` frame naming `member_counts` follows each
+    /// change the reconciler stores or clears.
     pub member_counts: Option<RoomMemberCountsDto>,
     /// `m.room.join_rules` `content.join_rule`
     /// (`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…).

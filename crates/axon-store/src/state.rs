@@ -230,6 +230,7 @@ impl Store {
             purge_on_leave,
         )
         .await
+        .map(drop)
     }
 
     /// Persist SDK-observed redaction evidence with the state tuple atomically.
@@ -244,20 +245,33 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.upsert_room_state_with_redaction_and_purge(s, local_user_id, evidence, false)
             .await
+            .map(drop)
     }
 
     /// Persist redaction evidence and atomically enqueue cleanup for local leaves.
+    ///
+    /// Returns whether the stored tuple changed: it was inserted, or its event,
+    /// content, or redaction evidence differs from what was stored. An
+    /// identical rewrite or a write the freshness guard refused is `false`
+    /// (ADR 0126 decision 5). The comparison reads the prior row from the
+    /// statement's snapshot, so a concurrent write to the same tuple can make
+    /// both writers report a change.
     pub async fn upsert_room_state_with_redaction_and_purge(
         &self,
         s: &RoomStateUpsert<'_>,
         local_user_id: Option<&str>,
         evidence: RoomStateRedaction<'_>,
         purge_on_leave: bool,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let (redacted, redaction_event_id) = evidence.columns();
         let purge = purge_on_leave && s.is_local_departure(local_user_id);
-        let query = sqlx_core::query::query(
-            "INSERT INTO room_state \
+        let query = sqlx_core::query_as::query_as::<Postgres, (bool, bool)>(
+            "WITH prior AS MATERIALIZED (\
+                 SELECT event_id, sender, origin_ts, content, redacted, redaction_event_id \
+                 FROM room_state \
+                 WHERE account_id = $1 AND room_id = $2 AND event_type = $3 AND state_key = $4\
+             ), written AS (\
+             INSERT INTO room_state \
              (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content, redacted, redaction_event_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
              ON CONFLICT (account_id, room_id, event_type, state_key) DO UPDATE SET \
@@ -274,7 +288,13 @@ impl Store {
                redaction_event_id = CASE WHEN room_state.event_id = EXCLUDED.event_id \
                    THEN COALESCE(room_state.redaction_event_id, EXCLUDED.redaction_event_id) \
                    ELSE EXCLUDED.redaction_event_id END \
-             WHERE EXCLUDED.origin_ts >= room_state.origin_ts",
+             WHERE EXCLUDED.origin_ts >= room_state.origin_ts \
+             RETURNING event_id, sender, origin_ts, content, redacted, redaction_event_id\
+             ) SELECT EXISTS (SELECT 1 FROM written), \
+                 EXISTS (SELECT 1 FROM written w WHERE NOT EXISTS (SELECT 1 FROM prior p WHERE \
+                     (p.event_id, p.sender, p.origin_ts, p.content, p.redacted, p.redaction_event_id) \
+                     IS NOT DISTINCT FROM \
+                     (w.event_id, w.sender, w.origin_ts, w.content, w.redacted, w.redaction_event_id)))",
         )
         .bind(s.account_id)
         .bind(s.room_id)
@@ -286,27 +306,29 @@ impl Store {
         .bind(&s.content)
         .bind(redacted)
         .bind(redaction_event_id);
-        if purge {
+        let changed = if purge {
             let mut tx = self.pool.begin().await?;
-            let changed = query.execute(&mut *tx).await?.rows_affected() != 0;
-            if changed {
+            // Any accepted leave write advances the purge, including a replay.
+            let (written, changed) = query.fetch_one(&mut *tx).await?;
+            if written {
                 Self::room_purge_watermark(s.account_id, s.room_id, true, &mut *tx).await?;
             }
             tx.commit().await?;
-            if changed {
+            if written {
                 self.purge_wakeup.notify_one();
                 tracing::info!(account_id = %s.account_id, room_id = %s.room_id, "queued room purge with local leave state");
             }
+            changed
         } else {
-            query.execute(&self.pool).await?;
-        }
+            query.fetch_one(&self.pool).await?.1
+        };
         if summary_display_state(s.event_type, s.state_key)
             || (s.event_type == "m.room.member" && local_user_id == Some(s.state_key))
         {
             self.refresh_room_summary_display(s.account_id, s.room_id)
                 .await?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Read a single resolved room-state tuple, or `None` if unset.

@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use axon_core::LiveFrame;
+use axon_core::{LiveFrame, RoomDetailSource};
 use axon_store::{MemberCountWrite, RoomMemberCounts, Store};
 use matrix_sdk::{
     ruma::{OwnedRoomId, RoomId},
@@ -17,6 +17,8 @@ use matrix_sdk::{
 use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::room_details::RoomDetailsChanges;
 
 // Only explicitly supplied counts from the current membership epoch qualify.
 // The lazy member list and the SDK's legacy zero defaults are never evidence.
@@ -72,6 +74,7 @@ async fn reconcile(
     room_id: &RoomId,
     steps: Steps,
     live_tx: &broadcast::Sender<LiveFrame>,
+    room_details: &RoomDetailsChanges,
 ) -> Steps {
     let Some(room) = client.get_room(room_id) else {
         return Steps::default();
@@ -81,7 +84,7 @@ async fn reconcile(
             account_id,
             room_id,
             "sdk_summary",
-            reconcile_counts(&room, store, account_id, room_id),
+            reconcile_counts(&room, store, account_id, room_id, room_details),
         )
         .await;
     let display_name = steps.display_name
@@ -115,7 +118,13 @@ async fn deadline(
 }
 
 /// Unknown/cold SDK state leaves the last timestamped observation intact.
-async fn reconcile_counts(room: &Room, store: &Store, account_id: Uuid, room_id: &RoomId) -> bool {
+async fn reconcile_counts(
+    room: &Room,
+    store: &Store,
+    account_id: Uuid,
+    room_id: &RoomId,
+    room_details: &RoomDetailsChanges,
+) -> bool {
     // Capture ordering before the SDK read, so a leave between this read and
     // persistence fences this snapshot using the same PostgreSQL clock.
     let observed_at = match store.member_count_observation_time().await {
@@ -125,15 +134,25 @@ async fn reconcile_counts(room: &Room, store: &Store, account_id: Uuid, room_id:
             return true;
         }
     };
-    persist_snapshot(&room.clone_info(), store, account_id, room_id, observed_at).await
+    persist_snapshot(
+        &room.clone_info(),
+        store,
+        account_id,
+        room_id,
+        observed_at,
+        room_details,
+    )
+    .await
 }
 
+/// A stored or cleared pair announces a `member_counts` change (ADR 0126).
 async fn persist_snapshot(
     info: &RoomInfo,
     store: &Store,
     account_id: Uuid,
     room_id: &RoomId,
     observed_at: i64,
+    room_details: &RoomDetailsChanges,
 ) -> bool {
     let result = if let Some(counts) = snapshot(info, observed_at) {
         store
@@ -152,6 +171,9 @@ async fn persist_snapshot(
     match result {
         Ok(outcome) => {
             tracing::trace!(%account_id, %room_id, source = "sdk_summary", ?outcome, "reconciled member count observation");
+            if outcome == MemberCountWrite::Applied {
+                room_details.mark(room_id.as_str(), RoomDetailSource::MemberCounts);
+            }
             outcome == MemberCountWrite::Retry
         }
         Err(error) => {
@@ -185,14 +207,16 @@ struct Worker {
     sweep: crate::room_sweep::RoomSweep,
     pending: Pending,
     live_tx: broadcast::Sender<LiveFrame>,
+    room_details: RoomDetailsChanges,
 }
 
 impl Worker {
-    fn new(live_tx: broadcast::Sender<LiveFrame>) -> Self {
+    fn new(live_tx: broadcast::Sender<LiveFrame>, room_details: RoomDetailsChanges) -> Self {
         Self {
             sweep: crate::room_sweep::RoomSweep::new(),
             pending: Pending::default(),
             live_tx,
+            room_details,
         }
     }
 
@@ -236,7 +260,7 @@ impl Worker {
             let retry = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return false,
-                retry = reconcile(client, store, account_id, &room_id, steps, &self.live_tx) => retry,
+                retry = reconcile(client, store, account_id, &room_id, steps, &self.live_tx, &self.room_details) => retry,
             };
             self.pending.push(room_id, retry, attempts + 1);
         }
@@ -251,12 +275,13 @@ pub(crate) async fn watch(
     cancel: CancellationToken,
     refresh: Arc<Notify>,
     live_tx: broadcast::Sender<LiveFrame>,
+    room_details: RoomDetailsChanges,
 ) {
     // Subscribe before the first page; receiver capacity is SDK-owned. Never
     // drain an unbounded update burst or retain an account-sized dedup map.
     let mut updates = client.room_info_notable_update_receiver();
     let mut tick = crate::room_sweep::interval();
-    let mut worker = Worker::new(live_tx);
+    let mut worker = Worker::new(live_tx, room_details);
     loop {
         tokio::select! {
             biased;
@@ -581,6 +606,22 @@ mod tests {
             .unwrap();
         sqlx_core::query::query("INSERT INTO room_summaries (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content) VALUES ($1, '!counts:localhost', 1, '$fixture', 1, false)")
             .bind(account.account_id).execute(store.pool()).await.unwrap();
+        let (live_tx, _) = broadcast::channel(8);
+        let changes = RoomDetailsChanges::new(account.account_id, live_tx);
+        // Every applied write announces `member_counts`; nothing else does.
+        let announced = |changes: &RoomDetailsChanges| {
+            let pending = changes.take_pending();
+            assert!(pending.len() <= 1, "{pending:?}");
+            pending
+                .get("!counts:localhost")
+                .map(|sources| {
+                    assert_eq!(
+                        sources.iter().copied().collect::<Vec<_>>(),
+                        [RoomDetailSource::MemberCounts]
+                    );
+                })
+                .is_some()
+        };
         let mut info = info(500, 3);
         assert!(
             !persist_snapshot(
@@ -589,6 +630,7 @@ mod tests {
                 account.account_id,
                 room_id!("!counts:localhost"),
                 store.member_count_observation_time().await.unwrap(),
+                &changes,
             )
             .await
         );
@@ -597,6 +639,19 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+        assert!(announced(&changes), "a first pair is a change");
+        assert!(
+            !persist_snapshot(
+                &info,
+                &store,
+                account.account_id,
+                room_id!("!counts:localhost"),
+                store.member_count_observation_time().await.unwrap(),
+                &changes,
+            )
+            .await
+        );
+        assert!(!announced(&changes), "an identical pair is not a change");
         info.mark_as_left();
         info.mark_as_joined();
         // An SDK invalidation time from a host clock far ahead must not leak
@@ -611,6 +666,7 @@ mod tests {
                 account.account_id,
                 room_id!("!counts:localhost"),
                 store.member_count_observation_time().await.unwrap(),
+                &changes,
             )
             .await
         );
@@ -619,6 +675,7 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        assert!(announced(&changes), "clearing a pair is a change");
         // Advance the database-clock observation by one millisecond rather
         // than relying on the application host's time or task scheduling.
         let now = store.member_count_observation_time().await.unwrap() + 1;
@@ -629,6 +686,7 @@ mod tests {
                 account.account_id,
                 room_id!("!counts:localhost"),
                 now,
+                &changes,
             )
             .await
         );
@@ -641,6 +699,7 @@ mod tests {
                 .joined,
             3
         );
+        assert!(announced(&changes));
         // A server-reported zero is positive evidence even with no invited
         // count and no SDK transition marker. It must erase the old 3.
         let mut zero = RoomInfo::new(room_id!("!counts:localhost"), RoomState::Joined);
@@ -654,7 +713,8 @@ mod tests {
                 &store,
                 account.account_id,
                 room_id!("!counts:localhost"),
-                now + 1
+                now + 1,
+                &changes,
             )
             .await
         );
@@ -663,6 +723,7 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        assert!(announced(&changes));
         // Superseded observations are terminal, never queued as retries.
         assert!(
             !persist_snapshot(
@@ -670,7 +731,8 @@ mod tests {
                 &store,
                 account.account_id,
                 room_id!("!counts:localhost"),
-                now
+                now,
+                &changes,
             )
             .await
         );
@@ -679,6 +741,10 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        assert!(
+            !announced(&changes),
+            "a superseded observation is not a change"
+        );
         store.delete_account_row(account.account_id).await.unwrap();
     }
 
@@ -744,7 +810,8 @@ mod tests {
         }
         let cancel = CancellationToken::new();
         let (live_tx, mut live_rx) = broadcast::channel(64);
-        let mut worker = Worker::new(live_tx.clone());
+        let room_details = RoomDetailsChanges::new(account.account_id, live_tx.clone());
+        let mut worker = Worker::new(live_tx.clone(), room_details.clone());
         let empty = || Err(broadcast::error::TryRecvError::Empty);
         // SDK update before Axon's projection: retain a bounded retry.
         let mut hint = Some(room_id!("!counts:localhost").to_owned());
@@ -804,6 +871,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((counts.joined, counts.invited), (500, 3));
+        let announced = room_details.take_pending();
+        assert!(announced.contains_key("!counts:localhost"));
+        assert!(
+            !announced.contains_key("!counts-0:localhost")
+                && !announced.contains_key("!counts-1:localhost"),
+            "preserved counts are not a change: {announced:?}"
+        );
         // Rejoin SDK update before the local membership handler: a hidden
         // summary must retain its hint until the projection becomes joined.
         sqlx_core::query::query("UPDATE room_summaries SET hidden_left = true WHERE account_id = $1 AND room_id = '!counts:localhost'")
@@ -887,6 +961,7 @@ mod tests {
             room_id!("!counts:localhost"),
             Steps::ALL,
             &live_tx,
+            &room_details,
         )
         .await;
         assert!(store

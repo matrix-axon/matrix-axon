@@ -145,6 +145,71 @@ async fn room_state_freshness_guard_rejects_older() {
 
 /// `room_state_of_type` returns every state_key of one type, ordered — e.g. a
 /// membership list.
+async fn changed(
+    store: &axon_store::Store,
+    state: RoomStateUpsert<'_>,
+    evidence: RoomStateRedaction<'_>,
+) -> bool {
+    store
+        .upsert_room_state_with_redaction_and_purge(&state, None, evidence, false)
+        .await
+        .expect("upsert")
+}
+
+/// The upsert reports a change only when the stored tuple differs afterwards,
+/// which is what `room_details.changed` announces (ADR 0126 decision 5).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_state_upsert_reports_only_real_changes() {
+    let store = common::migrated_store().await;
+    let account_id = test_account(&store, "rs-changed").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let acl = |event_id: &'static str, origin_ts: i64, deny: &str| RoomStateUpsert {
+        account_id,
+        room_id: &room_id,
+        event_type: "m.room.server_acl",
+        state_key: "",
+        event_id,
+        sender: "@alice:localhost",
+        origin_ts,
+        content: Some(json!({ "allow": ["*"], "deny": [deny] })),
+    };
+    let unknown = RoomStateRedaction::Unknown;
+    let redacted = RoomStateRedaction::Redacted {
+        event_id: Some("$redaction:localhost"),
+    };
+
+    assert!(changed(&store, acl("$acl1", 10, "evil.example"), unknown).await, "insert");
+    assert!(
+        !changed(&store, acl("$acl1", 10, "evil.example"), unknown).await,
+        "identical rewrite"
+    );
+    assert!(
+        !changed(&store, acl("$acl0", 5, "old.example"), unknown).await,
+        "older state the freshness guard refuses"
+    );
+    assert!(
+        changed(&store, acl("$acl2", 20, "worse.example"), unknown).await,
+        "replacement"
+    );
+    let mut pruned = acl("$acl2", 20, "worse.example");
+    pruned.content = Some(json!({}));
+    assert!(changed(&store, pruned, redacted).await, "redaction evidence");
+    assert!(
+        !changed(&store, acl("$acl2", 20, "worse.example"), unknown).await,
+        "an original replay cannot undo redaction, so it changes nothing"
+    );
+    let stored = store
+        .room_state(account_id, &room_id, "m.room.server_acl", "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (stored.event_id.as_str(), stored.content, stored.redacted),
+        ("$acl2", Some(json!({})), Some(true))
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn room_state_of_type_lists_members() {
