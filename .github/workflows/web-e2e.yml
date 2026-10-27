@@ -112,7 +112,11 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - uses: ./.github/actions/install-playwright
+      # `timeout-minutes` is the hard stop the action's retry loop cannot give
+      # itself: its cleanup has no timeout of its own.
+      - name: Install Playwright ${{ matrix.browser }}
+        timeout-minutes: 20
+        uses: ./.github/actions/install-playwright
         with:
           browser: ${{ matrix.browser }}
 
@@ -162,7 +166,9 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - uses: ./.github/actions/install-playwright
+      - name: Install Playwright webkit
+        timeout-minutes: 20
+        uses: ./.github/actions/install-playwright
         with:
           browser: webkit
 
