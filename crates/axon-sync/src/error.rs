@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// adapter (`axon-server`) maps these onto its own `MessageSender` error so
 /// `axon-api` never depends on this crate. Variants are chosen to map cleanly to
 /// HTTP status: unknown account / room → 404, not-yet-connected → 503, bad input
-/// → 400, an upstream homeserver failure → 502.
+/// → 400, an upstream homeserver failure → 502, no answer in time → 504.
 #[derive(Debug, Error)]
 pub enum GatewayError {
     #[error("message exceeds the event size budget")]
@@ -49,6 +49,14 @@ pub enum GatewayError {
     /// The homeserver rejected or failed the operation.
     #[error("upstream homeserver error: {0}")]
     Upstream(String),
+
+    /// The SDK's own request timeout ran out before the homeserver answered.
+    /// Deliberately *not* [`Upstream`](Self::Upstream), for the reason the
+    /// adapter's outer deadline is a `504` (ADR 0121 decision 5): giving up
+    /// ends Axon's wait, not the homeserver's work, so the call may still
+    /// take effect.
+    #[error("homeserver did not answer in time: {0}")]
+    Timeout(String),
 
     /// An encrypted attachment was downloaded intact but could not be
     /// decrypted: the ciphertext failed its `hashes.sha256` check, or the

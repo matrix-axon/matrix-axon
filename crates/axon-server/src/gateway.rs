@@ -118,6 +118,7 @@ fn map_err(err: GatewayError) -> SendError {
         GatewayError::NotConnected(msg) => SendError::Unavailable(msg),
         GatewayError::Invalid(msg) => SendError::Invalid(msg),
         GatewayError::Upstream(msg) => SendError::Upstream(msg),
+        GatewayError::Timeout(msg) => SendError::Timeout(msg),
         // Unreachable on this path: mutations upload attachments, they never
         // download and decrypt one, so only the media proxy can produce this.
         // Folded onto `Upstream` rather than asserted away, so a future caller
@@ -644,6 +645,22 @@ mod tests {
             bounded(Duration::from_secs(30), "leave", std::future::pending()).await;
         match result {
             Err(SendError::Timeout(message)) => assert_eq!(message, "leave timed out after 30s"),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    /// The SDK's own request timeout (30 s by default) fires inside a longer
+    /// adapter deadline, so the sync layer's typed timeout must come out as a
+    /// `504` as well.
+    #[tokio::test(start_paused = true)]
+    async fn an_sdk_timeout_inside_the_deadline_is_a_504_too() {
+        let result: Result<(), SendError> = bounded(Duration::from_secs(45), "leave", async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Err(GatewayError::Timeout("operation timed out".to_owned()))
+        })
+        .await;
+        match result {
+            Err(SendError::Timeout(message)) => assert_eq!(message, "operation timed out"),
             other => panic!("expected a timeout, got {other:?}"),
         }
     }

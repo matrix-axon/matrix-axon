@@ -232,6 +232,9 @@ fn gateway_to_fetch(err: GatewayError) -> FetchError {
         GatewayError::Forbidden(msg) => FetchError::Forbidden(msg),
         GatewayError::NotConnected(msg) => FetchError::NotConnected(msg),
         GatewayError::Upstream(msg) => FetchError::Upstream(msg),
+        // `FetchError` has no timeout of its own, and the media proxy keeps its
+        // `502` for one: a download that never finished delivered no bytes.
+        GatewayError::Timeout(msg) => FetchError::Upstream(msg),
         GatewayError::Undecryptable(msg) => FetchError::Undecryptable(msg),
         // Only message-send code constructs this variant. Treat a future
         // routing mistake as internal, not a media-size rejection or a panic.
