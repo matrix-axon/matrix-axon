@@ -112,8 +112,13 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Install Playwright browser
-        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+      # `timeout-minutes` is the hard stop the action's retry loop cannot give
+      # itself: its cleanup has no timeout of its own.
+      - name: Install Playwright ${{ matrix.browser }}
+        timeout-minutes: 20
+        uses: ./.github/actions/install-playwright
+        with:
+          browser: ${{ matrix.browser }}
 
       - name: Run ${{ matrix.project }} e2e lane
         run: pnpm exec playwright test --project=${{ matrix.project }}
@@ -161,8 +166,11 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Install Playwright WebKit
-        run: pnpm exec playwright install --with-deps webkit
+      - name: Install Playwright webkit
+        timeout-minutes: 20
+        uses: ./.github/actions/install-playwright
+        with:
+          browser: webkit
 
       - name: Run iPhone-profile WebKit e2e lane
         run: MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone

@@ -1,0 +1,86 @@
+name: Install Playwright
+description: >-
+  Installs one Playwright browser and the system packages it needs, retrying
+  the package download when the Ubuntu mirror stalls. Run it from a job whose
+  checkout already has clients/web installed.
+
+inputs:
+  browser:
+    description: "The Playwright browser to install: chromium, firefox or webkit"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    # `playwright install --with-deps` is two things, and only one of them
+    # stalls. The apt half (`install-deps`) pulls fonts and codec libraries from
+    # the runner's Ubuntu mirror, which has crawled at 50-110 kB/s on single
+    # files, taking 7 to 40 minutes where a healthy run takes seconds. The
+    # browser half comes from cdn.playwright.dev and took 3-4 seconds in every
+    # log inspected, slow apt runs included, so caching it saves nothing.
+    #
+    # Each attempt is cut off and started again. apt keeps the packages it has
+    # finished and resumes a partial one, so a retry carries on where the last
+    # attempt stopped, and a fresh connection is usually not the stalled one.
+    # Three attempts of four minutes, plus up to a minute of cleanup after each,
+    # bound the loop at about sixteen, where an unbounded stall costs the whole
+    # job. Cleanup has no timeout of its own (`dpkg --configure -a` can hang), so
+    # the caller sets `timeout-minutes` on the step as the hard stop.
+    #
+    # Every failure is retried, not only a stall: a mirror that is mid-sync fails
+    # fast and may well be fine a few seconds later, and a deterministic failure
+    # costs seconds. The warning says which it was, by exit status (124 is
+    # `timeout`'s own, 137 is its `-k` kill).
+    #
+    # `timeout` ends pnpm, node and sudo but not apt-get: in CI the apt-get
+    # outlived the timeout, kept downloading, and held the dpkg lock against the
+    # cleanup. So the loop stops it by name, as root, and waits for it and any
+    # dpkg to exit before the next attempt wants the lock; those two are the lock
+    # holders, so they are what it waits on, and it warns if either outlives the
+    # wait. `dpkg --configure -a` heals an install that was cut off mid-way; it
+    # is best effort and must not end the loop, because `bash -e` would turn its
+    # failure into the step's. Its failure is logged rather than hidden.
+    - name: Install Playwright system packages
+      shell: bash
+      working-directory: clients/web
+      env:
+        BROWSER: ${{ inputs.browser }}
+      run: |
+        attempts=3
+        for attempt in $(seq 1 "$attempts"); do
+          status=0
+          timeout -k 10 240 pnpm exec playwright install-deps "$BROWSER" || status=$?
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+            reason="ran past 4 minutes"
+          else
+            reason="failed with exit status $status"
+          fi
+          echo "::warning title=Playwright system packages::attempt $attempt of $attempts $reason"
+          # pkill exits 1 when nothing matched, which is the normal case after a
+          # failure that ended apt-get on its own.
+          sudo pkill -x apt-get || true
+          settled=false
+          for _ in $(seq 1 30); do
+            if ! pgrep -x apt-get > /dev/null && ! pgrep -x dpkg > /dev/null; then
+              settled=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$settled" != true ]; then
+            echo "::warning title=Playwright system packages::apt-get or dpkg was still running 60 seconds after the attempt ended; the next attempt may fail on the lock"
+          fi
+          sudo dpkg --configure -a || echo "::warning title=Playwright system packages::dpkg --configure -a failed after attempt $attempt"
+        done
+        echo "::error title=Playwright system packages::all $attempts attempts failed"
+        exit 1
+
+    - name: Install Playwright browser
+      shell: bash
+      working-directory: clients/web
+      env:
+        BROWSER: ${{ inputs.browser }}
+      run: pnpm exec playwright install "$BROWSER"
