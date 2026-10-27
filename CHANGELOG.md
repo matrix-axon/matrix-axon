@@ -3,6 +3,27 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.17 - 2026-10-27
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* build(deps): bump compression-codecs for zstd 0.14 and drop stale advisory ignores by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/852
+#### Features
+* feat(web): flag unread messages in other accounts on the account selector by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/846
+* feat(tui): filter /whereami members from the keyboard by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/848
+* feat(server): generate opt-in homeserver link previews by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/851
+#### Bug Fixes
+* fix(web): copy a held timestamp's message text reliably on iOS by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/849
+* fix(web): write the clipboard natively in the Tauri shell by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/850
+#### Other Changes
+* feat(sync): gate axon's background requests per homeserver (ADR 0122) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/836
+* fix(sync): identify Axon to MAS with a User-Agent and logo, and re-register on metadata change by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/838
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.16...v0.1.17
+
 ## v0.1.16 - 2026-10-25
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
