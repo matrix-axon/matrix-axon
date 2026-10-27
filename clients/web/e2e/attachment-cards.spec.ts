@@ -21,9 +21,32 @@ async function setup(
     thread?: boolean
     content?: Record<string, unknown>
     mimetype?: string
+    msgtype?: string
+    doubleTap?: 'reply' | null
   } = {},
 ) {
   const requests: string[] = []
+  if (options.doubleTap !== undefined) {
+    await page.route('**/v1/preferences/message_gestures', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            key: 'message_gestures',
+            value: {
+              schema_version: 1,
+              bindings: {
+                double_tap: options.doubleTap,
+                touch_and_hold: 'thread',
+                swipe_left: options.doubleTap === 'reply' ? 'react' : 'reply',
+              },
+              reaction_emoji: '👍',
+            },
+            updated_at: new Date().toISOString(),
+          },
+        },
+      }),
+    )
+  }
   const event = (reply: boolean) => ({
     account_id: ACCOUNT_ID,
     room_id: ROOM_ID,
@@ -35,7 +58,7 @@ async function setup(
     state_key: null,
     body: caption,
     content: {
-      msgtype: 'm.file',
+      msgtype: options.msgtype ?? 'm.file',
       body: caption,
       filename,
       url: 'mxc://hs/attachment-card',
@@ -76,11 +99,13 @@ async function setup(
       ? `${ROOM_URL}?thread=${encodeURIComponent('$attachment-root')}`
       : ROOM_URL,
   )
-  const card = page.locator(
-    options.thread
-      ? '.thread-panel [data-event-id="$attachment-card"] .media-attachment'
-      : '.room-stream [data-event-id="$attachment-root"] .media-attachment',
-  )
+  const card = page
+    .locator(
+      options.thread
+        ? '.thread-panel [data-event-id="$attachment-card"]'
+        : '.room-stream [data-event-id="$attachment-root"]',
+    )
+    .locator('.media-attachment, .media-tile')
   await expect(card).toBeVisible()
   return { card, requests }
 }
@@ -97,7 +122,7 @@ for (const thread of [false, true]) {
       .locator('.media-attachment-caption')
       .boundingBox())!
     const download = (await card
-      .getByRole('button', { name: 'Download', exact: true })
+      .getByRole('button', { name: `Download ${filename}`, exact: true })
       .boundingBox())!
     expect(text.width).toBeGreaterThan(bounds.width - 40)
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(
@@ -130,19 +155,28 @@ for (const thread of [false, true]) {
     )
     const dialog = page.getByRole('dialog')
     await expect(dialog).toBeVisible()
+    await expect(card.locator('xpath=ancestor::li')).not.toHaveClass(
+      /actions-open/,
+    )
     await expect(dialog).toContainText('Attachment preview contents.')
     await expect(
-      dialog.getByRole('button', { name: 'Download', exact: true }),
+      dialog.getByRole('button', { name: `Download ${filename}`, exact: true }),
     ).toHaveCSS('color', 'rgb(255, 255, 255)')
     const code = dialog.locator('code').first()
     await activate(code, testInfo.project.name === 'webkit-iphone')
+    await expect(dialog).toBeVisible()
+    await activate(
+      dialog.locator('.media-text-preview'),
+      testInfo.project.name === 'webkit-iphone',
+      { x: 1, y: 1 },
+    )
     await expect(dialog).toBeVisible()
     await page.screenshot({
       path: testInfo.outputPath('attachment-preview.png'),
     })
     await page.keyboard.press('Escape')
     await expect(dialog).toBeHidden()
-    const opener = card.getByRole('button', { name: `Preview ${filename}` })
+    const opener = card.getByRole('button', { name: filename, exact: true })
     await expect(opener).toBeFocused()
     await page.keyboard.press('Space')
     await expect(dialog).toBeVisible()
@@ -150,6 +184,68 @@ for (const thread of [false, true]) {
     await expect(opener).toBeFocused()
   })
 }
+
+test('a single tap opens the card with double-tap actions disabled', async ({
+  page,
+}, testInfo) => {
+  const { card } = await setup(page, { doubleTap: null })
+  await expect(card.locator('xpath=ancestor::li')).toHaveClass(
+    /touch-hold-enabled/,
+  )
+  const events: string[] = []
+  page.on('console', (message) => {
+    if (message.text().startsWith('attachment-input'))
+      events.push(message.text())
+  })
+  await page.evaluate(() => {
+    for (const type of ['pointerdown', 'pointerup', 'click']) {
+      document.addEventListener(
+        type,
+        (event) => {
+          const target = event.target as Element
+          console.debug(
+            'attachment-input',
+            event.type,
+            target.tagName,
+            target.className,
+          )
+        },
+        true,
+      )
+    }
+  })
+  await activate(
+    card.locator('.media-attachment-caption'),
+    testInfo.project.name === 'webkit-iphone',
+    { x: 8, y: 8 },
+  )
+  await page.waitForTimeout(400)
+  await testInfo.attach('pointer-events', {
+    body: JSON.stringify(events),
+    contentType: 'application/json',
+  })
+  await expect(page.getByRole('dialog')).toBeVisible()
+})
+
+test('a configured double tap takes priority over opening the preview', async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== 'webkit-iphone',
+    'Native touch double-tap uses the iPhone profile',
+  )
+  const { card, requests } = await setup(page, { doubleTap: 'reply' })
+  await expect(card.locator('xpath=ancestor::li')).toHaveClass(
+    /touch-hold-enabled/,
+  )
+  const target = card.getByRole('button', { name: filename, exact: true })
+  await target.tap()
+  await target.tap()
+  await expect(page.getByText('Replying to')).toBeVisible()
+  await page.waitForTimeout(400)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect(requests).toHaveLength(0)
+})
 
 test('download and caption links have independent actions', async ({
   page,
@@ -174,13 +270,70 @@ test('download and caption links have independent actions', async ({
   expect(requests).toHaveLength(0)
   const saved = page.waitForEvent('download')
   await activate(
-    card.getByRole('button', { name: 'Download', exact: true }),
+    card.getByRole('button', { name: `Download ${filename}`, exact: true }),
     testInfo.project.name === 'webkit-iphone',
   )
   expect((await saved).suggestedFilename()).toBe(filename)
   await expect(page.getByRole('dialog')).toHaveCount(0)
   expect(requests).toHaveLength(1)
 })
+
+for (const [kind, mimetype] of [
+  ['file', 'text/plain'],
+  ['audio', 'audio/mpeg'],
+  ['video', 'video/mp4'],
+  ['file', 'application/pdf'],
+]) {
+  test(`attachment gestures preserve swipe and hold for ${mimetype}`, async ({
+    page,
+  }) => {
+    const { card, requests } = await setup(page, {
+      msgtype: `m.${kind}`,
+      mimetype,
+    })
+    const target = card
+      .locator('.media-tile-surface, .media-attachment-caption')
+      .first()
+    const pointer = async (type: string, x: number) => {
+      await target.dispatchEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        pointerType: 'touch',
+        pointerId: 1,
+        isPrimary: true,
+        clientX: x,
+        clientY: 300,
+      })
+    }
+    await pointer('pointerdown', 260)
+    await pointer('pointermove', 210)
+    await expect(card.locator('xpath=ancestor::li')).toHaveClass(
+      /gesture-swipe-reveal/,
+    )
+    await pointer('pointermove', 140)
+    await pointer('pointerup', 140)
+    await target.dispatchEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    })
+    await expect(page.getByText('Replying to')).toBeVisible()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await pointer('pointerdown', 260)
+    await page.waitForTimeout(650)
+    await pointer('pointerup', 260)
+    await target.dispatchEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    })
+    await expect(
+      page.getByRole('complementary', { name: 'Thread' }),
+    ).toBeVisible()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    expect(requests).toHaveLength(0)
+  })
+}
 
 test('spoilers keep their own action and unsupported files stay download-only', async ({
   page,

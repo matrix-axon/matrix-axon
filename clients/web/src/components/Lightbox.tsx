@@ -37,7 +37,7 @@ import { MediaDownloadButton } from './MediaDownloadButton'
  * them the lightbox would dismiss itself out from under the file dialog.
  */
 const DISMISS_EXEMPT =
-  'video, audio, img, iframe, figcaption, button, a, label, input, .media-text'
+  'video, audio, img, iframe, figcaption, button, a, label, input, .media-text-preview'
 
 /**
  * How long after toggling immersive mode a further tap on the image is

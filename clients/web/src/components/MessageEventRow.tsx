@@ -355,9 +355,11 @@ export function MessageEventRow({
   const senderDisplay = members.displayName(event.sender)
   const canOpenThread = showThreadAction && onOpenThread !== undefined
   const parsedMedia = parseMedia(event)
+  // Attachment cards delegate taps to their opener; their players live in a
+  // dialog, so the row can arbitrate hold/swipe just as it does for images.
   const gestureEligible =
     hasMessageActions &&
-    (parsedMedia === null || parsedMedia.kind === 'image') &&
+    parsedMedia?.kind !== 'sticker' &&
     messageGestures !== null
   const doubleClickAction = gestureEligible
     ? (messageGestures?.bindings.double_tap ?? null)
@@ -438,7 +440,7 @@ export function MessageEventRow({
   const touchGestures = useTouchMessageGestures<HTMLLIElement>({
     eligible: gestureEligible,
     preferences: messageGestures,
-    openControlSelector: '.media-open',
+    openControlSelector: '.media-open, [data-media-preview-card]',
     onAction: runGestureAction,
     onSingleTap: onOpenActions,
     onTouchStart: cancelDesktopClick,

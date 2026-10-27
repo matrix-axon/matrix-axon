@@ -15,16 +15,23 @@ export function openMediaCard(
     event.shiftKey
   )
     return
-  if (closestGestureControl(event.target) !== event.currentTarget) return
-  if (event.detail !== 0 && window.getSelection()?.isCollapsed === false) return
+  const opener = event.currentTarget.querySelector<HTMLButtonElement>(
+    'button[aria-haspopup="dialog"]',
+  )
+  const control = closestGestureControl(event.target)
+  if (control !== null && control !== opener) return
+  // The card owns a plain click; pointer gestures still reach the message row.
+  event.stopPropagation()
+  const selection = window.getSelection()
+  if (
+    event.detail !== 0 &&
+    selection?.isCollapsed === false &&
+    (event.currentTarget.contains(selection.anchorNode) ||
+      event.currentTarget.contains(selection.focusNode))
+  )
+    return
   // Focus the real preview button so closing the dialog restores a useful
   // keyboard target even when the reader tapped non-focusable caption text.
-  const opener =
-    event.currentTarget instanceof HTMLButtonElement
-      ? event.currentTarget
-      : event.currentTarget.querySelector<HTMLButtonElement>(
-          '[aria-haspopup="dialog"]',
-        )
   opener?.focus({ preventScroll: true })
   open()
 }

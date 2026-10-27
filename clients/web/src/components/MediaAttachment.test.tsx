@@ -89,14 +89,14 @@ describe('MediaAttachment', () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click')
     const { getByRole } = renderAttachment(file())
 
-    fireEvent.click(getByRole('button', { name: 'Download' }))
+    fireEvent.click(getByRole('button', { name: 'Download report.pdf' }))
     await waitFor(() => expect(click).toHaveBeenCalledOnce())
     expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
 
   it('offers no Download button when the media has no mxc url', () => {
     const { queryByRole } = renderAttachment(file({ url: null }))
-    expect(queryByRole('button', { name: 'Download' })).toBeNull()
+    expect(queryByRole('button', { name: 'Download report.pdf' })).toBeNull()
   })
 
   it('surfaces a failure when the download errors', async () => {
@@ -106,7 +106,7 @@ describe('MediaAttachment', () => {
       ),
     )
     const { getByRole, findByText } = renderAttachment(file())
-    fireEvent.click(getByRole('button', { name: 'Download' }))
+    fireEvent.click(getByRole('button', { name: 'Download report.pdf' }))
     expect(await findByText('Download failed')).toBeTruthy()
   })
 })
@@ -165,6 +165,64 @@ it('keeps selected caption text from opening the viewer', () => {
   expect(document.querySelector('.lightbox')).toBeNull()
 })
 
+it('opens with an unrelated selection elsewhere on the page', () => {
+  const view = renderAttachment(
+    file({ filename: 'notes.txt', mimetype: 'text/plain' }),
+  )
+  vi.spyOn(view.services.media, 'fetchText').mockResolvedValue({
+    ok: true,
+    text: 'Preview text',
+  })
+  const elsewhere = document.createElement('p')
+  elsewhere.textContent = 'Another message'
+  document.body.append(elsewhere)
+  const range = document.createRange()
+  range.selectNodeContents(elsewhere)
+  window.getSelection()!.addRange(range)
+  fireEvent.click(view.container.querySelector('.media-attachment')!, {
+    detail: 1,
+  })
+  expect(view.queryByRole('dialog')).toBeTruthy()
+  elsewhere.remove()
+})
+
+it('clears a previous download failure when opening a fresh viewer', async () => {
+  const view = renderAttachment(
+    file({ filename: 'notes.txt', mimetype: 'text/plain' }),
+  )
+  server.use(
+    http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:media`, () =>
+      HttpResponse.json({ error: {} }, { status: 404 }),
+    ),
+  )
+  fireEvent.click(view.getByRole('button', { name: /Download/ }))
+  expect(await view.findByText('Download failed')).toBeTruthy()
+  vi.spyOn(view.services.media, 'fetchText').mockResolvedValue({
+    ok: true,
+    text: 'Preview text',
+  })
+  fireEvent.click(view.container.querySelector('.media-attachment')!)
+  expect(view.queryByText('Download failed')).toBeNull()
+  fireEvent.click(view.getByRole('button', { name: 'Close' }))
+  expect(view.queryByText('Download failed')).toBeNull()
+})
+
+it('keeps the text preview wrapper from dismissing the dialog', async () => {
+  const view = renderAttachment(
+    file({ filename: 'notes.txt', mimetype: 'text/plain' }),
+  )
+  vi.spyOn(view.services.media, 'fetchText').mockResolvedValue({
+    ok: true,
+    text: 'Preview text',
+  })
+  fireEvent.click(view.container.querySelector('.media-attachment')!)
+  await view.findByText('Preview text')
+  fireEvent.click(
+    view.getByRole('dialog').querySelector('.media-text-preview')!,
+  )
+  expect(view.queryByRole('dialog')).toBeTruthy()
+})
+
 it.each([
   { filename: 'archive.zip', mimetype: 'application/zip' },
   { filename: 'large.txt', mimetype: 'text/plain', size: 512 * 1024 + 1 },
@@ -174,6 +232,8 @@ it.each([
   expect(card.hasAttribute('data-media-preview-card')).toBe(false)
   fireEvent.click(card)
   expect(document.querySelector('.lightbox')).toBeNull()
-  expect(view.getByRole('button', { name: 'Download' })).toBeTruthy()
+  expect(
+    view.getByRole('button', { name: `Download ${descriptor.filename}` }),
+  ).toBeTruthy()
   expect(view.container.querySelector('[aria-haspopup="dialog"]')).toBeNull()
 })

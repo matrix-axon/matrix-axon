@@ -72,7 +72,6 @@ export function MediaTile({
         style={{ aspectRatio: aspect, width: `${TILE_MAX}px` }}
         aria-label={`${verb} ${media.filename}`}
         aria-haspopup="dialog"
-        onClick={(event) => openMediaCard(event, onOpen)}
       >
         <div ref={ref} class="media-tile-poster">
           {poster !== null && <img src={poster} alt="" decoding="async" />}

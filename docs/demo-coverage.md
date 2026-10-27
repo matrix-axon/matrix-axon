@@ -288,5 +288,5 @@ Run the `chromium` and `webkit-iphone` projects for desktop and phone geometry e
 The recorded demo remains uncovered because the corpus has no bundled-preview events; image cards do not imply preview authoring, automatic generation, or native sharing support.
 
 Attachment card layout and activation are covered by `clients/web/e2e/attachment-cards.spec.ts` in room and thread timelines on desktop Chromium and iPhone/WebKit.
-The checks cover full-width caption geometry, top-right 44-pixel download targets, on-demand preview dialogs, keyboard dismissal/focus restoration, independent caption links/downloads/spoilers, and desktop text selection.
+The checks cover full-width caption geometry, top-right 44-pixel download targets, on-demand preview dialogs, keyboard dismissal/focus restoration, independent caption links/downloads/spoilers, desktop text selection, and swipe/hold arbitration for file, audio, video, and PDF cards.
 The existing `media` recording still demonstrates image galleries; a recorded audio/text/PDF/video attachment-card scene remains outstanding.

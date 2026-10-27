@@ -76,7 +76,7 @@ describe('attachment media preview', () => {
       media({ filename: 'notes.txt', mimetype: 'text/plain' }),
     )
 
-    fireEvent.click(getByRole('button', { name: 'Preview notes.txt' }))
+    fireEvent.click(getByRole('button', { name: 'notes.txt' }))
     const code = await findByText('<b>not markup</b>')
     // A `<code>` inside the `<pre>` since ADR 0073 — the text is still a Preact
     // text child, so the markup in it stays inert.
@@ -91,7 +91,7 @@ describe('attachment media preview', () => {
       media({ filename: 'deploy.py', mimetype: 'text/plain' }),
     )
 
-    fireEvent.click(getByRole('button', { name: 'Preview deploy.py' }))
+    fireEvent.click(getByRole('button', { name: 'deploy.py' }))
     await waitFor(() =>
       expect(getByRole('dialog').querySelector('.hljs-keyword')).toBeTruthy(),
     )
@@ -110,7 +110,7 @@ describe('attachment media preview', () => {
       media({ filename: 'deploy', mimetype: 'text/plain' }),
     )
 
-    fireEvent.click(getByRole('button', { name: 'Preview deploy' }))
+    fireEvent.click(getByRole('button', { name: 'deploy' }))
     await waitFor(() =>
       expect(getByRole('dialog').querySelector('.hljs-keyword')).toBeTruthy(),
     )
@@ -122,7 +122,7 @@ describe('attachment media preview', () => {
       media({ filename: 'notes.txt', mimetype: 'text/plain' }),
     )
 
-    fireEvent.click(getByRole('button', { name: 'Preview notes.txt' }))
+    fireEvent.click(getByRole('button', { name: 'notes.txt' }))
     expect(await findByText('just some notes')).toBeTruthy()
     expect(getByRole('dialog').querySelector('.hljs')).toBeNull()
   })
@@ -144,7 +144,7 @@ describe('attachment media preview', () => {
     const { getByRole } = renderAttachment(
       media({ kind: 'audio', filename: 'voice.mp3', mimetype: 'audio/mpeg' }),
     )
-    fireEvent.click(getByRole('button', { name: 'Play voice.mp3' }))
+    fireEvent.click(getByRole('button', { name: 'voice.mp3' }))
     await waitFor(() =>
       expect(getByRole('dialog').querySelector('audio')).toBeTruthy(),
     )
@@ -237,7 +237,7 @@ describe('attachment media preview', () => {
     fireEvent.click(getByRole('button', { name: 'Open report.pdf' }))
     expect(await findByText('Could not load pdf')).toBeTruthy()
     expect(
-      getByRole('dialog').querySelector('[aria-label="Download"]'),
+      getByRole('dialog').querySelector('[aria-label="Download report.pdf"]'),
     ).toBeTruthy()
   })
 

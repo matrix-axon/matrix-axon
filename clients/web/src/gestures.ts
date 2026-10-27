@@ -111,13 +111,13 @@ export function isGestureControlTarget(target: EventTarget | null): boolean {
   return closestGestureControl(target) !== null
 }
 
-/** Card taps belong to preview; nested links/controls keep their own action. */
+/** Find the nearest interactive control that owns its input. */
 export function closestGestureControl(
   target: EventTarget | null,
 ): Element | null {
   return target instanceof Element
     ? target.closest(
-        'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker, [data-media-preview-card]',
+        'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
       )
     : null
 }

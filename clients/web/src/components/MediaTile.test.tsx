@@ -109,7 +109,7 @@ describe('MediaTile', () => {
     const { getByText, getByRole } = renderAttachment(video())
     expect(getByText('clip.mp4')).toBeTruthy()
     expect(getByText('2.3 MB')).toBeTruthy()
-    expect(getByRole('button', { name: 'Download' })).toBeTruthy()
+    expect(getByRole('button', { name: 'Download clip.mp4' })).toBeTruthy()
   })
 
   it('leaves audio and other files as a row card', () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import {
   GESTURE_SWIPE_SETTLE_MS,
   isGestureControlTarget,
+  closestGestureControl,
   isHorizontallyScrollable,
   MESSAGE_TOUCH_HOLD_MS,
   SWIPE_MIN_X,
@@ -19,13 +20,23 @@ const MESSAGE_DOUBLE_TAP_MS = 300
 const MESSAGE_DOUBLE_TAP_SLOP_PX = 24
 const MESSAGE_SWIPE_MAX_X = 96
 
-function closestButton(
+/** Resolve an opener or its card, while leaving nested links/buttons alone. */
+function closestOpenButton(
   target: EventTarget | null,
   selector: string | null,
 ): HTMLButtonElement | null {
   if (selector === null || !(target instanceof Element)) return null
   const control = target.closest(selector)
-  return control instanceof HTMLButtonElement ? control : null
+  const button =
+    control instanceof HTMLButtonElement
+      ? control
+      : control?.querySelector<HTMLButtonElement>(
+          'button[aria-haspopup="dialog"]',
+        )
+  const nested = closestGestureControl(target)
+  return button != null && (nested === null || nested === button)
+    ? button
+    : null
 }
 
 function isTimestampControl(target: EventTarget | null): boolean {
@@ -51,7 +62,7 @@ export function useTouchMessageGestures<T extends HTMLElement>({
 }: {
   eligible: boolean
   preferences: MessageGesturePreferences | null
-  /** A tap on this control is delayed so a second tap can claim the gesture. */
+  /** An opener or card containing it; defer taps so a second can claim them. */
   openControlSelector: string | null
   onAction: (action: MessageGestureAction) => void
   onSingleTap: () => void
@@ -221,7 +232,7 @@ export function useTouchMessageGestures<T extends HTMLElement>({
       pointer.current = null
       suppressNextClick.current = false
       clearSwipePresentation()
-      const openControl = closestButton(
+      const openControl = closestOpenButton(
         pointerEvent.target,
         openControlSelector,
       )
@@ -371,6 +382,14 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         suppressNextClick.current = true
         return
       }
+      // With no double-tap binding, let the native click activate the opener.
+      // Opening during pointerup can put the viewer under WebKit's subsequent
+      // compatibility click, which then dismisses it as a backdrop tap.
+      if (
+        gesture.openControl !== null &&
+        (!eligible || preferences?.bindings.double_tap == null)
+      )
+        return
       pointerEvent.preventDefault()
       suppressNextClick.current = true
       finishTap(
@@ -400,7 +419,7 @@ export function useTouchMessageGestures<T extends HTMLElement>({
       }
       if (
         suppressNextClick.current &&
-        closestButton(click.target, openControlSelector) !== null
+        closestOpenButton(click.target, openControlSelector) !== null
       ) {
         suppressNextClick.current = false
         click.preventDefault()

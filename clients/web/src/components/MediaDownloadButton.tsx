@@ -2,12 +2,12 @@
 export function MediaDownloadButton({
   onClick,
   downloading = false,
-  label = 'Download',
+  label,
   className = '',
 }: {
   onClick: () => void
   downloading?: boolean
-  label?: string
+  label: string
   className?: string
 }) {
   return (

@@ -41,6 +41,11 @@ export function MediaAttachment({
   const size = humanSize(media.size)
   const downloadable = isDownloadable(media)
 
+  const open = () => {
+    setError(null)
+    setExpanded(true)
+  }
+
   const download = async () => {
     setDownloading(true)
     setError(null)
@@ -54,6 +59,7 @@ export function MediaAttachment({
   const downloadButton = downloadable ? (
     <MediaDownloadButton
       className="media-attachment-download"
+      label={`Download ${media.filename}`}
       downloading={downloading}
       onClick={() => void download()}
     />
@@ -69,7 +75,7 @@ export function MediaAttachment({
           media={media}
           kind={plan.kind}
           content={content}
-          onOpen={() => setExpanded(true)}
+          onOpen={open}
         >
           {downloadButton}
         </MediaTile>
@@ -78,9 +84,7 @@ export function MediaAttachment({
           class={`media-attachment${plan !== null ? ' media-attachment-previewable' : ''}`}
           data-media-preview-card={plan !== null ? '' : undefined}
           onClick={
-            plan === null
-              ? undefined
-              : (event) => openMediaCard(event, () => setExpanded(true))
+            plan === null ? undefined : (event) => openMediaCard(event, open)
           }
         >
           <div class="media-attachment-heading">
@@ -96,11 +100,8 @@ export function MediaAttachment({
                 type="button"
                 class="media-attachment-name media-attachment-open"
                 title={media.filename}
-                aria-label={`${plan.kind === 'audio' ? 'Play' : 'Preview'} ${media.filename}`}
+                aria-description={`${plan.kind === 'audio' ? 'Play' : 'Preview'} attachment`}
                 aria-haspopup="dialog"
-                onClick={(event) =>
-                  openMediaCard(event, () => setExpanded(true))
-                }
               >
                 {media.filename}
               </button>
@@ -133,7 +134,10 @@ export function MediaAttachment({
           media={media}
           plan={plan}
           content={content}
-          onClose={() => setExpanded(false)}
+          onClose={() => {
+            setError(null)
+            setExpanded(false)
+          }}
           onDownload={downloadable ? () => void download() : undefined}
           downloading={downloading}
           downloadError={error}

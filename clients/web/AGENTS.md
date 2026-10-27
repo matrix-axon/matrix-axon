@@ -190,8 +190,9 @@ before starting a milestone.
   unidentifiable bytes) have been removed, so any bytes that arrive are
   offered for Download.
 - **Attachment cards** (`components/MediaAttachment.tsx`, `MediaTile.tsx`): captions span the card width and the shared `MediaDownloadButton` occupies the top-right header/tile corner.
-  Previewable cards own their click/tap area through `data-media-preview-card`; `closestGestureControl` lets nested buttons, caption links, and spoilers retain their actions while keeping message-row gestures out of the card.
-  `openMediaCard` ignores modifier clicks and active text selections and focuses the real filename/tile button before opening, so dialog dismissal restores a useful target.
+  `openMediaCard` delegates clicks once from `data-media-preview-card`, excluding nested controls except the real filename/tile opener.
+  The message touch recognizer resolves the card to that opener, preserving configured double-tap, hold, and swipe actions while leaving nested links and download controls independent.
+  `openMediaCard` ignores modifier clicks and selections touching the card and focuses the real filename/tile button before opening, so dialog dismissal restores a useful target.
   Every supported attachment kind opens in the existing `Lightbox`; text remains escaped/highlighted, and the existing type/size eligibility and on-demand loading rules apply.
   Text preview clicks/selection are exempt from backdrop dismissal.
   Unsupported and oversized files have no preview control and retain their download icon.

@@ -48,7 +48,7 @@ There is no separate Preview/Hide disclosure control.
 The viewer is dismissed with Escape, Close, or a backdrop click, using the shared modal focus contract.
 Text selection and clicks inside the text preview do not dismiss it, and dismissal restores focus to the filename/tile opener.
 Download uses the same icon and platform save path as the image viewer; the download button and caption links/spoilers keep independent actions.
-Previewable cards own their tap area, so message gestures are available on the surrounding row rather than competing with attachment activation.
+The message touch recognizer arbitrates card activation like image activation: a single tap opens the preview, while configured double-tap, hold, and swipe actions take priority.
 Unsupported or oversized media remains download-only.
 No attachment bytes are fetched merely by scrolling past a card.
 
