@@ -21,23 +21,30 @@ test('a rendered binary QR image scans back to the exact original bytes', async 
   await expect(canvas).toBeVisible()
   // The canvas is in the page before it is drawn: the renderer loads its
   // library lazily. `toBeVisible` passes on the blank 300x150 default, so wait
-  // for the first painted pixel or the screenshot can be of nothing.
+  // for the first painted pixel or the screenshot can be of nothing. The
+  // default 5s is an assertion budget for something already on screen, not for
+  // a cold chunk fetch on a slow runner.
   await expect
-    .poll(() =>
-      canvas.evaluate((element) => {
-        const { width, height } = element as HTMLCanvasElement
-        const context = (element as HTMLCanvasElement).getContext('2d')
-        if (context === null || width === 0 || height === 0) {
-          return false
-        }
-        const pixels = context.getImageData(0, 0, width, height).data
-        for (let alpha = 3; alpha < pixels.length; alpha += 4) {
-          if (pixels[alpha] !== 0) {
-            return true
+    .poll(
+      () =>
+        canvas.evaluate((element) => {
+          const { width, height } = element as HTMLCanvasElement
+          const context = (element as HTMLCanvasElement).getContext('2d')
+          if (context === null || width === 0 || height === 0) {
+            return false
           }
-        }
-        return false
-      }),
+          const pixels = context.getImageData(0, 0, width, height).data
+          for (let alpha = 3; alpha < pixels.length; alpha += 4) {
+            if (pixels[alpha] !== 0) {
+              return true
+            }
+          }
+          return false
+        }),
+      {
+        message: 'the QR canvas was never painted (or has no 2d context)',
+        timeout: 15_000,
+      },
     )
     .toBe(true)
   const image = await canvas.screenshot()
