@@ -30,6 +30,10 @@ const ROOM_INFO_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// `failures` stops here, so the wait is 30s, 60s, 120s, then 240s.
 const ROOM_INFO_MAX_FAILURES: u8 = 3;
 
+/// How long membership changes must pause before they refresh the popup.
+/// A burst becomes one read. Constant churn does not; the 30-second poll covers it.
+const ROOM_INFO_MEMBER_DEBOUNCE: Duration = Duration::from_secs(2);
+
 /// A pasted Matrix ID or display name fits. Anything longer cannot be a
 /// substring of a field this short, and a huge paste must not be stored.
 const MEMBER_FILTER_MAX_CHARS: usize = 1024;
@@ -115,16 +119,19 @@ pub(crate) struct RoomInfoCache {
     reads: Vec<AbortHandle>,
     /// `None` until the main loop wires the channel (and in unit tests).
     pub(crate) tx: Option<mpsc::UnboundedSender<RoomInfoOutcome>>,
-    /// When the open popup may poll again. `None` while it is closed.
+    /// When the open popup may poll again, measured from when the previous
+    /// batch settled. `None` while it is closed.
     next_poll: Option<Instant>,
-    /// When the current batch started. Failure backoff is measured from here,
-    /// so settling a batch does not read the wall clock.
-    batch_started_at: Option<Instant>,
     /// Transport failures in a row. The poll wait is `30s * 2^failures`.
+    /// One failed part backs off the whole batch: the four reads share this clock.
     failures: u8,
-    /// A reconnect or timeline invalidation arrived during the current batch.
-    /// The next poll starts one follow-up after that batch settles.
+    /// A reconnect or metadata invalidation arrived during the current batch.
+    /// After a successful batch, the next poll starts one follow-up.
+    /// A failure backoff keeps this from starting a batch early.
     refresh_again: bool,
+    /// When a paused membership burst may refresh the popup.
+    /// Each new member event pushes this forward.
+    member_refresh_at: Option<Instant>,
 }
 
 impl RoomInfoCache {
@@ -139,11 +146,31 @@ fn room_info_poll_delay(failures: u8) -> Duration {
     ROOM_INFO_POLL_INTERVAL.saturating_mul(1_u32 << u32::from(failures.min(ROOM_INFO_MAX_FAILURES)))
 }
 
+/// One transport failure backs off every read in the next poll.
+/// Metadata, counts, upgrade, and members share one in-flight batch, so a
+/// members timeout also delays the next metadata read. A second clock would
+/// let one kind of read run while another is still failing.
 fn batch_transport_failed(state: &RoomInfoState) -> bool {
     part_transport_failed(&state.metadata)
         || part_transport_failed(&state.info)
         || part_transport_failed(&state.upgrade)
         || part_transport_failed(&state.members)
+}
+
+fn room_info_event_refreshes(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "m.room.redaction"
+            | "m.room.canonical_alias"
+            | "m.room.create"
+            | "m.room.join_rules"
+            | "m.room.encryption"
+            | "m.room.power_levels"
+            | "m.room.server_acl"
+            | "m.room.history_visibility"
+            | "m.room.guest_access"
+            | "m.room.tombstone"
+    )
 }
 
 fn part_transport_failed<T>(part: &Part<T>) -> bool {
@@ -263,8 +290,8 @@ impl App {
     pub(crate) fn open_room_info(&mut self, key: RoomKey, now: Instant) {
         self.room_info.failures = 0;
         self.room_info.refresh_again = false;
+        self.room_info.member_refresh_at = None;
         self.request_room_info(key);
-        self.room_info.batch_started_at = Some(now);
         self.room_info.next_poll = Some(now + ROOM_INFO_POLL_INTERVAL);
     }
 
@@ -285,6 +312,7 @@ impl App {
             // instead of leaving the body on "not loaded".
             self.room_info.failures = 0;
             self.room_info.refresh_again = false;
+            self.room_info.member_refresh_at = None;
             self.popup_scroll = 0;
             self.reveal_room_info_members = false;
             self.begin_room_info_batch(key, now);
@@ -299,13 +327,20 @@ impl App {
             return;
         }
         let due = self.room_info.next_poll.is_some_and(|due| now >= due);
-        if self.room_info.refresh_again || due {
+        // Failure backoff is the schedule. A reconnect, a metadata event, or a
+        // membership pause does not start another batch before it is due.
+        let early = self.room_info.failures == 0
+            && (self.room_info.refresh_again
+                || self.room_info.member_refresh_at.is_some_and(|at| now >= at));
+        if due || early {
+            self.room_info.member_refresh_at = None;
             self.begin_room_info_batch(key, now);
         }
     }
 
-    /// Re-read because the socket reconnected or a state event or redaction
-    /// arrived. A batch that is already running records one follow-up.
+    /// Re-read because the socket reconnected or a metadata event or redaction
+    /// arrived. A batch that is already running records one follow-up, which
+    /// waits out a failure backoff.
     pub(crate) fn invalidate_open_room_info(&mut self, now: Instant) {
         if self.room_info_popup_is_open() {
             self.room_info.refresh_again = true;
@@ -313,17 +348,28 @@ impl App {
         self.poll_open_room_info(now);
     }
 
-    /// A live timeline event for `key`. State events and redactions refresh
-    /// the open popup. Messages, edits, and reactions do not.
+    /// A live timeline event for `key`.
+    /// Redactions and the state the popup reads refresh it.
+    /// Membership changes debounce into one later read.
+    /// Messages, names, topics, and other state do not.
     pub(crate) fn note_room_info_timeline_event(
         &mut self,
         key: &RoomKey,
-        refreshes_room_info: bool,
+        event_type: &str,
+        now: Instant,
     ) {
-        if !refreshes_room_info || self.selected_room_key().as_ref() != Some(key) {
+        if self.selected_room_key().as_ref() != Some(key) {
             return;
         }
-        self.invalidate_open_room_info(Instant::now());
+        if event_type == "m.room.member" {
+            if self.room_info_popup_is_open() {
+                self.room_info.member_refresh_at = Some(now + ROOM_INFO_MEMBER_DEBOUNCE);
+            }
+            return;
+        }
+        if room_info_event_refreshes(event_type) {
+            self.invalidate_open_room_info(now);
+        }
     }
 
     /// Abort the in-flight batch and drop a late outcome.
@@ -346,14 +392,13 @@ impl App {
         }
         self.room_info.next_poll = None;
         self.room_info.refresh_again = false;
-        self.room_info.batch_started_at = None;
+        self.room_info.member_refresh_at = None;
     }
 
     fn begin_room_info_batch(&mut self, key: RoomKey, now: Instant) {
         let before = self.room_info.generation;
         self.request_room_info(key);
         if self.room_info.generation != before {
-            self.room_info.batch_started_at = Some(now);
             self.room_info.next_poll = Some(now + room_info_poll_delay(self.room_info.failures));
             self.room_info.refresh_again = false;
         }
@@ -365,7 +410,13 @@ impl App {
 
     /// Apply one completed read. A result for a room the popup has moved on
     /// from, or from a superseded request, is dropped.
+    /// The clock is read here, when the batch settles on the event loop.
     pub(crate) fn apply_room_info_outcome(&mut self, outcome: RoomInfoOutcome) {
+        self.apply_room_info_outcome_at(outcome, Instant::now());
+    }
+
+    /// [`apply_room_info_outcome`] at `now`, so a test can pause the clock.
+    pub(crate) fn apply_room_info_outcome_at(&mut self, outcome: RoomInfoOutcome, now: Instant) {
         let just_settled = {
             let Some(state) = self.room_info.state.as_mut() else {
                 return;
@@ -394,11 +445,11 @@ impl App {
                 .state
                 .as_ref()
                 .is_some_and(batch_transport_failed);
-            self.note_room_info_batch_settled(failed);
+            self.note_room_info_batch_settled(failed, now);
         }
     }
 
-    fn note_room_info_batch_settled(&mut self, failed: bool) {
+    fn note_room_info_batch_settled(&mut self, failed: bool, now: Instant) {
         if failed {
             self.room_info.failures = self
                 .room_info
@@ -408,15 +459,17 @@ impl App {
         } else {
             self.room_info.failures = 0;
         }
-        let Some(started) = self.room_info.batch_started_at else {
+        if !self.room_info_popup_is_open() {
             return;
-        };
+        }
         let delay = if failed {
             room_info_poll_delay(self.room_info.failures)
         } else {
             ROOM_INFO_POLL_INTERVAL
         };
-        self.room_info.next_poll = Some(started + delay);
+        // From settle, not from start. A read that outruns its interval must
+        // not leave the next poll already due.
+        self.room_info.next_poll = Some(now + delay);
     }
 
     fn selected_room_key(&self) -> Option<RoomKey> {
@@ -3714,7 +3767,7 @@ mod tests {
         drop(rx);
     }
 
-    fn settle_room_info(app: &mut App, failure: Option<ReadFailure>) {
+    fn settle_room_info(app: &mut App, failure: Option<ReadFailure>, now: Instant) {
         let state = app.room_info.state.as_ref().expect("a batch is open");
         let key = state.key.clone();
         let generation = state.generation;
@@ -3728,11 +3781,14 @@ mod tests {
             RoomInfoPart::Upgrade(Ok(RoomUpgradeDto::default())),
             RoomInfoPart::Members(Ok(Vec::new())),
         ] {
-            app.apply_room_info_outcome(RoomInfoOutcome {
-                key: key.clone(),
-                generation,
-                part,
-            });
+            app.apply_room_info_outcome_at(
+                RoomInfoOutcome {
+                    key: key.clone(),
+                    generation,
+                    part,
+                },
+                now,
+            );
         }
     }
 
@@ -3769,7 +3825,7 @@ mod tests {
         let t0 = Instant::now();
         app.invalidate_open_room_info(t0);
         let generation = app.room_info.generation;
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, t0);
         assert_eq!(app.room_info.failures, 0);
         assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(30)));
 
@@ -3809,7 +3865,7 @@ mod tests {
         assert_eq!(app.room_info.generation, generation);
         assert!(app.room_info.refresh_again);
 
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, t0);
         assert!(app.room_info.refresh_again);
         app.poll_open_room_info(t0 + Duration::from_secs(1));
 
@@ -3826,7 +3882,7 @@ mod tests {
         app.invalidate_open_room_info(t0);
         let mut started = t0;
         for (nth, gap) in [60_u64, 120, 240, 240].into_iter().enumerate() {
-            settle_room_info(&mut app, Some(ReadFailure::Failed));
+            settle_room_info(&mut app, Some(ReadFailure::Failed), started);
             assert_eq!(
                 app.room_info.failures,
                 u8::try_from(nth + 1).unwrap().min(3)
@@ -3843,7 +3899,7 @@ mod tests {
             started += Duration::from_secs(gap);
         }
 
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, started);
         assert_eq!(app.room_info.failures, 0);
         assert_eq!(
             app.room_info.next_poll,
@@ -3858,7 +3914,7 @@ mod tests {
         app.mode = Mode::Popup(PopupKind::RoomInfo);
         let t0 = Instant::now();
         app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, Some(ReadFailure::Unsupported));
+        settle_room_info(&mut app, Some(ReadFailure::Unsupported), t0);
 
         assert_eq!(app.room_info.failures, 0);
         assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(30)));
@@ -3922,14 +3978,14 @@ mod tests {
         app.mode = Mode::Popup(PopupKind::RoomInfo);
         let t0 = Instant::now();
         app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, t0);
         let far = Some(t0 + Duration::from_secs(10_000));
         app.room_info.next_poll = far;
         let idle = app.room_info.generation;
 
         app.handle_live_frame(LiveFrame::Connected);
         assert_eq!(app.room_info.generation, idle + 1);
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, t0);
 
         app.mode = Mode::Compose;
         let idle = app.room_info.generation;
@@ -3952,20 +4008,39 @@ mod tests {
         ))));
         app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
             "!other:example.com",
-            "m.room.topic",
+            "m.room.encryption",
             Some(""),
             false,
         ))));
-        assert_eq!(app.room_info.generation, idle);
-
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
+            "!room:example.com",
+            "m.room.name",
+            Some(""),
+            false,
+        ))));
         app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
             "!room:example.com",
             "m.room.topic",
             Some(""),
             false,
         ))));
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
+            "!room:example.com",
+            "m.room.member",
+            Some("@ada:example.com"),
+            false,
+        ))));
+        assert_eq!(app.room_info.generation, idle);
+        assert!(app.room_info.member_refresh_at.is_some());
+
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
+            "!room:example.com",
+            "m.room.encryption",
+            Some(""),
+            false,
+        ))));
         assert_eq!(app.room_info.generation, idle + 1);
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, t0);
         app.room_info.next_poll = far;
         let idle = app.room_info.generation;
 
@@ -3985,7 +4060,7 @@ mod tests {
         app.mode = Mode::Popup(PopupKind::RoomInfo);
         let t0 = Instant::now();
         app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, t0);
         {
             let state = app.room_info.state.as_mut().unwrap();
             state.member_filter = "ada".to_owned();
@@ -3995,7 +4070,7 @@ mod tests {
         app.popup_scroll = 12;
 
         app.poll_open_room_info(t0 + Duration::from_secs(30));
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, t0 + Duration::from_secs(30));
 
         let state = app.room_info.state.as_ref().unwrap();
         assert_eq!(state.member_filter, "ada");
@@ -4011,7 +4086,7 @@ mod tests {
         app.mode = Mode::Popup(PopupKind::RoomInfo);
         let t0 = Instant::now();
         app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, None);
+        settle_room_info(&mut app, None, t0);
         {
             let state = app.room_info.state.as_mut().unwrap();
             state.metadata.value = Some(full_metadata());
@@ -4039,5 +4114,99 @@ mod tests {
         let lines = crate::ui::popup_room_info_lines(&app);
         assert!(lines.iter().any(|line| line.contains("loading")));
         assert!(!lines.iter().any(|line| line.contains("Room version:")));
+    }
+
+    #[tokio::test]
+    async fn a_slow_batch_polls_from_when_it_settles() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        let generation = app.room_info.generation;
+        let settled = t0 + Duration::from_secs(40);
+
+        settle_room_info(&mut app, None, settled);
+
+        assert_eq!(
+            app.room_info.next_poll,
+            Some(settled + Duration::from_secs(30))
+        );
+        app.poll_open_room_info(settled + Duration::from_secs(29));
+        assert_eq!(app.room_info.generation, generation);
+        app.poll_open_room_info(settled + Duration::from_secs(30));
+        assert_eq!(app.room_info.generation, generation + 1);
+    }
+
+    #[tokio::test]
+    async fn a_slow_failure_still_backs_off_from_when_it_settles() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        let settled = t0 + Duration::from_secs(60);
+        let generation = app.room_info.generation;
+
+        settle_room_info(&mut app, Some(ReadFailure::Failed), settled);
+
+        assert_eq!(app.room_info.failures, 1);
+        assert_eq!(
+            app.room_info.next_poll,
+            Some(settled + Duration::from_secs(60))
+        );
+        app.poll_open_room_info(settled + Duration::from_secs(59));
+        assert_eq!(app.room_info.generation, generation);
+        app.poll_open_room_info(settled + Duration::from_secs(60));
+        assert_eq!(app.room_info.generation, generation + 1);
+    }
+
+    #[tokio::test]
+    async fn a_live_invalidation_waits_out_a_failure_backoff() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        app.invalidate_open_room_info(t0 + Duration::from_secs(1));
+        settle_room_info(&mut app, Some(ReadFailure::Failed), t0);
+        assert!(app.room_info.refresh_again);
+        assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(60)));
+        let generation = app.room_info.generation;
+
+        app.poll_open_room_info(t0 + Duration::from_secs(1));
+        app.invalidate_open_room_info(t0 + Duration::from_secs(10));
+        app.poll_open_room_info(t0 + Duration::from_secs(10));
+        assert_eq!(app.room_info.generation, generation);
+
+        app.poll_open_room_info(t0 + Duration::from_secs(60));
+        assert_eq!(app.room_info.generation, generation + 1);
+    }
+
+    #[tokio::test]
+    async fn membership_changes_refresh_once_after_they_pause() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        settle_room_info(&mut app, None, t0);
+        let generation = app.room_info.generation;
+        let room_key = key();
+
+        app.note_room_info_timeline_event(&room_key, "m.room.member", t0 + Duration::from_secs(1));
+        app.note_room_info_timeline_event(&room_key, "m.room.name", t0 + Duration::from_secs(1));
+        app.note_room_info_timeline_event(&room_key, "m.room.topic", t0 + Duration::from_secs(1));
+        assert_eq!(app.room_info.generation, generation);
+        app.note_room_info_timeline_event(&room_key, "m.room.member", t0 + Duration::from_secs(2));
+        assert_eq!(
+            app.room_info.member_refresh_at,
+            Some(t0 + Duration::from_secs(4))
+        );
+
+        app.poll_open_room_info(t0 + Duration::from_secs(3));
+        assert_eq!(app.room_info.generation, generation);
+        app.poll_open_room_info(t0 + Duration::from_secs(4));
+        assert_eq!(app.room_info.generation, generation + 1);
     }
 }

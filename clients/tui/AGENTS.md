@@ -34,9 +34,12 @@
   The prompt ends when the popup closes or the selected room changes, so a later paste reaches the composer.
   Alt and Ctrl-Alt characters are typed into the prompt. Plain Ctrl stays a shortcut.
   A later refresh of the same room must keep the filter text and must not jump the scroll on its own.
-  While the popup is open it re-reads on reconnect, when a state event or redaction arrives for the selected room, and every 30 seconds from the tick.
+  While the popup is open it re-reads on reconnect, when a redaction or a metadata or tombstone state event arrives for the selected room, and every 30 seconds from the tick.
+  That wait starts when the previous batch settles, so a slow read does not start the next one immediately.
+  Membership changes wait until they pause for two seconds, then cause one re-read.
   One batch is in flight at a time.
-  A transport failure doubles that wait, up to four minutes, and a 404 does not.
+  One transport failure doubles the wait for the whole batch, up to four minutes, and a 404 does not.
+  A reconnect or a new event does not skip that backoff.
   Closing the popup cancels the batch.
   The poll stays until the server publishes required-state changes (#621).
   If the selected room changes under the open popup, the next tick fetches that room and resets the scroll.

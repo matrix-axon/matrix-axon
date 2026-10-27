@@ -76,8 +76,10 @@ The key is configurable and listed in `/shortcuts`.
 
 ### Refresh while visible
 
-The popup re-reads on open, on a live reconnect, and when a live state event or redaction arrives for the shown room.
-While visible it also polls every 30 seconds from the existing tick, with one request in flight, backoff after failures, and cancellation on close.
+The popup re-reads on open, on a live reconnect, and when a redaction or a metadata or tombstone state event arrives for the shown room.
+Membership changes wait until they pause, then cause one re-read.
+While visible it also polls every 30 seconds from the existing tick, measured from when the previous batch settled, with one request in flight, backoff after failures, and cancellation on close.
+One transport failure backs off the whole batch, and a live invalidation does not skip that backoff.
 A background refresh does not move the scroll position or clear an active member filter.
 If the selected room changes while the popup is open, the popup fetches that room and resets its scroll, instead of leaving the body on "not loaded".
 The polling is removed once the server signals required-state-only changes ([issue 343](https://github.com/matrix-axon/matrix-axon/issues/343) and issue 621).
