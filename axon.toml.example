@@ -126,7 +126,8 @@ ephemeral_event_types = ["m.typing", "m.receipt"]
 # Per-call timeout for an outbound read receipt, in seconds. A receipt that
 # times out leaves the room's unread badge where it was, so this is longer
 # than the typing timeout. A reverse proxy in front of axon needs a read
-# timeout at least this long. Default 30.
+# timeout at least this long, and a client's own request deadline still
+# applies: the web client gives up after 20 s. Default 30.
 # read_receipt_timeout_secs = 30
 # Per-call timeout for an outbound typing notice, in seconds. Default 10.
 # typing_timeout_secs = 10

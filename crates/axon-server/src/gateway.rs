@@ -80,15 +80,22 @@ impl GatewayAdapter {
 /// Runs `fut` under `timeout`, reporting a timeout via [`timed_out`] and
 /// mapping a gateway error via [`map_err`]. Every outbound call in this
 /// adapter goes through it, so none can report a timeout any other way.
+///
+/// The SDK's own request timeout (30 s by default) can fire first. That is
+/// reported in the same `<verb> timed out after Ns` form, with how long Axon
+/// actually waited, so a client matching on the message (the web client's
+/// join/knock hint) sees one shape. The SDK logs the failed request itself.
 async fn bounded<T>(
     timeout: Duration,
     verb: &str,
     fut: impl Future<Output = Result<T, GatewayError>>,
 ) -> Result<T, SendError> {
-    tokio::time::timeout(timeout, fut)
-        .await
-        .map_err(|_| timed_out(verb, timeout))?
-        .map_err(map_err)
+    let started = tokio::time::Instant::now();
+    match tokio::time::timeout(timeout, fut).await {
+        Err(_) => Err(timed_out(verb, timeout)),
+        Ok(Err(GatewayError::Timeout(_))) => Err(timed_out(verb, started.elapsed())),
+        Ok(result) => result.map_err(map_err),
+    }
 }
 
 /// The [`SendError::Timeout`] (a `504`) an outbound call reports when it hits
@@ -660,7 +667,7 @@ mod tests {
         })
         .await;
         match result {
-            Err(SendError::Timeout(message)) => assert_eq!(message, "operation timed out"),
+            Err(SendError::Timeout(message)) => assert_eq!(message, "leave timed out after 30s"),
             other => panic!("expected a timeout, got {other:?}"),
         }
     }

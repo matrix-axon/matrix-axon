@@ -48,7 +48,7 @@ updated_at)` holds one of two states per room:
   account believes it is joined to. Recorded by `SdkGateway`'s receipt path with
   no network access and no verdict, because one rejection proves nothing (see
   Context) and because the rejecting call has a latency budget to protect
-  (`sync.ephemeral_send_timeout_secs`). A repeat rejection is insert-if-absent:
+  (`sync.read_receipt_timeout_secs`, formerly `sync.ephemeral_send_timeout_secs`). A repeat rejection is insert-if-absent:
   it must not reset `first_flagged_at`, which is how long the room has looked
   wrong.
 - **`gone`** — the unread watcher's `reconcile_upstream_rooms` probed the room

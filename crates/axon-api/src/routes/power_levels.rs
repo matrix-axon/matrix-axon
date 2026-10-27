@@ -93,7 +93,7 @@ pub async fn set_power_levels(
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
         (status = 404, description = "Account or room not found", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
-        (status = 504, description = "The homeserver did not answer in time (ADR 0121); a write may still take effect", body = crate::response::ErrorResponse),
+        (status = 504, description = "The homeserver did not answer in time (ADR 0121)", body = crate::response::ErrorResponse),
         (status = 503, description = "Account not reachable", body = crate::response::ErrorResponse),
     ),
     tag = "power-levels",

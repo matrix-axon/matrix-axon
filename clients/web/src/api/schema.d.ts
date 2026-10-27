@@ -6751,7 +6751,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            /** @description The homeserver did not answer in time (ADR 0121) */
             504: {
                 headers: {
                     [name: string]: unknown;
@@ -9597,7 +9597,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            /** @description The homeserver did not answer in time (ADR 0121) */
             504: {
                 headers: {
                     [name: string]: unknown;
@@ -11028,7 +11028,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
+            /** @description The homeserver did not answer in time (ADR 0121) */
             504: {
                 headers: {
                     [name: string]: unknown;
