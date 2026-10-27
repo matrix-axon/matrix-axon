@@ -45,7 +45,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use crate::cli::{Cli, Command};
 use crate::devices::DeviceAdapter;
-use crate::gateway::GatewayAdapter;
+use crate::gateway::{GatewayAdapter, GatewayTimeouts};
 use crate::lifecycle::LifecycleAdapter;
 use crate::matrix_oauth_acquire::MatrixOAuthAcquireAdapter;
 use crate::matrix_oauth_browser::MatrixOAuthBrowserAdapter;
@@ -137,6 +137,14 @@ async fn main() -> anyhow::Result<()> {
     } else if config.used_legacy_data_dirs {
         tracing::warn!(
             "using pre-rename data/cache directories because they exist on disk and the current axon-server paths do not; move the trees (or pin the paths) when convenient"
+        );
+    }
+    if let Some(secs) = config.sync.ephemeral_send_timeout_secs {
+        tracing::warn!(
+            ephemeral_send_timeout_secs = secs,
+            read_receipt_timeout_secs = config.sync.read_receipt_timeout_secs,
+            typing_timeout_secs = config.sync.typing_timeout_secs,
+            "sync.ephemeral_send_timeout_secs is deprecated and applies only where the new key is unset; set sync.read_receipt_timeout_secs and sync.typing_timeout_secs instead"
         );
     }
 
@@ -277,11 +285,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // (M7b) is backed straight by the store.
     let sender = Arc::new(GatewayAdapter::new(
         sync_engine.gateway(),
-        std::time::Duration::from_secs(config.sync.send_mutation_timeout_secs),
-        std::time::Duration::from_secs(config.media.upstream_upload_timeout_secs),
-        std::time::Duration::from_secs(config.sync.ephemeral_send_timeout_secs),
-        std::time::Duration::from_secs(config.sync.membership_mutation_timeout_secs),
-        std::time::Duration::from_secs(config.sync.room_entry_timeout_secs),
+        GatewayTimeouts {
+            send_mutation: std::time::Duration::from_secs(config.sync.send_mutation_timeout_secs),
+            upstream_upload: std::time::Duration::from_secs(
+                config.media.upstream_upload_timeout_secs,
+            ),
+            read_receipt: std::time::Duration::from_secs(config.sync.read_receipt_timeout_secs),
+            typing: std::time::Duration::from_secs(config.sync.typing_timeout_secs),
+            membership_mutation: std::time::Duration::from_secs(
+                config.sync.membership_mutation_timeout_secs,
+            ),
+            room_entry: std::time::Duration::from_secs(config.sync.room_entry_timeout_secs),
+        },
     ));
     // Same adapter, unsized onto the ephemeral-outbound port (read receipts /
     // typing notices, ADR 0067 / ADR 0068 M19a) alongside `MessageSender` below.

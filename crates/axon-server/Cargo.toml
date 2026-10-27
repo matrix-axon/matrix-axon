@@ -71,6 +71,9 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 [dev-dependencies]
 axon-test-support = { workspace = true }
 tempfile = "3"
+# `test-util` pauses the clock so the gateway adapter's timeout tests run
+# without waiting out the timeout.
+tokio = { workspace = true, features = ["test-util"] }
 # Non-optional here (unlike the `dev-tools`-gated dep above) so `uploads.rs`'s
 # tests can drive raw state transitions the store API doesn't expose, without
 # requiring `--features dev-tools` just to run `cargo test`.

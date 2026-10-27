@@ -1443,7 +1443,7 @@ impl SdkGateway {
     /// is scoped to the *event*, so it cannot be told apart from "that one event
     /// is unknown" here, and a transient failure looks the same again. The
     /// watcher's own bounded probe decides, which also keeps this call's latency
-    /// budget (`sync.ephemeral_send_timeout_secs`) free of an extra round trip.
+    /// budget (`sync.read_receipt_timeout_secs`) free of an extra round trip.
     ///
     /// A success clears any row unconditionally rather than reading first: it is
     /// one indexed delete that matches nothing in the normal case, and it is how

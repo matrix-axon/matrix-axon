@@ -326,14 +326,27 @@ pub struct SyncConfig {
     /// to 30.
     #[serde(default = "default_send_mutation_timeout_secs")]
     pub send_mutation_timeout_secs: u64,
-    /// Per-call timeout for an outbound ephemeral send — a read receipt (ADR
-    /// 0067) or a typing notice (ADR 0068, M19a) — in seconds. Bounds a hung
-    /// homeserver response so the request-handling task can't block on it
-    /// unbounded. Defaults to 10.
-    #[serde(default = "default_ephemeral_send_timeout_secs")]
-    pub ephemeral_send_timeout_secs: u64,
-    /// Per-call timeout for an outbound room-membership mutation — `leave`,
-    /// `forget`, `invite`, `kick`, `ban`, `unban` (ADR 0068, M19b) — or an
+    /// Per-call timeout for an outbound read receipt (ADR 0067), in seconds.
+    /// A receipt is durable state, and one that times out leaves the room's
+    /// unread badge where it was, so it gets far longer than a typing notice
+    /// (issue #627). Nothing waits on it, but the request stays open that
+    /// long, so a reverse proxy in front of Axon needs a read timeout at least
+    /// this long. Defaults to 30.
+    #[serde(default = "default_read_receipt_timeout_secs")]
+    pub read_receipt_timeout_secs: u64,
+    /// Per-call timeout for an outbound typing notice (ADR 0068, M19a), in
+    /// seconds. A notice expires on its own, so a late one is worthless.
+    /// Defaults to 10.
+    #[serde(default = "default_typing_timeout_secs")]
+    pub typing_timeout_secs: u64,
+    /// Deprecated: the one timeout read receipts and typing notices shared
+    /// before issue #627. When set, it applies to whichever of
+    /// `read_receipt_timeout_secs` and `typing_timeout_secs` the config
+    /// omits, and `axon-server` logs a warning at boot.
+    #[serde(default)]
+    pub ephemeral_send_timeout_secs: Option<u64>,
+    /// Per-call timeout for an outbound room-membership mutation — `invite`,
+    /// `kick`, `ban`, `unban` (ADR 0068, M19b) — or an
     /// outbound room-settings mutation — `set_name`, `set_topic`,
     /// `remove_avatar`, `set_tag`, `remove_tag` (ADR 0068, M19d) — in
     /// seconds. Both groups share this one timeout: each is a purely
@@ -348,10 +361,12 @@ pub struct SyncConfig {
     #[serde(default = "default_membership_mutation_timeout_secs")]
     pub membership_mutation_timeout_secs: u64,
     /// Per-call timeout for an outbound room-entry mutation — `join`,
-    /// `knock`, `create_room`, `create_dm` (ADR 0068, M19c) — in seconds.
-    /// Longer than `membership_mutation_timeout_secs` because these can
-    /// involve federation resolution (an alias/`server_names` join) rather
-    /// than a purely local-room state write. Defaults to 30.
+    /// `knock`, `create_room`, `create_dm` (ADR 0068, M19c) — and for `leave`
+    /// and `forget`, in seconds. Longer than
+    /// `membership_mutation_timeout_secs` because these can involve
+    /// federation resolution (an alias/`server_names` join) rather than a
+    /// purely local-room state write, and leaving a large room needs state
+    /// resolution (ADR 0121 decision 5). Defaults to 30.
     #[serde(default = "default_room_entry_timeout_secs")]
     pub room_entry_timeout_secs: u64,
     /// Enable the M10 history-backfill engine: a continuous, throttled background
@@ -851,7 +866,11 @@ fn default_send_mutation_timeout_secs() -> u64 {
     30
 }
 
-fn default_ephemeral_send_timeout_secs() -> u64 {
+fn default_read_receipt_timeout_secs() -> u64 {
+    30
+}
+
+fn default_typing_timeout_secs() -> u64 {
     10
 }
 
@@ -963,6 +982,24 @@ fn same_path(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
+    }
+}
+
+/// Apply the deprecated `sync.ephemeral_send_timeout_secs`, when set, to
+/// whichever of its two replacements (issue #627) the file and environment
+/// omit, so an existing config keeps the timeout it chose.
+fn apply_legacy_ephemeral_timeout(figment: &Figment, sync: &mut SyncConfig) {
+    let Some(secs) = sync.ephemeral_send_timeout_secs else {
+        return;
+    };
+    if figment
+        .find_value("sync.read_receipt_timeout_secs")
+        .is_err()
+    {
+        sync.read_receipt_timeout_secs = secs;
+    }
+    if figment.find_value("sync.typing_timeout_secs").is_err() {
+        sync.typing_timeout_secs = secs;
     }
 }
 
@@ -1109,7 +1146,9 @@ impl Default for SyncConfig {
             live_event_buffer: default_live_event_buffer(),
             ephemeral_event_types: default_ephemeral_event_types(),
             send_mutation_timeout_secs: default_send_mutation_timeout_secs(),
-            ephemeral_send_timeout_secs: default_ephemeral_send_timeout_secs(),
+            read_receipt_timeout_secs: default_read_receipt_timeout_secs(),
+            typing_timeout_secs: default_typing_timeout_secs(),
+            ephemeral_send_timeout_secs: None,
             membership_mutation_timeout_secs: default_membership_mutation_timeout_secs(),
             room_entry_timeout_secs: default_room_entry_timeout_secs(),
             backfill_enabled: default_backfill_enabled(),
@@ -1231,6 +1270,8 @@ impl Config {
         if !problems.is_empty() {
             return Err(ConfigError::Validation(problems.join("; ")));
         }
+
+        apply_legacy_ephemeral_timeout(&figment, &mut config.sync);
 
         if let Some(path) = path.filter(|p| path_is_legacy_platform_config(p)) {
             apply_legacy_dir_defaults(&figment, &mut config, true);
@@ -1903,9 +1944,52 @@ mod tests {
             assert_eq!(config.sync.matrix_oauth.request_timeout_secs, 15);
             assert!(config.sync.matrix_oauth.static_registrations.is_empty());
             assert_eq!(config.sync.send_mutation_timeout_secs, 30);
-            assert_eq!(config.sync.ephemeral_send_timeout_secs, 10);
+            assert_eq!(config.sync.read_receipt_timeout_secs, 30);
+            assert_eq!(config.sync.typing_timeout_secs, 10);
+            assert_eq!(config.sync.ephemeral_send_timeout_secs, None);
             assert_eq!(config.sync.membership_mutation_timeout_secs, 15);
             assert_eq!(config.sync.room_entry_timeout_secs, 30);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_deprecated_ephemeral_timeout_fills_only_the_omitted_replacement() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.create_file(
+                "axon.toml",
+                r#"
+                    [database]
+                    url = "postgres://u:p@localhost/db"
+
+                    [sync]
+                    ephemeral_send_timeout_secs = 20
+                    read_receipt_timeout_secs = 45
+                "#,
+            )?;
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert_eq!(config.sync.read_receipt_timeout_secs, 45);
+            assert_eq!(config.sync.typing_timeout_secs, 20);
+
+            // The environment counts as setting a key, the same as the file.
+            jail.set_env("AXON_SYNC__TYPING_TIMEOUT_SECS", "5");
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert_eq!(config.sync.read_receipt_timeout_secs, 45);
+            assert_eq!(config.sync.typing_timeout_secs, 5);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_deprecated_ephemeral_timeout_still_works_alone_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AXON_SYNC__EPHEMERAL_SEND_TIMEOUT_SECS", "25");
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.read_receipt_timeout_secs, 25);
+            assert_eq!(config.sync.typing_timeout_secs, 25);
             Ok(())
         });
     }
