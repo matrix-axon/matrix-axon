@@ -507,12 +507,7 @@ mod tests {
             room_details: room_details.clone(),
         };
         let cancel = CancellationToken::new();
-        let worker = tokio::spawn(run(
-            client,
-            ctx,
-            HomeserverGate::for_test(),
-            cancel.clone(),
-        ));
+        let worker = tokio::spawn(run(client, ctx, HomeserverGate::for_test(), cancel.clone()));
         let stored = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let rows = store

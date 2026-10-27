@@ -179,7 +179,10 @@ async fn room_state_upsert_reports_only_real_changes() {
         event_id: Some("$redaction:localhost"),
     };
 
-    assert!(changed(&store, acl("$acl1", 10, "evil.example"), unknown).await, "insert");
+    assert!(
+        changed(&store, acl("$acl1", 10, "evil.example"), unknown).await,
+        "insert"
+    );
     assert!(
         !changed(&store, acl("$acl1", 10, "evil.example"), unknown).await,
         "identical rewrite"
@@ -194,7 +197,10 @@ async fn room_state_upsert_reports_only_real_changes() {
     );
     let mut pruned = acl("$acl2", 20, "worse.example");
     pruned.content = Some(json!({}));
-    assert!(changed(&store, pruned, redacted).await, "redaction evidence");
+    assert!(
+        changed(&store, pruned, redacted).await,
+        "redaction evidence"
+    );
     assert!(
         !changed(&store, acl("$acl2", 20, "worse.example"), unknown).await,
         "an original replay cannot undo redaction, so it changes nothing"

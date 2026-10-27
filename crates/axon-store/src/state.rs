@@ -33,6 +33,37 @@ fn summary_display_state(event_type: &str, state_key: &str) -> bool {
         )
 }
 
+/// A current singleton tuple and the stored redaction event that targets it
+/// (see [`Store::unapplied_room_state_redactions`]).
+#[derive(Debug, Clone)]
+pub struct UnappliedStateRedaction {
+    /// Matrix state type; the state key is always `""`.
+    pub event_type: String,
+    /// The current tuple's event ID, which the redaction targets.
+    pub event_id: String,
+    /// The current tuple's sender.
+    pub sender: String,
+    /// The current tuple's `origin_server_ts` in milliseconds.
+    pub origin_ts: i64,
+    /// The current tuple's stored content.
+    pub content: Option<Value>,
+    /// The redaction event as stored in `events.raw_event`.
+    pub redaction: Value,
+}
+
+impl sqlx_core::from_row::FromRow<'_, PgRow> for UnappliedStateRedaction {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        Ok(Self {
+            event_type: row.try_get("event_type")?,
+            event_id: row.try_get("event_id")?,
+            sender: row.try_get("sender")?,
+            origin_ts: row.try_get("origin_ts")?,
+            content: row.try_get("content")?,
+            redaction: row.try_get("redaction")?,
+        })
+    }
+}
+
 /// A single piece of current room state to upsert: the latest event holding the
 /// `(room_id, event_type, state_key)` tuple for an account.
 pub struct RoomStateUpsert<'a> {
@@ -468,7 +499,44 @@ impl Store {
         Ok(changed)
     }
 
-    /// Read every resolved state tuple of one type in a room, ordered by
+    /// Current singleton tuples of `event_types` without redaction evidence
+    /// that a stored `m.room.redaction` event targets, with that redaction's
+    /// raw event. Repair uses it for state the SDK cache never held (ADR 0126):
+    /// the caller applies the same redaction the SDK store would have applied.
+    /// Tuples over 128 KiB and redactions over 64 KiB are skipped before
+    /// transfer, and the reconciliation deadlines bound the query.
+    pub async fn unapplied_room_state_redactions(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_types: &[&str],
+    ) -> Result<Vec<UnappliedStateRedaction>, StoreError> {
+        let mut tx = self.reconciliation_transaction().await?;
+        let rows = sqlx_core::query_as::query_as::<Postgres, UnappliedStateRedaction>(
+            "SELECT s.event_type, s.event_id, s.sender, s.origin_ts, s.content, r.raw_event AS redaction \
+             FROM room_state s \
+             CROSS JOIN LATERAL (\
+                 SELECT rr.raw_event FROM events rr \
+                 WHERE rr.account_id = s.account_id AND rr.redacts = s.event_id \
+                   AND rr.room_id = s.room_id AND rr.event_type = 'm.room.redaction' \
+                 ORDER BY rr.id LIMIT 1\
+             ) r \
+             WHERE s.account_id = $1 AND s.room_id = $2 AND s.state_key = '' \
+               AND s.event_type = ANY($3) AND s.redacted IS DISTINCT FROM true \
+               AND COALESCE(octet_length(s.content::text), 0) <= 131072 \
+               AND octet_length(r.raw_event::text) <= 65536 \
+             ORDER BY s.event_type",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(event_types)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
+    /// Read every resolved state tuple of one type in a room, ordered by    /// Read every resolved state tuple of one type in a room, ordered by
     /// `state_key` — e.g. all `m.room.member` rows for a membership list.
     pub async fn room_state_of_type(
         &self,

@@ -61,7 +61,7 @@ Absence of the SDK marker does not prove that content is original rather than se
 An empty object or NULL content alone never establishes redaction.
 Already-redacted state can retain room-version-protected fields and remain `available` or `partial`.
 Axon uses the SDK's retained content instead of implementing its own pruning rules.
-A raw timeline redaction row alone never changes the metadata's evidence or withholds its content.
+A raw timeline redaction row alone never changes the metadata's evidence or withholds its content, with one exception below for state the SDK never holds.
 This also avoids withholding legitimate protected fields in pre-migration rows that already contain a redacted form.
 
 A bounded worker reconciles SDK-redacted singleton state into the shared `room_state` projection.
@@ -77,6 +77,10 @@ Each account has one paced worker, a 32-entry hint queue, and at most eight acti
 Duplicate hints coalesce; draining stops at four distinct rooms, leaving the channel tail for the next tick.
 Queue overflow and interrupted jobs heal through subsequent sweeps.
 The worker reads twelve singleton SDK cache entries per room, bounds raw JSON before decoding to 128 KiB, and uses a two-second deadline for each room and each sweep-page read.
+Guest-access and server-ACL state usually reaches Axon only through the supplementary connection, so the SDK cache may hold no copy to repair from, and that connection does not redeliver a redacted target.
+When the SDK has no entry of either type, the worker makes one more bounded query for a stored `m.room.redaction` event targeting Axon's current tuple of that type (tuples up to 128 KiB, redactions up to 64 KiB, under the reconciliation deadlines).
+For each one it finds, it applies the redaction the SDK store would have applied: ruma's `redact` under the room-version rules of the SDK's stored room info, with the same trust in a synced redaction the SDK gives the other ten types.
+The result goes through the same event-ID-guarded repair write, so a replacement is never touched by its predecessor's redaction.
 Ticks run once per second with missed ticks skipped; after a complete sweep the next sweep waits five minutes.
 That idle interval reduces repeated background SQLite reads; retained non-joined rooms can still occupy cheap sweep-page slots, but the worker checks SDK membership before reading singleton state.
 All acquisition is local SDK cache I/O; this worker makes no homeserver requests.
