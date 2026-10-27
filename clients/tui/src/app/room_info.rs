@@ -2,6 +2,8 @@
 //! reads Axon already serves, fetched off the event loop and rendered without
 //! turning "Axon does not know" into "the room does not have one".
 
+use std::time::{Duration, Instant};
+
 use chrono::{Local, TimeZone};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -19,6 +21,14 @@ use crate::config::{ColorScheme, TimeFormat};
 
 /// The four reads behind one `/whereami`: metadata, counts, upgrade, members.
 const ROOM_INFO_READS: u8 = 4;
+
+/// Steady poll while `/whereami` is open.
+/// Required-state updates have no live frame (ADR 0114).
+/// This stays until #621 publishes `room_details.changed`.
+const ROOM_INFO_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// `failures` stops here, so the wait is 30s, 60s, 120s, then 240s.
+const ROOM_INFO_MAX_FAILURES: u8 = 3;
 
 /// A pasted Matrix ID or display name fits. Anything longer cannot be a
 /// substring of a field this short, and a huge paste must not be stored.
@@ -105,6 +115,16 @@ pub(crate) struct RoomInfoCache {
     reads: Vec<AbortHandle>,
     /// `None` until the main loop wires the channel (and in unit tests).
     pub(crate) tx: Option<mpsc::UnboundedSender<RoomInfoOutcome>>,
+    /// When the open popup may poll again. `None` while it is closed.
+    next_poll: Option<Instant>,
+    /// When the current batch started. Failure backoff is measured from here,
+    /// so settling a batch does not read the wall clock.
+    batch_started_at: Option<Instant>,
+    /// Transport failures in a row. The poll wait is `30s * 2^failures`.
+    failures: u8,
+    /// A reconnect or timeline invalidation arrived during the current batch.
+    /// The next poll starts one follow-up after that batch settles.
+    refresh_again: bool,
 }
 
 impl RoomInfoCache {
@@ -113,6 +133,21 @@ impl RoomInfoCache {
             read.abort();
         }
     }
+}
+
+fn room_info_poll_delay(failures: u8) -> Duration {
+    ROOM_INFO_POLL_INTERVAL.saturating_mul(1_u32 << u32::from(failures.min(ROOM_INFO_MAX_FAILURES)))
+}
+
+fn batch_transport_failed(state: &RoomInfoState) -> bool {
+    part_transport_failed(&state.metadata)
+        || part_transport_failed(&state.info)
+        || part_transport_failed(&state.upgrade)
+        || part_transport_failed(&state.members)
+}
+
+fn part_transport_failed<T>(part: &Part<T>) -> bool {
+    part.failure == Some(ReadFailure::Failed)
 }
 
 #[derive(Debug)]
@@ -223,25 +258,165 @@ impl App {
         }
     }
 
+    /// Open `/whereami` for `key` and arm a fresh 30-second cadence.
+    /// A manual reopen does not inherit a failure backoff.
+    pub(crate) fn open_room_info(&mut self, key: RoomKey, now: Instant) {
+        self.room_info.failures = 0;
+        self.room_info.refresh_again = false;
+        self.request_room_info(key);
+        self.room_info.batch_started_at = Some(now);
+        self.room_info.next_poll = Some(now + ROOM_INFO_POLL_INTERVAL);
+    }
+
+    /// Keep an open popup fresh. `now` is the caller's clock, so tests can
+    /// pause it. The main loop passes `Instant::now` from its existing tick.
+    pub(crate) fn poll_open_room_info(&mut self, now: Instant) {
+        if !self.room_info_popup_is_open() {
+            self.cancel_room_info_refresh();
+            return;
+        }
+        let Some(key) = self.selected_room_key() else {
+            self.cancel_room_info_refresh();
+            return;
+        };
+        let cached = self.room_info.state.as_ref().map(|state| state.key.clone());
+        if cached.as_ref() != Some(&key) {
+            // The room on screen changed under the popup. Fetch that room
+            // instead of leaving the body on "not loaded".
+            self.room_info.failures = 0;
+            self.room_info.refresh_again = false;
+            self.popup_scroll = 0;
+            self.reveal_room_info_members = false;
+            self.begin_room_info_batch(key, now);
+            return;
+        }
+        if self
+            .room_info
+            .state
+            .as_ref()
+            .is_some_and(|state| state.in_flight > 0)
+        {
+            return;
+        }
+        let due = self.room_info.next_poll.is_some_and(|due| now >= due);
+        if self.room_info.refresh_again || due {
+            self.begin_room_info_batch(key, now);
+        }
+    }
+
+    /// Re-read because the socket reconnected or a state event or redaction
+    /// arrived. A batch that is already running records one follow-up.
+    pub(crate) fn invalidate_open_room_info(&mut self, now: Instant) {
+        if self.room_info_popup_is_open() {
+            self.room_info.refresh_again = true;
+        }
+        self.poll_open_room_info(now);
+    }
+
+    /// A live timeline event for `key`. State events and redactions refresh
+    /// the open popup. Messages, edits, and reactions do not.
+    pub(crate) fn note_room_info_timeline_event(
+        &mut self,
+        key: &RoomKey,
+        refreshes_room_info: bool,
+    ) {
+        if !refreshes_room_info || self.selected_room_key().as_ref() != Some(key) {
+            return;
+        }
+        self.invalidate_open_room_info(Instant::now());
+    }
+
+    /// Abort the in-flight batch and drop a late outcome.
+    /// Last-good values, the member filter, and the scroll position stay.
+    pub(crate) fn cancel_room_info_refresh(&mut self) {
+        let in_flight = self
+            .room_info
+            .state
+            .as_ref()
+            .is_some_and(|state| state.in_flight > 0);
+        self.room_info.abort_reads();
+        if let Some(state) = self.room_info.state.as_mut() {
+            state.in_flight = 0;
+        }
+        if in_flight {
+            self.room_info.generation += 1;
+            if let Some(state) = self.room_info.state.as_mut() {
+                state.generation = self.room_info.generation;
+            }
+        }
+        self.room_info.next_poll = None;
+        self.room_info.refresh_again = false;
+        self.room_info.batch_started_at = None;
+    }
+
+    fn begin_room_info_batch(&mut self, key: RoomKey, now: Instant) {
+        let before = self.room_info.generation;
+        self.request_room_info(key);
+        if self.room_info.generation != before {
+            self.room_info.batch_started_at = Some(now);
+            self.room_info.next_poll = Some(now + room_info_poll_delay(self.room_info.failures));
+            self.room_info.refresh_again = false;
+        }
+    }
+
+    fn room_info_popup_is_open(&self) -> bool {
+        matches!(self.mode, Mode::Popup(PopupKind::RoomInfo))
+    }
+
     /// Apply one completed read. A result for a room the popup has moved on
     /// from, or from a superseded request, is dropped.
     pub(crate) fn apply_room_info_outcome(&mut self, outcome: RoomInfoOutcome) {
-        let Some(state) = self.room_info.state.as_mut() else {
+        let just_settled = {
+            let Some(state) = self.room_info.state.as_mut() else {
+                return;
+            };
+            if state.key != outcome.key || state.generation != outcome.generation {
+                return;
+            }
+            let was_in_flight = state.in_flight > 0;
+            if was_in_flight {
+                state.in_flight -= 1;
+            }
+            match outcome.part {
+                RoomInfoPart::Metadata(result) => {
+                    state.metadata.settle(result.map(|metadata| *metadata))
+                }
+                RoomInfoPart::Info(result) => state.info.settle(result),
+                RoomInfoPart::Upgrade(result) => state.upgrade.settle(result),
+                RoomInfoPart::Members(result) => state.members.settle(result),
+            }
+            store_member_lines(state);
+            was_in_flight && state.in_flight == 0
+        };
+        if just_settled {
+            let failed = self
+                .room_info
+                .state
+                .as_ref()
+                .is_some_and(batch_transport_failed);
+            self.note_room_info_batch_settled(failed);
+        }
+    }
+
+    fn note_room_info_batch_settled(&mut self, failed: bool) {
+        if failed {
+            self.room_info.failures = self
+                .room_info
+                .failures
+                .saturating_add(1)
+                .min(ROOM_INFO_MAX_FAILURES);
+        } else {
+            self.room_info.failures = 0;
+        }
+        let Some(started) = self.room_info.batch_started_at else {
             return;
         };
-        if state.key != outcome.key || state.generation != outcome.generation {
-            return;
-        }
-        state.in_flight = state.in_flight.saturating_sub(1);
-        match outcome.part {
-            RoomInfoPart::Metadata(result) => {
-                state.metadata.settle(result.map(|metadata| *metadata))
-            }
-            RoomInfoPart::Info(result) => state.info.settle(result),
-            RoomInfoPart::Upgrade(result) => state.upgrade.settle(result),
-            RoomInfoPart::Members(result) => state.members.settle(result),
-        }
-        store_member_lines(state);
+        let delay = if failed {
+            room_info_poll_delay(self.room_info.failures)
+        } else {
+            ROOM_INFO_POLL_INTERVAL
+        };
+        self.room_info.next_poll = Some(started + delay);
     }
 
     fn selected_room_key(&self) -> Option<RoomKey> {
@@ -267,7 +442,7 @@ impl App {
 
     /// The prompt is only live inside the room-info popup for the selected room.
     fn member_filter_prompt_is_live(&self) -> bool {
-        matches!(self.mode, Mode::Popup(PopupKind::RoomInfo)) && self.member_filter_is_editing()
+        self.room_info_popup_is_open() && self.member_filter_is_editing()
     }
 
     /// Drop a committed filter and its prompt before `/whereami` opens again.
@@ -1436,8 +1611,13 @@ pub(crate) fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'s
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
-    use crate::api::{RoomMemberCountsDto, RoomPredecessorContent};
+    use crate::api::{
+        EventDto, LiveFrame, RoomInfoDto, RoomMemberCountsDto, RoomMetadataDto,
+        RoomPredecessorContent, RoomUpgradeDto,
+    };
     use crate::app::{Mode, PopupKind};
     use crate::config::{KeyBinding, TuiConfig};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -3525,5 +3705,339 @@ mod tests {
             .unwrap()
             .member_filter
             .is_empty());
+    }
+
+    /// Drop the receiver so spawned reads cannot deliver a second outcome.
+    fn wire_room_info(app: &mut App) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.room_info.tx = Some(tx);
+        drop(rx);
+    }
+
+    fn settle_room_info(app: &mut App, failure: Option<ReadFailure>) {
+        let state = app.room_info.state.as_ref().expect("a batch is open");
+        let key = state.key.clone();
+        let generation = state.generation;
+        let metadata = match failure {
+            Some(failure) => RoomInfoPart::Metadata(Err(failure)),
+            None => RoomInfoPart::Metadata(Ok(Box::new(RoomMetadataDto::default()))),
+        };
+        for part in [
+            metadata,
+            RoomInfoPart::Info(Ok(RoomInfoDto::default())),
+            RoomInfoPart::Upgrade(Ok(RoomUpgradeDto::default())),
+            RoomInfoPart::Members(Ok(Vec::new())),
+        ] {
+            app.apply_room_info_outcome(RoomInfoOutcome {
+                key: key.clone(),
+                generation,
+                part,
+            });
+        }
+    }
+
+    fn live_event(
+        room_id: &str,
+        event_type: &str,
+        state_key: Option<&str>,
+        redacted: bool,
+    ) -> EventDto {
+        EventDto {
+            account_id: Uuid::nil(),
+            event_id: format!("${event_type}:{room_id}"),
+            room_id: room_id.to_owned(),
+            sender: "@ada:example.com".to_owned(),
+            state_key: state_key.map(str::to_owned),
+            arrival_order: 1,
+            origin_ts: 1,
+            event_type: event_type.to_owned(),
+            content: None,
+            body: None,
+            relates_to: None,
+            redacted,
+            redaction_event_id: None,
+            reactions: None,
+            sender_trust: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn open_room_info_polls_every_30_seconds() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        let generation = app.room_info.generation;
+        settle_room_info(&mut app, None);
+        assert_eq!(app.room_info.failures, 0);
+        assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(30)));
+
+        app.poll_open_room_info(t0 + Duration::from_secs(29));
+        assert_eq!(app.room_info.generation, generation);
+        app.poll_open_room_info(t0 + Duration::from_secs(30));
+        assert_eq!(app.room_info.generation, generation + 1);
+    }
+
+    #[tokio::test]
+    async fn a_due_poll_does_not_overlap_an_in_flight_batch() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        let generation = app.room_info.generation;
+        assert!(app.room_info.state.as_ref().unwrap().in_flight > 0);
+
+        app.poll_open_room_info(t0 + Duration::from_secs(30));
+        app.invalidate_open_room_info(t0 + Duration::from_secs(30));
+
+        assert_eq!(app.room_info.generation, generation);
+        assert!(app.room_info.refresh_again);
+        assert_eq!(app.room_info.reads.len(), usize::from(ROOM_INFO_READS));
+    }
+
+    #[tokio::test]
+    async fn an_invalidation_during_a_batch_refreshes_once_when_it_settles() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        let generation = app.room_info.generation;
+        app.invalidate_open_room_info(t0 + Duration::from_secs(1));
+        assert_eq!(app.room_info.generation, generation);
+        assert!(app.room_info.refresh_again);
+
+        settle_room_info(&mut app, None);
+        assert!(app.room_info.refresh_again);
+        app.poll_open_room_info(t0 + Duration::from_secs(1));
+
+        assert_eq!(app.room_info.generation, generation + 1);
+        assert!(!app.room_info.refresh_again);
+    }
+
+    #[tokio::test]
+    async fn transport_failures_back_off_and_a_clean_batch_restores_30_seconds() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        let mut started = t0;
+        for (nth, gap) in [60_u64, 120, 240, 240].into_iter().enumerate() {
+            settle_room_info(&mut app, Some(ReadFailure::Failed));
+            assert_eq!(
+                app.room_info.failures,
+                u8::try_from(nth + 1).unwrap().min(3)
+            );
+            assert_eq!(
+                app.room_info.next_poll,
+                Some(started + Duration::from_secs(gap))
+            );
+            let generation = app.room_info.generation;
+            app.poll_open_room_info(started + Duration::from_secs(gap) - Duration::from_secs(1));
+            assert_eq!(app.room_info.generation, generation);
+            app.poll_open_room_info(started + Duration::from_secs(gap));
+            assert_eq!(app.room_info.generation, generation + 1);
+            started += Duration::from_secs(gap);
+        }
+
+        settle_room_info(&mut app, None);
+        assert_eq!(app.room_info.failures, 0);
+        assert_eq!(
+            app.room_info.next_poll,
+            Some(started + Duration::from_secs(30))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_read_does_not_lengthen_the_poll() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        settle_room_info(&mut app, Some(ReadFailure::Unsupported));
+
+        assert_eq!(app.room_info.failures, 0);
+        assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(30)));
+        let generation = app.room_info.generation;
+        app.poll_open_room_info(t0 + Duration::from_secs(30));
+        assert_eq!(app.room_info.generation, generation + 1);
+    }
+
+    #[tokio::test]
+    async fn closing_the_popup_cancels_the_in_flight_batch() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        let generation = app.room_info.generation;
+        let key = app.room_info.state.as_ref().unwrap().key.clone();
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.room_info.reads.is_empty());
+        assert!(app.room_info.generation > generation);
+        assert!(app.room_info.next_poll.is_none());
+        let cancelled = app.room_info.generation;
+        app.apply_room_info_outcome(RoomInfoOutcome {
+            key,
+            generation,
+            part: RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
+        });
+        let state = app.room_info.state.as_ref().unwrap();
+        assert!(state.metadata.value.is_none());
+        assert!(state.metadata.failure.is_none());
+        app.poll_open_room_info(t0 + Duration::from_secs(60));
+        assert_eq!(app.room_info.generation, cancelled);
+    }
+
+    #[tokio::test]
+    async fn leaving_the_popup_without_esc_cancels_on_the_next_poll() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        let generation = app.room_info.generation;
+        app.mode = Mode::MessageList;
+
+        app.poll_open_room_info(t0);
+
+        assert!(app.room_info.reads.is_empty());
+        assert!(app.room_info.generation > generation);
+        let cancelled = app.room_info.generation;
+        app.poll_open_room_info(t0 + Duration::from_secs(60));
+        assert_eq!(app.room_info.generation, cancelled);
+    }
+
+    #[tokio::test]
+    async fn reconnect_and_live_state_refresh_the_open_popup() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        settle_room_info(&mut app, None);
+        let far = Some(t0 + Duration::from_secs(10_000));
+        app.room_info.next_poll = far;
+        let idle = app.room_info.generation;
+
+        app.handle_live_frame(LiveFrame::Connected);
+        assert_eq!(app.room_info.generation, idle + 1);
+        settle_room_info(&mut app, None);
+
+        app.mode = Mode::Compose;
+        let idle = app.room_info.generation;
+        app.handle_live_frame(LiveFrame::Connected);
+        assert_eq!(app.room_info.generation, idle);
+
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.room_info.next_poll = far;
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
+            "!room:example.com",
+            "m.room.message",
+            None,
+            false,
+        ))));
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
+            "!room:example.com",
+            "m.room.message",
+            None,
+            true,
+        ))));
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
+            "!other:example.com",
+            "m.room.topic",
+            Some(""),
+            false,
+        ))));
+        assert_eq!(app.room_info.generation, idle);
+
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
+            "!room:example.com",
+            "m.room.topic",
+            Some(""),
+            false,
+        ))));
+        assert_eq!(app.room_info.generation, idle + 1);
+        settle_room_info(&mut app, None);
+        app.room_info.next_poll = far;
+        let idle = app.room_info.generation;
+
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
+            "!room:example.com",
+            "m.room.redaction",
+            None,
+            false,
+        ))));
+        assert_eq!(app.room_info.generation, idle + 1);
+    }
+
+    #[tokio::test]
+    async fn a_same_room_refresh_keeps_the_filter_and_the_scroll() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        settle_room_info(&mut app, None);
+        {
+            let state = app.room_info.state.as_mut().unwrap();
+            state.member_filter = "ada".to_owned();
+            state.member_filter_editing = true;
+            store_member_lines(state);
+        }
+        app.popup_scroll = 12;
+
+        app.poll_open_room_info(t0 + Duration::from_secs(30));
+        settle_room_info(&mut app, None);
+
+        let state = app.room_info.state.as_ref().unwrap();
+        assert_eq!(state.member_filter, "ada");
+        assert!(state.member_filter_editing);
+        assert_eq!(app.popup_scroll, 12);
+        assert!(!app.reveal_room_info_members);
+    }
+
+    #[tokio::test]
+    async fn a_selected_room_change_fetches_the_new_room() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        settle_room_info(&mut app, None);
+        {
+            let state = app.room_info.state.as_mut().unwrap();
+            state.metadata.value = Some(full_metadata());
+            state.member_filter = "ada".to_owned();
+            state.member_filter_editing = true;
+        }
+        app.popup_scroll = 9;
+        let mut other = room();
+        other.room_id = "!other:example.com".to_owned();
+        other.name = Some("Other".to_owned());
+        app.rooms.rooms.push(other);
+        app.rooms.selected = Some(1);
+        let generation = app.room_info.generation;
+
+        app.poll_open_room_info(t0 + Duration::from_secs(1));
+
+        let state = app.room_info.state.as_ref().unwrap();
+        assert_eq!(state.key.room_id, "!other:example.com");
+        assert!(state.member_filter.is_empty());
+        assert!(!state.member_filter_editing);
+        assert!(state.in_flight > 0);
+        assert!(app.room_info.generation > generation);
+        assert_eq!(app.popup_scroll, 0);
+        assert!(!app.reveal_room_info_members);
+        let lines = crate::ui::popup_room_info_lines(&app);
+        assert!(lines.iter().any(|line| line.contains("loading")));
+        assert!(!lines.iter().any(|line| line.contains("Room version:")));
     }
 }

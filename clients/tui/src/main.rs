@@ -531,6 +531,8 @@ async fn run_app(
                 app.flush_due_typing(now);
                 // Expire stale inbound typing overlays (M18, ADR 0056).
                 app.prune_typing(now);
+                // `/whereami` polls while it is open and cancels once it closes.
+                app.poll_open_room_info(now);
                 // Pull in list titles for rooms scrolling or filtering has just
                 // brought on screen. Bounded and idempotent — already-titled
                 // rooms are skipped (#189).
