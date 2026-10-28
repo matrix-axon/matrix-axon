@@ -96,16 +96,16 @@ weigh trust, so it belongs in the bundle, not just the device verdict.
 
 ### Same consumer-owned-port + composition-root-adapter shape as 7a-6
 
-`axon-api` defines the `SenderTrustService` port it needs; `axon-sync` owns the
-concrete `SenderTrustEngine` (it needs a live `Client` to read device/identity);
-`axon-server` adapts one onto the other. `axon-api` and `axon-sync` never depend
-on each other (ADR 0021/0027). The bundle is **read-only and takes no
-per-identity lock**: a read tolerates a client a concurrent teardown is severing
-(worst case an upstream error), and holding the lock across the homeserver
-round-trips (`get_device` / `get_user_identity` can issue a `/keys/query`) would
-let this per-message read endpoint starve login/logout/delete on a slow
-homeserver. The store's `event_sender_trust` is the first production reader of the
-sibling table.
+`axon-api` defines the `SenderTrustService` port it needs;
+`axon-sync` owns the concrete `SenderTrustEngine` (it needs a live `Client` to read device/identity);
+`axon-server` adapts one onto the other.
+`axon-api` and `axon-sync` never depend on each other (ADR 0021/0027).
+The bundle is **read-only and takes no per-identity lock**: a read tolerates a client a concurrent teardown is severing (worst case an upstream error), and login and the verify verbs hold that lock across homeserver calls, so taking it would make this per-message read endpoint wait out a slow homeserver it never talks to.
+The bundle's own reads are local.
+`get_device` / `get_user_identity` pass the `OlmMachine` no key-query timeout, so they return what the crypto store holds without waiting for a pending `/keys/query` (matrix-sdk 0.19).
+A cold `get_or_connect` restores the session from disk and spawns E2EE initialization in the background.
+The endpoint therefore needs no request timeout (#57).
+The store's `event_sender_trust` is the first production reader of the sibling table.
 
 The **`active` gate is an explicit store read**, not `ClientManager::get_or_connect`'s.
 `get_or_connect` re-checks `accounts.state` only on a *cache miss* — its cache-hit
@@ -134,11 +134,14 @@ remains the source of truth. The watcher shares the run-scoped child-token + dra
 lifecycle of the `verified`-flag watcher (ADR 0026), so it never outlives its
 client.
 
-Known limitations are tracked as follow-up issues: the overlay is disabled for a
-run if the `user_identities_stream` subscription fails at start with no retry
-(#101); the bundle's live device lookup can't surface a `MismatchedSender`
-device (#99); and the bundle's live key reads have no timeout (#100). All three
-are degraded-not-blind — the snapshot and on-demand bundle still work.
+A failed `user_identities_stream` subscription, or a stream that ends, pauses the overlay rather than ending it (#58).
+The watcher resubscribes on the supervisor's backoff (1 s doubling to 60 s, reset once a stream delivers) until its run ends.
+The reported-in-violation set survives the gap, and on each resubscribe the watcher rechecks those senders against the crypto store and emits the clear for any that cleared meanwhile.
+A sender who _entered_ a violation during the gap is not reported until their identity next changes, because the stream has no replay;
+the bundle still reports current trust on demand.
+
+One known limitation remains, tracked as a follow-up issue: the bundle's live device lookup can't surface a `MismatchedSender` device (#59).
+It is degraded-not-blind — the snapshot still records the mismatch.
 
 ## Consequences
 

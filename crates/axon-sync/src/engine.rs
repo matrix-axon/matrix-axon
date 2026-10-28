@@ -32,7 +32,7 @@ use matrix_sdk::ruma::events::{
     AnySyncStateEvent, AnySyncTimelineEvent,
 };
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::{OwnedRoomId, RoomId, UserId};
+use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
 use matrix_sdk::{Client, Room, RoomState};
 use matrix_sdk_ui::room_list_service::{RoomListService, State as RoomListState};
 use matrix_sdk_ui::sync_service::{State, SyncService};
@@ -2486,11 +2486,9 @@ async fn watch_verification(
 /// names the `user_id`, not per-event diffs; the verification bundle / timeline
 /// re-read is the source of truth.
 ///
-/// Subscribes to the SDK's `user_identities_stream` and tracks which senders it
-/// has reported as in-violation, so it emits exactly on a *change*: a frame with
-/// `verification_violation: true` when a sender enters a violation and one with
-/// `false` when it clears — the latter is what lets a client un-badge from the
-/// live stream alone. Runs until `cancel` fires or the subscription closes; never
+/// Binds [`follow_sender_trust`] to the SDK: the subscription is the SDK's
+/// `user_identities_stream`, reduced to `(user_id, in_violation)` pairs, and the
+/// post-gap recheck reads the stored identity. Runs until `cancel` fires; never
 /// persists anything (the snapshot is the durable record).
 async fn watch_sender_trust(
     client: Client,
@@ -2498,53 +2496,378 @@ async fn watch_sender_trust(
     live_tx: broadcast::Sender<LiveFrame>,
     cancel: CancellationToken,
 ) {
-    use futures_util::{pin_mut, StreamExt};
-    use matrix_sdk::ruma::OwnedUserId;
-    use std::collections::HashSet;
+    use futures_util::StreamExt;
 
-    let stream = match client.encryption().user_identities_stream().await {
-        Ok(stream) => stream,
-        Err(err) => {
-            // Known limitation (GH issue #101): a subscribe failure disables the
-            // overlay for the rest of this run with no retry. The bundle read
-            // endpoint still reports current trust, so it's degraded, not blind.
-            tracing::warn!(%account_id, error = %err, "could not subscribe to identity changes; sender-trust overlay disabled for this run");
-            return;
-        }
+    let client = &client;
+    let subscribe = || async move {
+        let stream = client.encryption().user_identities_stream().await?;
+        Ok::<_, matrix_sdk::Error>(stream.map(|updates| {
+            updates
+                .new
+                .values()
+                .chain(updates.changed.values())
+                .map(|identity| {
+                    (
+                        identity.user_id().to_owned(),
+                        identity.has_verification_violation(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        }))
     };
-    pin_mut!(stream);
+    // A local crypto-store read (no `/keys/query`). A missing identity has no
+    // violation to report, so it reads as clear.
+    let in_violation_now = |user_id: OwnedUserId| async move {
+        let identity = client.encryption().get_user_identity(&user_id).await?;
+        Ok::<_, matrix_sdk::Error>(
+            identity.is_some_and(|identity| identity.has_verification_violation()),
+        )
+    };
+    follow_sender_trust(account_id, &live_tx, &cancel, subscribe, in_violation_now).await;
+}
+
+/// Follow identity changes from `subscribe` and emit a `sender_trust.violation`
+/// frame on each violation *transition* (issue #58).
+///
+/// Tracks which senders it has reported as in-violation, so it emits exactly on a
+/// change: a frame with `verification_violation: true` when a sender enters a
+/// violation and one with `false` when it clears — the latter is what lets a
+/// client un-badge from the live stream alone.
+///
+/// A failed subscription, or a stream that ends, pauses the overlay rather than
+/// ending it: the watcher resubscribes after the supervisor's backoff
+/// ([`BACKOFF_START`] doubling to [`BACKOFF_MAX`]) until `cancel` fires. The
+/// backoff resets only once a stream has delivered something, so a stream that
+/// keeps ending at once cannot spin. On each resubscribe it rechecks every
+/// sender it has reported in-violation with `in_violation_now` and emits the
+/// clear for any that cleared during the gap (guardrail 5: reconcile absence,
+/// not just presence). A sender who *entered* a violation during the gap is
+/// missed until their identity next changes — the stream has no replay, and
+/// the verification bundle still reports current trust on demand.
+async fn follow_sender_trust<Sub, SubFut, Changes, SubErr, Check, CheckFut, CheckErr>(
+    account_id: Uuid,
+    live_tx: &broadcast::Sender<LiveFrame>,
+    cancel: &CancellationToken,
+    mut subscribe: Sub,
+    mut in_violation_now: Check,
+) where
+    Sub: FnMut() -> SubFut,
+    SubFut: std::future::Future<Output = Result<Changes, SubErr>>,
+    Changes: futures_util::Stream<Item = Vec<(OwnedUserId, bool)>>,
+    SubErr: std::fmt::Display,
+    Check: FnMut(OwnedUserId) -> CheckFut,
+    CheckFut: std::future::Future<Output = Result<bool, CheckErr>>,
+    CheckErr: std::fmt::Display,
+{
+    use futures_util::{pin_mut, StreamExt};
+
     // Senders we've reported as in-violation, so we emit only on a transition (and
-    // a clear emits a single `false` frame rather than going silent).
+    // a clear emits a single `false` frame rather than going silent). Kept across
+    // resubscribes so a clear seen after a gap still emits.
     let mut in_violation: HashSet<OwnedUserId> = HashSet::new();
+    let mut backoff = BACKOFF_START;
+    let mut paused = false;
     loop {
-        tokio::select! {
+        let subscribed = tokio::select! {
             _ = cancel.cancelled() => return,
-            next = stream.next() => match next {
-                Some(updates) => {
-                    for identity in updates.new.values().chain(updates.changed.values()) {
-                        let user_id = identity.user_id().to_owned();
-                        let violation = identity.has_verification_violation();
-                        // `insert`/`remove` return whether the set actually changed —
-                        // our transition test, so an unrelated identity change for a
-                        // sender whose violation state is unchanged emits nothing.
-                        let changed = if violation {
-                            in_violation.insert(user_id.clone())
-                        } else {
-                            in_violation.remove(&user_id)
-                        };
-                        if changed {
-                            tracing::debug!(%account_id, %user_id, verification_violation = violation, "sender trust changed");
-                            let _ = live_tx.send(LiveFrame::SenderTrustChanged(SenderTrustFrame {
-                                account_id,
-                                user_id: user_id.as_str().to_owned(),
-                                verification_violation: violation,
-                            }));
+            subscribed = subscribe() => subscribed,
+        };
+        match subscribed {
+            Err(err) => {
+                tracing::warn!(%account_id, error = %err, retry_secs = backoff.as_secs(), "could not subscribe to identity changes; sender-trust overlay paused, retrying");
+            }
+            Ok(changes) => {
+                if paused {
+                    tracing::info!(%account_id, rechecking = in_violation.len(), "sender-trust overlay resumed");
+                }
+                // Recheck only after subscribing, so a change racing the recheck
+                // still arrives on the stream; the transition test drops the
+                // duplicate.
+                let reported: Vec<OwnedUserId> = in_violation.iter().cloned().collect();
+                for user_id in reported {
+                    match in_violation_now(user_id.clone()).await {
+                        Ok(true) => {}
+                        Ok(false) => report_sender_trust(
+                            account_id,
+                            live_tx,
+                            &mut in_violation,
+                            user_id,
+                            false,
+                        ),
+                        Err(err) => {
+                            tracing::warn!(%account_id, %user_id, error = %err, "could not recheck sender trust after resubscribing; keeping the last report");
                         }
                     }
                 }
-                None => return,
-            },
+                pin_mut!(changes);
+                let mut delivered = false;
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        next = changes.next() => match next {
+                            Some(batch) => {
+                                delivered = true;
+                                for (user_id, violation) in batch {
+                                    report_sender_trust(
+                                        account_id,
+                                        live_tx,
+                                        &mut in_violation,
+                                        user_id,
+                                        violation,
+                                    );
+                                }
+                            }
+                            None => break,
+                        },
+                    }
+                }
+                if delivered {
+                    backoff = BACKOFF_START;
+                }
+                tracing::warn!(%account_id, retry_secs = backoff.as_secs(), "identity change stream ended; sender-trust overlay paused, resubscribing");
+            }
         }
+        paused = true;
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(backoff) => {}
+        }
+        backoff = (backoff * 2).min(BACKOFF_MAX);
+    }
+}
+
+/// Record `user_id`'s violation state and emit a `sender_trust.violation` frame
+/// if it changed. `insert`/`remove` return whether the set actually changed —
+/// the transition test, so an unrelated identity change for a sender whose
+/// violation state is unchanged emits nothing.
+fn report_sender_trust(
+    account_id: Uuid,
+    live_tx: &broadcast::Sender<LiveFrame>,
+    in_violation: &mut HashSet<OwnedUserId>,
+    user_id: OwnedUserId,
+    violation: bool,
+) {
+    let changed = if violation {
+        in_violation.insert(user_id.clone())
+    } else {
+        in_violation.remove(&user_id)
+    };
+    if changed {
+        tracing::debug!(%account_id, %user_id, verification_violation = violation, "sender trust changed");
+        let _ = live_tx.send(LiveFrame::SenderTrustChanged(SenderTrustFrame {
+            account_id,
+            user_id: user_id.as_str().to_owned(),
+            verification_violation: violation,
+        }));
+    }
+}
+
+#[cfg(test)]
+mod sender_trust_watch_tests {
+    use std::collections::{HashSet, VecDeque};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use axon_core::LiveFrame;
+    use futures_util::stream::{self, StreamExt};
+    use matrix_sdk::ruma::{user_id, OwnedUserId};
+    use tokio::sync::broadcast;
+    use tokio::time::Instant;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use super::{follow_sender_trust, BACKOFF_MAX, BACKOFF_START};
+
+    /// One scripted answer from the fake subscription.
+    enum Attempt {
+        Fail,
+        /// Deliver these batches, then end the stream.
+        Deliver(Vec<Vec<(OwnedUserId, bool)>>),
+    }
+
+    fn alice() -> OwnedUserId {
+        user_id!("@alice:example.org").to_owned()
+    }
+
+    fn bob() -> OwnedUserId {
+        user_id!("@bob:example.org").to_owned()
+    }
+
+    /// A running watcher and what a test observes of it.
+    struct Watcher {
+        frames: broadcast::Receiver<LiveFrame>,
+        cancel: CancellationToken,
+        /// When each subscribe call happened.
+        attempts: Arc<Mutex<Vec<Instant>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Watcher {
+        fn attempts(&self) -> Vec<Instant> {
+            self.attempts.lock().unwrap().clone()
+        }
+
+        /// The next frame. Paused time jumps straight to this deadline once the
+        /// watcher is idle, so a frame that never comes fails instead of hanging.
+        async fn next_frame(&mut self) -> (String, bool) {
+            let frame = tokio::time::timeout(Duration::from_secs(3600), self.frames.recv())
+                .await
+                .expect("no frame before the watcher went idle");
+            match frame.expect("frame") {
+                LiveFrame::SenderTrustChanged(frame) => {
+                    (frame.user_id, frame.verification_violation)
+                }
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+
+        /// Cancel, wait for the task, and assert no frame is left unread.
+        async fn stop(mut self) {
+            self.cancel.cancel();
+            self.task.await.unwrap();
+            assert!(matches!(
+                self.frames.try_recv(),
+                Err(broadcast::error::TryRecvError::Closed)
+            ));
+        }
+    }
+
+    /// Run the watcher against `script`, then a stream that never ends, with
+    /// `still_in_violation` answering the post-gap recheck.
+    fn spawn_watcher(script: Vec<Attempt>, still_in_violation: HashSet<OwnedUserId>) -> Watcher {
+        let (live_tx, live_rx) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let mut script = VecDeque::from(script);
+        let subscribe = {
+            let attempts = attempts.clone();
+            move || {
+                attempts.lock().unwrap().push(Instant::now());
+                let attempt = script.pop_front();
+                async move {
+                    match attempt {
+                        Some(Attempt::Fail) => Err("no olm machine"),
+                        Some(Attempt::Deliver(batches)) => Ok(stream::iter(batches).boxed()),
+                        None => Ok(stream::pending().boxed()),
+                    }
+                }
+            }
+        };
+        let in_violation_now = move |user_id: OwnedUserId| {
+            let violated = still_in_violation.contains(&user_id);
+            async move { Ok::<_, &str>(violated) }
+        };
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                follow_sender_trust(Uuid::nil(), &live_tx, &cancel, subscribe, in_violation_now)
+                    .await;
+            }
+        });
+        Watcher {
+            frames: live_rx,
+            cancel,
+            attempts,
+            task,
+        }
+    }
+
+    /// The bug in issue #58: a failed subscription used to end the watcher for
+    /// the run. It now retries, and the overlay works once it subscribes.
+    #[tokio::test(start_paused = true)]
+    async fn retries_a_failed_subscription() {
+        let mut watcher = spawn_watcher(
+            vec![
+                Attempt::Fail,
+                Attempt::Fail,
+                Attempt::Deliver(vec![vec![(alice(), true)]]),
+            ],
+            HashSet::new(),
+        );
+
+        assert_eq!(watcher.next_frame().await, (alice().to_string(), true));
+        let attempts = watcher.attempts();
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[1] - attempts[0], BACKOFF_START);
+        assert_eq!(attempts[2] - attempts[1], BACKOFF_START * 2);
+
+        watcher.stop().await;
+    }
+
+    /// A stream that ends is resubscribed, and a sender reported in-violation
+    /// who cleared during the gap gets the `false` frame the stream never sent.
+    /// One still in violation is not re-reported.
+    #[tokio::test(start_paused = true)]
+    async fn resubscribes_and_clears_senders_that_cleared_during_the_gap() {
+        let mut watcher = spawn_watcher(
+            vec![Attempt::Deliver(vec![vec![(alice(), true), (bob(), true)]])],
+            HashSet::from([bob()]),
+        );
+
+        assert_eq!(watcher.next_frame().await, (alice().to_string(), true));
+        assert_eq!(watcher.next_frame().await, (bob().to_string(), true));
+        assert_eq!(watcher.next_frame().await, (alice().to_string(), false));
+        assert_eq!(watcher.attempts().len(), 2);
+
+        // Bob is still in violation, so `stop` finds no further frame.
+        watcher.stop().await;
+    }
+
+    /// Repeated identical state emits once, and a stream that delivered resets
+    /// the backoff for the next resubscribe.
+    #[tokio::test(start_paused = true)]
+    async fn emits_transitions_only_and_resets_backoff_after_delivery() {
+        let mut watcher = spawn_watcher(
+            vec![
+                Attempt::Fail,
+                Attempt::Fail,
+                Attempt::Deliver(vec![vec![(alice(), true)], vec![(alice(), true)]]),
+            ],
+            HashSet::from([alice()]),
+        );
+
+        assert_eq!(watcher.next_frame().await, (alice().to_string(), true));
+        // Let the stream end and the watcher resubscribe to the pending stream.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let attempts = watcher.attempts();
+        assert_eq!(attempts.len(), 4);
+        assert_eq!(attempts[3] - attempts[2], BACKOFF_START);
+
+        // Alice is still in violation, so neither the repeat nor the recheck
+        // emitted: `stop` finds no further frame.
+        watcher.stop().await;
+    }
+
+    /// A stream that keeps ending at once backs off to the cap instead of
+    /// resubscribing in a tight loop.
+    #[tokio::test(start_paused = true)]
+    async fn backs_off_while_streams_end_without_delivering() {
+        let script = (0..10).map(|_| Attempt::Deliver(Vec::new())).collect();
+        let watcher = spawn_watcher(script, HashSet::new());
+
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        let attempts = watcher.attempts();
+        let gaps: Vec<Duration> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+        assert_eq!(gaps[..4], [1, 2, 4, 8].map(Duration::from_secs));
+        assert!(gaps.iter().all(|gap| *gap <= BACKOFF_MAX));
+        assert!(gaps.contains(&BACKOFF_MAX));
+
+        watcher.stop().await;
+    }
+
+    /// Cancellation ends the watcher while it waits out a backoff.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_ends_the_backoff_wait() {
+        let script = (0..10).map(|_| Attempt::Fail).collect();
+        let watcher = spawn_watcher(script, HashSet::new());
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(watcher.attempts().len(), 2);
+        let started = Instant::now();
+        watcher.stop().await;
+        // Paused time advances only when every task waits on a timer, so a
+        // watcher that sat out its remaining backoff would show here.
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 }
 
