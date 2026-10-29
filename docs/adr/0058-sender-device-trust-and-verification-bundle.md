@@ -135,9 +135,10 @@ lifecycle of the `verified`-flag watcher (ADR 0026), so it never outlives its
 client.
 
 A failed `user_identities_stream` subscription, or a stream that ends, pauses the overlay rather than ending it (#58).
-The watcher resubscribes on the supervisor's backoff (1 s doubling to 60 s, reset once a stream delivers) until its run ends.
+The watcher resubscribes on the supervisor's backoff (1 s doubling to 60 s, reset only after a stream stayed up for 60 s) until its run ends.
 The reported-in-violation set survives the gap, and on each resubscribe the watcher rechecks those senders against the crypto store and emits the clear for any that cleared meanwhile.
-A sender who _entered_ a violation during the gap is not reported until their identity next changes, because the stream has no replay;
+A sender whose identity is no longer in the store keeps the last report: a missing identity is no evidence of a clear, and un-badging on it would fail open.
+A sender who _entered_ a violation during the gap is not reported until their identity next changes, because the stream has no replay (#890);
 the bundle still reports current trust on demand.
 
 One known limitation remains, tracked as a follow-up issue: the bundle's live device lookup can't surface a `MismatchedSender` device (#59).

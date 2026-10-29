@@ -2515,13 +2515,11 @@ async fn watch_sender_trust(
                 .collect::<Vec<_>>()
         }))
     };
-    // A local crypto-store read (no `/keys/query`). A missing identity has no
-    // violation to report, so it reads as clear.
+    // A local crypto-store read (no `/keys/query`). A missing identity is no
+    // evidence either way, so it reads as unknown, not clear.
     let in_violation_now = |user_id: OwnedUserId| async move {
         let identity = client.encryption().get_user_identity(&user_id).await?;
-        Ok::<_, matrix_sdk::Error>(
-            identity.is_some_and(|identity| identity.has_verification_violation()),
-        )
+        Ok::<_, matrix_sdk::Error>(identity.map(|identity| identity.has_verification_violation()))
     };
     follow_sender_trust(account_id, &live_tx, &cancel, subscribe, in_violation_now).await;
 }
@@ -2537,13 +2535,16 @@ async fn watch_sender_trust(
 /// A failed subscription, or a stream that ends, pauses the overlay rather than
 /// ending it: the watcher resubscribes after the supervisor's backoff
 /// ([`BACKOFF_START`] doubling to [`BACKOFF_MAX`]) until `cancel` fires. The
-/// backoff resets only once a stream has delivered something, so a stream that
-/// keeps ending at once cannot spin. On each resubscribe it rechecks every
-/// sender it has reported in-violation with `in_violation_now` and emits the
-/// clear for any that cleared during the gap (guardrail 5: reconcile absence,
-/// not just presence). A sender who *entered* a violation during the gap is
-/// missed until their identity next changes — the stream has no replay, and
-/// the verification bundle still reports current trust on demand.
+/// backoff resets only after a stream stayed up for [`BACKOFF_MAX`], so a
+/// stream that keeps ending soon after it starts cannot spin, whether or not
+/// it delivered anything. On each resubscribe it rechecks every sender it has
+/// reported in-violation with `in_violation_now` and emits the clear for any
+/// that cleared during the gap (guardrail 5: reconcile absence, not just
+/// presence). `Ok(None)` means the identity is not in the store; that is no
+/// evidence of a clear, so the sender keeps the last report, as on an error.
+/// A sender who *entered* a violation during the gap is missed until their
+/// identity next changes (issue #890) — the stream has no replay, and the
+/// verification bundle still reports current trust on demand.
 async fn follow_sender_trust<Sub, SubFut, Changes, SubErr, Check, CheckFut, CheckErr>(
     account_id: Uuid,
     live_tx: &broadcast::Sender<LiveFrame>,
@@ -2556,7 +2557,7 @@ async fn follow_sender_trust<Sub, SubFut, Changes, SubErr, Check, CheckFut, Chec
     Changes: futures_util::Stream<Item = Vec<(OwnedUserId, bool)>>,
     SubErr: std::fmt::Display,
     Check: FnMut(OwnedUserId) -> CheckFut,
-    CheckFut: std::future::Future<Output = Result<bool, CheckErr>>,
+    CheckFut: std::future::Future<Output = Result<Option<bool>, CheckErr>>,
     CheckErr: std::fmt::Display,
 {
     use futures_util::{pin_mut, StreamExt};
@@ -2585,9 +2586,16 @@ async fn follow_sender_trust<Sub, SubFut, Changes, SubErr, Check, CheckFut, Chec
                 // duplicate.
                 let reported: Vec<OwnedUserId> = in_violation.iter().cloned().collect();
                 for user_id in reported {
-                    match in_violation_now(user_id.clone()).await {
-                        Ok(true) => {}
-                        Ok(false) => report_sender_trust(
+                    let now = tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        now = in_violation_now(user_id.clone()) => now,
+                    };
+                    match now {
+                        Ok(Some(true)) => {}
+                        Ok(None) => {
+                            tracing::debug!(%account_id, %user_id, "sender identity not in the crypto store after resubscribing; keeping the last report");
+                        }
+                        Ok(Some(false)) => report_sender_trust(
                             account_id,
                             live_tx,
                             &mut in_violation,
@@ -2600,13 +2608,12 @@ async fn follow_sender_trust<Sub, SubFut, Changes, SubErr, Check, CheckFut, Chec
                     }
                 }
                 pin_mut!(changes);
-                let mut delivered = false;
+                let subscribed_at = tokio::time::Instant::now();
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => return,
                         next = changes.next() => match next {
                             Some(batch) => {
-                                delivered = true;
                                 for (user_id, violation) in batch {
                                     report_sender_trust(
                                         account_id,
@@ -2621,7 +2628,7 @@ async fn follow_sender_trust<Sub, SubFut, Changes, SubErr, Check, CheckFut, Chec
                         },
                     }
                 }
-                if delivered {
+                if subscribed_at.elapsed() >= BACKOFF_MAX {
                     backoff = BACKOFF_START;
                 }
                 tracing::warn!(%account_id, retry_secs = backoff.as_secs(), "identity change stream ended; sender-trust overlay paused, resubscribing");
@@ -2664,7 +2671,7 @@ fn report_sender_trust(
 
 #[cfg(test)]
 mod sender_trust_watch_tests {
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -2683,6 +2690,19 @@ mod sender_trust_watch_tests {
         Fail,
         /// Deliver these batches, then end the stream.
         Deliver(Vec<Vec<(OwnedUserId, bool)>>),
+        /// Deliver these batches, then end the stream this long after it started.
+        DeliverThenEndAfter(Vec<Vec<(OwnedUserId, bool)>>, Duration),
+    }
+
+    /// The post-gap recheck's answer for a sender. A sender with no entry has
+    /// cleared.
+    #[derive(Clone, Copy)]
+    enum Recheck {
+        Still,
+        /// The identity is not in the crypto store.
+        Unknown,
+        /// The store read never returns.
+        Hang,
     }
 
     fn alice() -> OwnedUserId {
@@ -2691,6 +2711,10 @@ mod sender_trust_watch_tests {
 
     fn bob() -> OwnedUserId {
         user_id!("@bob:example.org").to_owned()
+    }
+
+    fn carol() -> OwnedUserId {
+        user_id!("@carol:example.org").to_owned()
     }
 
     /// A running watcher and what a test observes of it.
@@ -2721,10 +2745,14 @@ mod sender_trust_watch_tests {
             }
         }
 
-        /// Cancel, wait for the task, and assert no frame is left unread.
+        /// Cancel, wait for the task, and assert no frame is left unread. A
+        /// watcher that ignores the cancel fails the timeout instead of hanging.
         async fn stop(mut self) {
             self.cancel.cancel();
-            self.task.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3600), &mut self.task)
+                .await
+                .expect("the watcher ignored the cancel")
+                .unwrap();
             assert!(matches!(
                 self.frames.try_recv(),
                 Err(broadcast::error::TryRecvError::Closed)
@@ -2733,8 +2761,8 @@ mod sender_trust_watch_tests {
     }
 
     /// Run the watcher against `script`, then a stream that never ends, with
-    /// `still_in_violation` answering the post-gap recheck.
-    fn spawn_watcher(script: Vec<Attempt>, still_in_violation: HashSet<OwnedUserId>) -> Watcher {
+    /// `rechecks` answering the post-gap recheck.
+    fn spawn_watcher(script: Vec<Attempt>, rechecks: HashMap<OwnedUserId, Recheck>) -> Watcher {
         let (live_tx, live_rx) = broadcast::channel(16);
         let cancel = CancellationToken::new();
         let attempts = Arc::new(Mutex::new(Vec::new()));
@@ -2748,14 +2776,26 @@ mod sender_trust_watch_tests {
                     match attempt {
                         Some(Attempt::Fail) => Err("no olm machine"),
                         Some(Attempt::Deliver(batches)) => Ok(stream::iter(batches).boxed()),
+                        Some(Attempt::DeliverThenEndAfter(batches, lifetime)) => {
+                            let end = stream::once(tokio::time::sleep(lifetime))
+                                .filter_map(|()| async { None });
+                            Ok(stream::iter(batches).chain(end).boxed())
+                        }
                         None => Ok(stream::pending().boxed()),
                     }
                 }
             }
         };
         let in_violation_now = move |user_id: OwnedUserId| {
-            let violated = still_in_violation.contains(&user_id);
-            async move { Ok::<_, &str>(violated) }
+            let answer = rechecks.get(&user_id).copied();
+            async move {
+                match answer {
+                    None => Ok::<_, &str>(Some(false)),
+                    Some(Recheck::Still) => Ok(Some(true)),
+                    Some(Recheck::Unknown) => Ok(None),
+                    Some(Recheck::Hang) => std::future::pending().await,
+                }
+            }
         };
         let task = tokio::spawn({
             let cancel = cancel.clone();
@@ -2782,7 +2822,7 @@ mod sender_trust_watch_tests {
                 Attempt::Fail,
                 Attempt::Deliver(vec![vec![(alice(), true)]]),
             ],
-            HashSet::new(),
+            HashMap::new(),
         );
 
         assert_eq!(watcher.next_frame().await, (alice().to_string(), true));
@@ -2796,34 +2836,41 @@ mod sender_trust_watch_tests {
 
     /// A stream that ends is resubscribed, and a sender reported in-violation
     /// who cleared during the gap gets the `false` frame the stream never sent.
-    /// One still in violation is not re-reported.
+    /// One still in violation is not re-reported, and one whose identity is no
+    /// longer in the store keeps the last report rather than being un-badged.
     #[tokio::test(start_paused = true)]
     async fn resubscribes_and_clears_senders_that_cleared_during_the_gap() {
         let mut watcher = spawn_watcher(
-            vec![Attempt::Deliver(vec![vec![(alice(), true), (bob(), true)]])],
-            HashSet::from([bob()]),
+            vec![Attempt::Deliver(vec![vec![
+                (alice(), true),
+                (bob(), true),
+                (carol(), true),
+            ]])],
+            HashMap::from([(bob(), Recheck::Still), (carol(), Recheck::Unknown)]),
         );
 
         assert_eq!(watcher.next_frame().await, (alice().to_string(), true));
         assert_eq!(watcher.next_frame().await, (bob().to_string(), true));
+        assert_eq!(watcher.next_frame().await, (carol().to_string(), true));
         assert_eq!(watcher.next_frame().await, (alice().to_string(), false));
         assert_eq!(watcher.attempts().len(), 2);
 
-        // Bob is still in violation, so `stop` finds no further frame.
+        // Bob is still in violation and Carol is unknown, so `stop` finds no
+        // further frame.
         watcher.stop().await;
     }
 
-    /// Repeated identical state emits once, and a stream that delivered resets
-    /// the backoff for the next resubscribe.
+    /// Repeated identical state emits once, and a stream that delivered but
+    /// ended at once does not reset the backoff.
     #[tokio::test(start_paused = true)]
-    async fn emits_transitions_only_and_resets_backoff_after_delivery() {
+    async fn emits_transitions_only_and_keeps_backing_off_after_a_short_stream() {
         let mut watcher = spawn_watcher(
             vec![
                 Attempt::Fail,
                 Attempt::Fail,
                 Attempt::Deliver(vec![vec![(alice(), true)], vec![(alice(), true)]]),
             ],
-            HashSet::from([alice()]),
+            HashMap::from([(alice(), Recheck::Still)]),
         );
 
         assert_eq!(watcher.next_frame().await, (alice().to_string(), true));
@@ -2831,25 +2878,53 @@ mod sender_trust_watch_tests {
         tokio::time::sleep(Duration::from_secs(10)).await;
         let attempts = watcher.attempts();
         assert_eq!(attempts.len(), 4);
-        assert_eq!(attempts[3] - attempts[2], BACKOFF_START);
+        assert_eq!(attempts[3] - attempts[2], BACKOFF_START * 4);
 
         // Alice is still in violation, so neither the repeat nor the recheck
         // emitted: `stop` finds no further frame.
         watcher.stop().await;
     }
 
-    /// A stream that keeps ending at once backs off to the cap instead of
-    /// resubscribing in a tight loop.
+    /// A stream that stayed up for `BACKOFF_MAX` resets the backoff, even if
+    /// it delivered nothing.
     #[tokio::test(start_paused = true)]
-    async fn backs_off_while_streams_end_without_delivering() {
-        let script = (0..10).map(|_| Attempt::Deliver(Vec::new())).collect();
-        let watcher = spawn_watcher(script, HashSet::new());
+    async fn a_stream_that_stayed_up_resets_the_backoff() {
+        let watcher = spawn_watcher(
+            vec![
+                Attempt::Fail,
+                Attempt::Fail,
+                Attempt::DeliverThenEndAfter(Vec::new(), BACKOFF_MAX),
+            ],
+            HashMap::new(),
+        );
+
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        let attempts = watcher.attempts();
+        assert_eq!(attempts.len(), 4);
+        assert_eq!(attempts[3] - attempts[2], BACKOFF_MAX + BACKOFF_START);
+
+        watcher.stop().await;
+    }
+
+    /// Streams that keep ending soon after they start back off to the cap
+    /// instead of resubscribing in a tight loop, whether or not they delivered.
+    #[tokio::test(start_paused = true)]
+    async fn backs_off_while_streams_end_soon_after_starting() {
+        let script = (0..10)
+            .map(|i| match i % 3 {
+                0 => Attempt::Deliver(Vec::new()),
+                1 => Attempt::Deliver(vec![vec![(alice(), false)]]),
+                _ => Attempt::DeliverThenEndAfter(Vec::new(), BACKOFF_MAX / 2),
+            })
+            .collect();
+        let watcher = spawn_watcher(script, HashMap::new());
 
         tokio::time::sleep(Duration::from_secs(600)).await;
         let attempts = watcher.attempts();
         let gaps: Vec<Duration> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
-        assert_eq!(gaps[..4], [1, 2, 4, 8].map(Duration::from_secs));
-        assert!(gaps.iter().all(|gap| *gap <= BACKOFF_MAX));
+        // Every third stream stays up for 30 s before ending, on top of its
+        // backoff.
+        assert_eq!(gaps[..4], [1, 2, 34, 8].map(Duration::from_secs));
         assert!(gaps.contains(&BACKOFF_MAX));
 
         watcher.stop().await;
@@ -2859,7 +2934,7 @@ mod sender_trust_watch_tests {
     #[tokio::test(start_paused = true)]
     async fn cancel_ends_the_backoff_wait() {
         let script = (0..10).map(|_| Attempt::Fail).collect();
-        let watcher = spawn_watcher(script, HashSet::new());
+        let watcher = spawn_watcher(script, HashMap::new());
 
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert_eq!(watcher.attempts().len(), 2);
@@ -2868,6 +2943,21 @@ mod sender_trust_watch_tests {
         // Paused time advances only when every task waits on a timer, so a
         // watcher that sat out its remaining backoff would show here.
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    /// Cancellation ends the watcher while a post-gap recheck is stuck on a
+    /// store read.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_ends_a_stuck_recheck() {
+        let mut watcher = spawn_watcher(
+            vec![Attempt::Deliver(vec![vec![(alice(), true)]])],
+            HashMap::from([(alice(), Recheck::Hang)]),
+        );
+
+        assert_eq!(watcher.next_frame().await, (alice().to_string(), true));
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(watcher.attempts().len(), 2, "the recheck has started");
+        watcher.stop().await;
     }
 }
 
