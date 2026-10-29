@@ -1,5 +1,44 @@
-import { describe, expect, it } from 'vitest'
-import { parseEmojiPacks, imageShortcodeSuggestions } from './emoji-packs'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  parseEmojiPacks,
+  imageShortcodeSuggestions,
+  loadImagePacks,
+} from './emoji-packs'
+import type { ApiClient } from './api/client'
+
+it('aborts a stalled pack request at its deadline without aborting its caller', async () => {
+  vi.useFakeTimers()
+  const caller = new AbortController()
+  let requestSignal: AbortSignal | undefined
+  const api = {
+    GET: (_path: string, options: { signal: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        requestSignal = options.signal
+        options.signal.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true },
+        )
+      }),
+  } as unknown as ApiClient
+  try {
+    const request = loadImagePacks(
+      api,
+      'account',
+      '!room:hs',
+      'emoticon',
+      caller.signal,
+    )
+    const rejected = expect(request).rejects.toThrow('Aborted')
+    await vi.advanceTimersByTimeAsync(10_000)
+    await rejected
+    expect(requestSignal?.aborted).toBe(true)
+    expect(caller.signal.aborted).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
 
 const image = (shortcode = 'wave', url = 'mxc://hs/wave') => ({
   shortcode,

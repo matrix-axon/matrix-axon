@@ -186,6 +186,7 @@ export interface ShortcutHelp {
  * and left stale in another.
  */
 export const KEYS = {
+  insertEmoji: { label: 'Ctrl-;', aria: 'Control+;' },
   roomActions: { label: '+', aria: '+' },
   filterRooms: { label: 'Ctrl-K', aria: 'Control+K' },
   cycleFilter: { label: 'Ctrl-Shift-Y', aria: 'Control+Shift+Y' },
@@ -448,6 +449,10 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
     rows: [
       { keys: 'Shift-Enter', description: 'Insert a line break' },
       { keys: ':emoji-shortcode:', description: 'Insert an emoji' },
+      {
+        keys: KEYS.insertEmoji,
+        description: 'Open the emoji picker in the composer',
+      },
       { keys: '↑', description: 'Edit your last message (empty composer)' },
       { keys: 'Escape', description: 'Cancel reply or edit' },
       { keys: KEYS.bold, description: 'Bold the selection' },

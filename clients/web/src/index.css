@@ -6883,6 +6883,17 @@ audio.media-player {
   min-width: 0;
 }
 
+/* Inline emotes share the surrounding text's line box rather than the
+   attachment/image preview dimensions. */
+.body-html img[data-mx-emoticon] {
+  display: inline-block;
+  width: auto;
+  height: 1.4em;
+  max-width: 3em;
+  object-fit: contain;
+  vertical-align: -0.3em;
+}
+
 .custom-emoji-search {
   display: flex;
   gap: 0.4rem;

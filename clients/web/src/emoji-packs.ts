@@ -140,19 +140,29 @@ export async function loadImagePacks(
   usage: 'emoticon' | 'sticker',
   signal: AbortSignal,
 ) {
-  const { data, response } = await api.GET(
-    '/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs',
-    {
-      params: {
-        path: { account_id: accountId, room_id: roomId },
-        query: usage === 'sticker' ? { usage: 'sticker' } : undefined,
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (signal.aborted) controller.abort()
+  else signal.addEventListener('abort', abort, { once: true })
+  const deadline = setTimeout(abort, 10_000)
+  try {
+    const { data, response } = await api.GET(
+      '/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs',
+      {
+        params: {
+          path: { account_id: accountId, room_id: roomId },
+          query: usage === 'sticker' ? { usage: 'sticker' } : undefined,
+        },
+        signal: controller.signal,
       },
-      signal,
-    },
-  )
-  return {
-    data: data ? parseEmojiPacks(data.data, usage) : undefined,
-    status: response.status,
+    )
+    return {
+      data: data ? parseEmojiPacks(data.data, usage) : undefined,
+      status: response.status,
+    }
+  } finally {
+    clearTimeout(deadline)
+    signal.removeEventListener('abort', abort)
   }
 }
 

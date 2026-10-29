@@ -4,6 +4,15 @@ import {
   type CustomEmoji,
 } from '../emoji-packs'
 import { resolveEmojiShortcode } from '../emoji'
+import {
+  parseInlineEmoji,
+  rebaseInlineEmoji,
+  formatInlineEmoji,
+  inlineEmojiDraftFits,
+  MAX_INLINE_EMOJI,
+  type InlineEmojiReference,
+} from '../inline-emoji'
+import { EmojiPicker } from './EmojiPicker'
 import type { JSX } from 'preact'
 import { useImagePackCompletions } from './use-image-pack-completions'
 import { ReactionContent } from './ReactionContent'
@@ -18,7 +27,13 @@ import {
   formatEdit,
   formatKindForEvent,
 } from '../composer-formatting'
-import { hasModifier, isApplePlatform } from '../shortcuts'
+import {
+  hasModifier,
+  isApplePlatform,
+  isPrimaryModifier,
+  KEYS,
+  keyAria,
+} from '../shortcuts'
 import {
   SLASH_COMMAND,
   SLASH_COMMANDS,
@@ -158,6 +173,7 @@ export function Composer({
   status,
   banner,
   initialValue = '',
+  initialInlineEmoji = [],
   onSubmit,
   onCommand,
   roomCompletions,
@@ -169,6 +185,7 @@ export function Composer({
   attachments,
   onAttach,
   stickers,
+  emoji,
   autoFocus = false,
   onFocus,
   focusRequest,
@@ -180,7 +197,11 @@ export function Composer({
   status?: string
   banner?: { label: string; excerpt: string; onCancel: () => void }
   initialValue?: string
-  onSubmit(body: string): Promise<boolean>
+  initialInlineEmoji?: readonly InlineEmojiReference[]
+  onSubmit(
+    body: string,
+    inlineEmoji?: readonly InlineEmojiReference[],
+  ): Promise<boolean>
   /**
    * Intercepts submitted slash commands. Return true when the command was
    * handled and the composer should clear; false leaves the text in place.
@@ -195,7 +216,10 @@ export function Composer({
    * draft (M-W6 step 5b). The parent debounces the write; the composer just
    * reports keystrokes.
    */
-  onDraftChange?(value: string): void
+  onDraftChange?(
+    value: string,
+    inlineEmoji?: readonly InlineEmojiReference[],
+  ): void
   /**
    * `ArrowUp` on an empty composer, with no reply/edit already in progress
    * (ADR 0078). The parent decides which message that is, and whether one
@@ -222,6 +246,7 @@ export function Composer({
    */
   onAttach?(files: FileList | readonly File[]): void
   stickers?: StickerPickerOptions
+  emoji?: Pick<StickerPickerOptions, 'api' | 'accountId' | 'roomId'>
   /** Focus this composer when it first mounts. */
   autoFocus?: boolean
   onFocus?(): void
@@ -235,6 +260,28 @@ export function Composer({
   onHeightChange?(height: number | null): void
 }) {
   const [draft, setDraft] = useState(initialValue)
+  const inline = useRef(parseInlineEmoji(initialValue, initialInlineEmoji))
+  const pendingInline = useRef<InlineEmojiReference[] | null>(null)
+  const beforeInput = useRef<{
+    text: string
+    start: number
+    end: number
+    type: string
+  } | null>(null)
+  const emojiHistory = useRef({
+    entries: [{ text: initialValue, refs: inline.current }],
+    cursor: 0,
+  })
+  const initialEmojiKey = JSON.stringify(
+    parseInlineEmoji(initialValue, initialInlineEmoji),
+  )
+  const syncedEmoji = useRef(initialEmojiKey)
+  const [emojiSelection, setEmojiSelection] = useState<{
+    text: string
+    start: number
+    end: number
+    anchor: DOMRectReadOnly
+  } | null>(null)
   const [checkingSticker, setCheckingSticker] = useState(false)
   const [stickerProblem, setStickerProblem] = useState<string | null>(null)
   const stickerLookup = useRef<AbortController | null>(null)
@@ -278,15 +325,27 @@ export function Composer({
   // RoomPage can reuse the composer across rooms. Invalidate its pending
   // lookup before callbacks from the previous scope can send or change UI.
   useLayoutEffect(() => {
+    const scope = stickerScope.current
     setCheckingSticker(false)
     setStickerProblem(null)
+    setEmojiSelection(null)
     return () => {
-      stickerScope.current++
+      stickerScope.current = scope + 1
+      inline.current = []
+      pendingInline.current = null
+      emojiHistory.current = { entries: [], cursor: -1 }
       const pending = stickerLookup.current
       stickerLookup.current = null
       pending?.abort()
     }
-  }, [stickers?.api, stickers?.accountId, stickers?.roomId])
+  }, [
+    stickers?.api,
+    stickers?.accountId,
+    stickers?.roomId,
+    emoji?.api,
+    emoji?.accountId,
+    emoji?.roomId,
+  ])
 
   useEffect(() => {
     if (!attachMenuOpen) {
@@ -361,9 +420,15 @@ export function Composer({
       ? emojiQuery.query
       : null
   const packMatches = useImagePackCompletions(
-    stickers,
-    reactionEmojiQuery?.query ?? stickerQuery,
-    reactionEmojiQuery !== null ? 'emoticon' : 'sticker',
+    stickers ?? emoji,
+    reactionEmojiQuery?.query ??
+      stickerQuery ??
+      (commandsEnabled && isSlashCommandDraft(draft)
+        ? null
+        : (emojiQuery?.query ?? null)),
+    reactionEmojiQuery !== null || stickerQuery === null
+      ? 'emoticon'
+      : 'sticker',
   )
   const packValues = new Set(
     packMatches.map((match) => match.value.toLowerCase()),
@@ -489,15 +554,27 @@ export function Composer({
   // synced. Anything else is an unsynced local edit we must not clobber. This
   // is the TUI's `buffer_clean` rule (app/drafts.rs), so the two clients agree.
   useEffect(() => {
-    if (initialValue === synced.current) {
+    if (
+      initialValue === synced.current &&
+      initialEmojiKey === syncedEmoji.current
+    ) {
       return
     }
     const clean = draft === '' || draft === synced.current
     synced.current = initialValue
+    syncedEmoji.current = initialEmojiKey
     if (clean) {
+      inline.current = parseInlineEmoji(
+        initialValue,
+        JSON.parse(initialEmojiKey),
+      )
+      emojiHistory.current = {
+        entries: [{ text: initialValue, refs: inline.current }],
+        cursor: 0,
+      }
       setDraft(initialValue)
     }
-  }, [initialValue, draft])
+  }, [initialValue, initialEmojiKey, draft])
 
   // Focus when entering a reply/edit so typing can start immediately.
   useEffect(() => {
@@ -575,21 +652,119 @@ export function Composer({
       ?.scrollIntoView?.({ block: 'nearest' })
   }, [activeOptionId])
 
-  const change = (value: string, nextCaret = value.length) => {
+  const change = (
+    value: string,
+    nextCaret = value.length,
+    supplied?: readonly InlineEmojiReference[],
+    historyDirection?: number,
+    edit?: { start: number; end: number },
+  ) => {
+    const history = emojiHistory.current
+    let refs: InlineEmojiReference[] | undefined
+    if (historyDirection) {
+      for (
+        let i = history.cursor + historyDirection;
+        i >= 0 && i < history.entries.length;
+        i += historyDirection
+      ) {
+        if (history.entries[i].text === value) {
+          history.cursor = i
+          refs = history.entries[i].refs
+          break
+        }
+      }
+    }
+    refs = parseInlineEmoji(
+      value,
+      refs ?? supplied ?? rebaseInlineEmoji(draft, value, inline.current, edit),
+    )
+    inline.current = refs
+    if (!historyDirection) {
+      history.entries = history.entries.slice(0, history.cursor + 1)
+      history.entries.push({ text: value, refs })
+      if (history.entries.length > 128) history.entries.shift()
+      while (
+        history.entries.length > 1 &&
+        history.entries.reduce((size, entry) => size + entry.text.length, 0) >
+          1_048_576
+      )
+        history.entries.shift()
+      history.cursor = history.entries.length - 1
+    }
     setDraft(value)
     setCaret(nextCaret)
     setAutocompleteDismissedFor(null)
     if (!commandsEnabled || !isSlashCommandDraft(value)) {
-      onDraftChange?.(value)
+      if (refs.length) onDraftChange?.(value, refs)
+      else onDraftChange?.(value)
     }
+  }
+
+  const openEmojiPicker = () => {
+    const el = textarea.current
+    if (!el) return
+    setEmojiSelection({
+      text: el.value,
+      start: el.selectionStart,
+      end: el.selectionEnd,
+      anchor: el.getBoundingClientRect(),
+    })
+  }
+
+  const insertEmoji = (
+    key: string,
+    _shortcode?: string,
+    image?: CustomEmoji,
+  ) => {
+    const selection = emojiSelection
+    const el = textarea.current
+    setEmojiSelection(null)
+    if (!selection || !el || el.value !== selection.text) return
+    const insert = image ? `:${image.shortcode}:` : key
+    const next =
+      selection.text.slice(0, selection.start) +
+      insert +
+      selection.text.slice(selection.end)
+    const refs = rebaseInlineEmoji(
+      selection.text,
+      next,
+      inline.current,
+      selection,
+    )
+    if (image) {
+      if (refs.length >= MAX_INLINE_EMOJI) {
+        setStickerProblem('A message can contain up to 64 custom emoji.')
+        return
+      }
+      refs.push({
+        start: selection.start,
+        end: selection.start + insert.length,
+        shortcode: image.shortcode,
+        mxc: image.url,
+      })
+      if (!inlineEmojiDraftFits(next, refs)) {
+        setStickerProblem(
+          'This message has too much custom emoji data. Shorten the text or remove an emoji.',
+        )
+        return
+      }
+    }
+    pendingInline.current = refs
+    applyFormatEdit(el, {
+      from: selection.start,
+      to: selection.end,
+      insert,
+      selectionStart: selection.start + insert.length,
+      selectionEnd: selection.start + insert.length,
+    })
+    pendingInline.current = null
   }
 
   const completeCommand = (command: SlashCommandSpec | undefined) => {
     if (command === undefined) {
       return
     }
-    setDraft(`${command.name} `)
-    setCaret(command.name.length + 1)
+    change(`${command.name} `, command.name.length + 1)
     setAutocompleteDismissedFor(null)
     textarea.current?.focus()
   }
@@ -598,8 +773,10 @@ export function Composer({
     if (room === undefined) {
       return
     }
-    setDraft(`${SLASH_COMMAND.room} ${room.value} `)
-    setCaret(SLASH_COMMAND.room.length + room.value.length + 2)
+    change(
+      `${SLASH_COMMAND.room} ${room.value} `,
+      SLASH_COMMAND.room.length + room.value.length + 2,
+    )
     setAutocompleteDismissedFor(dismissKey('room', room.value))
     textarea.current?.focus()
   }
@@ -631,7 +808,41 @@ export function Composer({
     const spacer = suffix === '' || !/^[\s.,!?;:)\]}]/.test(suffix) ? ' ' : ''
     const next = `${draft.slice(0, emojiQuery.start)}${option.value}${spacer}${suffix}`
     const nextCaret = emojiQuery.start + option.value.length + spacer.length
-    change(next, nextCaret)
+    const refs = rebaseInlineEmoji(draft, next, inline.current, emojiQuery)
+    if (option.image && reactionEmojiQuery === null && stickerQuery === null) {
+      if (refs.length >= MAX_INLINE_EMOJI) {
+        setStickerProblem('A message can contain up to 64 custom emoji.')
+        return
+      }
+      refs.push({
+        start: emojiQuery.start,
+        end: emojiQuery.start + option.value.length,
+        shortcode: option.image.shortcode,
+        mxc: option.image.url,
+      })
+      if (!inlineEmojiDraftFits(next, refs)) {
+        setStickerProblem(
+          'This message has too much custom emoji data. Shorten the text or remove an emoji.',
+        )
+        return
+      }
+    }
+    if (
+      option.image &&
+      reactionEmojiQuery === null &&
+      stickerQuery === null &&
+      textarea.current
+    ) {
+      pendingInline.current = refs
+      applyFormatEdit(textarea.current, {
+        from: emojiQuery.start,
+        to: emojiQuery.end,
+        insert: option.value + spacer,
+        selectionStart: nextCaret,
+        selectionEnd: nextCaret,
+      })
+      pendingInline.current = null
+    } else change(next, nextCaret, refs)
     setAutocompleteDismissedFor(dismissKey('emoji', option.value))
     textarea.current?.focus()
     requestAnimationFrame(() => {
@@ -668,6 +879,12 @@ export function Composer({
       return
     }
     if (commandsEnabled && isSlashCommandDraft(body)) {
+      if (inline.current.length) {
+        setStickerProblem(
+          'Custom emoji inserted inline can be sent in regular messages. Remove the slash command to send this draft.',
+        )
+        return
+      }
       const submittedDraft = draft
       const result = onCommand?.(body)
       if (isPromiseLike(result)) {
@@ -689,8 +906,20 @@ export function Composer({
     // have meant a command. A composer without commands sends both verbatim.
     const message =
       commandsEnabled && body.startsWith('//') ? body.slice(1) : body
+    const offset =
+      draft.length - draft.trimStart().length + (message === body ? 0 : 1)
+    const references = parseInlineEmoji(
+      message,
+      inline.current.map((ref) => ({
+        ...ref,
+        start: ref.start - offset,
+        end: ref.end - offset,
+      })),
+    )
     const shortcode =
-      stickers !== undefined && (attachments?.items.length ?? 0) === 0
+      references.length === 0 &&
+      stickers !== undefined &&
+      (attachments?.items.length ?? 0) === 0
         ? standaloneStickerShortcode(message)
         : null
     if (stickers !== undefined && shortcode !== null) {
@@ -771,8 +1000,11 @@ export function Composer({
       return
     }
     setDraft('')
+    inline.current = []
+    emojiHistory.current = { entries: [{ text: '', refs: [] }], cursor: 0 }
     onDraftChange?.('')
-    void onSubmit(message)
+    if (references.length) void onSubmit(message, references)
+    else void onSubmit(message)
   }
 
   const clampComposerHeight = (height: number): number =>
@@ -1061,18 +1293,54 @@ export function Composer({
             value={draft}
             placeholder={placeholder}
             aria-label={ariaLabel}
+            aria-keyshortcuts={keyAria(KEYS.insertEmoji)}
             aria-autocomplete="list"
             aria-controls={autocompleteOpen ? autocompleteId : undefined}
             aria-expanded={autocompleteOpen}
             aria-activedescendant={activeOptionId}
             rows={1}
             enterkeyhint={singlePane ? 'enter' : 'send'}
-            onInput={(event) =>
+            onBeforeInput={(event) => {
+              const el = event.currentTarget
+              beforeInput.current = {
+                text: el.value,
+                start: el.selectionStart,
+                end: el.selectionEnd,
+                type: event.inputType,
+              }
+            }}
+            onInput={(event) => {
+              const saved = beforeInput.current
+              beforeInput.current = null
+              let edit =
+                saved?.text === draft
+                  ? { start: saved.start, end: saved.end }
+                  : undefined
+              if (
+                saved &&
+                edit &&
+                saved.start === saved.end &&
+                saved.type.startsWith('delete')
+              ) {
+                const removed =
+                  saved.text.length - event.currentTarget.value.length
+                if (saved.type.endsWith('Backward'))
+                  edit = { start: saved.start - removed, end: saved.end }
+                else if (saved.type.endsWith('Forward'))
+                  edit = { start: saved.start, end: saved.end + removed }
+              }
               change(
                 event.currentTarget.value,
                 event.currentTarget.selectionStart,
+                pendingInline.current ?? undefined,
+                event.inputType === 'historyUndo'
+                  ? -1
+                  : event.inputType === 'historyRedo'
+                    ? 1
+                    : undefined,
+                edit,
               )
-            }
+            }}
             onClick={(event) => setCaret(event.currentTarget.selectionStart)}
             onPointerDown={(event) => {
               if (event.pointerType === 'touch') {
@@ -1126,6 +1394,18 @@ export function Composer({
               })
             }}
             onKeyDown={(event) => {
+              if (
+                event.key === ';' &&
+                isPrimaryModifier(event) &&
+                !event.altKey &&
+                !event.shiftKey &&
+                !event.isComposing &&
+                event.keyCode !== 229
+              ) {
+                event.preventDefault()
+                openEmojiPicker()
+                return
+              }
               // Markdown formatting chords (ADR 0123). Claimed here, before the
               // app-wide handlers see the event, so `mod+b` is bold in the box
               // and the sidebar toggle only where nothing is being typed.
@@ -1133,15 +1413,19 @@ export function Composer({
               if (format !== null) {
                 event.preventDefault()
                 const el = event.currentTarget
-                applyFormatEdit(
-                  el,
-                  formatEdit(
-                    format,
-                    el.value,
-                    el.selectionStart,
-                    el.selectionEnd,
-                  ),
+                const edit = formatEdit(
+                  format,
+                  el.value,
+                  el.selectionStart,
+                  el.selectionEnd,
                 )
+                pendingInline.current = formatInlineEmoji(
+                  el.value,
+                  inline.current,
+                  edit,
+                )
+                applyFormatEdit(el, edit)
+                pendingInline.current = null
                 setCaret(el.selectionStart)
                 return
               }
@@ -1389,7 +1673,28 @@ export function Composer({
             )}
           </>
         )}
-        {stickers !== undefined && <StickerPickerButton {...stickers} />}
+        {stickers !== undefined && (
+          <StickerPickerButton {...stickers} onInsertEmoji={openEmojiPicker} />
+        )}
+        {emojiSelection !== null && (
+          <EmojiPicker
+            anchor={emojiSelection.anchor}
+            accountId={
+              commandsEnabled && isSlashCommandDraft(draft)
+                ? undefined
+                : emoji?.accountId
+            }
+            roomId={
+              commandsEnabled && isSlashCommandDraft(draft)
+                ? undefined
+                : emoji?.roomId
+            }
+            action="insert"
+            restoreTo={() => textarea.current}
+            onClose={() => setEmojiSelection(null)}
+            onSelect={insertEmoji}
+          />
+        )}
         <button
           type="submit"
           class="composer-send"

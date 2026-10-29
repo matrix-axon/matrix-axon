@@ -6,6 +6,7 @@ import {
 } from './matrix-to'
 import { markdownToHtmlIfFormatted } from './markdown/markdown'
 import { replaceEmojiShortcodes, type EmojiEntry } from './emoji'
+import { protectInlineEmoji, type InlineEmojiReference } from './inline-emoji'
 import type { MemberDto, RoomDto } from './stores/room-list'
 import {
   localpart,
@@ -26,6 +27,7 @@ export interface MessageLinkContext {
   rooms: readonly RoomDto[]
   roomTitles: ReadonlyMap<string, string>
   emojiEntries?: readonly EmojiEntry[]
+  inlineEmoji?: readonly InlineEmojiReference[]
 }
 
 export interface FormattedMessageParts {
@@ -110,25 +112,27 @@ export function formatMessageBody(
   body: string,
   context: MessageLinkContext,
 ): FormattedMessageParts {
-  const expandedBody = replaceEmojiShortcodes(body, context.emojiEntries)
+  const inline = protectInlineEmoji(body, context.inlineEmoji)
+  const expandedBody = replaceEmojiShortcodes(inline.text, context.emojiEntries)
   const markdownHtml = markdownToHtmlIfFormatted(expandedBody)
   if (markdownHtml !== null) {
     const linked = linkTextNodes(markdownHtml, context)
     return {
-      body: expandedBody,
+      body: inline.plain(expandedBody),
       format: 'org.matrix.custom.html',
-      formatted_body: sanitizeOutgoingHtml(linked.html),
+      formatted_body: sanitizeOutgoingHtml(inline.render(linked.html).html),
     }
   }
 
   const linked = linkPlainText(expandedBody, context)
-  if (!linked.changed) {
-    return { body: expandedBody }
+  const rendered = inline.render(linked.html)
+  if (!linked.changed && !rendered.changed) {
+    return { body: inline.plain(expandedBody) }
   }
   return {
-    body: expandedBody,
+    body: inline.plain(expandedBody),
     format: 'org.matrix.custom.html',
-    formatted_body: sanitizeOutgoingHtml(linked.html),
+    formatted_body: sanitizeOutgoingHtml(rendered.html),
   }
 }
 
