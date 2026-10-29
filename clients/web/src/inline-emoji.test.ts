@@ -17,6 +17,35 @@ const context = {
 const ref = { start: 3, end: 10, shortcode: 'smile', mxc: 'mxc://hs/custom' }
 
 describe('inline custom emoji', () => {
+  it('ignores quoted reply images and shortcodes when recovering edit bindings', () => {
+    const body = 'hi :smile:'
+    const sent = formatMessageBody(body, { ...context, inlineEmoji: [ref] })
+    for (const quoted of [
+      ':smile:',
+      '<img data-mx-emoticon src="mxc://hs/quoted" alt=":smile:">',
+    ]) {
+      expect(
+        inlineEmojiFromEvent(body, {
+          ...sent,
+          formatted_body: `<mx-reply><blockquote>${quoted}</blockquote></mx-reply>${sent.formatted_body}`,
+        }),
+      ).toEqual([ref])
+    }
+  })
+  it('does not send user-typed MXC Markdown images or links, alongside bound emoji', () => {
+    const body = 'hi :smile: ![x](mxc://hs/arbitrary) [x](mxc://hs/link)'
+    const sent = formatMessageBody(body, { ...context, inlineEmoji: [ref] })
+    const doc = new DOMParser().parseFromString(
+      sent.formatted_body!,
+      'text/html',
+    )
+    expect(
+      [...doc.querySelectorAll('img[src]')].map((img) =>
+        img.getAttribute('src'),
+      ),
+    ).toEqual([ref.mxc])
+    expect(doc.querySelector('a[href^="mxc:"]')).toBeNull()
+  })
   it('accounts for serialized draft bytes, including long MXCs and multibyte text', () => {
     expect(inlineEmojiDraftFits('hi :smile:', [ref])).toBe(true)
     expect(

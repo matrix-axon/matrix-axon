@@ -120,7 +120,9 @@ export function formatMessageBody(
     return {
       body: inline.plain(expandedBody),
       format: 'org.matrix.custom.html',
-      formatted_body: sanitizeOutgoingHtml(inline.render(linked.html).html),
+      formatted_body: sanitizeOutgoingHtml(inline.render(linked.html).html, {
+        inlineEmoji: true,
+      }),
     }
   }
 
@@ -132,7 +134,7 @@ export function formatMessageBody(
   return {
     body: inline.plain(expandedBody),
     format: 'org.matrix.custom.html',
-    formatted_body: sanitizeOutgoingHtml(rendered.html),
+    formatted_body: sanitizeOutgoingHtml(rendered.html, { inlineEmoji: true }),
   }
 }
 

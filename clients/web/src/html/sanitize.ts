@@ -152,14 +152,19 @@ function configure(): void {
  * every receiving client must sanitize anyway (ours does), our own output
  * stays honest by never carrying an active scheme.
  */
-export function sanitizeOutgoingHtml(html: string): string {
+export function sanitizeOutgoingHtml(
+  html: string,
+  { inlineEmoji = false }: { inlineEmoji?: boolean } = {},
+): string {
   return outgoingPurify.sanitize(html, {
     ALLOWED_TAGS,
-    ALLOWED_ATTR: [...ALLOWED_ATTR, 'src'],
+    ALLOWED_ATTR: inlineEmoji ? [...ALLOWED_ATTR, 'src'] : ALLOWED_ATTR,
     FORBID_CONTENTS: ['mx-reply', 'style', 'script'],
     ALLOW_DATA_ATTR: false,
-    ALLOWED_URI_REGEXP:
-      /^(?:mxc:\/\/|(?:(?:https?|mailto|ftp|tel|callto|sms|cid|xmpp|matrix|magnet):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$)))/i,
+    // Only generated emoticon src attributes get this exception. The hook
+    // validates each image; links always retain the ordinary URI allowlist.
+    ADD_URI_SAFE_ATTR: inlineEmoji ? ['src'] : [],
+    ALLOWED_URI_REGEXP,
   })
 }
 
@@ -170,7 +175,11 @@ outgoingPurify.addHook('uponSanitizeElement', (node, data) => {
   if (data.tagName !== 'img') return
   const img = node as Element
   const src = img.getAttribute('src')
-  if (src === null || customReactionMxc(src) === null)
+  if (
+    !img.hasAttribute('data-mx-emoticon') ||
+    src === null ||
+    customReactionMxc(src) === null
+  )
     img.removeAttribute('src')
   img.removeAttribute('data-mxc')
 })

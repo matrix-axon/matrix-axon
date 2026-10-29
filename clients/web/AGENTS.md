@@ -217,6 +217,11 @@ before starting a milestone.
   Formatting preserves bindings, edits inside a token discard them, and undo/redo restores bounded snapshots (128 entries and at most 1 MiB of retained text, excluding the current entry).
   Sending protects custom tokens from Unicode expansion/Markdown, generates MXC `img data-mx-emoticon` tags only in eligible text nodes, and retains readable fallback text.
   Outgoing sanitization uses a separate DOMPurify instance so display-only MXC-to-blob rewrites never reach the wire.
+  Markdown sanitization strips source MXCs before binding rendering; only generated emoji image sources receive the final sanitizer exception, never links.
+  Construct image nodes and fragments in the inert template document to avoid native MXC loads.
+  Edit recovery excludes rich-reply fallback subtrees.
+  Completion discovery retains at most two usage snapshots for thirty seconds within a mounted account/room scope; picker refresh and explicit sends stay fresh.
+  Emoji ownership follows the account/room/API independently of optional sticker sending, and the existing control opens insertion directly while editing.
   Captions and failed-media retries retain their formatted body; scope changes invalidate picker callbacks and transient history.
 - **Bundled URL previews** (`src/link-previews.ts`, `components/LinkPreviews.tsx`): `EventBody` appends image/text cards for room and thread messages, including media captions.
   Compact pinned thread-root headers disable the cards through `EventBody`'s `showLinkPreviews` prop; full message rows retain them.

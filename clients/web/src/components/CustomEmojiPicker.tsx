@@ -1,32 +1,15 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import {
   loadImagePacks,
+  inlineImageShortcode,
   type EmojiPacks,
   type CustomEmoji,
 } from '../emoji-packs'
 import { useServices } from '../services'
 import { ReactionContent } from './ReactionContent'
+import { moveGridFocus } from './grid-keyboard'
 
 type Load = { id: string; data?: EmojiPacks; error?: string }
-
-/** A mount-scoped snapshot: never retain pack data across a room or session. */
-export function CustomEmojiPicker({
-  accountId,
-  roomId,
-  onReact,
-}: {
-  accountId: string
-  roomId: string
-  onReact: (key: string, shortcode: string) => void
-}) {
-  return (
-    <ImagePackPicker
-      accountId={accountId}
-      roomId={roomId}
-      onSelect={(image) => onReact(image.url, image.shortcode)}
-    />
-  )
-}
 
 export function ImagePackPicker({
   accountId,
@@ -96,14 +79,21 @@ export function ImagePackPicker({
   const current = load?.id === id ? load : null
   const data = signedIn ? current?.data : undefined
   const search = query.trim().toLocaleLowerCase()
+  const insertable = (image: CustomEmoji) =>
+    action !== 'insert' || inlineImageShortcode(image.shortcode) !== null
+  const omitted = data?.packs.some((pack) =>
+    pack.images.some((image) => !insertable(image)),
+  )
   const packs =
     data?.packs
       .map((pack) => ({
         ...pack,
-        images: pack.images.filter((image) =>
-          `${image.shortcode} ${image.body ?? ''} ${pack.display_name ?? ''}`
-            .toLocaleLowerCase()
-            .includes(search),
+        images: pack.images.filter(
+          (image) =>
+            insertable(image) &&
+            `${image.shortcode} ${image.body ?? ''} ${pack.display_name ?? ''}`
+              .toLocaleLowerCase()
+              .includes(search),
         ),
       }))
       .filter((pack) => pack.images.length > 0) ?? []
@@ -133,30 +123,8 @@ export function ImagePackPicker({
           return
         }
         if (!(target instanceof HTMLButtonElement)) return
-        const index = buttons.indexOf(target)
-        if (index < 0) return
-        const grid = target.closest('.custom-emoji-grid')!
-        const columns = Math.max(
-          1,
-          getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean)
-            .length,
-        )
-        const delta =
-          event.key === 'ArrowDown'
-            ? columns
-            : event.key === 'ArrowUp'
-              ? -columns
-              : event.key === 'ArrowLeft'
-                ? -1
-                : 1
-        const next = buttons[index + delta]
-        if (next) {
-          event.preventDefault()
-          next.focus()
-        } else if (event.key === 'ArrowUp' && index < columns) {
-          event.preventDefault()
-          searchRef.current?.focus()
-        }
+        const grid = target.closest('.custom-emoji-grid')
+        if (grid) moveGridFocus(event, target, buttons, grid, searchRef.current)
       }}
     >
       <div class="custom-emoji-search">
@@ -212,6 +180,9 @@ export function ImagePackPicker({
               Retry
             </button>
           </p>
+        )}
+        {omitted && (
+          <p role="status">Some emoji names cannot be inserted inline.</p>
         )}
         {data?.partial && <p role="status">Some {label} could not be shown.</p>}
         {data && packs.length === 0 && (
