@@ -537,12 +537,11 @@ export function createMediaService(deps: {
         } catch {
           return { ok: false, error: { kind: 'auth' } }
         }
+        // AuthProvider defines null as signed out, not anonymous media access.
         if (token === null || generation !== sessionGeneration)
           return { ok: false, error: { kind: 'auth' } }
         const headers = new Headers()
-        if (token !== null) {
-          headers.set('authorization', `Bearer ${token}`)
-        }
+        headers.set('authorization', `Bearer ${token}`)
         const res = await fetch(url, {
           headers,
           signal: AbortSignal.timeout(transferTimeoutMs),
