@@ -209,6 +209,7 @@ impl App {
                 && self.pending_command_response.as_deref() == Some(SEARCH_HELP_TEXT);
             if kind == PopupKind::RoomInfo {
                 self.clear_member_filter();
+                self.cancel_room_info_refresh();
             }
             if kind == PopupKind::MediaPreview {
                 self.mode = Mode::MessageList;

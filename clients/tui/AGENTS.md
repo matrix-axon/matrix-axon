@@ -34,6 +34,17 @@
   The prompt ends when the popup closes or the selected room changes, so a later paste reaches the composer.
   Alt and Ctrl-Alt characters are typed into the prompt. Plain Ctrl stays a shortcut.
   A later refresh of the same room must keep the filter text and must not jump the scroll on its own.
+  While the popup is open it re-reads on reconnect, when a redaction or a metadata or tombstone state event arrives for the selected room, and every 30 seconds from the tick.
+  That wait starts when the previous batch settles, so a slow read does not start the next one immediately.
+  Membership changes wait until they pause for two seconds, and no later than ten seconds after the first change in the burst.
+  One batch is in flight at a time.
+  One transport failure doubles the wait for the whole batch, up to four minutes, and a 404 does not.
+  A metadata event does not skip that backoff.
+  One reconnect during the backoff may start a batch. The next reconnect waits for the schedule.
+  A refresh leaves each part's last value and last error in place until that part's new result arrives.
+  Closing the popup cancels the batch.
+  The poll stays until the server publishes required-state changes (#621).
+  If the selected room changes under the open popup, the next tick fetches that room and resets the scroll.
   Paste is accepted only while that prompt is open inside the room-info popup.
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.
 - Room titles follow ADR 0118: nonblank `name`, then `canonical_alias`, then the server's `display_name`, then room ID.

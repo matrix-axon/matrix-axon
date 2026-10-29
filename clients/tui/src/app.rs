@@ -2107,7 +2107,7 @@ impl App {
         // not Esc and the previous query was still committed.
         self.discard_member_filter();
         self.reveal_room_info_members = false;
-        self.request_room_info(key);
+        self.open_room_info(key, Instant::now());
         self.open_popup(PopupKind::RoomInfo);
     }
 

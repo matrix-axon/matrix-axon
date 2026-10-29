@@ -62,6 +62,10 @@ impl App {
                 // "stopped typing" frame may have been missed while down, so
                 // drop stale typing rather than leave a peer "typing" forever.
                 self.clear_typing_overlays();
+                // Required-state updates have no live frame. An open
+                // `/whereami` re-reads on every connect, including the first.
+                // One reconnect may skip a failure backoff; the next waits.
+                self.note_room_info_reconnect(Instant::now());
                 LiveFrameAction::None
             }
             LiveFrame::Reconnecting { reason, delay } => {
@@ -227,6 +231,9 @@ impl App {
             account_id: event.account_id,
             room_id: event.room_id.clone(),
         };
+        // Before the early returns: a metadata event or redaction still
+        // refreshes an open `/whereami` when this function does not append the row.
+        self.note_room_info_timeline_event(&key, &event.event_type, Instant::now());
         // Apply title state before timeline dedup/history guards: it also affects
         // off-screen rooms and must not wait for the SDK reconciler.
         if event.state_key() == Some("") {
