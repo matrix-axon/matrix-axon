@@ -23,7 +23,7 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-ruma-html = "0.8"
+ruma-html = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 

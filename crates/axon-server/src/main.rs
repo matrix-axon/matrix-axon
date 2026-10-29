@@ -13,6 +13,7 @@ mod db;
 mod devices;
 mod gateway;
 mod init;
+mod inline_media;
 mod lifecycle;
 mod matrix_oauth_acquire;
 mod matrix_oauth_browser;
@@ -346,6 +347,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // then repeats the expiry sweep for the rest of the process's life.
     uploads.reconcile_boot().await;
     crate::uploads::spawn_expiry_sweeper(uploads.clone());
+    crate::inline_media::spawn_backfill(store.clone());
     let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
     let sync_status = Arc::new(status::SyncStatusAdapter(sync_engine.sync_health()));
     let homeserver_status = Arc::new(status::HomeserverStatusAdapter(
