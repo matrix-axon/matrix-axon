@@ -5,6 +5,7 @@ import { deviceStateChange } from '../api/frames'
 import { randomId } from '../random-id'
 import type { LiveConnection } from './live-connection'
 import type { RoomDto } from './room-list'
+import { parseInlineEmoji, type InlineEmojiReference } from '../inline-emoji'
 
 /** localStorage key for this install's stable device id (ADR 0048). */
 const DEVICE_ID_KEY = 'axon.device_id'
@@ -82,7 +83,12 @@ export interface DeviceStateStore {
   /** Draft text for a room (`''` when none) — the `drafts` namespace. */
   draft(accountId: string, roomId: string): string
   /** Set/clear a room's draft (`''` clears); debounced like every write. */
-  setDraft(accountId: string, roomId: string, text: string): void
+  setDraft(
+    accountId: string,
+    roomId: string,
+    text: string,
+    inlineEmoji?: readonly InlineEmojiReference[],
+  ): void
   /** Fetch an account's drafts once — call when its rooms become reachable. */
   hydrateDrafts(accountId: string): void
 
@@ -732,8 +738,12 @@ export function createDeviceStateStore(
         entries.value.get(cacheKey(accountId, DRAFTS_NAMESPACE, roomId)),
       )
     },
-    setDraft(accountId, roomId, text) {
-      const value = text === '' ? null : { text }
+    setDraft(accountId, roomId, text, inlineEmoji) {
+      const refs = parseInlineEmoji(text, inlineEmoji)
+      const value =
+        text === ''
+          ? null
+          : { text, ...(refs.length ? { inline_emoji: refs } : {}) }
       writeCache(accountId, DRAFTS_NAMESPACE, roomId, value)
       schedulePut(accountId, DRAFTS_NAMESPACE, roomId, value)
     },

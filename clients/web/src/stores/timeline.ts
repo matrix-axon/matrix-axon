@@ -231,6 +231,7 @@ export interface TimelineStore {
     files: readonly File[],
     options?: {
       caption?: string
+      formattedBody?: string | null
       replyTo?: string
       threadRoot?: string
       senderId?: string
@@ -240,6 +241,7 @@ export interface TimelineStore {
     file: File,
     options?: {
       caption?: string
+      formattedBody?: string | null
       replyTo?: string
       threadRoot?: string
       senderId?: string
@@ -1467,6 +1469,7 @@ export function createTimelineStore(
 
   type MediaSendOptions = {
     caption?: string
+    formattedBody?: string | null
     replyTo?: string
     threadRoot?: string
     senderId?: string
@@ -1494,6 +1497,12 @@ export function createTimelineStore(
           body: {
             upload_id: uploadId,
             caption: caption ?? null,
+            ...(caption !== undefined && options.formattedBody
+              ? {
+                  format: 'org.matrix.custom.html',
+                  formatted_body: options.formattedBody,
+                }
+              : {}),
             reply_to: options.replyTo ?? null,
             thread_root: options.threadRoot ?? threadRoot ?? null,
             ...(options.urlPreviews === undefined
@@ -1537,6 +1546,12 @@ export function createTimelineStore(
           msgtype: kind === 'image' ? 'm.image' : 'm.file',
           body,
           filename: file.name,
+          ...(options.formattedBody
+            ? {
+                format: 'org.matrix.custom.html',
+                formatted_body: options.formattedBody,
+              }
+            : {}),
           // No `url`: no mxc exists until the upload lands. `EventBody` renders
           // this echo from `localEcho.media`, not through `parseMedia` (ADR
           // 0065) — an image with a non-mxc url is deliberately *not* media.
@@ -1613,6 +1628,7 @@ export function createTimelineStore(
       options: {
         ...options,
         caption: index === 0 ? options.caption : undefined,
+        formattedBody: index === 0 ? options.formattedBody : undefined,
         replyTo: index === 0 ? options.replyTo : undefined,
       },
       localId: '',
@@ -1725,9 +1741,12 @@ export function createTimelineStore(
           sendMedia(failedMedia.file, {
             ...options,
             // Invert the echo's `caption ?? filename` body rule. A caption that
-            // *was* the filename round-trips as "no caption", which the server
-            // renders identically — so the outcome is the same either way.
-            caption: body === failedMedia.file.name ? undefined : body,
+            // *was* the filename round-trips as "no caption" unless formatted
+            // HTML must be preserved alongside it.
+            caption:
+              body === failedMedia.file.name && options.formattedBody == null
+                ? undefined
+                : body,
             senderId,
           })
     },

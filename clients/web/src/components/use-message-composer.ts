@@ -1,5 +1,9 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useMemo, useState } from 'preact/hooks'
 import type { ComposerAutocompleteOption } from './Composer'
+import {
+  inlineEmojiFromEvent,
+  type InlineEmojiReference,
+} from '../inline-emoji'
 import {
   currentEmojiEntries,
   emojiShortcodeSuggestions,
@@ -22,7 +26,12 @@ import type { EventDto, TimelineStore } from '../stores/timeline'
 
 export type ComposerAction =
   | { kind: 'reply'; event: EventDto }
-  | { kind: 'edit'; event: EventDto; draft?: string }
+  | {
+      kind: 'edit'
+      event: EventDto
+      draft?: string
+      inlineEmoji?: readonly InlineEmojiReference[]
+    }
 
 export interface MessageComposerOptions {
   /** The store the composer sends into (room- or thread-scoped). */
@@ -78,12 +87,19 @@ export function useMessageComposer(options: MessageComposerOptions): {
   /** Why a drop staged nothing, if it did not. */
   dropProblem: string | null
   emojiEntries: readonly EmojiEntry[]
-  formatComposerBody: (body: string) => Promise<FormattedMessageParts>
+  editInlineEmoji: readonly InlineEmojiReference[]
+  formatComposerBody: (
+    body: string,
+    inlineEmoji?: readonly InlineEmojiReference[],
+  ) => Promise<FormattedMessageParts>
   mentionCompletions: (query: string) => ComposerAutocompleteOption[]
   roomReferenceCompletions: (query: string) => ComposerAutocompleteOption[]
   emojiCompletions: (query: string) => ComposerAutocompleteOption[]
   /** The Composer `onSubmit`: media, edit, reply, or plain send. */
-  submitMessage: (body: string) => Promise<boolean>
+  submitMessage: (
+    body: string,
+    inlineEmoji?: readonly InlineEmojiReference[],
+  ) => Promise<boolean>
 } {
   const {
     timeline,
@@ -95,6 +111,14 @@ export function useMessageComposer(options: MessageComposerOptions): {
     onMutation,
   } = options
   const [action, setAction] = useState<ComposerAction | null>(null)
+  const editInlineEmoji = useMemo(
+    () =>
+      action?.kind === 'edit'
+        ? (action.inlineEmoji ??
+          inlineEmojiFromEvent(action.event.body ?? '', action.event.content))
+        : [],
+    [action],
+  )
   const [emojiEntries, setEmojiEntries] = useState(() => currentEmojiEntries())
   const attachable = action?.kind !== 'edit'
   const {
@@ -133,13 +157,17 @@ export function useMessageComposer(options: MessageComposerOptions): {
           onCancel: () => setAction(null),
         }
 
-  const formatComposerBody = async (body: string) =>
+  const formatComposerBody = async (
+    body: string,
+    inlineEmoji?: readonly InlineEmojiReference[],
+  ) =>
     formatMessageBody(body, {
       accountId,
       members: [...members.members.value.values()],
       rooms,
       roomTitles,
       emojiEntries: await loadEmojiEntries(),
+      inlineEmoji,
     })
 
   const mentionCompletions = (query: string): ComposerAutocompleteOption[] =>
@@ -153,7 +181,10 @@ export function useMessageComposer(options: MessageComposerOptions): {
   const emojiCompletions = (query: string): ComposerAutocompleteOption[] =>
     emojiShortcodeSuggestions(emojiEntries, query)
 
-  const submitMessage = async (body: string): Promise<boolean> => {
+  const submitMessage = async (
+    body: string,
+    inlineEmoji?: readonly InlineEmojiReference[],
+  ): Promise<boolean> => {
     // Dismiss the reply/edit mode immediately — don't hold the banner hostage
     // to the network round trip; the timeline renders the pending/failed
     // outcome.
@@ -171,16 +202,17 @@ export function useMessageComposer(options: MessageComposerOptions): {
       // The composer's text captions the *first* image; with none, the server
       // uses each filename as the body (ADR 0065, ADR 0081).
       const caption =
-        body === '' ? undefined : (await formatComposerBody(body)).body
+        body === '' ? undefined : await formatComposerBody(body, inlineEmoji)
       const ok = await timeline.sendMediaBatch(staged, {
-        caption,
+        caption: caption?.body,
+        formattedBody: caption?.formatted_body,
         replyTo,
         senderId,
       })
       if (ok) onMutation?.()
       return ok
     }
-    const formatted = await formatComposerBody(body)
+    const formatted = await formatComposerBody(body, inlineEmoji)
     if (current?.kind === 'edit') {
       const ok = await timeline.edit(current.event.event_id, formatted.body, {
         formattedBody: formatted.formatted_body ?? null,
@@ -189,7 +221,7 @@ export function useMessageComposer(options: MessageComposerOptions): {
         // A failed edit has no retryable echo (sends do), so re-open edit
         // mode carrying the text the user typed — the error banner alone
         // would silently discard it (WCR-10).
-        setAction({ ...current, draft: body })
+        setAction({ ...current, draft: body, inlineEmoji })
       }
       if (ok) onMutation?.()
       return ok
@@ -216,6 +248,7 @@ export function useMessageComposer(options: MessageComposerOptions): {
     dropProblem,
     dropHandlers,
     emojiEntries,
+    editInlineEmoji,
     formatComposerBody,
     mentionCompletions,
     roomReferenceCompletions,

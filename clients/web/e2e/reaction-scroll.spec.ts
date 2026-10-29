@@ -122,8 +122,8 @@ test('the full reaction emoji picker anchors to the more button when space allow
   // Record the anchor from inside the click that opens the picker, rather than
   // from a read before it.
   //
-  // `openFullPicker` snapshots `getBoundingClientRect()` when the click fires
-  // and positions against that snapshot forever after (`MessageEventRow.tsx`).
+  // Opening the full picker snapshots `getBoundingClientRect()` when the click
+  // fires and positions against that snapshot afterward (`EmojiPicker.tsx`).
   // A separate read beforehand is a *different* snapshot: `evaluate` does not
   // wait for the element to stop moving, while `click` does, so a layout still
   // settling — this spec opens at 390px and resizes to 1400px — is read at one
@@ -194,7 +194,7 @@ test('the full reaction emoji picker anchors to the more button when space allow
       dialogZIndex: Number(getComputedStyle(dialog).zIndex),
       composerZIndex:
         composer === null ? 0 : Number(getComputedStyle(composer).zIndex),
-      parentTag: dialog.parentElement?.tagName ?? '',
+      inBody: document.body.contains(dialog),
       rowContainsDialog:
         dialog.closest('.event-row') !== null ||
         dialog.closest('.reaction-picker-shell') !== null,
@@ -209,7 +209,7 @@ test('the full reaction emoji picker anchors to the more button when space allow
   expect(geometry.pickerHeight).toBeGreaterThanOrEqual(300)
   expect(geometry.pickerWidth).toBeGreaterThanOrEqual(400)
   expect(geometry.dialogZIndex).toBeGreaterThan(geometry.composerZIndex)
-  expect(geometry.parentTag).toBe('BODY')
+  expect(geometry.inBody).toBe(true)
   expect(geometry.rowContainsDialog).toBe(false)
   expect(geometry.dialogTop).toBeGreaterThanOrEqual(0)
   expect(geometry.dialogBottom).toBeLessThanOrEqual(geometry.viewportHeight)

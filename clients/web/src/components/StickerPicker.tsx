@@ -14,7 +14,9 @@ export interface StickerPickerOptions {
 }
 
 /** Separate from the draft: selecting a sticker never submits composer text. */
-export function StickerPickerButton(options: StickerPickerOptions) {
+export function StickerPickerButton(
+  options: StickerPickerOptions & { onInsertEmoji?: () => void },
+) {
   const [open, setOpen] = useState(false)
   const button = useRef<HTMLButtonElement>(null)
   return (
@@ -44,6 +46,14 @@ export function StickerPickerButton(options: StickerPickerOptions) {
             {...options}
             restoreTo={() => button.current}
             onClose={() => setOpen(false)}
+            onInsertEmoji={
+              options.onInsertEmoji === undefined
+                ? undefined
+                : () => {
+                    setOpen(false)
+                    options.onInsertEmoji?.()
+                  }
+            }
             onSelect={(image) => {
               setOpen(false)
               options.onSelect(image)
@@ -61,9 +71,11 @@ function StickerDialog({
   onSelect,
   onClose,
   restoreTo,
+  onInsertEmoji,
 }: StickerPickerOptions & {
   onClose: () => void
   restoreTo: () => HTMLElement | null
+  onInsertEmoji?: () => void
 }) {
   const { containerRef } = useModalFocus<HTMLDivElement>({
     restoreTo,
@@ -92,6 +104,11 @@ function StickerDialog({
       <div class="overlay-panel sticker-picker-panel">
         <div class="overlay-head">
           <h2>Stickers</h2>
+          {onInsertEmoji && (
+            <button type="button" class="ghost" onClick={onInsertEmoji}>
+              Insert emoji…
+            </button>
+          )}
           <button type="button" class="ghost" onClick={onClose}>
             Close
           </button>

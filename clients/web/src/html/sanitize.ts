@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify'
 import { linkifyDomTree } from './linkify'
+import { customReactionMxc } from '../custom-reactions'
 
 interface MatrixHtmlRenderContext {
   resolveUserLink?: (
@@ -90,6 +91,8 @@ const ALLOWED_ATTR = [
   'data-mx-color',
   'data-mx-bg-color',
   'data-mx-spoiler',
+  'data-mx-emoticon',
+  'title',
   // `<img>` (mxc-only): `src` is never allowed through — the hook rewrites a
   // safe `mxc://` src into `data-mxc`, which `FormattedBody` resolves.
   'alt',
@@ -150,15 +153,27 @@ function configure(): void {
  * stays honest by never carrying an active scheme.
  */
 export function sanitizeOutgoingHtml(html: string): string {
-  configure()
-  return DOMPurify.sanitize(html, {
+  return outgoingPurify.sanitize(html, {
     ALLOWED_TAGS,
-    ALLOWED_ATTR,
+    ALLOWED_ATTR: [...ALLOWED_ATTR, 'src'],
     FORBID_CONTENTS: ['mx-reply', 'style', 'script'],
     ALLOW_DATA_ATTR: false,
-    ALLOWED_URI_REGEXP,
+    ALLOWED_URI_REGEXP:
+      /^(?:mxc:\/\/|(?:(?:https?|mailto|ftp|tel|callto|sms|cid|xmpp|matrix|magnet):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$)))/i,
   })
 }
+
+// Display sanitization rewrites MXCs to data-mxc. Outgoing HTML must retain
+// real MXC src attributes so other clients and the server can resolve them.
+const outgoingPurify = DOMPurify(window)
+outgoingPurify.addHook('uponSanitizeElement', (node, data) => {
+  if (data.tagName !== 'img') return
+  const img = node as Element
+  const src = img.getAttribute('src')
+  if (src === null || customReactionMxc(src) === null)
+    img.removeAttribute('src')
+  img.removeAttribute('data-mxc')
+})
 
 /**
  * Sanitize Matrix HTML and apply the Matrix-specific transforms, returning

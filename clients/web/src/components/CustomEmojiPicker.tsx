@@ -32,11 +32,13 @@ export function ImagePackPicker({
   accountId,
   roomId,
   usage = 'emoticon',
+  action = 'react',
   onSelect,
 }: {
   accountId: string
   roomId: string
   usage?: 'emoticon' | 'sticker'
+  action?: 'insert' | 'react'
   onSelect: (image: CustomEmoji) => void
 }) {
   const label = usage === 'sticker' ? 'stickers' : 'custom emoji'
@@ -106,7 +108,57 @@ export function ImagePackPicker({
       }))
       .filter((pack) => pack.images.length > 0) ?? []
   return (
-    <div class="custom-emoji-picker">
+    <div
+      class="custom-emoji-picker"
+      onKeyDown={(event) => {
+        if (
+          event.isComposing ||
+          !['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(
+            event.key,
+          )
+        )
+          return
+        const root = event.currentTarget
+        const buttons = [
+          ...root.querySelectorAll<HTMLButtonElement>(
+            '.custom-emoji-grid button',
+          ),
+        ]
+        const target = event.target
+        if (target instanceof HTMLInputElement) {
+          if (event.key === 'ArrowDown' && buttons[0]) {
+            event.preventDefault()
+            buttons[0].focus()
+          }
+          return
+        }
+        if (!(target instanceof HTMLButtonElement)) return
+        const index = buttons.indexOf(target)
+        if (index < 0) return
+        const grid = target.closest('.custom-emoji-grid')!
+        const columns = Math.max(
+          1,
+          getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean)
+            .length,
+        )
+        const delta =
+          event.key === 'ArrowDown'
+            ? columns
+            : event.key === 'ArrowUp'
+              ? -columns
+              : event.key === 'ArrowLeft'
+                ? -1
+                : 1
+        const next = buttons[index + delta]
+        if (next) {
+          event.preventDefault()
+          next.focus()
+        } else if (event.key === 'ArrowUp' && index < columns) {
+          event.preventDefault()
+          searchRef.current?.focus()
+        }
+      }}
+    >
       <div class="custom-emoji-search">
         <input
           ref={searchRef}
@@ -192,7 +244,9 @@ export function ImagePackPicker({
                   aria-label={
                     usage === 'sticker'
                       ? `Send sticker :${image.shortcode}:`
-                      : `React with :${image.shortcode}:`
+                      : action === 'insert'
+                        ? `Insert :${image.shortcode}:`
+                        : `React with :${image.shortcode}:`
                   }
                   onClick={() => onSelect(image)}
                 >

@@ -62,6 +62,29 @@ const draftsFrame = (deviceId: string, entries: Record<string, unknown>) =>
   })
 
 describe('createDeviceStateStore', () => {
+  it('keeps inline image bindings in the same draft value while retaining plain text for other clients', async () => {
+    const { store } = setup()
+    const refs = [
+      { start: 3, end: 10, shortcode: 'smile', mxc: 'mxc://hs/custom' },
+    ]
+    let written: unknown
+    server.use(
+      http.put(STATE_PATH, async ({ request }) => {
+        written = await request.json()
+        return HttpResponse.json({ data: {} })
+      }),
+    )
+    store.setDraft(ACCT, ROOM, 'hi :smile:', refs)
+    expect(store.draft(ACCT, ROOM)).toBe('hi :smile:')
+    expect(store.get(ACCT, 'drafts', ROOM)).toEqual({
+      text: 'hi :smile:',
+      inline_emoji: refs,
+    })
+    await store.flushPending()
+    expect(JSON.stringify(written)).toContain('mxc://hs/custom')
+    store.setDraft(ACCT, ROOM, 'new text')
+    expect(store.get(ACCT, 'drafts', ROOM)).toEqual({ text: 'new text' })
+  })
   it('mints a device id once and persists it across instances', () => {
     const storage = memoryStorage()
     const first = setup(storage).store.deviceId
