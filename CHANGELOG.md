@@ -3,6 +3,24 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.19 - 2026-10-29
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(web): render bundled link preview images by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/877
+* feat(tui): refresh an open /whereami popup by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/881
+* feat(web): open attachment previews from compact cards by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/878
+* feat(server): request guest access and server ACL state and publish room_details.changed by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/882
+#### Bug Fixes
+* fix(server): keep the sender-trust overlay watcher alive across subscription failures by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/883
+#### Other Changes
+* feat(server): feed the gateway's timeouts and server errors to the homeserver gate (ADR 0122 step 2) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/880
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.18...v0.1.19
+
 ## v0.1.18 - 2026-10-27
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
