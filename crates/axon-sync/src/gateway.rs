@@ -1058,14 +1058,21 @@ impl SdkGateway {
     /// the result, so a homeserver that stops answering, or fails under load,
     /// slows axon's background requests first. Reads only the cached client,
     /// so it never connects or waits: a call that connects the client itself
-    /// is not reported.
+    /// is not reported. That is logged at debug, so how often a reconnect
+    /// hides a call from the gate can be measured.
     pub fn interactive_call(&self, account_id: Uuid) -> InteractiveCall {
         match self.manager.cached(account_id) {
             Some(client) => self
                 .manager
                 .homeserver_gates()
                 .interactive_call(&client.homeserver()),
-            None => InteractiveCall::default(),
+            None => {
+                tracing::debug!(
+                    %account_id,
+                    "no connected client: this call will not report to the homeserver gate"
+                );
+                InteractiveCall::default()
+            }
         }
     }
 

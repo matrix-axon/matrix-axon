@@ -799,6 +799,8 @@ pub struct InteractiveCall {
     /// `None` reports nothing: the default, and a call made while the account
     /// had no connected client.
     gate: Option<(Arc<HomeserverGate>, u64)>,
+    /// Set by [`ignoring_timeouts`](Self::ignoring_timeouts).
+    ignore_timeouts: bool,
 }
 
 impl InteractiveCall {
@@ -806,14 +808,29 @@ impl InteractiveCall {
         let epoch = gate.epoch();
         InteractiveCall {
             gate: Some((gate, epoch)),
+            ignore_timeouts: false,
+        }
+    }
+
+    /// Report a 5xx, a 429 or a transport error, but not a timeout. For an
+    /// upload, whose timeout says as much about the file's size and axon's
+    /// uplink as about the homeserver's load.
+    pub fn ignoring_timeouts(self) -> Self {
+        InteractiveCall {
+            ignore_timeouts: true,
+            ..self
         }
     }
 
     /// Report how the call ended. `Err` is the caller's own timeout running
     /// out first.
     pub fn finish<T>(self, result: &Result<Result<T, GatewayError>, Elapsed>) {
-        if let Some((gate, epoch)) = self.gate {
-            gate.report_interactive(epoch, outcome_of(result));
+        let Some((gate, epoch)) = self.gate else {
+            return;
+        };
+        let outcome = outcome_of(result);
+        if !(self.ignore_timeouts && outcome == Outcome::TimedOut) {
+            gate.report_interactive(epoch, outcome);
         }
     }
 }
@@ -1272,6 +1289,29 @@ mod tests {
             INITIAL_LIMIT,
             "a default call reports nothing"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_reports_a_server_error_but_not_a_timeout() {
+        let url = Url::parse("http://hs.test").unwrap();
+        let timeouts: [Result<Result<(), GatewayError>, Elapsed>; 2] = [
+            Err(elapsed().await),
+            Ok(Err(GatewayError::Timeout("sdk".into()))),
+        ];
+        for timeout in timeouts {
+            let (gates, gate) = interactive_gate();
+            gates
+                .interactive_call(&url)
+                .ignoring_timeouts()
+                .finish(&timeout);
+            assert_eq!(state(&gate).0, INITIAL_LIMIT, "{timeout:?}");
+        }
+        let (gates, gate) = interactive_gate();
+        gates
+            .interactive_call(&url)
+            .ignoring_timeouts()
+            .finish::<()>(&Ok(Err(GatewayError::Overloaded("503".into()))));
+        assert_eq!(state(&gate).0, 1);
     }
 
     #[tokio::test(start_paused = true)]

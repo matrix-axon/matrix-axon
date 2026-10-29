@@ -101,6 +101,27 @@ impl GatewayAdapter {
     ) -> impl Future<Output = Result<T, SendError>> + 'a {
         self.bounded(account_id, self.send_mutation_timeout, verb, fut)
     }
+
+    /// [`bounded`](Self::bounded) under
+    /// [`upstream_upload_timeout`](Self::upstream_upload_timeout), for the
+    /// calls that upload bytes. Their timeout is not reported to the gate: it
+    /// says as much about the file's size and axon's uplink as about the
+    /// homeserver. A 5xx, 429 or transport error still is.
+    fn with_upload_timeout<'a, T: 'a>(
+        &self,
+        account_id: Uuid,
+        verb: &'a str,
+        fut: impl Future<Output = Result<T, GatewayError>> + 'a,
+    ) -> impl Future<Output = Result<T, SendError>> + 'a {
+        run_bounded(
+            self.gateway
+                .interactive_call(account_id)
+                .ignoring_timeouts(),
+            self.upstream_upload_timeout,
+            verb,
+            fut,
+        )
+    }
 }
 
 /// Runs `fut` under `timeout`, finishes `call` with the result, reports a
@@ -173,9 +194,8 @@ impl MessageSender for GatewayAdapter {
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
     ) -> Result<String, SendError> {
-        self.bounded(
+        self.with_upload_timeout(
             account_id,
-            self.upstream_upload_timeout,
             "preview send",
             self.gateway
                 .send_with_previews(account_id, room_id, message, attachment),
@@ -224,9 +244,8 @@ impl MessageSender for GatewayAdapter {
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, SendError> {
-        self.bounded(
+        self.with_upload_timeout(
             account_id,
-            self.upstream_upload_timeout,
             "media send",
             self.gateway.send_media(
                 account_id, room_id, attachment, caption, formatted, relation,
@@ -521,9 +540,8 @@ impl RoomSettingsSender for GatewayAdapter {
         // Reuses the media-upload timeout (not `membership_mutation_timeout`)
         // since this call, unlike the other five, does a real upload to the
         // homeserver — the same reason `send_media` uses it.
-        self.bounded(
+        self.with_upload_timeout(
             account_id,
-            self.upstream_upload_timeout,
             "set_avatar",
             self.gateway.set_avatar(account_id, room_id, attachment),
         )
@@ -628,9 +646,8 @@ impl AccountActionsSender for GatewayAdapter {
         // Reuses the media-upload timeout (not `membership_mutation_timeout`)
         // since this call does a real upload to the homeserver — the same
         // reason `RoomSettingsSender::set_avatar` uses it.
-        self.bounded(
+        self.with_upload_timeout(
             account_id,
-            self.upstream_upload_timeout,
             "set_avatar",
             self.gateway.set_account_avatar(account_id, attachment),
         )
