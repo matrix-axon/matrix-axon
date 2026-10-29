@@ -536,6 +536,7 @@ dependencies = [
  "axon-core",
  "chrono",
  "include_dir",
+ "ruma-html 0.8.0",
  "serde_json",
  "sqlx-core",
  "sqlx-postgres",

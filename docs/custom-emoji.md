@@ -111,6 +111,14 @@ Pack MIME declarations are not trusted: only PNG, JPEG, GIF, and WebP signatures
 Authorization precedes conditional ETag handling for originals and thumbnails.
 Media storage continues to use the existing per-object limits and globally bounded cache.
 
+API clients can also embed an emoji image in a text message using the existing `format: "org.matrix.custom.html"` and `formatted_body` send fields.
+Use an `img` with an MXC `src`, `data-mx-emoticon`, a readable `alt` such as `:wave:`, and bounded dimensions, following MSC2545.
+Keep the shortcode in the plain `body` fallback.
+For messages ingested or decrypted after this upgrade, Axon stores up to 64 distinct image references from sanitized HTML bodies of at most 64 KiB, including edit replacements.
+Those references continue authorizing media after a pack changes, subject to account isolation, room departure, and redaction of the reference or an edit's target.
+Existing stored messages are not reparsed by the upgrade.
+This does not change the standalone sticker or reaction send APIs.
+
 To send a selection, use the existing reaction endpoint with its unchanged MXC key and optional display name:
 
 ```json

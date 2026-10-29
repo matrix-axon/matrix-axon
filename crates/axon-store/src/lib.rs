@@ -13,6 +13,7 @@ mod display_names;
 mod error;
 mod events;
 mod image_packs;
+mod inline_media;
 mod instance_preferences;
 mod invites;
 mod matrix_oauth_acquire;
