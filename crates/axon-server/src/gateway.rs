@@ -22,7 +22,7 @@ use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
     ResolvedPowerLevels,
 };
-use axon_sync::{GatewayError, GatewayLeaveOutcome, SdkGateway};
+use axon_sync::{GatewayError, GatewayLeaveOutcome, InteractiveCall, SdkGateway};
 use uuid::Uuid;
 
 /// Wraps the sync engine's gateway so it satisfies the API's `MessageSender`
@@ -66,32 +66,82 @@ impl GatewayAdapter {
         }
     }
 
-    /// [`bounded`] under [`send_mutation_timeout`](Self::send_mutation_timeout).
-    /// Used by the [`MessageSender`] methods below.
-    async fn with_mutation_timeout<T>(
+    /// Runs one outbound call through [`run_bounded`], reporting how it ended
+    /// to `account_id`'s homeserver gate (ADR 0122 decision 1): a user is
+    /// waiting on every call here, so a homeserver that stops answering, or
+    /// fails under load, slows axon's background requests first. Every
+    /// outbound call in this adapter goes through it.
+    ///
+    /// Not an `async fn`: returning [`run_bounded`]'s future directly keeps
+    /// each call's future one level shallower, which the larger gateway calls
+    /// need to stay inside the compiler's layout depth limit.
+    fn bounded<'a, T: 'a>(
         &self,
-        verb: &str,
-        fut: impl Future<Output = Result<T, GatewayError>>,
-    ) -> Result<T, SendError> {
-        bounded(self.send_mutation_timeout, verb, fut).await
+        account_id: Uuid,
+        timeout: Duration,
+        verb: &'a str,
+        fut: impl Future<Output = Result<T, GatewayError>> + 'a,
+    ) -> impl Future<Output = Result<T, SendError>> + 'a {
+        run_bounded(
+            self.gateway.interactive_call(account_id),
+            timeout,
+            verb,
+            fut,
+        )
+    }
+
+    /// [`bounded`](Self::bounded) under
+    /// [`send_mutation_timeout`](Self::send_mutation_timeout). Used by the
+    /// [`MessageSender`] methods below.
+    fn with_mutation_timeout<'a, T: 'a>(
+        &self,
+        account_id: Uuid,
+        verb: &'a str,
+        fut: impl Future<Output = Result<T, GatewayError>> + 'a,
+    ) -> impl Future<Output = Result<T, SendError>> + 'a {
+        self.bounded(account_id, self.send_mutation_timeout, verb, fut)
+    }
+
+    /// [`bounded`](Self::bounded) under
+    /// [`upstream_upload_timeout`](Self::upstream_upload_timeout), for the
+    /// calls that upload bytes. Their timeout is not reported to the gate: it
+    /// says as much about the file's size and axon's uplink as about the
+    /// homeserver. A 5xx, 429 or transport error still is.
+    fn with_upload_timeout<'a, T: 'a>(
+        &self,
+        account_id: Uuid,
+        verb: &'a str,
+        fut: impl Future<Output = Result<T, GatewayError>> + 'a,
+    ) -> impl Future<Output = Result<T, SendError>> + 'a {
+        run_bounded(
+            self.gateway
+                .interactive_call(account_id)
+                .ignoring_timeouts(),
+            self.upstream_upload_timeout,
+            verb,
+            fut,
+        )
     }
 }
 
-/// Runs `fut` under `timeout`, reporting a timeout via [`timed_out`] and
-/// mapping a gateway error via [`map_err`]. Every outbound call in this
-/// adapter goes through it, so none can report a timeout any other way.
+/// Runs `fut` under `timeout`, finishes `call` with the result, reports a
+/// timeout via [`timed_out`] and maps a gateway error via [`map_err`], so no
+/// outbound call can report a timeout any other way.
 ///
 /// The SDK's own request timeout (30 s by default) can fire first. That is
 /// reported in the same `<verb> timed out after Ns` form, with how long Axon
 /// actually waited, so a client matching on the message (the web client's
 /// join/knock hint) sees one shape. The SDK logs the failed request itself.
-async fn bounded<T>(
+async fn run_bounded<T>(
+    call: InteractiveCall,
     timeout: Duration,
     verb: &str,
     fut: impl Future<Output = Result<T, GatewayError>>,
 ) -> Result<T, SendError> {
     let started = tokio::time::Instant::now();
-    match tokio::time::timeout(timeout, fut).await {
+    let result = tokio::time::timeout(timeout, fut).await;
+    call.finish(&result);
+    match result {
         Err(_) => Err(timed_out(verb, timeout)),
         Ok(Err(GatewayError::Timeout(_))) => Err(timed_out(verb, started.elapsed())),
         Ok(result) => result.map_err(map_err),
@@ -124,7 +174,7 @@ fn map_err(err: GatewayError) -> SendError {
         GatewayError::Forbidden(msg) => SendError::Forbidden(msg),
         GatewayError::NotConnected(msg) => SendError::Unavailable(msg),
         GatewayError::Invalid(msg) => SendError::Invalid(msg),
-        GatewayError::Upstream(msg) => SendError::Upstream(msg),
+        GatewayError::Upstream(msg) | GatewayError::Overloaded(msg) => SendError::Upstream(msg),
         GatewayError::Timeout(msg) => SendError::Timeout(msg),
         // Unreachable on this path: mutations upload attachments, they never
         // download and decrypt one, so only the media proxy can produce this.
@@ -144,8 +194,8 @@ impl MessageSender for GatewayAdapter {
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
     ) -> Result<String, SendError> {
-        bounded(
-            self.upstream_upload_timeout,
+        self.with_upload_timeout(
+            account_id,
             "preview send",
             self.gateway
                 .send_with_previews(account_id, room_id, message, attachment),
@@ -161,6 +211,7 @@ impl MessageSender for GatewayAdapter {
         relation: Relation<'_>,
     ) -> Result<String, SendError> {
         self.with_mutation_timeout(
+            account_id,
             "send",
             self.gateway
                 .send_message(account_id, room_id, body, formatted, relation),
@@ -176,6 +227,7 @@ impl MessageSender for GatewayAdapter {
         relation: Relation<'_>,
     ) -> Result<String, SendError> {
         self.with_mutation_timeout(
+            account_id,
             "sticker send",
             self.gateway
                 .send_sticker(account_id, room_id, sticker, relation),
@@ -192,8 +244,8 @@ impl MessageSender for GatewayAdapter {
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, SendError> {
-        bounded(
-            self.upstream_upload_timeout,
+        self.with_upload_timeout(
+            account_id,
             "media send",
             self.gateway.send_media(
                 account_id, room_id, attachment, caption, formatted, relation,
@@ -211,6 +263,7 @@ impl MessageSender for GatewayAdapter {
         formatted: Option<Formatted<'_>>,
     ) -> Result<String, SendError> {
         self.with_mutation_timeout(
+            account_id,
             "edit",
             self.gateway
                 .edit(account_id, room_id, event_id, body, formatted),
@@ -226,6 +279,7 @@ impl MessageSender for GatewayAdapter {
         reason: Option<&str>,
     ) -> Result<String, SendError> {
         self.with_mutation_timeout(
+            account_id,
             "redact",
             self.gateway.redact(account_id, room_id, event_id, reason),
         )
@@ -240,6 +294,7 @@ impl MessageSender for GatewayAdapter {
         key: &str,
     ) -> Result<String, SendError> {
         self.with_mutation_timeout(
+            account_id,
             "react",
             self.gateway.react(account_id, room_id, event_id, key),
         )
@@ -255,6 +310,7 @@ impl MessageSender for GatewayAdapter {
         shortcode: Option<&str>,
     ) -> Result<String, SendError> {
         self.with_mutation_timeout(
+            account_id,
             "react",
             self.gateway
                 .react_with_shortcode(account_id, room_id, event_id, key, shortcode),
@@ -271,7 +327,8 @@ impl EphemeralSender for GatewayAdapter {
         room_id: &str,
         event_id: &str,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.read_receipt_timeout,
             "read receipt",
             self.gateway
@@ -286,7 +343,8 @@ impl EphemeralSender for GatewayAdapter {
         room_id: &str,
         typing: bool,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.typing_timeout,
             "typing notice",
             self.gateway.send_typing_notice(account_id, room_id, typing),
@@ -298,7 +356,8 @@ impl EphemeralSender for GatewayAdapter {
 #[async_trait]
 impl MembershipSender for GatewayAdapter {
     async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<LeaveOutcome, SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.room_entry_timeout,
             "leave",
             self.gateway.leave(account_id, room_id),
@@ -312,7 +371,8 @@ impl MembershipSender for GatewayAdapter {
     }
 
     async fn forget(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.room_entry_timeout,
             "forget",
             self.gateway.forget(account_id, room_id),
@@ -326,7 +386,8 @@ impl MembershipSender for GatewayAdapter {
         room_id: &str,
         user_id: &str,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "invite",
             self.gateway.invite(account_id, room_id, user_id),
@@ -341,7 +402,8 @@ impl MembershipSender for GatewayAdapter {
         user_id: &str,
         reason: Option<&str>,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "kick",
             self.gateway.kick(account_id, room_id, user_id, reason),
@@ -356,7 +418,8 @@ impl MembershipSender for GatewayAdapter {
         user_id: &str,
         reason: Option<&str>,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "ban",
             self.gateway.ban(account_id, room_id, user_id, reason),
@@ -371,7 +434,8 @@ impl MembershipSender for GatewayAdapter {
         user_id: &str,
         reason: Option<&str>,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "unban",
             self.gateway.unban(account_id, room_id, user_id, reason),
@@ -388,7 +452,8 @@ impl RoomEntrySender for GatewayAdapter {
         room_id_or_alias: &str,
         server_names: &[String],
     ) -> Result<String, SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.room_entry_timeout,
             "join",
             self.gateway
@@ -404,7 +469,8 @@ impl RoomEntrySender for GatewayAdapter {
         reason: Option<&str>,
         server_names: &[String],
     ) -> Result<String, SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.room_entry_timeout,
             "knock",
             self.gateway
@@ -418,7 +484,8 @@ impl RoomEntrySender for GatewayAdapter {
         account_id: Uuid,
         request: CreateRoomRequest,
     ) -> Result<String, SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.room_entry_timeout,
             "create_room",
             self.gateway.create_room(account_id, request),
@@ -427,7 +494,8 @@ impl RoomEntrySender for GatewayAdapter {
     }
 
     async fn create_dm(&self, account_id: Uuid, user_id: &str) -> Result<String, SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.room_entry_timeout,
             "create_dm",
             self.gateway.create_dm(account_id, user_id),
@@ -439,7 +507,8 @@ impl RoomEntrySender for GatewayAdapter {
 #[async_trait]
 impl RoomSettingsSender for GatewayAdapter {
     async fn set_name(&self, account_id: Uuid, room_id: &str, name: &str) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "set_name",
             self.gateway.set_name(account_id, room_id, name),
@@ -453,7 +522,8 @@ impl RoomSettingsSender for GatewayAdapter {
         room_id: &str,
         topic: &str,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "set_topic",
             self.gateway.set_topic(account_id, room_id, topic),
@@ -470,8 +540,8 @@ impl RoomSettingsSender for GatewayAdapter {
         // Reuses the media-upload timeout (not `membership_mutation_timeout`)
         // since this call, unlike the other five, does a real upload to the
         // homeserver — the same reason `send_media` uses it.
-        bounded(
-            self.upstream_upload_timeout,
+        self.with_upload_timeout(
+            account_id,
             "set_avatar",
             self.gateway.set_avatar(account_id, room_id, attachment),
         )
@@ -479,7 +549,8 @@ impl RoomSettingsSender for GatewayAdapter {
     }
 
     async fn remove_avatar(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "remove_avatar",
             self.gateway.remove_avatar(account_id, room_id),
@@ -494,7 +565,8 @@ impl RoomSettingsSender for GatewayAdapter {
         tag: &str,
         order: Option<f64>,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "set_tag",
             self.gateway.set_tag(account_id, room_id, tag, order),
@@ -508,7 +580,8 @@ impl RoomSettingsSender for GatewayAdapter {
         room_id: &str,
         tag: &str,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "remove_tag",
             self.gateway.remove_tag(account_id, room_id, tag),
@@ -525,7 +598,8 @@ impl PowerLevelsSender for GatewayAdapter {
         room_id: &str,
         changes: PowerLevelChanges,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "set_power_levels",
             self.gateway.set_power_levels(account_id, room_id, changes),
@@ -538,7 +612,8 @@ impl PowerLevelsSender for GatewayAdapter {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<ResolvedPowerLevels, SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "power_levels",
             self.gateway.power_levels(account_id, room_id),
@@ -554,7 +629,8 @@ impl AccountActionsSender for GatewayAdapter {
         account_id: Uuid,
         display_name: &str,
     ) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "set_display_name",
             self.gateway.set_display_name(account_id, display_name),
@@ -570,8 +646,8 @@ impl AccountActionsSender for GatewayAdapter {
         // Reuses the media-upload timeout (not `membership_mutation_timeout`)
         // since this call does a real upload to the homeserver — the same
         // reason `RoomSettingsSender::set_avatar` uses it.
-        bounded(
-            self.upstream_upload_timeout,
+        self.with_upload_timeout(
+            account_id,
             "set_avatar",
             self.gateway.set_account_avatar(account_id, attachment),
         )
@@ -579,7 +655,8 @@ impl AccountActionsSender for GatewayAdapter {
     }
 
     async fn remove_avatar(&self, account_id: Uuid) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "remove_avatar",
             self.gateway.remove_account_avatar(account_id),
@@ -598,7 +675,8 @@ impl AccountActionsSender for GatewayAdapter {
         // non-local profile lookup over federation — the same
         // federation-resolution risk `public_rooms` below is given the
         // longer budget for.
-        bounded(
+        self.bounded(
+            account_id,
             self.room_entry_timeout,
             "user_profile",
             self.gateway.fetch_user_profile_of(account_id, user_id),
@@ -607,7 +685,8 @@ impl AccountActionsSender for GatewayAdapter {
     }
 
     async fn ignore_user(&self, account_id: Uuid, user_id: &str) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "ignore_user",
             self.gateway.ignore_user(account_id, user_id),
@@ -616,7 +695,8 @@ impl AccountActionsSender for GatewayAdapter {
     }
 
     async fn unignore_user(&self, account_id: Uuid, user_id: &str) -> Result<(), SendError> {
-        bounded(
+        self.bounded(
+            account_id,
             self.membership_mutation_timeout,
             "unignore_user",
             self.gateway.unignore_user(account_id, user_id),
@@ -633,7 +713,8 @@ impl AccountActionsSender for GatewayAdapter {
         // like join/knock, a directory search can involve federation
         // resolution — `query.server` explicitly lets a caller target
         // another homeserver's directory rather than a purely local read.
-        bounded(
+        self.bounded(
+            account_id,
             self.room_entry_timeout,
             "public_rooms",
             self.gateway.public_rooms(account_id, query),
@@ -644,12 +725,19 @@ impl AccountActionsSender for GatewayAdapter {
 
 #[cfg(test)]
 mod tests {
+    use axon_sync::HomeserverGates;
+
     use super::*;
 
     #[tokio::test(start_paused = true)]
     async fn a_call_the_homeserver_never_answers_is_a_504_naming_the_verb() {
-        let result: Result<(), SendError> =
-            bounded(Duration::from_secs(30), "leave", std::future::pending()).await;
+        let result: Result<(), SendError> = run_bounded(
+            InteractiveCall::default(),
+            Duration::from_secs(30),
+            "leave",
+            std::future::pending(),
+        )
+        .await;
         match result {
             Err(SendError::Timeout(message)) => assert_eq!(message, "leave timed out after 30s"),
             other => panic!("expected a timeout, got {other:?}"),
@@ -661,10 +749,15 @@ mod tests {
     /// `504` as well.
     #[tokio::test(start_paused = true)]
     async fn an_sdk_timeout_inside_the_deadline_is_a_504_too() {
-        let result: Result<(), SendError> = bounded(Duration::from_secs(45), "leave", async {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Err(GatewayError::Timeout("operation timed out".to_owned()))
-        })
+        let result: Result<(), SendError> = run_bounded(
+            InteractiveCall::default(),
+            Duration::from_secs(45),
+            "leave",
+            async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Err(GatewayError::Timeout("operation timed out".to_owned()))
+            },
+        )
         .await;
         match result {
             Err(SendError::Timeout(message)) => assert_eq!(message, "leave timed out after 30s"),
@@ -674,13 +767,61 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_homeserver_error_inside_the_timeout_stays_a_502() {
-        let result: Result<(), SendError> = bounded(Duration::from_secs(30), "leave", async {
-            Err(GatewayError::Upstream("M_UNKNOWN".to_owned()))
-        })
+        let result: Result<(), SendError> = run_bounded(
+            InteractiveCall::default(),
+            Duration::from_secs(30),
+            "leave",
+            async { Err(GatewayError::Upstream("M_UNKNOWN".to_owned())) },
+        )
         .await;
         match result {
             Err(SendError::Upstream(message)) => assert_eq!(message, "M_UNKNOWN"),
             other => panic!("expected an upstream error, got {other:?}"),
         }
+    }
+
+    /// A user's call that times out, or that the homeserver fails under load,
+    /// halves the homeserver's gate for axon's background requests (ADR 0122
+    /// decision 1); the client still sees the same `504` or `502`.
+    #[tokio::test(start_paused = true)]
+    async fn a_timeout_or_an_overloaded_homeserver_feeds_the_gate() {
+        let homeserver = url::Url::parse("http://hs.test").unwrap();
+
+        let gates = HomeserverGates::default();
+        let result: Result<(), SendError> = run_bounded(
+            gates.interactive_call(&homeserver),
+            Duration::from_secs(30),
+            "leave",
+            std::future::pending(),
+        )
+        .await;
+        assert!(matches!(result, Err(SendError::Timeout(_))), "{result:?}");
+        assert_eq!(gates.snapshot()[0].limit, 1);
+
+        let gates = HomeserverGates::default();
+        let result: Result<(), SendError> = run_bounded(
+            gates.interactive_call(&homeserver),
+            Duration::from_secs(30),
+            "leave",
+            async { Err(GatewayError::Overloaded("503".to_owned())) },
+        )
+        .await;
+        assert!(matches!(result, Err(SendError::Upstream(_))), "{result:?}");
+        assert_eq!(gates.snapshot()[0].limit, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_homeserver_answer_leaves_the_gate_alone() {
+        let homeserver = url::Url::parse("http://hs.test").unwrap();
+        let gates = HomeserverGates::default();
+        let result: Result<(), SendError> = run_bounded(
+            gates.interactive_call(&homeserver),
+            Duration::from_secs(30),
+            "leave",
+            async { Err(GatewayError::Upstream("M_UNKNOWN".to_owned())) },
+        )
+        .await;
+        assert!(matches!(result, Err(SendError::Upstream(_))), "{result:?}");
+        assert_eq!(gates.snapshot()[0].limit, 2);
     }
 }

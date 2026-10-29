@@ -1,6 +1,6 @@
 # ADR 0122 — A load gate between axon's background work and the homeserver
 
-Status: accepted (#749); step 1 implemented, as amended below
+Status: accepted (#749); steps 1 and 2 implemented, as amended below
 
 ## Context
 
@@ -392,3 +392,44 @@ breaker for at most the first one-minute cooldown.
 
 `GET /v1/status` reports long-polls waiting at the gate in `waiting`, beside
 background requests.
+
+## Amendment — step 2 as built (2026-10-27)
+
+- **Every call through the API's gateway reports,** not only the ones ADR
+  0121 added timeouts to: sends and uploads, receipts and typing, membership,
+  room entry, room settings, power levels and account actions. They all pass
+  through one bounded helper in the server's adapter, which reports each
+  call's outcome to the account's gate. The media proxy is not part of the
+  gateway and still reports nothing.
+- **Started means when the adapter starts the call.** The adapter reads the
+  gate's decrease epoch then, so a burst of user calls that time out together
+  halves the limit once, the rule background requests follow.
+- **A call that connects the account's client reports nothing.** The gate is
+  found from the account's cached client without waiting, so a call made
+  before the client is connected (or while a connect is in flight) has no gate
+  to report to. Clients are connected at boot, so this is rare. Each such
+  call is logged at debug (target `axon_sync::gateway`), so how often a
+  reconnect hides a call from the gate can be measured.
+- **Load is a gateway error of its own.** A 5xx, 429 or transport error from
+  the SDK becomes `GatewayError::Overloaded`, classified by the gate's own rule
+  so the two cannot disagree. It is still a `502`, with the same message as
+  any other upstream failure; only the gate tells them apart.
+- **An upload's timeout does not count** (2026-10-29). Media and preview
+  sends and the two avatar uploads run under `upstream_upload_timeout`, and
+  that timeout depends on the file's size and axon's own uplink as much as on
+  the homeserver. A 5xx, 429 or transport error from an upload still counts.
+  A homeserver that really is struggling makes receipts and sends time out
+  too, so the gate still hears about it.
+- **A call the client abandons reports nothing.** Dropping the handler
+  (the client disconnects) drops the call before it can finish. A drop guard
+  that reported an abandoned call as a timeout was considered and rejected.
+  A drop does not say the homeserver was slow: on prod, the client abandoned
+  two receipts after about 7 s, far inside their 30 s deadline, while the
+  homeserver was answering other calls normally. Instead, the web client is to wait past axon's
+  deadline for calls that have one, so that axon's own timeout fires and
+  reports. That is the same change ADR 0121's pending state needs (#872).
+  Tracked in #879.
+- **A 429 counts as load, as it does for background requests.** That can let
+  one user's rate limit slow every account on the homeserver. The SDK's
+  default retries also replay a 429 inside a user call's deadline, so a
+  persistent one reports as a timeout. Both are left to #885.

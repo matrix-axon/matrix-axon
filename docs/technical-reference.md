@@ -129,6 +129,8 @@ It admits two background requests at once to start, grows to four after fast suc
 A timed-out request keeps its slot for 15 minutes, because the homeserver may still be working on it.
 At a limit of zero a circuit breaker stops all background requests, then sends one probe after a cooldown of 1 to 30 minutes, once no held slots remain.
 Requests a user is waiting on, such as sends, joins, recovery and manual re-decryption, never wait on the gate.
+When one of them times out or fails with a 5xx, 429 or transport error, it halves the limit too, but never below one, so a struggling homeserver slows background work before it slows users.
+An upload's timeout is the exception: it doesn't count, because it depends on the file's size and the server's own uplink.
 `GET /v1/status` lists each gate under `homeservers`: its limit, active and held slots, waiting requests, and breaker state.
 The gate's state is in memory and starts fresh on restart.
 Its constants are not configurable.

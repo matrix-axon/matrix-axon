@@ -231,7 +231,7 @@ fn gateway_to_fetch(err: GatewayError) -> FetchError {
         GatewayError::RoomNotFound(msg) => FetchError::NotFound(format!("room not found: {msg}")),
         GatewayError::Forbidden(msg) => FetchError::Forbidden(msg),
         GatewayError::NotConnected(msg) => FetchError::NotConnected(msg),
-        GatewayError::Upstream(msg) => FetchError::Upstream(msg),
+        GatewayError::Upstream(msg) | GatewayError::Overloaded(msg) => FetchError::Upstream(msg),
         // `FetchError` has no timeout of its own, and the media proxy keeps its
         // `502` for one: a download that never finished delivered no bytes.
         GatewayError::Timeout(msg) => FetchError::Upstream(msg),

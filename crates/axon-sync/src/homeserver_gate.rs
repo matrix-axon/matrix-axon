@@ -44,6 +44,8 @@ use tokio::time::error::Elapsed;
 use tokio::time::Instant;
 use url::Url;
 
+use crate::error::GatewayError;
+
 /// The limit a new gate starts at. Backfill pages one room at a time per
 /// account; 2 lets another caller run beside it.
 pub(crate) const INITIAL_LIMIT: u32 = 2;
@@ -785,6 +787,73 @@ impl Drop for LongPoll {
     }
 }
 
+/// One call through the API's gateway, which a user is waiting on (ADR 0122
+/// decision 1). It never waits for the gate. [`finish`](Self::finish) feeds a
+/// timeout or a server error to the gate under the interactive cap. Built
+/// by [`HomeserverGates::interactive_call`] when the call starts, so a burst
+/// that has already halved the limit does not halve it again.
+#[must_use = "an interactive call reports its outcome with `finish`"]
+#[derive(Debug, Default)]
+pub struct InteractiveCall {
+    /// The account's gate and its decrease epoch when the call started.
+    /// `None` reports nothing: the default, and a call made while the account
+    /// had no connected client.
+    gate: Option<(Arc<HomeserverGate>, u64)>,
+    /// Set by [`ignoring_timeouts`](Self::ignoring_timeouts).
+    ignore_timeouts: bool,
+}
+
+impl InteractiveCall {
+    fn new(gate: Arc<HomeserverGate>) -> Self {
+        let epoch = gate.epoch();
+        InteractiveCall {
+            gate: Some((gate, epoch)),
+            ignore_timeouts: false,
+        }
+    }
+
+    /// Report a 5xx, a 429 or a transport error, but not a timeout. For an
+    /// upload, whose timeout says as much about the file's size and axon's
+    /// uplink as about the homeserver's load.
+    pub fn ignoring_timeouts(self) -> Self {
+        InteractiveCall {
+            ignore_timeouts: true,
+            ..self
+        }
+    }
+
+    /// Report how the call ended. `Err` is the caller's own timeout running
+    /// out first.
+    pub fn finish<T>(self, result: &Result<Result<T, GatewayError>, Elapsed>) {
+        let Some((gate, epoch)) = self.gate else {
+            return;
+        };
+        let outcome = outcome_of(result);
+        if !(self.ignore_timeouts && outcome == Outcome::TimedOut) {
+            gate.report_interactive(epoch, outcome);
+        }
+    }
+}
+
+impl GateError for GatewayError {
+    fn outcome(&self) -> Outcome {
+        match self {
+            GatewayError::Timeout(_) => Outcome::TimedOut,
+            GatewayError::Overloaded(_) => Outcome::Overloaded,
+            GatewayError::EventTooLarge
+            | GatewayError::MediaNotFound(_)
+            | GatewayError::Forbidden(_)
+            | GatewayError::Invalid(_)
+            | GatewayError::Upstream(_) => Outcome::Refused,
+            GatewayError::UnknownAccount(_)
+            | GatewayError::AccountNotActive(_)
+            | GatewayError::NotConnected(_)
+            | GatewayError::RoomNotFound(_)
+            | GatewayError::Undecryptable(_) => Outcome::Local,
+        }
+    }
+}
+
 /// One gate's state for `GET /v1/status` (ADR 0122 decision 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateSnapshot {
@@ -838,6 +907,12 @@ impl HomeserverGates {
                 .entry(key.clone())
                 .or_insert_with(|| Arc::new(HomeserverGate::new(key))),
         )
+    }
+
+    /// Start a call a user is waiting on, against `homeserver`'s gate (ADR
+    /// 0122 decision 1). It never waits for the gate.
+    pub fn interactive_call(&self, homeserver: &Url) -> InteractiveCall {
+        InteractiveCall::new(self.for_url(homeserver))
     }
 
     /// Every gate's state, ordered by homeserver.
@@ -1163,6 +1238,100 @@ mod tests {
             gate.report_interactive(gate.epoch(), Outcome::Success);
         }
         assert_eq!(state(&gate).0, 1, "interactive successes never grow it");
+    }
+
+    /// The first interactive call's gate, and the gate itself for asserting on.
+    fn interactive_gate() -> (HomeserverGates, Arc<HomeserverGate>) {
+        let gates = HomeserverGates::default();
+        let gate = gates.for_url(&Url::parse("http://hs.test").unwrap());
+        (gates, gate)
+    }
+
+    async fn elapsed() -> Elapsed {
+        tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interactive_call_that_times_out_or_is_overloaded_halves_the_limit() {
+        let url = Url::parse("http://hs.test").unwrap();
+        let failures: [Result<Result<(), GatewayError>, Elapsed>; 3] = [
+            Err(elapsed().await),
+            Ok(Err(GatewayError::Timeout("sdk".into()))),
+            Ok(Err(GatewayError::Overloaded("503".into()))),
+        ];
+        for failure in failures {
+            let (gates, gate) = interactive_gate();
+            gates.interactive_call(&url).finish(&failure);
+            assert_eq!(state(&gate), (1, 0, 0, Breaker::Closed), "{failure:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interactive_call_the_homeserver_answered_changes_nothing() {
+        let url = Url::parse("http://hs.test").unwrap();
+        let answers: [Result<Result<(), GatewayError>, Elapsed>; 4] = [
+            Ok(Ok(())),
+            Ok(Err(GatewayError::Upstream("400".into()))),
+            Ok(Err(GatewayError::Forbidden("403".into()))),
+            Ok(Err(GatewayError::NotConnected("no client".into()))),
+        ];
+        for answer in answers {
+            let (gates, gate) = interactive_gate();
+            gates.interactive_call(&url).finish(&answer);
+            assert_eq!(state(&gate).0, INITIAL_LIMIT, "{answer:?}");
+        }
+        let (_, gate) = interactive_gate();
+        InteractiveCall::default().finish::<()>(&Err(elapsed().await));
+        assert_eq!(
+            state(&gate).0,
+            INITIAL_LIMIT,
+            "a default call reports nothing"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_reports_a_server_error_but_not_a_timeout() {
+        let url = Url::parse("http://hs.test").unwrap();
+        let timeouts: [Result<Result<(), GatewayError>, Elapsed>; 2] = [
+            Err(elapsed().await),
+            Ok(Err(GatewayError::Timeout("sdk".into()))),
+        ];
+        for timeout in timeouts {
+            let (gates, gate) = interactive_gate();
+            gates
+                .interactive_call(&url)
+                .ignoring_timeouts()
+                .finish(&timeout);
+            assert_eq!(state(&gate).0, INITIAL_LIMIT, "{timeout:?}");
+        }
+        let (gates, gate) = interactive_gate();
+        gates
+            .interactive_call(&url)
+            .ignoring_timeouts()
+            .finish::<()>(&Ok(Err(GatewayError::Overloaded("503".into()))));
+        assert_eq!(state(&gate).0, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_calls_started_before_a_decrease_do_not_halve_again() {
+        let url = Url::parse("http://hs.test").unwrap();
+        let (gates, gate) = interactive_gate();
+        // Background fast successes take the limit to its maximum.
+        for _ in 0..GROW_AFTER * (MAX_LIMIT - INITIAL_LIMIT) {
+            gate.acquire(T).await.finish(Outcome::Success);
+        }
+        assert_eq!(state(&gate).0, MAX_LIMIT);
+        let first = gates.interactive_call(&url);
+        let second = gates.interactive_call(&url);
+        first.finish::<()>(&Err(elapsed().await));
+        second.finish::<()>(&Err(elapsed().await));
+        assert_eq!(state(&gate).0, MAX_LIMIT / 2, "one burst halves once");
+        gates
+            .interactive_call(&url)
+            .finish::<()>(&Err(elapsed().await));
+        assert_eq!(state(&gate).0, MAX_LIMIT / 4, "a later call halves again");
     }
 
     #[tokio::test(start_paused = true)]
