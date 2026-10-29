@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/preact'
 import { expect, it, vi } from 'vitest'
 import { Composer } from './Composer'
+import type { ApiClient } from '../api/client'
 import type { EmojiPickerProps } from './EmojiPicker'
 
 vi.mock('./EmojiPicker', () => ({
@@ -39,6 +40,21 @@ vi.mock('./EmojiPicker', () => ({
       >
         Second
       </button>
+      {[' party', 'a:b'].map((name) => (
+        <button
+          type="button"
+          onClick={() =>
+            onSelect('mxc://hs/legacy', name, {
+              url: 'mxc://hs/legacy',
+              shortcode: name,
+              body: null,
+              info: null,
+              emoticon: true,
+              sticker: false,
+            })
+          }
+        >{`Legacy ${name}`}</button>
+      ))}
       <button type="button" onClick={onClose}>
         Close
       </button>
@@ -125,4 +141,45 @@ it('drops the binding when the shortcode itself is edited', () => {
   fireEvent.input(input, { target: { value: 'hi :smiles:' } })
   fireEvent.submit(input.closest('form')!)
   expect(onSubmit).toHaveBeenCalledWith('hi :smiles:')
+})
+
+it('retains dirty bindings when optional sticker controls change in the same scope', () => {
+  const api = {} as ApiClient
+  const emoji = { api, accountId: 'account', roomId: '!room:hs' }
+  const stickers = { ...emoji, onSelect: vi.fn() }
+  const onSubmit = vi.fn(async () => true)
+  const initialInlineEmoji = [
+    { start: 3, end: 10, shortcode: 'smile', mxc: 'mxc://first/smile' },
+  ]
+  const props = {
+    placeholder: 'Message',
+    initialValue: 'hi :smile:',
+    initialInlineEmoji,
+    onSubmit,
+    emoji,
+  }
+  const view = render(<Composer {...props} stickers={stickers} />)
+  const input = screen.getByRole('textbox') as HTMLTextAreaElement
+  fireEvent.input(input, { target: { value: 'hi :smile: edited' } })
+  view.rerender(<Composer {...props} />)
+  fireEvent.submit(input.closest('form')!)
+  expect(onSubmit).toHaveBeenCalledWith('hi :smile: edited', initialInlineEmoji)
+})
+
+it('normalizes padded picker names and reports names that cannot round-trip', () => {
+  const { input, open, onDraftChange } = setup('hi ')
+  open(3)
+  fireEvent.click(screen.getByRole('button', { name: 'Legacy party' }))
+  expect(input.value).toBe('hi :party:')
+  expect(onDraftChange).toHaveBeenLastCalledWith('hi :party:', [
+    { start: 3, end: 10, shortcode: 'party', mxc: 'mxc://hs/legacy' },
+  ])
+  open(input.value.length)
+  fireEvent.click(screen.getByRole('button', { name: 'Legacy a:b' }))
+  expect(input.value).toBe('hi :party:')
+  expect(
+    screen.getByText(
+      'This emoji name cannot be inserted inline. Choose another emoji.',
+    ),
+  ).toBeTruthy()
 })

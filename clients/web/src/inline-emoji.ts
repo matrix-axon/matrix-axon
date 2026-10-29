@@ -74,6 +74,8 @@ export function inlineEmojiFromEvent(
   if (typeof html !== 'string' || html.length > 65536) return []
   const actual = document.createElement('template')
   actual.innerHTML = html
+  // The reply context belongs to another event, not to the editable body.
+  actual.content.querySelectorAll('mx-reply').forEach((reply) => reply.remove())
   const images = [...actual.content.querySelectorAll('img[data-mx-emoticon]')]
     .slice(0, MAX_INLINE_EMOJI)
     .flatMap((img) => {
@@ -271,7 +273,7 @@ export function protectInlineEmoji(
     let changed = false
     for (const node of nodes) {
       const pattern = new RegExp(`${prefix}(\\d+)End`, 'g')
-      const fragment = document.createDocumentFragment()
+      const fragment = template.content.ownerDocument.createDocumentFragment()
       let cursor = 0
       for (const match of node.data.matchAll(pattern)) {
         fragment.append(node.data.slice(cursor, match.index))
@@ -283,7 +285,9 @@ export function protectInlineEmoji(
         if (node.parentElement?.closest('a, code, pre')) {
           fragment.append(`:${ref.shortcode}:`)
         } else {
-          const img = document.createElement('img')
+          // Keep construction inert: assigning an MXC in the live document
+          // would ask the browser/WebView to load an unsupported scheme.
+          const img = template.content.ownerDocument.createElement('img')
           img.setAttribute('data-mx-emoticon', '')
           img.src = ref.mxc
           img.alt = `:${ref.shortcode}:`

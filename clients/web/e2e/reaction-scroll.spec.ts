@@ -253,3 +253,21 @@ test('the full reaction emoji picker fits a short browser viewport', async ({
   expect(geometry.dialogTop).toBeGreaterThanOrEqual(0)
   expect(geometry.dialogBottom).toBeLessThanOrEqual(geometry.viewportHeight)
 })
+
+test('the compact quick reactions still send while the full picker is open', async ({
+  page,
+}) => {
+  await openReactionFixture(page)
+  const sent: unknown[] = []
+  await page.route(/\/events\/[^/]+\/reactions$/, (route) => {
+    sent.push(route.request().postDataJSON())
+    return route.fulfill({ json: { data: { event_id: '$quick' } } })
+  })
+  const row = page.locator('.event-row', { hasText: 'newest message' }).last()
+  await row.locator('.event-body').click()
+  await row.getByRole('button', { name: 'React', exact: true }).click()
+  await page.getByRole('button', { name: 'More reactions' }).click()
+  await expect(page.getByRole('dialog', { name: 'Emoji picker' })).toBeVisible()
+  await row.locator('.reaction-picker button').first().click()
+  await expect.poll(() => sent).toEqual([{ key: '👍' }])
+})

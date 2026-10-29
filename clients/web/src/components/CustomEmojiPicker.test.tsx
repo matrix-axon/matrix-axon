@@ -12,7 +12,7 @@ import { options } from 'preact'
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { ServicesContext } from '../services'
 import { testServices, TEST_BASE_URL } from '../test/services'
-import { CustomEmojiPicker } from './CustomEmojiPicker'
+import { ImagePackPicker } from './CustomEmojiPicker'
 
 const PATH = `${TEST_BASE_URL}/v1/accounts/:account/rooms/:room/emoji-packs`
 const server = setupServer()
@@ -73,10 +73,10 @@ function setup(signedIn = true) {
   const onReact = vi.fn()
   const view = render(
     <ServicesContext.Provider value={services}>
-      <CustomEmojiPicker
+      <ImagePackPicker
         accountId="account"
         roomId="!room:hs"
-        onReact={onReact}
+        onSelect={onReact}
       />
     </ServicesContext.Provider>,
   )
@@ -99,7 +99,9 @@ it('groups packs, filters names, sends the selected identity and releases previe
   expect(view.getByRole('heading', { name: 'Personal emoji' })).toBeTruthy()
   expect(view.getByRole('heading', { name: 'Testing' })).toBeTruthy()
   fireEvent.click(view.getAllByRole('button', { name: 'React with :wave:' })[1])
-  expect(view.onReact).toHaveBeenCalledWith('mxc://hs/room-wave', 'wave')
+  expect(view.onReact).toHaveBeenCalledWith(
+    expect.objectContaining({ url: 'mxc://hs/room-wave', shortcode: 'wave' }),
+  )
   fireEvent.input(view.getByRole('searchbox'), { target: { value: 'absent' } })
   expect(view.getByText('No matching custom emoji.')).toBeTruthy()
   await waitFor(() => expect(view.release).toHaveBeenCalled())
@@ -158,10 +160,10 @@ it('discards a pending response when the account changes', async () => {
   await waitFor(() => expect(seen).toBe(true))
   view.rerender(
     <ServicesContext.Provider value={view.services}>
-      <CustomEmojiPicker
+      <ImagePackPicker
         accountId="other"
         roomId="!room:hs"
-        onReact={view.onReact}
+        onSelect={view.onReact}
       />
     </ServicesContext.Provider>,
   )
@@ -206,4 +208,40 @@ it('clears visible packs and shows a signed-out message on session expiry', asyn
     expect(view.getByRole('status').textContent).toContain('Sign in'),
   )
   expect(view.queryByRole('button', { name: 'React with :wave:' })).toBeNull()
+})
+
+it('normalizes names and omits non-token names only for inline insertion', async () => {
+  const response = data(' party ')
+  response.data.packs[0].images.push({
+    shortcode: 'a:b',
+    url: 'mxc://hs/colon',
+  })
+  server.use(http.get(PATH, () => HttpResponse.json(response)))
+  const view = setup()
+  await waitFor(() =>
+    expect(view.getByRole('button', { name: 'React with :a:b:' })).toBeTruthy(),
+  )
+  view.rerender(
+    <ServicesContext.Provider value={view.services}>
+      <ImagePackPicker
+        accountId="account"
+        roomId="!room:hs"
+        action="insert"
+        onSelect={view.onReact}
+      />
+    </ServicesContext.Provider>,
+  )
+  await waitFor(() =>
+    expect(
+      view.getAllByRole('button', { name: 'Insert :party:' }),
+    ).toHaveLength(2),
+  )
+  expect(view.queryByRole('button', { name: 'Insert :a:b:' })).toBeNull()
+  expect(
+    view.getByText('Some emoji names cannot be inserted inline.'),
+  ).toBeTruthy()
+  fireEvent.click(view.getAllByRole('button', { name: 'Insert :party:' })[0])
+  expect(view.onReact).toHaveBeenCalledWith(
+    expect.objectContaining({ shortcode: 'party' }),
+  )
 })

@@ -1,5 +1,6 @@
 import {
   lookupImageShortcode,
+  inlineImageShortcode,
   standaloneStickerShortcode,
   type CustomEmoji,
 } from '../emoji-packs'
@@ -16,7 +17,7 @@ import { EmojiPicker } from './EmojiPicker'
 import type { JSX } from 'preact'
 import { useImagePackCompletions } from './use-image-pack-completions'
 import { ReactionContent } from './ReactionContent'
-import { StickerPickerButton, type StickerPickerOptions } from './StickerPicker'
+import { ComposerEmojiButton, type StickerPickerOptions } from './StickerPicker'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
@@ -286,6 +287,7 @@ export function Composer({
   const [stickerProblem, setStickerProblem] = useState<string | null>(null)
   const stickerLookup = useRef<AbortController | null>(null)
   const stickerScope = useRef(0)
+  const emojiScope = emoji ?? stickers
   const [composerHeight, setComposerHeight] = useState<number | null>(null)
   const currentComposerHeight = height === undefined ? composerHeight : height
   const [autocompleteDismissedFor, setAutocompleteDismissedFor] = useState<
@@ -328,24 +330,24 @@ export function Composer({
     const scope = stickerScope.current
     setCheckingSticker(false)
     setStickerProblem(null)
-    setEmojiSelection(null)
     return () => {
       stickerScope.current = scope + 1
-      inline.current = []
-      pendingInline.current = null
-      emojiHistory.current = { entries: [], cursor: -1 }
       const pending = stickerLookup.current
       stickerLookup.current = null
       pending?.abort()
     }
-  }, [
-    stickers?.api,
-    stickers?.accountId,
-    stickers?.roomId,
-    emoji?.api,
-    emoji?.accountId,
-    emoji?.roomId,
-  ])
+  }, [stickers?.api, stickers?.accountId, stickers?.roomId])
+
+  // Binding ownership follows the account/room, independently of whether
+  // standalone sticker sending is available (for example, during an edit).
+  useLayoutEffect(() => {
+    setEmojiSelection(null)
+    return () => {
+      inline.current = []
+      pendingInline.current = null
+      emojiHistory.current = { entries: [], cursor: -1 }
+    }
+  }, [emojiScope?.api, emojiScope?.accountId, emojiScope?.roomId])
 
   useEffect(() => {
     if (!attachMenuOpen) {
@@ -711,53 +713,71 @@ export function Composer({
     })
   }
 
-  const insertEmoji = (
-    key: string,
-    _shortcode?: string,
+  // One insertion path owns name validation, metadata limits, and native undo
+  // for both picker selections and custom shortcode completions.
+  const insertEmojiText = (
+    start: number,
+    end: number,
+    value: string,
     image?: CustomEmoji,
-  ) => {
-    const selection = emojiSelection
+    suffix = '',
+  ): boolean => {
     const el = textarea.current
-    setEmojiSelection(null)
-    if (!selection || !el || el.value !== selection.text) return
-    const insert = image ? `:${image.shortcode}:` : key
-    const next =
-      selection.text.slice(0, selection.start) +
-      insert +
-      selection.text.slice(selection.end)
-    const refs = rebaseInlineEmoji(
-      selection.text,
-      next,
-      inline.current,
-      selection,
-    )
+    if (!el) return false
+    const name = image ? inlineImageShortcode(image.shortcode) : null
+    if (image && name === null) {
+      setStickerProblem(
+        'This emoji name cannot be inserted inline. Choose another emoji.',
+      )
+      return false
+    }
+    const token = image ? `:${name}:` : value
+    const insert = token + suffix
+    const next = el.value.slice(0, start) + insert + el.value.slice(end)
+    const refs = rebaseInlineEmoji(el.value, next, inline.current, {
+      start,
+      end,
+    })
     if (image) {
       if (refs.length >= MAX_INLINE_EMOJI) {
         setStickerProblem('A message can contain up to 64 custom emoji.')
-        return
+        return false
       }
       refs.push({
-        start: selection.start,
-        end: selection.start + insert.length,
-        shortcode: image.shortcode,
+        start,
+        end: start + token.length,
+        shortcode: name!,
         mxc: image.url,
       })
       if (!inlineEmojiDraftFits(next, refs)) {
         setStickerProblem(
           'This message has too much custom emoji data. Shorten the text or remove an emoji.',
         )
-        return
+        return false
       }
     }
+    setStickerProblem(null)
     pendingInline.current = refs
     applyFormatEdit(el, {
-      from: selection.start,
-      to: selection.end,
+      from: start,
+      to: end,
       insert,
-      selectionStart: selection.start + insert.length,
-      selectionEnd: selection.start + insert.length,
+      selectionStart: start + insert.length,
+      selectionEnd: start + insert.length,
     })
     pendingInline.current = null
+    return true
+  }
+
+  const insertEmoji = (
+    key: string,
+    _shortcode?: string,
+    image?: CustomEmoji,
+  ) => {
+    const selection = emojiSelection
+    setEmojiSelection(null)
+    if (!selection || textarea.current?.value !== selection.text) return
+    insertEmojiText(selection.start, selection.end, key, image)
   }
 
   const completeCommand = (command: SlashCommandSpec | undefined) => {
@@ -808,41 +828,24 @@ export function Composer({
     const spacer = suffix === '' || !/^[\s.,!?;:)\]}]/.test(suffix) ? ' ' : ''
     const next = `${draft.slice(0, emojiQuery.start)}${option.value}${spacer}${suffix}`
     const nextCaret = emojiQuery.start + option.value.length + spacer.length
-    const refs = rebaseInlineEmoji(draft, next, inline.current, emojiQuery)
     if (option.image && reactionEmojiQuery === null && stickerQuery === null) {
-      if (refs.length >= MAX_INLINE_EMOJI) {
-        setStickerProblem('A message can contain up to 64 custom emoji.')
-        return
-      }
-      refs.push({
-        start: emojiQuery.start,
-        end: emojiQuery.start + option.value.length,
-        shortcode: option.image.shortcode,
-        mxc: option.image.url,
-      })
-      if (!inlineEmojiDraftFits(next, refs)) {
-        setStickerProblem(
-          'This message has too much custom emoji data. Shorten the text or remove an emoji.',
+      if (
+        !insertEmojiText(
+          emojiQuery.start,
+          emojiQuery.end,
+          option.value,
+          option.image,
+          spacer,
         )
+      )
         return
-      }
+    } else {
+      change(
+        next,
+        nextCaret,
+        rebaseInlineEmoji(draft, next, inline.current, emojiQuery),
+      )
     }
-    if (
-      option.image &&
-      reactionEmojiQuery === null &&
-      stickerQuery === null &&
-      textarea.current
-    ) {
-      pendingInline.current = refs
-      applyFormatEdit(textarea.current, {
-        from: emojiQuery.start,
-        to: emojiQuery.end,
-        insert: option.value + spacer,
-        selectionStart: nextCaret,
-        selectionEnd: nextCaret,
-      })
-      pendingInline.current = null
-    } else change(next, nextCaret, refs)
     setAutocompleteDismissedFor(dismissKey('emoji', option.value))
     textarea.current?.focus()
     requestAnimationFrame(() => {
@@ -1673,8 +1676,11 @@ export function Composer({
             )}
           </>
         )}
-        {stickers !== undefined && (
-          <StickerPickerButton {...stickers} onInsertEmoji={openEmojiPicker} />
+        {emojiScope !== undefined && (
+          <ComposerEmojiButton
+            {...(stickers ?? emojiScope)}
+            onInsertEmoji={openEmojiPicker}
+          />
         )}
         {emojiSelection !== null && (
           <EmojiPicker
@@ -1682,12 +1688,12 @@ export function Composer({
             accountId={
               commandsEnabled && isSlashCommandDraft(draft)
                 ? undefined
-                : emoji?.accountId
+                : emojiScope?.accountId
             }
             roomId={
               commandsEnabled && isSlashCommandDraft(draft)
                 ? undefined
-                : emoji?.roomId
+                : emojiScope?.roomId
             }
             action="insert"
             restoreTo={() => textarea.current}

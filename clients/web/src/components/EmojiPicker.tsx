@@ -11,6 +11,7 @@ import { useShortcuts } from '../shortcuts'
 import { BodyPortal } from './BodyPortal'
 import { ImagePackPicker } from './CustomEmojiPicker'
 import { useModalFocus } from './use-modal-focus'
+import { moveGridFocus } from './grid-keyboard'
 
 type EmojiPickerClickDetail = {
   unicode?: string
@@ -69,6 +70,8 @@ export interface EmojiPickerProps {
   onSelect: (key: string, shortcode?: string, image?: CustomEmoji) => void
   onClose: () => void
   restoreTo?: () => HTMLElement | null
+  /** Controls that stay interactive while this dialog is open. */
+  relatedControls?: () => HTMLElement | null
 }
 
 /** Shared full picker: reaction and composer callers only choose what a selection does. */
@@ -88,6 +91,7 @@ function EmojiPickerSurface({
   onSelect,
   onClose,
   restoreTo,
+  relatedControls,
 }: EmojiPickerProps) {
   const { containerRef } = useModalFocus<HTMLDivElement>({
     restoreTo,
@@ -144,7 +148,8 @@ function EmojiPickerSurface({
     const outside = (event: PointerEvent) => {
       if (
         event.target instanceof Node &&
-        !containerRef.current?.contains(event.target)
+        !containerRef.current?.contains(event.target) &&
+        !relatedControls?.()?.contains(event.target)
       )
         onClose()
     }
@@ -157,7 +162,7 @@ function EmojiPickerSurface({
       window.removeEventListener('scroll', place, true)
       document.removeEventListener('pointerdown', outside)
     }
-  }, [place, containerRef, onClose])
+  }, [place, containerRef, onClose, relatedControls])
   useShortcuts(
     {
       Escape: (event) => {
@@ -398,36 +403,7 @@ function moveEmojiPickerFocus(
     const buttons = [
       ...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]'),
     ]
-    const index = buttons.indexOf(emojiButton)
-    if (index === -1) {
-      return false
-    }
-    const columns = Math.max(
-      getComputedStyle(menu)
-        .gridTemplateColumns.split(' ')
-        .filter((value) => value !== '').length,
-      1,
-    )
-    const step =
-      event.key === 'ArrowLeft'
-        ? -1
-        : event.key === 'ArrowRight'
-          ? 1
-          : event.key === 'ArrowUp'
-            ? -columns
-            : event.key === 'ArrowDown'
-              ? columns
-              : 0
-    if (step === 0) {
-      return false
-    }
-    const next = buttons[index + step]
-    if (next === undefined) {
-      return false
-    }
-    event.preventDefault()
-    next.focus()
-    return true
+    return moveGridFocus(event, emojiButton, buttons, menu)
   }
 
   const navButton = active.closest('.nav-button')

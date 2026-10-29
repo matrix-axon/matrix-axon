@@ -203,6 +203,14 @@ export async function lookupImageShortcode(
   return null
 }
 
+/** Names inserted as tokens must survive trimming and the token grammar. */
+export function inlineImageShortcode(value: unknown): string | null {
+  const name = reactionShortcode(value)
+  return name !== null && standaloneStickerShortcode(`:${name}:`) === name
+    ? name
+    : null
+}
+
 /** Suggest the same winner that a case-insensitive standalone send resolves. */
 export function imageShortcodeSuggestions(
   packs: EmojiPacks,
@@ -216,10 +224,7 @@ export function imageShortcodeSuggestions(
     for (const image of pack.images) {
       if (usage === 'emoticon' ? !image.emoticon : !image.sticker) continue
       // Legacy packs can contain names that cannot round-trip as one token.
-      if (
-        standaloneStickerShortcode(`:${image.shortcode}:`) !== image.shortcode
-      )
-        continue
+      if (inlineImageShortcode(image.shortcode) !== image.shortcode) continue
       const name = image.shortcode.toLowerCase()
       if (seen.has(name)) continue
       seen.add(name)

@@ -910,11 +910,13 @@ export function ReactionPicker({
 }) {
   const { containerRef } = useModalFocus<HTMLDivElement>()
   const moreButton = useRef<HTMLButtonElement>(null)
+  const shell = useRef<HTMLDivElement>(null)
   const [full, setFull] = useState(false)
   // Explicitly relinquish the compact focus trap when the portal takes over.
   // Exactly one dialog must own Tab, including during the ref transition.
   const setCompactRef = useCallback(
     (element: HTMLDivElement | null) => {
+      shell.current = element
       containerRef.current = full ? null : element
     },
     [containerRef, full],
@@ -991,6 +993,7 @@ export function ReactionPicker({
           roomId={roomId}
           onClose={onClose}
           onSelect={react}
+          relatedControls={() => shell.current}
         />
       )}
     </div>

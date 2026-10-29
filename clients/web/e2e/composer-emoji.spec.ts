@@ -24,7 +24,7 @@ function event(
     account_id: ACCOUNT_ID,
     room_id: ROOM_ID,
     event_id: id,
-    sender: '@alice:hs',
+    sender: id.startsWith('$emoji-sent-') ? '@me:hs' : '@alice:hs',
     origin_ts: 1000,
     arrival_order: 1,
     type: 'm.room.message',
@@ -42,7 +42,26 @@ function event(
 }
 
 async function fixtures(page: Page) {
+  await page.addInitScript(() => {
+    const property = Object.getOwnPropertyDescriptor(
+      HTMLImageElement.prototype,
+      'src',
+    )!
+    const created: boolean[] = []
+    ;(
+      window as unknown as { inlineImageLiveDocuments: boolean[] }
+    ).inlineImageLiveDocuments = created
+    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+      ...property,
+      set(value: string) {
+        if (value.startsWith('mxc://'))
+          created.push(this.ownerDocument === document)
+        property.set!.call(this, value)
+      },
+    })
+  })
   const sent: Record<string, unknown>[] = []
+  const edits: Record<string, unknown>[] = []
   let stored: unknown = null
   let available = true
   let packReads = 0
@@ -67,6 +86,15 @@ async function fixtures(page: Page) {
     const id = decodeURIComponent(
       new URL(route.request().url()).pathname.split('/').at(-1)!,
     )
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON() as Record<string, unknown>
+      edits.push(body)
+      confirmed.set(
+        id,
+        event(id, String(body.body), { msgtype: 'm.text', ...body }),
+      )
+      return route.fulfill({ json: { data: { event_id: id } } })
+    }
     return route.fulfill({ json: { data: confirmed.get(id) ?? event(id) } })
   })
   await page.route('**/emoji-packs*', (route) => {
@@ -162,6 +190,7 @@ async function fixtures(page: Page) {
   })
   return {
     sent,
+    edits,
     stored: () => stored,
     packReads: () => packReads,
     removePacks: () => {
@@ -236,6 +265,13 @@ for (const thread of [false, true]) {
     expect(sent[0].format).toBe('org.matrix.custom.html')
     expect(sent[0].formatted_body).toContain(`src="${ROOM_MXC}"`)
     expect(sent[0].formatted_body).toContain('data-mx-emoticon')
+    const liveDocuments = await page.evaluate(
+      () =>
+        (window as unknown as { inlineImageLiveDocuments: boolean[] })
+          .inlineImageLiveDocuments,
+    )
+    expect(liveDocuments.length).toBeGreaterThan(0)
+    expect(liveDocuments).not.toContain(true)
     if (thread) expect(sent[0].thread_root).toBe('$emoji-root')
     const img = pane.locator(
       '[data-event-id="$emoji-sent-1"] .body-html img[data-mx-emoticon]',
@@ -298,3 +334,44 @@ test('a selected image survives draft reload and pack removal without another lo
   await expect(input).toBeFocused()
   await expect(input).toHaveValue('keep this draft')
 })
+
+for (const thread of [false, true]) {
+  test(`touch users can insert custom emoji while editing in the ${thread ? 'thread' : 'room'}`, async ({
+    page,
+  }) => {
+    const { sent, edits } = await fixtures(page)
+    await signIn(page)
+    await page.goto(
+      thread
+        ? `${ROOM_URL}?thread=${encodeURIComponent('$emoji-root')}`
+        : ROOM_URL,
+    )
+    const pane = page.locator(thread ? '.thread-panel' : '.room-stream')
+    const input = pane.locator('.composer textarea')
+    await input.fill('edit this message')
+    await pane
+      .locator('.composer')
+      .getByRole('button', { name: 'Send', exact: true })
+      .click()
+    await expect.poll(() => sent.length).toBe(1)
+    const row = pane.locator('[data-event-id="$emoji-sent-1"]')
+    await row.locator('.event-body').click()
+    await row.getByRole('button', { name: 'Edit', exact: true }).click()
+    await expect(input).toHaveValue('edit this message')
+    await input.evaluate((el) => el.setSelectionRange(5, 9))
+    await pane
+      .locator('.composer')
+      .getByRole('button', { name: 'Insert emoji', exact: true })
+      .click()
+    const dialog = page.getByRole('dialog', { name: 'Emoji picker' })
+    await dialog.getByRole('button', { name: 'Custom', exact: true }).click()
+    await dialog.getByRole('button', { name: 'Insert :smile:' }).nth(1).click()
+    await expect(input).toHaveValue('edit :smile: message')
+    await pane
+      .locator('.composer')
+      .getByRole('button', { name: 'Send', exact: true })
+      .click()
+    await expect.poll(() => edits.length).toBe(1)
+    expect(edits[0].formatted_body).toContain(ROOM_MXC)
+  })
+}

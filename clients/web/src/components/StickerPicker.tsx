@@ -13,9 +13,12 @@ export interface StickerPickerOptions {
   onSelect: (image: CustomEmoji) => void
 }
 
-/** Separate from the draft: selecting a sticker never submits composer text. */
-export function StickerPickerButton(
-  options: StickerPickerOptions & { onInsertEmoji?: () => void },
+/** One composer control: sticker menu while sending, direct insertion while editing. */
+export function ComposerEmojiButton(
+  options: Pick<StickerPickerOptions, 'api' | 'accountId' | 'roomId'> & {
+    onSelect?: StickerPickerOptions['onSelect']
+    onInsertEmoji?: () => void
+  },
 ) {
   const [open, setOpen] = useState(false)
   const button = useRef<HTMLButtonElement>(null)
@@ -25,9 +28,11 @@ export function StickerPickerButton(
         ref={button}
         type="button"
         class="ghost composer-attach composer-sticker"
-        aria-label="Send sticker"
-        title="Send sticker"
-        onClick={() => setOpen(true)}
+        aria-label={options.onSelect ? 'Send sticker' : 'Insert emoji'}
+        title={options.onSelect ? 'Send sticker' : 'Insert emoji'}
+        onClick={() =>
+          options.onSelect ? setOpen(true) : options.onInsertEmoji?.()
+        }
       >
         <svg
           class="composer-attach-icon"
@@ -40,7 +45,7 @@ export function StickerPickerButton(
           <path d="M20 13V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8zM13 20v-5a2 2 0 0 1 2-2h5M7 8h2M13 8h2M7 13c1.5 2 3 2 4 1" />
         </svg>
       </button>
-      {open && (
+      {open && options.onSelect && (
         <BodyPortal>
           <StickerDialog
             {...options}
@@ -56,7 +61,7 @@ export function StickerPickerButton(
             }
             onSelect={(image) => {
               setOpen(false)
-              options.onSelect(image)
+              options.onSelect?.(image)
             }}
           />
         </BodyPortal>
