@@ -1,5 +1,195 @@
 use super::*;
 
+async fn inline_event(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    event_id: &str,
+    kind: &str,
+    content: Option<Value>,
+) {
+    let redacts = content.as_ref().and_then(|c| c["redacts"].as_str());
+    store
+        .upsert_event(&NewEvent {
+            event_id,
+            room_id,
+            account_id,
+            sender: "@inline:localhost",
+            origin_ts: 1,
+            event_type: kind,
+            content: content.clone(),
+            raw_event: json!({"type":kind}),
+            megolm_session_id: None,
+            redacts,
+            relates_to: content
+                .as_ref()
+                .and_then(|c| c.get("m.relates_to").cloned()),
+            decrypted_body_text: None,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn inline_images_survive_pack_removal_and_revoke_before_conditional_responses() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@inline-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let b = store
+        .upsert_account(
+            &format!("@inline-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = format!("!inline-{}:localhost", Uuid::new_v4());
+    joined(&store, a.account_id, &a.user_id, &room).await;
+    let mxc = "mxc://example.org/inline-message";
+    let content = json!({"msgtype":"m.text", "body":"hi :wave:", "format":"org.matrix.custom.html", "formatted_body":format!("hi <img data-mx-emoticon src='{mxc}' alt=':wave:' height='24'>")});
+    personal(&store, a.account_id, json!({"images":{"wave":{"url":mxc}}})).await;
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-message",
+        "m.room.message",
+        Some(content.clone()),
+    )
+    .await;
+    personal(&store, a.account_id, json!({"images":{}})).await;
+    let proxy = Arc::new(ConfiguredMediaProxy::ok(b"GIF89ainline"));
+    let app = media_app(store.clone(), proxy.clone());
+    let path = format!("/v1/media/{}/example.org/inline-message", a.account_id);
+    let thumb = format!("{path}/thumbnail?width=32&height=32");
+    for uri in [&path, &thumb] {
+        let (status, headers, _) = get_media_bytes(&app, uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "image/gif");
+    }
+    assert_eq!(
+        get_media_bytes(
+            &app,
+            &format!("/v1/media/{}/example.org/inline-message", b.account_id),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    state(
+        &store,
+        a.account_id,
+        &room,
+        "m.room.member",
+        &a.user_id,
+        json!({"membership":"leave"}),
+        2,
+    )
+    .await;
+    assert_eq!(
+        get_media_bytes(&app, &path, Some("*")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    state(
+        &store,
+        a.account_id,
+        &room,
+        "m.room.member",
+        &a.user_id,
+        json!({"membership":"join"}),
+        3,
+    )
+    .await;
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-redact",
+        "m.room.redaction",
+        Some(json!({"redacts":"$inline-message"})),
+    )
+    .await;
+    for uri in [&path, &thumb] {
+        assert_eq!(
+            get_media_bytes(&app, uri, Some("*")).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    // Re-decryption populates the projection atomically, with no pack present.
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-utd",
+        "m.room.encrypted",
+        None,
+    )
+    .await;
+    store
+        .update_decrypted_event(
+            a.account_id,
+            "$inline-utd",
+            &content,
+            "m.room.message",
+            Some("hi :wave:"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_media_bytes(&app, &path, None).await.0, StatusCode::OK);
+    let unsafe_app = media_app(
+        store.clone(),
+        Arc::new(ConfiguredMediaProxy::ok(b"<svg onload='x'>")),
+    );
+    assert_eq!(
+        get_media_bytes(&unsafe_app, &path, None).await.1["content-type"],
+        "application/octet-stream"
+    );
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-edit-target",
+        "m.room.message",
+        Some(json!({"msgtype":"m.text", "body":"old"})),
+    )
+    .await;
+    inline_event(&store, a.account_id, &room, "$inline-edit", "m.room.message", Some(json!({
+        "m.relates_to":{"rel_type":"m.replace", "event_id":"$inline-edit-target"},
+        "m.new_content":{"msgtype":"m.text", "body":":edit:", "format":"org.matrix.custom.html", "formatted_body":"<img src='mxc://example.org/inline-edit'>"}
+    }))).await;
+    let edit_path = format!("/v1/media/{}/example.org/inline-edit", a.account_id);
+    assert_eq!(
+        get_media_bytes(&app, &edit_path, None).await.0,
+        StatusCode::OK
+    );
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-edit-target-redaction",
+        "m.room.redaction",
+        Some(json!({"redacts":"$inline-edit-target"})),
+    )
+    .await;
+    assert_eq!(
+        get_media_bytes(&app, &edit_path, Some("*")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = ANY($1)")
+        .bind(vec![a.account_id, b.account_id])
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
+
 async fn state(
     store: &Store,
     account: Uuid,

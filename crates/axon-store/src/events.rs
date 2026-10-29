@@ -537,8 +537,8 @@ impl Store {
                INSERT INTO events \
                  (event_id, room_id, account_id, sender, origin_ts, event_type, \
                   content, raw_event, megolm_session_id, redacts, relates_to, \
-                  decrypted_body_text) \
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                  decrypted_body_text, inline_media_urls) \
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
                ON CONFLICT (account_id, event_id) DO NOTHING \
                RETURNING id, account_id, event_id, room_id, origin_ts, \
                          relates_to, redacts, decrypted_body_text \
@@ -563,6 +563,10 @@ impl Store {
             .bind(ev.redacts)
             .bind(&ev.relates_to)
             .bind(ev.decrypted_body_text)
+            .bind(crate::inline_media::inline_media_urls(
+                ev.event_type,
+                ev.content.as_ref(),
+            ))
             .fetch_optional(&self.pool)
             .await?;
         if let Some((id,)) = inserted {
@@ -786,7 +790,7 @@ impl Store {
         let sql = format!(
             "WITH ins AS ( \
                UPDATE events \
-               SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6 \
+               SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6, inline_media_urls = $7 \
                WHERE account_id = $1 AND event_id = $2 AND content IS NULL \
                RETURNING account_id, event_id, room_id, origin_ts, id, \
                          relates_to, redacts, decrypted_body_text \
@@ -800,6 +804,10 @@ impl Store {
             .bind(event_type)
             .bind(decrypted_body_text)
             .bind(relates_to)
+            .bind(crate::inline_media::inline_media_urls(
+                event_type,
+                Some(content),
+            ))
             .execute(&self.pool)
             .await?;
         Ok(())

@@ -30,6 +30,11 @@ See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and seq
 Personal, current-room, and joined canonical ancestor image packs support custom emoji and sticker discovery.
 The room `emoji-packs` endpoint exposes cached packs, with `usage=sticker` selecting sticker-capable entries.
 The media proxy accepts current pack references before their first use as reactions.
+Newly ingested or decrypted HTML messages also retain up to 64 distinct inline image references, independent of subsequent pack changes.
+References come from parsed, sanitized `img` elements in HTML bodies of at most 64 KiB, including edit replacements.
+These references authorize only the owning account while the room is not known left or banned, and redacting the reference or an edit's target revokes that authorization.
+Inline images use the same raster MIME restrictions as pack previews.
+Messages already stored before this upgrade keep their previous media authorization behavior; the upgrade does not parse historical message bodies.
 Clients may send an optional shortcode with a custom reaction, or send an existing pack image through `send-sticker` as a standalone `m.sticker` event.
 See [Custom emoji discovery](custom-emoji.md) for limits, sync behavior, inheritance, sending, and diagnostics.
 
