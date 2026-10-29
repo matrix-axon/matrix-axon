@@ -169,8 +169,8 @@ Shared packs subscribed from other rooms and pack editing remain outside this ve
 With focus in a room or thread composer, press **Ctrl-;** on Linux/Windows or **⌘-;** on macOS to open the emoji picker.
 Search standard Unicode emoji or switch to **Custom** to browse the available packs.
 Selection replaces the highlighted text or inserts at the cursor, then returns focus to the composer; Escape cancels and Undo/Redo uses the textarea's native history.
-On touch devices, open the existing **Send sticker** picker and choose **Insert emoji…**.
-While editing, the same composer control opens **Insert emoji** directly; the number of composer buttons stays the same.
+Open the existing **Send sticker** picker and choose **Emoji** on desktop or the smiley-face icon on mobile.
+While editing, the smiley-face composer control opens the emoji picker directly; the number of composer buttons stays the same.
 The shortcut is also listed in keyboard help.
 Custom emoji remain readable `:shortcodes:` while composing and become inline images in sent messages, replies, thread replies, edits, and attachment captions.
 Their plain-text fallback retains the shortcode.
