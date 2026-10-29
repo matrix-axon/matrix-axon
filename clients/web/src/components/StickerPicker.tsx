@@ -13,6 +13,24 @@ export interface StickerPickerOptions {
   onSelect: (image: CustomEmoji) => void
 }
 
+function EmojiIcon() {
+  return (
+    <svg
+      class="composer-attach-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
+    </svg>
+  )
+}
+
 /** One composer control: sticker menu while sending, direct insertion while editing. */
 export function ComposerEmojiButton(
   options: Pick<StickerPickerOptions, 'api' | 'accountId' | 'roomId'> & {
@@ -28,22 +46,26 @@ export function ComposerEmojiButton(
         ref={button}
         type="button"
         class="ghost composer-attach composer-sticker"
-        aria-label={options.onSelect ? 'Send sticker' : 'Insert emoji'}
-        title={options.onSelect ? 'Send sticker' : 'Insert emoji'}
+        aria-label={options.onSelect ? 'Send sticker' : 'Emoji'}
+        title={options.onSelect ? 'Send sticker' : 'Emoji'}
         onClick={() =>
           options.onSelect ? setOpen(true) : options.onInsertEmoji?.()
         }
       >
-        <svg
-          class="composer-attach-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          aria-hidden="true"
-        >
-          <path d="M20 13V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8zM13 20v-5a2 2 0 0 1 2-2h5M7 8h2M13 8h2M7 13c1.5 2 3 2 4 1" />
-        </svg>
+        {options.onSelect ? (
+          <svg
+            class="composer-attach-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+          >
+            <path d="M20 13V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8zM13 20v-5a2 2 0 0 1 2-2h5M7 8h2M13 8h2M7 13c1.5 2 3 2 4 1" />
+          </svg>
+        ) : (
+          <EmojiIcon />
+        )}
       </button>
       {open && options.onSelect && (
         <BodyPortal>
@@ -110,8 +132,15 @@ function StickerDialog({
         <div class="overlay-head">
           <h2>Stickers</h2>
           {onInsertEmoji && (
-            <button type="button" class="ghost" onClick={onInsertEmoji}>
-              Insert emoji…
+            <button
+              type="button"
+              class="ghost emoji-picker-entry"
+              aria-label="Emoji"
+              title="Emoji"
+              onClick={onInsertEmoji}
+            >
+              <span>Emoji</span>
+              <EmojiIcon />
             </button>
           )}
           <button type="button" class="ghost" onClick={onClose}>

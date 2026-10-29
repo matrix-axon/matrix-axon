@@ -6984,6 +6984,28 @@ button.custom-emoji-refresh {
   flex-shrink: 0;
 }
 
+.emoji-picker-entry > .composer-attach-icon {
+  display: none;
+}
+
+@media (max-width: 47.99rem) {
+  .emoji-picker-entry {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .emoji-picker-entry > span {
+    display: none;
+  }
+
+  .emoji-picker-entry > .composer-attach-icon {
+    display: block;
+  }
+}
+
 /* Mixed sticker/Unicode suggestions must fit even a narrow thread pane. */
 .sticker-suggestions {
   grid-template-columns: minmax(0, 1fr);

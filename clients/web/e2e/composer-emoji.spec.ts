@@ -321,7 +321,30 @@ test('a selected image survives draft reload and pack removal without another lo
     .locator('.room-stream .composer')
     .getByRole('button', { name: 'Send sticker', exact: true })
     .click()
-  await page.getByRole('button', { name: 'Insert emoji…', exact: true }).click()
+  const emojiEntry = page.getByRole('button', { name: 'Emoji', exact: true })
+  await expect(emojiEntry).toBeVisible()
+  const mobile = page.viewportSize()!.width < 768
+  if (mobile) {
+    await expect(emojiEntry.locator('svg')).toBeVisible()
+    await expect(emojiEntry.locator('span')).toBeHidden()
+  } else {
+    await expect(emojiEntry.locator('span')).toHaveText('Emoji')
+    await expect(emojiEntry.locator('span')).toBeVisible()
+    await expect(emojiEntry.locator('svg')).toBeHidden()
+  }
+  expect(
+    await emojiEntry.evaluate((button) => {
+      const box = button.getBoundingClientRect()
+      return button.contains(
+        document.elementFromPoint(
+          box.x + box.width / 2,
+          box.y + box.height / 2,
+        ),
+      )
+    }),
+  ).toBe(true)
+  await page.screenshot({ path: info.outputPath('emoji-entry.png') })
+  await emojiEntry.click()
   dialog = page.getByRole('dialog', { name: 'Emoji picker' })
   await expect(dialog).toBeVisible()
   const box = (await dialog.boundingBox())!
@@ -361,7 +384,7 @@ for (const thread of [false, true]) {
     await input.evaluate((el) => el.setSelectionRange(5, 9))
     await pane
       .locator('.composer')
-      .getByRole('button', { name: 'Insert emoji', exact: true })
+      .getByRole('button', { name: 'Emoji', exact: true })
       .click()
     const dialog = page.getByRole('dialog', { name: 'Emoji picker' })
     await dialog.getByRole('button', { name: 'Custom', exact: true }).click()
