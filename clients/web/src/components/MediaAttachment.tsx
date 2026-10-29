@@ -134,10 +134,7 @@ export function MediaAttachment({
           media={media}
           plan={plan}
           content={content}
-          onClose={() => {
-            setError(null)
-            setExpanded(false)
-          }}
+          onClose={() => setExpanded(false)}
           onDownload={downloadable ? () => void download() : undefined}
           downloading={downloading}
           downloadError={error}

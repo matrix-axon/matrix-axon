@@ -77,7 +77,8 @@ was stored).
 Attachment cards show captions across their full width, with an icon-only Download control at the top right.
 Click or tap a previewable card, or activate its filename with Enter or Space, to open the shared media viewer; there is no separate Preview button.
 Text and audio previews use the same viewer as PDF and video, with Escape, Close, or the backdrop returning to the card.
-Caption links and spoilers keep their own actions, and selecting caption text does not open a preview.
+Caption links and spoilers keep their own actions, and selecting caption text does not open a preview or message actions.
+A failed download remains visible on the card after closing the viewer; opening a fresh viewer or retrying the download clears the previous error.
 A single tap opens the preview; configured double-tap, touch-and-hold, and swipe actions still work over the card, while links and the download icon keep their own actions.
 Unsupported or oversized attachments remain download-only, and preview bytes load only after opening the card.
 

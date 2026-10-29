@@ -42,12 +42,22 @@ afterEach(() => {
 })
 afterAll(() => server.close())
 
-function renderAttachment(media: ParsedMedia, content?: unknown) {
+function renderAttachment(
+  media: ParsedMedia,
+  content?: unknown,
+  onRowClick?: () => void,
+) {
   const services = testServices()
   return {
     ...render(
       <ServicesContext.Provider value={services}>
-        <MediaAttachment accountId={ACCOUNT} media={media} content={content} />
+        <div onClick={onRowClick}>
+          <MediaAttachment
+            accountId={ACCOUNT}
+            media={media}
+            content={content}
+          />
+        </div>
       </ServicesContext.Provider>,
     ),
     services,
@@ -150,12 +160,15 @@ it('opens the preview from caption text but preserves embedded links and spoiler
 })
 
 it('keeps selected caption text from opening the viewer', () => {
+  const onRowClick = vi.fn()
   const view = renderAttachment(
     file({
       filename: 'notes.txt',
       mimetype: 'text/plain',
       caption: 'Select this caption',
     }),
+    undefined,
+    onRowClick,
   )
   const caption = view.container.querySelector('.media-attachment-caption')!
   const range = document.createRange()
@@ -163,6 +176,7 @@ it('keeps selected caption text from opening the viewer', () => {
   window.getSelection()!.addRange(range)
   fireEvent.click(caption, { detail: 1 })
   expect(document.querySelector('.lightbox')).toBeNull()
+  expect(onRowClick).not.toHaveBeenCalled()
 })
 
 it('opens with an unrelated selection elsewhere on the page', () => {
@@ -221,6 +235,34 @@ it('keeps the text preview wrapper from dismissing the dialog', async () => {
     view.getByRole('dialog').querySelector('.media-text-preview')!,
   )
   expect(view.queryByRole('dialog')).toBeTruthy()
+})
+
+it('retains a viewer download failure on the card after closing', async () => {
+  const view = renderAttachment(
+    file({ filename: 'notes.txt', mimetype: 'text/plain' }),
+  )
+  vi.spyOn(view.services.media, 'fetchText').mockResolvedValue({
+    ok: true,
+    text: 'Preview text',
+  })
+  server.use(
+    http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:media`, () =>
+      HttpResponse.json({ error: {} }, { status: 404 }),
+    ),
+  )
+  fireEvent.click(view.container.querySelector('.media-attachment')!)
+  await view.findByText('Preview text')
+  fireEvent.click(
+    view
+      .getByRole('dialog')
+      .querySelector('button[aria-label="Download notes.txt"]')!,
+  )
+  expect(await view.findByText('Download failed')).toBeTruthy()
+  fireEvent.click(view.getByRole('button', { name: 'Close' }))
+  expect(view.queryByRole('dialog')).toBeNull()
+  expect(view.queryByText('Download failed')).toBeTruthy()
+  fireEvent.click(view.container.querySelector('.media-attachment')!)
+  expect(view.queryByText('Download failed')).toBeNull()
 })
 
 it.each([

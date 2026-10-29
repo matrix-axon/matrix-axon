@@ -13,7 +13,7 @@ export function MediaDownloadButton({
   return (
     <button
       type="button"
-      class={`ghost media-download-button ${className}`}
+      class={`ghost media-download-button ${className}`.trim()}
       aria-label={label}
       aria-busy={downloading}
       title={label}

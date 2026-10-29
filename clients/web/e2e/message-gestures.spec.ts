@@ -410,6 +410,56 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
   await expect(page.getByRole('navigation', { name: 'Rooms' })).toBeVisible()
 })
 
+for (const gallery of [false, true]) {
+  test(`native ${gallery ? 'gallery' : 'individual image'} taps open once with double-tap disabled`, async ({
+    page,
+    request,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name !== 'webkit-iphone',
+      'Native WebKit touch uses the iPhone profile',
+    )
+    await request.put('/v1/preferences/message_gestures', {
+      data: {
+        device_id: 'native-image-tap-test',
+        value: {
+          schema_version: 1,
+          bindings: {
+            double_tap: null,
+            touch_and_hold: 'thread',
+            swipe_left: 'reply',
+          },
+          reaction_emoji: '👍',
+        },
+      },
+    })
+    await openMobileRoom(page)
+    const surface = page.locator(
+      gallery
+        ? '.gallery-cell[data-event-id="$gallery-0:hs"]'
+        : '.event-row[data-event-id="$seed-image-a:hs"]',
+    )
+    const opener = surface.locator(
+      gallery ? '.gallery-cell-open' : '.media-open',
+    )
+    await expect(surface).toHaveClass(/touch-hold-enabled/)
+    await opener.scrollIntoViewIfNeeded()
+    // Use a native touch and its real compatibility click, not a synthetic pair.
+    await opener.tap()
+    const viewer = page.getByRole('dialog', {
+      name: gallery ? 'gallery-0.png' : 'seed-image-a.png',
+    })
+    await expect(viewer).toBeVisible()
+    await page.waitForTimeout(400)
+    await expect(viewer).toBeVisible()
+    await expect(
+      viewer.getByRole('button', { name: 'Close', exact: true }),
+    ).toBeVisible()
+    await viewer.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(viewer).toBeHidden()
+  })
+}
+
 test('individual images preserve tap-to-open and use configured gestures', async ({
   page,
   request,

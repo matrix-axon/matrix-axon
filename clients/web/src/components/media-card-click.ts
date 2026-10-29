@@ -20,7 +20,9 @@ export function openMediaCard(
   )
   const control = closestGestureControl(event.target)
   if (control !== null && control !== opener) return
-  // The card owns a plain click; pointer gestures still reach the message row.
+  // Even a selection-ending click belongs to the card: letting it reach the
+  // row would open message actions after a text drag. Pointer gestures still
+  // reach the row independently.
   event.stopPropagation()
   const selection = window.getSelection()
   if (

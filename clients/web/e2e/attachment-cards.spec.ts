@@ -386,6 +386,11 @@ test('selecting attachment caption text does not open the preview', async ({
   expect(
     await page.evaluate(() => window.getSelection()?.toString().length ?? 0),
   ).toBeGreaterThan(0)
+  // A row click can defer opening its action bar for the double-click window.
+  await page.waitForTimeout(400)
+  await expect(card.locator('xpath=ancestor::li')).not.toHaveClass(
+    /actions-open/,
+  )
   await expect(page.getByRole('dialog')).toHaveCount(0)
   expect(requests).toHaveLength(0)
 })
