@@ -145,7 +145,11 @@ export function EventBody({
 
   const previews =
     showLinkPreviews && event.type === 'm.room.message' ? (
-      <LinkPreviews content={event.content} body={event.body} />
+      <LinkPreviews
+        accountId={event.account_id}
+        content={event.content}
+        body={event.body}
+      />
     ) : null
 
   if (resolved !== null) {

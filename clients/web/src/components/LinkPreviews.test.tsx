@@ -16,11 +16,17 @@ it('keeps additional previews expanded when their URLs reorder', () => {
       'og:title': url,
     })),
   })
-  const view = render(<LinkPreviews body={body} content={content(urls)} />)
+  const view = render(
+    <LinkPreviews accountId="first" body={body} content={content(urls)} />,
+  )
   const disclosure = view.container.querySelector('details')!
   disclosure.open = true
   view.rerender(
-    <LinkPreviews body={body} content={content([...urls].reverse())} />,
+    <LinkPreviews
+      accountId="first"
+      body={body}
+      content={content([...urls].reverse())}
+    />,
   )
   expect(view.container.querySelector('details')!.open).toBe(true)
   expect(view.container.querySelector('details')!.textContent).toContain(

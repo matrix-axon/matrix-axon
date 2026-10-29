@@ -1,3 +1,4 @@
+import { effect } from '@preact/signals'
 import { apiErrorCode, apiErrorMessage } from '../api/client'
 import type { AuthProvider } from '../auth/provider'
 import { browserPlatform, type Platform } from '../platform'
@@ -91,6 +92,8 @@ export interface ThumbnailRequest {
 
 export interface MediaRequestOptions {
   thumbnail?: ThumbnailRequest
+  /** Optional hard response-byte ceiling for small bundled preview images. */
+  maxBytes?: number
   /**
    * Re-type the fetched bytes before the object URL is minted (ADR 0072). The
    * proxy downgrades everything that is not image/audio/video to
@@ -241,55 +244,68 @@ function uploadTimeoutMs(bytes: number, base: number): number {
   return base + Math.ceil(bytes / UPLOAD_MIN_BYTES_PER_MS)
 }
 
-/**
- * The body of `res` as text, giving up past a byte or time bound.
- *
- * Reads `res.body` directly rather than `res.clone().json()`: cloning tees the
- * stream and pins *both* branches in memory until each is consumed, and nothing
- * else on this path ever reads the other one. Cancelling the reader resolves
- * the pending `read()`, so the timeout needs no race.
- */
-async function readBoundedText(res: Response): Promise<string | null> {
-  const body = res.body
-  if (body === null) {
-    // No stream to bound — the body is already buffered (jsdom and some test
-    // doubles), so there is nothing to read incrementally and nothing to pin.
-    return res.text()
+/** One bounded byte reader for media and error envelopes. No cloned streams. */
+async function readBoundedBytes(
+  res: Response,
+  limit: number,
+  timeoutMs?: number,
+): Promise<Uint8Array<ArrayBuffer> | null> {
+  if (Number(res.headers.get('content-length')) > limit) {
+    void res.body?.cancel().catch(() => {})
+    return null
   }
-  const reader = body.getReader()
-  const timer = setTimeout(() => {
-    void reader.cancel().catch(() => {})
-  }, ERROR_ENVELOPE_TIMEOUT_MS)
+  if (res.body === null) {
+    // Some buffered transports expose no stream. Inspect their actual bytes;
+    // never invent a successful empty body or trust just Content-Length.
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    return bytes.byteLength <= limit ? bytes : null
+  }
+  const reader = res.body.getReader()
+  let timedOut = false
+  const timer =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true
+          void reader.cancel().catch(() => {})
+        }, timeoutMs)
   const chunks: Uint8Array[] = []
   let total = 0
   try {
     for (;;) {
       const { done, value } = await reader.read()
-      if (done) {
-        break
-      }
-      if (value === undefined) {
-        continue
-      }
+      if (timedOut) return null
+      if (done) break
+      if (value === undefined) continue
+      if (value.byteLength > limit - total) return null
       total += value.byteLength
-      if (total > ERROR_ENVELOPE_MAX_BYTES) {
-        return null
-      }
       chunks.push(value)
     }
-  } catch {
-    return null
+    const joined = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      joined.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return joined
   } finally {
     clearTimeout(timer)
     void reader.cancel().catch(() => {})
+    reader.releaseLock()
   }
-  const joined = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    joined.set(chunk, offset)
-    offset += chunk.byteLength
+}
+
+async function readBoundedText(res: Response): Promise<string | null> {
+  try {
+    const bytes = await readBoundedBytes(
+      res,
+      ERROR_ENVELOPE_MAX_BYTES,
+      ERROR_ENVELOPE_TIMEOUT_MS,
+    )
+    return bytes === null ? null : new TextDecoder().decode(bytes)
+  } catch {
+    return null
   }
-  return new TextDecoder().decode(joined)
 }
 
 /**
@@ -413,6 +429,25 @@ export function createMediaService(deps: {
   const zeroRef = new Map<string, true>()
   // In-flight fetches, so concurrent acquires of one key share one download.
   const inflight = new Map<string, Promise<MediaResult>>()
+  let sessionGeneration = 0
+  const identity = deps.auth.sessionId
+  let sessionId = identity?.peek()
+  if (identity !== undefined) {
+    effect(() => {
+      const next = identity.value
+      if (next === sessionId) return
+      sessionId = next
+      sessionGeneration += 1
+      for (const entry of cache.values()) {
+        if (entry.refs === 0) URL.revokeObjectURL(entry.url)
+      }
+      // Live holders release their invalidated URLs normally. Old downloads
+      // remain deadline-bounded, but cannot seed or clear the new session.
+      cache.clear()
+      zeroRef.clear()
+      inflight.clear()
+    })
+  }
 
   const keyOf = (
     accountId: string,
@@ -422,7 +457,7 @@ export function createMediaService(deps: {
     const thumbnail = options?.thumbnail
     // A re-typed fetch yields a different blob than the raw one, so it needs
     // its own cache slot even though it hits the same proxy URL.
-    const type = options?.contentType ?? ''
+    const type = `${options?.maxBytes ?? ''}\0${options?.contentType ?? ''}`
     if (thumbnail === undefined) {
       return `${accountId}\0full\0${type}\0${mxc}`
     }
@@ -491,19 +526,42 @@ export function createMediaService(deps: {
       return { ok: false, error: { kind: 'network' } }
     }
 
+    const generation = sessionGeneration
     return gate.run(async () => {
       try {
-        const token = await deps.auth.getToken()
-        const headers = new Headers()
-        if (token !== null) {
-          headers.set('authorization', `Bearer ${token}`)
+        if (generation !== sessionGeneration)
+          return { ok: false, error: { kind: 'auth' } }
+        let token: string | null
+        try {
+          token = await deps.auth.getToken()
+        } catch {
+          return { ok: false, error: { kind: 'auth' } }
         }
+        // AuthProvider defines null as signed out, not anonymous media access.
+        if (token === null || generation !== sessionGeneration)
+          return { ok: false, error: { kind: 'auth' } }
+        const headers = new Headers()
+        headers.set('authorization', `Bearer ${token}`)
         const res = await fetch(url, {
           headers,
           signal: AbortSignal.timeout(transferTimeoutMs),
         })
+        if (generation !== sessionGeneration) {
+          void res.body?.cancel().catch(() => {})
+          return { ok: false, error: { kind: 'auth' } }
+        }
         if (res.ok) {
-          const raw = await res.blob()
+          let raw: Blob
+          if (options?.maxBytes !== undefined) {
+            const bytes = await readBoundedBytes(res, options.maxBytes)
+            if (bytes === null)
+              return { ok: false, error: { kind: 'too_large' } }
+            raw = new Blob([bytes], {
+              type: res.headers.get('content-type') ?? '',
+            })
+          } else {
+            raw = await res.blob()
+          }
           // The shell's fetch (`@tauri-apps/plugin-http`) builds its
           // `Response` without headers and attaches them afterwards, so
           // `blob()` comes back untyped though `Content-Type` is readable.
@@ -518,12 +576,20 @@ export function createMediaService(deps: {
             type === undefined || type === raw.type
               ? raw
               : new Blob([raw], { type })
-          return { ok: true, blob, format: await sniffBlob(blob) }
+          const format = await sniffBlob(blob)
+          if (generation !== sessionGeneration)
+            return { ok: false, error: { kind: 'auth' } }
+          return { ok: true, blob, format }
         }
         if (res.status === 401) {
           // Let the provider drop the revoked token, exactly as the API client
           // does — the failure still flows back to the caller.
-          deps.auth.onAuthFailure()
+          if (
+            deps.auth.peekToken === undefined ||
+            deps.auth.peekToken() === token
+          ) {
+            deps.auth.onAuthFailure()
+          }
           return { ok: false, error: { kind: 'auth', status: 401 } }
         }
         if (res.status === 404) {
@@ -664,6 +730,9 @@ export function createMediaService(deps: {
     mxcUrl: string,
     options?: MediaRequestOptions,
   ): Promise<MediaHandle> {
+    // A warm cache needs no credential I/O. Real session changes clear it;
+    // access-token renewal is still the same reader.
+    const generation = sessionGeneration
     const key = keyOf(accountId, mxcUrl, options)
 
     const cached = cache.get(key)
@@ -681,6 +750,10 @@ export function createMediaService(deps: {
     if (pending === undefined) {
       pending = (async () => {
         const result = await download(accountId, mxcUrl, options)
+        if (generation !== sessionGeneration) {
+          if (result.ok) URL.revokeObjectURL(result.url)
+          return { ok: false, error: { kind: 'auth' } } as MediaResult
+        }
         if (result.ok) {
           // Seed a zero-ref entry; each awaiter registers its own ref below.
           cache.set(key, { url: result.url, refs: 0, format: result.format })
@@ -688,10 +761,14 @@ export function createMediaService(deps: {
         return result
       })()
       inflight.set(key, pending)
-      void pending.finally(() => inflight.delete(key))
+      void pending.finally(() => {
+        if (inflight.get(key) === pending) inflight.delete(key)
+      })
     }
 
     const result = await pending
+    if (generation !== sessionGeneration)
+      return failedHandle({ ok: false, error: { kind: 'auth' } })
     if (!result.ok) {
       return failedHandle(result)
     }

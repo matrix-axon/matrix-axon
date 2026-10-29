@@ -2754,10 +2754,45 @@ button.event-person:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.link-preview {
+  position: relative;
+  display: flow-root;
+}
+
+/* A sibling of the card link, inside its reserved image slot: retrying must
+ * not navigate to the article or change the card's height. */
+.link-preview-retry {
+  position: absolute;
+  top: 7rem;
+  right: 1.6rem;
+  max-width: calc(100% - 3.2rem);
+}
+
 .link-preview-host,
 .link-preview-site {
   color: var(--muted);
   font-size: 0.8rem;
+}
+
+/* The card owns this fixed slot: loading, failure, and sender dimensions must
+ * not move surrounding messages or stretch the narrow thread/mobile pane. */
+.link-preview-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 10rem;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg);
+  font-size: 0.8rem;
+}
+
+.link-preview-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .link-preview-description {

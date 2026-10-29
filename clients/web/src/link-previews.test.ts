@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseLinkPreviews } from './link-previews'
+import { encryptedPreviewFile } from './test/link-preview'
 
 const url = 'https://example.org/article'
 const entry = { matched_url: url, 'og:title': 'Article' }
@@ -68,7 +69,7 @@ describe('parseLinkPreviews', () => {
     ).toEqual([])
   })
 
-  it('deduplicates previews and ignores entries without usable text', () => {
+  it('deduplicates previews and accepts images without text metadata', () => {
     expect(
       parseLinkPreviews(
         bundle([entry, entry, { matched_url: url, 'og:title': {} }]),
@@ -83,7 +84,7 @@ describe('parseLinkPreviews', () => {
         ]),
         url,
       ),
-    ).toEqual([])
+    ).toMatchObject([{ image: { mxc: 'mxc://hs/image', encrypted: false } }])
     expect(
       parseLinkPreviews(
         bundle([{ matched_url: url, 'og:description': 'Description only' }]),
@@ -127,5 +128,108 @@ describe('parseLinkPreviews', () => {
         entries.map((e) => e.matched_url).join(' '),
       ),
     ).toHaveLength(8)
+  })
+})
+
+describe('preview image validation', () => {
+  const parse = (fields: Record<string, unknown>) =>
+    parseLinkPreviews(bundle([{ ...entry, ...fields }]), url)[0]!.image
+
+  it.each(['matrix:image:encrypted', 'beeper:image:encryption'])(
+    'accepts %s without retaining key material in the normalized shape',
+    (field) => {
+      expect(
+        parse({ [field]: encryptedPreviewFile, 'og:image': 'mxc://hs/plain' }),
+      ).toEqual({ mxc: encryptedPreviewFile.url, encrypted: true })
+    },
+  )
+
+  it.each([
+    'https://tracking.test/pixel',
+    'data:image/png;base64,abc',
+    'file:///local',
+    'mxc:///image',
+    'mxc://hs/',
+    'mxc://hs/a/b',
+    'mxc://user@hs/image',
+    'mxc://hs/image?query',
+    'mxc://hs/image#fragment',
+    'mxc://hs/space here',
+    `mxc://hs/${'é'.repeat(1024)}`,
+  ])('rejects hostile image reference %s but preserves text', (value) => {
+    expect(parse({ 'og:image': value })).toBeNull()
+  })
+
+  it.each([
+    { 'og:image:width': 1e12 },
+    { 'og:image:height': -1 },
+    { 'og:image:width': '300' },
+    { 'og:image:width': NaN },
+    { 'og:image:width': 4000, 'og:image:height': 4000 },
+    { 'matrix:image:size': 2 * 1024 * 1024 + 1 },
+    { 'og:image:type': 'image/svg+xml' },
+  ])('rejects unbounded/active encrypted metadata %j', (fields) => {
+    expect(
+      parse({ 'matrix:image:encrypted': encryptedPreviewFile, ...fields }),
+    ).toBeNull()
+  })
+
+  it('allows large plain source images to use bounded server thumbnails', () => {
+    expect(
+      parse({
+        'og:image': 'mxc://hs/hero',
+        'og:image:width': 5000,
+        'og:image:height': 3000,
+        'matrix:image:size': 3 * 1024 * 1024,
+      }),
+    ).toEqual({ mxc: 'mxc://hs/hero', encrypted: false })
+  })
+
+  it.each([-1, NaN, '300'])(
+    'rejects malformed dimensions for plain images: %s',
+    (width) => {
+      expect(
+        parse({ 'og:image': 'mxc://hs/image', 'og:image:width': width }),
+      ).toBeNull()
+    },
+  )
+
+  it.each([
+    null,
+    {},
+    { ...encryptedPreviewFile, v: 'v1' },
+    { ...encryptedPreviewFile, key: {} },
+    { ...encryptedPreviewFile, iv: 'bad' },
+    { ...encryptedPreviewFile, hashes: {} },
+    { ...encryptedPreviewFile, url: 'https://tracking.test/pixel' },
+  ])(
+    'does not downgrade invalid encrypted metadata to a plain alias',
+    (file) => {
+      expect(
+        parse({
+          'matrix:image:encrypted': file,
+          'og:image': 'mxc://hs/plain',
+          'beeper:image:encryption': encryptedPreviewFile,
+        }),
+      ).toBeNull()
+    },
+  )
+
+  it('keeps matching-body, standard authority and spoiler rules for images', () => {
+    const imageEntry = { ...entry, 'og:image': 'mxc://hs/image' }
+    expect(parseLinkPreviews(bundle([imageEntry]), `${url}/other`)).toEqual([])
+    expect(
+      parseLinkPreviews({ ...bundle([imageEntry]), 'm.url_previews': [] }, url),
+    ).toEqual([])
+    expect(
+      parseLinkPreviews(
+        {
+          ...bundle([imageEntry]),
+          format: 'org.matrix.custom.html',
+          formatted_body: `<span data-mx-spoiler>${url}</span>`,
+        },
+        url,
+      ),
+    ).toEqual([])
   })
 })

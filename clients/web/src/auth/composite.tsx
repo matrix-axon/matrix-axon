@@ -1,4 +1,4 @@
-import { computed } from '@preact/signals'
+import { computed, type ReadonlySignal } from '@preact/signals'
 import { useId } from 'preact/hooks'
 import type {
   AppAuthProvider,
@@ -17,6 +17,7 @@ import {
 } from './token-paste'
 
 export interface CompositeAuthProvider extends AppAuthProvider {
+  sessionId: ReadonlySignal<string>
   oauth: OAuthAuthProvider
   tokenPaste: TokenPasteProvider
   /**
@@ -62,6 +63,11 @@ export function createCompositeAuthProvider(
   }
 
   const provider: CompositeAuthProvider = {
+    sessionId: computed(() =>
+      oauth.signedIn.value
+        ? `oauth:${oauth.sessionId.value}`
+        : `token:${tokenPaste.sessionId.value}`,
+    ),
     oauth,
     tokenPaste,
     getToken: () => active().getToken(),
