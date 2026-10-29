@@ -11,6 +11,7 @@ mod backfill;
 mod device_state;
 mod display_names;
 mod error;
+mod event_visibility;
 mod events;
 mod image_packs;
 mod inline_media;

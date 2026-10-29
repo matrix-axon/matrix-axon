@@ -114,9 +114,14 @@ Media storage continues to use the existing per-object limits and globally bound
 API clients can also embed an emoji image in a text message using the existing `format: "org.matrix.custom.html"` and `formatted_body` send fields.
 Use an `img` with an MXC `src`, `data-mx-emoticon`, a readable `alt` such as `:wave:`, and bounded dimensions, following MSC2545.
 Keep the shortcode in the plain `body` fallback.
-For messages ingested or decrypted after this upgrade, Axon stores up to 64 distinct image references from sanitized HTML bodies of at most 64 KiB, including edit replacements.
-Those references continue authorizing media after a pack changes, subject to account isolation, room departure, and redaction of the reference or an edit's target.
-Existing stored messages are not reparsed by the upgrade.
+Axon stores the first 64 distinct image references in document order from sanitized HTML bodies of at most 64 KiB.
+Authorization follows the timeline's latest valid edit, excluding stray replacement content, other senders' edits, and superseded edits.
+Those references continue authorizing media after a pack changes, subject to account isolation, room departure, and authorized redaction of the reference or an edit's target in the same room.
+Proven redaction authority is retained, so demoting a moderator does not restore a redacted image.
+Historical messages are reparsed by a paced background worker in restart-safe batches of at most 32 rows, using the isolated maintenance connection.
+Each batch has a ten-second overall deadline; failures retry and committed progress survives restart.
+Historical content objects larger than 128 KiB are skipped with an empty projection.
+Identical re-delivery also repairs a pending projection without replacing stored event content.
 This does not change the standalone sticker or reaction send APIs.
 
 To send a selection, use the existing reaction endpoint with its unchanged MXC key and optional display name:
