@@ -33,6 +33,37 @@ fn summary_display_state(event_type: &str, state_key: &str) -> bool {
         )
 }
 
+/// A current singleton tuple and the stored redaction event that targets it
+/// (see [`Store::unapplied_room_state_redactions`]).
+#[derive(Debug, Clone)]
+pub struct UnappliedStateRedaction {
+    /// Matrix state type; the state key is always `""`.
+    pub event_type: String,
+    /// The current tuple's event ID, which the redaction targets.
+    pub event_id: String,
+    /// The current tuple's sender.
+    pub sender: String,
+    /// The current tuple's `origin_server_ts` in milliseconds.
+    pub origin_ts: i64,
+    /// The current tuple's stored content.
+    pub content: Option<Value>,
+    /// The redaction event as stored in `events.raw_event`.
+    pub redaction: Value,
+}
+
+impl sqlx_core::from_row::FromRow<'_, PgRow> for UnappliedStateRedaction {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        Ok(Self {
+            event_type: row.try_get("event_type")?,
+            event_id: row.try_get("event_id")?,
+            sender: row.try_get("sender")?,
+            origin_ts: row.try_get("origin_ts")?,
+            content: row.try_get("content")?,
+            redaction: row.try_get("redaction")?,
+        })
+    }
+}
+
 /// A single piece of current room state to upsert: the latest event holding the
 /// `(room_id, event_type, state_key)` tuple for an account.
 pub struct RoomStateUpsert<'a> {
@@ -230,6 +261,7 @@ impl Store {
             purge_on_leave,
         )
         .await
+        .map(drop)
     }
 
     /// Persist SDK-observed redaction evidence with the state tuple atomically.
@@ -244,20 +276,33 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.upsert_room_state_with_redaction_and_purge(s, local_user_id, evidence, false)
             .await
+            .map(drop)
     }
 
     /// Persist redaction evidence and atomically enqueue cleanup for local leaves.
+    ///
+    /// Returns whether the stored tuple changed: it was inserted, or its event,
+    /// content, or redaction evidence differs from what was stored. An
+    /// identical rewrite or a write the freshness guard refused is `false`
+    /// (ADR 0126 decision 5). The comparison reads the prior row from the
+    /// statement's snapshot, so a concurrent write to the same tuple can make
+    /// both writers report a change.
     pub async fn upsert_room_state_with_redaction_and_purge(
         &self,
         s: &RoomStateUpsert<'_>,
         local_user_id: Option<&str>,
         evidence: RoomStateRedaction<'_>,
         purge_on_leave: bool,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let (redacted, redaction_event_id) = evidence.columns();
         let purge = purge_on_leave && s.is_local_departure(local_user_id);
-        let query = sqlx_core::query::query(
-            "INSERT INTO room_state \
+        let query = sqlx_core::query_as::query_as::<Postgres, (bool, bool)>(
+            "WITH prior AS MATERIALIZED (\
+                 SELECT event_id, sender, origin_ts, content, redacted, redaction_event_id \
+                 FROM room_state \
+                 WHERE account_id = $1 AND room_id = $2 AND event_type = $3 AND state_key = $4\
+             ), written AS (\
+             INSERT INTO room_state \
              (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content, redacted, redaction_event_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
              ON CONFLICT (account_id, room_id, event_type, state_key) DO UPDATE SET \
@@ -274,7 +319,13 @@ impl Store {
                redaction_event_id = CASE WHEN room_state.event_id = EXCLUDED.event_id \
                    THEN COALESCE(room_state.redaction_event_id, EXCLUDED.redaction_event_id) \
                    ELSE EXCLUDED.redaction_event_id END \
-             WHERE EXCLUDED.origin_ts >= room_state.origin_ts",
+             WHERE EXCLUDED.origin_ts >= room_state.origin_ts \
+             RETURNING event_id, sender, origin_ts, content, redacted, redaction_event_id\
+             ) SELECT EXISTS (SELECT 1 FROM written), \
+                 EXISTS (SELECT 1 FROM written w WHERE NOT EXISTS (SELECT 1 FROM prior p WHERE \
+                     (p.event_id, p.sender, p.origin_ts, p.content, p.redacted, p.redaction_event_id) \
+                     IS NOT DISTINCT FROM \
+                     (w.event_id, w.sender, w.origin_ts, w.content, w.redacted, w.redaction_event_id)))",
         )
         .bind(s.account_id)
         .bind(s.room_id)
@@ -286,27 +337,29 @@ impl Store {
         .bind(&s.content)
         .bind(redacted)
         .bind(redaction_event_id);
-        if purge {
+        let changed = if purge {
             let mut tx = self.pool.begin().await?;
-            let changed = query.execute(&mut *tx).await?.rows_affected() != 0;
-            if changed {
+            // Any accepted leave write advances the purge, including a replay.
+            let (written, changed) = query.fetch_one(&mut *tx).await?;
+            if written {
                 Self::room_purge_watermark(s.account_id, s.room_id, true, &mut *tx).await?;
             }
             tx.commit().await?;
-            if changed {
+            if written {
                 self.purge_wakeup.notify_one();
                 tracing::info!(account_id = %s.account_id, room_id = %s.room_id, "queued room purge with local leave state");
             }
+            changed
         } else {
-            query.execute(&self.pool).await?;
-        }
+            query.fetch_one(&self.pool).await?.1
+        };
         if summary_display_state(s.event_type, s.state_key)
             || (s.event_type == "m.room.member" && local_user_id == Some(s.state_key))
         {
             self.refresh_room_summary_display(s.account_id, s.room_id)
                 .await?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Read a single resolved room-state tuple, or `None` if unset.
@@ -444,6 +497,43 @@ impl Store {
         }
         tx.commit().await?;
         Ok(changed)
+    }
+
+    /// Current singleton tuples of `event_types` without redaction evidence
+    /// that a stored `m.room.redaction` event targets, with that redaction's
+    /// raw event. Repair uses it for state the SDK cache never held (ADR 0126):
+    /// the caller applies the same redaction the SDK store would have applied.
+    /// Tuples over 128 KiB and redactions over 64 KiB are skipped before
+    /// transfer, and the reconciliation deadlines bound the query.
+    pub async fn unapplied_room_state_redactions(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_types: &[&str],
+    ) -> Result<Vec<UnappliedStateRedaction>, StoreError> {
+        let mut tx = self.reconciliation_transaction().await?;
+        let rows = sqlx_core::query_as::query_as::<Postgres, UnappliedStateRedaction>(
+            "SELECT s.event_type, s.event_id, s.sender, s.origin_ts, s.content, r.raw_event AS redaction \
+             FROM room_state s \
+             CROSS JOIN LATERAL (\
+                 SELECT rr.raw_event FROM events rr \
+                 WHERE rr.account_id = s.account_id AND rr.redacts = s.event_id \
+                   AND rr.room_id = s.room_id AND rr.event_type = 'm.room.redaction' \
+                 ORDER BY rr.id LIMIT 1\
+             ) r \
+             WHERE s.account_id = $1 AND s.room_id = $2 AND s.state_key = '' \
+               AND s.event_type = ANY($3) AND s.redacted IS DISTINCT FROM true \
+               AND COALESCE(octet_length(s.content::text), 0) <= 131072 \
+               AND octet_length(r.raw_event::text) <= 65536 \
+             ORDER BY s.event_type",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(event_types)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows)
     }
 
     /// Read every resolved state tuple of one type in a room, ordered by

@@ -1104,9 +1104,10 @@ export interface paths {
          *     No upstream requests or membership aggregation occur on this route.
          *     Missing snapshots remain unknown, including for unjoined/unknown rooms.
          *     Content is limited to 128 KiB per state tuple before transfer and decoding.
-         *     Re-read on reopen/reconnect. Until state invalidation covers required-state
-         *     updates, open panels need bounded polling to detect changes without a live
-         *     frame. Event `origin_ts` is provenance, not a sync-freshness timestamp.
+         *     Re-read on reopen, on reconnect, and on a `room_details.changed` WebSocket
+         *     frame whose `sources` include `metadata`, which follows every change to a
+         *     stored snapshot; open panels need no polling.
+         *     Event `origin_ts` is provenance, not a sync-freshness timestamp.
          */
         get: operations["room_metadata"];
         put?: never;

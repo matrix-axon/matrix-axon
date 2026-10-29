@@ -16,7 +16,7 @@
 //!
 //! - **Interactive** requests (a user is waiting) never wait. Their timeouts and
 //!   server errors can halve the limit, but no lower than 1.
-//! - **Long-polls** (the ADR 0124 image-pack transport) wait only while the
+//! - **Long-polls** (the ADR 0124 supplementary state transport) wait only while the
 //!   breaker is not closed, and hold no slot while polling, since a poll is
 //!   meant to sit at the homeserver for its whole server-side timeout. Their
 //!   latency is never classified. Hard failures halve the limit like any

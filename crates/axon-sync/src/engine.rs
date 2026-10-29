@@ -15,7 +15,7 @@ use std::time::Duration;
 use axon_core::PushMaterial;
 use axon_core::{
     AccountDataFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveEvent, LiveFrame,
-    SenderTrustFrame, SyncConfig, SyncStateFrame, UnreadCountsFrame,
+    RoomDetailSource, SenderTrustFrame, SyncConfig, SyncStateFrame, UnreadCountsFrame,
 };
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
@@ -705,6 +705,9 @@ pub(crate) struct PersistContext {
     /// stored events + search documents (ADR 0044). Off by default.
     pub(crate) purge_on_leave: bool,
     pub(crate) state_redaction_tx: tokio::sync::mpsc::Sender<OwnedRoomId>,
+    /// Coalesces `room_details.changed` frames for metadata state changes
+    /// (ADR 0126).
+    pub(crate) room_details: crate::room_details::RoomDetailsChanges,
 }
 
 /// Parse an event's raw JSON text into a [`serde_json::Value`], logging (with
@@ -1070,7 +1073,8 @@ async fn persist_room_state_event(
     persist_room_state_value(ev, &raw_val, room.room_id(), &room.client(), &ctx).await;
 }
 
-/// Shared projection for ordinary SDK state and the isolated pack transport.
+/// Shared projection for ordinary SDK state and the isolated supplementary
+/// state transport.
 /// The latter never feeds a sync response into the SDK's room/summary store.
 pub(crate) async fn persist_room_state_value(
     ev: AnySyncStateEvent,
@@ -1113,7 +1117,7 @@ pub(crate) async fn persist_room_state_value(
     {
         return;
     }
-    if let Err(err) = ctx
+    match ctx
         .store
         .upsert_room_state_with_redaction_and_purge(
             &upsert,
@@ -1123,9 +1127,16 @@ pub(crate) async fn persist_room_state_value(
         )
         .await
     {
-        tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), error = %err, "failed to persist room state");
-    } else {
-        tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), event_id = %event_id, evidence = ?evidence, "persisted room state");
+        Err(err) => {
+            tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), error = %err, "failed to persist room state");
+        }
+        Ok(changed) => {
+            tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), event_id = %event_id, evidence = ?evidence, changed, "persisted room state");
+            if changed && axon_core::room_details::is_metadata_state(&event_type, &state_key) {
+                ctx.room_details
+                    .mark(room_id.as_str(), RoomDetailSource::Metadata);
+            }
+        }
     }
 
     if matches!(evidence, RoomStateRedaction::Unknown)
@@ -1853,6 +1864,14 @@ async fn run_account(
     // Register event persistence before starting the sync service so no events
     // are missed between SyncService::start() and handler registration.
     let (state_redaction_tx, state_redaction_rx) = tokio::sync::mpsc::channel(32);
+    // Owned by this run like the workers below: canceled and joined on exit.
+    let room_details =
+        crate::room_details::RoomDetailsChanges::new(account.account_id, live_tx.clone());
+    let room_details_cancel = cancel.child_token();
+    let room_details_handle = tokio::spawn(crate::room_details::run(
+        room_details.clone(),
+        room_details_cancel.clone(),
+    ));
     let persist_ctx = PersistContext {
         store: store.clone(),
         account_id: account.account_id,
@@ -1861,6 +1880,7 @@ async fn run_account(
         local_user_id: Arc::from(account.user_id.as_str()),
         purge_on_leave: config.purge_on_leave,
         state_redaction_tx,
+        room_details: room_details.clone(),
     };
     // Clone before the handler context takes ownership: the backfill task persists
     // paged events through the same path (M10), reusing this context.
@@ -1980,6 +2000,7 @@ async fn run_account(
         member_counts_cancel.clone(),
         member_counts_refresh.clone(),
         live_tx.clone(),
+        room_details.clone(),
     ));
 
     // Subscribe before `start`, so the first response is not missed on the
@@ -1998,14 +2019,15 @@ async fn run_account(
         },
     ));
 
-    // Pack responses only project pack state; they never mutate SDK rooms.
-    // See docs/custom-emoji.md for transport isolation and load bounds.
-    let image_packs_cancel = cancel.child_token();
-    let image_packs_handle = tokio::spawn(crate::image_packs::run(
+    // Supplementary responses only project allowlisted state; they never
+    // mutate SDK rooms. See docs/custom-emoji.md for transport isolation and
+    // load bounds.
+    let supplementary_state_cancel = cancel.child_token();
+    let supplementary_state_handle = tokio::spawn(crate::supplementary_state::run(
         client.clone(),
         backfill_ctx.clone(),
         Arc::clone(&gate),
-        image_packs_cancel.clone(),
+        supplementary_state_cancel.clone(),
     ));
     sync_service.start().await;
     tracing::info!(account_id = %account.account_id, "sync service started");
@@ -2296,9 +2318,9 @@ async fn run_account(
     };
     verification_rooms.unregister(account.account_id, verification_room_run_id);
 
-    image_packs_cancel.cancel();
-    if let Err(err) = image_packs_handle.await {
-        tracing::warn!(account_id = %account.account_id, error = %err, "image pack worker did not shut down cleanly");
+    supplementary_state_cancel.cancel();
+    if let Err(err) = supplementary_state_handle.await {
+        tracing::warn!(account_id = %account.account_id, error = %err, "supplementary state worker did not shut down cleanly");
     }
     member_counts_cancel.cancel();
     if let Err(err) = member_counts_handle.await {
@@ -2308,6 +2330,11 @@ async fn run_account(
     state_redaction_cancel.cancel();
     if let Err(err) = state_redaction_handle.await {
         tracing::warn!(account_id = %account.account_id, error = %err, "state redaction worker did not shut down cleanly");
+    }
+    // After every producer above has stopped, so their last changes go out.
+    room_details_cancel.cancel();
+    if let Err(err) = room_details_handle.await {
+        tracing::warn!(account_id = %account.account_id, error = %err, "room details notifier did not shut down cleanly");
     }
 
     // Always drain the service so its SQLite store flushes before we drop it,
@@ -4389,6 +4416,10 @@ mod purge_ingestion_tests {
                     .await
                     .unwrap();
                 let (live_tx, _) = broadcast::channel(8);
+                let room_details = crate::room_details::RoomDetailsChanges::new(
+                    account.account_id,
+                    live_tx.clone(),
+                );
                 let (state_redaction_tx, _) = tokio::sync::mpsc::channel(32);
                 client.add_event_handler_context(PersistContext {
                     store: store.clone(),
@@ -4398,6 +4429,7 @@ mod purge_ingestion_tests {
                     local_user_id: Arc::from(user.as_str()),
                     purge_on_leave,
                     state_redaction_tx,
+                    room_details,
                 });
                 client.add_event_handler(
                     move |ev: AnySyncTimelineEvent,

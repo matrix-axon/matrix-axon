@@ -87,6 +87,7 @@ Axon therefore runs one additional state-only Simplified Sliding Sync connection
 The transport uses raw SDK HTTP requests, disables SDK retries, and projects only allowlisted pack and hierarchy state through the shared state persistence helper.
 It never submits a response to SDK sync processing, so summary fields, recency, pagination tokens, timelines, and extensions cannot overwrite the primary connection's SDK state.
 The connection also requests parent/child links, creation and power-level state, and the local user's membership so inherited packs hydrate after restart.
+Since [ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) it also carries guest-access and server-ACL state for [room metadata](room-metadata.md#sync-coverage-and-remaining-acquisition), as connection `axon-state`.
 It does not request whole member lists; one-way claims without cached sender membership remain unverifiable.
 The projection retains existing timestamp guards and redaction/departure handling.
 Space parent and child clears with `{}` are persisted unchanged; an absent `via` removes the relationship.
