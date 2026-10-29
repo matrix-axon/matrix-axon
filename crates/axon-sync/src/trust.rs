@@ -12,8 +12,8 @@
 //! shape: a concrete engine owned by [`SyncEngine`](crate::SyncEngine), adapted
 //! onto the API's `SenderTrustService` port by `axon-server`. Unlike the verify
 //! verbs it is **read-only** and takes no per-identity lock — see
-//! [`SenderTrustEngine::bundle`] for why holding one across the SDK round-trips
-//! would be a lock-contention hazard on a per-message read endpoint.
+//! [`SenderTrustEngine::bundle`] for why taking one would make a per-message read
+//! endpoint wait behind lifecycle verbs that talk to the homeserver.
 
 use axon_store::{AccountState, EventSenderTrust, Store};
 use matrix_sdk::ruma::{OwnedDeviceId, OwnedUserId};
@@ -102,10 +102,12 @@ impl SenderTrustEngine {
     ///
     /// Unlike the verification verbs, this is **read-only** and takes no
     /// per-identity lifecycle lock: a bundle read tolerates a client a concurrent
-    /// logout/delete is severing (worst case an `Upstream` error), and holding the
-    /// lock across the homeserver round-trips below (`get_device` /
-    /// `get_user_identity` can issue a `/keys/query`) would let a per-message read
-    /// endpoint starve login/logout/delete on a slow homeserver. The `active` gate
+    /// logout/delete is severing (worst case an `Upstream` error), and login and
+    /// the verify verbs hold that lock across homeserver calls, so taking it here
+    /// would make a read wait out a slow homeserver it never talks to. The live
+    /// evidence is read from the local crypto store (see
+    /// [`current_trust`](Self::current_trust)), so this awaits no homeserver
+    /// request and needs no request timeout (issue #57). The `active` gate
     /// is an explicit store read (see below) rather than
     /// [`ClientManager::get_or_connect`]'s, whose cache-hit fast path can return a
     /// still-cached client for a just-deactivated account without re-checking the
@@ -174,6 +176,12 @@ impl SenderTrustEngine {
     /// Read the sender's current device + identity trust from the live SDK. A
     /// missing device or identity (deleted, not yet downloaded, federation lag) is
     /// reported as "unknown" rather than an error — it's a normal condition.
+    ///
+    /// Both lookups are local crypto-store reads. The SDK's `get_device` and
+    /// `get_user_identity` pass no key-query timeout to the `OlmMachine`, which
+    /// then returns what is stored without waiting for a pending `/keys/query`
+    /// (matrix-sdk 0.19). So "current" means as of the sync loop's last key
+    /// download, and a stale device list reads stale rather than blocking.
     async fn current_trust(
         &self,
         client: &Client,
@@ -182,7 +190,7 @@ impl SenderTrustEngine {
     ) -> Result<CurrentTrust, TrustError> {
         let encryption = client.encryption();
 
-        // Known limitation (GH issue #99): we look the device up under the event's
+        // Known limitation (issue #59): we look the device up under the event's
         // `sender`. For a `MismatchedSender` event the session device belongs to a
         // *different* user than `sender`, so `get_device` returns `None` here and
         // `device_known` is reported `false` — the live half can't surface a
