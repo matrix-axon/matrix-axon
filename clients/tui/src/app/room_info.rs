@@ -31,8 +31,12 @@ const ROOM_INFO_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const ROOM_INFO_MAX_FAILURES: u8 = 3;
 
 /// How long membership changes must pause before they refresh the popup.
-/// A burst becomes one read. Constant churn does not; the 30-second poll covers it.
+/// A burst becomes one read.
 const ROOM_INFO_MEMBER_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// A burst cannot push the membership refresh later than this after its first event.
+/// Constant churn still refreshes, instead of waiting for the 30-second poll.
+const ROOM_INFO_MEMBER_DEBOUNCE_CAP: Duration = Duration::from_secs(10);
 
 /// A pasted Matrix ID or display name fits. Anything longer cannot be a
 /// substring of a field this short, and a huge paste must not be stored.
@@ -125,13 +129,20 @@ pub(crate) struct RoomInfoCache {
     /// Transport failures in a row. The poll wait is `30s * 2^failures`.
     /// One failed part backs off the whole batch: the four reads share this clock.
     failures: u8,
-    /// A reconnect or metadata invalidation arrived during the current batch.
+    /// A metadata invalidation arrived during the current batch.
     /// After a successful batch, the next poll starts one follow-up.
     /// A failure backoff keeps this from starting a batch early.
     refresh_again: bool,
+    /// A reconnect may start one batch during the current failure backoff.
+    reconnect_bypass: bool,
+    /// That one reconnect bypass has already been used in this backoff window.
+    backoff_bypassed: bool,
     /// When a paused membership burst may refresh the popup.
-    /// Each new member event pushes this forward.
+    /// Each new member event pushes this forward, but not past
+    /// `member_refresh_not_after`.
     member_refresh_at: Option<Instant>,
+    /// The membership burst cannot defer its refresh past this instant.
+    member_refresh_not_after: Option<Instant>,
 }
 
 impl RoomInfoCache {
@@ -217,11 +228,9 @@ impl App {
             Some(state) => {
                 state.generation = generation;
                 state.in_flight = ROOM_INFO_READS;
-                // A retry is pending again: say "loading", not the old failure.
-                state.metadata.failure = None;
-                state.info.failure = None;
-                state.upgrade.failure = None;
-                state.members.failure = None;
+                // Leave each part's value and failure until its own result
+                // arrives. Clearing them here would flash "loading" over the
+                // last error, and a cancel mid-batch would drop both.
             }
             None => {
                 cache.state = Some(RoomInfoState {
@@ -290,7 +299,9 @@ impl App {
     pub(crate) fn open_room_info(&mut self, key: RoomKey, now: Instant) {
         self.room_info.failures = 0;
         self.room_info.refresh_again = false;
-        self.room_info.member_refresh_at = None;
+        self.room_info.reconnect_bypass = false;
+        self.room_info.backoff_bypassed = false;
+        self.clear_member_refresh();
         self.request_room_info(key);
         self.room_info.next_poll = Some(now + ROOM_INFO_POLL_INTERVAL);
     }
@@ -299,11 +310,15 @@ impl App {
     /// pause it. The main loop passes `Instant::now` from its existing tick.
     pub(crate) fn poll_open_room_info(&mut self, now: Instant) {
         if !self.room_info_popup_is_open() {
-            self.cancel_room_info_refresh();
+            if !self.room_info_refresh_is_idle() {
+                self.cancel_room_info_refresh();
+            }
             return;
         }
         let Some(key) = self.selected_room_key() else {
-            self.cancel_room_info_refresh();
+            if !self.room_info_refresh_is_idle() {
+                self.cancel_room_info_refresh();
+            }
             return;
         };
         let cached = self.room_info.state.as_ref().map(|state| state.key.clone());
@@ -312,7 +327,9 @@ impl App {
             // instead of leaving the body on "not loaded".
             self.room_info.failures = 0;
             self.room_info.refresh_again = false;
-            self.room_info.member_refresh_at = None;
+            self.room_info.reconnect_bypass = false;
+            self.room_info.backoff_bypassed = false;
+            self.clear_member_refresh();
             self.popup_scroll = 0;
             self.reveal_room_info_members = false;
             self.begin_room_info_batch(key, now);
@@ -327,15 +344,34 @@ impl App {
             return;
         }
         let due = self.room_info.next_poll.is_some_and(|due| now >= due);
-        // Failure backoff is the schedule. A reconnect, a metadata event, or a
-        // membership pause does not start another batch before it is due.
-        let early = self.room_info.failures == 0
-            && (self.room_info.refresh_again
-                || self.room_info.member_refresh_at.is_some_and(|at| now >= at));
+        // Failure backoff is the schedule for metadata events and membership.
+        // One reconnect in that window may start a batch early.
+        let member_due = self.room_info.member_refresh_at.is_some_and(|at| now >= at);
+        let early = self.room_info.reconnect_bypass
+            || (self.room_info.failures == 0 && (self.room_info.refresh_again || member_due));
         if due || early {
-            self.room_info.member_refresh_at = None;
+            if due {
+                self.room_info.backoff_bypassed = false;
+            } else if self.room_info.reconnect_bypass && self.room_info.failures > 0 {
+                self.room_info.backoff_bypassed = true;
+            }
+            self.room_info.reconnect_bypass = false;
+            self.clear_member_refresh();
             self.begin_room_info_batch(key, now);
         }
+    }
+
+    /// The socket reconnected. One such event may skip a failure backoff.
+    /// Another reconnect in the same window waits for the schedule.
+    pub(crate) fn note_room_info_reconnect(&mut self, now: Instant) {
+        if self.room_info_popup_is_open() {
+            if self.room_info.failures == 0 {
+                self.room_info.refresh_again = true;
+            } else if !self.room_info.backoff_bypassed {
+                self.room_info.reconnect_bypass = true;
+            }
+        }
+        self.poll_open_room_info(now);
     }
 
     /// Re-read because the socket reconnected or a metadata event or redaction
@@ -362,9 +398,7 @@ impl App {
             return;
         }
         if event_type == "m.room.member" {
-            if self.room_info_popup_is_open() {
-                self.room_info.member_refresh_at = Some(now + ROOM_INFO_MEMBER_DEBOUNCE);
-            }
+            self.schedule_member_refresh(now);
             return;
         }
         if room_info_event_refreshes(event_type) {
@@ -392,7 +426,40 @@ impl App {
         }
         self.room_info.next_poll = None;
         self.room_info.refresh_again = false;
+        self.room_info.reconnect_bypass = false;
+        self.room_info.backoff_bypassed = false;
+        self.clear_member_refresh();
+    }
+
+    fn room_info_refresh_is_idle(&self) -> bool {
+        let in_flight = self
+            .room_info
+            .state
+            .as_ref()
+            .is_some_and(|state| state.in_flight > 0);
+        !in_flight
+            && self.room_info.reads.is_empty()
+            && self.room_info.next_poll.is_none()
+            && !self.room_info.refresh_again
+            && !self.room_info.reconnect_bypass
+            && self.room_info.member_refresh_at.is_none()
+    }
+
+    fn clear_member_refresh(&mut self) {
         self.room_info.member_refresh_at = None;
+        self.room_info.member_refresh_not_after = None;
+    }
+
+    fn schedule_member_refresh(&mut self, now: Instant) {
+        if !self.room_info_popup_is_open() {
+            return;
+        }
+        let not_after = self
+            .room_info
+            .member_refresh_not_after
+            .unwrap_or(now + ROOM_INFO_MEMBER_DEBOUNCE_CAP);
+        self.room_info.member_refresh_not_after = Some(not_after);
+        self.room_info.member_refresh_at = Some((now + ROOM_INFO_MEMBER_DEBOUNCE).min(not_after));
     }
 
     fn begin_room_info_batch(&mut self, key: RoomKey, now: Instant) {
@@ -458,6 +525,7 @@ impl App {
                 .min(ROOM_INFO_MAX_FAILURES);
         } else {
             self.room_info.failures = 0;
+            self.room_info.backoff_bypassed = false;
         }
         if !self.room_info_popup_is_open() {
             return;
@@ -2467,7 +2535,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_retry_reads_as_loading_until_it_settles() {
+    async fn a_retry_keeps_the_last_failure_until_its_result_arrives() {
         let mut app = app();
         let (tx, _rx) = mpsc::unbounded_channel();
         app.room_info.tx = Some(tx);
@@ -2487,12 +2555,26 @@ mod tests {
         app.request_room_info(key());
 
         let during = crate::ui::popup_room_info_lines(&app);
-        assert_eq!(line(&during, "Members:"), "Members: loading…");
-        assert!(!during
+        assert_eq!(
+            line(&during, "Members:"),
+            "Members: unavailable (request failed)"
+        );
+        assert!(during
             .iter()
             .any(|line| line.starts_with("Latest refresh failed")));
         // The data it already had stays up while the retry runs.
         assert_eq!(line(&during, "Room version:"), "Room version: 11");
+        assert_eq!(
+            app.room_info.state.as_ref().unwrap().metadata.failure,
+            Some(ReadFailure::Failed)
+        );
+
+        app.cancel_room_info_refresh();
+
+        let state = app.room_info.state.as_ref().unwrap();
+        assert_eq!(state.metadata.failure, Some(ReadFailure::Failed));
+        assert!(state.metadata.value.is_some());
+        assert_eq!(state.info.failure, Some(ReadFailure::Failed));
     }
 
     #[tokio::test]
@@ -4207,6 +4289,62 @@ mod tests {
         app.poll_open_room_info(t0 + Duration::from_secs(3));
         assert_eq!(app.room_info.generation, generation);
         app.poll_open_room_info(t0 + Duration::from_secs(4));
+        assert_eq!(app.room_info.generation, generation + 1);
+    }
+
+    #[tokio::test]
+    async fn a_membership_burst_cannot_defer_its_refresh_past_the_cap() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        settle_room_info(&mut app, None, t0);
+        let generation = app.room_info.generation;
+        let room_key = key();
+
+        app.note_room_info_timeline_event(&room_key, "m.room.member", t0);
+        app.note_room_info_timeline_event(
+            &room_key,
+            "m.room.member",
+            t0 + ROOM_INFO_MEMBER_DEBOUNCE_CAP + Duration::from_secs(5),
+        );
+
+        assert_eq!(
+            app.room_info.member_refresh_at,
+            Some(t0 + ROOM_INFO_MEMBER_DEBOUNCE_CAP)
+        );
+        app.poll_open_room_info(t0 + ROOM_INFO_MEMBER_DEBOUNCE_CAP - Duration::from_secs(1));
+        assert_eq!(app.room_info.generation, generation);
+        app.poll_open_room_info(t0 + ROOM_INFO_MEMBER_DEBOUNCE_CAP);
+        assert_eq!(app.room_info.generation, generation + 1);
+    }
+
+    #[tokio::test]
+    async fn one_reconnect_skips_a_failure_backoff_and_the_next_waits() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        let t0 = Instant::now();
+        app.invalidate_open_room_info(t0);
+        settle_room_info(&mut app, Some(ReadFailure::Failed), t0);
+        let generation = app.room_info.generation;
+        assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(60)));
+
+        app.note_room_info_reconnect(t0 + Duration::from_secs(5));
+        assert_eq!(app.room_info.generation, generation + 1);
+        settle_room_info(
+            &mut app,
+            Some(ReadFailure::Failed),
+            t0 + Duration::from_secs(5),
+        );
+        let generation = app.room_info.generation;
+
+        app.note_room_info_reconnect(t0 + Duration::from_secs(6));
+        app.invalidate_open_room_info(t0 + Duration::from_secs(7));
+        assert_eq!(app.room_info.generation, generation);
+
+        app.poll_open_room_info(t0 + Duration::from_secs(5) + Duration::from_secs(120));
         assert_eq!(app.room_info.generation, generation + 1);
     }
 }

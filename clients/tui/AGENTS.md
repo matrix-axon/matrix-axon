@@ -36,10 +36,12 @@
   A later refresh of the same room must keep the filter text and must not jump the scroll on its own.
   While the popup is open it re-reads on reconnect, when a redaction or a metadata or tombstone state event arrives for the selected room, and every 30 seconds from the tick.
   That wait starts when the previous batch settles, so a slow read does not start the next one immediately.
-  Membership changes wait until they pause for two seconds, then cause one re-read.
+  Membership changes wait until they pause for two seconds, and no later than ten seconds after the first change in the burst.
   One batch is in flight at a time.
   One transport failure doubles the wait for the whole batch, up to four minutes, and a 404 does not.
-  A reconnect or a new event does not skip that backoff.
+  A metadata event does not skip that backoff.
+  One reconnect during the backoff may start a batch. The next reconnect waits for the schedule.
+  A refresh leaves each part's last value and last error in place until that part's new result arrives.
   Closing the popup cancels the batch.
   The poll stays until the server publishes required-state changes (#621).
   If the selected room changes under the open popup, the next tick fetches that room and resets the scroll.

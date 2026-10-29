@@ -64,7 +64,8 @@ impl App {
                 self.clear_typing_overlays();
                 // Required-state updates have no live frame. An open
                 // `/whereami` re-reads on every connect, including the first.
-                self.invalidate_open_room_info(Instant::now());
+                // One reconnect may skip a failure backoff; the next waits.
+                self.note_room_info_reconnect(Instant::now());
                 LiveFrameAction::None
             }
             LiveFrame::Reconnecting { reason, delay } => {
