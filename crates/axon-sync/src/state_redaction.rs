@@ -6,10 +6,12 @@ use std::time::Duration;
 use axon_store::{RoomStateRedaction, RoomStateUpsert, UnappliedStateRedaction};
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
 use matrix_sdk::ruma::canonical_json::{redact, CanonicalJsonObject, RedactedBecause};
-use matrix_sdk::ruma::room_version_rules::RedactionRules;
-use matrix_sdk::ruma::{events::AnySyncStateEvent, OwnedRoomId, RoomId};
+use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsEventContent};
+use matrix_sdk::ruma::room_version_rules::{RedactionRules, RoomVersionRules};
+use matrix_sdk::ruma::{events::AnySyncStateEvent, OwnedRoomId, RoomId, UserId};
 use matrix_sdk::store::RoomLoadSettings;
-use matrix_sdk::{Client, RoomState};
+use matrix_sdk::store::StateStoreExt;
+use matrix_sdk::{Client, RoomInfo, RoomState};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -228,18 +230,67 @@ async fn locally_redacted_state(
         tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, "no SDK room info for stored state redaction; sweep will retry");
         return Vec::new();
     };
-    let rules = info.room_version_rules_or_default().redaction;
+    let rules = info.room_version_rules_or_default();
+    let power_levels = power_levels(client, room_id, &info, &rules).await;
     candidates
         .into_iter()
         .filter_map(|candidate| {
             let event_type = candidate.event_type.clone();
-            let redacted = redact_stored(candidate, &rules);
+            if !redaction_authorized(
+                &candidate.redaction,
+                &candidate.sender,
+                power_levels.as_ref(),
+            ) {
+                tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, "stored redaction is not authorized; left unapplied");
+                return None;
+            }
+            let redacted = redact_stored(candidate, &rules.redaction);
             if redacted.is_none() {
                 tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, "stored state or its redaction is not redactable JSON");
             }
             redacted
         })
         .collect()
+}
+
+/// The room's current power levels from the SDK cache, which the primary
+/// connection keeps, as the SDK's own `Room::power_levels` computes them.
+async fn power_levels(
+    client: &Client,
+    room_id: &RoomId,
+    info: &RoomInfo,
+    rules: &RoomVersionRules,
+) -> Option<RoomPowerLevels> {
+    let raw = client
+        .state_store()
+        .get_state_event_static::<RoomPowerLevelsEventContent>(room_id)
+        .await
+        .ok()??;
+    let content = raw.deserialize().ok()?;
+    Some(content.power_levels(&rules.authorization, info.creators()?))
+}
+
+/// Whether a client may apply `redaction` to state that `target_sender` sent.
+/// Delivery is not authorization: from room version 3, a homeserver accepts
+/// any redaction and applies it only once it confirms that the redaction's
+/// sender may redact others' events or is on the target sender's server. This
+/// is that check, against the room's current power levels; without them only
+/// a same-server redaction applies.
+fn redaction_authorized(
+    redaction: &serde_json::Value,
+    target_sender: &str,
+    power_levels: Option<&RoomPowerLevels>,
+) -> bool {
+    let Some(sender) = redaction
+        .get("sender")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|sender| <&UserId>::try_from(sender).ok())
+    else {
+        return false;
+    };
+    <&UserId>::try_from(target_sender)
+        .is_ok_and(|target| target.server_name() == sender.server_name())
+        || power_levels.is_some_and(|levels| levels.user_can_redact_event_of_other(sender))
 }
 
 fn redact_stored(
@@ -329,6 +380,54 @@ mod tests {
     use matrix_sdk::{RoomInfo, StateChanges};
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn redactions_apply_from_the_same_server_or_with_power_to_redact_others() {
+        use matrix_sdk::ruma::events::room::power_levels::RoomPowerLevelsSource;
+        use matrix_sdk::ruma::room_version_rules::AuthorizationRules;
+        let redaction = |sender: &str| json!({"type": "m.room.redaction", "sender": sender});
+        let levels = RoomPowerLevels::new(
+            RoomPowerLevelsSource::Original(
+                serde_json::from_value(json!({"redact": 50, "users": {
+                    "@mod:other.example": 50, "@helper:other.example": 49}}))
+                .unwrap(),
+            ),
+            &AuthorizationRules::V11,
+            Vec::new(),
+        );
+        let target = "@admin:example.org";
+        assert!(redaction_authorized(
+            &redaction("@admin:example.org"),
+            target,
+            None
+        ));
+        assert!(redaction_authorized(
+            &redaction("@other:example.org"),
+            target,
+            None
+        ));
+        assert!(!redaction_authorized(
+            &redaction("@mod:other.example"),
+            target,
+            None
+        ));
+        assert!(redaction_authorized(
+            &redaction("@mod:other.example"),
+            target,
+            Some(&levels)
+        ));
+        assert!(!redaction_authorized(
+            &redaction("@helper:other.example"),
+            target,
+            Some(&levels)
+        ));
+        assert!(!redaction_authorized(
+            &redaction("not a user"),
+            target,
+            Some(&levels)
+        ));
+        assert!(!redaction_authorized(&json!({}), target, Some(&levels)));
+    }
 
     /// Repair announces `metadata` only if it covers every metadata type.
     #[test]
@@ -490,6 +589,46 @@ mod tests {
                 None,
                 Some(json!({"allow": ["*"], "deny": []}))
             )
+        );
+        assert!(room_details.take_pending().is_empty());
+        // A homeserver delivers redactions it has not applied. One from
+        // another server, with no power to redact others' events, is not
+        // applied here either.
+        let raw = json!({"type": "m.room.redaction", "event_id": "$bogus:elsewhere.example",
+            "sender": "@evil:elsewhere.example", "origin_server_ts": 21,
+            "redacts": "$acl2:localhost", "content": {"redacts": "$acl2:localhost"}});
+        store
+            .upsert_event(&axon_store::NewEvent {
+                event_id: "$bogus:elsewhere.example",
+                room_id: room_id.as_str(),
+                account_id: account.account_id,
+                sender: "@evil:elsewhere.example",
+                origin_ts: 21,
+                event_type: "m.room.redaction",
+                content: Some(raw["content"].clone()),
+                raw_event: raw,
+                megolm_session_id: None,
+                redacts: Some("$acl2:localhost"),
+                relates_to: None,
+                decrypted_body_text: None,
+            })
+            .await
+            .unwrap();
+        reconcile_room(&ctx, &client, &room_id).await;
+        let row = store
+            .room_state(
+                account.account_id,
+                room_id.as_str(),
+                "m.room.server_acl",
+                "",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (row.redacted, row.content),
+            (None, Some(json!({"allow": ["*"], "deny": []}))),
+            "an unauthorized redaction was applied"
         );
         assert!(room_details.take_pending().is_empty());
         store.delete_account_row(account.account_id).await.unwrap();

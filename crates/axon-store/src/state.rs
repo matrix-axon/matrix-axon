@@ -536,7 +536,7 @@ impl Store {
         Ok(rows)
     }
 
-    /// Read every resolved state tuple of one type in a room, ordered by    /// Read every resolved state tuple of one type in a room, ordered by
+    /// Read every resolved state tuple of one type in a room, ordered by
     /// `state_key` — e.g. all `m.room.member` rows for a membership list.
     pub async fn room_state_of_type(
         &self,

@@ -79,7 +79,9 @@ Queue overflow and interrupted jobs heal through subsequent sweeps.
 The worker reads twelve singleton SDK cache entries per room, bounds raw JSON before decoding to 128 KiB, and uses a two-second deadline for each room and each sweep-page read.
 Guest-access and server-ACL state usually reaches Axon only through the supplementary connection, so the SDK cache may hold no copy to repair from, and that connection does not redeliver a redacted target.
 When the SDK has no entry of either type, the worker makes one more bounded query for a stored `m.room.redaction` event targeting Axon's current tuple of that type (tuples up to 128 KiB, redactions up to 64 KiB, under the reconciliation deadlines).
-For each one it finds, it applies the redaction the SDK store would have applied: ruma's `redact` under the room-version rules of the SDK's stored room info, with the same trust in a synced redaction the SDK gives the other ten types.
+A homeserver delivers redactions it has accepted but not applied: from room version 3 it applies one only after confirming that its sender may redact others' events or is on the target sender's server.
+The worker applies a stored redaction only under that same rule, using the room's current power levels from the SDK cache; without them, only a redaction from the target sender's server applies.
+It then redacts the tuple as the SDK store would: ruma's `redact` under the room-version rules of the SDK's stored room info.
 The result goes through the same event-ID-guarded repair write, so a replacement is never touched by its predecessor's redaction.
 Ticks run once per second with missed ticks skipped; after a complete sweep the next sweep waits five minutes.
 That idle interval reduces repeated background SQLite reads; retained non-joined rooms can still occupy cheap sweep-page slots, but the worker checks SDK membership before reading singleton state.
@@ -202,6 +204,7 @@ The primary sync hands state to Axon one event at a time with no end-of-room sig
 Under continuous changes it publishes no later than one second after the first pending change, and at once when 256 rooms are pending, so neither a busy account nor a large first sync can grow the queue without bound.
 A room whose changes straddle a flush receives two frames.
 The coalescer is canceled and joined with the account run, after the workers that feed it, and publishes what is pending when it stops.
+SDK event handlers keep their context after the run stops, so a change they record later is published at once rather than held.
 The bus is lossy like every other frame, so a lagged or reconnecting client re-reads.
 
 After the upgrade that added the frame, the first sweep of the supplementary connection publishes one frame per room that has guest-access or server-ACL state, at the pace of its 100-room range growth.

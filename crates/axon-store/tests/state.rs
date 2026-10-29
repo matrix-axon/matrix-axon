@@ -143,8 +143,7 @@ async fn room_state_freshness_guard_rejects_older() {
     common::cleanup_account(&pool, account_id).await;
 }
 
-/// `room_state_of_type` returns every state_key of one type, ordered — e.g. a
-/// membership list.
+/// Upsert without a local user or purge, and report whether the tuple changed.
 async fn changed(
     store: &axon_store::Store,
     state: RoomStateUpsert<'_>,
@@ -216,6 +215,8 @@ async fn room_state_upsert_reports_only_real_changes() {
     );
 }
 
+/// `room_state_of_type` returns every state_key of one type, ordered — e.g. a
+/// membership list.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn room_state_of_type_lists_members() {
