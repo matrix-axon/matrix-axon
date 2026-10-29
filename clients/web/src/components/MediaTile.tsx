@@ -3,6 +3,7 @@ import type { ParsedMedia } from '../media/parse-media'
 import type { PreviewKind } from '../media/preview-kind'
 import { useMediaBlob } from '../media/use-media-blob'
 import { MediaCaption } from './MediaCaption'
+import { openMediaCard } from './media-card-click'
 
 /** The widest a tile gets, in CSS px — matches `MediaImage`'s thumbnail cap so
  *  a video and a photo in the same room line up. */
@@ -29,13 +30,12 @@ export function MediaTile({
 }: {
   accountId: string
   media: ParsedMedia
-  /** Only the lightbox kinds reach here (`previewPresentation`); anything
-   *  else falls back to the document treatment rather than failing. */
+  /** Video and PDF use a visual tile; audio/text use the compact file card. */
   kind: PreviewKind
   /** Event `content`, so a caption with `formatted_body` can use it. */
   content?: unknown
   onOpen: () => void
-  /** The Download button — rendered into the tile's footer. */
+  /** The download control, overlaid at the top right of the tile. */
   children?: preact.ComponentChildren
 }) {
   // Lazy, not eager: this is decoration on a card that may never be looked at,
@@ -61,14 +61,17 @@ export function MediaTile({
       : '16 / 9'
 
   return (
-    <div class={`media-tile media-tile-${kind}`}>
+    <div
+      class={`media-tile media-tile-${kind}`}
+      data-media-preview-card=""
+      onClick={(event) => openMediaCard(event, onOpen)}
+    >
       <button
         type="button"
         class="media-tile-surface"
         style={{ aspectRatio: aspect, width: `${TILE_MAX}px` }}
         aria-label={`${verb} ${media.filename}`}
         aria-haspopup="dialog"
-        onClick={onOpen}
       >
         <div ref={ref} class="media-tile-poster">
           {poster !== null && <img src={poster} alt="" decoding="async" />}
@@ -101,8 +104,8 @@ export function MediaTile({
           )}
           {size !== null && <span class="muted">{size}</span>}
         </span>
-        {children}
       </div>
+      {children}
     </div>
   )
 }

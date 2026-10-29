@@ -189,6 +189,14 @@ before starting a milestone.
   otherwise; the gates built on that assumption (withholding Download for
   unidentifiable bytes) have been removed, so any bytes that arrive are
   offered for Download.
+- **Attachment cards** (`components/MediaAttachment.tsx`, `MediaTile.tsx`): captions span the card width and the shared `MediaDownloadButton` occupies the top-right header/tile corner.
+  `openMediaCard` delegates clicks once from `data-media-preview-card`, excluding nested controls except the real filename/tile opener.
+  The message touch recognizer resolves the card to that opener, preserving configured double-tap, hold, and swipe actions while leaving nested links and download controls independent.
+  `openMediaCard` ignores modifier clicks and selections touching the card and focuses the real filename/tile button before opening, so dialog dismissal restores a useful target.
+  Every supported attachment kind opens in the existing `Lightbox`; text remains escaped/highlighted, and the existing type/size eligibility and on-demand loading rules apply.
+  Text preview clicks/selection are exempt from backdrop dismissal.
+  Download errors persist on the card after viewer close; a fresh viewer or download attempt clears the previous error.
+  Unsupported and oversized files have no preview control and retain their download icon.
 - **Custom reaction images** (`components/ReactionContent.tsx`): valid MXC reaction keys render through the existing authenticated media service in room and thread chips.
   The fixed 20px slot lazy-loads a 32px thumbnail and tries the original once on a fetch or decode failure, then retains a placeholder.
   Account and MXC changes remount the image child so async state cannot cross identities.

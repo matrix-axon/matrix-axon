@@ -1,4 +1,8 @@
-# ADR 0072 — Web client inline media preview
+# ADR 0072 — Web client on-demand media previews
+
+The original inline presentation described below is historical.
+The [shared-lightbox decision](#all-attachment-previews-use-the-shared-lightbox) supersedes it for all attachment previews.
+The filename is retained so existing links remain valid.
 
 ## Context
 
@@ -37,31 +41,23 @@ exactly like an image. `fetchBlobUrl` is deliberately *not* used: it is uncached
 and caller-revoked, which suits the transient Download anchor and not a player
 that can be re-opened.
 
-### Video and PDF take the lightbox; audio and text stay inline
+### All attachment previews use the shared lightbox
 
-Not everything previewable wants the same surface. A PDF page in a timeline
-column is unreadable and a video shown small is a video you squint at — and both
-are things you look at once and then leave. Those open in `Lightbox`, the
-full-viewport shell images already use (ADR 0064), which on a phone *is* the
-full screen once the overlay's padding is dropped at the narrow breakpoint. No
-Fullscreen API call is involved: the overlay already covers the viewport, and
-iOS promotes a playing `<video>` on its own.
+Updated October 27, 2026: the compact attachment-card redesign supersedes the initial inline audio/text presentation.
+A row of Preview/Download buttons squeezed caption text into a narrow column on phones.
+The card now has a compact filename header with a top-right download icon, followed by a full-width caption and size.
+Tapping its noninteractive area or activating its filename opens the existing `Lightbox` for text, audio, PDF, and video.
+There is no separate Preview/Hide disclosure control.
 
-An audio player is a control strip, not a view; covering the timeline to show
-one would be theft. Text reads fine in place. Both stay inline, where the
-expand button remains a true disclosure toggle that reads `Hide` when open.
+The viewer is dismissed with Escape, Close, or a backdrop click, using the shared modal focus contract.
+Text selection and clicks inside the text preview do not dismiss it, and dismissal restores focus to the filename/tile opener.
+Download uses the same icon and platform save path as the image viewer; the download button and caption links/spoilers keep independent actions.
+A failed viewer download remains visible on the card after closing; a fresh download attempt or opening a new viewer clears the previous error.
+The message touch recognizer arbitrates card activation like image activation: a single tap opens the preview, while configured double-tap, hold, and swipe actions take priority.
+Unsupported or oversized media remains download-only.
+No attachment bytes are fetched merely by scrolling past a card.
 
-The lightbox is dismissed three ways — Escape (capture-phase, so it beats the
-timeline's own handlers), the ✕, and a backdrop click — which is the shared
-modal contract, not something new. Because it is dismissed from inside, the
-card's button is not a toggle for those kinds: it never reads `Hide`, and
-carries `aria-haspopup="dialog"` instead of `aria-expanded`.
-
-This split is why `Lightbox` is now a presentation shell taking `children`,
-with loading left to the caller (`LightboxImage` for the image case): an image,
-a video and a PDF want different elements and different failure text.
-
-### The card for a lightbox kind is a tile, and the tile is a placeholder
+### Video and PDF keep visual tiles, and those tiles are placeholders
 
 Video and PDF cards are tiles — an aspect-correct surface with a play/document
 glyph, duration and size, the whole thing clickable — rather than a row of text
