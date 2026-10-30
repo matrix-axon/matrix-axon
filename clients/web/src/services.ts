@@ -1697,11 +1697,9 @@ export function createServices(
   if (settings.perfMarks.peek()) {
     setPerfEnabled(true)
   }
-  const accounts = createAccountsStore(
-    api,
-    (accountId) =>
-      incomingShares?.invalidateAccount(accountId) ?? Promise.resolve(),
-  )
+  const accounts = createAccountsStore(api, async (accountId) => {
+    await incomingShares?.invalidateAccount(accountId)
+  })
   const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
     storage: sessionStorage,
   })
