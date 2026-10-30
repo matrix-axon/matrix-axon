@@ -343,6 +343,21 @@ test('a selected image survives draft reload and pack removal without another lo
       )
     }),
   ).toBe(true)
+  const header = page
+    .getByRole('dialog', { name: 'Sticker picker' })
+    .locator('.overlay-head')
+  const titleBox = (await header
+    .getByRole('heading', { name: 'Stickers' })
+    .boundingBox())!
+  const emojiBox = (await emojiEntry.boundingBox())!
+  const closeBox = (await header
+    .getByRole('button', { name: 'Close', exact: true })
+    .boundingBox())!
+  expect(emojiBox.x - (titleBox.x + titleBox.width)).toBeGreaterThan(8)
+  expect(closeBox.x - (emojiBox.x + emojiBox.width)).toBeGreaterThanOrEqual(4)
+  expect(closeBox.x - (emojiBox.x + emojiBox.width)).toBeLessThanOrEqual(12)
+  expect(Math.abs(emojiBox.y - closeBox.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(emojiBox.height - closeBox.height)).toBeLessThanOrEqual(1)
   await page.screenshot({ path: info.outputPath('emoji-entry.png') })
   await emojiEntry.click()
   dialog = page.getByRole('dialog', { name: 'Emoji picker' })

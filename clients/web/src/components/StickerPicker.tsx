@@ -131,21 +131,23 @@ function StickerDialog({
       <div class="overlay-panel sticker-picker-panel">
         <div class="overlay-head">
           <h2>Stickers</h2>
-          {onInsertEmoji && (
-            <button
-              type="button"
-              class="ghost emoji-picker-entry"
-              aria-label="Emoji"
-              title="Emoji"
-              onClick={onInsertEmoji}
-            >
-              <span>Emoji</span>
-              <EmojiIcon />
+          <div class="sticker-picker-actions">
+            {onInsertEmoji && (
+              <button
+                type="button"
+                class="ghost emoji-picker-entry"
+                aria-label="Emoji"
+                title="Emoji"
+                onClick={onInsertEmoji}
+              >
+                <span>Emoji</span>
+                <EmojiIcon />
+              </button>
+            )}
+            <button type="button" class="ghost" onClick={onClose}>
+              Close
             </button>
-          )}
-          <button type="button" class="ghost" onClick={onClose}>
-            Close
-          </button>
+          </div>
         </div>
         <ImagePackPicker
           accountId={accountId}
