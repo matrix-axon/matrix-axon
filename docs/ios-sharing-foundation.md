@@ -180,7 +180,8 @@ The record stayed ready throughout, with its edited text intact and no dispatch 
 The synthetic record was explicitly discarded after verification, and Axon was left running normally.
 
 The on-device accessibility audit reported no element-description or text-clipping issues on the audited recovery screen, plus one hit-region advisory in the header area at `{{60, 85}, {26, 18}}`.
-That advisory remains unclassified; this is not full accessibility acceptance.
+A later iPad XCTest audit classified its corresponding header advisory as static text with the existing connection-status label; it is not an undersized recovery control.
+This is not full accessibility acceptance.
 The host's memory-warning command failed with `NSPOSIXErrorDomain 2`, so no delivered memory-warning result is claimed.
 A same-process debugger-pause test could not be verified with this inspector driver; the unit and browser expiry checks remain the evidence for that specific editor path.
 Any automation that suspends an app must provide an independent automatic-resume deadline rather than rely on a later interactive turn.
@@ -192,9 +193,29 @@ A temporary signed XCUITest runner used the existing development-probe identity 
 The separate process confirmed an initialized descriptor, usable access credential, and shared Keychain item.
 A real tap and native typing reached the synthetic recovery editor; XCTest confirmed one visible keyboard, a hittable editor, and a hittable 45-point Keep draft control.
 Programmatic focus alone had not opened the keyboard, so it was not used as evidence for this result.
+An iPad XCTest accessibility audit found no element-description or text-clipping issues.
+Its only hit-region advisory was the existing static connection-status label (`XCUIElementTypeStaticText`, at `(86, 49, 27, 18)`), rather than an interactive recovery control.
 
 One synthetic recovery message was sent successfully to Axon Testing and its local record was acknowledged.
+A subsequent read of that room found exactly one timeline event containing its unique synthetic marker.
 An attempted response interception did not modify Tauri's immutable invocation function, so that successful send is not evidence of a network interruption.
 A separate synthetic record was advanced through the real native bridge to a durable dispatch checkpoint before process termination, without making a network request.
+After lease expiry, the relaunched app retained the text, reclaimed ownership, and displayed outcome unknown.
+Explicit resend remained disabled while duplicate-risk consent was unchecked.
+The synthetic uncertain record was then discarded without resending.
 This distinguishes physical crash-checkpoint recovery from an interrupted live transfer.
 Full VoiceOver use, Dynamic Type, split-view interaction, and real extension transfer interruption remain later-stage device checks.
+
+The user authorized destructive lifecycle verification on the iPad while retaining the iPhone session.
+Signing out with a disposable pending draft completed successfully and cleared the pending-record list.
+A separate signed process then confirmed no usable shared credential and no shared Keychain item.
+For removal/reinstall, the signed-out app wrote clearly synthetic sentinels to its private Keychain service and shared access-token item; no real credential was backed up or copied to the host.
+The temporary peer runner was removed before the main app, so it could not keep the App Group container alive.
+After reinstalling the app and peer without launching the main app, the peer confirmed that the inherited shared Keychain item still existed, but the installation descriptor was absent and credential use was refused.
+The first main-app launch removed the private sentinel, left private credential storage empty, and presented the signed-out server-setup view.
+While no server was configured, the sharing service had not initialized: the peer again measured no descriptor and no usable credential despite the inherited synthetic item still being present.
+Thus launching into server setup is not evidence that shared cleanup has run; sharing initialization remains app-owned and access stays denied until it runs.
+The main app then initialized sharing through its native bridge, creating its own installation descriptor with no pending records.
+The separate peer measured an initialized descriptor, no usable credential, and no remaining shared Keychain sentinel.
+The temporary runner was removed and the regular development app with its genuine sharing probe was restored on the iPad.
+The iPad remains signed out after the authorized reset; the iPhone session and data were preserved.
