@@ -26,6 +26,11 @@ def inspect(bundle):
     assert group in entitlements.get("com.apple.security.application-groups", []), "Signed App Group missing"
     assert group in allowed.get("com.apple.security.application-groups", []), "Profile App Group missing"
     info = plistlib.loads((bundle / "Info.plist").read_bytes())
+    ats = info.get("NSAppTransportSecurity", {})
+    assert not any(ats.get(key, False) for key in [
+        "NSAllowsArbitraryLoads", "NSAllowsArbitraryLoadsInWebContent",
+        "NSAllowsArbitraryLoadsForMedia",
+    ]), "Native sharing must retain default ATS protections"
     keychain = info.get("AxonSharedKeychainGroup", "")
     assert keychain.endswith(".org.matrixaxon.axon.sharing"), "Shared Keychain group missing"
     assert keychain in entitlements.get("keychain-access-groups", []), "Signed shared Keychain entitlement missing"
@@ -42,4 +47,4 @@ for probe in probes:
     assert extension_keychain == keychain, "App/extension Keychain groups differ"
     for key in ["CFBundleVersion", "CFBundleShortVersionString"]:
         assert extension[key] == app[key], "App/extension versions differ"
-print("Verified signed App Group, shared Keychain, provisioning, and probe embedding.")
+print("Verified signed App Group, shared Keychain, provisioning, default ATS, and probe embedding.")

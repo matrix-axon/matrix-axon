@@ -1818,7 +1818,11 @@ export function createServices(
         auth.onAccessTokenRefreshed(listener),
       accessToken: () => auth.getToken(),
       onBeforeSignOut: (hook) => auth.onBeforeSignOut(hook),
-      finishSignOut: () => auth.finishSignOut(),
+      // A push retry may finish after another sign-out hook failed. Re-enter
+      // those barriers; the deleted push record makes its own hook a no-op.
+      finishSignOut: () => {
+        void auth.clearToken()
+      },
       put: (token, body) =>
         putPushRegistration(platform.fetch, baseUrl, token, body),
       remove: (token, id) =>

@@ -17,6 +17,82 @@ final class ShareStoreTests: XCTestCase {
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+  func testThumbnailAttachmentPublishesAtomicallyAndReclaimsReplacedBytes() throws {
+    let png = Data(
+      base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII="
+    )!
+    var item = try store.claim(store.create(text: "draft").id)
+    item.previews = (0..<8).map { SharePreview(matched_url: "https://example.org/" + String($0)) }
+    item = try store.update(item)
+    XCTAssertThrowsError(
+      try store.importThumbnail(
+        item.id, owner: item.owner!, data: png, mime: "image/png",
+        preview: SharePreview(matched_url: "https://example.org/ninth")))
+    XCTAssertEqual(try store.list().first?.files.count, 0)
+    item = try store.importThumbnail(
+      item.id, owner: item.owner!, data: png, mime: "image/png",
+      preview: SharePreview(matched_url: "https://example.org/0"))
+    let first = item.files[0].id
+    for _ in 0..<20 {
+      item = try store.importThumbnail(
+        item.id, owner: item.owner!, data: png, mime: "image/png",
+        preview: SharePreview(matched_url: "https://example.org/0"))
+    }
+    XCTAssertEqual(item.files.count, 1)
+    XCTAssertEqual(item.previews?.count, 8)
+    XCTAssertEqual(item.previews?.last?.thumbnail, item.files[0].id)
+    XCTAssertFalse(
+      FileManager.default.fileExists(
+        atPath: root.appendingPathComponent(item.id).appendingPathComponent(first).path))
+  }
+  func testPrivateCleanupJournalSurvivesRestartAndBusySharedStorage() throws {
+    let control = root.appendingPathComponent("../" + UUID().uuidString).standardizedFileURL
+    defer { try? FileManager.default.removeItem(at: control) }
+    let journal = try ShareStore(root: control)
+    var item = try store.claim(store.create(text: "removed account").id)
+    item.accountId = UUID().uuidString
+    item = try store.update(item)
+    _ = try store.create(text: "other account")
+    try journal.recordCleanup(account: item.accountId!)
+    try store.coordinated {
+      XCTAssertThrowsError(try journal.reconcileCleanup(into: store))
+    }
+    let restarted = try ShareStore(root: control)
+    try restarted.reconcileCleanup(into: store)
+    XCTAssertEqual(try store.list().count, 1)
+    XCTAssertThrowsError(try store.update(item))
+    try restarted.recordCleanup()
+    try ShareStore(root: control).reconcileCleanup(into: store)
+    XCTAssertNil(try store.session())
+    XCTAssertTrue(try store.list().isEmpty)
+    // An already consumed journal is idempotent.
+    try restarted.reconcileCleanup(into: store)
+  }
+  func testInactiveLegacyUnreferencedThumbnailIsReclaimed() throws {
+    let png = Data(
+      base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII="
+    )!
+    var item = try store.claim(store.create(text: "draft").id)
+    item = try store.importThumbnail(item.id, owner: item.owner!, data: png, mime: "image/png")
+    let file = root.appendingPathComponent(item.id).appendingPathComponent(item.files[0].id)
+    XCTAssertEqual(try store.list().first?.files.count, 1)
+    _ = try store.update(item, release: true)
+    XCTAssertEqual(try store.list().first?.files.count, 0)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+  }
+  func testListingUnchangedDraftDoesNotRewriteManifest() throws {
+    let item = try store.create(text: "draft")
+    let path = root.appendingPathComponent(item.id).appendingPathComponent("manifest.json").path
+    let before =
+      try FileManager.default.attributesOfItem(atPath: path)[.systemFileNumber] as! NSNumber
+    _ = try store.list()
+    let after =
+      try FileManager.default.attributesOfItem(atPath: path)[.systemFileNumber] as! NSNumber
+    XCTAssertEqual(before, after)
+  }
+
   func testCompetingConsumersAndExpiredOwnerCannotCommit() throws {
     let item = try store.create(text: "hello")
     var owned = try store.claim(item.id)

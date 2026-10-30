@@ -32,6 +32,32 @@ class NativeAuthPlugin: Plugin {
   private var sharedSession: SharedSession?
   private var installation: String?
   private let shareHTTP = ShareHTTP()
+  private var cleanupStore: ShareStore?
+
+  private func sharingAccessGroup() -> String? {
+    guard let group = Bundle.main.object(forInfoDictionaryKey: "AxonSharedKeychainGroup") as? String,
+          !group.contains("$(") else { return nil }
+    return group
+  }
+
+  // Called under sharingSetup. This app-private protected journal is committed
+  // before touching App Group storage; no UserDefaults flush is assumed.
+  private func cleanupJournal() throws -> ShareStore {
+    if let cleanupStore { return cleanupStore }
+    let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+      appropriateFor: nil, create: true).appendingPathComponent("AxonSharingControl", isDirectory: true)
+    let store = try ShareStore(root: root)
+    cleanupStore = store
+    return store
+  }
+  private func scheduleSharingCleanup(account: String? = nil) throws {
+    guard sharingSetup.lock(before: Date().addingTimeInterval(3)) else { throw ShareFailure.busy }
+    defer { sharingSetup.unlock() }
+    try cleanupJournal().recordCleanup(account: account)
+  }
+  private func reconcileSharingCleanup(_ store: ShareStore) throws {
+    try cleanupJournal().reconcileCleanup(into: store)
+  }
   /// The one Sign in with Apple request in flight. `ASAuthorizationController`
   /// holds its delegate weakly, so without this the delegate is released as
   /// soon as `appleSignIn` returns and the result is never delivered.
@@ -86,14 +112,14 @@ class NativeAuthPlugin: Plugin {
   /// The containing app owns install initialization. This method is never
   /// linked into the extension-safe module or called by an extension.
   private func prepareSharing() throws -> (ShareStore, SharedSession, String) {
-    sharingSetup.lock()
+    guard sharingSetup.lock(before: Date().addingTimeInterval(3)) else { throw ShareFailure.busy }
     defer { sharingSetup.unlock() }
     if let store = shareStore, let session = sharedSession, let install = installation {
+      try reconcileSharingCleanup(store)
       return (store, session, install)
     }
     guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedSession.group),
-          let accessGroup = Bundle.main.object(forInfoDictionaryKey: "AxonSharedKeychainGroup") as? String,
-          !accessGroup.contains("$(") else { throw ShareFailure.unavailable }
+          let accessGroup = sharingAccessGroup() else { throw ShareFailure.unavailable }
     let defaults = UserDefaults.standard
     let markerKey = "org.matrixaxon.axon.sharing.installation"
     let previous = defaults.string(forKey: markerKey)
@@ -109,6 +135,7 @@ class NativeAuthPlugin: Plugin {
       if !upgraded { Keychain.forgetPreviousInstall() }
       defaults.set(install, forKey: markerKey)
     }
+    try reconcileSharingCleanup(store)
     shareStore = store; sharedSession = session; installation = install
     return (store, session, install)
   }
@@ -124,6 +151,16 @@ class NativeAuthPlugin: Plugin {
     queue.async {
       defer { if transfer { self.shareTransferSlots.signal() } }
       do {
+        if args.action == "invalidate" {
+          try self.scheduleSharingCleanup()
+          try SharedSession.invalidate(fence: { _ = try self.prepareSharing() }, accessGroup: self.sharingAccessGroup())
+          invoke.resolve(["value": [:]])
+          return
+        }
+        if args.action == "clear_account" {
+          guard let account = args.accountId, UUID(uuidString: account) != nil else { throw ShareFailure.invalid }
+          try self.scheduleSharingCleanup(account: account)
+        }
         let (store, session, install) = try self.prepareSharing()
         var result: Any = [:]
         switch args.action {
@@ -131,8 +168,10 @@ class NativeAuthPlugin: Plugin {
           guard let server = args.server else { throw ShareFailure.invalid }
           result = try self.shareObject(session.publish(installation: install, server: server,
             token: args.token, expiresAt: args.expiresAt.map { $0 / 1000 }, replace: args.replace ?? false))
+        case "check_transport":
+          guard let descriptor = try store.session(), URL(string: descriptor.server)?.scheme == "https" else { throw ShareFailure.httpsRequired }
         case "list": result = try self.shareObject(store.list())
-        case "clear_account": try store.clearAccount(args.accountId ?? "")
+        case "clear_account": break // prepareSharing reconciled the durable intent.
         case "claim": result = try self.shareObject(store.claim(args.id ?? ""))
         case "update":
           guard let manifest = args.manifest else { throw ShareFailure.invalid }
@@ -170,9 +209,8 @@ class NativeAuthPlugin: Plugin {
           } else {
             (descriptor, token) = try session.credential()
           }
-          let manifest = try store.list().first { $0.id == id }
-          guard manifest?.session == descriptor.generation, manifest?.owner == owner,
-                manifest?.accountId == account else { throw ShareFailure.stale }
+          let manifest = try store.owned(id, owner: owner, account: account)
+          guard manifest.session == descriptor.generation else { throw ShareFailure.stale }
           if args.action == "upload" {
             let (url, file) = try store.verifiedFile(id, file: args.file ?? "", owner: owner)
             let kind = file.thumbnail || file.mime.hasPrefix("image/") ? "image" : "file"
@@ -196,7 +234,8 @@ class NativeAuthPlugin: Plugin {
             else if body.starts(with: [0xff, 0xd8, 0xff]) { mime = "image/jpeg" }
             else if body.starts(with: Array("RIFF".utf8)) { mime = "image/webp" }
             else { throw ShareFailure.invalid }
-            result = try self.shareObject(store.importThumbnail(id, owner: owner, data: body, mime: mime))
+            guard let preview = args.preview else { throw ShareFailure.invalid }
+            result = try self.shareObject(store.importThumbnail(id, owner: owner, data: body, mime: mime, preview: preview))
           }
         #if DEBUG
         case "seed": result = try self.shareObject(store.create(text: args.text ?? ""))
@@ -253,6 +292,7 @@ private struct ShareArgs: Decodable {
   let accountId: String?
   let uploadId: String?
   let uploadIds: [String]?
+  let preview: SharePreview?
   let generation: String?
 }
 

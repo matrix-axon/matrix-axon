@@ -70,7 +70,7 @@ public enum PreviewContract {
       guard let raw = preview["matched_url"] as? String, raw.utf16.count <= 4096,
         let url = URLComponents(string: raw), ["http", "https"].contains(url.scheme),
         url.host != nil, url.user == nil, url.password == nil, urls.contains(raw),
-        seen.insert(raw).inserted
+        seen.insert(canonicalURL(raw) ?? raw).inserted
       else { return "invalid" }
       var entry: [String: Any] = ["matrix:matched_url": raw]
       for (key, limit) in [("title", 300), ("description", 1000), ("site_name", 120)] {
@@ -113,6 +113,17 @@ public enum PreviewContract {
     }
     if media { content["_reserved_media_fields"] = String(repeating: "x", count: 12 * 1024) }
     return size(content) > 40 * 1024 ? "event_too_large" : nil
+  }
+
+  private static func canonicalURL(_ raw: String) -> String? {
+    guard var url = URLComponents(string: raw) else { return nil }
+    url.scheme = url.scheme?.lowercased()
+    url.host = url.host?.lowercased()
+    if (url.scheme == "https" && url.port == 443) || (url.scheme == "http" && url.port == 80) {
+      url.port = nil
+    }
+    if url.percentEncodedPath.isEmpty { url.percentEncodedPath = "/" }
+    return url.url?.standardized.absoluteString
   }
 
   private static func size(_ value: Any) -> Int {

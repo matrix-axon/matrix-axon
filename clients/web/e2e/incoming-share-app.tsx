@@ -14,10 +14,18 @@ const read = (): IncomingShare[] =>
     localStorage.getItem('fixture.incoming') ?? '[]',
   ) as IncomingShare[]
 const port: IncomingSharePort = {
-  subscribe: () => () => {},
+  subscribe(listener) {
+    window.addEventListener('focus', listener)
+    return () => window.removeEventListener('focus', listener)
+  },
   async call<T>(action: string, args = {}): Promise<T> {
     const records = read()
     if (action === 'list') return records as T
+    if (action === 'check_transport') {
+      if (localStorage.getItem('fixture.httpSharing') === 'true')
+        throw { code: 'httpsRequired' }
+      return {} as T
+    }
     const record = records.find((item) => item.id === args.id)
     if (action === 'claim' && record !== undefined) {
       record.owner = crypto.randomUUID()

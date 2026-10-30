@@ -9,6 +9,9 @@ Distribution builds do not register an unfinished share target.
 Open Pending shares and choose **Review share**.
 Confirm the sending Matrix account and joined room, edit the text or first attachment caption, and review previews and saved delivery outcomes.
 An ordinary room draft stays separate.
+Typing is saved after 250 milliseconds of idle time, with a one-second maximum batching window; leaving the editor, hiding the page, and Send flush pending text.
+A sudden process termination can lose text still inside that short batching window.
+After ownership expires, resume or Refresh reclaims an available share and preserves unsaved editor text without sending it.
 **Keep draft** retains the incoming share; it does not send or acknowledge delivery.
 Unfinished records expire after 24 hours, and **Discard share** explicitly removes local content.
 
@@ -45,6 +48,9 @@ Only the main app establishes installation identity and runs its existing privat
 The extension requires that identity before using inherited Keychain data.
 Identity replacement/sign-out invalidates pending content; token renewal preserves its session generation.
 Account removal invalidates matching records.
+Native account cleanup records private retry intent before accessing shared storage; a successful server logout/removal remains successful when local cleanup must be retried.
+Sign-out revokes the shared credential or commits a durable session fence before completing.
+File deletion and inaccessible Keychain cleanup can be deferred; if neither revocation barrier can be committed, sign-out reports that specific failure and keeps the session active.
 Late import, upload, and bridge completions cannot recreate invalidated records.
 
 A cross-process file lock guards descriptors, quota reservations, revisions, and ownership fences.
@@ -54,7 +60,8 @@ Resume reconciliation reports incomplete imports, removes orphaned temporary dat
 Unreadable published metadata is retained and listed for explicit discard rather than silently erased.
 Native uploads read protected files directly; the bridge only returns bounded chunks for thumbnail presentation.
 Discard makes a bounded best-effort cleanup attempt for known unclaimed server uploads; server staging expiry remains the fallback.
-Native HTTP uses validated HTTPS certificates, permits explicitly configured HTTP servers like the existing transport, and refuses redirects.
+Native sharing requires an HTTPS Axon server, validates certificates, refuses redirects, and retains the default iOS App Transport Security protections.
+A configured HTTP server can still be used through the main app's existing transport, but incoming-share generation and sending preserve the draft and explain that HTTPS is required.
 Diagnostics include share IDs, states, sizes, and fixed error categories; they exclude content, filenames, source URLs, and credentials.
 
 ## Contributor checks
@@ -65,6 +72,7 @@ From `clients/web`:
 pnpm check:api
 pnpm test src/incoming-share
 pnpm test:sharing:native
+pnpm test:sharing:simulator
 pnpm lint
 pnpm format:check
 pnpm build
@@ -74,7 +82,17 @@ pnpm test:e2e
 `check:api` also checks Swift wire schemas against OpenAPI.
 Regenerate deliberately with `node scripts/share-contract.mjs --write`.
 Swift and TypeScript consume the server's existing valid/invalid preview fixtures; Swift additionally round-trips the shared local manifest fixture.
-The macOS workflow compiles the common module with iOS extension API restrictions.
+The macOS workflow compiles the common module with iOS extension API restrictions and runs its XCTest suite on an iPhone simulator.
+The simulator command requires Xcode, an installed iOS runtime, and `xcodegen` (`brew install xcodegen`).
+It reuses a booted iPhone simulator or boots an available one; `AXON_SHARING_SIMULATOR=<UDID>` selects one explicitly.
+It builds a temporary unsigned test runner, leaves Axon's installed app/session alone, and prints the retained `.xcresult` path.
+
+| Layer                    | What it establishes                                                                                                                                     | Remaining limitation                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Swift and web unit tests | Revocation failures, ownership races, quotas, atomic preview attachment, schema parity, save batching, and cleanup outcomes                             | Simulated process/network failures and injected credential vault                        |
+| Playwright               | Actual recovery UI, typing, wake hints, destination validation, HTTPS explanation, and no automatic resend across four browser configurations           | Native ownership bridge is substituted                                                  |
+| iOS Simulator XCTest     | Actual iOS Foundation/filesystem APIs and native recovery transitions                                                                                   | Does not establish physical provisioning, shared Keychain access, or reinstall behavior |
+| Signed iPhone/iPad       | App Group/Keychain entitlement behavior, lock/reinstall lifecycle, interrupted real transfers, keyboard, VoiceOver, Dynamic Type, and iPad multitasking | Requires deliberate device acceptance; live sends stay in Axon Testing                  |
 
 The browser recovery fixture is a separate build entry, excluded from ordinary distribution builds:
 
@@ -106,7 +124,7 @@ The probe reports App Group access, initialization, usable credential availabili
 Return to Axon → Pending shares to review, retain, or discard it.
 Any live send must target the dedicated **Axon Testing** room (`!SScJmZuEkBUnuydXdf:bostoncoop.net`).
 
-The exported-artifact checker verifies signed entitlements against embedded profiles, app/extension versions, and probe embedding.
+The exported-artifact checker verifies signed entitlements against embedded profiles, app/extension versions, default ATS protections, and probe embedding.
 Verify upgrades from a previously installed build preserve login, session-only login remains unavailable to the extension, and sign-out/server/account changes fence outstanding operations.
 Verify removal/reinstall and extension access before the first app launch do not consume inherited Keychain credentials.
 Record actual installation-marker behavior on iPhone; a simulator or a successful signature alone does not establish it.
@@ -114,18 +132,33 @@ Exercise cold/warm/suspended app states, process termination during import/uploa
 Repeat recovery layout, multitasking, VoiceOver, and Dynamic Type checks on the signed iPhone and iPad.
 Until that matrix is recorded, foundation implementation does not establish native-device acceptance or close issue [817](https://github.com/matrix-axon/matrix-axon/issues/817).
 
+For the updated build, prioritize these manual checks:
+
+1. Save a synthetic probe draft, type in recovery, immediately choose Keep draft, and reopen it.
+   Background Axon for more than five minutes, return, and confirm ownership renews while the text survives and nothing sends automatically.
+2. Sign out with a disposable pending draft and confirm the probe no longer finds a usable access credential and its pending-record count is zero.
+   Sign back in and confirm a new synthetic draft can be recovered.
+3. On iPad, review with the keyboard open, in split view, at large text sizes, and with VoiceOver.
+   Confirm all controls remain reachable and delivery warnings are read.
+4. Use Axon Testing for any deliberate send interruption; force-quit or interrupt connectivity during a request, relaunch, and inspect the saved outcomes before retrying.
+   The outcome can already be confirmed if the response arrived before termination; an uncertain outcome must require explicit resend consent.
+5. Use a disposable session for removal/reinstall and check the extension before the first app launch.
+   This is the remaining physical test of inherited Keychain data and the app-owned installation marker.
+
 ## Verification recorded on 2026-10-30
 
 On the linked iPhone, the signed probe reported an accessible App Group, initialized installation, and usable access credential.
 The user created a synthetic draft in the extension, found it in Pending shares, and explicitly sent it successfully.
 This establishes actual cross-process session access and the recovery-to-send path on the phone.
+That user-run check predates the review fixes; repeat sign-out, resume, and recovery acceptance on the updated build.
 The signed app also installed on the linked iPad; its recovery UI and accessibility checks remain pending.
 The final probe build installed on both devices.
 Clean project regeneration and signed IPA export passed for both the probe configuration and the default release configuration using the debugging export method.
 The exported-artifact checks verified App Group and Keychain entitlements against provisioning profiles; the default IPA contains no extension bundle.
 
-Automated verification passed 23 Swift tests, 2,759 web unit tests (two skipped), and recovery UI tests in Chromium, Firefox, desktop WebKit, and iPhone WebKit.
+After review fixes, automated verification passed 30 Swift tests on both macOS and iOS Simulator, 2,772 web unit tests (two skipped), and 12 recovery UI checks across Chromium, Firefox, desktop WebKit, and iPhone WebKit.
+The full Chromium run passed 247 tests with 11 skipped.
 The unchanged server's preview contract and generation fixtures also passed against their production validators.
-The broader desktop browser run passed 734 tests with 30 skipped and three WebKit failures; isolated reruns passed two of those failures.
+The earlier broader desktop browser run passed 734 tests with 30 skipped and three WebKit failures; isolated reruns passed two of those failures.
 The remaining attachment-download event failure also reproduces on the untouched base commit `5b94c613` on this Mac.
 These browser results do not replace the signed-device interruption, reinstall, low-storage, and accessibility checks above.

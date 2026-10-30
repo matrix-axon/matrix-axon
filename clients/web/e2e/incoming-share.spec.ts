@@ -74,3 +74,91 @@ test('recovery preserves cards and uncertain outcomes until explicit discard', a
   ).toBeVisible()
   expect(sends).toEqual([])
 })
+
+test('typing persists in batches and refresh recovers expired ownership', async ({
+  page,
+}) => {
+  const sends: string[] = []
+  page.on('request', (request) => {
+    if (/\/send(?:-media)?$/.test(request.url())) sends.push(request.url())
+  })
+  await page.goto('/e2e/incoming-share.html')
+  await page.evaluate(
+    (record) =>
+      localStorage.setItem('fixture.incoming', JSON.stringify([record])),
+    {
+      ...record,
+      operation: { ...record.operation, state: 'ready' as const },
+    },
+  )
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  const editor = page.getByRole('textbox', {
+    name: 'Message or first attachment caption',
+  })
+  const suffix = 'x'.repeat(200)
+  await editor.press('End')
+  await editor.pressSequentially(suffix)
+  const expected = record.text + suffix
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => JSON.parse(localStorage.getItem('fixture.incoming')!)[0].text,
+      ),
+    )
+    .toBe(expected)
+  const writes = await page.evaluate(
+    () => JSON.parse(localStorage.getItem('fixture.incoming')!)[0].revision,
+  )
+  expect(writes).toBeLessThan(10)
+  await page.evaluate(() => {
+    const records = JSON.parse(localStorage.getItem('fixture.incoming')!)
+    delete records[0].owner
+    records[0].leaseUntil = 0
+    records[0].revision++
+    localStorage.setItem('fixture.incoming', JSON.stringify(records))
+    window.dispatchEvent(new Event('focus'))
+  })
+  await expect(
+    page.getByText('Ownership renewed', { exact: false }),
+  ).toBeVisible()
+  await expect(editor).toHaveValue(expected)
+  await editor.fill('Reclaimed draft https://example.org/article')
+  await page.getByRole('button', { name: 'Keep draft', exact: true }).click()
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(editor).toHaveValue(
+    'Reclaimed draft https://example.org/article',
+  )
+  await page
+    .getByRole('combobox', { name: 'Room', exact: true })
+    .selectOption('')
+  await expect(
+    page.getByRole('button', { name: 'Send reviewed share' }),
+  ).toBeDisabled()
+  expect(sends).toEqual([])
+})
+
+test('HTTP native sharing explains the restriction and retains the draft', async ({
+  page,
+}) => {
+  const sends: string[] = []
+  page.on('request', (request) => {
+    if (/\/send(?:-media)?$/.test(request.url())) sends.push(request.url())
+  })
+  await page.goto('/e2e/incoming-share.html')
+  await page.evaluate(
+    (record) => {
+      localStorage.setItem('fixture.incoming', JSON.stringify([record]))
+      localStorage.setItem('fixture.httpSharing', 'true')
+    },
+    { ...record, operation: { ...record.operation, state: 'ready' as const } },
+  )
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await page.getByRole('button', { name: 'Send reviewed share' }).click()
+  await expect(page.getByRole('alert')).toContainText(
+    'requires an HTTPS server',
+  )
+  await expect(
+    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
+  ).toHaveValue(record.text)
+  expect(sends).toEqual([])
+})

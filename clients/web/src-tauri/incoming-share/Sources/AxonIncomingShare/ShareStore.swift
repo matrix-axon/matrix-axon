@@ -106,6 +106,78 @@ public final class ShareStore {
 
   public func list() throws -> [ShareManifest] { try coordinated { try reconcileLocked() } }
 
+  private struct Cleanup: Codable {
+    var reset = false
+    var accounts: [String] = []
+  }
+
+  /// The app uses a separate private root for this bounded, credential-free
+  /// journal. It remains writable when the shared container is unavailable.
+  public func recordCleanup(account: String? = nil) throws {
+    if let account, UUID(uuidString: account) == nil { throw ShareFailure.invalid }
+    try coordinated {
+      let path = root.appendingPathComponent("cleanup.json")
+      var state =
+        fm.fileExists(atPath: path.path) ? try decode(Cleanup.self, from: path) : Cleanup()
+      if let account {
+        if !state.accounts.contains(account) { state.accounts.append(account) }
+        if state.accounts.count > 128 {
+          state.reset = true
+          state.accounts = []
+        }
+      } else {
+        state.reset = true
+        state.accounts = []
+      }
+      try write(state, to: path)
+    }
+  }
+
+  public func reconcileCleanup(into destination: ShareStore) throws {
+    try coordinated {
+      let path = root.appendingPathComponent("cleanup.json")
+      guard fm.fileExists(atPath: path.path) else { return }
+      var state = try decode(Cleanup.self, from: path)
+      guard state.accounts.count <= 128 else { throw ShareFailure.invalid }
+      if state.reset {
+        try destination.invalidateSession()
+        state.reset = false
+        try write(state, to: path)
+      }
+      let deadline = Date().addingTimeInterval(3)
+      while let account = state.accounts.first {
+        guard Date() < deadline else { throw ShareFailure.busy }
+        try destination.clearAccount(account)
+        state.accounts.removeFirst()
+        try write(state, to: path)
+      }
+      try fm.removeItem(at: path)
+    }
+  }
+
+  public func invalidateSession() throws {
+    try coordinated {
+      // Commit the fence before attempting any fallible deletion. Keeping this
+      // intent also blocks inherited credentials until the app next publishes.
+      let tombstone = ShareSession(
+        installation: UUID().uuidString,
+        server: "https://unconfigured.invalid", credentialAvailable: false, expiresAt: nil)
+      try write(tombstone, to: root.appendingPathComponent("session.pending.json"))
+      for directory in (try? directories()) ?? [] {
+        do { try fm.removeItem(at: directory) } catch { Self.log.error("share_cleanup_deferred") }
+      }
+    }
+  }
+
+  public func owned(_ id: String, owner: String, account: String) throws -> ShareManifest {
+    try coordinated {
+      let manifest = try load(id)
+      try validateOwner(manifest, owner)
+      guard manifest.accountId == account else { throw ShareFailure.stale }
+      return manifest
+    }
+  }
+
   public func clearAccount(_ account: String) throws {
     guard UUID(uuidString: account) != nil else { throw ShareFailure.invalid }
     try coordinated {
@@ -160,27 +232,10 @@ public final class ShareStore {
         (try usedBytes(readAll())) - current.bytes + proposed.bytes <= ShareLimits.pendingBytes
       else { throw ShareFailure.quota }
       // Confirmed results are immutable, including their destination/caption.
-      let fixedDestination = current.files.contains { file in
-        guard let state = file.operation?.state else { return false }
-        return state == .sent || state == .dispatching || state == .unknown
-      }
-      if current.operation.state == .sent || current.operation.state == .dispatching
-        || current.operation.state == .unknown || fixedDestination
-      {
-        guard current.operation.state != .sent || proposed.operation == current.operation,
-          proposed.text == current.text,
-          proposed.accountId == current.accountId, proposed.roomId == current.roomId,
-          proposed.previews == current.previews
-        else { throw ShareFailure.invalid }
-      }
+      try validateContentChange(from: current, to: proposed)
       try validateTransition(from: current.operation, to: proposed.operation)
       var next = proposed
-      let retainedThumbnails = Set(next.previews?.compactMap(\.thumbnail) ?? [])
-      let removed = current.files.filter { file in
-        file.thumbnail && current.previews?.contains(where: { $0.thumbnail == file.id }) == true
-          && !retainedThumbnails.contains(file.id)
-      }
-      next.files.removeAll { file in removed.contains(where: { $0.id == file.id }) }
+      let removed = removeUnusedThumbnails(from: current, next: &next)
       next.revision += 1
       next.leaseUntil =
         release ? nil : min(now() + ShareLimits.lease, next.createdAt + ShareLimits.retention)
@@ -198,11 +253,42 @@ public final class ShareStore {
           )
         }
       }
-      for file in removed {
-        try? fm.removeItem(at: directory(next.id).appendingPathComponent(file.id))
-      }
+      deleteFiles(removed, share: next.id)
       return next
     }
+  }
+
+  private func validateContentChange(from current: ShareManifest, to proposed: ShareManifest) throws
+  {
+    let fixedDestination = current.files.contains { file in
+      guard let state = file.operation?.state else { return false }
+      return state == .sent || state == .dispatching || state == .unknown
+    }
+    if current.operation.state == .sent || current.operation.state == .dispatching
+      || current.operation.state == .unknown || fixedDestination
+    {
+      guard current.operation.state != .sent || proposed.operation == current.operation,
+        proposed.text == current.text,
+        proposed.accountId == current.accountId, proposed.roomId == current.roomId,
+        proposed.previews == current.previews
+      else { throw ShareFailure.invalid }
+    }
+  }
+
+  private func removeUnusedThumbnails(from current: ShareManifest, next: inout ShareManifest)
+    -> [ShareFile]
+  {
+    let retainedThumbnails = Set(next.previews?.compactMap(\.thumbnail) ?? [])
+    let removed = current.files.filter { file in
+      file.thumbnail && current.previews?.contains(where: { $0.thumbnail == file.id }) == true
+        && !retainedThumbnails.contains(file.id)
+    }
+    next.files.removeAll { file in removed.contains(where: { $0.id == file.id }) }
+    return removed
+  }
+
+  private func deleteFiles(_ files: [ShareFile], share: String) {
+    for file in files { try? fm.removeItem(at: directory(share).appendingPathComponent(file.id)) }
   }
 
   public func discard(_ id: String, owner: String? = nil, completed: Bool = false) throws {
@@ -363,7 +449,9 @@ public final class ShareStore {
     }
   }
 
-  public func importThumbnail(_ id: String, owner: String, data: Data, mime: String) throws
+  public func importThumbnail(
+    _ id: String, owner: String, data: Data, mime: String, preview: SharePreview? = nil
+  ) throws
     -> ShareManifest
   {
     guard data.count <= ShareLimits.thumbnailBytes else { throw ShareFailure.quota }
@@ -371,21 +459,38 @@ public final class ShareStore {
     return try coordinated {
       var manifest = try load(id)
       try validateOwner(manifest, owner)
+      let original = manifest
+      let fileId = UUID().uuidString
+      if var preview {
+        guard ["source", "generated"].contains(preview.provenance) else {
+          throw ShareFailure.invalid
+        }
+        preview.thumbnail = fileId
+        manifest.previews =
+          (manifest.previews ?? []).filter { $0.matched_url != preview.matched_url } + [preview]
+        guard manifest.previews!.count <= 8 else { throw ShareFailure.quota }
+        try validateContentChange(from: original, to: manifest)
+      }
       guard manifest.files.filter(\.thumbnail).count < 16 else { throw ShareFailure.quota }
       guard
         manifest.bytes + data.count + (try reservations(in: directory(id)))
           <= ShareLimits.batchBytes,
         (try usedBytes(readAll())) + data.count <= ShareLimits.pendingBytes
       else { throw ShareFailure.quota }
-      let fileId = UUID().uuidString
-      try writeBytes(data, to: directory(id).appendingPathComponent(fileId))
+      let destination = try directory(id).appendingPathComponent(fileId)
+      var committed = false
+      defer { if !committed { try? fm.removeItem(at: destination) } }
+      try writeBytes(data, to: destination)
       manifest.files.append(
         ShareFile(
           id: fileId, name: "preview", mime: mime, bytes: data.count,
           digest: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
           thumbnail: true))
       manifest.revision += 1
+      let removed = removeUnusedThumbnails(from: original, next: &manifest)
       try save(manifest)
+      committed = true
+      deleteFiles(removed, share: id)
       return manifest
     }
   }
@@ -499,6 +604,11 @@ public final class ShareStore {
         continue
       }
       if !active {
+        let original = manifest
+        // Heal thumbnails retained by older two-step acquisition code before
+        // a preview attachment failed. An active import keeps its ownership.
+        let thumbnails = Set(manifest.previews?.compactMap(\.thumbnail) ?? [])
+        manifest.files.removeAll { $0.thumbnail && !thumbnails.contains($0.id) }
         manifest.owner = nil
         manifest.leaseUntil = nil
         if manifest.operation.state == .dispatching { manifest.operation.state = .unknown }
@@ -521,7 +631,7 @@ public final class ShareStore {
         for file in stagedFiles {
           if !retained.contains(file.lastPathComponent) { try fm.removeItem(at: file) }
         }
-        try save(manifest)
+        if manifest != original { try save(manifest) }
       }
       result.append(manifest)
     }

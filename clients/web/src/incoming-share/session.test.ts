@@ -40,6 +40,30 @@ function fixture(sessionOnly = false) {
   return { call, auth, stop, store, ready: () => ready() }
 }
 describe('shared session publication', () => {
+  it('sign-out survives publication and cleanup failure after native revocation', async () => {
+    const f = fixture()
+    await f.ready()
+    f.call.mockImplementation(async (action) => {
+      if (action === 'publish') throw { code: 'unavailable' }
+      return {}
+    })
+    expect(await f.auth.clearToken()).toBe(true)
+    expect(f.auth.signedIn.value).toBe(false)
+    await f.ready().catch(() => {})
+    f.stop()
+  })
+  it('reports a failure to commit either revocation barrier and permits retry', async () => {
+    const f = fixture()
+    await f.ready()
+    f.call.mockRejectedValue({ code: 'invalidation' })
+    expect(await f.auth.clearToken()).toBe(false)
+    expect(f.auth.signedIn.value).toBe(true)
+    expect(f.store.error.value).toContain('Could not disable shared access')
+    f.call.mockResolvedValue({})
+    expect(await f.auth.clearToken()).toBe(true)
+    f.stop()
+  })
+
   it('publishes persisted access credentials with no refresh credential', async () => {
     const f = fixture()
     await f.ready()
@@ -65,11 +89,7 @@ describe('shared session publication', () => {
     await f.auth.clearToken()
     await f.ready()
     expect(f.store.reset).toHaveBeenCalled()
-    expect(f.call).toHaveBeenCalledWith('publish', {
-      server: 'https://axon.test',
-      token: null,
-      replace: true,
-    })
+    expect(f.call).toHaveBeenCalledWith('invalidate')
     expect(f.auth.signedIn.value).toBe(false)
     f.stop()
   })

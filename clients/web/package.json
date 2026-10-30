@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "gen:api": "openapi-typescript ../../openapi/openapi.json -o src/api/schema.d.ts",
     "check:api": "node scripts/check-api-schema.mjs && node scripts/share-contract.mjs",
+    "test:sharing:simulator": "node scripts/test-sharing-simulator.mjs",
     "test:sharing:native": "swift test --package-path src-tauri/incoming-share",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",

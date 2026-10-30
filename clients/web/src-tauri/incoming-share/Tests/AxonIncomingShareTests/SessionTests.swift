@@ -24,6 +24,40 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(try store.session()?.generation, next.generation)
     XCTAssertTrue(try store.list().isEmpty)
   }
+  func testRevocationSurvivesEitherUnavailableBoundaryButNeverBoth() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try ShareStore(root: root)
+    let vault = Vault()
+    let session = SharedSession(store: store, accessGroup: "test", vault: vault)
+    _ = try session.publish(
+      installation: "install", server: "https://axon.example", token: "synthetic", expiresAt: nil,
+      replace: false)
+    _ = try store.create(text: "draft")
+    vault.unavailable = true
+    try SharedSession.invalidate(
+      fence: { try store.invalidateSession() }, accessGroup: "test", vault: vault)
+    XCTAssertNil(try store.session())
+    XCTAssertThrowsError(try session.credential())
+    XCTAssertTrue(try store.list().isEmpty)
+    XCTAssertThrowsError(
+      try SharedSession.invalidate(
+        fence: { throw ShareFailure.busy }, accessGroup: "test", vault: vault))
+    vault.unavailable = false
+    try SharedSession.invalidate(
+      fence: { throw ShareFailure.unavailable }, accessGroup: "test", vault: vault)
+    XCTAssertNil(vault.token)
+  }
+  func testHTTPSharingRejectsBeforeAnyNetworkRequest() {
+    let descriptor = ShareSession(
+      installation: "install", server: "http://example.org", credentialAvailable: true,
+      expiresAt: nil)
+    XCTAssertThrowsError(
+      try ShareHTTP().request(descriptor: descriptor, token: "synthetic", path: "/v1/rooms")
+    ) {
+      XCTAssertEqual($0 as? ShareFailure, .httpsRequired)
+    }
+  }
   func testTransferBudgetsStayBoundedAcrossSupportedSizes() {
     XCTAssertLessThanOrEqual(ShareHTTP.deadline(bytes: ShareLimits.thumbnailBytes), 30)
     XCTAssertLessThanOrEqual(ShareHTTP.deadline(bytes: ShareLimits.batchBytes), 180)
