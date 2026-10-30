@@ -84,7 +84,9 @@ Regenerate deliberately with `node scripts/share-contract.mjs --write`.
 Swift and TypeScript consume the server's existing valid/invalid preview fixtures; Swift additionally round-trips the shared local manifest fixture.
 The macOS workflow compiles the common module with iOS extension API restrictions and runs its XCTest suite on an iPhone simulator.
 The simulator command requires Xcode, an installed iOS runtime, and `xcodegen` (`brew install xcodegen`).
-It reuses a booted iPhone simulator or boots an available one; `AXON_SHARING_SIMULATOR=<UDID>` selects one explicitly.
+It prefers an iPhone simulator matching the selected Xcode simulator SDK, reusing a booted match when available.
+If no matching runtime is installed, it uses another available iPhone; `AXON_SHARING_SIMULATOR=<UDID>` selects one explicitly.
+The command prints the SDK and selected runtime before booting, and bounds first-boot data migration to five minutes.
 It builds a temporary unsigned test runner, leaves Axon's installed app/session alone, and prints the retained `.xcresult` path.
 
 | Layer                    | What it establishes                                                                                                                                     | Remaining limitation                                                                    |
