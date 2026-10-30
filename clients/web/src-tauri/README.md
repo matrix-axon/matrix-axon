@@ -160,6 +160,11 @@ has no effect and the next regeneration overwrites them; change
 
 ## iOS
 
+Incoming-share session/staging and the Pending shares recovery UI are described in [the foundation guide](../../../docs/ios-sharing-foundation.md).
+App Group and shared Keychain capabilities must be enabled in the developer portal and included in provisioning profiles.
+Run `node scripts/configure-ios-sharing.mjs` from `clients/web` after every manual `tauri ios init`; packaging runs the same hook automatically.
+`AXON_SHARE_PROBE=1` adds the development-only signed access probe; normal distribution builds omit it.
+
 Needs macOS with Xcode. Everything below is `clients/web` unless it says
 otherwise.
 
@@ -266,14 +271,12 @@ have to agree before the Apple sheet will open:
   enabled as a primary App ID. Any Services ID used for browser sign-in should
   be grouped under it (Services ID → Sign in with Apple → Configure → Primary
   App ID), so the browser and the app see the same Apple subject.
-- **The build carries the entitlement.** Tauri has no iOS entitlements
-  setting and writes an empty file on every `tauri ios init`, so
-  `Entitlements.ios.plist` beside `tauri.conf.json` is copied over it by
-  `scripts/package-ios.sh`. For the dev loop, copy it once yourself after
-  `tauri ios init`:
+- **The build carries the entitlement.** Tauri writes an empty entitlement file on `tauri ios init`.
+  The shared configuration hook loads `Entitlements.ios.plist` into XcodeGen's entitlement properties, preserving them through project regeneration.
+  Packaging invokes it automatically; run it yourself after a manual `tauri ios init`:
 
   ```sh
-  cp src-tauri/Entitlements.ios.plist src-tauri/gen/apple/axon_iOS/axon_iOS.entitlements
+  node scripts/configure-ios-sharing.mjs
   ```
 
 Signing is automatic, so no profile is made by hand. Xcode regenerates the team

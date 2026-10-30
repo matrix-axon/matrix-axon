@@ -1,6 +1,7 @@
 # Incoming sharing on iOS and Android
 
-Status: native sharing proposed; server send/generation prerequisites implemented separately, with no native-device validation yet.
+Status: server send/generation and image rendering implemented; iOS session/staging and main-app recovery foundation implemented with signed-device acceptance in progress.
+Production native share-sheet ingestion remains a subsequent stage.
 Tracking issue: [564](https://github.com/matrix-axon/matrix-axon/issues/564).
 Proposed architecture decision: [ADR 0125](adr/0125-ios-first-incoming-sharing.md).
 Implement iOS first because it serves most current mobile users; Android follows the completed iOS media stage.
@@ -28,7 +29,8 @@ Cancellation before dispatch sends nothing; cancellation during dispatch cannot 
 ## Current implementation and prerequisites
 
 Both packaged apps wrap `clients/web` in Tauri.
-The platform boundary is `clients/web/src/platform/index.ts`; it currently has no incoming-share port.
+The platform boundary is `clients/web/src/platform/index.ts`; its optional incoming-share port supports native pending-share recovery.
+The extension-safe Swift module is `clients/web/src-tauri/incoming-share`, and [the foundation guide](ios-sharing-foundation.md) describes its recovery UI, build configuration, contract fixtures, and signed-device acceptance.
 Its browser `navigator.share()` path is outbound sharing and does not register the packaged app as a destination.
 
 | Existing code                                                          | Reuse or required change                                                                                                                                        |
@@ -37,8 +39,8 @@ Its browser `navigator.share()` path is outbound sharing and does not register t
 | `clients/web/src/components/use-message-composer.ts`                   | Existing room/thread submit behavior; reuse on Android and main-app recovery                                                                                    |
 | `clients/web/src/stores/timeline.ts`                                   | Sequential multi-file sends, caption on the first file, independent item outcomes; extend with an optional durable progress sink rather than copy this pipeline |
 | `clients/web/src/media/media-service.ts`                               | Existing upload endpoint, file classification and upload budgets; share fixtures with the native adapter                                                        |
-| `clients/web/src-tauri/native-auth/ios/Sources/NativeAuthPlugin.swift` | Current app-private Keychain and reinstall cleanup; needs extension-safe shared session access                                                                  |
-| `clients/web/src-tauri/Entitlements.ios.plist`                         | Currently Apple sign-in and push entitlements; no sharing App Group or explicit shared Keychain group                                                           |
+| `clients/web/src-tauri/native-auth/ios/Sources/NativeAuthPlugin.swift` | App-private credentials/reinstall cleanup plus shared access-token publication; refresh credentials remain app-only                                             |
+| `clients/web/src-tauri/Entitlements.ios.plist`                         | Apple sign-in/push plus the sharing App Group and explicit private/shared Keychain access groups                                                                |
 | `scripts/package-ios.sh`                                               | Deletes and regenerates `gen/apple`; extension targets and signing must be installed reproducibly after generation                                              |
 | `clients/web/src-tauri/android/MainActivity.kt`                        | Custom activity currently handles WebView configuration/insets; preserve that behavior and existing notification/OAuth intent handling                          |
 | `clients/web/src-tauri/build_support/android_manifest.rs`              | Existing deterministic manifest transformations; extend for share registration                                                                                  |
@@ -278,8 +280,8 @@ Later implementation stages stay in the web/native-client silo and consume the s
 Every implementation PR updates user/build documentation, `docs/client-parity.md` when tracked status changes, and `docs/demo-coverage.md` for changed rendered flows.
 Record rich-link acquisition, bundled sending and image rendering separately; text-card support alone does not complete the end-to-end feature.
 Run required client checks and focused native tests per PR; documentation-only work needs formatting/link checks rather than unrelated runtime suites.
-The Linux design workspace cannot establish extension signing, iOS lifecycle or memory acceptance.
-Before native implementation/verification, continue on the available macOS development machine with Xcode and a signed iPhone build; do not claim a web test proves native registration.
+Native acceptance requires macOS with Xcode and a signed iPhone build; web tests cannot establish native registration, installation-marker behavior, or actual lifecycle/resource budgets.
+The development-only foundation probe is excluded from distribution and does not implement production share intake.
 
 | Verification area | Required evidence                                                                                                                                                   |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

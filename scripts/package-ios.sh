@@ -255,20 +255,13 @@ rm -rf "$tauri_dir/gen/apple"
 pnpm tauri ios init --ci ${config_args[@]+"${config_args[@]}"}
 
 echo "==> installing the iOS entitlements"
-# `tauri ios init` writes an empty entitlements file and has no setting to fill
-# it, so the committed one is copied over it on every regeneration. Without it
-# Sign in with Apple fails at run time, not at build time: see the file's own
-# comment.
-entitlements="$tauri_dir/gen/apple/axon_iOS/axon_iOS.entitlements"
-if [ ! -f "$entitlements" ]; then
-  echo "error: no generated entitlements file at $entitlements" >&2
+if [ "${AXON_SHARE_PROBE:-0}" = "1" ] && [ "$export_method" != "debugging" ]; then
+  echo "error: AXON_SHARE_PROBE is development-only; use --export-method debugging" >&2
   exit 1
 fi
-cp "$tauri_dir/Entitlements.ios.plist" "$entitlements"
-# The committed plist says development. Store and TestFlight builds need
-# production, which is what the provisioning profile for those export methods
-# carries. The client reads the signed value.
-plutil -replace aps-environment -string "$aps_environment" "$entitlements"
+AXON_APS_ENVIRONMENT="$aps_environment" node "$web_dir/scripts/configure-ios-sharing.mjs"
+# The shared configuration hook installs entitlements, selects the push
+# environment, and regenerates the project after every Tauri regeneration.
 echo "    aps-environment: $aps_environment"
 
 echo "==> syncing the app icon from icons/ios"
@@ -287,6 +280,9 @@ echo "    $(ls "$icon_src"/*.png | wc -l | tr -d ' ') icons, flattened"
 
 build_args=(tauri ios build --export-method "$export_method"
   ${config_args[@]+"${config_args[@]}"})
+if [ "${AXON_SHARE_PROBE:-0}" = "1" ]; then
+  build_args+=(--debug)
+fi
 
 echo "==> building (export method: $export_method)"
 pnpm "${build_args[@]}"
@@ -320,6 +316,11 @@ ipa_check=$(mktemp -d)
 unzip -q "$ipa" 'Payload/*' -d "$ipa_check"
 shipped_app=$(ls -d "$ipa_check"/Payload/*.app | head -1)
 shipped_plist="$shipped_app/Info.plist"
+if [ "${AXON_SHARE_PROBE:-0}" = "1" ]; then
+  python3 "$web_dir/scripts/check-ios-sharing.py" "$shipped_app" --probe
+else
+  python3 "$web_dir/scripts/check-ios-sharing.py" "$shipped_app"
+fi
 scheme=$(plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw -o - "$shipped_plist" 2>/dev/null || echo "(none)")
 echo "    url scheme:   $scheme"
 echo "    version:      $(plutil -extract CFBundleShortVersionString raw -o - "$shipped_plist" 2>/dev/null)"

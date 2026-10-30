@@ -45,6 +45,7 @@ shows it.
 | Timeline text, sender names, day separators             | `timeline`            | `timeline`                                                                                                | `timeline`      |
 | Formatted (HTML) messages with links                    | `timeline`            | `timeline`                                                                                                | `timeline`      |
 | Bundled URL preview text/image cards (MSC4095)          | **n/a**               | **not covered** — demo corpus has no bundled preview metadata                                             | **not covered** |
+| iOS pending-share recovery                              | **n/a**               | **not covered** — requires native staging/probe; browser fixture covers recovery separately               | **not covered** |
 | Reactions (seeded badges render)                        | `timeline`            | `timeline`                                                                                                | `send`          |
 | React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
 | Custom reaction images (MSC4027)                        | **not covered**       | **not covered**                                                                                           | **not covered** |

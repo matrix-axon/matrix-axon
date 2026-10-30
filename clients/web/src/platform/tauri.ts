@@ -25,6 +25,7 @@ import {
 import { remotePushFor } from './remote-push'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
+import { nativeIncomingShare } from './incoming-share'
 import {
   deliverNotificationClick,
   notificationClickFromPayload,
@@ -393,6 +394,7 @@ export function tauriPlatform(
   }
   return {
     secureStorage: native.secureStorage,
+    incomingShare: native.secureStorage === null ? null : nativeIncomingShare(),
     appleSignIn: native.appleSignIn,
     // The plugin's fetch is signature-compatible with the global, but has no
     // timeout of its own; see `REQUEST_TIMEOUT_MS`. The signal has to go in

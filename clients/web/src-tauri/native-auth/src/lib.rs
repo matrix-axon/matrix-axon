@@ -47,6 +47,8 @@ pub struct Capabilities {
 pub struct Error {
     kind: ErrorKind,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +67,7 @@ impl Error {
         Self {
             kind: ErrorKind::Unsupported,
             message: "not available on this platform".into(),
+            code: None,
         }
     }
 }
@@ -75,6 +78,7 @@ impl From<tauri::plugin::mobile::PluginInvokeError> for Error {
         use tauri::plugin::mobile::PluginInvokeError;
         match error {
             PluginInvokeError::InvokeRejected(response) => Self {
+                code: response.code.clone(),
                 kind: if response.code.as_deref() == Some("cancelled") {
                     ErrorKind::Cancelled
                 } else {
@@ -84,9 +88,10 @@ impl From<tauri::plugin::mobile::PluginInvokeError> for Error {
                     .message
                     .unwrap_or_else(|| "native sign-in failed".into()),
             },
-            other => Self {
+            _ => Self {
+                code: None,
                 kind: ErrorKind::Failed,
-                message: other.to_string(),
+                message: "native operation failed".into(),
             },
         }
     }
@@ -212,6 +217,32 @@ async fn secret_delete<R: Runtime>(app: tauri::AppHandle<R>, key: String) -> Res
     }
 }
 
+/// Bounded native incoming-share operations. Credentials never enter files.
+#[tauri::command]
+async fn share<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value> {
+    if serde_json::to_vec(&request).map_or(true, |v| v.len() > 1024 * 1024) {
+        return Err(Error {
+            kind: ErrorKind::Failed,
+            message: "Incoming share: invalid".into(),
+            code: Some("invalid".into()),
+        });
+    }
+    #[cfg(target_os = "ios")]
+    {
+        Ok(native(&app)
+            .run_mobile_plugin_async("share", request)
+            .await?)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, request);
+        Err(Error::unsupported())
+    }
+}
+
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("native-auth")
         .invoke_handler(tauri::generate_handler![
@@ -219,7 +250,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             apple_sign_in,
             secret_load,
             secret_set,
-            secret_delete
+            secret_delete,
+            share
         ])
         .setup(|_app, _api| {
             #[cfg(target_os = "ios")]

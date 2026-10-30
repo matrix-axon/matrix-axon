@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "createdAt": 1000,
+  "session": "opaque-session-generation",
+  "accountId": "00000000-0000-4000-8000-000000000002",
+  "roomId": "!room:example.org",
+  "text": "First caption https://example.org/article",
+  "previews": [
+    {
+      "matched_url": "https://example.org/article",
+      "title": "Retained title 😀",
+      "description": "",
+      "provenance": "source",
+      "thumbnail": "00000000-0000-4000-8000-000000000003"
+    }
+  ],
+  "files": [
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "name": "preview",
+      "mime": "image/png",
+      "bytes": 68,
+      "digest": "fixture-digest",
+      "thumbnail": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "report.pdf",
+      "mime": "application/pdf",
+      "bytes": 1024,
+      "digest": "fixture-digest",
+      "thumbnail": false,
+      "operation": {
+        "id": "00000000-0000-4000-8000-000000000005",
+        "state": "sent",
+        "eventId": "$confirmed"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "name": "second.txt",
+      "mime": "text/plain",
+      "bytes": 10,
+      "digest": "fixture-digest",
+      "thumbnail": false,
+      "operation": {
+        "id": "00000000-0000-4000-8000-000000000007",
+        "state": "unknown"
+      }
+    }
+  ],
+  "operation": {
+    "id": "00000000-0000-4000-8000-000000000008",
+    "state": "ready"
+  },
+  "importFailures": [],
+  "revision": 4
+}

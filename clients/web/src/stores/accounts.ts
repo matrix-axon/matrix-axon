@@ -91,7 +91,10 @@ export interface AccountsStore {
  * not an optimistic local edit. `error` is a plain writable signal so the UI
  * can also dismiss it.
  */
-export function createAccountsStore(api: ApiClient): AccountsStore {
+export function createAccountsStore(
+  api: ApiClient,
+  onDeactivate?: (accountId: string) => Promise<void>,
+): AccountsStore {
   const accounts = signal<Account[]>([])
   const loading = signal(true)
   const error = signal<string | null>(null)
@@ -129,6 +132,8 @@ export function createAccountsStore(api: ApiClient): AccountsStore {
         return false
       }
       error.value = null
+      if (action.kind === 'logout' || action.kind === 'delete')
+        await onDeactivate?.(action.accountId)
       await refresh()
       return true
     } catch (cause) {

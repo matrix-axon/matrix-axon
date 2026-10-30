@@ -355,10 +355,22 @@
           "markdownDescription": "Denies the secret_set command without any pre-configured scope."
         },
         {
-          "description": "Everything the shell's sign-in needs: ask what this platform supports, run Sign in with Apple, and keep Axon's own tokens in the Keychain.\n#### This default permission set includes:\n\n- `allow-capabilities`\n- `allow-apple-sign-in`\n- `allow-secret-load`\n- `allow-secret-set`\n- `allow-secret-delete`",
+          "description": "Enables the share command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share",
+          "markdownDescription": "Enables the share command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share",
+          "markdownDescription": "Denies the share command without any pre-configured scope."
+        },
+        {
+          "description": "Everything the shell's sign-in needs: ask what this platform supports, run Sign in with Apple, and keep Axon's own tokens in the Keychain.\n#### This default permission set includes:\n\n- `allow-capabilities`\n- `allow-apple-sign-in`\n- `allow-secret-load`\n- `allow-secret-set`\n- `allow-secret-delete`\n- `allow-share`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Everything the shell's sign-in needs: ask what this platform supports, run Sign in with Apple, and keep Axon's own tokens in the Keychain.\n#### This default permission set includes:\n\n- `allow-capabilities`\n- `allow-apple-sign-in`\n- `allow-secret-load`\n- `allow-secret-set`\n- `allow-secret-delete`"
+          "markdownDescription": "Everything the shell's sign-in needs: ask what this platform supports, run Sign in with Apple, and keep Axon's own tokens in the Keychain.\n#### This default permission set includes:\n\n- `allow-capabilities`\n- `allow-apple-sign-in`\n- `allow-secret-load`\n- `allow-secret-set`\n- `allow-secret-delete`\n- `allow-share`"
         }
       ]
     }
