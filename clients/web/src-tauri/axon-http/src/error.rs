@@ -42,7 +42,7 @@ impl TransportError {
         Self { kind, detail: None }
     }
 
-    fn with(kind: Kind, detail: impl Into<String>) -> Self {
+    pub(crate) fn with(kind: Kind, detail: impl Into<String>) -> Self {
         Self {
             kind,
             detail: Some(detail.into()),
@@ -60,29 +60,6 @@ impl fmt::Display for TransportError {
 }
 
 impl StdError for TransportError {}
-
-/// A redirect hop, or the request URL itself, left `http` and `https`.
-#[derive(Debug)]
-pub(crate) struct ScopeViolation;
-
-impl fmt::Display for ScopeViolation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("scheme is not http or https")
-    }
-}
-
-impl StdError for ScopeViolation {}
-
-#[derive(Debug)]
-pub(crate) struct TooManyRedirects;
-
-impl fmt::Display for TooManyRedirects {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("too many redirects")
-    }
-}
-
-impl StdError for TooManyRedirects {}
 
 /// Name resolution failed. Raised by the client's resolver so that `dns` is
 /// recognised by type: `hyper-util`'s own resolver error is private and says
@@ -202,12 +179,6 @@ pub(crate) fn is_protocol_nack(err: &(dyn StdError + 'static)) -> bool {
 /// The category of a failure before a response arrived.
 pub(crate) fn classify_send(err: &reqwest::Error) -> TransportError {
     let causes = causes(err);
-    if find::<ScopeViolation>(&causes).is_some() {
-        return TransportError::new(Kind::Scope);
-    }
-    if find::<TooManyRedirects>(&causes).is_some() {
-        return TransportError::with(Kind::Other, "TooManyRedirects");
-    }
     if find::<DnsFailure>(&causes).is_some() {
         return TransportError::new(Kind::Dns);
     }

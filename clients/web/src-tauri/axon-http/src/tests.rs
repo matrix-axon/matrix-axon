@@ -572,6 +572,22 @@ async fn user_agent_and_raw_body_reach_the_server() {
     assert_eq!(body, b"Axon/test (test)|0|");
 }
 
+#[tokio::test]
+async fn a_redirect_from_a_known_http2_origin_to_an_http1_origin_is_followed() {
+    let target = Server::start(true, ok_handler()).await;
+    target.alpn.store(Alpn::Refuse as u8, Ordering::SeqCst);
+    let source = Server::start(true, redirecting(target.url("/"))).await;
+    let transport = transport();
+    warm(&transport, &source).await;
+    // Each hop takes the client its own origin calls for: the HTTP/2-only
+    // client for the source, the negotiating one for the target.
+    let (head, body) = fetch(&transport, 0, get(&source.url("/away"))).await;
+    assert_eq!(head.version, "http/1.1");
+    assert_eq!(body, b"hello");
+    assert!(transport.knows_h2(&source.url("/")));
+    assert!(!transport.knows_h2(&target.url("/")));
+}
+
 // ===== cancel and the table =====
 
 #[tokio::test]
@@ -664,6 +680,45 @@ async fn a_cancel_that_arrives_first_stops_the_send() {
     assert_eq!(live(&transport), 0);
     // The early cancel was used up: the id is free again.
     fetch(&transport, 0, get(&server.url("/"))).await;
+}
+
+#[tokio::test]
+async fn a_cancelled_send_leaves_a_reused_id_alone() {
+    let server = Server::start(
+        false,
+        handler(|_| async {
+            std::future::pending::<()>().await;
+            reply(200, TestBody::empty())
+        }),
+    )
+    .await;
+    let transport = transport();
+    let arrived = server.arrived.notified();
+    let old = {
+        let (transport, url) = (transport.clone(), server.url("/old"));
+        tokio::spawn(async move { transport.send(key(1), get(&url)).await })
+    };
+    arrived.await;
+    transport.cancel(key(1));
+    // The cancel frees the id at once. Register a new request under it before
+    // the cancelled task runs again.
+    let mut replacement = Box::pin(transport.send(key(1), get(&server.url("/new"))));
+    std::future::poll_fn(|cx| {
+        assert!(replacement.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(live(&transport), 1);
+    assert_eq!(
+        promptly(old).await.unwrap().unwrap_err().kind,
+        Kind::Cancelled
+    );
+    assert_eq!(live(&transport), 1, "the old send removed the new entry");
+    transport.cancel(key(1));
+    assert_eq!(
+        promptly(replacement).await.unwrap_err().kind,
+        Kind::Cancelled
+    );
 }
 
 #[tokio::test]
@@ -949,6 +1004,84 @@ async fn redirects_stop_after_ten_hops() {
         .unwrap_err();
     assert_eq!(err.kind, Kind::Other);
     assert_eq!(err.detail.as_deref(), Some("TooManyRedirects"));
+}
+
+/// Echoes `method|authorization|content-type|body`, after the redirects
+/// `/301`, `/303` and `/307` to `/echo`, and `/away` to `away`.
+fn redirecting(away: String) -> Handler {
+    handler(move |req: hyper::Request<Incoming>| {
+        let away = away.clone();
+        async move {
+            use http_body_util::BodyExt;
+            let to = |status, location: &str| {
+                let mut response = reply(status, TestBody::empty());
+                response
+                    .headers_mut()
+                    .insert("location", location.parse().unwrap());
+                response
+            };
+            match req.uri().path() {
+                "/301" => return to(301, "/echo"),
+                "/303" => return to(303, "/echo"),
+                "/307" => return to(307, "/echo"),
+                "/away" => return to(302, &away),
+                _ => {}
+            }
+            let header = |name| {
+                req.headers()
+                    .get(name)
+                    .map_or("", |value| value.to_str().unwrap())
+                    .to_owned()
+            };
+            let mut echo = format!(
+                "{}|{}|{}|",
+                req.method(),
+                header("authorization"),
+                header("content-type")
+            )
+            .into_bytes();
+            echo.extend_from_slice(&req.into_body().collect().await.unwrap().to_bytes());
+            reply(200, TestBody::Full(Some(Bytes::from(echo))))
+        }
+    })
+}
+
+#[tokio::test]
+async fn redirects_rewrite_methods_and_drop_credentials_as_fetch_does() {
+    let other = Server::start(false, redirecting(String::new())).await;
+    let server = Server::start(false, redirecting(other.url("/echo"))).await;
+    let transport = transport();
+    let send = |method: Method, path: &str| {
+        let mut outgoing = request(method, &server.url(path));
+        outgoing
+            .headers
+            .insert("authorization", "Bearer t".parse().unwrap());
+        outgoing
+            .headers
+            .insert("content-type", "text/plain".parse().unwrap());
+        outgoing.body = Some(b"x".to_vec());
+        outgoing
+    };
+    let cases = [
+        (Method::POST, "/303", "GET|Bearer t||"),
+        (Method::POST, "/301", "GET|Bearer t||"),
+        (Method::PUT, "/301", "PUT|Bearer t|text/plain|x"),
+        (Method::POST, "/307", "POST|Bearer t|text/plain|x"),
+        // Another port is another origin: the token stays behind.
+        (Method::GET, "/away", "GET||text/plain|x"),
+    ];
+    for (id, (method, path, expected)) in cases.into_iter().enumerate() {
+        let (head, body) = fetch(&transport, id as u64, send(method.clone(), path)).await;
+        assert_eq!(
+            String::from_utf8(body).unwrap(),
+            expected,
+            "{method} {path}"
+        );
+        assert!(head.url.ends_with("/echo"), "{}", head.url);
+    }
+    let stats = transport.stats();
+    assert_eq!(stats.requests_sent, 5);
+    assert_eq!(stats.live_entries, 0);
 }
 
 // ===== retries =====

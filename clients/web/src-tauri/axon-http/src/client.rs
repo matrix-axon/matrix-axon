@@ -13,7 +13,7 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect;
 use serde::Serialize;
 
-use crate::error::{is_protocol_nack, DnsFailure, ScopeViolation, TooManyRedirects};
+use crate::error::{is_protocol_nack, DnsFailure};
 
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Below carrier NAT idle timers (some expire a mapping after about 30 s) and
@@ -21,7 +21,6 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(25);
 const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_REDIRECTS: usize = 10;
 
 /// Counters that outlive any one client, so they keep counting across a
 /// `reset` (ADR 0127 § 5).
@@ -127,7 +126,9 @@ pub(crate) fn build(
         .http2_keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
         .http2_keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)
         .http2_keep_alive_while_idle(false)
-        .redirect(redirect::Policy::custom(check_redirect))
+        // The transport follows redirects itself, choosing the client for
+        // each hop.
+        .redirect(redirect::Policy::none())
         .dns_resolver(Arc::new(Resolver))
         .connector_layer(CountConnections(Arc::clone(counters)))
         .retry(retry);
@@ -139,17 +140,6 @@ pub(crate) fn build(
         builder = builder.add_root_certificate(root.clone());
     }
     builder.build()
-}
-
-/// Every hop must stay `http` or `https`, and there are at most ten of them.
-fn check_redirect(attempt: redirect::Attempt<'_>) -> redirect::Action {
-    if !matches!(attempt.url().scheme(), "http" | "https") {
-        attempt.error(ScopeViolation)
-    } else if attempt.previous().len() > MAX_REDIRECTS {
-        attempt.error(TooManyRedirects)
-    } else {
-        attempt.follow()
-    }
 }
 
 /// The retry policy's scope, which reqwest only lets you set per host.

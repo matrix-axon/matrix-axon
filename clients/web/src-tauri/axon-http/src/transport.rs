@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
+use hyper::body::Bytes;
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -23,15 +24,18 @@ const FAST_RESET_WINDOW: Duration = Duration::from_secs(1);
 /// one left behind when a cancel races a request that just finished.
 const EARLY_CANCEL_TTL: Duration = Duration::from_secs(30);
 
+const MAX_REDIRECTS: usize = 10;
+
 /// A request's place in the table: the webview it came from and the id the
 /// JavaScript side chose for it.
 pub(crate) type Key = (String, u64);
 
-pub(crate) struct Outgoing {
+/// A request as the caller sent it, or (with a `Bytes` body) one hop of it.
+pub(crate) struct Outgoing<B = Vec<u8>> {
     pub(crate) method: Method,
     pub(crate) url: Url,
     pub(crate) headers: HeaderMap,
-    pub(crate) body: Option<Vec<u8>>,
+    pub(crate) body: Option<B>,
 }
 
 /// What `send` resolves with once the response headers arrive.
@@ -49,9 +53,13 @@ pub struct Head {
 }
 
 struct Entry {
-    /// The client the request went out on. A `reset` replaces the current
-    /// client, and this one lives until its last entry leaves.
-    _client: reqwest::Client,
+    /// Which registration under its key this is. A cancel frees the key at
+    /// once, so the task that registered it can wake to find the key taken by
+    /// a newer request, which it must leave alone.
+    generation: u64,
+    /// The clients the request went out on. A `reset` replaces the current
+    /// ones, and these live until their last entry leaves.
+    _clients: Clients,
     cancel: CancellationToken,
     body: Body,
 }
@@ -76,6 +84,22 @@ impl Drop for Entry {
 struct Table {
     entries: HashMap<Key, Entry>,
     early_cancels: HashMap<Key, Instant>,
+    generations: u64,
+}
+
+impl Table {
+    /// The entry under `key`, if it is still registration `generation`.
+    fn entry(&mut self, key: &Key, generation: u64) -> Option<&mut Entry> {
+        self.entries
+            .get_mut(key)
+            .filter(|entry| entry.generation == generation)
+    }
+
+    fn remove(&mut self, key: &Key, generation: u64) {
+        if self.entry(key, generation).is_some() {
+            self.entries.remove(key);
+        }
+    }
 }
 
 /// The two clients a `reset` replaces together.
@@ -86,6 +110,9 @@ struct Table {
 /// `h2` and discards the rest). `h2` speaks only HTTP/2, which lets hyper-util
 /// hold every request in a burst behind the first connection. Origins move to
 /// it once they have answered over HTTP/2.
+///
+/// Neither follows redirects: the transport does, so that each hop goes out
+/// on the client its own origin calls for.
 #[derive(Clone)]
 struct Clients {
     negotiated: reqwest::Client,
@@ -135,23 +162,13 @@ impl Transport {
 
     /// Send a request and wait for its headers.
     pub(crate) async fn send(&self, key: Key, outgoing: Outgoing) -> Result<Head, TransportError> {
-        if !matches!(outgoing.url.scheme(), "http" | "https") {
+        if !is_http(&outgoing.url) {
             return Err(TransportError::new(Kind::Scope));
         }
         let method = outgoing.method.clone();
-        let origin =
-            (outgoing.url.scheme() == "https").then(|| outgoing.url.origin().ascii_serialization());
         let clients = self.current();
-        let via_h2 = origin
-            .as_ref()
-            .is_some_and(|origin| lock(&self.h2_origins).contains(origin));
-        let client = if via_h2 {
-            clients.h2
-        } else {
-            clients.negotiated
-        };
         let cancel = CancellationToken::new();
-        {
+        let generation = {
             let mut table = lock(&self.table);
             if table.early_cancels.remove(&key).is_some() {
                 return Err(TransportError::new(Kind::Cancelled));
@@ -159,29 +176,166 @@ impl Transport {
             if table.entries.contains_key(&key) {
                 return Err(TransportError::new(Kind::Other));
             }
+            table.generations += 1;
+            let generation = table.generations;
             table.entries.insert(
                 key.clone(),
                 Entry {
-                    _client: client.clone(),
+                    generation,
+                    _clients: clients.clone(),
                     cancel: cancel.clone(),
                     body: Body::Pending,
                 },
             );
-        }
+            generation
+        };
 
+        Counters::bump(&self.counters.requests_sent);
         let sent = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(TransportError::new(Kind::Cancelled)),
-            sent = self.dispatch(&client, outgoing) => sent,
+            sent = self.follow(&clients, outgoing) => sent,
         };
 
+        let mut table = lock(&self.table);
+        let response = match sent {
+            Ok(response) => response,
+            Err(err) => {
+                table.remove(&key, generation);
+                return Err(err);
+            }
+        };
+        let Some(entry) = table.entry(&key, generation) else {
+            // Cancelled between the response arriving and this lock.
+            return Err(TransportError::new(Kind::Cancelled));
+        };
+        let head = head_of(&response, &method);
+        if head.body {
+            entry.body = Body::Ready(response);
+        } else {
+            table.entries.remove(&key);
+        }
+        Ok(head)
+    }
+
+    /// One logical request, following redirects with `fetch`'s rules, as
+    /// reqwest's own redirect handling applies them:
+    ///
+    /// - A `301` or `302` turns a `POST` into a `GET`, and a `303` turns
+    ///   anything but `HEAD` into one. Either way the body and the headers
+    ///   that describe it go. A `307` or `308` sends the same request again.
+    /// - A hop to another host or port loses `Authorization`, `Cookie` and
+    ///   `Proxy-Authorization`, for the rest of the chain.
+    /// - A `Location` that is missing or will not parse ends the chain with
+    ///   the redirect response itself. One that leaves `http` and `https`
+    ///   fails as `scope`, and an eleventh hop as `TooManyRedirects`.
+    ///
+    /// Unlike reqwest, no hop gets a `Referer`: reqwest's carries the previous
+    /// URL whole, query included, to whichever host comes next.
+    async fn follow(
+        &self,
+        clients: &Clients,
+        outgoing: Outgoing,
+    ) -> Result<reqwest::Response, TransportError> {
+        let Outgoing {
+            mut method,
+            mut url,
+            mut headers,
+            body,
+        } = outgoing;
+        // `Bytes`, so a `307` or `308` can send the body again without a copy.
+        let mut body = body.map(Bytes::from);
+        let mut redirects = 0;
+        loop {
+            let request = Outgoing {
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers.clone(),
+                body: body.clone(),
+            };
+            let response = self.hop(clients, request).await?;
+            let status = response.status();
+            if !matches!(
+                status,
+                StatusCode::MOVED_PERMANENTLY
+                    | StatusCode::FOUND
+                    | StatusCode::SEE_OTHER
+                    | StatusCode::TEMPORARY_REDIRECT
+                    | StatusCode::PERMANENT_REDIRECT
+            ) {
+                return Ok(response);
+            }
+            let Some(next) = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|location| location.to_str().ok())
+                .and_then(|location| url.join(location).ok())
+            else {
+                return Ok(response);
+            };
+            if !is_http(&next) {
+                return Err(TransportError::new(Kind::Scope));
+            }
+            if redirects == MAX_REDIRECTS {
+                return Err(TransportError::with(Kind::Other, "TooManyRedirects"));
+            }
+            redirects += 1;
+
+            let rewrite = match status {
+                StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND => method == Method::POST,
+                StatusCode::SEE_OTHER => true,
+                _ => false,
+            };
+            if rewrite {
+                if method != Method::HEAD {
+                    method = Method::GET;
+                }
+                body = None;
+                for name in [
+                    header::CONTENT_TYPE,
+                    header::CONTENT_LENGTH,
+                    header::CONTENT_ENCODING,
+                    header::TRANSFER_ENCODING,
+                ] {
+                    headers.remove(name);
+                }
+            }
+            if next.host_str() != url.host_str()
+                || next.port_or_known_default() != url.port_or_known_default()
+            {
+                for name in [
+                    header::AUTHORIZATION,
+                    header::COOKIE,
+                    header::PROXY_AUTHORIZATION,
+                ] {
+                    headers.remove(name);
+                }
+            }
+            url = next;
+        }
+    }
+
+    /// One hop, on the client its origin calls for, keeping what the
+    /// transport knows about that origin up to date.
+    async fn hop(
+        &self,
+        clients: &Clients,
+        request: Outgoing<Bytes>,
+    ) -> Result<reqwest::Response, TransportError> {
+        let origin =
+            (request.url.scheme() == "https").then(|| request.url.origin().ascii_serialization());
+        let via_h2 = origin
+            .as_ref()
+            .is_some_and(|origin| lock(&self.h2_origins).contains(origin));
+        let client = if via_h2 {
+            &clients.h2
+        } else {
+            &clients.negotiated
+        };
+        let sent = self.dispatch(client, request).await;
         if let Some(origin) = origin {
             match &sent {
-                Ok(response)
-                    if !via_h2
-                        && response.version() == reqwest::Version::HTTP_2
-                        && response.url().origin().ascii_serialization() == origin =>
-                {
+                Ok(response) if !via_h2 && response.version() == reqwest::Version::HTTP_2 => {
                     lock(&self.h2_origins).insert(origin);
                 }
                 // Anything that went wrong once a connection existed sends the
@@ -203,44 +357,24 @@ impl Transport {
                 _ => {}
             }
         }
-
-        let mut table = lock(&self.table);
-        let response = match sent {
-            Ok(response) => response,
-            Err(err) => {
-                table.entries.remove(&key);
-                return Err(err);
-            }
-        };
-        let Some(entry) = table.entries.get_mut(&key) else {
-            // Cancelled between the response arriving and this lock.
-            return Err(TransportError::new(Kind::Cancelled));
-        };
-        let head = head_of(&response, &method);
-        if head.body {
-            entry.body = Body::Ready(response);
-        } else {
-            table.entries.remove(&key);
-        }
-        Ok(head)
+        sent
     }
 
-    /// One logical request, with the one retry the send path owns: a `GET` or
-    /// `HEAD` reset within [`FAST_RESET_WINDOW`] of being sent. That is a
-    /// pooled connection the server closed just as the request left. `hyper`
-    /// drops a connection that errored, so the retry goes out on another one.
+    /// One hop with the one retry the send path owns: a `GET` or `HEAD` reset
+    /// within [`FAST_RESET_WINDOW`] of being sent. That is a pooled
+    /// connection the server closed just as the request left. `hyper` drops a
+    /// connection that errored, so the retry goes out on another one.
     async fn dispatch(
         &self,
         client: &reqwest::Client,
-        outgoing: Outgoing,
+        request: Outgoing<Bytes>,
     ) -> Result<reqwest::Response, TransportError> {
-        let request = build_request(client, outgoing)?;
+        let request = request.build(client)?;
         let again = if matches!(*request.method(), Method::GET | Method::HEAD) {
             request.try_clone()
         } else {
             None
         };
-        Counters::bump(&self.counters.requests_sent);
         let started = Instant::now();
         let result = match client.execute(request).await {
             Err(err) if started.elapsed() < FAST_RESET_WINDOW && is_reset_failure(&err) => {
@@ -260,13 +394,13 @@ impl Transport {
     /// The next chunk of a body, or `None` at its end. The entry leaves the
     /// table at the end, on an error, and on a cancel.
     pub(crate) async fn read_body(&self, key: &Key) -> Result<Option<Vec<u8>>, TransportError> {
-        let (mut response, cancel) = {
+        let (mut response, cancel, generation) = {
             let mut table = lock(&self.table);
             let Some(entry) = table.entries.get_mut(key) else {
                 return Err(TransportError::new(Kind::Cancelled));
             };
             match std::mem::replace(&mut entry.body, Body::Reading) {
-                Body::Ready(response) => (response, entry.cancel.clone()),
+                Body::Ready(response) => (response, entry.cancel.clone(), entry.generation),
                 // A read while another is outstanding, or before headers:
                 // the binding pulls one chunk at a time, after `send`.
                 other => {
@@ -285,17 +419,17 @@ impl Transport {
         let mut table = lock(&self.table);
         match chunk {
             Ok(Some(bytes)) => {
-                if let Some(entry) = table.entries.get_mut(key) {
+                if let Some(entry) = table.entry(key, generation) {
                     entry.body = Body::Ready(response);
                 }
                 Ok(Some(bytes.to_vec()))
             }
             Ok(None) => {
-                table.entries.remove(key);
+                table.remove(key, generation);
                 Ok(None)
             }
             Err(err) => {
-                table.entries.remove(key);
+                table.remove(key, generation);
                 Err(classify_body(&err))
             }
         }
@@ -358,39 +492,43 @@ impl Transport {
     }
 }
 
-fn build_request(
-    client: &reqwest::Client,
-    outgoing: Outgoing,
-) -> Result<reqwest::Request, TransportError> {
-    let Outgoing {
-        method,
-        url,
-        mut headers,
-        body,
-    } = outgoing;
-    // https://fetch.spec.whatwg.org/#http-network-or-cache-fetch step 18,
-    // which `tauri-plugin-http` also follows.
-    if headers.contains_key(header::RANGE) {
-        headers.insert(
-            header::ACCEPT_ENCODING,
-            header::HeaderValue::from_static("identity"),
-        );
+fn is_http(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+}
+
+impl Outgoing<Bytes> {
+    fn build(self, client: &reqwest::Client) -> Result<reqwest::Request, TransportError> {
+        let Self {
+            method,
+            url,
+            mut headers,
+            body,
+        } = self;
+        // https://fetch.spec.whatwg.org/#http-network-or-cache-fetch step 18,
+        // which `tauri-plugin-http` also follows.
+        if headers.contains_key(header::RANGE) {
+            headers.insert(
+                header::ACCEPT_ENCODING,
+                header::HeaderValue::from_static("identity"),
+            );
+        }
+        // A `POST` or `PUT` without a body still says `Content-Length: 0`, as
+        // `fetch` does. hyper sends no length for an empty body, so it is set
+        // here.
+        if body.is_none() && matches!(method, Method::POST | Method::PUT) {
+            headers.insert(
+                header::CONTENT_LENGTH,
+                header::HeaderValue::from_static("0"),
+            );
+        }
+        let mut builder = client.request(method, url).headers(headers);
+        if let Some(body) = body {
+            builder = builder.body(body);
+        }
+        builder
+            .build()
+            .map_err(|_| TransportError::new(Kind::Other))
     }
-    // A `POST` or `PUT` without a body still says `Content-Length: 0`, as
-    // `fetch` does. hyper sends no length for an empty body, so it is set here.
-    if body.is_none() && matches!(method, Method::POST | Method::PUT) {
-        headers.insert(
-            header::CONTENT_LENGTH,
-            header::HeaderValue::from_static("0"),
-        );
-    }
-    let mut builder = client.request(method, url).headers(headers);
-    if let Some(body) = body {
-        builder = builder.body(body);
-    }
-    builder
-        .build()
-        .map_err(|_| TransportError::new(Kind::Other))
 }
 
 fn head_of(response: &reqwest::Response, method: &Method) -> Head {
