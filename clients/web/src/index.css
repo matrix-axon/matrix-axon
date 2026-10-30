@@ -6984,6 +6984,12 @@ button.custom-emoji-refresh {
   flex-shrink: 0;
 }
 
+.sticker-picker-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
 .emoji-picker-entry > .composer-attach-icon {
   display: none;
 }
