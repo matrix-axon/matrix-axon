@@ -1,7 +1,7 @@
 name: iOS sharing foundation
 on:
   pull_request:
-    paths:
+    paths: &sharing-paths
       - clients/web/src-tauri/incoming-share/**
       - clients/web/src-tauri/share-probe/**
       - clients/web/src-tauri/native-auth/ios/**
@@ -14,6 +14,7 @@ on:
       - .github/workflows/ios-sharing.yml
   push:
     branches: [main]
+    paths: *sharing-paths
   workflow_dispatch:
 permissions:
   contents: read
