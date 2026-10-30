@@ -126,6 +126,7 @@ export interface SecureStorage extends Storage {
 }
 
 export interface Platform {
+  incomingShare?: import('../incoming-share/types').IncomingSharePort | null
   /**
    * The HTTP transport. Signature-compatible with the global, because
    * `openapi-fetch` takes it as its `fetch` option and the media service calls

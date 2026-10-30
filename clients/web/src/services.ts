@@ -117,6 +117,11 @@ import {
 } from './stores/update-check'
 import { BUILD_INFO } from './build-info'
 import {
+  createIncomingShareStore,
+  type IncomingShareStore,
+} from './incoming-share/store'
+import { connectIncomingShareSession } from './incoming-share/session'
+import {
   createAttachmentStaging,
   type AttachmentStaging,
 } from './media/attachment-staging'
@@ -128,6 +133,7 @@ import { createBrowserQrAdapter, type BrowserQrAdapter } from './qr/browser-qr'
  * an in-memory storage; components never construct services themselves.
  */
 export interface AppServices {
+  incomingShares?: IncomingShareStore | null
   auth: CompositeAuthProvider
   api: ApiClient
   settings: SettingsStore
@@ -1655,6 +1661,28 @@ export function createServices(
     enabled: platform.updatesFromOrigin,
   })
   const timelines = createTimelineStoreCache(api, media)
+  const incomingShares =
+    platform.incomingShare == null
+      ? null
+      : createIncomingShareStore(
+          platform.incomingShare,
+          api,
+          timelines,
+          async () => await auth.getToken(),
+        )
+  if (
+    incomingShares !== null &&
+    platform.incomingShare != null &&
+    platform.secureStorage !== null
+  ) {
+    connectIncomingShareSession(
+      platform.incomingShare,
+      incomingShares,
+      auth,
+      platform.secureStorage,
+      baseUrl,
+    )
+  }
   const attachments = createAttachmentStaging()
   const settings = createSettingsStore(storage)
   // Instrumentation has to be live *before* anything worth measuring happens.
@@ -1669,7 +1697,11 @@ export function createServices(
   if (settings.perfMarks.peek()) {
     setPerfEnabled(true)
   }
-  const accounts = createAccountsStore(api)
+  const accounts = createAccountsStore(
+    api,
+    (accountId) =>
+      incomingShares?.invalidateAccount(accountId) ?? Promise.resolve(),
+  )
   const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
     storage: sessionStorage,
   })
@@ -1894,6 +1926,7 @@ export function createServices(
     composerFocus,
     platform,
     remotePushError,
+    incomingShares,
   }
 }
 

@@ -91,7 +91,7 @@ Images load as their cards approach the viewport, with a 2 MiB download ceiling;
 Temporary media failures offer **Retry image** and retry after reconnect without navigating to the article.
 Large plain source images can still use bounded server thumbnails; encrypted originals retain their stricter metadata limits.
 Cards never fetch the linked webpage or an external image URL.
-Preview authoring and opt-in generation are not yet exposed in the web composer; the server [send and generation APIs](../../docs/bundled-link-previews.md) are available to other callers.
+Preview authoring and opt-in generation are not yet exposed in the ordinary web composer; the iOS [pending-share recovery surface](../../docs/ios-sharing-foundation.md) provides explicit preview generation, removal, and durable recovery.
 Formatted messages containing spoilers omit preview cards, even after the spoiler is revealed.
 Malformed or oversized preview metadata is ignored.
 

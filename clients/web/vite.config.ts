@@ -453,6 +453,17 @@ function isAlive(pid: number): boolean {
 }
 
 export default defineConfig({
+  build:
+    process.env.AXON_SHARE_E2E === '1'
+      ? {
+          rollupOptions: {
+            input: {
+              main: join(webClientDir, 'index.html'),
+              incoming: join(webClientDir, 'e2e/incoming-share.html'),
+            },
+          },
+        }
+      : undefined,
   plugins: [
     preact(),
     thirdPartyLicenses(),
