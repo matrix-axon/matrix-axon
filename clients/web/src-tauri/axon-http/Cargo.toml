@@ -1,0 +1,59 @@
+# The shell's HTTP transport: one pooled `reqwest::Client` for every `/v1` and
+# media request (ADR 0127), replacing `tauri-plugin-http`'s client per request.
+#
+# A plugin rather than code in the app crate so that its commands get their own
+# permission set, as `native-auth` and `remote-push` do. It lives inside the
+# shell's workspace directory, so it is a member of that workspace implicitly
+# and shares its lockfile. Never published.
+[package]
+name = "tauri-plugin-axon-http"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+publish = false
+# Required by `tauri-plugin`: the app's build script finds this plugin's
+# permission manifests through the `DEP_TAURI_PLUGIN_AXON_HTTP_*` variables
+# that `links` makes Cargo export.
+links = "tauri-plugin-axon-http"
+
+[dependencies]
+# Only to recognise HTTP/2 `REFUSED_STREAM` and graceful `GOAWAY` in an error
+# chain (ADR 0127 § 7). The same 0.4 that reqwest links, so the downcast sees
+# reqwest's own type.
+h2 = "0.4"
+# Only to recognise a connection closed under a request (`is_incomplete_message`)
+# in an error chain. No features of its own: reqwest's decide what is built.
+hyper = { version = "1", default-features = false }
+percent-encoding = "2"
+# The features `tauri-plugin-http` 2.5 turns on by default, minus cookies and
+# charset, which nothing here uses. `macos-system-configuration` is what makes
+# the system proxy apply on macOS (and Windows, through `system-proxy`), so the
+# proxy behaviour matches the plugin's by construction.
+reqwest = { version = "0.12", default-features = false, features = [
+  "http2",
+  "macos-system-configuration",
+  "rustls-tls",
+] }
+# Only to name certificate errors for `detail` (ADR 0127 § 4). No default
+# features: those would compile in aws-lc-rs next to the ring provider reqwest
+# already uses.
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["macros", "net", "sync"] }
+tokio-util = "0.7"
+tower-layer = "0.3"
+tower-service = "0.3"
+
+[dev-dependencies]
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

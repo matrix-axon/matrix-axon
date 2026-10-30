@@ -1,0 +1,12 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, and read the connection counters. Any `http` or `https` URL is reachable, the same reach `http:default` grants today (ADR 0127 § 8)."
+permissions = [
+  "allow-send",
+  "allow-read-body",
+  "allow-cancel",
+  "allow-drop-body",
+  "allow-reset",
+  "allow-stats",
+]

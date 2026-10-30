@@ -74,6 +74,25 @@ The client is built with:
 One client serves every host.
 `reqwest` pools per host, so a server URL change or a second account on another server needs nothing special.
 
+**A second client for origins known to speak HTTP/2** (added during implementation).
+Negotiating by ALPN means `hyper-util` cannot know a server speaks HTTP/2 until a handshake has finished.
+Until then, a burst of requests to a cold pool opens one TCP and TLS connection per request.
+The first to negotiate `h2` is kept and the rest are discarded, but every one of them was a handshake.
+Only a client built HTTP/2-only takes `hyper-util`'s per-origin connecting lock, which holds every request in the burst until the first connection is ready.
+Measured against an in-process server, ten concurrent requests after a `reset` opened ten connections on the negotiating client and one on the HTTP/2-only client.
+Since § 6 resets on every resume, that difference repeats with every resume.
+
+So the plugin builds two clients with the settings above.
+One negotiates by ALPN, offering `h2` and `http/1.1`.
+The other offers only `h2`.
+An `https` origin moves to the HTTP/2-only client once a response from it arrives over HTTP/2.
+It moves back on any failure there once a connection existed, because a server that stops offering HTTP/2 shows up as one: a TLS alert, or, from a server that ignores the ALPN offer, an HTTP/1.1 answer to the HTTP/2 preface that reads as a `reset`.
+That failure is the one request such a server costs.
+A cancel, `connect_timeout`, `refused` or `dns` leaves the origin where it is: those say nothing about the server, and on a network that drops new connections, moving back would bring back the burst.
+The set of known origins describes servers, not connections, so it survives a `reset`.
+Plain `http` never moves, because there is no ALPN to negotiate.
+First contact in each run of the app still pays the burst once.
+
 ### 2. Commands keep the plugin's request lifecycle
 
 The command surface mirrors the plugin's, so abort and streamed bodies carry over without redesign:
@@ -89,6 +108,7 @@ The command surface mirrors the plugin's, so abort and streamed bodies carry ove
 
 Entries leave the table on body end, error, cancel or drop.
 A response known to be empty is never stored at all: a null-body status (101, 103, 204, 205, 304), any response to `HEAD`, and `Content-Length: 0`.
+`send` says so with `body: false`, so the binding builds a null-body `Response` without repeating the rule.
 A body that turns out to be empty in any other way (a chunked `200` with no data) leaves on the first `read_body`, which finds its end.
 As a backstop, the binding registers each `Response` with a `FinalizationRegistry` that calls `drop_body`, so a response discarded unread still leaves the table once it is collected.
 The number of live entries is exposed (§ 5), so a leak shows up as a number that keeps growing.
@@ -137,7 +157,8 @@ So `api/client.ts`'s abort handling is unchanged, and an abort is never logged a
 ### 6. A fresh client after resume
 
 When the app returns to the foreground, or the webview fires `online`, the binding calls `reset`.
-That swaps in a newly built client, while requests already in flight finish on the old one.
+That swaps in newly built clients (both of § 1's), while requests already in flight finish on the old ones.
+The origins known to speak HTTP/2 are kept, so the first burst after resume opens one connection.
 
 Each table entry owns what its request needs, including a handle to the client it was sent on.
 So `cancel` and `read_body` reach a request on the old client without consulting the current one, and the old client lives until its last entry leaves.
@@ -268,6 +289,7 @@ It helps, but every remaining request still pays a handshake, and the app would 
   On macOS: `lsof -nP -iTCP -a -p "$(pgrep -x axon)"`.
   On Linux: `ss -tnp | grep axon`.
   Expect one to the server plus the WebSocket, where today's build shows a new connection per request in `TIME_WAIT`.
+  On first contact the negotiating client's connection is briefly a second one; it closes after the 25-second idle timeout.
 - **The failure mode, reproduced.**
   On a Linux test box, rate-limit new connections to a local axon:
 
@@ -294,6 +316,7 @@ It helps, but every remaining request still pays a handshake, and the app would 
   Android's raw-payload IPC path differs from iOS's and has to be measured, not assumed.
 - **Rust tests**, against an in-process server that counts accepted connections:
   - N requests share one connection, both over HTTP/1.1 keep-alive and over HTTP/2.
+  - After a `reset`, a burst of concurrent requests to an origin known to speak HTTP/2 opens one connection, and an origin that stops offering HTTP/2 goes back to negotiating.
   - A cancel before headers and a cancel mid-body each release their entries.
   - Empty bodies never linger: a `HEAD`, a `204`, a `200` with `Content-Length: 0`, and a chunked `200` with no data each leave the live count at zero.
   - Across a `reset`, a request in flight on the old client can still be read and cancelled, and the counters keep their values.
