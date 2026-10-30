@@ -32,7 +32,9 @@ if (device === undefined)
   )
 if (device.state !== 'Booted')
   run('xcrun', ['simctl', 'boot', device.udid], 30_000)
-run('xcrun', ['simctl', 'bootstatus', device.udid, '-b'], 120_000)
+// A fresh CI simulator migrates OS data on first boot; allow the same bounded
+// five-minute budget as the test build instead of timing out mid-migration.
+run('xcrun', ['simctl', 'bootstatus', device.udid, '-b'])
 const project = {
   name: 'SharingFoundationTests',
   options: { deploymentTarget: { iOS: '15.0' } },
