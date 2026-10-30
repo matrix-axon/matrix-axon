@@ -12,24 +12,44 @@ const source = fileURLToPath(
 const output = mkdtempSync(join(tmpdir(), 'axon-sharing-simulator-'))
 const run = (command, args, timeout = 300_000) =>
   execFileSync(command, args, { stdio: 'inherit', timeout })
-const devices = Object.values(
+const sdk = execFileSync(
+  'xcrun',
+  ['--sdk', 'iphonesimulator', '--show-sdk-version'],
+  {
+    encoding: 'utf8',
+    timeout: 15_000,
+  },
+).trim()
+const devices = Object.entries(
   JSON.parse(
     execFileSync('xcrun', ['simctl', 'list', 'devices', 'available', '-j'], {
       encoding: 'utf8',
       timeout: 15_000,
     }),
   ).devices,
-).flat()
+).flatMap(([runtime, devices]) =>
+  devices.map((device) => ({ ...device, runtime })),
+)
 const requested = process.env.AXON_SHARING_SIMULATOR
+const phones = devices.filter((device) => device.name.startsWith('iPhone'))
+const matching = phones.filter(
+  (device) =>
+    device.runtime.split('.iOS-')[1]?.split('-').slice(0, 2).join('.') ===
+    sdk.split('.').slice(0, 2).join('.'),
+)
 const device = requested
   ? devices.find((device) => device.udid === requested)
-  : (devices.find(
-      (device) => device.state === 'Booted' && device.name.startsWith('iPhone'),
-    ) ?? devices.find((device) => device.name.startsWith('iPhone')))
+  : (matching.find((device) => device.state === 'Booted') ??
+    matching[0] ??
+    phones.find((device) => device.state === 'Booted') ??
+    phones[0])
 if (device === undefined)
   throw new Error(
     'No available iPhone simulator. Install an iOS runtime in Xcode; optionally set AXON_SHARING_SIMULATOR to its UDID.',
   )
+console.log(
+  `Simulator SDK ${sdk}; selected ${device.name} (${device.runtime}).`,
+)
 if (device.state !== 'Booted')
   run('xcrun', ['simctl', 'boot', device.udid], 30_000)
 // A fresh CI simulator migrates OS data on first boot; allow the same bounded
