@@ -127,10 +127,12 @@ Any live send must target the dedicated **Axon Testing** room (`!SScJmZuEkBUnuyd
 The exported-artifact checker verifies signed entitlements against embedded profiles, app/extension versions, default ATS protections, and probe embedding.
 Verify upgrades from a previously installed build preserve login, session-only login remains unavailable to the extension, and sign-out/server/account changes fence outstanding operations.
 Verify removal/reinstall and extension access before the first app launch do not consume inherited Keychain credentials.
-Record actual installation-marker behavior on iPhone; a simulator or a successful signature alone does not establish it.
+Record actual installation-marker behavior on a signed physical device; a simulator or a successful signature alone does not establish it.
 Exercise cold/warm/suspended app states, process termination during import/upload/dispatch, offline and rejected authentication, quota/low-storage failure, and competing consumers.
 Repeat recovery layout, multitasking, VoiceOver, and Dynamic Type checks on the signed iPhone and iPad.
-Until that matrix is recorded, foundation implementation does not establish native-device acceptance or close issue [817](https://github.com/matrix-axon/matrix-axon/issues/817).
+Foundation acceptance requires the signed session, upgrade, sign-out, installation-marker, and durable recovery results, together with the automated boundary tests in issue [817](https://github.com/matrix-axon/matrix-axon/issues/817).
+Actual provider ingestion, native extension composition, and extension transfer/resource acceptance remain gates for the subsequent text/rich-link and media stages.
+The broader matrix above remains the device checklist for those stages; a development probe does not establish their acceptance.
 
 For the updated build, prioritize these manual checks:
 
@@ -151,7 +153,7 @@ On the linked iPhone, the signed probe reported an accessible App Group, initial
 The user created a synthetic draft in the extension, found it in Pending shares, and explicitly sent it successfully.
 This establishes actual cross-process session access and the recovery-to-send path on the phone.
 That user-run check predates the review fixes; repeat sign-out, resume, and recovery acceptance on the updated build.
-The signed app also installed on the linked iPad; its recovery UI and accessibility checks remain pending.
+The signed app also installed on the linked iPad; subsequent recovery checks are recorded below.
 The final probe build installed on both devices.
 Clean project regeneration and signed IPA export passed for both the probe configuration and the default release configuration using the debugging export method.
 The exported-artifact checks verified App Group and Keychain entitlements against provisioning profiles; the default IPA contains no extension bundle.
@@ -162,3 +164,37 @@ The unchanged server's preview contract and generation fixtures also passed agai
 The earlier broader desktop browser run passed 734 tests with 30 skipped and three WebKit failures; isolated reruns passed two of those failures.
 The remaining attachment-download event failure also reproduces on the untouched base commit `5b94c613` on this Mac.
 These browser results do not replace the signed-device interruption, reinstall, low-storage, and accessibility checks above.
+
+## Physical automation follow-up
+
+On the installed development build, an unlocked iPhone running iOS 27.0.1 accepted a synthetic draft through the real native bridge and protected App Group store.
+Typing through the recovery UI produced one saved edit revision rather than a native write per character.
+Keep draft and reopening preserved the edited text, with no send attempted.
+The measured view was 440 points wide, had no horizontal overflow, and exposed a 44-point Keep draft control.
+
+Ordinary backgrounding in this debugging setup preserved the draft but continued lease renewals, so elapsed background time alone did not establish ownership expiry.
+After a deliberately suspended process was later no longer running, relaunch recovered the saved text and claimed the record after its old lease expired.
+This is a cold-recovery result; it does not establish that the original editor survived in the same process.
+An explicit subsequent kill/relaunch also retained the draft: claiming it was correctly refused while the old lease remained valid, and review succeeded after expiry.
+The record stayed ready throughout, with its edited text intact and no dispatch recorded.
+The synthetic record was explicitly discarded after verification, and Axon was left running normally.
+
+The on-device accessibility audit reported no element-description or text-clipping issues on the audited recovery screen, plus one hit-region advisory in the header area at `{{60, 85}, {26, 18}}`.
+That advisory remains unclassified; this is not full accessibility acceptance.
+The host's memory-warning command failed with `NSPOSIXErrorDomain 2`, so no delivered memory-warning result is claimed.
+A same-process debugger-pause test could not be verified with this inspector driver; the unit and browser expiry checks remain the evidence for that specific editor path.
+Any automation that suspends an app must provide an independent automatic-resume deadline rather than rely on a later interactive turn.
+
+Both physical devices launched Axon and reported an unlocked state.
+After Web Inspector was enabled, the iPad passed genuine native draft creation, batched editing (one saved edit revision), Keep draft, and reopen checks.
+Its full-screen viewport measured 1,376 by 1,032 points without horizontal overflow.
+A temporary signed XCUITest runner used the existing development-probe identity and only its App Group/shared Keychain entitlements; the main app was upgraded to a development build without the embedded probe during this check.
+The separate process confirmed an initialized descriptor, usable access credential, and shared Keychain item.
+A real tap and native typing reached the synthetic recovery editor; XCTest confirmed one visible keyboard, a hittable editor, and a hittable 45-point Keep draft control.
+Programmatic focus alone had not opened the keyboard, so it was not used as evidence for this result.
+
+One synthetic recovery message was sent successfully to Axon Testing and its local record was acknowledged.
+An attempted response interception did not modify Tauri's immutable invocation function, so that successful send is not evidence of a network interruption.
+A separate synthetic record was advanced through the real native bridge to a durable dispatch checkpoint before process termination, without making a network request.
+This distinguishes physical crash-checkpoint recovery from an interrupted live transfer.
+Full VoiceOver use, Dynamic Type, split-view interaction, and real extension transfer interruption remain later-stage device checks.
