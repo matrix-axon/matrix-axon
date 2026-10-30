@@ -50,6 +50,19 @@ export interface IncomingSharePort {
   subscribe(listener: () => void): () => void
 }
 
+export function shareOperations(record: IncomingShare): ShareOperation[] {
+  const files = record.files.flatMap((file) =>
+    file.operation === undefined ? [] : [file.operation],
+  )
+  return files.length === 0 ? [record.operation] : files
+}
+
+export function shareCompleted(record: IncomingShare): boolean {
+  return shareOperations(record).every(
+    (operation) => operation.state === 'sent',
+  )
+}
+
 /** Reject unsupported/corrupt records without acknowledging their contents. */
 export function isIncomingShare(value: unknown): value is IncomingShare {
   if (typeof value !== 'object' || value === null) return false

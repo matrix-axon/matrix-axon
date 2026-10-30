@@ -16,12 +16,14 @@ export function connectIncomingShareSession(
   let previous = auth.sessionId.peek()
   let generation = 0
   let tail = Promise.resolve()
+  let signingOut: string | null = null
   store.setSessionReady(() => tail)
   const publish = () => {
     const identity = auth.sessionId.value
     const token = auth.peekToken()
     const signedIn = auth.signedIn.value
     const replace = previous !== identity
+    if (signingOut !== identity) signingOut = null
     previous = identity
     const current = ++generation
     if (replace) store.reset()
@@ -44,6 +46,8 @@ export function connectIncomingShareSession(
         /* An invalid stored value grants no extension access. */
       }
     } else if (storage.getItem('axon.token') === token) persisted = token
+    const publishedToken =
+      signedIn && signingOut !== identity ? persisted : null
     tail = tail
       .catch(() => {})
       .then(async () => {
@@ -53,7 +57,7 @@ export function connectIncomingShareSession(
         // Identity invalidations must not be skipped by a subsequent refresh.
         await port.call('publish', {
           server,
-          token: signedIn ? persisted : null,
+          token: publishedToken,
           expiresAt,
           replace: false,
         })
@@ -66,21 +70,21 @@ export function connectIncomingShareSession(
     })
   }
   const stop = effect(publish)
-  const unsubscribe = port.subscribe(() => {
-    void tail.then(
-      () => store.refresh(),
-      () => {},
-    )
-  })
   const removeHook = auth.onBeforeSignOut(async () => {
+    signingOut = auth.sessionId.peek()
     store.reset()
     // Fence native dispatch before finishing the main-app sign-out.
     await tail.catch(() => {})
-    await port.call('publish', { server, token: null, replace: true })
+    try {
+      await port.call('invalidate')
+    } catch (cause) {
+      store.error.value =
+        'Could not disable shared access. Keep Axon open and retry signing out.'
+      throw cause
+    }
   })
   return () => {
     stop()
-    unsubscribe()
     removeHook()
     generation += 1
   }

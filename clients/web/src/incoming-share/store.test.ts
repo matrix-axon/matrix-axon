@@ -81,6 +81,124 @@ function fixture(
 }
 
 describe('durable incoming-share recovery', () => {
+  it('a delayed list cannot replace a newer editor revision', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    const snapshot = structuredClone(f.record())
+    let finish!: (records: IncomingShare[]) => void
+    const original = f.port.call
+    f.port.call = async (action, args) => {
+      if (action === 'list')
+        return (await new Promise<IncomingShare[]>((resolve) => {
+          finish = resolve
+        })) as never
+      return original(action, args)
+    }
+    const reading = f.store.refresh()
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    await f.store.edit('newer text')
+    await f.store.flushEdits()
+    finish([snapshot])
+    await reading
+    expect(f.store.selected.value?.revision).toBe(f.record().revision)
+    expect(f.store.editorText.value).toBe('newer text')
+  })
+
+  it('coalesces typing and flushes the latest text before Send', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    for (let i = 0; i < 200; i++) await f.store.edit(`caption ${i}`)
+    expect(f.calls.filter((call) => call.action === 'update')).toHaveLength(0)
+    expect(f.store.editorText.value).toBe('caption 199')
+    await f.store.send()
+    expect(f.post.mock.calls[0][1].body.body).toBe('caption 199')
+    expect(f.calls.filter((call) => call.action === 'update')).toHaveLength(3)
+  })
+  it('flushes draft edits on close and invalidates delayed edits on reset', async () => {
+    vi.useFakeTimers()
+    try {
+      const f = fixture()
+      await f.store.open('share')
+      await f.store.edit('kept draft')
+      await f.store.close()
+      expect(f.record().text).toBe('kept draft')
+      await f.store.open('share')
+      await f.store.edit('must not reappear')
+      const before = f.calls.length
+      f.store.reset()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(f.calls).toHaveLength(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('saves after idle and retains unsaved text across ownership expiry', async () => {
+    vi.useFakeTimers()
+    try {
+      const f = fixture()
+      await f.store.open('share')
+      await f.store.edit('saved after idle')
+      await vi.advanceTimersByTimeAsync(250)
+      expect(f.record().text).toBe('saved after idle')
+      await f.store.edit('unsaved on resume')
+      f.seed({ owner: undefined })
+      await f.store.refresh()
+      expect(f.store.editorText.value).toBe('unsaved on resume')
+      await f.store.flushEdits()
+      expect(f.record().text).toBe('unsaved on resume')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('rejects a ninth preview before generation or retention', async () => {
+    const f = fixture()
+    f.seed({
+      previews: Array.from({ length: 8 }, (_, i) => ({
+        matched_url: `https://example.org/${i}`,
+        provenance: 'source' as const,
+      })),
+    })
+    await f.store.open('share')
+    await f.store.generate('https://example.org/ninth')
+    expect(f.post).not.toHaveBeenCalled()
+    expect(f.calls.some((call) => call.action === 'retain')).toBe(false)
+    expect(f.store.error.value).toContain('limit')
+  })
+  it('explains unavailable rooms and preserves HTTP drafts without a send', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    vi.mocked(f.api.GET).mockResolvedValueOnce({ data: { data: [] } } as never)
+    await f.store.send()
+    expect(f.store.error.value).toContain('room is no longer available')
+    const original = f.port.call
+    f.port.call = async (action, args) => {
+      if (action === 'check_transport') throw { code: 'httpsRequired' }
+      return original(action, args)
+    }
+    await f.store.send()
+    expect(f.store.error.value).toContain('requires an HTTPS server')
+    expect(f.post).not.toHaveBeenCalled()
+    expect(f.store.selected.value).not.toBeNull()
+  })
+
+  it('explains an empty destination without recommending authentication', async () => {
+    const f = fixture()
+    f.seed({ roomId: '' })
+    await f.store.open('share')
+    await f.store.send()
+    expect(f.store.error.value).toContain(
+      'Choose a sending account and joined room',
+    )
+    expect(f.post).not.toHaveBeenCalled()
+  })
+  it('refresh reclaims expired ownership without sending', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    f.seed({ owner: undefined })
+    await f.store.refresh()
+    expect(f.calls.filter((call) => call.action === 'claim')).toHaveLength(2)
+    expect(f.post).not.toHaveBeenCalled()
+  })
   it('main-app session-only uploads pass credentials transiently without publishing them', async () => {
     const f = fixture('ready', async () => 'one-time-access')
     f.seed({
@@ -287,8 +405,10 @@ describe('durable incoming-share recovery', () => {
       },
     ]
     await f.store.edit('Some text https://example.org')
+    await f.store.flushEdits()
     expect(f.record().previews).toHaveLength(1)
     await f.store.edit('https://example.org/new')
+    await f.store.flushEdits()
     expect(f.record().previews).toEqual([])
   })
   it('a stale enumeration cannot repopulate signed-out content', async () => {
@@ -307,6 +427,7 @@ describe('durable incoming-share recovery', () => {
       createTimelineStoreCache(f.api, {} as MediaService),
     )
     const reading = store.refresh()
+    await Promise.resolve()
     store.reset()
     resolve([f.initial])
     await reading

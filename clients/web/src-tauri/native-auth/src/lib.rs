@@ -88,10 +88,20 @@ impl From<tauri::plugin::mobile::PluginInvokeError> for Error {
                     .message
                     .unwrap_or_else(|| "native sign-in failed".into()),
             },
-            _ => Self {
-                code: None,
+            PluginInvokeError::UnreachableWebview => Self {
+                code: Some("unreachable_webview".into()),
                 kind: ErrorKind::Failed,
-                message: "native operation failed".into(),
+                message: "native webview is unavailable".into(),
+            },
+            PluginInvokeError::CannotDeserializeResponse(_) => Self {
+                code: Some("invalid_response".into()),
+                kind: ErrorKind::Failed,
+                message: "native response could not be decoded".into(),
+            },
+            PluginInvokeError::CannotSerializePayload(_) => Self {
+                code: Some("invalid_request".into()),
+                kind: ErrorKind::Failed,
+                message: "native request could not be encoded".into(),
             },
         }
     }

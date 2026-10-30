@@ -4,6 +4,15 @@ import XCTest
 @testable import AxonIncomingShare
 
 final class ContractTests: XCTestCase {
+  func testEquivalentURLsAreDuplicates() {
+    for other in ["https://example.org/", "https://EXAMPLE.org:443/"] {
+      XCTAssertEqual(
+        PreviewContract.check([
+          "body": "https://example.org " + other,
+          "url_previews": [["matched_url": "https://example.org"], ["matched_url": other]],
+        ]), "invalid")
+    }
+  }
   func testPortableLocalManifestRoundTrip() throws {
     let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
       .appendingPathComponent("../../../../src/incoming-share/fixtures/manifest-v1.json")

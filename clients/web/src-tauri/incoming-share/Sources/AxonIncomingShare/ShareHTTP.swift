@@ -31,6 +31,9 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     method: String = "GET", body: Data? = nil, file: URL? = nil,
     mime: String? = nil, limit: Int = 256 * 1024
   ) throws -> (Int, Data) {
+    guard URL(string: descriptor.server)?.scheme == "https" else {
+      throw ShareFailure.httpsRequired
+    }
     try SharedSession.validateToken(token)
     guard (mime?.utf8.count ?? 0) <= 128,
       mime?.rangeOfCharacter(from: .controlCharacters) == nil

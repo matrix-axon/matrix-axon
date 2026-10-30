@@ -1,9 +1,10 @@
-import { signal } from '@preact/signals'
+import { computed, signal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
 import type { TimelineStoreCache } from '../stores/timeline-cache'
 import type { SendProgress } from '../stores/timeline'
 import { matchUrls } from '../html/linkify'
 import { previewPreflight, type PreviewInput } from './contract'
+import { shareCompleted, shareOperations } from './types'
 import type {
   IncomingShare,
   IncomingSharePort,
@@ -27,6 +28,50 @@ export function createIncomingShareStore(
   let tail: Promise<void> = Promise.resolve()
   let sessionReady = () => Promise.resolve()
   let stopRequested = false
+  const drafts = signal<Record<string, string>>({})
+  const editorText = computed(() => {
+    const record = selected.value
+    return record === null ? '' : (drafts.value[record.id] ?? record.text)
+  })
+  let flushingEdit:
+    { id: string; text: string; promise: Promise<void> } | undefined
+  let editTimer: ReturnType<typeof setTimeout> | undefined
+  let editDeadline: ReturnType<typeof setTimeout> | undefined
+  const problem = (code: string) => Object.assign(new Error(code), { code })
+  function clearEditTimers() {
+    clearTimeout(editTimer)
+    clearTimeout(editDeadline)
+    editTimer = undefined
+    editDeadline = undefined
+  }
+  async function flushEdits() {
+    clearEditTimers()
+    const id = selected.peek()?.id
+    if (id === undefined) return
+    const text = drafts.peek()[id]
+    if (text === undefined) return
+    if (flushingEdit?.id === id && flushingEdit.text === text)
+      return flushingEdit.promise
+    const urls = new Set(matchUrls(text).map((match) => match.url))
+    const promise = change((record) => ({
+      ...record,
+      text,
+      previews: record.previews?.filter((preview) =>
+        urls.has(preview.matched_url),
+      ),
+    }))
+    flushingEdit = { id, text, promise }
+    try {
+      await promise
+    } finally {
+      if (flushingEdit?.promise === promise) flushingEdit = undefined
+    }
+    if (drafts.peek()[id] === text) {
+      const next = { ...drafts.peek() }
+      delete next[id]
+      drafts.value = next
+    }
+  }
 
   function describeFailure(cause: unknown) {
     const code =
@@ -34,6 +79,16 @@ export function createIncomingShareStore(
         ? cause.code
         : null
     const messages: Record<string, string> = {
+      destination: 'Choose a sending account and joined room before sending.',
+      incomplete:
+        'Some items could not be imported. Discard this share and import the intended selection again.',
+      room: 'This room is no longer available for the selected account. Choose a current joined room.',
+      authentication:
+        'Open Axon and sign in or refresh your session before resuming.',
+      httpsRequired:
+        'Native sharing requires an HTTPS server. This draft is retained; configure HTTPS before sending.',
+      invalidation:
+        'Could not disable shared access. Keep Axon open and retry signing out.',
       missingFile:
         'The retained file is missing or corrupt. Replace or remove its preview, or discard this share.',
       quota:
@@ -49,15 +104,46 @@ export function createIncomingShareStore(
     error.value =
       typeof code === 'string' && messages[code] !== undefined
         ? messages[code]
-        : 'Could not access this pending share. Open Axon, sign in or refresh your session, then retry.'
+        : 'Could not complete this operation. The draft is retained; refresh pending shares and retry.'
   }
   async function refresh() {
     const generation = epoch
+    const reviewed = selected.peek()
+    let reclaiming = false
     try {
+      await tail
       const records = await port.call<IncomingShare[]>('list')
-      if (generation === epoch) pending.value = records
+      if (generation !== epoch) return
+      pending.value = records
+      const current = selected.peek()
+      if (busy.peek() || current === null) return
+      if (current.id !== reviewed?.id || current.owner !== reviewed?.owner)
+        return
+      const fresh = records.find((record) => record.id === current.id)
+      if (fresh !== undefined && fresh.owner === current.owner) {
+        if (fresh.revision > current.revision) selected.value = fresh
+        return
+      }
+      selected.value = null
+      if (fresh !== undefined && fresh.owner === undefined) {
+        reclaiming = true
+        busy.value = true
+        const reclaimed = await port.call<IncomingShare>('claim', {
+          id: current.id,
+        })
+        if (generation === epoch && selected.peek() === null) {
+          selected.value = reclaimed
+          error.value =
+            'Ownership renewed. Review the saved outcomes and draft before sending.'
+        }
+      } else {
+        error.value =
+          'This share changed or another process owns it. Unsaved edits are kept here; reopen the share when it is available.'
+      }
     } catch (cause) {
       if (generation === epoch) describeFailure(cause)
+    } finally {
+      if (reclaiming && generation === epoch) busy.value = false
     }
   }
   function change(
@@ -67,14 +153,14 @@ export function createIncomingShareStore(
     const generation = epoch
     const id = selected.peek()?.id
     const task = tail.then(async () => {
-      if (generation !== epoch) throw new Error('session changed')
+      if (generation !== epoch) throw problem('stale')
       const record = selected.peek()
-      if (record === null || record.id !== id) throw new Error('share changed')
+      if (record === null || record.id !== id) throw problem('stale')
       const next = await port.call<IncomingShare>('update', {
         manifest: update(structuredClone(record)),
         release,
       })
-      if (generation !== epoch) throw new Error('session changed')
+      if (generation !== epoch) throw problem('stale')
       selected.value = next
     })
     tail = task.catch((cause: unknown) => {
@@ -125,6 +211,7 @@ export function createIncomingShareStore(
     if (selected.peek() === null) return
     const generation = epoch
     try {
+      await flushEdits()
       await change((record) => record, true)
     } finally {
       if (generation === epoch) {
@@ -138,6 +225,7 @@ export function createIncomingShareStore(
     const generation = epoch
     busy.value = true
     try {
+      clearEditTimers()
       await tail
       const abandoned =
         selected.peek()?.id === id
@@ -150,6 +238,9 @@ export function createIncomingShareStore(
       if (abandoned !== undefined && abandoned !== null)
         void cleanup(abandoned, generation)
       if (generation === epoch) {
+        const kept = { ...drafts.peek() }
+        delete kept[id]
+        drafts.value = kept
         if (selected.peek()?.id === id) selected.value = null
         await refresh()
       }
@@ -160,12 +251,7 @@ export function createIncomingShareStore(
     }
   }
   async function cleanup(record: IncomingShare, generation: number) {
-    const operations = [
-      record.operation,
-      ...record.files.flatMap((file) =>
-        file.operation === undefined ? [] : [file.operation],
-      ),
-    ]
+    const operations = shareOperations(record)
     if (
       record.accountId === undefined ||
       operations.some((operation) =>
@@ -206,10 +292,16 @@ export function createIncomingShareStore(
     const generation = epoch
     busy.value = true
     try {
+      await flushEdits()
       await tail
       const record = selected.peek()
-      if (record?.accountId === undefined)
-        throw new Error('destination required')
+      if (!record?.accountId) throw problem('destination')
+      if (
+        (record.previews?.length ?? 0) >= 8 &&
+        !record.previews?.some((p) => p.matched_url === url)
+      )
+        throw problem('quota')
+      await port.call('check_transport')
       const { data } = await api.POST(
         '/v1/accounts/{account_id}/link-previews/generate',
         {
@@ -233,27 +325,26 @@ export function createIncomingShareStore(
         await sessionReady()
         if (generation !== epoch) return
         if (accessToken !== undefined && token == null)
-          throw new Error('authentication required')
+          throw problem('authentication')
         const retained = await port.call<IncomingShare>('retain', {
           id: record.id,
           owner: record.owner,
           accountId: record.accountId,
           uploadId: preview.image_upload_id,
+          preview,
           token,
         })
         if (generation !== epoch) return
-        const file = retained.files.at(-1)
-        if (file === undefined) throw new Error('thumbnail missing')
-        preview.thumbnail = file.id
         selected.value = retained
+      } else {
+        await change((latest) => ({
+          ...latest,
+          previews: [
+            ...(latest.previews ?? []).filter((p) => p.matched_url !== url),
+            preview,
+          ],
+        }))
       }
-      await change((latest) => ({
-        ...latest,
-        previews: [
-          ...(latest.previews ?? []).filter((p) => p.matched_url !== url),
-          preview,
-        ],
-      }))
       error.value = null
     } catch (cause) {
       if (generation === epoch) describeFailure(cause)
@@ -266,7 +357,7 @@ export function createIncomingShareStore(
     const token = await accessToken?.()
     await sessionReady()
     if (current !== epoch || (accessToken !== undefined && token == null))
-      throw new Error('authentication required')
+      throw problem('authentication')
     const record = selected.peek()!
     const generation = epoch
     const result = await port.call<{ uploadId: string }>('upload', {
@@ -276,7 +367,7 @@ export function createIncomingShareStore(
       file: fileId,
       token,
     })
-    if (generation !== epoch) throw new Error('session changed')
+    if (generation !== epoch) throw problem('stale')
     return result.uploadId
   }
   async function send() {
@@ -286,18 +377,12 @@ export function createIncomingShareStore(
     error.value = null
     stopRequested = false
     try {
+      await flushEdits()
       await tail
       await sessionReady()
       let record = selected.peek()
       if (record !== null) {
-        const saved = record.files.flatMap((file) =>
-          file.operation === undefined ? [] : [file.operation],
-        )
-        if (
-          (saved.length === 0 ? [record.operation] : saved).every(
-            (operation) => operation.state === 'sent',
-          )
-        ) {
+        if (shareCompleted(record)) {
           await port.call('ack', { id: record.id, owner: record.owner })
           if (generation === epoch) {
             selected.value = null
@@ -306,12 +391,9 @@ export function createIncomingShareStore(
           return
         }
       }
-      if (
-        record?.accountId === undefined ||
-        record.roomId === undefined ||
-        record.importFailures.length > 0
-      )
-        throw new Error('incomplete selection')
+      if (!record?.accountId || !record.roomId) throw problem('destination')
+      if (record.importFailures.length > 0) throw problem('incomplete')
+      await port.call('check_transport')
       // Confirm against current joined rooms, independent of cached picker names.
       const rooms = await api.GET('/v1/rooms')
       if (generation !== epoch) return
@@ -322,16 +404,13 @@ export function createIncomingShareStore(
             room.account_id === record!.accountId,
         )
       )
-        throw new Error('room unavailable')
+        throw problem('room')
       const attachments = record.files.filter((file) => !file.thumbnail)
       const captionPending =
         attachments.length === 0
           ? record.operation.state !== 'sent'
           : attachments[0].operation?.state !== 'sent'
-      const operations =
-        attachments.length === 0
-          ? [record.operation]
-          : attachments.map((file) => file.operation!)
+      const operations = shareOperations(record)
       if (
         operations.some((operation) =>
           ['unknown', 'dispatching', 'failed'].includes(operation.state),
@@ -477,9 +556,22 @@ export function createIncomingShareStore(
       if (generation === epoch) busy.value = false
     }
   }
+  const unsubscribe = port.subscribe(() => {
+    void sessionReady().then(
+      () => refresh(),
+      () => {},
+    )
+  })
   return {
+    dispose() {
+      unsubscribe()
+      clearEditTimers()
+      epoch += 1
+    },
     pending,
     selected,
+    editorText,
+    flushEdits,
     busy,
     error,
     refresh,
@@ -517,7 +609,7 @@ export function createIncomingShareStore(
           count: Math.min(64 * 1024, file.bytes - offset),
         })
         if (generation !== epoch || selected.peek()?.id !== record.id)
-          throw new Error('session changed')
+          throw problem('stale')
         const chunk = Uint8Array.from(atob(result.bytes), (character) =>
           character.charCodeAt(0),
         )
@@ -536,6 +628,10 @@ export function createIncomingShareStore(
     },
     async invalidateAccount(accountId: string) {
       if (selected.peek()?.accountId === accountId) {
+        clearEditTimers()
+        const kept = { ...drafts.peek() }
+        delete kept[selected.peek()!.id]
+        drafts.value = kept
         epoch += 1
         selected.value = null
         busy.value = false
@@ -547,18 +643,22 @@ export function createIncomingShareStore(
       sessionReady = wait
     },
     async edit(text: string) {
-      const urls = new Set(matchUrls(text).map((match) => match.url))
-      await change((record) => ({
-        ...record,
-        text,
-        previews: record.previews?.filter((p) => urls.has(p.matched_url)),
-      }))
+      const id = selected.peek()?.id
+      if (id === undefined || busy.peek()) return
+      drafts.value = { ...drafts.peek(), [id]: text }
+      clearTimeout(editTimer)
+      const persist = () => {
+        void flushEdits().catch(() => {})
+      }
+      editTimer = setTimeout(persist, 250)
+      editDeadline ??= setTimeout(persist, 1000)
     },
     async destination(accountId: string, roomId?: string) {
+      await flushEdits()
       await change((record) => ({
         ...record,
-        accountId,
-        roomId,
+        accountId: accountId || undefined,
+        roomId: roomId || undefined,
         previews:
           record.accountId === accountId
             ? record.previews
@@ -569,6 +669,7 @@ export function createIncomingShareStore(
       }))
     },
     async removePreview(url: string, imageOnly = false) {
+      await flushEdits()
       await change((record) => ({
         ...record,
         previews: imageOnly
@@ -604,6 +705,8 @@ export function createIncomingShareStore(
         await change((record) => record)
     },
     reset() {
+      clearEditTimers()
+      drafts.value = {}
       stopRequested = true
       epoch += 1
       selected.value = null

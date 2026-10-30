@@ -433,3 +433,30 @@ describe('enableBackup', () => {
     expect(counter.calls).toBe(1)
   })
 })
+
+describe('deactivation cleanup', () => {
+  it.each(['logout', 'remove'] as const)(
+    'reports server success and refreshes after %s cleanup fails',
+    async (action) => {
+      const GET = vi.fn().mockResolvedValue({ data: { data: [ALICE] } })
+      const success = vi
+        .fn()
+        .mockResolvedValue({ response: new Response(null, { status: 200 }) })
+      const api = {
+        GET,
+        POST: success,
+        DELETE: success,
+      } as unknown as Parameters<typeof createAccountsStore>[0]
+      const store = createAccountsStore(api, async () => {
+        throw { code: 'busy' }
+      })
+      await store.refresh()
+      GET.mockResolvedValue({ data: { data: [] } })
+      expect(await store[action](ALICE.account_id)).toBe(true)
+      expect(store.accounts.value).toEqual([])
+      expect(GET).toHaveBeenCalledTimes(2)
+      expect(store.error.value).toContain('account change succeeded')
+      expect(store.error.value).toContain('cleanup is pending')
+    },
+  )
+})

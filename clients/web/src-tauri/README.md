@@ -164,6 +164,8 @@ Incoming-share session/staging and the Pending shares recovery UI are described 
 App Group and shared Keychain capabilities must be enabled in the developer portal and included in provisioning profiles.
 Run `node scripts/configure-ios-sharing.mjs` from `clients/web` after every manual `tauri ios init`; packaging runs the same hook automatically.
 `AXON_SHARE_PROBE=1` adds the development-only signed access probe; normal distribution builds omit it.
+Native incoming sharing requires an HTTPS Axon server and retains drafts configured for HTTP.
+`pnpm test:sharing:simulator` runs the shared Swift recovery tests under iOS using a separate unsigned test runner; it requires Xcode, an installed iOS runtime, and `xcodegen`.
 
 Needs macOS with Xcode. Everything below is `clients/web` unless it says
 otherwise.

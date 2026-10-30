@@ -62,6 +62,26 @@ public final class SharedSession {
     self.vault = vault ?? KeychainVault(accessGroup: accessGroup)
   }
 
+  /// Either barrier suffices: extensions require both a published descriptor
+  /// and its credential. Cleanup may fail after dispatch authority is revoked.
+  /// The app persists a retry breadcrumb before invoking this operation.
+  public static func invalidate(
+    fence: () throws -> Void, accessGroup: String?, vault: ShareCredentialVault? = nil
+  ) throws {
+    var revoked = false
+    if let vault = vault ?? accessGroup.map({ KeychainVault(accessGroup: $0) }) {
+      do {
+        try vault.write(nil)
+        revoked = true
+      } catch { /* Try the file barrier below. */  }
+    }
+    do {
+      try fence()
+      revoked = true
+    } catch { /* Retry on next app access. */  }
+    guard revoked else { throw ShareFailure.invalidation }
+  }
+
   /// App-only publication. The native generation survives reloads and token
   /// renewal; explicit identity replacement invalidates the old generation.
   public func publish(

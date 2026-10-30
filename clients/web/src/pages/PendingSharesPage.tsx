@@ -2,6 +2,7 @@ import { useEffect, useState } from 'preact/hooks'
 import { useServices } from '../services'
 import { matchUrls } from '../html/linkify'
 import { LinkPreviews } from '../components/LinkPreviews'
+import { shareCompleted, shareOperations } from '../incoming-share/types'
 import type { ShareOperation } from '../incoming-share/types'
 import type { IncomingShareStore } from '../incoming-share/store'
 import './pending-shares.css'
@@ -66,7 +67,14 @@ export function PendingSharesPage() {
     const heartbeat = setInterval(() => {
       void store.heartbeat().catch(() => {})
     }, 30_000)
+    const persist = () => {
+      void store.flushEdits().catch(() => {})
+    }
+    document.addEventListener('visibilitychange', persist)
+    window.addEventListener('pagehide', persist)
     return () => {
+      document.removeEventListener('visibilitychange', persist)
+      window.removeEventListener('pagehide', persist)
       clearInterval(heartbeat)
       void store.close().catch(() => {})
     }
@@ -109,32 +117,19 @@ export function PendingSharesPage() {
   }))
   const blocked =
     record !== null &&
-    [
-      record.operation,
-      ...record.files.flatMap((file) =>
-        file.operation === undefined ? [] : [file.operation],
-      ),
-    ].some((item) =>
+    shareOperations(record).some((item) =>
       ['unknown', 'dispatching', 'failed', 'uploading'].includes(item.state),
     )
   const fixedDestination =
     record !== null &&
-    [
-      record.operation,
-      ...record.files.flatMap((file) =>
-        file.operation === undefined ? [] : [file.operation],
-      ),
-    ].some((item) => ['sent', 'dispatching', 'unknown'].includes(item.state))
+    shareOperations(record).some((item) =>
+      ['sent', 'dispatching', 'unknown'].includes(item.state),
+    )
   const deliveredOperations =
     record?.files.flatMap((file) =>
       file.operation === undefined ? [] : [file.operation],
     ) ?? []
-  const complete =
-    record !== null &&
-    (deliveredOperations.length === 0
-      ? [record.operation]
-      : deliveredOperations
-    ).every((item) => item.state === 'sent')
+  const complete = record !== null && shareCompleted(record)
   const captionSent =
     record !== null &&
     (deliveredOperations[0] ?? record.operation).state === 'sent'
@@ -243,13 +238,14 @@ export function PendingSharesPage() {
               Message or first attachment caption
               <textarea
                 key={record.id}
-                defaultValue={record.text}
+                value={store.editorText.value}
+                onBlur={() => act(store.flushEdits())}
                 onInput={(event) => act(store.edit(event.currentTarget.value))}
               />
             </label>
             <LinkPreviews
               accountId={record.accountId ?? ''}
-              body={record.text}
+              body={store.editorText.value}
               content={{ 'm.url_previews': previews ?? [] }}
             />
             {record.previews?.map((preview) => (
@@ -303,7 +299,7 @@ export function PendingSharesPage() {
             </p>
             {[
               ...new Set(
-                matchUrls(record.text)
+                matchUrls(store.editorText.value)
                   .filter((match) => /^https?:/.test(match.url))
                   .map((match) => match.url),
               ),
@@ -356,8 +352,8 @@ export function PendingSharesPage() {
               disabled={
                 busy ||
                 blocked ||
-                record.accountId === undefined ||
-                record.roomId === undefined ||
+                !record.accountId ||
+                !record.roomId ||
                 record.importFailures.length > 0
               }
               onClick={() => act(store.send())}

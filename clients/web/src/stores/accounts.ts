@@ -132,9 +132,18 @@ export function createAccountsStore(
         return false
       }
       error.value = null
-      if (action.kind === 'logout' || action.kind === 'delete')
-        await onDeactivate?.(action.accountId)
+      let cleanupPending = false
+      if (action.kind === 'logout' || action.kind === 'delete') {
+        try {
+          await onDeactivate?.(action.accountId)
+        } catch {
+          cleanupPending = true
+        }
+      }
       await refresh()
+      if (cleanupPending)
+        error.value =
+          'The account change succeeded. Local share cleanup is pending; reopen Pending shares to retry.'
       return true
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : String(cause)

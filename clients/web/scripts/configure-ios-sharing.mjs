@@ -36,7 +36,8 @@ app.entitlements = {
 }
 app.info.properties.AxonSharedKeychainGroup =
   '$(AppIdentifierPrefix)org.matrixaxon.axon.sharing'
-app.info.properties.NSAppTransportSecurity = { NSAllowsArbitraryLoads: true }
+// Keep native sharing under default ATS; configured HTTP drafts remain local.
+delete app.info.properties.NSAppTransportSecurity
 app.settings.base = {
   ...app.settings.base,
   CODE_SIGN_ENTITLEMENTS: 'axon_iOS/axon_iOS.entitlements',
@@ -77,7 +78,6 @@ if (process.env.AXON_SHARE_PROBE === '1') {
         CFBundleVersion: app.info.properties.CFBundleVersion,
         AxonSharedKeychainGroup:
           '$(AppIdentifierPrefix)org.matrixaxon.axon.sharing',
-        NSAppTransportSecurity: { NSAllowsArbitraryLoads: true },
         NSExtension: {
           NSExtensionPointIdentifier: 'com.apple.share-services',
           NSExtensionPrincipalClass:
