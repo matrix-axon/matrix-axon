@@ -1,5 +1,600 @@
 use super::*;
 
+async fn inline_event(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    event_id: &str,
+    kind: &str,
+    content: Option<Value>,
+) {
+    inline_event_as(
+        store,
+        account_id,
+        room_id,
+        event_id,
+        kind,
+        content,
+        "@inline:localhost",
+    )
+    .await;
+}
+
+async fn inline_event_as(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    event_id: &str,
+    kind: &str,
+    content: Option<Value>,
+    sender: &str,
+) {
+    let redacts = content.as_ref().and_then(|c| c["redacts"].as_str());
+    store
+        .upsert_event(&NewEvent {
+            event_id,
+            room_id,
+            account_id,
+            sender,
+            origin_ts: 1,
+            event_type: kind,
+            content: content.clone(),
+            raw_event: json!({"type":kind}),
+            megolm_session_id: None,
+            redacts,
+            relates_to: content
+                .as_ref()
+                .and_then(|c| c.get("m.relates_to").cloned()),
+            decrypted_body_text: None,
+        })
+        .await
+        .unwrap();
+}
+
+fn inline_content(mxc: &str) -> Value {
+    json!({"msgtype":"m.text", "body":":image:", "format":"org.matrix.custom.html", "formatted_body":format!("<img src='{mxc}'>")})
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn inline_media_history_repair_is_bounded_resumable_and_handles_redelivery() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@inline-history-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!inline-history:localhost";
+    let mxc = "mxc://example.org/history-image";
+    for i in 0..70 {
+        inline_event(
+            &store,
+            a.account_id,
+            room,
+            &format!("$history-{i}"),
+            "m.room.message",
+            Some(inline_content(mxc)),
+        )
+        .await;
+    }
+    // Simulate rows that predate the projection, without bypassing migrations.
+    sqlx_core::query::query("UPDATE events SET inline_media_urls=NULL WHERE account_id=$1")
+        .bind(a.account_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert!(!store
+        .inline_message_authorizes_media(a.account_id, mxc)
+        .await
+        .unwrap());
+    let mut locked = store.pool().begin().await.unwrap();
+    sqlx_core::query::query(
+        "SELECT id FROM events WHERE account_id=$1 ORDER BY id LIMIT 1 FOR UPDATE",
+    )
+    .bind(a.account_id)
+    .fetch_one(&mut *locked)
+    .await
+    .unwrap();
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        store.backfill_inline_media_batch()
+    )
+    .await
+    .is_err());
+    locked.rollback().await.unwrap();
+    assert_eq!(store.backfill_inline_media_batch().await.unwrap(), 32);
+    assert!(store
+        .inline_message_authorizes_media(a.account_id, mxc)
+        .await
+        .unwrap());
+    // A fresh Store represents restart: progress is in the database, not memory.
+    let resumed = super::store().await;
+    assert_eq!(resumed.backfill_inline_media_batch().await.unwrap(), 32);
+    assert_eq!(resumed.backfill_inline_media_batch().await.unwrap(), 6);
+    assert_eq!(resumed.backfill_inline_media_batch().await.unwrap(), 0);
+    sqlx_core::query::query(
+        "UPDATE events SET inline_media_urls=NULL WHERE account_id=$1 AND event_id='$history-0'",
+    )
+    .bind(a.account_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$history-0",
+        "m.room.message",
+        Some(inline_content(mxc)),
+    )
+    .await;
+    let pending: bool = sqlx_core::query_scalar::query_scalar("SELECT inline_media_urls IS NULL FROM events WHERE account_id=$1 AND event_id='$history-0'").bind(a.account_id).fetch_one(store.pool()).await.unwrap();
+    assert!(
+        !pending,
+        "identical re-delivery heals the pending projection"
+    );
+    // Different content under the same ID must not change the stored reference.
+    sqlx_core::query::query(
+        "UPDATE events SET inline_media_urls=NULL WHERE account_id=$1 AND event_id='$history-0'",
+    )
+    .bind(a.account_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$history-0",
+        "m.room.message",
+        Some(inline_content("mxc://example.org/substitute")),
+    )
+    .await;
+    assert!(!store
+        .inline_message_authorizes_media(a.account_id, "mxc://example.org/substitute")
+        .await
+        .unwrap());
+    assert_eq!(resumed.backfill_inline_media_batch().await.unwrap(), 1);
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id=$1")
+        .bind(a.account_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn inline_media_requires_authorized_same_room_redactions() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@inline-auth-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!inline-auth:localhost";
+    let mxc = "mxc://example.org/auth-image";
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$auth-source",
+        "m.room.message",
+        Some(inline_content(mxc)),
+    )
+    .await;
+    inline_event(
+        &store,
+        a.account_id,
+        "!other:localhost",
+        "$cross-room",
+        "m.room.redaction",
+        Some(json!({"redacts":"$auth-source"})),
+    )
+    .await;
+    assert!(
+        store
+            .inline_message_authorizes_media(a.account_id, mxc)
+            .await
+            .unwrap(),
+        "cross-room redactions must not apply"
+    );
+    inline_event_as(
+        &store,
+        a.account_id,
+        room,
+        "$unauthorized",
+        "m.room.redaction",
+        Some(json!({"redacts":"$auth-source"})),
+        "@unprivileged:remote.test",
+    )
+    .await;
+    assert!(
+        store
+            .inline_message_authorizes_media(a.account_id, mxc)
+            .await
+            .unwrap(),
+        "unprivileged foreign redactions must not apply"
+    );
+    state(
+        &store,
+        a.account_id,
+        room,
+        "m.room.power_levels",
+        "",
+        json!({"users":{"@moderator:remote.test":"100"},"redact":"50"}),
+        1,
+    )
+    .await;
+    inline_event_as(
+        &store,
+        a.account_id,
+        room,
+        "$authorized",
+        "m.room.redaction",
+        Some(json!({"redacts":"$auth-source"})),
+        "@moderator:remote.test",
+    )
+    .await;
+    assert!(
+        !store
+            .inline_message_authorizes_media(a.account_id, mxc)
+            .await
+            .unwrap(),
+        "authorized moderator redactions apply"
+    );
+    let late_mxc = "mxc://example.org/late-target";
+    inline_event_as(
+        &store,
+        a.account_id,
+        room,
+        "$redaction-first",
+        "m.room.redaction",
+        Some(json!({"redacts":"$late-target"})),
+        "@moderator:remote.test",
+    )
+    .await;
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$late-target",
+        "m.room.message",
+        Some(inline_content(late_mxc)),
+    )
+    .await;
+    assert!(
+        !store
+            .inline_message_authorizes_media(a.account_id, late_mxc)
+            .await
+            .unwrap(),
+        "redaction-before-target uses the same authority rules"
+    );
+    state(
+        &store,
+        a.account_id,
+        room,
+        "m.room.power_levels",
+        "",
+        json!({"users":{},"redact":50}),
+        2,
+    )
+    .await;
+    assert!(
+        !store
+            .inline_message_authorizes_media(a.account_id, mxc)
+            .await
+            .unwrap(),
+        "demoting a moderator must not restore redacted media"
+    );
+    assert!(store
+        .get_event(a.account_id, "$auth-source")
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .is_none());
+    assert!(!store
+        .inline_message_authorizes_media(a.account_id, late_mxc)
+        .await
+        .unwrap());
+    state(
+        &store,
+        a.account_id,
+        room,
+        "m.room.create",
+        "",
+        json!({"room_version":"12", "additional_creators":["@founder:remote.test"]}),
+        1,
+    )
+    .await;
+    let creator_mxc = "mxc://example.org/creator-target";
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$creator-target",
+        "m.room.message",
+        Some(inline_content(creator_mxc)),
+    )
+    .await;
+    inline_event_as(
+        &store,
+        a.account_id,
+        room,
+        "$creator-redaction",
+        "m.room.redaction",
+        Some(json!({"redacts":"$creator-target"})),
+        "@founder:remote.test",
+    )
+    .await;
+    assert!(
+        !store
+            .inline_message_authorizes_media(a.account_id, creator_mxc)
+            .await
+            .unwrap(),
+        "v12 additional creators retain authority without a users entry"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn inline_media_follows_only_the_latest_valid_edit() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@inline-edit-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = "!inline-edits:localhost";
+    let mxc = "mxc://example.org/edited-image";
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$stray",
+        "m.room.message",
+        Some(json!({"msgtype":"m.text", "body":"plain", "m.new_content":inline_content(mxc)})),
+    )
+    .await;
+    assert!(
+        !store
+            .inline_message_authorizes_media(a.account_id, mxc)
+            .await
+            .unwrap(),
+        "stray replacement content is invisible"
+    );
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$edit-source",
+        "m.room.message",
+        Some(json!({"msgtype":"m.text", "body":"plain"})),
+    )
+    .await;
+    let edit = json!({"m.relates_to":{"rel_type":"m.replace", "event_id":"$edit-source"}, "m.new_content":inline_content(mxc)});
+    inline_event_as(
+        &store,
+        a.account_id,
+        room,
+        "$foreign-edit",
+        "m.room.message",
+        Some(edit.clone()),
+        "@someone:remote.test",
+    )
+    .await;
+    assert!(
+        !store
+            .inline_message_authorizes_media(a.account_id, mxc)
+            .await
+            .unwrap(),
+        "another sender cannot edit the target"
+    );
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$valid-edit",
+        "m.room.message",
+        Some(edit),
+    )
+    .await;
+    assert!(store
+        .inline_message_authorizes_media(a.account_id, mxc)
+        .await
+        .unwrap());
+    inline_event(&store, a.account_id, room, "$latest-edit", "m.room.message", Some(json!({"m.relates_to":{"rel_type":"m.replace", "event_id":"$edit-source"}, "m.new_content":{"msgtype":"m.text", "body":"no image now"}}))).await;
+    assert!(
+        !store
+            .inline_message_authorizes_media(a.account_id, mxc)
+            .await
+            .unwrap(),
+        "a superseded edit is invisible"
+    );
+    inline_event(
+        &store,
+        a.account_id,
+        room,
+        "$redact-latest",
+        "m.room.redaction",
+        Some(json!({"redacts":"$latest-edit"})),
+    )
+    .await;
+    assert!(
+        store
+            .inline_message_authorizes_media(a.account_id, mxc)
+            .await
+            .unwrap(),
+        "redacting the latest edit restores the preceding edit"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn inline_images_survive_pack_removal_and_revoke_before_conditional_responses() {
+    let store = store().await;
+    let a = store
+        .upsert_account(
+            &format!("@inline-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let b = store
+        .upsert_account(
+            &format!("@inline-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap();
+    let room = format!("!inline-{}:localhost", Uuid::new_v4());
+    joined(&store, a.account_id, &a.user_id, &room).await;
+    let mxc = "mxc://example.org/inline-message";
+    let content = json!({"msgtype":"m.text", "body":"hi :wave:", "format":"org.matrix.custom.html", "formatted_body":format!("hi <img data-mx-emoticon src='{mxc}' alt=':wave:' height='24'>")});
+    personal(&store, a.account_id, json!({"images":{"wave":{"url":mxc}}})).await;
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-message",
+        "m.room.message",
+        Some(content.clone()),
+    )
+    .await;
+    personal(&store, a.account_id, json!({"images":{}})).await;
+    let proxy = Arc::new(ConfiguredMediaProxy::ok(b"GIF89ainline"));
+    let app = media_app(store.clone(), proxy.clone());
+    let path = format!("/v1/media/{}/example.org/inline-message", a.account_id);
+    let thumb = format!("{path}/thumbnail?width=32&height=32");
+    for uri in [&path, &thumb] {
+        let (status, headers, _) = get_media_bytes(&app, uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "image/gif");
+    }
+    assert_eq!(
+        get_media_bytes(
+            &app,
+            &format!("/v1/media/{}/example.org/inline-message", b.account_id),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    state(
+        &store,
+        a.account_id,
+        &room,
+        "m.room.member",
+        &a.user_id,
+        json!({"membership":"leave"}),
+        2,
+    )
+    .await;
+    assert_eq!(
+        get_media_bytes(&app, &path, Some("*")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    state(
+        &store,
+        a.account_id,
+        &room,
+        "m.room.member",
+        &a.user_id,
+        json!({"membership":"join"}),
+        3,
+    )
+    .await;
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-redact",
+        "m.room.redaction",
+        Some(json!({"redacts":"$inline-message"})),
+    )
+    .await;
+    for uri in [&path, &thumb] {
+        assert_eq!(
+            get_media_bytes(&app, uri, Some("*")).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    // Re-decryption populates the projection atomically, with no pack present.
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-utd",
+        "m.room.encrypted",
+        None,
+    )
+    .await;
+    store
+        .update_decrypted_event(
+            a.account_id,
+            "$inline-utd",
+            &content,
+            "m.room.message",
+            Some("hi :wave:"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_media_bytes(&app, &path, None).await.0, StatusCode::OK);
+    let unsafe_app = media_app(
+        store.clone(),
+        Arc::new(ConfiguredMediaProxy::ok(b"<svg onload='x'>")),
+    );
+    assert_eq!(
+        get_media_bytes(&unsafe_app, &path, None).await.1["content-type"],
+        "application/octet-stream"
+    );
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-edit-target",
+        "m.room.message",
+        Some(json!({"msgtype":"m.text", "body":"old"})),
+    )
+    .await;
+    inline_event(&store, a.account_id, &room, "$inline-edit", "m.room.message", Some(json!({
+        "m.relates_to":{"rel_type":"m.replace", "event_id":"$inline-edit-target"},
+        "m.new_content":{"msgtype":"m.text", "body":":edit:", "format":"org.matrix.custom.html", "formatted_body":"<img src='mxc://example.org/inline-edit'>"}
+    }))).await;
+    let edit_path = format!("/v1/media/{}/example.org/inline-edit", a.account_id);
+    assert_eq!(
+        get_media_bytes(&app, &edit_path, None).await.0,
+        StatusCode::OK
+    );
+    inline_event(
+        &store,
+        a.account_id,
+        &room,
+        "$inline-edit-target-redaction",
+        "m.room.redaction",
+        Some(json!({"redacts":"$inline-edit-target"})),
+    )
+    .await;
+    assert_eq!(
+        get_media_bytes(&app, &edit_path, Some("*")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = ANY($1)")
+        .bind(vec![a.account_id, b.account_id])
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
+
 async fn state(
     store: &Store,
     account: Uuid,

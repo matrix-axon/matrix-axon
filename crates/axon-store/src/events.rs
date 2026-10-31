@@ -285,6 +285,30 @@ fn reaction_shortcode_sql() -> &'static str {
 // for counts/senders; event_id breaks timestamp ties deterministically.
 const REACTION_SHORTCODE_AGG: &str = "(array_agg(capped.shortcode ORDER BY capped.origin_ts, capped.event_id) FILTER (WHERE capped.shortcode IS NOT NULL))[1]";
 
+/// Latest valid edit for root alias `e`, shared by timelines and media authorization.
+pub(crate) fn latest_edit_lateral() -> String {
+    let redacted = crate::event_visibility::event_is_redacted("ev");
+    format!(
+        "LEFT JOIN LATERAL ( \
+         SELECT ev.content->'m.new_content' AS new_content, \
+                ev.content->'m.new_content'->>'body' AS new_body, \
+                ev.origin_ts AS latest_edit_ts, ev.inline_media_urls, \
+                COUNT(*) OVER () AS edit_count \
+         FROM events ev \
+         WHERE ev.account_id = e.account_id AND ev.room_id = e.room_id \
+           AND ev.relates_to->>'rel_type' = 'm.replace' \
+           AND ev.relates_to->>'event_id' = e.event_id \
+           AND ev.sender = e.sender AND ev.event_type = e.event_type \
+           AND ev.raw_event->>'state_key' IS NULL AND e.raw_event->>'state_key' IS NULL \
+           AND e.relates_to->>'rel_type' IS DISTINCT FROM 'm.replace' \
+           AND jsonb_typeof(ev.content->'m.new_content') = 'object' \
+           AND (ev.content->'m.new_content'->>'msgtype' IS NOT DISTINCT FROM e.content->>'msgtype') \
+           AND NOT {redacted} \
+         ORDER BY ev.origin_ts DESC, ev.id DESC LIMIT 1 \
+         ) edit ON TRUE"
+    )
+}
+
 /// Shared SELECT projection for timeline reads, with read-time redaction masking
 /// **and M8 relation aggregation** (edit collapse + reaction tally). Three
 /// `LEFT JOIN LATERAL`s enrich each event `e`:
@@ -327,6 +351,9 @@ const REACTION_SHORTCODE_AGG: &str = "(array_agg(capped.shortcode ORDER BY cappe
 /// [`LazyLock`] so the scan cap is interpolated from a single constant.
 pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
     let reaction_shortcode = reaction_shortcode_sql();
+    let root_redaction = crate::event_visibility::redaction_matches("rr", "e");
+    let latest_edit = latest_edit_lateral();
+    let reaction_redacted = crate::event_visibility::event_is_redacted("rx");
     format!(
         "SELECT e.id, e.event_id, e.room_id, e.sender, e.raw_event->>'state_key' AS state_key, \
             e.raw_event->'unsigned'->'prev_content' AS prev_content, \
@@ -348,38 +375,10 @@ pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
      JOIN accounts ac ON ac.account_id = e.account_id \
      LEFT JOIN LATERAL ( \
          SELECT rr.event_id FROM events rr \
-         WHERE rr.account_id = e.account_id \
-           AND rr.event_type = 'm.room.redaction' \
-           AND rr.redacts = e.event_id \
+         WHERE {root_redaction} \
          LIMIT 1 \
      ) r ON TRUE \
-     LEFT JOIN LATERAL ( \
-         SELECT ev.content->'m.new_content'          AS new_content, \
-                ev.content->'m.new_content'->>'body' AS new_body, \
-                ev.origin_ts                          AS latest_edit_ts, \
-                COUNT(*) OVER ()                       AS edit_count \
-         FROM events ev \
-         WHERE ev.account_id = e.account_id \
-           AND ev.room_id = e.room_id \
-           AND ev.relates_to->>'rel_type' = 'm.replace' \
-           AND ev.relates_to->>'event_id' = e.event_id \
-           AND ev.sender = e.sender \
-           AND ev.event_type = e.event_type \
-           AND ev.raw_event->>'state_key' IS NULL \
-           AND e.raw_event->>'state_key' IS NULL \
-           AND e.relates_to->>'rel_type' IS DISTINCT FROM 'm.replace' \
-           AND ev.content->'m.new_content' IS NOT NULL \
-           AND (ev.content->'m.new_content'->>'msgtype' \
-                IS NOT DISTINCT FROM e.content->>'msgtype') \
-           AND NOT EXISTS ( \
-               SELECT 1 FROM events rr \
-               WHERE rr.account_id = ev.account_id \
-                 AND rr.event_type = 'm.room.redaction' \
-                 AND rr.redacts = ev.event_id \
-           ) \
-         ORDER BY ev.origin_ts DESC, ev.id DESC \
-         LIMIT 1 \
-     ) edit ON TRUE \
+     {latest_edit} \
      LEFT JOIN LATERAL ( \
          SELECT jsonb_object_agg(grp.key, grp.tally) AS reactions \
          FROM ( \
@@ -411,12 +410,7 @@ pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
                        AND rx.relates_to->>'rel_type' = 'm.annotation' \
                        AND rx.relates_to->>'event_id' = e.event_id \
                        AND rx.relates_to->>'key' IS NOT NULL \
-                       AND NOT EXISTS ( \
-                           SELECT 1 FROM events rr \
-                           WHERE rr.account_id = rx.account_id \
-                             AND rr.event_type = 'm.room.redaction' \
-                             AND rr.redacts = rx.event_id \
-                       ) \
+                       AND NOT {reaction_redacted} \
                      ORDER BY rx.sender, rx.relates_to->>'key', rx.event_id \
                  ) pair \
                  ORDER BY pair.origin_ts, pair.event_id \
@@ -513,7 +507,9 @@ const SEARCH_FANOUT_TAIL: &str = "\
 
 impl Store {
     /// Insert a Matrix event. Idempotent: if `(account_id, event_id)` already
-    /// exists the existing row is left unchanged and no error is returned.
+    /// exists its content is left unchanged. An identical re-delivery may fill
+    /// a pending historical inline-media projection, atomically with normal
+    /// indexing/summary notifications; later duplicates remain no-ops.
     ///
     /// Appends the search-index obligations and the room-summary touch in the
     /// **same statement** (ADR 0039, ADR 0095): the event's own document, plus
@@ -522,7 +518,7 @@ impl Store {
     /// `room_summaries` row `list_rooms` reads. Because the `INSERT … RETURNING`
     /// feeds both follow-on writes, an event change, its indexing obligation,
     /// and its activity marker commit atomically, and a no-op
-    /// (`ON CONFLICT DO NOTHING`) writes nothing — a duplicate delivery does
+    /// writes nothing — an unchanged duplicate delivery does
     /// no redundant indexing or summary work. See [`SEARCH_FANOUT_TAIL`].
     ///
     /// Returns the row's `id` — its **arrival order**, the monotonic sequence in
@@ -532,22 +528,27 @@ impl Store {
     /// duplicate delivery the existing row's id is read back, so the value is
     /// stable across re-delivery.
     pub async fn upsert_event(&self, ev: &NewEvent<'_>) -> Result<i64, StoreError> {
+        let proofs = crate::event_visibility::capture_redaction_proofs();
         let sql = format!(
             "WITH ins AS ( \
                INSERT INTO events \
                  (event_id, room_id, account_id, sender, origin_ts, event_type, \
                   content, raw_event, megolm_session_id, redacts, relates_to, \
-                  decrypted_body_text) \
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
-               ON CONFLICT (account_id, event_id) DO NOTHING \
+                  decrypted_body_text, inline_media_urls) \
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+               ON CONFLICT (account_id, event_id) DO UPDATE \
+                 SET inline_media_urls = EXCLUDED.inline_media_urls \
+                 WHERE events.inline_media_urls IS NULL \
+                   AND events.content IS NOT DISTINCT FROM EXCLUDED.content \
+                   AND events.event_type = EXCLUDED.event_type \
                RETURNING id, account_id, event_id, room_id, origin_ts, \
-                         relates_to, redacts, decrypted_body_text \
+                         relates_to, redacts, decrypted_body_text, sender, event_type, raw_event \
              ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), \
              display AS ( \
                SELECT refresh_room_summary_display(account_id, room_id) \
                FROM summaries WHERE inserted \
              ), \
-             outbox AS ( {SEARCH_FANOUT_TAIL} ) \
+             outbox AS ( {SEARCH_FANOUT_TAIL} ), proofs AS ( {proofs} ) \
              SELECT ins.id FROM ins LEFT JOIN display ON TRUE"
         );
         let inserted: Option<(i64,)> = sqlx_core::query_as::query_as::<Postgres, (i64,)>(&sql)
@@ -563,12 +564,16 @@ impl Store {
             .bind(ev.redacts)
             .bind(&ev.relates_to)
             .bind(ev.decrypted_body_text)
+            .bind(crate::inline_media::inline_media_urls(
+                ev.event_type,
+                ev.content.as_ref(),
+            ))
             .fetch_optional(&self.pool)
             .await?;
         if let Some((id,)) = inserted {
             return Ok(id);
         }
-        // `ON CONFLICT DO NOTHING` returned no row, so this event was already
+        // The insert/repair returned no row, so this event was already
         // ingested. Read its arrival order back rather than reporting none: the
         // caller's contract is "where this event sits in arrival order", and that
         // is the same answer whether this delivery created the row or not.
@@ -783,14 +788,15 @@ impl Store {
         // The same RETURNING feeds the room-summary touch (ADR 0095): a UTD that
         // just gained a body may become the room's activity marker even if a
         // later non-content event is already stored.
+        let proofs = crate::event_visibility::capture_redaction_proofs();
         let sql = format!(
             "WITH ins AS ( \
                UPDATE events \
-               SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6 \
+               SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6, inline_media_urls = $7 \
                WHERE account_id = $1 AND event_id = $2 AND content IS NULL \
                RETURNING account_id, event_id, room_id, origin_ts, id, \
-                         relates_to, redacts, decrypted_body_text \
-             ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ) \
+                         relates_to, redacts, decrypted_body_text, sender, event_type, raw_event \
+             ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), proofs AS ( {proofs} ) \
              {SEARCH_FANOUT_TAIL}"
         );
         sqlx_core::query::query(&sql)
@@ -800,6 +806,10 @@ impl Store {
             .bind(event_type)
             .bind(decrypted_body_text)
             .bind(relates_to)
+            .bind(crate::inline_media::inline_media_urls(
+                event_type,
+                Some(content),
+            ))
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -1117,6 +1127,7 @@ impl Store {
         // the distinct-sender `count`, and the number of keys — and one sender
         // spamming a reaction can't consume the budget or hide other senders.
         let reaction_shortcode = reaction_shortcode_sql();
+        let reaction_redacted = crate::event_visibility::event_is_redacted("rx");
         let sql = format!(
             "SELECT capped.key                       AS key, \
                     COUNT(*)                          AS count, \
@@ -1149,12 +1160,7 @@ impl Store {
                            SELECT t.room_id FROM events t \
                            WHERE t.account_id = $1 AND t.event_id = $2 LIMIT 1 \
                        ) \
-                       AND NOT EXISTS ( \
-                           SELECT 1 FROM events rr \
-                           WHERE rr.account_id = rx.account_id \
-                             AND rr.event_type = 'm.room.redaction' \
-                             AND rr.redacts = rx.event_id \
-                       ) \
+                       AND NOT {reaction_redacted} \
                      ORDER BY rx.sender, rx.relates_to->>'key', rx.event_id \
                  ) pair \
                  ORDER BY pair.origin_ts, pair.event_id \
@@ -1283,6 +1289,8 @@ impl Store {
         if axon_core::media::parse_mxc(mxc_url).is_none() {
             return Ok(None);
         }
+        let reaction_visible = crate::event_visibility::media_room_is_visible("reaction");
+        let reaction_redacted = crate::event_visibility::event_is_redacted("reaction");
         let sql = format!(
             "{} \
              WHERE e.account_id = $1 \
@@ -1302,19 +1310,7 @@ impl Store {
                              AND reaction.raw_event->>'state_key' IS NULL \
                              AND jsonb_typeof(reaction.content->'m.relates_to'->'event_id') = 'string' \
                              AND reaction.content->'m.relates_to'->>'event_id' <> '' \
-                             AND NOT EXISTS ( \
-                                 SELECT 1 FROM room_state rs \
-                                 JOIN accounts owner ON owner.account_id = reaction.account_id \
-                                 WHERE rs.account_id = reaction.account_id AND rs.room_id = reaction.room_id \
-                                   AND rs.event_type = 'm.room.member' AND rs.state_key = owner.user_id \
-                                   AND rs.content->>'membership' IN ('leave', 'ban') \
-                             ) \
-                             AND NOT EXISTS ( \
-                                 SELECT 1 FROM events rr \
-                                 WHERE rr.account_id = reaction.account_id \
-                                   AND rr.event_type = 'm.room.redaction' \
-                                   AND rr.redacts = reaction.event_id \
-                             ) \
+                             AND {reaction_visible} AND NOT {reaction_redacted} \
                            ORDER BY reaction.id DESC LIMIT 1 \
                        ) reaction_matches \
                        UNION ALL \

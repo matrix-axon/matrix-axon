@@ -85,6 +85,7 @@ fs4 = { version = "0.13" }
 matrix-sdk    = { version = "=0.19.1" }
 matrix-sdk-ui = { version = "=0.19.1" }
 matrix-sdk-base = { version = "=0.19.1" }
+ruma-html = { version = "0.9" }
 
 # Platform-standard data/config/cache directory resolution (XDG on Linux,
 # ~/Library on macOS, Known Folders on Windows) for the on-disk store defaults.

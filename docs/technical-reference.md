@@ -30,6 +30,18 @@ See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and seq
 Personal, current-room, and joined canonical ancestor image packs support custom emoji and sticker discovery.
 The room `emoji-packs` endpoint exposes cached packs, with `usage=sticker` selecting sticker-capable entries.
 The media proxy accepts current pack references before their first use as reactions.
+HTML messages also retain the first 64 distinct inline image references in document order, independent of subsequent pack changes.
+References come from parsed, sanitized `img` elements in HTML bodies of at most 64 KiB.
+Authorization uses the same latest valid edit as the timeline, so stray replacement content, another sender's edits, and superseded edits do not authorize images.
+These references authorize only the owning account while the room is not known left or banned, and an authorized redaction in the same room revokes the reference.
+Redaction checks use SDK-pruned evidence or cached sender/server and power-level authority, matching the server's existing state-repair policy.
+Proven redaction authority is persisted atomically with event ingestion in either arrival order, so later power-level changes cannot restore redacted media.
+The inline authorization read has a ten-second overall deadline, including pool acquisition, in addition to configured database deadlines.
+Inline images use the same raster MIME restrictions as pack previews.
+Historical references are repaired in the background in committed batches of at most 32 messages, using the isolated maintenance connection and a ten-second batch deadline.
+The worker waits one second between batches, retries failures, and resumes pending rows after restart; identical re-deliveries can also heal pending references.
+Until a historical row is repaired, its previous media authorization behavior applies.
+Historical repair bounds each loaded content object to 128 KiB; oversized objects receive an empty projection.
 Clients may send an optional shortcode with a custom reaction, or send an existing pack image through `send-sticker` as a standalone `m.sticker` event.
 See [Custom emoji discovery](custom-emoji.md) for limits, sync behavior, inheritance, sending, and diagnostics.
 
