@@ -35,7 +35,36 @@ export interface RoomUnreadCounts {
   highlightCount: number
 }
 
-export type RoomMembershipResult = { ok: true } | { ok: false; message: string }
+/**
+ * A leave or forget. `pending` marks a `504`: axon stopped waiting for the
+ * homeserver, which may still finish the call (ADR 0121 decision 5). That is
+ * not a failure, and `message` says so instead of inviting a retry.
+ */
+export type RoomMembershipResult =
+  { ok: true } | { ok: false; message: string; pending?: boolean }
+
+/** What a leave that axon timed out on tells the user. */
+export const LEAVE_PENDING_MESSAGE =
+  "Your homeserver hasn't finished leaving this room yet. The room will drop off your list once it has, so there's no need to leave again."
+
+/** What a forget that axon timed out on tells the user. */
+export const FORGET_PENDING_MESSAGE =
+  "Your homeserver hasn't finished forgetting this room yet. It will finish on its own, so there's no need to forget it again."
+
+/**
+ * Room-list refreshes after a pending leave, each delay counted from the one
+ * before (30 s, 90 s, 210 s and 450 s after the `504`). The live bus carries no
+ * membership change (issue #103), so nothing else would show the room going.
+ * On prod, a leave of a 36,000-member space took Synapse 194 s and its retry
+ * 328 s (issue #743). Until the first step, a second leave or forget of the
+ * room is not sent: the first may still be running, and on prod the retry
+ * cost Synapse more than the original. After it, a deliberate retry goes
+ * through, since the `504` may have come from a proxy before axon ever saw
+ * the call.
+ */
+export const PENDING_MEMBERSHIP_REFRESH_DELAYS_MS: readonly number[] = [
+  30_000, 60_000, 120_000, 240_000,
+]
 /**
  * M19d room-settings write. Unlike `RoomMembershipResult` this carries the
  * error `code`, because the caller needs to tell a `forbidden` (the power
@@ -127,6 +156,15 @@ export interface RoomsStore {
   leaveRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
   /** Forget one left/banned room through M19b, then refresh room state. */
   forgetRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
+  /**
+   * The leave or forget of this room that axon timed out on and the store is
+   * still waiting out, if any (see `PENDING_MEMBERSHIP_REFRESH_DELAYS_MS`).
+   * Reactive: a component that reads it re-renders when it settles.
+   */
+  pendingMembership(
+    accountId: string,
+    roomId: string,
+  ): 'leave' | 'forget' | null
   /** Set this room's name through M19d. An empty string clears it. */
   setRoomName(
     accountId: string,
@@ -284,6 +322,42 @@ export function createRoomsStore(
   const resolvedMembers = new Map<string, readonly MemberDto[]>()
   /** Rooms this session successfully left/forgot before sync caught up. */
   const locallyHiddenRooms = new Set<string>()
+  /**
+   * Leaves and forgets axon timed out on, by `roomKey` and then verb, each
+   * with the timer for its next step (`PENDING_MEMBERSHIP_REFRESH_DELAYS_MS`)
+   * and whether that step is past the first, when a retry may go out. A room
+   * can hold both: a pending leave that finished, then a forget that timed
+   * out. `pendingVerbs` mirrors it for rendering.
+   */
+  const pendingMemberships = new Map<
+    string,
+    Map<
+      'leave' | 'forget',
+      { timer: ReturnType<typeof setTimeout>; retryable: boolean }
+    >
+  >()
+  const pendingVerbs = signal<ReadonlyMap<string, 'leave' | 'forget'>>(
+    new Map(),
+  )
+  /**
+   * Copy `pendingMemberships` into `pendingVerbs`, a pending leave ahead of a
+   * pending forget, since the room is still listed until the leave lands.
+   * Writes only on a change, because `resetSession` runs inside an effect.
+   */
+  function publishPendingMemberships(): void {
+    const next = new Map<string, 'leave' | 'forget'>()
+    for (const [key, verbs] of pendingMemberships) {
+      next.set(key, verbs.has('leave') ? 'leave' : 'forget')
+    }
+    const current = pendingVerbs.peek()
+    if (
+      current.size === next.size &&
+      [...next].every(([key, verb]) => current.get(key) === verb)
+    ) {
+      return
+    }
+    pendingVerbs.value = next
+  }
   /**
    * Monotonic counter of live metadata patches, and the value each room was
    * last patched at. `doRefresh` compares against the value it captured when
@@ -838,6 +912,15 @@ export function createRoomsStore(
     tagsPatchedAt.clear()
     directPatchedAt.clear()
     pendingDisplayNames.clear()
+    // Above the pristine-store guard: a leave can time out before the list
+    // ever loaded, and its refreshes must not run under the next reader.
+    for (const verbs of pendingMemberships.values()) {
+      for (const { timer } of verbs.values()) {
+        clearTimeout(timer)
+      }
+    }
+    pendingMemberships.clear()
+    publishPendingMemberships()
     // A second guard: the timer also skips a write once the generation moves
     // or the rows are cleared, so the previous reader's rows never land under
     // the next one's key.
@@ -954,17 +1037,41 @@ export function createRoomsStore(
   }
 
   async function membershipMutation(
+    verb: 'leave' | 'forget',
     accountId: string,
     roomId: string,
-    call: () => Promise<{ error?: unknown }>,
+    call: () => Promise<{ error?: unknown; response: Response }>,
   ): Promise<RoomMembershipResult> {
+    const key = roomKey({ account_id: accountId, room_id: roomId })
+    const pending: RoomMembershipResult = {
+      ok: false,
+      pending: true,
+      message:
+        verb === 'leave' ? LEAVE_PENDING_MESSAGE : FORGET_PENDING_MESSAGE,
+    }
+    // Sending it again straight away would only double the homeserver's
+    // work: on prod the retry of a slow leave cost Synapse more than the
+    // first attempt. Past the first step, a retry is the user's call.
+    const held = pendingMemberships.get(key)?.get(verb)
+    if (held !== undefined && !held.retryable) {
+      return pending
+    }
     try {
-      const { error: apiError } = await call()
+      const { error: apiError, response } = await call()
+      // A 504 is axon, or a proxy in front of it, giving up on waiting. The
+      // homeserver has not refused, so this is not an error for the banner.
+      if (apiError !== undefined && response.status === 504) {
+        awaitPendingMembership(verb, key)
+        return pending
+      }
       if (apiError !== undefined) {
         const message = apiErrorMessage(apiError)
         error.value = message
         return { ok: false, message }
       }
+      // An answer settles whatever an earlier timeout left pending.
+      endPendingMembership(key, 'leave')
+      endPendingMembership(key, 'forget')
       const hiddenKey = hideRoomLocally(accountId, roomId)
       try {
         await refresh()
@@ -979,11 +1086,80 @@ export function createRoomsStore(
     }
   }
 
+  /**
+   * Hold a leave or forget axon timed out on as pending, and let the room
+   * list settle it (ADR 0121 step 4).
+   *
+   * A leave refreshes the list at each step and ends as soon as the room is
+   * gone from it (ADR 0037 drops left rooms). A forget changes nothing the
+   * list shows, so it only holds the window. Either way the entry ends with
+   * the last step: a leave still listed by then may have failed, and sending
+   * it again is the user's call.
+   */
+  function awaitPendingMembership(verb: 'leave' | 'forget', key: string): void {
+    endPendingMembership(key, verb)
+    const step = (index: number) => {
+      const delay = PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[index]
+      if (delay === undefined) {
+        endPendingMembership(key, verb)
+        return
+      }
+      const timer = setTimeout(() => {
+        if (verb === 'forget') {
+          step(index + 1)
+          return
+        }
+        void refresh().then(() => {
+          // Ended while the refresh was out: by `resetSession`, or by an
+          // answer to a later leave or forget of the room.
+          if (pendingMemberships.get(key)?.get(verb)?.timer !== timer) {
+            return
+          }
+          if (rooms.value.some((room) => roomKey(room) === key)) {
+            step(index + 1)
+          } else {
+            endPendingMembership(key, verb)
+          }
+        })
+      }, delay)
+      const verbs = pendingMemberships.get(key) ?? new Map()
+      verbs.set(verb, { timer, retryable: index > 0 })
+      pendingMemberships.set(key, verbs)
+      publishPendingMemberships()
+    }
+    step(0)
+  }
+
+  function endPendingMembership(key: string, verb: 'leave' | 'forget'): void {
+    const verbs = pendingMemberships.get(key)
+    const entry = verbs?.get(verb)
+    if (verbs === undefined || entry === undefined) {
+      return
+    }
+    clearTimeout(entry.timer)
+    verbs.delete(verb)
+    if (verbs.size === 0) {
+      pendingMemberships.delete(key)
+    }
+    publishPendingMemberships()
+  }
+
+  function pendingMembership(
+    accountId: string,
+    roomId: string,
+  ): 'leave' | 'forget' | null {
+    return (
+      pendingVerbs.value.get(
+        roomKey({ account_id: accountId, room_id: roomId }),
+      ) ?? null
+    )
+  }
+
   function leaveRoom(
     accountId: string,
     roomId: string,
   ): Promise<RoomMembershipResult> {
-    return membershipMutation(accountId, roomId, () =>
+    return membershipMutation('leave', accountId, roomId, () =>
       api.POST('/v1/accounts/{account_id}/rooms/{room_id}/leave', {
         params: { path: { account_id: accountId, room_id: roomId } },
       }),
@@ -994,7 +1170,7 @@ export function createRoomsStore(
     accountId: string,
     roomId: string,
   ): Promise<RoomMembershipResult> {
-    return membershipMutation(accountId, roomId, () =>
+    return membershipMutation('forget', accountId, roomId, () =>
       api.POST('/v1/accounts/{account_id}/rooms/{room_id}/forget', {
         params: { path: { account_id: accountId, room_id: roomId } },
       }),
@@ -1599,6 +1775,7 @@ export function createRoomsStore(
     resetSession,
     leaveRoom,
     forgetRoom,
+    pendingMembership,
     setRoomName,
     setRoomTopic,
     setRoomAvatar,

@@ -23,6 +23,7 @@ import {
   type MemberDto,
   type RoomDto,
 } from '../stores/room-list'
+import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
@@ -461,7 +462,13 @@ export function RoomInfoPanel({
     setLeaveBusy(false)
     if (!result.ok) {
       setLeaveConfirmOpen(false)
-      setLeaveStatus(`Could not leave room: ${result.message}`)
+      // A leave still running on the homeserver is shown from the store
+      // below, for as long as it is pending, not as a failure.
+      setLeaveStatus(
+        result.pending === true
+          ? null
+          : `Could not leave room: ${result.message}`,
+      )
       return
     }
     location.route('/', true)
@@ -769,6 +776,11 @@ export function RoomInfoPanel({
             role="status"
           >
             {copyStatus === 'copied' ? 'Copied' : 'Could not copy link'}
+          </p>
+        )}
+        {rooms.pendingMembership(accountId, roomId) === 'leave' && (
+          <p class="room-info-status" role="status">
+            {LEAVE_PENDING_MESSAGE}
           </p>
         )}
         {leaveStatus !== null && (

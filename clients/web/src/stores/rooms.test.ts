@@ -13,7 +13,13 @@ import {
 import { createApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
 import { isLikelyDm, roomKey, roomTitle } from './room-list'
-import { createRoomsStore, roomMetadataPatch } from './rooms'
+import {
+  createRoomsStore,
+  FORGET_PENDING_MESSAGE,
+  LEAVE_PENDING_MESSAGE,
+  PENDING_MEMBERSHIP_REFRESH_DELAYS_MS,
+  roomMetadataPatch,
+} from './rooms'
 
 const BASE_URL = 'http://axon.test'
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
@@ -1176,6 +1182,249 @@ function stateEvent(type: string, content: unknown) {
     ReturnType<typeof makeStore>['noteTimelineEvent']
   >[0]
 }
+
+describe('a leave or forget axon timed out on (ADR 0121 step 4)', () => {
+  const ROOM_PATH = `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(NAMED.room_id)}`
+  /** The whole pending window: every refresh delay, end to end. */
+  const WINDOW_MS = PENDING_MEMBERSHIP_REFRESH_DELAYS_MS.reduce(
+    (sum, ms) => sum + ms,
+    0,
+  )
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function gatewayTimeout(verb: string) {
+    return HttpResponse.json(
+      {
+        error: {
+          code: 'gateway_timeout',
+          message: `${verb} timed out after 30s`,
+        },
+      },
+      { status: 504 },
+    )
+  }
+
+  /** `/v1/rooms` listing `listed()`, and a leave and forget that answer 504. */
+  function useTimedOutMembership(listed: () => unknown[]) {
+    const calls = { list: 0, leave: 0, forget: 0 }
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () => {
+        calls.list += 1
+        return HttpResponse.json({ data: listed() })
+      }),
+      http.post(`${ROOM_PATH}/leave`, () => {
+        calls.leave += 1
+        return gatewayTimeout('leave')
+      }),
+      http.post(`${ROOM_PATH}/forget`, () => {
+        calls.forget += 1
+        return gatewayTimeout('forget')
+      }),
+    )
+    return calls
+  }
+
+  it('reports a 504 from leave as pending, not as a failure', async () => {
+    useTimedOutMembership(() => [NAMED])
+    const store = makeStore()
+    await store.refresh()
+
+    const result = await store.leaveRoom(ACCOUNT, NAMED.room_id)
+
+    expect(result).toEqual({
+      ok: false,
+      pending: true,
+      message: LEAVE_PENDING_MESSAGE,
+    })
+    // Nothing for the app-wide error banner, and the room stays: the leave
+    // may yet fail, and only the room list can say that it went through.
+    expect(store.error.value).toBeNull()
+    expect(store.rooms.value).toEqual([NAMED])
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('leave')
+  })
+
+  it('keeps a 502 from leave a failure', async () => {
+    server.use(
+      http.post(`${ROOM_PATH}/leave`, () =>
+        HttpResponse.json(
+          { error: { code: 'upstream_error', message: 'homeserver said no' } },
+          { status: 502 },
+        ),
+      ),
+    )
+    const store = makeStore()
+
+    const result = await store.leaveRoom(ACCOUNT, NAMED.room_id)
+
+    expect(result).toEqual({ ok: false, message: 'homeserver said no' })
+    expect(store.error.value).toBe('homeserver said no')
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBeNull()
+  })
+
+  it('does not send the leave again while it is pending', async () => {
+    const calls = useTimedOutMembership(() => [NAMED])
+    const store = makeStore()
+
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    const again = await store.leaveRoom(ACCOUNT, NAMED.room_id)
+
+    expect(again).toEqual({
+      ok: false,
+      pending: true,
+      message: LEAVE_PENDING_MESSAGE,
+    })
+    expect(calls.leave).toBe(1)
+  })
+
+  it('lets a retry through once the first refresh step has passed', async () => {
+    vi.useFakeTimers()
+    const calls = useTimedOutMembership(() => [NAMED])
+    const store = makeStore()
+    await store.refresh()
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+
+    await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+    // The 504 may have come from a proxy before axon saw the call, so a
+    // deliberate second leave goes out now...
+    const retry = await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    expect(retry).toEqual({
+      ok: false,
+      pending: true,
+      message: LEAVE_PENDING_MESSAGE,
+    })
+    expect(calls.leave).toBe(2)
+
+    // ...and its own 504 starts the window over, holding back a third.
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    expect(calls.leave).toBe(2)
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('leave')
+  })
+
+  it('keeps a pending leave going when a later forget times out too', async () => {
+    vi.useFakeTimers()
+    let listed: unknown[] = [NAMED]
+    const calls = useTimedOutMembership(() => listed)
+    const store = makeStore()
+    await store.refresh()
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    await store.forgetRoom(ACCOUNT, NAMED.room_id)
+    const before = calls.list
+
+    // The room is still listed, so the leave is what the user is shown.
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('leave')
+    await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+    expect(calls.list).toBe(before + 1)
+
+    listed = []
+    await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[1])
+    expect(calls.list).toBe(before + 2)
+    // The leave landed; the forget is still being waited out.
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('forget')
+  })
+
+  it('refreshes the room list until the room is gone, then stops', async () => {
+    vi.useFakeTimers()
+    let listed: unknown[] = [NAMED]
+    const calls = useTimedOutMembership(() => listed)
+    const store = makeStore()
+    await store.refresh()
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    const before = calls.list
+
+    await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+    expect(calls.list).toBe(before + 1)
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('leave')
+
+    // The homeserver finished, and the next refresh no longer lists the room.
+    listed = []
+    await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[1])
+    expect(calls.list).toBe(before + 2)
+    expect(store.rooms.value).toEqual([])
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(WINDOW_MS)
+    expect(calls.list).toBe(before + 2)
+  })
+
+  it('ends after the last refresh, and then a leave is sent again', async () => {
+    vi.useFakeTimers()
+    const calls = useTimedOutMembership(() => [NAMED])
+    const store = makeStore()
+    await store.refresh()
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    const before = calls.list
+
+    await vi.advanceTimersByTimeAsync(WINDOW_MS)
+
+    expect(calls.list).toBe(
+      before + PENDING_MEMBERSHIP_REFRESH_DELAYS_MS.length,
+    )
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBeNull()
+    // Still listed: the leave may have failed, and trying again is the
+    // user's call.
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    expect(calls.leave).toBe(2)
+  })
+
+  it('holds a pending forget for the window without refreshing', async () => {
+    vi.useFakeTimers()
+    const calls = useTimedOutMembership(() => [])
+    const store = makeStore()
+
+    const result = await store.forgetRoom(ACCOUNT, NAMED.room_id)
+    expect(result).toEqual({
+      ok: false,
+      pending: true,
+      message: FORGET_PENDING_MESSAGE,
+    })
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('forget')
+    await store.forgetRoom(ACCOUNT, NAMED.room_id)
+    expect(calls.forget).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(WINDOW_MS)
+
+    // A forget changes nothing the room list shows, so there is nothing to
+    // refresh for.
+    expect(calls.list).toBe(0)
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBeNull()
+  })
+
+  it('ends a pending leave on an answer to a later forget', async () => {
+    const calls = useTimedOutMembership(() => [])
+    server.use(
+      http.post(`${ROOM_PATH}/forget`, () => {
+        calls.forget += 1
+        return HttpResponse.json({ data: {} })
+      }),
+    )
+    const store = makeStore()
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+
+    const result = await store.forgetRoom(ACCOUNT, NAMED.room_id)
+
+    // A pending leave does not hold back a forget, and the forget's answer
+    // proves the leave went through.
+    expect(result).toEqual({ ok: true })
+    expect(calls.forget).toBe(1)
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBeNull()
+  })
+
+  it('drops a pending leave on a session reset', async () => {
+    vi.useFakeTimers()
+    const calls = useTimedOutMembership(() => [NAMED])
+    const store = makeStore()
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+
+    store.resetSession()
+    await vi.advanceTimersByTimeAsync(WINDOW_MS)
+
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBeNull()
+    expect(calls.list).toBe(0)
+  })
+})
 
 describe('roomMetadataPatch', () => {
   it('reads the observed name, topic and avatar shapes', () => {

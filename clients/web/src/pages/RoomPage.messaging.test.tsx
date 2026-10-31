@@ -20,6 +20,7 @@ import {
 } from 'vitest'
 import { ServicesContext } from '../services'
 import { roomKey } from '../stores/room-list'
+import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import { SINGLE_PANE_QUERY } from '../layout'
 import type { EventDto } from '../stores/timeline'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -3561,6 +3562,51 @@ describe('room command', () => {
     await waitFor(() => expect(roomRequests).toBeGreaterThan(mountedRequests))
     await waitFor(() => expect(services.rooms.rooms.value).toEqual([]))
     await waitFor(() => expect(window.location.pathname).toBe('/'))
+  })
+
+  // ADR 0121 step 4: a 504 is not a failure, so the command is spent instead
+  // of left in the composer to be sent again, and the composer says why.
+  it('/leave that axon timed out on reports pending and is not sent again', async () => {
+    let leaveRequests = 0
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/leave`,
+        () => {
+          leaveRequests += 1
+          return HttpResponse.json(
+            {
+              error: {
+                code: 'gateway_timeout',
+                message: 'leave timed out after 30s',
+              },
+            },
+            { status: 504 },
+          )
+        },
+      ),
+    )
+    const { findByLabelText, findByText, queryByText } = renderRoom([
+      event('$root', 100),
+    ])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/leave' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(await findByText(LEAVE_PENDING_MESSAGE)).toBeTruthy()
+    expect(leaveRequests).toBe(1)
+    expect(textarea.value).toBe('')
+    expect(queryByText('leave timed out after 30s')).toBeNull()
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+
+    fireEvent.input(textarea, { target: { value: '/leave' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(textarea.value).toBe(''))
+    expect(leaveRequests).toBe(1)
   })
 
   it('/leave asks for confirmation when this account is the only joined member', async () => {
