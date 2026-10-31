@@ -259,11 +259,15 @@ export function createIncomingShareStore(
       )
     )
       return
+    const previewUploads =
+      operations[0]?.state === 'sent'
+        ? []
+        : (record.previews?.flatMap((preview) =>
+            preview.image_upload_id == null ? [] : [preview.image_upload_id],
+          ) ?? [])
     const ids = [
       ...new Set([
-        ...(record.previews?.flatMap((preview) =>
-          preview.image_upload_id == null ? [] : [preview.image_upload_id],
-        ) ?? []),
+        ...previewUploads,
         ...record.files.flatMap((file) =>
           file.operation?.uploadId === undefined ||
           file.operation.state === 'sent'

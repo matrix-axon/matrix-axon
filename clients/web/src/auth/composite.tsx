@@ -1,4 +1,4 @@
-import { computed, type ReadonlySignal } from '@preact/signals'
+import { batch, computed, type ReadonlySignal } from '@preact/signals'
 import { useId } from 'preact/hooks'
 import type {
   AppAuthProvider,
@@ -35,9 +35,11 @@ export interface CompositeAuthProvider extends AppAuthProvider {
   onBeforeSignOut(
     hook: (token: string | null) => void | Promise<void>,
   ): () => void
+  /** Runs after every sign-out barrier settles if the session was retained. */
+  onSignOutAborted(hook: () => void | Promise<void>): () => void
   /**
-   * Drop the local session without running sign-out hooks. A push delete that
-   * succeeds on a later attempt uses this so it does not DELETE again.
+   * Internal session-drop primitive after all barriers succeed. Application
+   * integrations, including deferred push deletion, must use `clearToken`.
    */
   finishSignOut(): void
   /** See {@link OAuthAuthProvider.onAccessTokenRefreshed}. */
@@ -57,6 +59,8 @@ export function createCompositeAuthProvider(
   const oauth = createOAuthAuthProvider({ ...options, persistence })
   const tokenPaste = createTokenPasteProvider(persistence)
   const signOutHooks = new Set<(token: string | null) => void | Promise<void>>()
+  const abortHooks = new Set<() => void | Promise<void>>()
+  let signingOut: Promise<boolean> | null = null
 
   function active(): AuthProvider {
     return oauth.signedIn.value ? oauth : tokenPaste
@@ -75,7 +79,9 @@ export function createCompositeAuthProvider(
       active().onAuthFailure()
     },
     clearToken() {
+      if (signingOut !== null) return signingOut
       const token = provider.peekToken()
+      const identity = provider.sessionId.peek()
       const waits: Promise<void>[] = []
       for (const hook of [...signOutHooks]) {
         try {
@@ -91,17 +97,32 @@ export function createCompositeAuthProvider(
         provider.finishSignOut()
         return
       }
-      return Promise.all(waits).then(
-        () => {
-          provider.finishSignOut()
-          return true
-        },
-        () => false,
-      )
+      // A failed barrier must not restore authority while another barrier is
+      // still revoking it. Concurrent attempts share this completion too.
+      signingOut = Promise.allSettled(waits)
+        .then(async (results) => {
+          if (
+            results.every((result) => result.status === 'fulfilled') &&
+            provider.sessionId.peek() === identity
+          ) {
+            provider.finishSignOut()
+            return true
+          }
+          await Promise.allSettled([...abortHooks].map(async (hook) => hook()))
+          return false
+        })
+        .finally(() => {
+          signingOut = null
+        })
+      return signingOut
     },
     finishSignOut() {
-      oauth.clearToken()
-      tokenPaste.clearToken()
+      // Publish one signed-out state, never the hidden pasted credential
+      // between clearing the preferred OAuth session and its fallback.
+      batch(() => {
+        oauth.clearToken()
+        tokenPaste.clearToken()
+      })
     },
     refreshNow() {
       if (!oauth.signedIn.value) {
@@ -120,6 +141,12 @@ export function createCompositeAuthProvider(
       signOutHooks.add(hook)
       return () => {
         signOutHooks.delete(hook)
+      }
+    },
+    onSignOutAborted(hook) {
+      abortHooks.add(hook)
+      return () => {
+        abortHooks.delete(hook)
       }
     },
     onAccessTokenRefreshed(listener) {

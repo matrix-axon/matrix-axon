@@ -104,17 +104,21 @@ public struct ShareSession: Codable, Equatable {
   public var revision: String
   public var server: String
   public var credentialAvailable: Bool
+  // Optional for older descriptors. A remembered access credential was the
+  // only unambiguous staging grant before this field was introduced.
+  public var stagingAllowed: Bool?
   public var expiresAt: TimeInterval?
   public init(
     installation: String, generation: String = UUID().uuidString,
     revision: String = UUID().uuidString, server: String,
-    credentialAvailable: Bool, expiresAt: TimeInterval?
+    credentialAvailable: Bool, expiresAt: TimeInterval?, stagingAllowed: Bool? = nil
   ) {
     self.installation = installation
     self.generation = generation
     self.revision = revision
     self.server = server
     self.credentialAvailable = credentialAvailable
+    self.stagingAllowed = stagingAllowed
     self.expiresAt = expiresAt
   }
 }

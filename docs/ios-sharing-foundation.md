@@ -33,6 +33,7 @@ Confirmed items retain their event IDs and are never resent during recovery.
 An interrupted dispatch is **outcome unknown**, because the server may have accepted it without returning a response.
 Inspect the destination before explicitly allowing a resend; the duplicate-risk checkbox never triggers a send itself.
 Stopping a batch prevents subsequent dispatches after the current request finishes, and cannot recall a message already accepted upstream.
+Discarding a partial batch never deletes preview upload handles already associated with its delivered caption or first attachment.
 
 ## Session and storage boundaries
 
@@ -42,6 +43,9 @@ This preserves established logins during upgrade and leaves Remember Me semantic
 The extension never reads the main app's refresh credentials or rotates them.
 Main-app recovery can pass a session-only access token transiently to a native upload without writing it to the shared Keychain.
 Expired, missing, inaccessible, and session-only credentials require main-app recovery; the draft remains local.
+New staging requires a published installation descriptor with an explicit signed-in staging grant.
+A session-only sign-in grants staging without persisting its token; sign-out and unpublished credential-update intents reject new imports rather than reporting a draft saved under an invalid identity.
+Existing drafts survive interrupted credential publication and become available again after publication recovers.
 
 The App Group contains protected, backup-excluded content and a credential-free server/session descriptor.
 Only the main app establishes installation identity and runs its existing private reinstall cleanup.
@@ -52,13 +56,18 @@ Native account cleanup records private retry intent before accessing shared stor
 Sign-out revokes the shared credential or commits a durable session fence before completing.
 File deletion and inaccessible Keychain cleanup can be deferred; if neither revocation barrier can be committed, sign-out reports that specific failure and keeps the session active.
 Late import, upload, and bridge completions cannot recreate invalidated records.
+An aborted sign-out waits for every revocation barrier to settle before republishing the still-active session; concurrent sign-out attempts share one completion.
+A deferred push deletion rechecks the remaining sign-out barriers and visibly reports a refused completion in Settings.
 
 A cross-process file lock guards descriptors, quota reservations, revisions, and ownership fences.
 Files and manifests are published atomically with filesystem synchronization.
 Network and provider waits run outside that lock, and all locks, leases, copies, transfers, and response bodies are bounded.
 Resume reconciliation reports incomplete imports, removes orphaned temporary data, and turns interrupted dispatches into unknown outcomes without replay.
+Heartbeats and delivery-state changes avoid global quota scans; growing content still checks authoritative cross-process totals under the lock.
 Unreadable published metadata is retained and listed for explicit discard rather than silently erased.
-Native uploads read protected files directly; the bridge only returns bounded chunks for thumbnail presentation.
+Native uploads use a protected APFS copy-on-write snapshot of the retained file; hashing runs outside the shared lock and the HTTP request uses those exact verified bytes.
+Snapshot creation does not duplicate file data extents; normal completion removes it and expired-owner reconciliation removes remnants of interrupted transfers.
+The bridge only returns bounded chunks for thumbnail presentation.
 Discard makes a bounded best-effort cleanup attempt for known unclaimed server uploads; server staging expiry remains the fallback.
 Native sharing requires an HTTPS Axon server, validates certificates, refuses redirects, and retains the default iOS App Transport Security protections.
 A configured HTTP server can still be used through the main app's existing transport, but incoming-share generation and sending preserve the draft and explain that HTTPS is required.

@@ -81,6 +81,52 @@ function fixture(
 }
 
 describe('durable incoming-share recovery', () => {
+  it('discard preserves preview uploads referenced by a sent first attachment', async () => {
+    const f = fixture()
+    f.seed({
+      files: [
+        {
+          id: 'first',
+          name: 'first.txt',
+          mime: 'text/plain',
+          bytes: 1,
+          digest: 'digest',
+          thumbnail: false,
+          operation: {
+            id: 'first-op',
+            state: 'sent',
+            uploadId: 'delivered-file',
+            eventId: '$first',
+          },
+        },
+        {
+          id: 'second',
+          name: 'second.txt',
+          mime: 'text/plain',
+          bytes: 1,
+          digest: 'digest',
+          thumbnail: false,
+          operation: {
+            id: 'second-op',
+            state: 'failed',
+            uploadId: 'unsent-file',
+          },
+        },
+      ],
+      previews: [
+        {
+          matched_url: 'https://example.org',
+          provenance: 'generated',
+          image_upload_id: 'delivered-preview',
+        },
+      ],
+    })
+    await f.store.open('share')
+    await f.store.discard('share')
+    expect(
+      f.calls.find(({ action }) => action === 'cleanup')?.args?.uploadIds,
+    ).toEqual(['unsent-file'])
+  })
   it('a delayed list cannot replace a newer editor revision', async () => {
     const f = fixture()
     await f.store.open('share')

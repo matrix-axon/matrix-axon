@@ -167,9 +167,10 @@ class NativeAuthPlugin: Plugin {
         case "publish":
           guard let server = args.server else { throw ShareFailure.invalid }
           result = try self.shareObject(session.publish(installation: install, server: server,
-            token: args.token, expiresAt: args.expiresAt.map { $0 / 1000 }, replace: args.replace ?? false))
+            token: args.token, expiresAt: args.expiresAt.map { $0 / 1000 }, replace: args.replace ?? false,
+            stagingAllowed: args.stagingAllowed))
         case "check_transport":
-          guard let descriptor = try store.session(), URL(string: descriptor.server)?.scheme == "https" else { throw ShareFailure.httpsRequired }
+          try store.checkTransport()
         case "list": result = try self.shareObject(store.list())
         case "clear_account": break // prepareSharing reconciled the durable intent.
         case "claim": result = try self.shareObject(store.claim(args.id ?? ""))
@@ -212,12 +213,13 @@ class NativeAuthPlugin: Plugin {
           let manifest = try store.owned(id, owner: owner, account: account)
           guard manifest.session == descriptor.generation else { throw ShareFailure.stale }
           if args.action == "upload" {
-            let (url, file) = try store.verifiedFile(id, file: args.file ?? "", owner: owner)
-            let kind = file.thumbnail || file.mime.hasPrefix("image/") ? "image" : "file"
-            let filename = file.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "attachment"
-            let (status, body) = try self.shareHTTP.request(descriptor: descriptor, token: token,
-              path: "/v1/accounts/\(account)/media/uploads?kind=\(kind)&filename=\(filename)",
-              method: "POST", file: url, mime: file.mime)
+            let (status, body) = try store.withVerifiedFile(id, file: args.file ?? "", owner: owner) { url, file in
+              let kind = file.thumbnail || file.mime.hasPrefix("image/") ? "image" : "file"
+              let filename = file.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "attachment"
+              return try self.shareHTTP.request(descriptor: descriptor, token: token,
+                path: "/v1/accounts/\(account)/media/uploads?kind=\(kind)&filename=\(filename)",
+                method: "POST", file: url, mime: file.mime)
+            }
             guard (200..<300).contains(status),
                   let envelope = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                   let data = envelope["data"] as? [String: Any], let upload = data["upload_id"] as? String,
@@ -281,6 +283,7 @@ private struct ShareArgs: Decodable {
   let token: String?
   let expiresAt: Double?
   let replace: Bool?
+  let stagingAllowed: Bool?
   let id: String?
   let owner: String?
   let manifest: ShareManifest?

@@ -46,6 +46,12 @@ public final class ShareStore {
   public func session() throws -> ShareSession? {
     try coordinated { try readSession() }
   }
+  public func checkTransport() throws {
+    try coordinated {
+      guard let session = try readSession() else { throw ShareFailure.authentication }
+      guard URL(string: session.server)?.scheme == "https" else { throw ShareFailure.httpsRequired }
+    }
+  }
 
   /// The app alone calls this. Replacing identity invalidates content before
   /// publishing a descriptor for the replacement; refresh preserves generation.
@@ -86,7 +92,9 @@ public final class ShareStore {
 
   public func create(text: String) throws -> ShareManifest {
     try coordinated {
-      guard let session = try readStagingSession() else { throw ShareFailure.unavailable }
+      guard let session = try readSession(),
+        session.stagingAllowed ?? session.credentialAvailable
+      else { throw ShareFailure.authentication }
       guard text.utf8.count <= ShareLimits.textBytes else { throw ShareFailure.quota }
       let records = try reconcileLocked()
       guard records.count < ShareLimits.pendingCount,
@@ -227,10 +235,15 @@ public final class ShareStore {
       guard
         proposed.previews?.allSatisfy({ ["source", "generated"].contains($0.provenance) }) ?? true
       else { throw ShareFailure.invalid }
-      guard
-        proposed.bytes + (try reservations(in: directory(proposed.id))) <= ShareLimits.batchBytes,
-        (try usedBytes(readAll())) - current.bytes + proposed.bytes <= ShareLimits.pendingBytes
-      else { throw ShareFailure.quota }
+      // Fixed metadata reservations already cover heartbeat/outcome updates.
+      // Only content growth needs a cross-record quota scan; never cache a
+      // process-local total that another App Group consumer could invalidate.
+      if proposed.bytes > current.bytes {
+        guard
+          proposed.bytes + (try reservations(in: directory(proposed.id))) <= ShareLimits.batchBytes,
+          (try usedBytes(readAll())) - current.bytes + proposed.bytes <= ShareLimits.pendingBytes
+        else { throw ShareFailure.quota }
+      }
       // Confirmed results are immutable, including their destination/caption.
       try validateContentChange(from: current, to: proposed)
       try validateTransition(from: current.operation, to: proposed.operation)
@@ -294,11 +307,9 @@ public final class ShareStore {
   public func discard(_ id: String, owner: String? = nil, completed: Bool = false) throws {
     try coordinated {
       let current: ShareManifest
-      do { current = try load(id) } catch is DecodingError {
-        guard !completed else { throw ShareFailure.invalid }
-        try fm.removeItem(at: directory(id))
-        return
-      } catch ShareFailure.invalid {
+      do { current = try load(id) } catch {
+        // Unreadable records have no trusted ownership or delivery metadata.
+        // The UI requires explicit discard; acknowledgment must still fail.
         guard !completed else { throw ShareFailure.invalid }
         try fm.removeItem(at: directory(id))
         return
@@ -519,36 +530,65 @@ public final class ShareStore {
     else { throw ShareFailure.invalid }
   }
 
-  /// Verify retained bytes before an upload. Missing/corrupt data is visible
-  /// recovery work, never a reason to regenerate the linked page implicitly.
-  public func verifiedFile(_ id: String, file: String, owner: String) throws -> (URL, ShareFile) {
-    try coordinated {
+  /// Hash an APFS copy-on-write snapshot outside the shared lock, then use
+  /// that exact snapshot for upload. Later edits/replacement of the retained
+  /// path cannot change the verified bytes. A killed transfer's .part is
+  /// reclaimed by normal expired-owner reconciliation.
+  public func withVerifiedFile<T>(
+    _ id: String, file: String, owner: String, use: (URL, ShareFile) throws -> T
+  ) throws -> T {
+    let (snapshot, item): (URL, ShareFile) = try coordinated {
       let manifest = try load(id)
       try validateOwner(manifest, owner)
       guard let item = manifest.files.first(where: { $0.id == file }) else {
         throw ShareFailure.missingFile
       }
-      let url = try directory(id).appendingPathComponent(item.id)
-      let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+      let directory = try directory(id)
+      let descriptor = open(
+        directory.appendingPathComponent(item.id).path,
+        O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
       guard descriptor >= 0 else { throw ShareFailure.missingFile }
       defer { close(descriptor) }
       var info = stat()
-      guard fstat(descriptor, &info) == 0, info.st_size == item.bytes else {
-        throw ShareFailure.missingFile
+      guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+        info.st_size == item.bytes
+      else { throw ShareFailure.missingFile }
+      let snapshot = directory.appendingPathComponent(UUID().uuidString + ".part")
+      // Cloning shares immutable data extents; it does not copy/hash 100 MiB
+      // under the lock or reserve a second full upload buffer on disk.
+      guard fclonefileat(descriptor, AT_FDCWD, snapshot.path, 0) == 0 else {
+        Self.log.error("share_snapshot_failed share_id=\(id, privacy: .public) errno=\(errno)")
+        throw ShareFailure.unavailable
       }
-      var hash = SHA256()
-      var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-      while true {
-        let count = Darwin.read(descriptor, &buffer, buffer.count)
-        guard count >= 0 else { throw ShareFailure.missingFile }
-        if count == 0 { break }
-        hash.update(data: Data(buffer.prefix(count)))
+      do { try protect(snapshot) } catch {
+        try? fm.removeItem(at: snapshot)
+        throw error
       }
-      guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == item.digest else {
-        throw ShareFailure.missingFile
-      }
-      return (url, item)
+      return (snapshot, item)
     }
+    defer { try? fm.removeItem(at: snapshot) }
+    let descriptor = open(snapshot.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    guard descriptor >= 0 else { throw ShareFailure.missingFile }
+    defer { close(descriptor) }
+    let deadline = Date().addingTimeInterval(30)
+    var hash = SHA256()
+    var bytes = 0
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while true {
+      guard Date() < deadline else { throw ShareFailure.expired }
+      let count = Darwin.read(descriptor, &buffer, buffer.count)
+      guard count >= 0 else { throw ShareFailure.missingFile }
+      if count == 0 { break }
+      bytes += count
+      guard bytes <= item.bytes else { throw ShareFailure.missingFile }
+      hash.update(data: Data(buffer.prefix(count)))
+    }
+    guard bytes == item.bytes,
+      hash.finalize().map({ String(format: "%02x", $0) }).joined() == item.digest
+    else { throw ShareFailure.missingFile }
+    // Sign-out, discard and lease loss during hashing must fence dispatch.
+    try coordinated { try validateOwner(load(id), owner) }
+    return try use(snapshot, item)
   }
 
   public func validateSession(_ manifest: ShareManifest) throws {
@@ -674,7 +714,8 @@ public final class ShareStore {
     return fm.fileExists(atPath: url.path) ? try decode(ShareSession.self, from: url) : nil
   }
   /// A failed credential write removes dispatch authority, while its durable
-  /// descriptor intent still permits bounded staging under the same identity.
+  /// descriptor intent still permits recovery of existing drafts under the
+  /// same identity. New imports require a published, staging-enabled session.
   private func readStagingSession() throws -> ShareSession? {
     let pending = root.appendingPathComponent("session.pending.json")
     return fm.fileExists(atPath: pending.path)

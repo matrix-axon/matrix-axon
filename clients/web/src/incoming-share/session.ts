@@ -20,6 +20,8 @@ export function connectIncomingShareSession(
   store.setSessionReady(() => tail)
   const publish = () => {
     const identity = auth.sessionId.value
+    // peekToken performs no I/O, but reads OAuth/token-paste signals. Keep this
+    // read tracked: both silent and manual renewals must publish new expiry.
     const token = auth.peekToken()
     const signedIn = auth.signedIn.value
     const replace = previous !== identity
@@ -46,8 +48,8 @@ export function connectIncomingShareSession(
         /* An invalid stored value grants no extension access. */
       }
     } else if (storage.getItem('axon.token') === token) persisted = token
-    const publishedToken =
-      signedIn && signingOut !== identity ? persisted : null
+    const stagingAllowed = signedIn && signingOut !== identity
+    const publishedToken = stagingAllowed ? persisted : null
     tail = tail
       .catch(() => {})
       .then(async () => {
@@ -58,6 +60,7 @@ export function connectIncomingShareSession(
         await port.call('publish', {
           server,
           token: publishedToken,
+          stagingAllowed,
           expiresAt,
           replace: false,
         })
@@ -83,9 +86,21 @@ export function connectIncomingShareSession(
       throw cause
     }
   })
+  const removeAbortHook = auth.onSignOutAborted(async () => {
+    if (signingOut === null) return
+    signingOut = null
+    const failure = store.error.value
+    publish()
+    try {
+      await tail
+    } catch {
+      if (failure !== null) store.error.value = failure
+    }
+  })
   return () => {
     stop()
     removeHook()
+    removeAbortHook()
     generation += 1
   }
 }

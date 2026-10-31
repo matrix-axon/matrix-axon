@@ -7,6 +7,29 @@ import { createCompositeAuthProvider } from './composite'
 afterEach(cleanup)
 
 describe('createCompositeAuthProvider', () => {
+  it('shares a pending sign-out and never clears a replacement identity', async () => {
+    const auth = createCompositeAuthProvider({
+      providers: [],
+      baseUrl: 'https://axon.test',
+      storage: memoryStorage({ 'axon.token': 'old' }),
+      sessionStorage: memoryStorage(),
+    })
+    let release!: () => void
+    let calls = 0
+    auth.onBeforeSignOut(() => {
+      calls++
+      return new Promise<void>((resolve) => {
+        release = resolve
+      })
+    })
+    const pending = auth.clearToken()
+    expect(auth.clearToken()).toBe(pending)
+    expect(calls).toBe(1)
+    auth.tokenPaste.setToken('replacement')
+    release()
+    expect(await pending).toBe(false)
+    expect(auth.peekToken()).toBe('replacement')
+  })
   it('uses a pasted token when there is no OAuth session', () => {
     const storage = memoryStorage({ 'axon.token': 'manual-token' })
     const auth = createCompositeAuthProvider({

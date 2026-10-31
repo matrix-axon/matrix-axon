@@ -1819,7 +1819,13 @@ export function createServices(
       // A push retry may finish after another sign-out hook failed. Re-enter
       // those barriers; the deleted push record makes its own hook a no-op.
       finishSignOut: () => {
-        void auth.clearToken()
+        // Do not await from the push retry's own queue: the repeated push
+        // barrier is enqueued behind it. Observe the result outside that queue.
+        void Promise.resolve(auth.clearToken()).then((cleared) => {
+          if (cleared === false)
+            remotePushError.value =
+              'Device registration removed, but sign-out could not finish. Retry signing out in Settings.'
+        })
       },
       put: (token, body) =>
         putPushRegistration(platform.fetch, baseUrl, token, body),

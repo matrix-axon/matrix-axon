@@ -34,6 +34,46 @@ test.beforeEach(async ({ page }) => {
       localStorage.setItem('fixture.incoming', JSON.stringify([record]))
   }, record)
 })
+test('preview work disables the caption and preserves its saved text', async ({
+  page,
+}) => {
+  await page.addInitScript(
+    (record) => {
+      localStorage.setItem('fixture.incoming', JSON.stringify([record]))
+    },
+    {
+      ...record,
+      operation: { ...record.operation, state: 'ready' },
+      previews: [],
+    },
+  )
+  let release!: () => void
+  const waiting = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/link-previews/generate', async (route) => {
+    await waiting
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { status: 'unavailable' } }),
+    })
+  })
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  const caption = page.getByRole('textbox', {
+    name: 'Message or first attachment caption',
+  })
+  await expect(caption).toBeEnabled()
+  await page
+    .getByRole('button', { name: 'Include preview:', exact: false })
+    .click()
+  await expect(caption).toBeDisabled()
+  await expect(caption).toHaveValue(record.text)
+  release()
+  await expect(caption).toBeEnabled()
+  await expect(caption).toHaveValue(record.text)
+})
 test('recovery preserves cards and uncertain outcomes until explicit discard', async ({
   page,
 }) => {

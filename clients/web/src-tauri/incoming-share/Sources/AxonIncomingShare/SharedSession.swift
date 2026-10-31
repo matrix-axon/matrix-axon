@@ -86,7 +86,7 @@ public final class SharedSession {
   /// renewal; explicit identity replacement invalidates the old generation.
   public func publish(
     installation: String, server: String, token: String?, expiresAt: Double?,
-    replace: Bool
+    replace: Bool, stagingAllowed: Bool? = nil
   ) throws -> ShareSession {
     guard let url = URL(string: server), ["https", "http"].contains(url.scheme),
       url.host != nil, url.user == nil, url.password == nil,
@@ -101,7 +101,8 @@ public final class SharedSession {
           generation: !replace && previous?.installation == installation
             && previous?.server == server
             ? previous!.generation : UUID().uuidString,
-          server: server, credentialAvailable: token != nil, expiresAt: expiresAt)
+          server: server, credentialAvailable: token != nil, expiresAt: expiresAt,
+          stagingAllowed: stagingAllowed ?? (token != nil))
       }, credential: { try self.vault.write(token) })
   }
 

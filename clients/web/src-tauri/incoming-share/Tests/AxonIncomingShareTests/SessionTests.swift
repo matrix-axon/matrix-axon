@@ -4,6 +4,18 @@ import XCTest
 @testable import AxonIncomingShare
 
 final class SessionTests: XCTestCase {
+  func testInvalidatedSessionCannotStageNewShares() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try ShareStore(root: root)
+    try store.publish(
+      ShareSession(
+        installation: "install", server: "https://axon.example",
+        credentialAvailable: true, expiresAt: nil), credential: {})
+    try store.invalidateSession()
+    XCTAssertThrowsError(try store.create(text: "must not report a saved draft"))
+    XCTAssertTrue(try store.list().isEmpty)
+  }
   func testKilledPublicationIntentFencesAuthorityAndHealsOldRecords() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -92,7 +104,7 @@ final class SessionTests: XCTestCase {
         token: "new-access", expiresAt: nil, replace: false))
     XCTAssertThrowsError(try session.credential())
     XCTAssertEqual(try store.list().map(\.id), [draft.id])
-    _ = try store.create(text: "staged while Keychain is unavailable")
+    XCTAssertThrowsError(try store.create(text: "new staging waits for publication recovery"))
     vault.unavailable = false
     let refreshed = try session.publish(
       installation: "install", server: "https://axon.example",
@@ -122,6 +134,42 @@ final class SessionTests: XCTestCase {
       installation: "new-install", server: "https://axon.example", token: nil, expiresAt: nil,
       replace: true)
     XCTAssertNil(vault.token)
+  }
+
+  func testPublishedSignedOutSessionRefusesStagingButSessionOnlySignInAllowsIt() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try ShareStore(root: root)
+    let session = SharedSession(store: store, accessGroup: "test", vault: Vault())
+    _ = try session.publish(
+      installation: "install", server: "https://axon.example",
+      token: nil, expiresAt: nil, replace: true, stagingAllowed: false)
+    XCTAssertThrowsError(try store.create(text: "signed out"))
+    _ = try session.publish(
+      installation: "install", server: "https://axon.example",
+      token: nil, expiresAt: nil, replace: true, stagingAllowed: true)
+    XCTAssertNoThrow(try store.create(text: "recover in the main app"))
+    XCTAssertThrowsError(try session.credential())
+  }
+
+  func testMissingSessionTransportDoesNotRecommendHTTPS() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try ShareStore(root: root)
+    XCTAssertThrowsError(try store.checkTransport()) {
+      XCTAssertEqual($0 as? ShareFailure, .authentication)
+    }
+    try store.publish(
+      ShareSession(
+        installation: "install", server: "http://axon.example",
+        credentialAvailable: true, expiresAt: nil), credential: {})
+    XCTAssertThrowsError(try store.checkTransport()) {
+      XCTAssertEqual($0 as? ShareFailure, .httpsRequired)
+    }
+    try store.invalidateSession()
+    XCTAssertThrowsError(try store.checkTransport()) {
+      XCTAssertEqual($0 as? ShareFailure, .authentication)
+    }
   }
 
   func testExpiredAndSessionOnlyCredentialsPreserveDraft() throws {

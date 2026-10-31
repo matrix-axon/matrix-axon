@@ -17,6 +17,67 @@ final class ShareStoreTests: XCTestCase {
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+  func testVerifiedUploadSnapshotSurvivesRetainedFileMutationAndCleansUp() throws {
+    let source = root.appendingPathComponent("provider.txt")
+    try Data("original".utf8).write(to: source)
+    var owned = try store.claim(store.create(text: "caption").id)
+    owned = try store.importFile(
+      owned.id, owner: owned.owner!, source: source,
+      name: "file.txt", mime: "text/plain")
+    let file = owned.files[0]
+    let retained = root.appendingPathComponent(owned.id).appendingPathComponent(file.id)
+    var snapshot: URL!
+    try store.withVerifiedFile(owned.id, file: file.id, owner: owned.owner!) { url, _ in
+      snapshot = url
+      // Both in-place mutation and path replacement must leave verified bytes
+      // stable for the whole transport callback.
+      try Data("changed!".utf8).write(to: retained)
+      try Data("replaced".utf8).write(to: retained, options: .atomic)
+      XCTAssertEqual(try Data(contentsOf: url), Data("original".utf8))
+      let peer = try ShareStore(root: root, now: { self.time })
+      XCTAssertNoThrow(try peer.coordinated {})
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: snapshot.path))
+    XCTAssertThrowsError(
+      try store.withVerifiedFile(
+        owned.id, file: file.id,
+        owner: owned.owner!
+      ) { _, _ in })
+    XCTAssertFalse(
+      try FileManager.default.contentsOfDirectory(atPath: retained.deletingLastPathComponent().path)
+        .contains(where: { $0.hasSuffix(".part") }))
+  }
+
+  func testUnavailableMetadataCanBeDiscardedWithoutFollowingItsSymlink() throws {
+    let owned = try store.create(text: "draft")
+    let metadata = root.appendingPathComponent(owned.id).appendingPathComponent("manifest.json")
+    let target = root.appendingPathComponent("unrelated.json")
+    try Data("keep this file".utf8).write(to: target)
+    try FileManager.default.removeItem(at: metadata)
+    try FileManager.default.createSymbolicLink(at: metadata, withDestinationURL: target)
+    XCTAssertEqual(try store.list().first?.importFailures, ["unreadable_manifest"])
+    XCTAssertThrowsError(try store.discard(owned.id, completed: true))
+    try store.discard(owned.id)
+    XCTAssertTrue(try store.list().isEmpty)
+    XCTAssertEqual(try Data(contentsOf: target), Data("keep this file".utf8))
+  }
+
+  func testNonGrowingUpdatesDoNotScanOtherRecordsForQuota() throws {
+    var owned = try store.claim(store.create(text: "draft").id)
+    let unrelated = try store.claim(store.create(text: "other").id)
+    var growing = try store.claim(store.create(text: "new").id)
+    try Data("unreadable reservation".utf8).write(
+      to: root.appendingPathComponent(unrelated.id)
+        .appendingPathComponent("unfinished.part.reservation"))
+    owned.operation.state = .dispatching
+    owned = try store.update(owned)
+    XCTAssertEqual(owned.operation.state, .dispatching)
+    owned = try store.update(owned)
+    XCTAssertNotNil(owned.owner)
+    growing.text += "larger"
+    XCTAssertThrowsError(try store.update(growing))
+  }
+
   func testThumbnailAttachmentPublishesAtomicallyAndReclaimsReplacedBytes() throws {
     let png = Data(
       base64Encoded:
@@ -192,9 +253,10 @@ final class ShareStoreTests: XCTestCase {
       Data("original".utf8))
     XCTAssertThrowsError(
       try store.readFile(owned.id, file: first.id, owner: owned.owner!, offset: 0, count: 100000))
-    let url = try store.verifiedFile(owned.id, file: first.id, owner: owned.owner!).0
+    let url = root.appendingPathComponent(owned.id).appendingPathComponent(first.id)
     try Data("modified".utf8).write(to: url)
-    XCTAssertThrowsError(try store.verifiedFile(owned.id, file: first.id, owner: owned.owner!))
+    XCTAssertThrowsError(
+      try store.withVerifiedFile(owned.id, file: first.id, owner: owned.owner!) { _, _ in })
   }
 
   func testThumbnailHasNoAttachmentOperationAndMissingCopyIsVisible() throws {
@@ -208,9 +270,10 @@ final class ShareStoreTests: XCTestCase {
     XCTAssertTrue(file.thumbnail)
     XCTAssertNil(file.operation)
     XCTAssertEqual(owned.bytes, png.count + owned.text.utf8.count)
-    let url = try store.verifiedFile(owned.id, file: file.id, owner: owned.owner!).0
+    let url = root.appendingPathComponent(owned.id).appendingPathComponent(file.id)
     try FileManager.default.removeItem(at: url)
-    XCTAssertThrowsError(try store.verifiedFile(owned.id, file: file.id, owner: owned.owner!))
+    XCTAssertThrowsError(
+      try store.withVerifiedFile(owned.id, file: file.id, owner: owned.owner!) { _, _ in })
     XCTAssertEqual(try store.list().first?.files.count, 1)
     XCTAssertThrowsError(
       try store.importThumbnail(

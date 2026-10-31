@@ -45,6 +45,11 @@ it('deferred push sign-out completion rechecks the native sharing barrier', asyn
     ),
   )
   expect(services.auth.signedIn.value).toBe(true)
+  await vi.waitFor(() =>
+    expect(services.remotePushError.value).toContain(
+      'sign-out could not finish',
+    ),
+  )
   unavailable = false
   captured!.finishSignOut()
   await vi.waitFor(() => expect(services.auth.signedIn.value).toBe(false))
