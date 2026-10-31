@@ -2218,6 +2218,10 @@ export function RoomPage() {
                 ? 'Message'
                 : `Message ${composerLabelTitle}`
             }
+            // `roomEntryStatus` is set only while a later /join, /knock, /dm,
+            // /invite or invite cancel is in flight, and cleared when it ends.
+            // It goes first because it describes the command just typed; a
+            // pending leave or forget is store state and shows again after.
             status={roomEntryStatus ?? membershipStatus ?? undefined}
             banner={composerBanner}
             onEditLast={editLast}

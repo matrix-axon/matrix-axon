@@ -1279,6 +1279,52 @@ describe('a leave or forget axon timed out on (ADR 0121 step 4)', () => {
     expect(calls.leave).toBe(1)
   })
 
+  it('lets a retry through once the first refresh step has passed', async () => {
+    vi.useFakeTimers()
+    const calls = useTimedOutMembership(() => [NAMED])
+    const store = makeStore()
+    await store.refresh()
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+
+    await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+    // The 504 may have come from a proxy before axon saw the call, so a
+    // deliberate second leave goes out now...
+    const retry = await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    expect(retry).toEqual({
+      ok: false,
+      pending: true,
+      message: LEAVE_PENDING_MESSAGE,
+    })
+    expect(calls.leave).toBe(2)
+
+    // ...and its own 504 starts the window over, holding back a third.
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    expect(calls.leave).toBe(2)
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('leave')
+  })
+
+  it('keeps a pending leave going when a later forget times out too', async () => {
+    vi.useFakeTimers()
+    let listed: unknown[] = [NAMED]
+    const calls = useTimedOutMembership(() => listed)
+    const store = makeStore()
+    await store.refresh()
+    await store.leaveRoom(ACCOUNT, NAMED.room_id)
+    await store.forgetRoom(ACCOUNT, NAMED.room_id)
+    const before = calls.list
+
+    // The room is still listed, so the leave is what the user is shown.
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('leave')
+    await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+    expect(calls.list).toBe(before + 1)
+
+    listed = []
+    await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[1])
+    expect(calls.list).toBe(before + 2)
+    // The leave landed; the forget is still being waited out.
+    expect(store.pendingMembership(ACCOUNT, NAMED.room_id)).toBe('forget')
+  })
+
   it('refreshes the room list until the room is gone, then stops', async () => {
     vi.useFakeTimers()
     let listed: unknown[] = [NAMED]

@@ -56,8 +56,11 @@ export const FORGET_PENDING_MESSAGE =
  * before (30 s, 90 s, 210 s and 450 s after the `504`). The live bus carries no
  * membership change (issue #103), so nothing else would show the room going.
  * On prod, a leave of a 36,000-member space took Synapse 194 s and its retry
- * 328 s (issue #743). The same window keeps a second leave or forget of the
- * room from being sent while the first may still be running.
+ * 328 s (issue #743). Until the first step, a second leave or forget of the
+ * room is not sent: the first may still be running, and on prod the retry
+ * cost Synapse more than the original. After it, a deliberate retry goes
+ * through, since the `504` may have come from a proxy before axon ever saw
+ * the call.
  */
 export const PENDING_MEMBERSHIP_REFRESH_DELAYS_MS: readonly number[] = [
   30_000, 60_000, 120_000, 240_000,
@@ -320,34 +323,40 @@ export function createRoomsStore(
   /** Rooms this session successfully left/forgot before sync caught up. */
   const locallyHiddenRooms = new Set<string>()
   /**
-   * Leaves and forgets axon timed out on, by `roomKey`, each with the timer
-   * for its next step (`PENDING_MEMBERSHIP_REFRESH_DELAYS_MS`).
-   * `pendingVerbs` mirrors it for rendering.
+   * Leaves and forgets axon timed out on, by `roomKey` and then verb, each
+   * with the timer for its next step (`PENDING_MEMBERSHIP_REFRESH_DELAYS_MS`)
+   * and whether that step is past the first, when a retry may go out. A room
+   * can hold both: a pending leave that finished, then a forget that timed
+   * out. `pendingVerbs` mirrors it for rendering.
    */
   const pendingMemberships = new Map<
     string,
-    { verb: 'leave' | 'forget'; timer: ReturnType<typeof setTimeout> }
+    Map<
+      'leave' | 'forget',
+      { timer: ReturnType<typeof setTimeout>; retryable: boolean }
+    >
   >()
   const pendingVerbs = signal<ReadonlyMap<string, 'leave' | 'forget'>>(
     new Map(),
   )
   /**
-   * Copy `pendingMemberships` into `pendingVerbs`. Writes only on a change,
-   * because `resetSession` runs inside an effect.
+   * Copy `pendingMemberships` into `pendingVerbs`, a pending leave ahead of a
+   * pending forget, since the room is still listed until the leave lands.
+   * Writes only on a change, because `resetSession` runs inside an effect.
    */
   function publishPendingMemberships(): void {
+    const next = new Map<string, 'leave' | 'forget'>()
+    for (const [key, verbs] of pendingMemberships) {
+      next.set(key, verbs.has('leave') ? 'leave' : 'forget')
+    }
     const current = pendingVerbs.peek()
     if (
-      current.size === pendingMemberships.size &&
-      [...pendingMemberships].every(
-        ([key, { verb }]) => current.get(key) === verb,
-      )
+      current.size === next.size &&
+      [...next].every(([key, verb]) => current.get(key) === verb)
     ) {
       return
     }
-    pendingVerbs.value = new Map(
-      [...pendingMemberships].map(([key, { verb }]) => [key, verb]),
-    )
+    pendingVerbs.value = next
   }
   /**
    * Monotonic counter of live metadata patches, and the value each room was
@@ -905,8 +914,10 @@ export function createRoomsStore(
     pendingDisplayNames.clear()
     // Above the pristine-store guard: a leave can time out before the list
     // ever loaded, and its refreshes must not run under the next reader.
-    for (const { timer } of pendingMemberships.values()) {
-      clearTimeout(timer)
+    for (const verbs of pendingMemberships.values()) {
+      for (const { timer } of verbs.values()) {
+        clearTimeout(timer)
+      }
     }
     pendingMemberships.clear()
     publishPendingMemberships()
@@ -1038,9 +1049,11 @@ export function createRoomsStore(
       message:
         verb === 'leave' ? LEAVE_PENDING_MESSAGE : FORGET_PENDING_MESSAGE,
     }
-    // Sending it again would only double the homeserver's work: on prod the
-    // retry of a slow leave cost Synapse more than the first attempt.
-    if (pendingMemberships.get(key)?.verb === verb) {
+    // Sending it again straight away would only double the homeserver's
+    // work: on prod the retry of a slow leave cost Synapse more than the
+    // first attempt. Past the first step, a retry is the user's call.
+    const held = pendingMemberships.get(key)?.get(verb)
+    if (held !== undefined && !held.retryable) {
       return pending
     }
     try {
@@ -1057,7 +1070,8 @@ export function createRoomsStore(
         return { ok: false, message }
       }
       // An answer settles whatever an earlier timeout left pending.
-      endPendingMembership(key)
+      endPendingMembership(key, 'leave')
+      endPendingMembership(key, 'forget')
       const hiddenKey = hideRoomLocally(accountId, roomId)
       try {
         await refresh()
@@ -1083,11 +1097,11 @@ export function createRoomsStore(
    * it again is the user's call.
    */
   function awaitPendingMembership(verb: 'leave' | 'forget', key: string): void {
-    endPendingMembership(key)
+    endPendingMembership(key, verb)
     const step = (index: number) => {
       const delay = PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[index]
       if (delay === undefined) {
-        endPendingMembership(key)
+        endPendingMembership(key, verb)
         return
       }
       const timer = setTimeout(() => {
@@ -1098,29 +1112,35 @@ export function createRoomsStore(
         void refresh().then(() => {
           // Ended while the refresh was out: by `resetSession`, or by an
           // answer to a later leave or forget of the room.
-          if (pendingMemberships.get(key)?.timer !== timer) {
+          if (pendingMemberships.get(key)?.get(verb)?.timer !== timer) {
             return
           }
           if (rooms.value.some((room) => roomKey(room) === key)) {
             step(index + 1)
           } else {
-            endPendingMembership(key)
+            endPendingMembership(key, verb)
           }
         })
       }, delay)
-      pendingMemberships.set(key, { verb, timer })
+      const verbs = pendingMemberships.get(key) ?? new Map()
+      verbs.set(verb, { timer, retryable: index > 0 })
+      pendingMemberships.set(key, verbs)
       publishPendingMemberships()
     }
     step(0)
   }
 
-  function endPendingMembership(key: string): void {
-    const entry = pendingMemberships.get(key)
-    if (entry === undefined) {
+  function endPendingMembership(key: string, verb: 'leave' | 'forget'): void {
+    const verbs = pendingMemberships.get(key)
+    const entry = verbs?.get(verb)
+    if (verbs === undefined || entry === undefined) {
       return
     }
     clearTimeout(entry.timer)
-    pendingMemberships.delete(key)
+    verbs.delete(verb)
+    if (verbs.size === 0) {
+      pendingMemberships.delete(key)
+    }
     publishPendingMemberships()
   }
 
