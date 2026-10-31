@@ -118,8 +118,12 @@ Axon stores the first 64 distinct image references in document order from saniti
 Authorization follows the timeline's latest valid edit, excluding stray replacement content, other senders' edits, and superseded edits.
 Those references continue authorizing media after a pack changes, subject to account isolation, room departure, and authorized redaction of the reference or an edit's target in the same room.
 Proven redaction authority is retained, so demoting a moderator does not restore a redacted image.
+The upgrade preserves preexisting same-room redactions across all event types before serving traffic.
+Creation and power-level state arriving after a redaction re-evaluate its authority atomically; concurrent room writes are serialized under configured database deadlines.
 Historical messages are reparsed by a paced background worker in restart-safe batches of at most 32 rows, using the isolated maintenance connection.
 Each batch has a ten-second overall deadline; failures retry and committed progress survives restart.
+At the pacing ceiling of roughly 32 messages per second, one million pending messages take at least 8.7 hours; parsing and database load extend that estimate.
+The startup migration builds its indexes non-concurrently and preserves historical redactions before accepting traffic, so large event stores should schedule an upgrade maintenance window.
 Historical content objects larger than 128 KiB are skipped with an empty projection.
 Identical re-delivery also repairs a pending projection without replacing stored event content.
 This does not change the standalone sticker or reaction send APIs.

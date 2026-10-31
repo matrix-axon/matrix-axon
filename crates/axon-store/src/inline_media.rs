@@ -122,14 +122,11 @@ impl Store {
                  FROM events WHERE event_type='m.room.message' AND inline_media_urls IS NULL \
                  ORDER BY id LIMIT 32 FOR UPDATE",
             ).fetch_all(&mut *tx).await?;
-            let proofs = crate::event_visibility::capture_redaction_proofs();
-            let proof_sql = format!("WITH ins AS (SELECT * FROM events WHERE id=$1) {proofs}");
+            // Upgrade migration and event/authority-state writes own redaction
+            // proofs. Keep this row-locking repair independent of proof inserts
+            // so it cannot invert their scope-lock/foreign-key lock ordering.
             for row in &rows {
                 let id: i64 = row.try_get("id")?;
-                sqlx_core::query::query(&proof_sql)
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
                 let content: Option<Value> = row.try_get("content")?;
                 let urls = inline_media_urls("m.room.message", content.as_ref());
                 sqlx_core::query::query("UPDATE events SET inline_media_urls=$2 WHERE id=$1")

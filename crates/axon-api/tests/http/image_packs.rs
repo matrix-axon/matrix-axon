@@ -1894,3 +1894,236 @@ async fn emoji_packs_debug_explains_inheritance_without_changing_results() {
     assert!(inheritance_log(&logs).contains("ancestor_count=16"));
     store.delete_account_row(a.account_id).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn historical_redactions_keep_masking_non_message_events_on_upgrade() {
+    let original = store().await;
+    let account = original
+        .upsert_account(
+            &format!("@legacy-redactions-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let room = "!legacy-redactions:localhost";
+    inline_event(
+        &original,
+        account,
+        room,
+        "$legacy-root",
+        "m.room.message",
+        Some(json!({"body":"root"})),
+    )
+    .await;
+    for (id, kind, content) in [
+        (
+            "$legacy-reaction",
+            "m.reaction",
+            json!({"m.relates_to":{"rel_type":"m.annotation","event_id":"$legacy-root","key":"👍"}}),
+        ),
+        (
+            "$legacy-sticker",
+            "m.sticker",
+            json!({"body":"sticker", "url":"mxc://example.org/legacy-sticker"}),
+        ),
+    ] {
+        inline_event(&original, account, room, id, kind, Some(content)).await;
+        inline_event_as(
+            &original,
+            account,
+            room,
+            &format!("{id}-redaction"),
+            "m.room.redaction",
+            Some(json!({"redacts":id})),
+            "@moderator:remote.test",
+        )
+        .await;
+    }
+    // This fixture models pre-upgrade masking, which accepted delivered
+    // same-room redactions without keeping a historical power-level proof.
+    // Re-run just the data migration after creating those legacy rows.
+    let watermark = original.search_outbox_high_water().await.unwrap();
+    sqlx_core::query::query("DELETE FROM _sqlx_migrations WHERE version=20261031205128")
+        .execute(original.pool())
+        .await
+        .unwrap();
+    let upgraded = store().await;
+    for id in ["$legacy-reaction", "$legacy-sticker"] {
+        assert!(
+            upgraded
+                .get_event(account, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content
+                .is_none(),
+            "upgrading must not restore previously redacted {id}"
+        );
+    }
+    assert!(upgraded
+        .event_reactions(account, "$legacy-root")
+        .await
+        .unwrap()
+        .is_empty());
+    let reindex = upgraded.drain_search_outbox(watermark, 100).await.unwrap();
+    for id in ["$legacy-root", "$legacy-reaction", "$legacy-sticker"] {
+        assert!(reindex
+            .iter()
+            .any(|item| item.account_id == account && item.event_id == id));
+    }
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id=$1")
+        .bind(account)
+        .execute(original.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn redaction_authority_is_retried_when_room_state_arrives_late() {
+    let store = store().await;
+    let account = store
+        .upsert_account(
+            &format!("@late-authority-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    for (room, kind, authority, demoted) in [
+        (
+            "!late-power:localhost",
+            "m.room.power_levels",
+            json!({"users":{"@moderator:remote.test":100},"redact":50}),
+            json!({"users":{},"redact":50}),
+        ),
+        (
+            "!late-create:localhost",
+            "m.room.create",
+            json!({"room_version":"12","additional_creators":["@moderator:remote.test"]}),
+            json!({"room_version":"12","additional_creators":[]}),
+        ),
+    ] {
+        let target = format!("${kind}-target");
+        inline_event(
+            &store,
+            account,
+            room,
+            &target,
+            "m.sticker",
+            Some(json!({"body":"sticker","url":"mxc://example.org/late"})),
+        )
+        .await;
+        inline_event_as(
+            &store,
+            account,
+            room,
+            &format!("${kind}-redaction"),
+            "m.room.redaction",
+            Some(json!({"redacts":target})),
+            "@moderator:remote.test",
+        )
+        .await;
+        assert!(store
+            .get_event(account, &target)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .is_some());
+        let watermark = store.search_outbox_high_water().await.unwrap();
+        state(&store, account, room, kind, "", authority, 10).await;
+        let reindex = store.drain_search_outbox(watermark, 100).await.unwrap();
+        assert!(reindex
+            .iter()
+            .any(|item| item.account_id == account && item.event_id == target));
+        assert!(
+            store
+                .get_event(account, &target)
+                .await
+                .unwrap()
+                .unwrap()
+                .content
+                .is_none(),
+            "late {kind} must capture redaction authority for all event types"
+        );
+        state(&store, account, room, kind, "", demoted, 11).await;
+        assert!(
+            store
+                .get_event(account, &target)
+                .await
+                .unwrap()
+                .unwrap()
+                .content
+                .is_none(),
+            "a later authority change must not erase captured evidence"
+        );
+    }
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id=$1")
+        .bind(account)
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn concurrent_redaction_and_authority_state_cannot_miss_each_other() {
+    let store = store().await;
+    let account = store
+        .upsert_account(
+            &format!("@concurrent-proof-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    for i in 0..8 {
+        let room = format!("!concurrent-proof-{i}:localhost");
+        let target = format!("$concurrent-target-{i}");
+        let redaction = format!("$concurrent-redaction-{i}");
+        inline_event(
+            &store,
+            account,
+            &room,
+            &target,
+            "m.sticker",
+            Some(json!({"body":"sticker"})),
+        )
+        .await;
+        tokio::join!(
+            state(
+                &store,
+                account,
+                &room,
+                "m.room.power_levels",
+                "",
+                json!({"users":{"@mod:remote.test":100}}),
+                1
+            ),
+            inline_event_as(
+                &store,
+                account,
+                &room,
+                &redaction,
+                "m.room.redaction",
+                Some(json!({"redacts":target})),
+                "@mod:remote.test"
+            )
+        );
+        assert!(store
+            .get_event(account, &target)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .is_none());
+    }
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id=$1")
+        .bind(account)
+        .execute(store.pool())
+        .await
+        .unwrap();
+}

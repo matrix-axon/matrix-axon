@@ -528,6 +528,8 @@ impl Store {
     /// duplicate delivery the existing row's id is read back, so the value is
     /// stable across re-delivery.
     pub async fn upsert_event(&self, ev: &NewEvent<'_>) -> Result<i64, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        crate::event_visibility::lock_redaction_scope(&mut tx, ev.account_id, ev.room_id).await?;
         let proofs = crate::event_visibility::capture_redaction_proofs();
         let sql = format!(
             "WITH ins AS ( \
@@ -568,9 +570,10 @@ impl Store {
                 ev.event_type,
                 ev.content.as_ref(),
             ))
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
         if let Some((id,)) = inserted {
+            tx.commit().await?;
             return Ok(id);
         }
         // The insert/repair returned no row, so this event was already
@@ -582,8 +585,9 @@ impl Store {
         )
         .bind(ev.account_id)
         .bind(ev.event_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(id)
     }
 
@@ -788,6 +792,17 @@ impl Store {
         // The same RETURNING feeds the room-summary touch (ADR 0095): a UTD that
         // just gained a body may become the room's activity marker even if a
         // later non-content event is already stored.
+        let mut tx = self.pool.begin().await?;
+        let room: Option<String> = sqlx_core::query_scalar::query_scalar(
+            "SELECT room_id FROM events WHERE account_id=$1 AND event_id=$2",
+        )
+        .bind(account_id)
+        .bind(event_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(room) = room {
+            crate::event_visibility::lock_redaction_scope(&mut tx, account_id, &room).await?;
+        }
         let proofs = crate::event_visibility::capture_redaction_proofs();
         let sql = format!(
             "WITH ins AS ( \
@@ -810,8 +825,9 @@ impl Store {
                 event_type,
                 Some(content),
             ))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 

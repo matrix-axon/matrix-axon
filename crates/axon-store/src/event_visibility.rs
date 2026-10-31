@@ -1,5 +1,53 @@
 //! Shared room and redaction predicates for timeline and media reads.
 
+use sqlx_core::transaction::Transaction;
+use sqlx_postgres::Postgres;
+use uuid::Uuid;
+
+use crate::StoreError;
+
+/// Serialize event and authority-state writes in one account/room. Take the
+/// transaction lock in its own statement so the following write gets a fresh
+/// READ COMMITTED snapshot after any wait. Otherwise two concurrent statements
+/// can each miss the other's event/state and permanently lose the proof.
+/// The pool's statement/lock deadlines bound acquisition; commit/drop releases it.
+pub(crate) async fn lock_redaction_scope(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    room_id: &str,
+) -> Result<(), StoreError> {
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 895))")
+        .bind(format!("{account_id}:{room_id}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Capture newly provable redactions of any event type after authority state
+/// arrives. Existing evidence is append-only: a later demotion never revokes it.
+pub(crate) fn capture_room_redaction_proofs() -> String {
+    let valid = redaction_with_current_authority("redaction", "target");
+    format!(
+        "WITH proven AS ( \
+         INSERT INTO event_redaction_proofs (account_id,room_id,redaction_event_id,target_event_id) \
+         SELECT redaction.account_id,redaction.room_id,redaction.event_id,target.event_id \
+         FROM events redaction JOIN events target \
+           ON target.account_id=redaction.account_id AND target.event_id=redaction.redacts \
+         WHERE redaction.account_id=$1 AND redaction.room_id=$2 \
+           AND redaction.event_type='m.room.redaction' \
+           AND NOT EXISTS (SELECT 1 FROM event_redaction_proofs proof \
+             WHERE proof.account_id=redaction.account_id AND proof.redaction_event_id=redaction.event_id) \
+           AND {valid} ON CONFLICT DO NOTHING RETURNING account_id,target_event_id \
+         ), affected AS ( \
+           SELECT target.account_id,target.event_id,target.relates_to FROM proven \
+           JOIN events target ON target.account_id=proven.account_id AND target.event_id=proven.target_event_id \
+         ) INSERT INTO search_outbox (account_id,event_id) \
+           SELECT account_id,event_id FROM affected UNION \
+           SELECT account_id,relates_to->>'event_id' FROM affected \
+           WHERE relates_to->>'event_id' IS NOT NULL"
+    )
+}
+
 /// Delivery alone is not proof a redaction applies (room versions 3+).
 /// Match the room, then accept SDK-pruned evidence, same-server authority,
 /// or cached permission to redact others' events, as state repair does.
