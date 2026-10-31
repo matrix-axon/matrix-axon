@@ -120,6 +120,18 @@ CASES: list[tuple[str, set[str]]] = [
         "clients/web/src-tauri/Cargo.toml",
         {"shell-fmt", "shell-clippy", "shell-test"},
     ),
+    # The in-repo transport plugin (ADR 0127) is a member of the shell's
+    # workspace, so its sources and test fixtures reach the shell hooks too.
+    (
+        "clients/web/src-tauri/axon-http/src/transport.rs",
+        {"shell-fmt", "shell-clippy", "shell-test"},
+    ),
+    (
+        "clients/web/src-tauri/axon-http/testdata/localhost.cert.der",
+        {"shell-fmt", "shell-clippy", "shell-test"},
+    ),
+    # Its build script rewrites these on every build; not ours to format.
+    ("clients/web/src-tauri/axon-http/permissions/schemas/schema.json", set()),
     # tauri.conf.json is a compile-time input: `tauri::generate_context!()`
     # embeds it, so changing it changes the binary. It is also prettier's.
     (

@@ -146,12 +146,15 @@ jobs:
         run: cargo fmt --check
         working-directory: clients/web/src-tauri
 
+      # `--workspace`: a bare run at a package root reaches only that package,
+      # and the in-repo plugins (`axon-http`, `native-auth`, `remote-push`) are
+      # members of their own. rustfmt already walks every member.
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: clients/web/src-tauri
 
       - name: test
-        run: cargo test
+        run: cargo test --workspace
         working-directory: clients/web/src-tauri
 
   # The shell's 486 crates are in neither the root workspace's disclosure nor
