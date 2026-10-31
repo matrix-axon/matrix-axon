@@ -391,7 +391,7 @@ async fn read_request(stream: &mut TcpStream) {
     let _ = stream.read_exact(&mut body).await;
 }
 
-// ===== HTTP/2 server that refuses its first stream =====
+// ===== HTTP/2 server that refuses its first streams =====
 
 struct RefusingServer {
     port: u16,
@@ -400,7 +400,8 @@ struct RefusingServer {
 }
 
 impl RefusingServer {
-    async fn start() -> Self {
+    /// Refuses the first `refusals` streams across all connections.
+    async fn start(refusals: usize) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let accepted = Arc::new(AtomicUsize::new(0));
@@ -416,7 +417,7 @@ impl RefusingServer {
                     let stream = acceptor.accept(stream).await.unwrap();
                     let mut conn = h2::server::handshake(stream).await.unwrap();
                     while let Some(Ok((_req, mut respond))) = conn.accept().await {
-                        if s.fetch_add(1, Ordering::SeqCst) == 0 {
+                        if s.fetch_add(1, Ordering::SeqCst) < refusals {
                             respond.send_reset(h2::Reason::REFUSED_STREAM);
                         } else {
                             let response = hyper::Response::new(());
@@ -722,6 +723,16 @@ async fn a_cancelled_send_leaves_a_reused_id_alone() {
 }
 
 #[tokio::test]
+async fn an_expired_early_cancel_stops_nothing() {
+    let server = Server::start(false, ok_handler()).await;
+    let transport = transport();
+    transport.cancel(key(0));
+    transport.age_early_cancels(Duration::from_secs(31));
+    fetch(&transport, 0, get(&server.url("/"))).await;
+    assert_eq!(server.requests(), 1);
+}
+
+#[tokio::test]
 async fn drop_body_releases_an_unread_response() {
     let server = Server::start(false, ok_handler()).await;
     let transport = transport();
@@ -1006,7 +1017,7 @@ async fn redirects_stop_after_ten_hops() {
     assert_eq!(err.detail.as_deref(), Some("TooManyRedirects"));
 }
 
-/// Echoes `method|authorization|content-type|body`, after the redirects
+/// Echoes `method|authorization|content-type|origin|body`, after the redirects
 /// `/301`, `/303` and `/307` to `/echo`, and `/away` to `away`.
 fn redirecting(away: String) -> Handler {
     handler(move |req: hyper::Request<Incoming>| {
@@ -1034,10 +1045,11 @@ fn redirecting(away: String) -> Handler {
                     .to_owned()
             };
             let mut echo = format!(
-                "{}|{}|{}|",
+                "{}|{}|{}|{}|",
                 req.method(),
                 header("authorization"),
-                header("content-type")
+                header("content-type"),
+                header("origin")
             )
             .into_bytes();
             echo.extend_from_slice(&req.into_body().collect().await.unwrap().to_bytes());
@@ -1047,7 +1059,7 @@ fn redirecting(away: String) -> Handler {
 }
 
 #[tokio::test]
-async fn redirects_rewrite_methods_and_drop_credentials_as_fetch_does() {
+async fn redirects_rewrite_methods_and_taint_credentials_as_fetch_does() {
     let other = Server::start(false, redirecting(String::new())).await;
     let server = Server::start(false, redirecting(other.url("/echo"))).await;
     let transport = transport();
@@ -1059,16 +1071,28 @@ async fn redirects_rewrite_methods_and_drop_credentials_as_fetch_does() {
         outgoing
             .headers
             .insert("content-type", "text/plain".parse().unwrap());
+        outgoing
+            .headers
+            .insert("origin", "tauri://localhost".parse().unwrap());
         outgoing.body = Some(b"x".to_vec());
         outgoing
     };
     let cases = [
-        (Method::POST, "/303", "GET|Bearer t||"),
-        (Method::POST, "/301", "GET|Bearer t||"),
-        (Method::PUT, "/301", "PUT|Bearer t|text/plain|x"),
-        (Method::POST, "/307", "POST|Bearer t|text/plain|x"),
-        // Another port is another origin: the token stays behind.
-        (Method::GET, "/away", "GET||text/plain|x"),
+        (Method::POST, "/303", "GET|Bearer t||tauri://localhost|"),
+        (Method::POST, "/301", "GET|Bearer t||tauri://localhost|"),
+        (
+            Method::PUT,
+            "/301",
+            "PUT|Bearer t|text/plain|tauri://localhost|x",
+        ),
+        (
+            Method::POST,
+            "/307",
+            "POST|Bearer t|text/plain|tauri://localhost|x",
+        ),
+        // Another port is another origin: the token stays behind, and the
+        // page's origin is no longer vouched for.
+        (Method::GET, "/away", "GET||text/plain|null|x"),
     ];
     for (id, (method, path, expected)) in cases.into_iter().enumerate() {
         let (head, body) = fetch(&transport, id as u64, send(method.clone(), path)).await;
@@ -1088,7 +1112,7 @@ async fn redirects_rewrite_methods_and_drop_credentials_as_fetch_does() {
 
 #[tokio::test]
 async fn refused_stream_is_retried_once_for_any_method() {
-    let server = RefusingServer::start().await;
+    let server = RefusingServer::start(1).await;
     let transport = transport();
     let mut post = request(Method::POST, &server.url());
     post.body = Some(b"send once".to_vec());
@@ -1102,6 +1126,19 @@ async fn refused_stream_is_retried_once_for_any_method() {
     assert_eq!(stats.retries.nack, 1);
     assert_eq!(stats.retries.fast_reset, 0);
     assert_eq!(stats.requests_sent, 1);
+}
+
+#[tokio::test]
+async fn a_refusal_of_the_retry_is_counted_once_and_not_retried_again() {
+    let server = RefusingServer::start(usize::MAX).await;
+    let transport = transport();
+    let err = transport
+        .send(key(0), request(Method::POST, &server.url()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, Kind::Reset);
+    assert_eq!(server.streams.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.stats().retries.nack, 1);
 }
 
 #[tokio::test]

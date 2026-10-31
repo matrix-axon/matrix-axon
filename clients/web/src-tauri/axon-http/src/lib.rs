@@ -34,6 +34,7 @@ use reqwest::{Method, Url};
 use serde::Deserialize;
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::plugin::{Builder, TauriPlugin};
+use tauri::webview::PageLoadEvent;
 use tauri::{Manager, RunEvent, Runtime, State, Webview, WindowEvent};
 
 pub use client::{Retries, Stats};
@@ -85,6 +86,25 @@ fn request_body(body: &InvokeBody) -> Result<Option<Vec<u8>>> {
         InvokeBody::Json(_) => Vec::new(),
     };
     Ok((!bytes.is_empty()).then_some(bytes))
+}
+
+/// The method as `fetch` normalises it: the six standard names, in any case,
+/// become upper case (so `get` is `GET`, not an extension method), and
+/// `CONNECT`, `TRACE` and `TRACK` are refused.
+fn method(name: &str) -> Result<Method> {
+    const NORMALISED: [&str; 6] = ["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"];
+    const FORBIDDEN: [&str; 3] = ["CONNECT", "TRACE", "TRACK"];
+    if FORBIDDEN
+        .iter()
+        .any(|forbidden| forbidden.eq_ignore_ascii_case(name))
+    {
+        return Err(malformed());
+    }
+    let name = NORMALISED
+        .into_iter()
+        .find(|standard| standard.eq_ignore_ascii_case(name))
+        .unwrap_or(name);
+    Method::from_bytes(name.as_bytes()).map_err(|_| malformed())
 }
 
 /// Headers `fetch` forbids a page to set, which `tauri-plugin-http` drops as
@@ -151,7 +171,7 @@ async fn send<R: Runtime>(
 ) -> Result<Head> {
     let line = request_line(request.headers())?;
     let body = request_body(request.body())?;
-    let method = Method::from_bytes(line.method.as_bytes()).map_err(|_| malformed())?;
+    let method = method(&line.method)?;
     let url = Url::parse(&line.url).map_err(|_| malformed())?;
     let headers = outgoing_headers(line.headers, origin_of(&webview).as_deref())?;
     let key = (webview.label().to_owned(), line.id);
@@ -221,6 +241,15 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             let options = client::ClientOptions::new(user_agent(&app.package_info().version));
             app.manage(Transport::new(options)?);
             Ok(())
+        })
+        .on_page_load(|webview, payload| {
+            // A reload or navigation leaves no page to read or cancel what the
+            // old one had in flight.
+            if payload.event() == PageLoadEvent::Started {
+                if let Some(transport) = webview.try_state::<Transport>() {
+                    transport.forget_webview(webview.label());
+                }
+            }
         })
         .on_event(|app, event| {
             // The shell's webviews each fill a window of the same label.
@@ -299,6 +328,19 @@ mod ipc_tests {
         assert!(headers.get(header::HOST).is_none());
         assert!(headers.get("sec-fetch-mode").is_none());
         assert_eq!(headers.get(header::ORIGIN).unwrap(), "tauri://localhost");
+    }
+
+    #[test]
+    fn methods_are_normalised_as_fetch_does() {
+        assert_eq!(method("get").unwrap(), Method::GET);
+        assert_eq!(method("Head").unwrap(), Method::HEAD);
+        assert_eq!(method("delete").unwrap(), Method::DELETE);
+        // Not one of the six: left as sent, as `fetch` leaves it.
+        assert_eq!(method("patch").unwrap().as_str(), "patch");
+        assert_eq!(method("PATCH").unwrap(), Method::PATCH);
+        for forbidden in ["CONNECT", "trace", "Track"] {
+            assert_eq!(method(forbidden).unwrap_err().kind, Kind::Other);
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect;
 use serde::Serialize;
 
-use crate::error::{is_protocol_nack, DnsFailure};
+use crate::error::DnsFailure;
 
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Below carrier NAT idle timers (some expire a mapping after about 30 s) and
@@ -102,23 +102,6 @@ pub(crate) fn build(
     counters: &Arc<Counters>,
     h2_only: bool,
 ) -> reqwest::Result<reqwest::Client> {
-    let nack_counters = Arc::clone(counters);
-    // A policy built through the public builder replaces reqwest's default
-    // (which is private) rather than extending it, and always carries tower's
-    // `TpsBudget`: 20% extra over 10 s, with a floor of 10 retries a second.
-    let retry = reqwest::retry::for_host(AnyHost)
-        .max_retries_per_request(1)
-        .classify_fn(move |req_rep| {
-            if req_rep.error().is_some_and(is_protocol_nack) {
-                // Counted when the policy asks for the retry. The budget can
-                // still refuse it, but not below its floor of 10 a second.
-                Counters::bump(&nack_counters.nack_retries);
-                req_rep.retryable()
-            } else {
-                req_rep.success()
-            }
-        });
-
     let mut builder = reqwest::Client::builder()
         .user_agent(options.user_agent.as_str())
         .connect_timeout(CONNECT_TIMEOUT)
@@ -131,7 +114,9 @@ pub(crate) fn build(
         .redirect(redirect::Policy::none())
         .dns_resolver(Arc::new(Resolver))
         .connector_layer(CountConnections(Arc::clone(counters)))
-        .retry(retry);
+        // reqwest's default retries HTTP/2 refusals itself, out of sight of
+        // the counters. The transport retries them instead (ADR 0127 § 7).
+        .retry(reqwest::retry::never());
     if h2_only {
         builder = builder.http2_prior_knowledge();
     }
@@ -140,15 +125,6 @@ pub(crate) fn build(
         builder = builder.add_root_certificate(root.clone());
     }
     builder.build()
-}
-
-/// The retry policy's scope, which reqwest only lets you set per host.
-struct AnyHost;
-
-impl PartialEq<&str> for AnyHost {
-    fn eq(&self, _: &&str) -> bool {
-        true
-    }
 }
 
 /// The system resolver, as `hyper-util`'s default uses it (a blocking

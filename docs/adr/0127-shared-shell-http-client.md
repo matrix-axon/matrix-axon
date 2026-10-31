@@ -58,18 +58,18 @@ It holds one `reqwest::Client` in managed state, built once at setup and shared 
 
 The client is built with:
 
-| Setting                                  | Value                                                                     | Why                                                                                                                                                                                                                                                                                                            |
-| ---------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| HTTP/2                                   | enabled, negotiated by ALPN                                               | One connection per server over TLS. Caddy already negotiates `h2`.                                                                                                                                                                                                                                             |
-| HTTP/1.1                                 | keep-alive pool                                                           | Plain-`http` LAN servers (ADR 0102 § 2) still reuse connections.                                                                                                                                                                                                                                               |
-| `connect_timeout`                        | 10 s                                                                      | A connection that cannot be made fails as `connect_timeout` instead of eating the whole deadline.                                                                                                                                                                                                              |
-| `pool_idle_timeout`                      | 25 s                                                                      | Below carrier NAT idle timers, some of which expire a mapping after about 30 s, and below most server idle timeouts (Caddy's is 5 minutes). Servers that close sooner are covered by § 7's fast-reset retry.                                                                                                   |
-| `http2_keep_alive_interval` / `_timeout` | 20 s / 10 s, only while streams are open                                  | Detects a dead connection under load without waking the radio when idle.                                                                                                                                                                                                                                       |
-| TLS                                      | rustls with the same root store the plugin uses today                     | No change to which certificates are trusted (see "What this does not decide").                                                                                                                                                                                                                                 |
-| Proxy                                    | the same `reqwest` proxy features the plugin enables                      | Parity by construction. `hyper-util` reads OS proxy settings only on macOS and Windows; on iOS and Android only proxy environment variables apply, for the old transport and the new one alike.                                                                                                                |
-| Redirects                                | at most 10, followed by the plugin; every hop must stay `http` or `https` | Parity, plus the hop check the plugin only added (opt-in) in 2.7.0. The plugin follows them so each hop can take the client its origin calls for (below). Hops follow `fetch`'s method and credential rules, as `reqwest` does, but carry no `Referer`: `reqwest`'s is the whole previous URL, query included. |
-| Cookies                                  | none                                                                      | Parity; `/v1` authenticates with bearer tokens.                                                                                                                                                                                                                                                                |
-| `User-Agent`                             | `Axon/<version> (<os>)`                                                   | Server and proxy logs can tell the shell apart from browsers, and from versions of itself.                                                                                                                                                                                                                     |
+| Setting                                  | Value                                                                     | Why                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HTTP/2                                   | enabled, negotiated by ALPN                                               | One connection per server over TLS. Caddy already negotiates `h2`.                                                                                                                                                                                                                                                                                                                                                                                |
+| HTTP/1.1                                 | keep-alive pool                                                           | Plain-`http` LAN servers (ADR 0102 § 2) still reuse connections.                                                                                                                                                                                                                                                                                                                                                                                  |
+| `connect_timeout`                        | 10 s                                                                      | A connection that cannot be made fails as `connect_timeout` instead of eating the whole deadline.                                                                                                                                                                                                                                                                                                                                                 |
+| `pool_idle_timeout`                      | 25 s                                                                      | Below carrier NAT idle timers, some of which expire a mapping after about 30 s, and below most server idle timeouts (Caddy's is 5 minutes). Servers that close sooner are covered by § 7's fast-reset retry.                                                                                                                                                                                                                                      |
+| `http2_keep_alive_interval` / `_timeout` | 20 s / 10 s, only while streams are open                                  | Detects a dead connection under load without waking the radio when idle.                                                                                                                                                                                                                                                                                                                                                                          |
+| TLS                                      | rustls with the same root store the plugin uses today                     | No change to which certificates are trusted (see "What this does not decide").                                                                                                                                                                                                                                                                                                                                                                    |
+| Proxy                                    | the same `reqwest` proxy features the plugin enables                      | Parity by construction. `hyper-util` reads OS proxy settings only on macOS and Windows; on iOS and Android only proxy environment variables apply, for the old transport and the new one alike.                                                                                                                                                                                                                                                   |
+| Redirects                                | at most 10, followed by the plugin; every hop must stay `http` or `https` | Parity, plus the hop check the plugin only added (opt-in) in 2.7.0. The plugin follows them so each hop can take the client its origin calls for (below). Hops follow `fetch`'s method and credential rules: a cross-origin hop drops `Authorization`, `Cookie` and `Proxy-Authorization` and sends `Origin: null`, and other headers carry on, as in `fetch`. No hop carries a `Referer`: `reqwest`'s is the whole previous URL, query included. |
+| Cookies                                  | none                                                                      | Parity; `/v1` authenticates with bearer tokens.                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `User-Agent`                             | `Axon/<version> (<os>)`                                                   | Server and proxy logs can tell the shell apart from browsers, and from versions of itself.                                                                                                                                                                                                                                                                                                                                                        |
 
 One client serves every host.
 `reqwest` pools per host, so a server URL change or a second account on another server needs nothing special.
@@ -100,6 +100,8 @@ The command surface mirrors the plugin's, so abort and streamed bodies carry ove
 
 - **`send`** registers the request under an id the JavaScript side chose, sends it, and resolves with `{ status, headers, url, version }` once headers arrive.
   Because the id is chosen before the call, a cancel can arrive before `send` returns.
+  A cancel that arrives before its `send` is remembered for 30 seconds.
+  The method is normalised as `fetch` normalises it: `get` is `GET`, and `CONNECT`, `TRACE` and `TRACK` are refused.
 - **`read_body`** pulls the next chunk, as the plugin's `fetch_read_body` does.
   Pull, not push, so `ReadableStream` backpressure still reaches the socket.
 - **`cancel`** aborts a request at any stage.
@@ -107,7 +109,7 @@ The command surface mirrors the plugin's, so abort and streamed bodies carry ove
   Under the plugin, every abort cost a connection.
 - **`drop_body`** releases a response whose body the caller will not read.
 
-Entries leave the table on body end, error, cancel or drop.
+Entries leave the table on body end, error, cancel or drop, and when their webview starts loading a page or its window is destroyed: the page that could read or cancel them is gone.
 A response known to be empty is never stored at all: a null-body status (101, 103, 204, 205, 304), any response to `HEAD`, and `Content-Length: 0`.
 `send` says so with `body: false`, so the binding builds a null-body `Response` without repeating the rule.
 A body that turns out to be empty in any other way (a chunked `200` with no data) leaves on the first `read_body`, which finds its end.
@@ -180,11 +182,9 @@ That is safe for every method, `POST` included:
   RFC 9113 § 8.7 guarantees the server did not process the stream.
 
 `reqwest` 0.12.28's built-in default covers exactly those two HTTP/2 cases, with no budget and up to two retries per request.
-That default (`retry::Builder::default`) is private to the crate, and a custom policy replaces it instead of extending it.
-So the plugin builds its own policy, with the same two checks written out, so that each retry can be counted in `transport:stats` (§ 5).
-A policy built through `reqwest::retry`'s public builder always carries `tower`'s `TpsBudget`: retries may add 20% to the requests seen in a 10-second window, with a floor of 10 retries a second.
-The plugin also caps it at one retry per request (`max_retries_per_request(1)`).
-The floor means a test that expects exactly one retry is never refused by the budget.
+Nothing outside `reqwest` sees those retries happen, and a classifier in a custom policy runs on every attempt, including ones the policy will not retry, so counting there overcounts.
+So the plugin turns `reqwest`'s retries off (`retry::never()`) and retries the two cases itself, once per request, counting each retry as it is sent (`nack`, § 5).
+Like `reqwest`'s default, it has no budget: the server never processed the refused stream, and one retry per request bounds the extra load.
 
 **One ambiguous case is also retried: the stale-connection race.**
 A `GET` or `HEAD` that fails with `reset` before any response byte, within 1 s of being sent, is retried once on a fresh connection.
@@ -193,7 +193,7 @@ That signature is a reused connection the server closed just as the request left
 The 25-second idle timeout in § 1 makes the race rare behind Caddy, but plain-`http` LAN servers often close idle connections much sooner (Apache's default is 5 s).
 Browsers retry this case the same way, and today's connection per request never meets it at all, so leaving it unretried would be a regression.
 A slower reset means network trouble and is not retried, since retrying would add load to the link that is failing, which is the problem this ADR exists to fix.
-This retry lives in the plugin's send path rather than in the `reqwest` policy, because it depends on timing the policy cannot see.
+It lives in the same place, and a request is retried at most once, whichever case it meets.
 It is counted separately (`fast_reset`), so field readings show how often it fires.
 
 Nothing else is retried, because a connection that resets after the request was written may or may not have delivered it:
@@ -319,8 +319,9 @@ It helps, but every remaining request still pays a handshake, and the app would 
   - N requests share one connection, both over HTTP/1.1 keep-alive and over HTTP/2.
   - After a `reset`, a burst of concurrent requests to an origin known to speak HTTP/2 opens one connection, and an origin that stops offering HTTP/2 goes back to negotiating.
   - A redirect from a known HTTP/2 origin reaches an HTTP/1.1-only one, and both origins keep their places.
-  - Redirect hops rewrite methods and drop credentials as `fetch` does.
+  - Redirect hops rewrite methods, drop credentials and send `Origin: null` across origins, as `fetch` does.
   - A cancel before headers and a cancel mid-body each release their entries.
+  - A cancel that arrived first stops its `send`, unless it is more than 30 seconds old.
   - A cancelled request's task, waking after its id was reused, leaves the new request's entry alone.
   - Empty bodies never linger: a `HEAD`, a `204`, a `200` with `Content-Length: 0`, and a chunked `200` with no data each leave the live count at zero.
   - Across a `reset`, a request in flight on the old client can still be read and cancelled, and the counters keep their values.
@@ -329,6 +330,6 @@ It helps, but every remaining request still pays a handshake, and the app would 
     - `dns`: a `.invalid` host.
     - `tls`: a self-signed certificate.
     - `reset`: a server that closes the connection after reading the request.
-  - `REFUSED_STREAM` is retried once for any method, and counted as `nack`.
+  - `REFUSED_STREAM` is retried once for any method, and counted as `nack`; a refused retry is counted once and not retried again.
   - A `GET` reset within 1 s is retried once and counted as `fast_reset`. A slower `GET` reset is not retried, and a `POST` or `PUT` reset is never retried.
   - An abort through the caller's signal rejects as `AbortError`, even when the Rust side's `cancelled` arrives first.

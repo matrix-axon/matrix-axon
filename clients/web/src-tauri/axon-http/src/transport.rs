@@ -12,7 +12,9 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{self, ClientOptions, Counters, Stats};
-use crate::error::{classify_body, classify_send, is_reset_failure, Kind, TransportError};
+use crate::error::{
+    classify_body, classify_send, is_protocol_nack, is_reset_failure, Kind, TransportError,
+};
 
 /// How soon after sending a `reset` still reads as the stale-connection race
 /// rather than network trouble (ADR 0127 § 7).
@@ -100,6 +102,11 @@ impl Table {
             self.entries.remove(key);
         }
     }
+
+    fn prune_early_cancels(&mut self, now: Instant) {
+        self.early_cancels
+            .retain(|_, at| now.duration_since(*at) < EARLY_CANCEL_TTL);
+    }
 }
 
 /// The two clients a `reset` replaces together.
@@ -170,6 +177,7 @@ impl Transport {
         let cancel = CancellationToken::new();
         let generation = {
             let mut table = lock(&self.table);
+            table.prune_early_cancels(Instant::now());
             if table.early_cancels.remove(&key).is_some() {
                 return Err(TransportError::new(Kind::Cancelled));
             }
@@ -224,8 +232,10 @@ impl Transport {
     /// - A `301` or `302` turns a `POST` into a `GET`, and a `303` turns
     ///   anything but `HEAD` into one. Either way the body and the headers
     ///   that describe it go. A `307` or `308` sends the same request again.
-    /// - A hop to another host or port loses `Authorization`, `Cookie` and
-    ///   `Proxy-Authorization`, for the rest of the chain.
+    /// - A hop to another origin loses `Authorization`, `Cookie` and
+    ///   `Proxy-Authorization` for the rest of the chain, and its `Origin`
+    ///   becomes `null` (fetch's tainted origin). Other headers carry on, as
+    ///   in `fetch`.
     /// - A `Location` that is missing or will not parse ends the chain with
     ///   the redirect response itself. One that leaves `http` and `https`
     ///   fails as `scope`, and an eleventh hop as `TooManyRedirects`.
@@ -300,15 +310,16 @@ impl Transport {
                     headers.remove(name);
                 }
             }
-            if next.host_str() != url.host_str()
-                || next.port_or_known_default() != url.port_or_known_default()
-            {
+            if next.origin() != url.origin() {
                 for name in [
                     header::AUTHORIZATION,
                     header::COOKIE,
                     header::PROXY_AUTHORIZATION,
                 ] {
                     headers.remove(name);
+                }
+                if headers.contains_key(header::ORIGIN) {
+                    headers.insert(header::ORIGIN, header::HeaderValue::from_static("null"));
                 }
             }
             url = next;
@@ -360,33 +371,39 @@ impl Transport {
         sent
     }
 
-    /// One hop with the one retry the send path owns: a `GET` or `HEAD` reset
-    /// within [`FAST_RESET_WINDOW`] of being sent. That is a pooled
-    /// connection the server closed just as the request left. `hyper` drops a
-    /// connection that errored, so the retry goes out on another one.
+    /// One hop, retried at most once (ADR 0127 § 7), and counted where the
+    /// retry is sent:
+    ///
+    /// - HTTP/2 `REFUSED_STREAM` or a graceful `GOAWAY`, for any method: the
+    ///   server did not process the stream.
+    /// - A `GET` or `HEAD` reset within [`FAST_RESET_WINDOW`] of being sent.
+    ///   That is a pooled connection the server closed just as the request
+    ///   left. `hyper` drops a connection that errored, so the retry goes out
+    ///   on another one.
     async fn dispatch(
         &self,
         client: &reqwest::Client,
         request: Outgoing<Bytes>,
     ) -> Result<reqwest::Response, TransportError> {
         let request = request.build(client)?;
-        let again = if matches!(*request.method(), Method::GET | Method::HEAD) {
-            request.try_clone()
-        } else {
-            None
-        };
+        // Every body is `Bytes`, so any request clones.
+        let again = request.try_clone();
+        let idempotent = matches!(*request.method(), Method::GET | Method::HEAD);
         let started = Instant::now();
-        let result = match client.execute(request).await {
-            Err(err) if started.elapsed() < FAST_RESET_WINDOW && is_reset_failure(&err) => {
-                match again {
-                    Some(again) => {
-                        Counters::bump(&self.counters.fast_reset_retries);
-                        client.execute(again).await
-                    }
-                    None => Err(err),
-                }
+        let result = match (client.execute(request).await, again) {
+            (Err(err), Some(again)) if is_protocol_nack(&err) => {
+                Counters::bump(&self.counters.nack_retries);
+                client.execute(again).await
             }
-            result => result,
+            (Err(err), Some(again))
+                if idempotent
+                    && started.elapsed() < FAST_RESET_WINDOW
+                    && is_reset_failure(&err) =>
+            {
+                Counters::bump(&self.counters.fast_reset_retries);
+                client.execute(again).await
+            }
+            (result, _) => result,
         };
         result.map_err(|err| classify_send(&err))
     }
@@ -443,9 +460,7 @@ impl Transport {
             return;
         }
         let now = Instant::now();
-        table
-            .early_cancels
-            .retain(|_, at| now.duration_since(*at) < EARLY_CANCEL_TTL);
+        table.prune_early_cancels(now);
         table.early_cancels.insert(key, now);
     }
 
@@ -489,6 +504,13 @@ impl Transport {
 
     pub(crate) fn learn_h2(&self, url: &str) {
         lock(&self.h2_origins).insert(Self::origin(url));
+    }
+
+    /// Make every remembered early cancel `by` older.
+    pub(crate) fn age_early_cancels(&self, by: Duration) {
+        for at in lock(&self.table).early_cancels.values_mut() {
+            *at = at.checked_sub(by).unwrap();
+        }
     }
 }
 
