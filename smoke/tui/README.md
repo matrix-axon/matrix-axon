@@ -96,8 +96,10 @@ Current true-local scenarios:
   render through Axon sync.
 - `true_local_command_surfaces`: `/help` renders without breaking the terminal UI.
 - `true_local_shortcuts_popup`: `/shortcuts` renders keyboard help.
-- `true_local_status_commands`: `/whereami`, `/whoami`, and `/status` render
-  expected account/room/server information.
+- `true_local_status_commands`: `/whereami` on Smoke General renders a room
+  version, the public join rule, the unencrypted encryption line, and a member
+  loaded from `/members`. `/whoami` and `/status` render the account and server
+  lines.
 - `true_local_room_navigation`: switches rooms by name and refreshes rooms.
 - `true_local_send_variants`: sends `//` literal slash text, `/literal`,
   `/html`, and `/rainbow` messages.

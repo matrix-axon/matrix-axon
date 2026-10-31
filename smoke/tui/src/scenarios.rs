@@ -592,9 +592,28 @@ pub async fn true_local_status_commands(ctx: &Ctx) -> ScenarioOutcome {
         // The room name and the account's user id are on screen before any of
         // these commands run, so each wait names text only that output has.
         submit_command(&mut driver, "/whereami")?;
-        driver.wait_for_screen("whereami popup to render", ctx.timeout, |screen| {
-            screen.contains("Room Info")
-        })?;
+        // Smoke General is a public, unencrypted room. These three lines are in
+        // the first page of the popup; the member projection is below it.
+        driver.wait_for_screen(
+            "whereami to render room version, join rule, and encryption",
+            ctx.timeout,
+            whereami_room_details_visible,
+        )?;
+        // The 30×100 smoke terminal leaves the member section below the fold.
+        // PageDown moves eight rows and clamps at the bottom, and the list can
+        // arrive after the first scroll, so keep paging until a loaded member
+        // is on screen.
+        let members = [
+            stack.accounts.target.user_id.as_str(),
+            stack.accounts.peer.user_id.as_str(),
+            stack.accounts.observer.user_id.as_str(),
+        ];
+        page_down_until(
+            &mut driver,
+            "whereami to render a member from /members",
+            ctx.timeout,
+            |screen| whereami_member_visible(screen, &members),
+        )?;
         // The popup is modal: keys typed into it never reach the compose line.
         press_escape(&mut driver)?;
         driver.wait_for_screen("whereami popup to close", ctx.timeout, |screen| {
@@ -1063,6 +1082,101 @@ fn press_escape(driver: &mut PtyDriver) -> anyhow::Result<()> {
     driver.send_bytes(&[0x1b])
 }
 
+/// VT220 Page Down (`CSI 6 ~`). The room-info popup scrolls eight rows per press.
+fn press_page_down(driver: &mut PtyDriver) -> anyhow::Result<()> {
+    driver.send_bytes(b"\x1b[6~")
+}
+
+/// Page Down until `predicate` holds. Each burst is enough to reach the bottom
+/// of the room-info popup on the smoke terminal; repeating it picks up a member
+/// list that lands after the first scroll has already clamped.
+fn page_down_until(
+    driver: &mut PtyDriver,
+    what: &str,
+    timeout: Duration,
+    predicate: impl Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if predicate(&driver.screen_text()) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {timeout:?} waiting for {what}\n--- screen ---\n{}",
+                driver.screen_text()
+            );
+        }
+        for _ in 0..6 {
+            press_page_down(driver)?;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Room version, join rule, and encryption from `/metadata`, not the summary
+/// and not the combined "still loading" line.
+fn whereami_room_details_visible(screen: &str) -> bool {
+    field_value_is(screen, "Encryption: ", "no encryption state cached")
+        && field_value_is(screen, "Join rule: ", "public")
+        && room_version_visible(screen)
+}
+
+fn field_value_is(screen: &str, label: &str, value: &str) -> bool {
+    screen.lines().any(|line| {
+        line.split_once(label).is_some_and(|(_, rest)| {
+            let rest = rest.trim_start();
+            rest.starts_with(value)
+                && rest[value.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !ch.is_ascii_alphanumeric())
+        })
+    })
+}
+
+/// A cached room version, such as `10` or `11`. Synapse chooses the number, so
+/// this accepts any numeric token and rejects the unknown/unavailable phrases.
+fn room_version_visible(screen: &str) -> bool {
+    screen.lines().any(|line| {
+        line.split_once("Room version: ")
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(is_room_version_token)
+    })
+}
+
+fn is_room_version_token(token: &str) -> bool {
+    // A border glyph can sit on the same cell run as the version (`11│`).
+    let token = token.trim_end_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.');
+    !token.is_empty()
+        && token.chars().any(|ch| ch.is_ascii_digit())
+        && token.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+/// A row from the `/members` projection: the section heading plus a fixture
+/// user on a member line. The creator line and "Your Matrix ID" also print
+/// that user, without a configured-power phrase.
+fn whereami_member_visible(screen: &str, user_ids: &[&str]) -> bool {
+    if !screen.lines().any(|line| line.contains("Members (")) {
+        return false;
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    user_ids.iter().any(|user_id| {
+        lines.iter().enumerate().any(|(index, line)| {
+            if !line.contains(user_id) {
+                return false;
+            }
+            let from = index.saturating_sub(1);
+            let to = (index + 1).min(lines.len().saturating_sub(1));
+            lines[from..=to].iter().any(|nearby| {
+                nearby.contains("configured power")
+                    || nearby.contains("no per-user power level")
+                    || nearby.contains("creator (power")
+            })
+        })
+    })
+}
+
 /// Send an `Alt`+<char> chord. Terminals encode this as ESC followed by the
 /// character byte in one write, which crossterm parses as `KeyModifiers::ALT`.
 fn press_alt(driver: &mut PtyDriver, ch: char) -> anyhow::Result<()> {
@@ -1117,5 +1231,72 @@ fn failed_before_spawn(err: anyhow::Error) -> ScenarioOutcome {
         result: Err(err),
         transcript: Vec::new(),
         final_screen: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_room_version_token, whereami_member_visible, whereami_room_details_visible};
+
+    const USER: &str = "@axon-abcd1234:localhost";
+    const PEER: &str = "@peer-abcd1234:localhost";
+
+    #[test]
+    fn whereami_details_wait_for_cached_metadata() {
+        let loading = "\
+Encryption, access, and room details: loading
+Room version: unknown (not cached)
+Join rule: unknown (not cached)
+";
+        assert!(!whereami_room_details_visible(loading));
+
+        let uncached = "\
+Encryption: no encryption state cached
+Join rule: unknown (not cached)
+Room version: not specified
+";
+        assert!(!whereami_room_details_visible(uncached));
+
+        let ready = "\
+│ Encryption: no encryption state cached          │
+│ Join rule: public                               │
+│ Room version: 11│
+";
+        assert!(whereami_room_details_visible(ready));
+        assert!(is_room_version_token("10"));
+        assert!(!is_room_version_token("unknown"));
+        assert!(!is_room_version_token("11abc"));
+    }
+
+    #[test]
+    fn whereami_member_wait_ignores_summary_lines() {
+        let summary = format!(
+            "\
+Your Matrix ID: {USER}
+Creator: {USER}
+    {USER}  100
+Members: 3 joined, 0 invited (last changed just now)
+"
+        );
+        assert!(!whereami_member_visible(&summary, &[USER, PEER]));
+
+        let loaded = format!(
+            "\
+Members (3 loaded)
+  Joined
+    unknown  {USER}  configured power 100
+    unknown  {PEER}  no per-user power level
+"
+        );
+        assert!(whereami_member_visible(&loaded, &[USER, PEER]));
+
+        let wrapped = format!(
+            "\
+Members (3 loaded)
+    unknown  {USER}
+      creator (power not represented)
+"
+        );
+        assert!(whereami_member_visible(&wrapped, &[USER]));
     }
 }
