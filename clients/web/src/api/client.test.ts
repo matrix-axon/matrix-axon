@@ -1,4 +1,4 @@
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { setupServer } from 'msw/node'
 import {
   afterAll,
@@ -12,8 +12,10 @@ import {
 import type { AuthProvider } from '../auth/provider'
 import { setPerfEnabled, setTelemetrySink } from '../perf'
 import {
+  API_REQUEST_TIMEOUT_MS,
   apiErrorCode,
   apiErrorMessage,
+  AXON_DEADLINES_MS,
   createApiClient,
   isErrorEnvelope,
   REQUEST_TIMEOUT_MESSAGE,
@@ -702,6 +704,158 @@ describe('request telemetry', () => {
 
     await expect(pending).rejects.toThrow()
     expect(deadlines()).toEqual([])
+  })
+})
+
+describe("deadlines that wait past axon's own (issues 872 and 879)", () => {
+  const ACCT = ACCOUNT.account_id
+  const ROOM = '!room:example.org'
+  const ROOMS = `${BASE_URL}/v1/accounts/${ACCT}/rooms`
+  const READ = `${ROOMS}/${encodeURIComponent(ROOM)}/read`
+  const TYPING = `${ROOMS}/${encodeURIComponent(ROOM)}/typing`
+  const AVATAR = `${ROOMS}/${encodeURIComponent(ROOM)}/avatar`
+
+  /**
+   * Each entry is axon's default timeout for the route plus five seconds. A
+   * value at or under the floor would be pointless, and one under axon's
+   * timeout would bring back the bug: the client hangs up, axon drops the
+   * call, and neither the user nor the homeserver gate hears axon's 504.
+   */
+  it("gives each loosely bounded route axon's default plus a margin", () => {
+    expect(AXON_DEADLINES_MS).toEqual({
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/send': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/send-sticker': 35_000,
+      'PUT /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}': 35_000,
+      'DELETE /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/read': 35_000,
+      'POST /v1/accounts/{account_id}/rooms': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/dm': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/join': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/knock': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/leave': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/forget': 35_000,
+      'GET /v1/accounts/{account_id}/users/{user_id}/profile': 35_000,
+      'GET /v1/accounts/{account_id}/directory/public_rooms': 35_000,
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/send-media': 65_000,
+      'PUT /v1/accounts/{account_id}/rooms/{room_id}/avatar': 65_000,
+      'PUT /v1/accounts/{account_id}/profile/avatar': 65_000,
+    })
+    for (const ms of Object.values(AXON_DEADLINES_MS)) {
+      expect(ms).toBeGreaterThan(API_REQUEST_TIMEOUT_MS)
+    }
+  })
+
+  it('lets a listed route outlive the floor', async () => {
+    server.use(
+      http.post(READ, async () => {
+        await delay(150)
+        return HttpResponse.json({ data: null })
+      }),
+    )
+    const api = createApiClient(stubAuth('tok'), BASE_URL, undefined, 40, {
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/read': 5_000,
+    })
+
+    const { response } = await api.POST(
+      '/v1/accounts/{account_id}/rooms/{room_id}/read',
+      {
+        params: { path: { account_id: ACCT, room_id: ROOM } },
+        body: { event_id: '$e' },
+      },
+    )
+
+    expect(response.status).toBe(200)
+  })
+
+  it("hands axon's 504 to the caller instead of its own timeout", async () => {
+    server.use(
+      http.post(READ, async () => {
+        await delay(150)
+        return HttpResponse.json(
+          {
+            error: {
+              code: 'gateway_timeout',
+              message: 'read receipt timed out after 30s',
+            },
+          },
+          { status: 504 },
+        )
+      }),
+    )
+    const api = createApiClient(stubAuth('tok'), BASE_URL, undefined, 40, {
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/read': 5_000,
+    })
+
+    const { response, error } = await api.POST(
+      '/v1/accounts/{account_id}/rooms/{room_id}/read',
+      {
+        params: { path: { account_id: ACCT, room_id: ROOM } },
+        body: { event_id: '$e' },
+      },
+    )
+
+    expect(response.status).toBe(504)
+    expect(apiErrorCode(error)).toBe('gateway_timeout')
+  })
+
+  it('still bounds a listed route by its own deadline', async () => {
+    server.use(http.post(READ, () => new Promise(() => {})))
+    const api = createApiClient(stubAuth('tok'), BASE_URL, undefined, 5_000, {
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/read': 40,
+    })
+
+    await expect(
+      api.POST('/v1/accounts/{account_id}/rooms/{room_id}/read', {
+        params: { path: { account_id: ACCT, room_id: ROOM } },
+        body: { event_id: '$e' },
+      }),
+    ).rejects.toThrow(REQUEST_TIMEOUT_MESSAGE)
+  })
+
+  // Typing is bounded at 10 s by axon, so it keeps the floor.
+  it('keeps the floor on a route the table does not list', async () => {
+    server.use(
+      http.put(TYPING, async () => {
+        await delay(150)
+        return HttpResponse.json({ data: null })
+      }),
+    )
+    const api = createApiClient(stubAuth('tok'), BASE_URL, undefined, 40, {
+      'POST /v1/accounts/{account_id}/rooms/{room_id}/read': 5_000,
+    })
+
+    await expect(
+      api.PUT('/v1/accounts/{account_id}/rooms/{room_id}/typing', {
+        params: { path: { account_id: ACCT, room_id: ROOM } },
+        body: { typing: true },
+      }),
+    ).rejects.toThrow(REQUEST_TIMEOUT_MESSAGE)
+  })
+
+  // Setting a room avatar is an upload (60 s in axon); removing one is a
+  // plain state write (15 s), which must not inherit the longer wait.
+  it('matches the method as well as the path', async () => {
+    const slowly = async () => {
+      await delay(150)
+      return HttpResponse.json({ data: null })
+    }
+    server.use(http.put(AVATAR, slowly), http.delete(AVATAR, slowly))
+    const api = createApiClient(stubAuth('tok'), BASE_URL, undefined, 40, {
+      'PUT /v1/accounts/{account_id}/rooms/{room_id}/avatar': 5_000,
+    })
+    const params = { path: { account_id: ACCT, room_id: ROOM } }
+
+    await expect(
+      api.DELETE('/v1/accounts/{account_id}/rooms/{room_id}/avatar', {
+        params,
+      }),
+    ).rejects.toThrow(REQUEST_TIMEOUT_MESSAGE)
+    const { response } = await api.PUT(
+      '/v1/accounts/{account_id}/rooms/{room_id}/avatar',
+      { params, body: { upload_id: 'up-1' } },
+    )
+    expect(response.status).toBe(200)
   })
 })
 

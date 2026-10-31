@@ -192,8 +192,9 @@ export function createEphemeralSender(
       ).response
     } catch {
       // No answer at all: offline, a dropped connection, or the client's own
-      // request deadline — which is shorter than the server's receipt timeout,
-      // so a slow homeserver usually lands here rather than as a 502.
+      // request deadline. That deadline waits past the server's receipt
+      // timeout (`AXON_DEADLINES_MS`), so a slow homeserver lands below as a
+      // 504 from axon instead, which also tells axon's homeserver gate.
       return 'transient'
     }
     // openapi-fetch *resolves* on an HTTP error, so read the status.
