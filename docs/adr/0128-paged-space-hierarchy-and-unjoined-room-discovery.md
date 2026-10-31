@@ -52,7 +52,9 @@ It reads only local data and never waits for the homeserver.
 
 - **Query:** `limit` (default 100, maximum 500), `cursor` (opaque, from a previous page's `next_cursor`), and `enrich` (boolean, default `false`; decision 2).
 - **Order and paging:** MSC1772 order as today (`order` ascending with absent last, then `origin_ts`, then child room ID), paged by a keyset cursor over those three values.
-  A link added or removed between pages shifts nothing: each page starts strictly after the last row the previous page returned.
+  The cursor records whether the last row's `order` was absent, so the absent-last group pages correctly.
+  Each page starts strictly after the last row the previous page returned, so a link added or removed between pages neither duplicates nor skips any other link.
+  A link whose `order` or `origin_ts` changes between pages (a replaced `m.space.child` event) moves in the sort and can appear twice or not at all in one walk; clients de-duplicate by room ID, and the next walk is consistent.
 - **Response:** `{ room_id, children, next_cursor, total_children, discovery }`.
   - `total_children` counts the space's local child links (non-empty `m.space.child` content), so a client can show "120 of 1,340".
   - `next_cursor` is `null` only on the last page; there is no total cap, so nothing is dropped silently.
@@ -60,7 +62,8 @@ It reads only local data and never waits for the homeserver.
 - **Each child** carries every `SpaceChildDto` field with its current meaning (cached synced state, `null` when unknown), plus:
   - `parent_room_id`: the space whose link produced the row; always the requested space for now (decision 8).
   - `joined`: whether the account is joined to the child.
-  - `discovered`: the cached discovery summary (decision 4), or `null`.
+  - `discovered`: the cached discovery summary (decision 4), or `null` when Axon has no discovery row for the child.
+    A row whose status is not `available` (`not_returned`, `forbidden`, or `not_found`) is returned as a non-null `discovered` with that `status`, its provenance, and no summary fields, so a client can tell "never discovered" from "discovered and since withdrawn".
     It is always `null` for a joined child, because synced state is authoritative for joined rooms.
 
 Clients display a child's synced fields when it is joined, and `discovered` fields when it is not and `discovered.status` is `available`, falling back to the synced fields and then to the room ID.
@@ -73,10 +76,11 @@ The existing `space/children` route stays as it is, including its cap and bare-a
 A hierarchy read with `enrich=true` schedules a crawl of the requested space when all of these hold:
 
 - the account is joined to the space;
-- the space has no crawl, or its crawl's `expires_at` has passed, or an incomplete crawl is waiting to resume;
-- the crawl's `next_attempt_at` has passed.
+- the space has no crawl; or its last crawl ended (`complete`, `truncated`, or a conclusive denial) and its `expires_at` has passed; or its crawl is `in_progress` or `failed`, is not already queued or running, and can resume (decision 3);
+- the crawl's `next_attempt_at`, if any, has passed.
 
 Otherwise the read is pure, so client polling cannot drive upstream traffic past `CRAWL_TTL` and the failure backoff.
+A `truncated` crawl is conclusive until `expires_at`, exactly like a `complete` one, so a space with more than `MAX_PAGES` pages of children is crawled once per `CRAWL_TTL`, not on every read.
 Reads without `enrich`, such as room-list grouping, never cause discovery.
 Spaces are never crawled in the background.
 
@@ -88,35 +92,58 @@ ADR 0126's homeserver details and absence confirmations stay limited to joined r
 
 A crawl is a sequence of `hierarchy(space)` jobs on the account's ADR 0126 worker, one job per page.
 After committing a page, the job queues the next page behind whatever is already waiting, so a panel opened during a long crawl is served between pages.
-If the queue's drop-oldest rule evicts a continuation, the saved cursor survives and the next `enrich` read resumes the crawl, restarting it if the cursor's session has expired.
+The worker's `JOB_INTERVAL` (250 ms) keeps one account at four requests a second or fewer, under Synapse's per-requester hierarchy limit of five.
 
-- **Request:** `max_depth=1`, `suggested_only=false`, `limit=PAGE_LIMIT`, and `from` when resuming.
+- **Crawl outcome:** each crawl has an outcome, persisted in `space_discovery`:
+  - `in_progress`: pages remain and the cursor is saved;
+  - `complete`: the last page had no `next_batch`;
+  - `truncated`: the crawl stopped at a limit;
+  - `failed`: a request failed and is waiting for `next_attempt_at`.
+
+  `complete`, `truncated`, and a conclusive denial end the crawl until `expires_at` (decision 2).
+  An `in_progress` crawl whose continuation the queue's drop-oldest rule evicted, or a `failed` crawl past its `next_attempt_at`, resumes from the saved cursor on the next `enrich` read, restarting if the cursor's session has expired.
+
+- **Generations:** each crawl started from the first page, including a restart after an expired cursor, takes a new generation number and a new `started_at`.
+  Resuming from a saved cursor keeps the generation.
+- **Request:** `max_depth=1`, `suggested_only=false`, `limit` at the crawl's current page limit, and `from` when resuming.
   Every request takes a gate permit as background work, with ADR 0126's reqwest path, bounded body reader, and access-token handling.
-- **Page size:** a body over `MAX_PAGE_BYTES` is refused before parsing, and the same cursor is retried with half the limit, down to 1.
-  Synapse accepts a changed `limit` within a session.
-  A single-room page still over the limit ends the crawl as `truncated` with failure `too_large`.
+- **Page size:** a crawl starts at `PAGE_LIMIT`.
+  A body over `MAX_PAGE_BYTES` is refused before parsing, the crawl's page limit is halved and persisted, and the same cursor is retried as the next job; Synapse accepts a changed `limit` within a session.
+  The lower limit applies to the rest of the crawl and is never raised within it, so a crawl makes at most six size retries in total (50 down to 1), not six per page.
+  A single-room page still over the limit ends the crawl `truncated` with failure `too_large`.
 - **Parsing:** each entry is parsed into a summary that skips `children_state` and any other unknown fields.
   The requested space's own entry is skipped.
-  An entry that fails validation (decision 4) is skipped and counted; the rest of the page still commits.
+  A field that fails validation is withheld from the summary, as decision 4 describes, and the rest of the entry is kept.
+  Only an entry with no valid `room_id`, or one that is not a JSON object, is skipped whole and counted as `unidentified`.
 - **Linking:** a returned room is cached only if the space has a current local `m.space.child` link to it.
   A room the homeserver returns that Axon has no link for is counted as `unlinked` and dropped: local state alone decides membership, ordering, and the suggested flag.
   A local link the homeserver did not return stays in the hierarchy read with its synced fields, or with no summary at all.
+- **Returned set:** a `space_discovery_children` table records, for each (account, space, child), the generation in which the crawl last returned that child.
+  Every linked entry with a valid `room_id` counts as returned, including one with withheld fields, so a malformed field can never make a good summary `not_returned`.
 - **Continuation:** the crawl ends `complete` when a page has no `next_batch`.
-  It ends `truncated` after `MAX_PAGES` pages, or when a `next_batch` repeats a token already used in this crawl (failure `pagination_loop`).
-  An `M_INVALID_PARAM` on a resumed page restarts the crawl from the first page once (`MAX_CURSOR_RESTARTS`); a second one fails with `cursor_expired` and takes the backoff.
+  It ends `truncated` after `MAX_PAGES` pages, or when a `next_batch` repeats a token already used in this generation (failure `pagination_loop`).
+  An `M_INVALID_PARAM` on a resumed page restarts the crawl as a new generation once (`MAX_CURSOR_RESTARTS`); a second one makes the crawl `failed` with `cursor_expired` and takes the backoff.
 - **Outcomes:**
   - `403` or `404 M_NOT_FOUND`: the crawl ends with failure `forbidden` or `not_found` and the conclusive-denial expiration; cached summaries for the space's children are kept until a later complete crawl or the leave cleanup (decision 6) removes them.
   - `404` or `405 M_UNRECOGNIZED`: the account's homeserver lacks the endpoint; `support` becomes `unsupported` for `UNSUPPORTED_TTL`.
-  - Any other failure leaves committed pages in place, keeps the cursor, and takes ADR 0126's failure backoff.
-- **Omission:** after a `complete`, untruncated crawl, a child that had an `available` summary and was not returned becomes `not_returned`, and its fields are cleared.
-  The homeserver omits rooms the account can no longer see, so this is how a loss of access reaches the cache.
-  A truncated or failed crawl never marks anything `not_returned`; it cannot prove absence (issue 553).
-- **Fencing:** a page commits only if the account still exists and the space's `membership_epoch` (ADR 0126 decision 4) is the one recorded when the job started.
-  A child joined at commit time is skipped, so a join during the request wins.
+  - Any other failure leaves committed pages in place, keeps the cursor, makes the crawl `failed`, and takes ADR 0126's failure backoff.
+- **Completion:** when a crawl ends `complete`, one transaction does two things:
+  - **Omission:** every linked child whose returned generation is older than the current one, and whose `room_discovery` row is `available` with an `observed_at` before this generation's `started_at`, becomes `not_returned` and its fields are cleared.
+    The homeserver omits rooms the account can no longer see, so this is how a loss of access reaches the cache.
+    The `observed_at` condition keeps a summary that another space's crawl or a room-summary job refreshed during this crawl.
+    If the generation skipped any `unidentified` entry, omission is not applied, because the skipped entry may have been one of the unreturned children.
+  - **Orphans:** every `room_discovery` row that no joined space links to any more is deleted, along with `space_discovery_children` rows for links that no longer exist.
+
+  A `truncated` or `failed` crawl does neither; it cannot prove absence (issue 553).
+
+- **Fencing:** each page commits in one transaction that first takes a share lock on the space's `room_summaries` row and checks that the account exists and that the space's `membership_epoch` (ADR 0126 decision 4) is the one recorded when the job started.
+  A leave of the space must update that row, so it waits for the commit and its cleanup then removes what the commit wrote.
+  In the same transaction, a child the account has joined is skipped, so a join completed before the commit wins.
+  A join that races the commit cannot leave a visible stale row: reads withhold discovery for joined rooms, and the child's later leave deletes its row (decision 6).
   No lock is held across the request.
 
-The crawl status in `discovery` reports `state` (`idle`, `queued`, or `running`), `complete`, `truncated`, `pages`, `rooms_cached`, `started_at`, `completed_at`, `expires_at`, `support`, the last failure's category, and `next_attempt_at`.
-As in ADR 0126, `queued` and `running` live only in memory, so a restart cannot leave a crawl permanently pending, while cursors, expiration, and backoff persist.
+The crawl status in `discovery` reports `state` (`idle`, `queued`, or `running`), the crawl outcome, `pages`, the current page limit, `rooms_cached`, `started_at`, `completed_at`, `expires_at`, `support`, the last failure's category, and `next_attempt_at`.
+As in ADR 0126, `queued` and `running` live only in memory, so a restart cannot leave a crawl permanently pending, while outcomes, cursors, page limits, expiration, and backoff persist.
 
 ### 4. Discovery summaries are a separate account-scoped cache
 
@@ -128,11 +155,13 @@ It is never merged into `room_state` or `room_summaries`.
 - **Security-relevant absence:** a missing `encryption` field means unknown, never unencrypted, and the DTO says so (`encryption: null` with no default applied).
 - **Provenance:** `source` (`hierarchy` or `summary`), `observed_at`, and `expires_at`, all from the server clock.
 - **Status:** `available`, `not_returned`, `forbidden`, or `not_found`; every status other than `available` carries no fields.
+  The row is shared by every space that links the room, so the latest conclusive answer wins: a crawl of another space that returns the room makes it `available` again.
 - **Validation:** each string field has a byte limit; the canonical alias must parse as a room alias and the avatar as an `mxc://` URI; the member count must be a non-negative integer.
   A field that fails is withheld and named in `withheld`, and the rest of the summary is kept.
+  This is the only validation outcome for a field; decision 3 skips an entry only when it has no valid room ID.
 - **Refresh state** for room-summary requests (decision 5) uses ADR 0126's refresh object: `idle`, `queued`, or `running`, the last failure's category, and `next_attempt_at`.
 
-A crawl's per-space state lives in a separate `space_discovery` table keyed by account and space.
+A crawl's per-space state lives in a separate `space_discovery` table keyed by account and space, and the generation in which each child was last returned in `space_discovery_children` (decision 3).
 
 ### 5. Room summaries fill in one selected unjoined room
 
@@ -146,16 +175,16 @@ A client calls it when a user selects an unjoined room, such as a space child in
   The response's `membership` field is ignored; local membership is authoritative.
 - **Outcomes:** `200` replaces the row with `source: summary`; `403` and `404 M_NOT_FOUND` record `forbidden` or `not_found` with the conclusive-denial expiration and clear the fields; `404` or `405 M_UNRECOGNIZED` records `unsupported`; anything else is a failure with backoff.
 - **Fallback:** when the summary endpoint is unsupported, the room's summary comes only from crawls of the spaces that link to it; the read schedules a crawl of one linking joined space as if that space had been read with `enrich=true`.
-- **Fencing:** the result commits only if the account still exists, the room is still unjoined, and a joined space still links to it.
+- **Fencing:** the result commits in one transaction that checks the account still exists, the room is still unjoined, and a joined space still links to it, taking a share lock on that space's `room_summaries` row as decision 3 does.
 
 Summaries are never requested for several children at once; hierarchy pages serve that need.
 
 ### 6. Join, leave, and removal transitions
 
 - **Joining a discovered room** deletes its `room_discovery` row in the same transition that marks it joined, and reads withhold discovery for joined rooms regardless; synced state is authoritative from that point, including fields it does not carry.
-- **Leaving a joined room** has no discovery effect beyond making the room eligible for discovery again if a joined space links to it.
-- **Leaving a space** deletes its `space_discovery` row and every `room_discovery` row no joined space still links to, in the `hidden_left` transition that ADR 0126 uses for its cleanup; it also increments the space's `membership_epoch`, which fences any page in flight.
-- **Removing a child link** leaves the summary in place until the next complete crawl of any space or a leave cleanup, either of which deletes rows no joined space links to; reads never show it meanwhile, because they list only linked children.
+- **Leaving a joined room** deletes any `room_discovery` row for it in the `hidden_left` transition, so a row written by a commit that raced the join never outlives the membership; the room becomes eligible for discovery again if a joined space links to it.
+- **Leaving a space** deletes its `space_discovery` and `space_discovery_children` rows and every `room_discovery` row no joined space still links to, in the `hidden_left` transition that ADR 0126 uses for its cleanup; it also increments the space's `membership_epoch`, which fences any page in flight.
+- **Removing a child link** leaves the summary in place until the orphan step of the next complete crawl of any space (decision 3) or a leave cleanup deletes rows no joined space links to; reads never show it meanwhile, because they list only linked children.
 - **Removing the account** cascades.
 
 ### 7. The legacy children route is unchanged and becomes deprecated
@@ -205,7 +234,7 @@ The conclusive-denial expiration, `UNSUPPORTED_TTL`, failure backoff, job interv
 
 ### 11. Diagnostics
 
-The worker logs crawls and summary jobs under `axon_sync::acquisition` with `account_id`, the space or room ID, `kind`, `outcome`, `elapsed_ms`, page number, page limit, rooms cached, `unlinked`, skipped entries, and restarts.
+The worker logs crawls and summary jobs under `axon_sync::acquisition` with `account_id`, the space or room ID, `kind`, `outcome`, `elapsed_ms`, page number, page limit, rooms cached, `unlinked`, `unidentified`, withheld fields, and restarts.
 It logs at debug per page and at warn for repeated failures, `pagination_loop`, and `too_large`.
 It never logs names, topics, aliases, response bodies, or tokens.
 
@@ -229,7 +258,7 @@ It never logs names, topics, aliases, response bodies, or tokens.
 - Unjoined children gain names, avatars, topics, member counts, and join rules progressively after a client asks for enrichment, each crawl page arriving as a `room_details.changed` frame.
 - Upstream cost is bounded by explicit requests, `CRAWL_TTL`, the gate, the per-account worker, and the page and crawl limits; room-list grouping costs nothing upstream.
 - Loss of access reaches the cache through complete crawls and conclusive summary answers, and leaving a space removes its discovery data.
-- New schema: `room_discovery`, `space_discovery`, and transition cleanup in the leave and join triggers; forward-only migrations with no backfill.
+- New schema: `room_discovery`, `space_discovery`, `space_discovery_children`, and transition cleanup in the leave and join triggers; forward-only migrations with no backfill.
 - Clients have one more read to adopt; the legacy route keeps working for older clients indefinitely.
 
 ## Delivery
@@ -246,20 +275,24 @@ Client adoption follows as separate PRs: web (issue 623), TUI (issue 624), and t
 
 ## Verification
 
-- **Paged read:** hundreds and thousands of local children page in MSC1772 order; while links are added and removed between pages, no row appears twice and no link present throughout is skipped; `total_children` and `next_cursor` are correct at the boundaries; a malformed or foreign cursor is a 400; the legacy route is unchanged.
+- **Paged read:** hundreds and thousands of local children page in MSC1772 order; while links are added and removed between pages, no row appears twice and no link present throughout is skipped; `total_children` and `next_cursor` are correct at the boundaries; the absent-`order` group pages across a boundary; a changed `order` between pages is tolerated without an error; a malformed or foreign cursor is a 400; the legacy route is unchanged.
 - **Crawl, against a mock homeserver under paused tokio time:**
   - names improve page by page, with one frame per changed page and none for identical pages;
   - `MAX_PAGES` ends as `truncated`; a repeated `next_batch` ends as `pagination_loop`;
   - an expired cursor restarts once, then fails with backoff;
-  - an oversized page retries at half size, and a single oversized room ends as `too_large`;
+  - an oversized page retries at half size, later pages keep the lower limit, a crawl makes at most six size retries, and a single oversized room ends as `too_large`;
   - a failure partway keeps committed pages and resumes from the saved cursor;
   - `404`/`405 M_UNRECOGNIZED` records `unsupported`; `403` and `404 M_NOT_FOUND` record denial;
   - unlinked rooms are dropped; local links missing from the response stay listed;
-  - only a complete crawl marks omitted children `not_returned`;
+  - only a complete crawl marks omitted children `not_returned`, using the returned set across a resumed crawl and resetting it on a restart;
+  - an entry with a withheld field counts as returned and keeps its other fields; an `unidentified` entry disables omission for that generation;
+  - a summary refreshed by another space's crawl or a room-summary job during this crawl is not marked `not_returned`;
+  - completion deletes `room_discovery` rows no joined space links to;
+  - a `not_returned` row reads as a non-null `discovered` with that status and no fields;
   - a field dropped by a newer page is removed;
   - a missing `encryption` field reads as unknown;
   - a panel job queued during a crawl runs before the crawl's next page.
-- **Triggers:** a read without `enrich`, a read of an unjoined space, a fresh crawl, and a crawl in backoff all schedule nothing; repeated reads schedule nothing until `expires_at` or `next_attempt_at`.
+- **Triggers:** a read without `enrich`, a read of an unjoined space, a fresh `complete` or `truncated` crawl, and a crawl in backoff all schedule nothing; an evicted `in_progress` crawl resumes from its cursor; repeated reads schedule nothing until `expires_at` or `next_attempt_at`.
 - **Room summaries:** stable, unstable, and unsupported capability paths; `via` comes from the links; a room not linked from a joined space, a joined room, and an unknown room make no request.
-- **Transitions:** joining a child during a page or summary request discards its result and deletes its row; leaving the space during a crawl commits nothing and removes its discovery rows, including after a rejoin; removing the account during a request commits nothing; values, cursors, and backoff survive a restart while `queued` and `running` do not.
+- **Transitions:** joining a child during a page or summary request discards its result and deletes its row; a join racing the commit leaves no row visible while joined and none after the later leave; a leave of the space racing a page commit waits for it and then removes what it wrote; leaving the space during a crawl commits nothing and removes its discovery rows, including after a rejoin; removing the account during a request commits nothing; values, cursors, and backoff survive a restart while `queued` and `running` do not.
 - **Live, on a disposable Synapse stack:** a space with about 300 children, some unjoined and some private, lists immediately, fills in names over several pages, and drops a child's summary after the account loses access to it.
