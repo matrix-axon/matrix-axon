@@ -23,6 +23,7 @@ import { ShellActionsContext } from '../shell-actions'
 import type { MemberDto, RoomDto } from '../stores/room-list'
 import type { EventDto } from '../stores/timeline'
 import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
+import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import { memoryStorage } from '../test/memory-storage'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
@@ -958,6 +959,49 @@ describe('RoomPage', () => {
 
     await waitFor(() => expect(window.location.pathname).toBe('/'))
     expect(leaveCalls).toBe(1)
+  })
+
+  // ADR 0121 step 4: axon's 504 means the homeserver may still finish the
+  // leave, so it is not shown as a failure that invites leaving again.
+  it('shows a leave axon timed out on as pending, not as a failure', async () => {
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'gateway_timeout',
+                message: 'leave timed out after 30s',
+              },
+            },
+            { status: 504 },
+          ),
+      ),
+    )
+    const { findByLabelText, findByRole, queryByRole } = renderRoom(
+      [event('$1', T0)],
+      { members: [member('@me:hs', 'join', 'Me')] },
+    )
+
+    await findByLabelText('Message Ops')
+    fireEvent.click(
+      await findByRole('button', { name: 'Open room information' }),
+    )
+    const panel = await findByLabelText('Room information')
+    fireEvent.click(within(panel).getByRole('button', { name: 'Leave' }))
+    fireEvent.click(
+      within(await findByRole('dialog', { name: 'Leave Ops' })).getByRole(
+        'button',
+        { name: 'Leave room' },
+      ),
+    )
+
+    const notice = await within(panel).findByText(LEAVE_PENDING_MESSAGE)
+    expect(notice.getAttribute('role')).toBe('status')
+    expect(within(panel).queryByText(/Could not leave room/)).toBeNull()
+    expect(queryByRole('dialog', { name: 'Leave Ops' })).toBeNull()
+    expect(window.location.pathname).not.toBe('/')
   })
 
   it('/whereami opens room information and clears the composer', async () => {

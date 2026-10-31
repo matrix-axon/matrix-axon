@@ -79,6 +79,7 @@ import {
 } from '../slash-commands'
 import { createMembersStore, type MembersStore } from '../stores/members'
 import { roomKey, roomTitle, type MemberDto } from '../stores/room-list'
+import { FORGET_PENDING_MESSAGE, LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import {
   resolveRoomTarget,
   roomCommandSuggestions,
@@ -289,6 +290,16 @@ export function RoomPage() {
   const [jumpOpen, setJumpOpen] = useState(false)
   const [dateJumpStart, setDateJumpStart] = useState<number | null>(null)
   const [roomEntryStatus, setRoomEntryStatus] = useState<string | null>(null)
+  // A leave or forget of this room that axon timed out on, still running on
+  // the homeserver as far as anyone knows. The store clears it once the room
+  // list settles it, so this shows only for as long as that is true.
+  const pendingMembership = rooms.pendingMembership(accountId, roomId)
+  const membershipStatus =
+    pendingMembership === 'leave'
+      ? LEAVE_PENDING_MESSAGE
+      : pendingMembership === 'forget'
+        ? FORGET_PENDING_MESSAGE
+        : null
   const { openUnreadThreads, setJumpAction, setRoomChrome } = useShellActions()
   const heading = useRef<HTMLHeadingElement>(null)
   const roomBody = useRef<HTMLDivElement>(null)
@@ -1693,6 +1704,12 @@ export function RoomPage() {
       action === 'leave'
         ? await rooms.leaveRoom(accountId, roomId)
         : await rooms.forgetRoom(accountId, roomId)
+    // Still running on the homeserver (ADR 0121 step 4): the composer status
+    // says so from the store, and the command is spent rather than left in
+    // the composer to be sent again.
+    if (!result.ok && result.pending === true) {
+      return true
+    }
     if (!result.ok) {
       timeline.error.value = result.message
       return false
@@ -2201,7 +2218,7 @@ export function RoomPage() {
                 ? 'Message'
                 : `Message ${composerLabelTitle}`
             }
-            status={roomEntryStatus ?? undefined}
+            status={roomEntryStatus ?? membershipStatus ?? undefined}
             banner={composerBanner}
             onEditLast={editLast}
             onFocus={pinLiveTimelineAfterComposerFocus}

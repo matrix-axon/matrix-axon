@@ -155,6 +155,7 @@ function roomsStub() {
     resetSession: () => {},
     leaveRoom: () => Promise.resolve({ ok: true as const }),
     forgetRoom: () => Promise.resolve({ ok: true as const }),
+    pendingMembership: () => null,
     setRoomName: () => Promise.resolve({ ok: true as const }),
     setRoomTopic: () => Promise.resolve({ ok: true as const }),
     setRoomAvatar: () => Promise.resolve({ ok: true as const }),
