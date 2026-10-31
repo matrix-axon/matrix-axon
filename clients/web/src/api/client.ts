@@ -44,18 +44,111 @@ export interface ErrorEnvelope {
  * deadline always wins the race and keeps its own failure classification. This
  * is the floor under everything that brought none, not a latency budget.
  *
+ * It is *not* the deadline on calls that axon itself bounds more loosely:
+ * those wait past axon's own timeout instead (see [`AXON_DEADLINES_MS`]).
+ *
  * **Not** `platform/tauri.ts`'s `REQUEST_TIMEOUT_MS`, which is a different
  * bound for a different reason and deliberately much longer (120 s). That one
  * is a resource backstop on every shell `fetch`, media transfers included, so
  * a blackholed server cannot retain a download permit for the session; it has
  * to be generous enough for a large attachment on a slow link. This one is a
- * UX deadline on the JSON API alone — nothing it covers is a transfer, so
- * nothing it covers has any business taking 20 s. On a packaged build both
- * apply and the shorter one decides, which is the intended order. Media is
- * untouched by this constant either way: `media/media-service.ts` fetches
- * bytes directly rather than through this client.
+ * UX deadline on the JSON API alone — nothing it covers is a transfer. On a
+ * packaged build both apply and the shorter one decides, which is the
+ * intended order. Media is untouched by this constant either way:
+ * `media/media-service.ts` fetches bytes directly rather than through this
+ * client.
  */
 export const API_REQUEST_TIMEOUT_MS = 20_000
+
+/**
+ * How long a call waits past axon's own deadline for it: time for axon's work
+ * around the homeserver call, and for its answer to come back.
+ */
+const PAST_AXON_MS = 5_000
+
+type HttpMethod = 'get' | 'put' | 'post' | 'delete' | 'patch'
+
+/** A typed `/v1` route as `"<METHOD> <schema path>"`. */
+export type RouteKey = {
+  [P in keyof paths]: {
+    [M in HttpMethod]: [NonNullable<paths[P][M]>] extends [never]
+      ? never
+      : `${Uppercase<M>} ${P}`
+  }[HttpMethod]
+}[keyof paths]
+
+/** Per-route deadlines, in ms, that replace `API_REQUEST_TIMEOUT_MS`. */
+export type RouteDeadlines = Readonly<Partial<Record<RouteKey, number>>>
+
+// axon's default timeouts for the calls below, from
+// `crates/axon-core/src/config.rs`. An operator can raise them, and the client
+// cannot follow until axon advertises its own (issue 899).
+/** `default_send_mutation_timeout_secs`: sends, edits, redactions, reactions. */
+const AXON_SEND_MUTATION_MS = 30_000
+/** `default_read_receipt_timeout_secs`. */
+const AXON_READ_RECEIPT_MS = 30_000
+/** `default_room_entry_timeout_secs`: join, knock, create, DM, leave, forget. */
+const AXON_ROOM_ENTRY_MS = 30_000
+/** `default_media_upstream_upload_timeout_secs`: media sends, avatar sets. */
+const AXON_UPSTREAM_UPLOAD_MS = 60_000
+
+/**
+ * The calls axon bounds more loosely than `API_REQUEST_TIMEOUT_MS`, each given
+ * axon's deadline plus `PAST_AXON_MS` (issues 872 and 879).
+ *
+ * Under the 20 s floor the client hung up first. Axon then dropped the call,
+ * so the user saw the client's own timeout instead of axon's answer, and the
+ * homeserver gate never heard that the homeserver was slow (ADR 0122 step 2).
+ * Waiting past axon's deadline lets axon's timeout fire, answer with a `504`
+ * and report to the gate. A server-side guard that reported an abandoned call
+ * as a timeout was considered there and rejected.
+ *
+ * Calls axon bounds at 20 s or less keep the floor: typing (10 s), and
+ * invite, kick, ban and the room-settings writes (15 s). So does every read.
+ *
+ * `POST …/send` takes the send-mutation timeout because this client never
+ * bundles link previews. A send that did would run under the upload timeout
+ * (`crates/axon-api/src/routes/bundled_previews.rs`).
+ */
+export const AXON_DEADLINES_MS: RouteDeadlines = {
+  'POST /v1/accounts/{account_id}/rooms/{room_id}/send':
+    AXON_SEND_MUTATION_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/{room_id}/send-sticker':
+    AXON_SEND_MUTATION_MS + PAST_AXON_MS,
+  'PUT /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}':
+    AXON_SEND_MUTATION_MS + PAST_AXON_MS,
+  'DELETE /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}':
+    AXON_SEND_MUTATION_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions':
+    AXON_SEND_MUTATION_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/{room_id}/read':
+    AXON_READ_RECEIPT_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms': AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/dm': AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/join':
+    AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/knock':
+    AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/{room_id}/leave':
+    AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/{room_id}/forget':
+    AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/rooms/{room_id}/send-media':
+    AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
+  'PUT /v1/accounts/{account_id}/rooms/{room_id}/avatar':
+    AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
+}
+
+/** One request's deadline: its route's entry in `routes`, else `timeoutMs`. */
+function deadlineMs(
+  method: string,
+  schemaPath: string,
+  timeoutMs: number,
+  routes: RouteDeadlines,
+): number {
+  const key = `${method.toUpperCase()} ${schemaPath}` as RouteKey
+  return routes[key] ?? timeoutMs
+}
 
 /**
  * The same request with `timeoutMs` added to whatever deadline it already had.
@@ -485,13 +578,16 @@ export class RequestFailedError extends Error {
  * client; the browser gets its own `fetch` and behaves exactly as before.
  *
  * `timeoutMs` is the deadline every request gets (see
- * [`API_REQUEST_TIMEOUT_MS`]); tests shorten it, and `0` disables it.
+ * [`API_REQUEST_TIMEOUT_MS`]); tests shorten it, and `0` disables every
+ * deadline. `routeTimeouts` replaces it for the routes it names (see
+ * [`AXON_DEADLINES_MS`]); tests shorten those too.
  */
 export function createApiClient(
   auth: AuthProvider,
   baseUrl = '/',
   platform: Pick<Platform, 'fetch'> = browserPlatform(),
   timeoutMs = API_REQUEST_TIMEOUT_MS,
+  routeTimeouts: RouteDeadlines = AXON_DEADLINES_MS,
 ): ApiClient {
   // Each outgoing request's deadline, held strongly for as long as its request
   // is in flight. `fetchWithinDeadline` must race the deadline itself, not the
@@ -506,10 +602,15 @@ export function createApiClient(
   })
 
   const bearer: Middleware = {
-    async onRequest({ request }) {
+    async onRequest({ request, schemaPath }) {
       // Created before the token is asked for, because acquiring one can be a
       // network round trip of its own — see `withinDeadline`.
-      const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null
+      const deadline =
+        timeoutMs > 0
+          ? AbortSignal.timeout(
+              deadlineMs(request.method, schemaPath, timeoutMs, routeTimeouts),
+            )
+          : null
       const trace = perfTraceRequest(request.url)
       // Only a provider that *went* somewhere can fail to come back, and the
       // synchronous ones are the common case (a pasted token is a string).
