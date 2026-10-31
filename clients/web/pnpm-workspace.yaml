@@ -3,14 +3,20 @@ allowBuilds:
   msw: false
 
 # Workspace level graph overrides
+#
+# Every entry below is a security floor for a transitive dependency. Only
+# `minimatch` is required to hold the lockfile above a vulnerable version today
+# (eslint and typescript-estree would otherwise resolve 10.x, and
+# @redocly/openapi-core 5.x). The `js-yaml`, `undici` and `zod` entries are not
+# strictly needed as of 2026-10-31: a fresh, lockfile-less resolve already picks
+# the patched versions. We keep them anyway so that a future re-resolve cannot
+# drift back to a vulnerable release, and so `pnpm audit` keeps passing, if a
+# dependent ever pins an older range. Remove an entry only once nothing in the
+# graph can resolve below its fixed version.
 overrides:
   # CVE-2026-118764: minimatch < 11.0.1 contains an attacker-controlled pattern
   # amplification in firstPhasePreProcess() when optimizationLevel >= 2.
   'minimatch': '^11.0.1'
-  # This override was added in PR #184 (July 2026) to address a pnpm peer conflict
-  # but may not be necessary as of 2026-10-31. We should revisit next time this file
-  # is updated.
-  'openapi-typescript@7.13.0>typescript': '~6.0.3'
   # GHSA-2883-xcg3-v3hh: js-yaml's `maxTotalMergeKeys` did not bound CPU use on
   # a merge-key bomb. Our own dependency is already 4.3.2; this reaches the copy
   # `@redocly/openapi-core` pins, which is a dev-only path (it builds the
