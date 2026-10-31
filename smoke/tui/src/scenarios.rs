@@ -1165,8 +1165,13 @@ fn press_popup_page(driver: &mut PtyDriver, page: PopupPage) -> anyhow::Result<(
 }
 
 /// Wait until the screen differs from `before` and then sits still, or until
-/// two settle windows pass with no difference. An unchanged screen is the
-/// popup clamp. Page keys are not sent from here.
+/// two settle windows pass with no difference. An unchanged screen means this
+/// key painted nothing: a real scroll stop and a dropped key look the same,
+/// and both turn the pass around. A second key would jump sixteen rows and
+/// can skip a one-line field, so it is not sent to tell them apart. A paint
+/// that changes returns after the quiet period; the four-second wait is only
+/// the budget for a screen that never changes. Page keys are not sent from
+/// here.
 fn await_page_paint(driver: &PtyDriver, before: &str, deadline: Instant) -> PagePaint {
     let mut last = before.to_owned();
     let mut stable_since = Instant::now();
@@ -1331,7 +1336,8 @@ fn field_value_is(screen: &str, label: &str, value: &str) -> bool {
 
 /// The whole remainder of a `Room version:` line, not the first word. A
 /// one-digit number is rejected: a wrapped fragment such as `2` is not a
-/// version, and synapse:latest is 10 or newer. A custom version carries
+/// version, and synapse:latest is 10 or newer. Accepting every spec integer
+/// from 1 through 12 would let that fragment pass. A custom version carries
 /// `.`, `-`, or `_` (`org.example.custom`).
 fn room_version_visible(screen: &str) -> bool {
     screen.lines().any(|line| {
@@ -1360,6 +1366,13 @@ fn is_room_version_token(rest: &str) -> bool {
 /// on the same screen. The user id counts only on its own member line: the
 /// same line as a power phrase, or the line above a wrapped phrase that holds
 /// no other Matrix ID. `Creator:` and `Your Matrix ID:` also print the user.
+///
+/// The smoke terminal is 30×100 and the popup is 72% by 80%, about 22 inner
+/// rows. Each page moves eight rows, so consecutive screens overlap by about
+/// fourteen. `Members (` is two lines above the first row (`Joined`, then the
+/// row). A page boundary can fall in that gap, and this check then fails
+/// closed. Splitting the heading and the row across pages would accept a
+/// summary line that only shares its screen with a power phrase.
 fn whereami_member_visible(screen: &str, user_ids: &[&str]) -> bool {
     if !screen.lines().any(|line| line.contains("Members (")) {
         return false;

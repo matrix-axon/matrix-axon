@@ -17,8 +17,8 @@ pub struct Manifest {
     ///
     /// Absent when the manifest was written by a local-stack binary from before
     /// this field existed, including `--keep-up` on that older stack. Scenarios
-    /// that do not read it still load.
-    #[serde(default)]
+    /// that do not read it still load. A missing field on `Option` is already
+    /// `None`, so this field does not use `serde(default)`.
     pub accounts: Option<Accounts>,
     pub rooms: Rooms,
     pub fixtures: Fixtures,
