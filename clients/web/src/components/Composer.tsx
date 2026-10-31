@@ -75,6 +75,10 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+function initialEmojiHistory(text: string, refs: InlineEmojiReference[]) {
+  return { entries: [{ text, refs }], cursor: 0, textLength: text.length }
+}
+
 const COMPOSER_MIN_HEIGHT = 38
 const COMPOSER_KEYBOARD_RESIZE_STEP = 24
 const MOBILE_COMPOSER_MAX_LINES = 4
@@ -269,10 +273,7 @@ export function Composer({
     end: number
     type: string
   } | null>(null)
-  const emojiHistory = useRef({
-    entries: [{ text: initialValue, refs: inline.current }],
-    cursor: 0,
-  })
+  const emojiHistory = useRef(initialEmojiHistory(initialValue, inline.current))
   const initialEmojiKey = JSON.stringify(
     parseInlineEmoji(initialValue, initialInlineEmoji),
   )
@@ -288,6 +289,11 @@ export function Composer({
   const stickerLookup = useRef<AbortController | null>(null)
   const stickerScope = useRef(0)
   const emojiScope = emoji ?? stickers
+  const bindingScope = useRef({
+    api: emojiScope?.api,
+    accountId: emojiScope?.accountId,
+    roomId: emojiScope?.roomId,
+  })
   const [composerHeight, setComposerHeight] = useState<number | null>(null)
   const currentComposerHeight = height === undefined ? composerHeight : height
   const [autocompleteDismissedFor, setAutocompleteDismissedFor] = useState<
@@ -338,16 +344,40 @@ export function Composer({
     }
   }, [stickers?.api, stickers?.accountId, stickers?.roomId])
 
-  // Binding ownership follows the account/room, independently of whether
-  // standalone sticker sending is available (for example, during an edit).
+  // Bindings and text cross an ownership boundary together. Initial-value
+  // hydration within the same scope still follows the clean-draft rule below.
   useLayoutEffect(() => {
-    setEmojiSelection(null)
-    return () => {
-      inline.current = []
-      pendingInline.current = null
-      emojiHistory.current = { entries: [], cursor: -1 }
+    const next = {
+      api: emojiScope?.api,
+      accountId: emojiScope?.accountId,
+      roomId: emojiScope?.roomId,
     }
-  }, [emojiScope?.api, emojiScope?.accountId, emojiScope?.roomId])
+    const previous = bindingScope.current
+    if (
+      previous.api === next.api &&
+      previous.accountId === next.accountId &&
+      previous.roomId === next.roomId
+    )
+      return
+    bindingScope.current = next
+    const refs = parseInlineEmoji(initialValue, JSON.parse(initialEmojiKey))
+    inline.current = refs
+    pendingInline.current = null
+    beforeInput.current = null
+    emojiHistory.current = initialEmojiHistory(initialValue, refs)
+    synced.current = initialValue
+    syncedEmoji.current = initialEmojiKey
+    setDraft(initialValue)
+    setCaret(initialValue.length)
+    setEmojiSelection(null)
+    setStickerProblem(null)
+  }, [
+    emojiScope?.api,
+    emojiScope?.accountId,
+    emojiScope?.roomId,
+    initialValue,
+    initialEmojiKey,
+  ])
 
   useEffect(() => {
     if (!attachMenuOpen) {
@@ -570,10 +600,7 @@ export function Composer({
         initialValue,
         JSON.parse(initialEmojiKey),
       )
-      emojiHistory.current = {
-        entries: [{ text: initialValue, refs: inline.current }],
-        cursor: 0,
-      }
+      emojiHistory.current = initialEmojiHistory(initialValue, inline.current)
       setDraft(initialValue)
     }
   }, [initialValue, initialEmojiKey, draft])
@@ -676,21 +703,30 @@ export function Composer({
         }
       }
     }
+    const unknownHistory = !!historyDirection && refs === undefined
     refs = parseInlineEmoji(
       value,
-      refs ?? supplied ?? rebaseInlineEmoji(draft, value, inline.current, edit),
+      unknownHistory
+        ? []
+        : (refs ??
+            supplied ??
+            rebaseInlineEmoji(draft, value, inline.current, edit)),
     )
     inline.current = refs
-    if (!historyDirection) {
-      history.entries = history.entries.slice(0, history.cursor + 1)
+    if (unknownHistory) {
+      // The browser can coalesce edits or undo beyond the retained window.
+      // Start a new history origin instead of attaching orphaned snapshots.
+      emojiHistory.current = initialEmojiHistory(value, refs)
+    } else if (!historyDirection) {
+      for (const removed of history.entries.splice(history.cursor + 1))
+        history.textLength -= removed.text.length
       history.entries.push({ text: value, refs })
-      if (history.entries.length > 128) history.entries.shift()
+      history.textLength += value.length
       while (
-        history.entries.length > 1 &&
-        history.entries.reduce((size, entry) => size + entry.text.length, 0) >
-          1_048_576
+        history.entries.length > 128 ||
+        (history.entries.length > 1 && history.textLength > 1_048_576)
       )
-        history.entries.shift()
+        history.textLength -= history.entries.shift()!.text.length
       history.cursor = history.entries.length - 1
     }
     setDraft(value)
@@ -1004,7 +1040,7 @@ export function Composer({
     }
     setDraft('')
     inline.current = []
-    emojiHistory.current = { entries: [{ text: '', refs: [] }], cursor: 0 }
+    emojiHistory.current = initialEmojiHistory('', [])
     onDraftChange?.('')
     if (references.length) void onSubmit(message, references)
     else void onSubmit(message)

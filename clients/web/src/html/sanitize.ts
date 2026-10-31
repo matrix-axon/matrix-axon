@@ -92,7 +92,6 @@ const ALLOWED_ATTR = [
   'data-mx-bg-color',
   'data-mx-spoiler',
   'data-mx-emoticon',
-  'title',
   // `<img>` (mxc-only): `src` is never allowed through — the hook rewrites a
   // safe `mxc://` src into `data-mxc`, which `FormattedBody` resolves.
   'alt',
@@ -158,7 +157,9 @@ export function sanitizeOutgoingHtml(
 ): string {
   return outgoingPurify.sanitize(html, {
     ALLOWED_TAGS,
-    ALLOWED_ATTR: inlineEmoji ? [...ALLOWED_ATTR, 'src'] : ALLOWED_ATTR,
+    ALLOWED_ATTR: inlineEmoji
+      ? [...ALLOWED_ATTR, 'src', 'title']
+      : ALLOWED_ATTR,
     FORBID_CONTENTS: ['mx-reply', 'style', 'script'],
     ALLOW_DATA_ATTR: false,
     // Only generated emoticon src attributes get this exception. The hook
@@ -172,16 +173,19 @@ export function sanitizeOutgoingHtml(
 // real MXC src attributes so other clients and the server can resolve them.
 const outgoingPurify = DOMPurify(window)
 outgoingPurify.addHook('uponSanitizeElement', (node, data) => {
-  if (data.tagName !== 'img') return
-  const img = node as Element
-  const src = img.getAttribute('src')
-  if (
-    !img.hasAttribute('data-mx-emoticon') ||
-    src === null ||
-    customReactionMxc(src) === null
-  )
-    img.removeAttribute('src')
-  img.removeAttribute('data-mxc')
+  if (node.nodeType !== Node.ELEMENT_NODE) return
+  const element = node as Element
+  const src = element.getAttribute('src')
+  const generated =
+    data.tagName === 'img' &&
+    element.hasAttribute('data-mx-emoticon') &&
+    src !== null &&
+    customReactionMxc(src) !== null
+  if (!generated) {
+    element.removeAttribute('src')
+    element.removeAttribute('title')
+  }
+  element.removeAttribute('data-mxc')
 })
 
 /**

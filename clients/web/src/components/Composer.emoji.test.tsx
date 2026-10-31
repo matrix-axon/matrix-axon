@@ -183,3 +183,57 @@ it('normalizes padded picker names and reports names that cannot round-trip', ()
     ),
   ).toBeTruthy()
 })
+
+it('re-seeds text and image bindings together when the API scope changes', () => {
+  const firstApi = {} as ApiClient
+  const secondApi = {} as ApiClient
+  const refs = [
+    { start: 3, end: 10, shortcode: 'smile', mxc: 'mxc://first/smile' },
+  ]
+  const onSubmit = vi.fn(async () => true)
+  const props = {
+    placeholder: 'Message',
+    initialValue: 'hi :smile:',
+    initialInlineEmoji: refs,
+    onSubmit,
+  }
+  const view = render(
+    <Composer
+      {...props}
+      emoji={{ api: firstApi, accountId: 'a', roomId: 'r' }}
+    />,
+  )
+  const input = screen.getByRole('textbox') as HTMLTextAreaElement
+  fireEvent.input(input, { target: { value: 'hi :smile: unsynced' } })
+  view.rerender(
+    <Composer
+      {...props}
+      emoji={{ api: secondApi, accountId: 'a', roomId: 'r' }}
+    />,
+  )
+  expect(input.value).toBe('hi :smile:')
+  fireEvent.submit(input.closest('form')!)
+  expect(onSubmit).toHaveBeenCalledWith('hi :smile:', refs)
+})
+
+it('discards orphaned binding history after a native undo to an untracked state', () => {
+  const { input, open, onSubmit } = setup('hi ')
+  open(3)
+  fireEvent.click(screen.getByRole('button', { name: 'First' }))
+  fireEvent.input(input, { target: { value: 'hi :smile: one' } })
+  fireEvent.input(input, { target: { value: 'hi :smile: two' } })
+  fireEvent.input(input, {
+    target: { value: 'hi :smile: one' },
+    inputType: 'historyUndo',
+  })
+  fireEvent.input(input, {
+    target: { value: 'unknown native state' },
+    inputType: 'historyUndo',
+  })
+  fireEvent.input(input, {
+    target: { value: 'hi :smile: two' },
+    inputType: 'historyRedo',
+  })
+  fireEvent.submit(input.closest('form')!)
+  expect(onSubmit).toHaveBeenCalledWith('hi :smile: two')
+})

@@ -215,9 +215,12 @@ before starting a milestone.
   Bindings must validate against the exact text and remain scoped to the composer/account/room.
   Use the native `beforeinput` range when rebasing repeated names; common-prefix/suffix inference alone cannot distinguish edits among identical tokens.
   Formatting preserves bindings, edits inside a token discard them, and undo/redo restores bounded snapshots (128 entries and at most 1 MiB of retained text, excluding the current entry).
+  Keep a running history length; an untracked native history state starts a new plain-text history origin rather than restoring orphaned image identities.
+  Scope changes re-seed text and bindings together; failed-edit drafts store an explicit binding array, including an empty one.
   Sending protects custom tokens from Unicode expansion/Markdown, generates MXC `img data-mx-emoticon` tags only in eligible text nodes, and retains readable fallback text.
   Outgoing sanitization uses a separate DOMPurify instance so display-only MXC-to-blob rewrites never reach the wire.
   Markdown sanitization strips source MXCs before binding rendering; only generated emoji image sources receive the final sanitizer exception, never links.
+  Sender-provided titles are not display-allowlisted; outgoing titles and sources are restricted to generated emoticon images.
   Construct image nodes and fragments in the inert template document to avoid native MXC loads.
   Edit recovery excludes rich-reply fallback subtrees.
   Completion discovery retains at most two usage snapshots for thirty seconds within a mounted account/room scope; picker refresh and explicit sends stay fresh.

@@ -115,7 +115,12 @@ export function useMessageComposer(options: MessageComposerOptions): {
     () =>
       action?.kind === 'edit'
         ? (action.inlineEmoji ??
-          inlineEmojiFromEvent(action.event.body ?? '', action.event.content))
+          (action.draft !== undefined
+            ? []
+            : inlineEmojiFromEvent(
+                action.event.body ?? '',
+                action.event.content,
+              )))
         : [],
     [action],
   )
@@ -221,7 +226,7 @@ export function useMessageComposer(options: MessageComposerOptions): {
         // A failed edit has no retryable echo (sends do), so re-open edit
         // mode carrying the text the user typed — the error banner alone
         // would silently discard it (WCR-10).
-        setAction({ ...current, draft: body, inlineEmoji })
+        setAction({ ...current, draft: body, inlineEmoji: inlineEmoji ?? [] })
       }
       if (ok) onMutation?.()
       return ok

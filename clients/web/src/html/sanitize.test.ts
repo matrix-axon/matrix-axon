@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { renderMatrixHtml } from './sanitize'
+import { renderMatrixHtml, sanitizeOutgoingHtml } from './sanitize'
 
 describe('renderMatrixHtml', () => {
   it('keeps the Matrix HTML subset', () => {
@@ -296,4 +296,46 @@ describe('renderMatrixHtml', () => {
     ).toContain('<summary>s</summary>')
     expect(renderMatrixHtml('<marquee>zoom</marquee>')).toBe('zoom')
   })
+})
+
+it('does not accept sender-provided link tooltips', () => {
+  const incoming = renderMatrixHtml(
+    '<a href="https://evil.test" title="https://bank.test/login">bank</a>',
+  )
+  const display = new DOMParser().parseFromString(incoming, 'text/html')
+  expect(display.querySelector('a')?.hasAttribute('title')).toBe(false)
+})
+
+it('allows outgoing sources and titles only on generated emoticons', () => {
+  const outgoing = sanitizeOutgoingHtml(
+    '<a href="https://evil.test" title="https://bank.test/login" src="mxc://hs/non-image">bank</a>' +
+      '<img data-mx-emoticon src="mxc://hs/emoji" title=":party:">' +
+      '<img src="mxc://hs/other" title="not generated">',
+    { inlineEmoji: true },
+  )
+  const doc = new DOMParser().parseFromString(outgoing, 'text/html')
+  expect(doc.querySelector('a')?.hasAttribute('title')).toBe(false)
+  expect(doc.querySelector('a')?.hasAttribute('src')).toBe(false)
+  expect(
+    doc.querySelector('img[data-mx-emoticon]')?.getAttribute('title'),
+  ).toBe(':party:')
+  expect(
+    doc.querySelector('img:not([data-mx-emoticon])')?.hasAttribute('title'),
+  ).toBe(false)
+  expect(
+    doc.querySelector('img:not([data-mx-emoticon])')?.hasAttribute('src'),
+  ).toBe(false)
+})
+
+it('strips outgoing sources from non-image elements even in inline emoji mode', () => {
+  const out = sanitizeOutgoingHtml(
+    '<a href="https://example.test" src="mxc://hs/unbound">x</a>',
+    { inlineEmoji: true },
+  )
+  expect(
+    new DOMParser()
+      .parseFromString(out, 'text/html')
+      .querySelector('a')
+      ?.hasAttribute('src'),
+  ).toBe(false)
 })

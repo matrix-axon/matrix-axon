@@ -724,6 +724,52 @@ describe('editing and redacting', () => {
     )
   })
 
+  it('does not resurrect removed image bindings after a failed edit', async () => {
+    const edits: Record<string, unknown>[] = []
+    server.use(
+      http.put(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId`,
+        async ({ request }) => {
+          edits.push((await request.json()) as Record<string, unknown>)
+          return HttpResponse.json(
+            { error: { code: 'internal', message: 'edit unavailable' } },
+            { status: 500 },
+          )
+        },
+      ),
+    )
+    const { services, findAllByRole, getByLabelText, findByText } = renderRoom([
+      event('$custom-edit', 200, {
+        sender: OWN_USER,
+        body: 'hi :custom:',
+        content: {
+          msgtype: 'm.text',
+          body: 'hi :custom:',
+          format: 'org.matrix.custom.html',
+          formatted_body:
+            'hi <img data-mx-emoticon src="mxc://hs/custom" alt=":custom:">',
+        } as unknown as EventDto['content'],
+      }),
+    ])
+    vi.spyOn(services.media, 'acquire').mockResolvedValue({
+      release: vi.fn(),
+      result: { ok: false, reason: 'not_found' },
+    } as never)
+    fireEvent.click((await findAllByRole('button', { name: 'Edit' }))[0])
+    let input = getByLabelText('Message Ops') as HTMLTextAreaElement
+    fireEvent.input(input, { target: { value: 'hi :customX:' } })
+    fireEvent.input(input, { target: { value: 'hi :custom:' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await findByText('edit unavailable')
+    await findByText('Editing')
+    input = getByLabelText('Message Ops') as HTMLTextAreaElement
+    await waitFor(() => expect(input.value).toBe('hi :custom:'))
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(2))
+    expect(edits[0].formatted_body ?? '').not.toContain('mxc://hs/custom')
+    expect(edits[1].formatted_body ?? '').not.toContain('mxc://hs/custom')
+  })
+
   it('redact requires confirmation and masks the row', async () => {
     let deleted: string | null = null
     server.use(
