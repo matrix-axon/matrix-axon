@@ -87,9 +87,12 @@ export type RouteDeadlines = Readonly<Partial<Record<RouteKey, number>>>
 const AXON_SEND_MUTATION_MS = 30_000
 /** `default_read_receipt_timeout_secs`. */
 const AXON_READ_RECEIPT_MS = 30_000
-/** `default_room_entry_timeout_secs`: join, knock, create, DM, leave, forget. */
+/**
+ * `default_room_entry_timeout_secs`: join, knock, create, DM, leave, forget,
+ * and the two reads that can federate, profile lookups and directory searches.
+ */
 const AXON_ROOM_ENTRY_MS = 30_000
-/** `default_media_upstream_upload_timeout_secs`: media sends, avatar sets. */
+/** `default_media_upstream_upload_timeout_secs`: media sends, avatar sets (room and account). */
 const AXON_UPSTREAM_UPLOAD_MS = 60_000
 
 /**
@@ -104,7 +107,10 @@ const AXON_UPSTREAM_UPLOAD_MS = 60_000
  * as a timeout was considered there and rejected.
  *
  * Calls axon bounds at 20 s or less keep the floor: typing (10 s), and
- * invite, kick, ban and the room-settings writes (15 s). So does every read.
+ * invite, kick, ban and the room-settings writes (15 s). So do most reads,
+ * which axon bounds at 20 s or less (search at 10 s) or not at all. Two reads
+ * are listed: a profile lookup or a directory search can reach another
+ * homeserver over federation, so axon runs both under its room-entry timeout.
  *
  * `POST …/send` takes the send-mutation timeout because this client never
  * bundles link previews. A send that did would run under the upload timeout
@@ -133,9 +139,15 @@ export const AXON_DEADLINES_MS: RouteDeadlines = {
     AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
   'POST /v1/accounts/{account_id}/rooms/{room_id}/forget':
     AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
+  'GET /v1/accounts/{account_id}/users/{user_id}/profile':
+    AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
+  'GET /v1/accounts/{account_id}/directory/public_rooms':
+    AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
   'POST /v1/accounts/{account_id}/rooms/{room_id}/send-media':
     AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
   'PUT /v1/accounts/{account_id}/rooms/{room_id}/avatar':
+    AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
+  'PUT /v1/accounts/{account_id}/profile/avatar':
     AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
 }
 

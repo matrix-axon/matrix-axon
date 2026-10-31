@@ -735,8 +735,11 @@ describe("deadlines that wait past axon's own (issues 872 and 879)", () => {
       'POST /v1/accounts/{account_id}/rooms/knock': 35_000,
       'POST /v1/accounts/{account_id}/rooms/{room_id}/leave': 35_000,
       'POST /v1/accounts/{account_id}/rooms/{room_id}/forget': 35_000,
+      'GET /v1/accounts/{account_id}/users/{user_id}/profile': 35_000,
+      'GET /v1/accounts/{account_id}/directory/public_rooms': 35_000,
       'POST /v1/accounts/{account_id}/rooms/{room_id}/send-media': 65_000,
       'PUT /v1/accounts/{account_id}/rooms/{room_id}/avatar': 65_000,
+      'PUT /v1/accounts/{account_id}/profile/avatar': 65_000,
     })
     for (const ms of Object.values(AXON_DEADLINES_MS)) {
       expect(ms).toBeGreaterThan(API_REQUEST_TIMEOUT_MS)
