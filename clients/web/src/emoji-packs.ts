@@ -140,19 +140,29 @@ export async function loadImagePacks(
   usage: 'emoticon' | 'sticker',
   signal: AbortSignal,
 ) {
-  const { data, response } = await api.GET(
-    '/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs',
-    {
-      params: {
-        path: { account_id: accountId, room_id: roomId },
-        query: usage === 'sticker' ? { usage: 'sticker' } : undefined,
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (signal.aborted) controller.abort()
+  else signal.addEventListener('abort', abort, { once: true })
+  const deadline = setTimeout(abort, 10_000)
+  try {
+    const { data, response } = await api.GET(
+      '/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs',
+      {
+        params: {
+          path: { account_id: accountId, room_id: roomId },
+          query: usage === 'sticker' ? { usage: 'sticker' } : undefined,
+        },
+        signal: controller.signal,
       },
-      signal,
-    },
-  )
-  return {
-    data: data ? parseEmojiPacks(data.data, usage) : undefined,
-    status: response.status,
+    )
+    return {
+      data: data ? parseEmojiPacks(data.data, usage) : undefined,
+      status: response.status,
+    }
+  } finally {
+    clearTimeout(deadline)
+    signal.removeEventListener('abort', abort)
   }
 }
 
@@ -193,6 +203,14 @@ export async function lookupImageShortcode(
   return null
 }
 
+/** Names inserted as tokens must survive trimming and the token grammar. */
+export function inlineImageShortcode(value: unknown): string | null {
+  const name = reactionShortcode(value)
+  return name !== null && standaloneStickerShortcode(`:${name}:`) === name
+    ? name
+    : null
+}
+
 /** Suggest the same winner that a case-insensitive standalone send resolves. */
 export function imageShortcodeSuggestions(
   packs: EmojiPacks,
@@ -206,10 +224,7 @@ export function imageShortcodeSuggestions(
     for (const image of pack.images) {
       if (usage === 'emoticon' ? !image.emoticon : !image.sticker) continue
       // Legacy packs can contain names that cannot round-trip as one token.
-      if (
-        standaloneStickerShortcode(`:${image.shortcode}:`) !== image.shortcode
-      )
-        continue
+      if (inlineImageShortcode(image.shortcode) !== image.shortcode) continue
       const name = image.shortcode.toLowerCase()
       if (seen.has(name)) continue
       seen.add(name)

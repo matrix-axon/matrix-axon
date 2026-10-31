@@ -1,4 +1,5 @@
 import { stickerFromImage } from '../emoji-packs'
+import { type InlineEmojiReference } from '../inline-emoji'
 import {
   useCallback,
   useEffect,
@@ -268,6 +269,7 @@ export function ThreadPanel({
     dropHandlers,
     dropProblem,
     formatComposerBody,
+    editInlineEmoji,
     mentionCompletions,
     roomReferenceCompletions,
     emojiCompletions,
@@ -291,10 +293,13 @@ export function ThreadPanel({
    * for a re-read. The composer clears `action` before it awaits, so the
    * target is captured here, in the render that owns it.
    */
-  const submitThreadMessage = async (body: string): Promise<boolean> => {
+  const submitThreadMessage = async (
+    body: string,
+    inlineEmoji?: readonly InlineEmojiReference[],
+  ): Promise<boolean> => {
     const editingRoot =
       action?.kind === 'edit' && action.event.event_id === rootId
-    const ok = await submitMessage(body)
+    const ok = await submitMessage(body, inlineEmoji)
     if (ok && editingRoot) {
       refetchRoot()
     }
@@ -789,9 +794,11 @@ export function ThreadPanel({
             ? (action.draft ?? action.event.body ?? '')
             : ''
         }
+        initialInlineEmoji={action?.kind === 'edit' ? editInlineEmoji : []}
         mentionCompletions={mentionCompletions}
         roomReferenceCompletions={roomReferenceCompletions}
         emojiCompletions={emojiCompletions}
+        emoji={{ api, accountId, roomId }}
         onCommand={
           onCommand === undefined
             ? undefined

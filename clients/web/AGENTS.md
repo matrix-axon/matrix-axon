@@ -209,6 +209,20 @@ before starting a milestone.
 - **Markdown-on-send** (`src/markdown/markdown.ts`): plain prose sends a
   bare body; detected formatting sends `org.matrix.custom.html`. The server
   never interprets Markdown. Raw inline HTML in composer input is escaped.
+- **Inline composer emoji** (`src/inline-emoji.ts`, `components/EmojiPicker.tsx`): the full picker is shared by reactions and composers.
+  Composer insertion uses the native textarea editing helper and saves bounded UTF-16 ranges with the chosen MXC and shortcode.
+  Room draft values retain their interoperable `text` field and optionally carry `inline_emoji` bindings in the same atomic device-state value.
+  Bindings must validate against the exact text and remain scoped to the composer/account/room.
+  Use the native `beforeinput` range when rebasing repeated names; common-prefix/suffix inference alone cannot distinguish edits among identical tokens.
+  Formatting preserves bindings, edits inside a token discard them, and undo/redo restores bounded snapshots (128 entries and at most 1 MiB of retained text, excluding the current entry).
+  Sending protects custom tokens from Unicode expansion/Markdown, generates MXC `img data-mx-emoticon` tags only in eligible text nodes, and retains readable fallback text.
+  Outgoing sanitization uses a separate DOMPurify instance so display-only MXC-to-blob rewrites never reach the wire.
+  Markdown sanitization strips source MXCs before binding rendering; only generated emoji image sources receive the final sanitizer exception, never links.
+  Construct image nodes and fragments in the inert template document to avoid native MXC loads.
+  Edit recovery excludes rich-reply fallback subtrees.
+  Completion discovery retains at most two usage snapshots for thirty seconds within a mounted account/room scope; picker refresh and explicit sends stay fresh.
+  Emoji ownership follows the account/room/API independently of optional sticker sending, and the existing control opens insertion directly while editing.
+  Captions and failed-media retries retain their formatted body; scope changes invalidate picker callbacks and transient history.
 - **Bundled URL previews** (`src/link-previews.ts`, `components/LinkPreviews.tsx`): `EventBody` appends image/text cards for room and thread messages, including media captions.
   Compact pinned thread-root headers disable the cards through `EventBody`'s `showLinkPreviews` prop; full message rows retain them.
   The standard `m.url_previews` field takes precedence over `com.beeper.linkpreviews`, including empty arrays and malformed values.

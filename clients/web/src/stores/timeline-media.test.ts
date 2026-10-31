@@ -91,6 +91,48 @@ function serveSuccess(): { sendBody: () => unknown } {
 
 const png = () => new File(['bytes'], 'cat.png', { type: 'image/png' })
 
+it('retains an inline formatted caption through media failure and retry even when the caption equals the filename', async () => {
+  const store = makeStore()
+  const bodies: Record<string, unknown>[] = []
+  const formatted = '<img data-mx-emoticon src="mxc://hs/custom" alt=":cat:">'
+  server.use(
+    http.post(UPLOAD_PATH, () =>
+      HttpResponse.json({ data: { upload_id: UPLOAD_ID } }),
+    ),
+    http.post(SEND_MEDIA_PATH, async ({ request }) => {
+      bodies.push((await request.json()) as Record<string, unknown>)
+      return bodies.length === 1
+        ? HttpResponse.json(
+            { error: { code: 'upstream', message: 'Unavailable' } },
+            { status: 502 },
+          )
+        : HttpResponse.json({ data: { event_id: '$caption' } })
+    }),
+    http.get(EVENTS_PATH, () =>
+      HttpResponse.json({ data: confirmed('$caption', 'cat.png') }),
+    ),
+  )
+  expect(
+    await store.sendMedia(png(), {
+      caption: 'cat.png',
+      formattedBody: formatted,
+    }),
+  ).toBe(false)
+  const echo = store.events.value.find(
+    (event) => event.localEcho?.status === 'failed',
+  )!
+  expect((echo.content as { formatted_body?: string }).formatted_body).toBe(
+    formatted,
+  )
+  expect(await store.retrySend(echo.event_id)).toBe(true)
+  expect(bodies).toHaveLength(2)
+  for (const body of bodies) {
+    expect(body.caption).toBe('cat.png')
+    expect(body.format).toBe('org.matrix.custom.html')
+    expect(body.formatted_body).toBe(formatted)
+  }
+})
+
 describe('sendMedia', () => {
   it('echoes the image locally, then claims the staged upload and reconciles', async () => {
     const seen = serveSuccess()
@@ -338,14 +380,22 @@ describe('sendMediaBatch', () => {
     const store = makeStore()
     await store.sendMediaBatch(files('a.png', 'b.png'), {
       caption: 'look at these',
+      formattedBody:
+        'look <img data-mx-emoticon src="mxc://hs/custom" alt=":custom:">',
       replyTo: '$parent',
     })
 
-    const bodies = sends() as { caption: unknown; reply_to: unknown }[]
+    const bodies = sends() as {
+      caption: unknown
+      reply_to: unknown
+      formatted_body?: string
+    }[]
     expect(bodies[0].caption).toBe('look at these')
     expect(bodies[0].reply_to).toBe('$parent')
+    expect(bodies[0].formatted_body).toContain('mxc://hs/custom')
     expect(bodies[1].caption).toBeNull()
     expect(bodies[1].reply_to).toBeNull()
+    expect(bodies[1].formatted_body).toBeUndefined()
   })
 
   it('applies the thread root to every image', async () => {

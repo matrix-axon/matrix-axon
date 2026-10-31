@@ -50,6 +50,7 @@ shows it.
 | Custom reaction images (MSC4027)                        | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Standalone sticker selection and sending                | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Custom emoji packs and `/react` completion              | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Composer emoji picker and inline custom emoji           | **n/a**               | **not covered**                                                                                           | **not covered** |
 | Reaction badge updating live from another user's react  | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Replies                                                 | `timeline`            | `timeline`                                                                                                | `send`          |
 | Edits (`m.replace`, applied in place)                   | `threads`             | `threads`                                                                                                 | **not covered** |
@@ -274,6 +275,8 @@ scene now depends on:
   Enter is not the send affordance a touch-only user has — the Send button is.
 
 The web custom emoji picker is covered by `clients/web/e2e/custom-emoji-picker.spec.ts`, including personal and room packs, image previews, sends, withdrawals, and mobile safe-area and keyboard viewport containment in both room and thread pickers.
+Composer insertion is covered by `clients/web/e2e/composer-emoji.spec.ts`: standard and custom selection, duplicate pack names, native undo/redo, room/thread sends, room draft reload, pack removal, and touch access through the sticker picker.
+No recorded demo scene covers the composer emoji picker yet.
 A recorded demo scene for pack selection remains outstanding; the existing `react` scene continues to demonstrate Unicode reactions.
 
 Standalone sticker selection is covered by `clients/web/e2e/stickers.spec.ts`, including personal and room packs, room/thread sends, draft preservation, original image rendering, keyboard dismissal, and narrow viewport containment.

@@ -1,42 +1,27 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import {
   loadImagePacks,
+  inlineImageShortcode,
   type EmojiPacks,
   type CustomEmoji,
 } from '../emoji-packs'
 import { useServices } from '../services'
 import { ReactionContent } from './ReactionContent'
+import { moveGridFocus } from './grid-keyboard'
 
 type Load = { id: string; data?: EmojiPacks; error?: string }
-
-/** A mount-scoped snapshot: never retain pack data across a room or session. */
-export function CustomEmojiPicker({
-  accountId,
-  roomId,
-  onReact,
-}: {
-  accountId: string
-  roomId: string
-  onReact: (key: string, shortcode: string) => void
-}) {
-  return (
-    <ImagePackPicker
-      accountId={accountId}
-      roomId={roomId}
-      onSelect={(image) => onReact(image.url, image.shortcode)}
-    />
-  )
-}
 
 export function ImagePackPicker({
   accountId,
   roomId,
   usage = 'emoticon',
+  action = 'react',
   onSelect,
 }: {
   accountId: string
   roomId: string
   usage?: 'emoticon' | 'sticker'
+  action?: 'insert' | 'react'
   onSelect: (image: CustomEmoji) => void
 }) {
   const label = usage === 'sticker' ? 'stickers' : 'custom emoji'
@@ -94,19 +79,54 @@ export function ImagePackPicker({
   const current = load?.id === id ? load : null
   const data = signedIn ? current?.data : undefined
   const search = query.trim().toLocaleLowerCase()
+  const insertable = (image: CustomEmoji) =>
+    action !== 'insert' || inlineImageShortcode(image.shortcode) !== null
+  const omitted = data?.packs.some((pack) =>
+    pack.images.some((image) => !insertable(image)),
+  )
   const packs =
     data?.packs
       .map((pack) => ({
         ...pack,
-        images: pack.images.filter((image) =>
-          `${image.shortcode} ${image.body ?? ''} ${pack.display_name ?? ''}`
-            .toLocaleLowerCase()
-            .includes(search),
+        images: pack.images.filter(
+          (image) =>
+            insertable(image) &&
+            `${image.shortcode} ${image.body ?? ''} ${pack.display_name ?? ''}`
+              .toLocaleLowerCase()
+              .includes(search),
         ),
       }))
       .filter((pack) => pack.images.length > 0) ?? []
   return (
-    <div class="custom-emoji-picker">
+    <div
+      class="custom-emoji-picker"
+      onKeyDown={(event) => {
+        if (
+          event.isComposing ||
+          !['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(
+            event.key,
+          )
+        )
+          return
+        const root = event.currentTarget
+        const buttons = [
+          ...root.querySelectorAll<HTMLButtonElement>(
+            '.custom-emoji-grid button',
+          ),
+        ]
+        const target = event.target
+        if (target instanceof HTMLInputElement) {
+          if (event.key === 'ArrowDown' && buttons[0]) {
+            event.preventDefault()
+            buttons[0].focus()
+          }
+          return
+        }
+        if (!(target instanceof HTMLButtonElement)) return
+        const grid = target.closest('.custom-emoji-grid')
+        if (grid) moveGridFocus(event, target, buttons, grid, searchRef.current)
+      }}
+    >
       <div class="custom-emoji-search">
         <input
           ref={searchRef}
@@ -161,6 +181,9 @@ export function ImagePackPicker({
             </button>
           </p>
         )}
+        {omitted && (
+          <p role="status">Some emoji names cannot be inserted inline.</p>
+        )}
         {data?.partial && <p role="status">Some {label} could not be shown.</p>}
         {data && packs.length === 0 && (
           <p role="status">
@@ -192,7 +215,9 @@ export function ImagePackPicker({
                   aria-label={
                     usage === 'sticker'
                       ? `Send sticker :${image.shortcode}:`
-                      : `React with :${image.shortcode}:`
+                      : action === 'insert'
+                        ? `Insert :${image.shortcode}:`
+                        : `React with :${image.shortcode}:`
                   }
                   onClick={() => onSelect(image)}
                 >

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import {
   loadImagePacks,
   imageShortcodeSuggestions,
@@ -6,7 +6,12 @@ import {
 } from '../emoji-packs'
 import type { StickerPickerOptions } from './StickerPicker'
 
-/** Fetch once per open query, then filter locally as its prefix changes. */
+const SNAPSHOT_TTL_MS = 30_000
+
+/** Reuse at most two usage snapshots within this mounted account/room scope.
+ * No global cache: unmount/sign-out drops the snapshot, and browsing/explicit
+ * sends retain fresh discovery. Query prefixes always filter locally.
+ */
 export function useImagePackCompletions(
   options:
     Pick<StickerPickerOptions, 'api' | 'accountId' | 'roomId'> | undefined,
@@ -24,14 +29,37 @@ export function useImagePackCompletions(
     usage: 'emoticon' | 'sticker'
     data: EmojiPacks
   } | null>(null)
+  const cache = useRef<{
+    id: string
+    api: StickerPickerOptions['api']
+    data: Map<'emoticon' | 'sticker', { loadedAt: number; data: EmojiPacks }>
+  } | null>(null)
   useEffect(() => {
+    if (!api || !accountId || !roomId) {
+      cache.current = null
+      setSnapshot(null)
+      return
+    }
+    if (cache.current?.id !== id || cache.current.api !== api) {
+      cache.current = { id, api, data: new Map() }
+      setSnapshot(null)
+    }
+    if (!active) return
+    const current = cache.current
+    const cached = current.data.get(usage)
+    if (cached && Date.now() - cached.loadedAt < SNAPSHOT_TTL_MS) {
+      setSnapshot({ id, api, usage, data: cached.data })
+      return
+    }
     setSnapshot(null)
-    if (!active || !api || !accountId || !roomId) return
     const controller = new AbortController()
     let cancelled = false
     void loadImagePacks(api, accountId, roomId, usage, controller.signal)
       .then(({ data }) => {
-        if (!cancelled && data) setSnapshot({ id, api, usage, data })
+        if (!cancelled && data) {
+          current.data.set(usage, { loadedAt: Date.now(), data })
+          setSnapshot({ id, api, usage, data })
+        }
       })
       .catch(() => {}) // Unicode suggestions stay usable; Send reports discovery failures.
     return () => {

@@ -99,8 +99,10 @@ import {
 import type { ThreadUnreadStore } from '../stores/thread-unread'
 import {
   READ_MARKERS_NAMESPACE,
+  DRAFTS_NAMESPACE,
   THREAD_READ_MARKERS_NAMESPACE,
 } from '../stores/device-state'
+import { parseInlineEmoji } from '../inline-emoji'
 import {
   type EventDto,
   type HeadLoadOutcome,
@@ -1243,6 +1245,7 @@ export function RoomPage() {
     dropHandlers,
     dropProblem,
     emojiEntries,
+    editInlineEmoji,
     formatComposerBody,
     mentionCompletions,
     roomReferenceCompletions,
@@ -2236,11 +2239,23 @@ export function RoomPage() {
                 ? (action.draft ?? action.event.body ?? '')
                 : deviceState.draft(accountId, roomId)
             }
+            initialInlineEmoji={
+              action?.kind === 'edit'
+                ? editInlineEmoji
+                : parseInlineEmoji(
+                    deviceState.draft(accountId, roomId),
+                    (
+                      deviceState.get(accountId, DRAFTS_NAMESPACE, roomId) as {
+                        inline_emoji?: unknown
+                      } | null
+                    )?.inline_emoji,
+                  )
+            }
             onDraftChange={
               action?.kind === 'edit'
                 ? undefined
-                : (text) => {
-                    deviceState.setDraft(accountId, roomId, text)
+                : (text, inlineEmoji) => {
+                    deviceState.setDraft(accountId, roomId, text, inlineEmoji)
                     // `onDraftChange` is not called for slash-command drafts
                     // (Composer suppresses them), so a non-empty text here is
                     // genuine composition worth a typing notice. An empty text
@@ -2259,6 +2274,7 @@ export function RoomPage() {
             mentionCompletions={mentionCompletions}
             roomReferenceCompletions={roomReferenceCompletions}
             emojiCompletions={emojiCompletions}
+            emoji={{ api, accountId, roomId }}
             stickers={
               action?.kind === 'edit'
                 ? undefined

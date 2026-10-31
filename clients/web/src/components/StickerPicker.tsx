@@ -13,8 +13,31 @@ export interface StickerPickerOptions {
   onSelect: (image: CustomEmoji) => void
 }
 
-/** Separate from the draft: selecting a sticker never submits composer text. */
-export function StickerPickerButton(options: StickerPickerOptions) {
+function EmojiIcon() {
+  return (
+    <svg
+      class="composer-attach-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
+    </svg>
+  )
+}
+
+/** One composer control: sticker menu while sending, direct insertion while editing. */
+export function ComposerEmojiButton(
+  options: Pick<StickerPickerOptions, 'api' | 'accountId' | 'roomId'> & {
+    onSelect?: StickerPickerOptions['onSelect']
+    onInsertEmoji?: () => void
+  },
+) {
   const [open, setOpen] = useState(false)
   const button = useRef<HTMLButtonElement>(null)
   return (
@@ -23,30 +46,44 @@ export function StickerPickerButton(options: StickerPickerOptions) {
         ref={button}
         type="button"
         class="ghost composer-attach composer-sticker"
-        aria-label="Send sticker"
-        title="Send sticker"
-        onClick={() => setOpen(true)}
+        aria-label={options.onSelect ? 'Send sticker' : 'Emoji'}
+        title={options.onSelect ? 'Send sticker' : 'Emoji'}
+        onClick={() =>
+          options.onSelect ? setOpen(true) : options.onInsertEmoji?.()
+        }
       >
-        <svg
-          class="composer-attach-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          aria-hidden="true"
-        >
-          <path d="M20 13V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8zM13 20v-5a2 2 0 0 1 2-2h5M7 8h2M13 8h2M7 13c1.5 2 3 2 4 1" />
-        </svg>
+        {options.onSelect ? (
+          <svg
+            class="composer-attach-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+          >
+            <path d="M20 13V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8zM13 20v-5a2 2 0 0 1 2-2h5M7 8h2M13 8h2M7 13c1.5 2 3 2 4 1" />
+          </svg>
+        ) : (
+          <EmojiIcon />
+        )}
       </button>
-      {open && (
+      {open && options.onSelect && (
         <BodyPortal>
           <StickerDialog
             {...options}
             restoreTo={() => button.current}
             onClose={() => setOpen(false)}
+            onInsertEmoji={
+              options.onInsertEmoji === undefined
+                ? undefined
+                : () => {
+                    setOpen(false)
+                    options.onInsertEmoji?.()
+                  }
+            }
             onSelect={(image) => {
               setOpen(false)
-              options.onSelect(image)
+              options.onSelect?.(image)
             }}
           />
         </BodyPortal>
@@ -61,9 +98,11 @@ function StickerDialog({
   onSelect,
   onClose,
   restoreTo,
+  onInsertEmoji,
 }: StickerPickerOptions & {
   onClose: () => void
   restoreTo: () => HTMLElement | null
+  onInsertEmoji?: () => void
 }) {
   const { containerRef } = useModalFocus<HTMLDivElement>({
     restoreTo,
@@ -92,9 +131,23 @@ function StickerDialog({
       <div class="overlay-panel sticker-picker-panel">
         <div class="overlay-head">
           <h2>Stickers</h2>
-          <button type="button" class="ghost" onClick={onClose}>
-            Close
-          </button>
+          <div class="sticker-picker-actions">
+            {onInsertEmoji && (
+              <button
+                type="button"
+                class="ghost emoji-picker-entry"
+                aria-label="Emoji"
+                title="Emoji"
+                onClick={onInsertEmoji}
+              >
+                <span>Emoji</span>
+                <EmojiIcon />
+              </button>
+            )}
+            <button type="button" class="ghost" onClick={onClose}>
+              Close
+            </button>
+          </div>
         </div>
         <ImagePackPicker
           accountId={accountId}

@@ -151,7 +151,8 @@ Type a prefix with or without a leading colon, choose its preview with Tab or a 
 An exact custom shortcode also works without selecting a suggestion; matching is case-insensitive and preserves the pack's original name in the sent reaction metadata.
 Sticker-only entries are excluded from reaction commands, and servers without pack discovery retain Unicode reaction support.
 
-Only a whole-message shortcode becomes a sticker: names in prose, attachment captions, and edits keep their text behavior.
+Only an unbound whole-message shortcode becomes a sticker.
+Choosing an image from the inline emoji picker sends it as part of a text message, even when it is the only item in that message.
 Names absent from a successful discovery response, and servers without pack discovery, use the existing text/Unicode shortcode handling.
 Sticker discovery has a ten-second deadline; recognized Unicode names still send as text if discovery fails or times out.
 Unknown custom names retain their draft for retry on discovery failure or timeout.
@@ -165,18 +166,24 @@ Older servers show an unavailable or empty sticker state without affecting text 
 Available packs follow server discovery, including canonical ancestor spaces when supported by the server.
 Shared packs subscribed from other rooms and pack editing remain outside this version.
 
-To test with the companion server changes, run the server from `codex/server-room-emoji` alongside this client.
-Build the web bundle in this workspace and point the embedded-server build at it:
-
-```bash
-pnpm --dir clients/web install --frozen-lockfile
-pnpm --dir clients/web build
-AXON_WEB_DIST="$PWD/clients/web/dist" cargo build -p axon-server --features embed-web
-```
-
-Run that server with your test configuration, open a joined room with a personal or room pack, and use the picker steps above.
-For reactions, both room and thread sends should display the chosen shortcode in their tooltips; selecting an owned chip withdraws it.
-For standalone stickers, use **Send sticker** in each composer and confirm that the selected image appears as its own timeline event while any unsent draft remains in place.
+With focus in a room or thread composer, press **Ctrl-;** on Linux/Windows or **⌘-;** on macOS to open the emoji picker.
+Search standard Unicode emoji or switch to **Custom** to browse the available packs.
+Selection replaces the highlighted text or inserts at the cursor, then returns focus to the composer; Escape cancels and Undo/Redo uses the textarea's native history.
+Open the existing **Send sticker** picker and choose **Emoji** on desktop or the smiley-face icon on mobile.
+While editing, the smiley-face composer control opens the emoji picker directly; the number of composer buttons stays the same.
+The shortcut is also listed in keyboard help.
+Custom emoji remain readable `:shortcodes:` while composing and become inline images in sent messages, replies, thread replies, edits, and attachment captions.
+Their plain-text fallback retains the shortcode.
+Room drafts preserve the selected image identity across reloads and pack changes, including different images with the same name.
+Editing the shortcode itself removes its image association; choosing a completion or picker entry binds it again.
+In prose, custom shortcode completions include image previews and pack names.
+Completion snapshots are reused for up to thirty seconds within the current account and room; picker refresh and explicit shortcode sends fetch current discovery.
+Names that cannot round-trip as one shortcode are omitted from inline insertion, with a notice in the picker; reaction browsing remains available for them.
+Standalone sticker completion and reaction commands retain their existing behavior.
+Inline custom insertion is for regular messages; slash commands retain their own text and reaction handling.
+Received inline images use the authenticated media proxy and stay at text-line size.
+Custom images remain accessible through sent messages even after their pack changes when the server supports durable inline-media references.
+On older servers, availability can depend on the current pack or the media being referenced by another supported event.
 
 ## Prerequisites
 

@@ -1218,7 +1218,10 @@ describe('reactions', () => {
     const compactPicker = container.querySelector('.reaction-picker')
     const fullPicker = await findByRole('dialog', { name: 'Emoji picker' })
     expect(fullPicker).toBeTruthy()
-    expect(fullPicker.parentElement).toBe(document.body)
+    // BodyPortal may add a host, but the fixed popup must leave the message
+    // row's layout/containment and remain attached beneath document.body.
+    expect(document.body.contains(fullPicker)).toBe(true)
+    expect(fullPicker.closest('.event-row')).toBeNull()
     expect(shell?.contains(fullPicker)).toBe(false)
     expect(fullPicker.parentElement).not.toBe(compactPicker)
     expect(compactPicker?.contains(fullPicker)).toBe(false)
