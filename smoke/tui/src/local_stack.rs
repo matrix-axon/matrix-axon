@@ -13,6 +13,13 @@ use crate::env::{env_cargo, resolve_workspace_bin};
 pub struct Manifest {
     pub axon_base_url: String,
     pub axon_bearer_token: String,
+    /// Users the local stack registered. Smoke General joins all three.
+    ///
+    /// Absent when the manifest was written by a local-stack binary from before
+    /// this field existed, including `--keep-up` on that older stack. Scenarios
+    /// that do not read it still load. A missing field on `Option` is already
+    /// `None`, so this field does not use `serde(default)`.
+    pub accounts: Option<Accounts>,
     pub rooms: Rooms,
     pub fixtures: Fixtures,
     /// Present only when the stack was brought up with `--corpus` (ADR 0086).
@@ -50,6 +57,14 @@ pub struct DemoViewer {
 pub struct MatrixAccount {
     pub user_id: String,
     pub password: String,
+}
+
+/// The three Matrix users `axon-smoke-local-stack` registers for every run.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Accounts {
+    pub target: MatrixAccount,
+    pub peer: MatrixAccount,
+    pub observer: MatrixAccount,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -240,4 +255,59 @@ fn resolve_local_stack_bin() -> anyhow::Result<PathBuf> {
         bail!("local-stack binary not found at {}", bin.display());
     }
     Ok(bin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Manifest;
+
+    fn manifest_json() -> serde_json::Value {
+        serde_json::json!({
+            "axon_base_url": "http://127.0.0.1:1",
+            "axon_bearer_token": "token",
+            "accounts": {
+                "target": {"user_id": "@axon:localhost", "password": "secret"},
+                "peer": {"user_id": "@peer:localhost", "password": "secret"},
+                "observer": {"user_id": "@observer:localhost", "password": "secret"}
+            },
+            "rooms": {
+                "general": {"name": "Smoke General"},
+                "long_timeline": {"name": "Smoke Timeline", "jump_dates": []},
+                "relations": {"name": "Smoke Relations"}
+            },
+            "fixtures": {"relations": {
+                "root_event_id": "$r",
+                "reply_event_id": "$y",
+                "edit_event_id": "$e",
+                "peer_reaction_event_id": "$p",
+                "own_reaction_event_id": "$o",
+                "formatted_event_id": "$f",
+                "redacted_event_id": "$d",
+                "redaction_event_id": "$x",
+                "thread_root_event_id": "$t",
+                "thread_member_event_id": "$m"
+            }}
+        })
+    }
+
+    #[test]
+    fn manifest_reads_the_registered_accounts() {
+        let manifest: Manifest =
+            serde_json::from_value(manifest_json()).expect("local-stack manifest shape");
+        assert_eq!(
+            manifest.accounts.expect("accounts").target.user_id,
+            "@axon:localhost"
+        );
+        assert_eq!(manifest.rooms.general.name, "Smoke General");
+    }
+
+    #[test]
+    fn manifest_without_accounts_still_parses() {
+        let mut value = manifest_json();
+        value.as_object_mut().expect("object").remove("accounts");
+        let manifest: Manifest =
+            serde_json::from_value(value).expect("older manifest omits accounts");
+        assert!(manifest.accounts.is_none());
+        assert_eq!(manifest.rooms.general.name, "Smoke General");
+    }
 }
