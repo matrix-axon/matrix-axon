@@ -14,7 +14,12 @@ pub struct Manifest {
     pub axon_base_url: String,
     pub axon_bearer_token: String,
     /// Users the local stack registered. Smoke General joins all three.
-    pub accounts: Accounts,
+    ///
+    /// Absent when the manifest was written by a local-stack binary from before
+    /// this field existed, including `--keep-up` on that older stack. Scenarios
+    /// that do not read it still load.
+    #[serde(default)]
+    pub accounts: Option<Accounts>,
     pub rooms: Rooms,
     pub fixtures: Fixtures,
     /// Present only when the stack was brought up with `--corpus` (ADR 0086).
@@ -256,9 +261,8 @@ fn resolve_local_stack_bin() -> anyhow::Result<PathBuf> {
 mod tests {
     use super::Manifest;
 
-    #[test]
-    fn manifest_reads_the_registered_accounts() {
-        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+    fn manifest_json() -> serde_json::Value {
+        serde_json::json!({
             "axon_base_url": "http://127.0.0.1:1",
             "axon_bearer_token": "token",
             "accounts": {
@@ -283,9 +287,27 @@ mod tests {
                 "thread_root_event_id": "$t",
                 "thread_member_event_id": "$m"
             }}
-        }))
-        .expect("local-stack manifest shape");
-        assert_eq!(manifest.accounts.target.user_id, "@axon:localhost");
+        })
+    }
+
+    #[test]
+    fn manifest_reads_the_registered_accounts() {
+        let manifest: Manifest =
+            serde_json::from_value(manifest_json()).expect("local-stack manifest shape");
+        assert_eq!(
+            manifest.accounts.expect("accounts").target.user_id,
+            "@axon:localhost"
+        );
+        assert_eq!(manifest.rooms.general.name, "Smoke General");
+    }
+
+    #[test]
+    fn manifest_without_accounts_still_parses() {
+        let mut value = manifest_json();
+        value.as_object_mut().expect("object").remove("accounts");
+        let manifest: Manifest =
+            serde_json::from_value(value).expect("older manifest omits accounts");
+        assert!(manifest.accounts.is_none());
         assert_eq!(manifest.rooms.general.name, "Smoke General");
     }
 }

@@ -592,28 +592,26 @@ pub async fn true_local_status_commands(ctx: &Ctx) -> ScenarioOutcome {
         // The room name and the account's user id are on screen before any of
         // these commands run, so each wait names text only that output has.
         submit_command(&mut driver, "/whereami")?;
-        // Smoke General is a public, unencrypted room. These three lines are in
-        // the first page of the popup; the member projection is below it.
-        driver.wait_for_screen(
-            "whereami to render room version, join rule, and encryption",
-            ctx.timeout,
-            whereami_room_details_visible,
-        )?;
-        // The 30×100 smoke terminal leaves the member section below the fold.
-        // PageDown moves eight rows and clamps at the bottom, and the list can
-        // arrive after the first scroll, so keep paging until a loaded member
-        // is on screen.
+        // Smoke General is public and has no m.room.encryption event. The
+        // encryption field therefore renders the absent-state snapshot; that
+        // phrase does not prove an encryption event was stored. The popup is
+        // taller than the 30×100 viewport, so record each line as paging
+        // reveals it instead of requiring the metadata lines on the first page.
+        let accounts = stack.accounts.as_ref().ok_or_else(|| {
+            anyhow!(
+                "whereami member check needs accounts from the current axon-smoke-local-stack; \
+                 an older --keep-up manifest omits them"
+            )
+        })?;
         let members = [
-            stack.accounts.target.user_id.as_str(),
-            stack.accounts.peer.user_id.as_str(),
-            stack.accounts.observer.user_id.as_str(),
+            accounts.target.user_id.as_str(),
+            accounts.peer.user_id.as_str(),
+            accounts.observer.user_id.as_str(),
         ];
-        page_down_until(
-            &mut driver,
-            "whereami to render a member from /members",
-            ctx.timeout,
-            |screen| whereami_member_visible(screen, &members),
-        )?;
+        if members.iter().any(|user_id| user_id.is_empty()) {
+            bail!("local-stack manifest has an empty account user id");
+        }
+        collect_whereami_details(&mut driver, ctx.timeout, &members)?;
         // The popup is modal: keys typed into it never reach the compose line.
         press_escape(&mut driver)?;
         driver.wait_for_screen("whereami popup to close", ctx.timeout, |screen| {
@@ -1082,40 +1080,236 @@ fn press_escape(driver: &mut PtyDriver) -> anyhow::Result<()> {
     driver.send_bytes(&[0x1b])
 }
 
-/// VT220 Page Down (`CSI 6 ~`). The room-info popup scrolls eight rows per press.
-fn press_page_down(driver: &mut PtyDriver) -> anyhow::Result<()> {
-    driver.send_bytes(b"\x1b[6~")
+/// One two-second wait, then another on the same pre-key screen. A paint that
+/// settles ends the wait early. Two queued page keys jump sixteen rows and can
+/// skip a one-line field, so the next key is not sent until this returns.
+const PAGE_SETTLE: Duration = Duration::from_secs(2);
+/// Quiet time after a paint before it counts as this key's frame. The TUI
+/// ticks about every 100ms, so this covers the scroll landing after an
+/// unrelated status update.
+const PAGE_QUIET: Duration = Duration::from_millis(250);
+/// A cursor or status line that never sits still must not page until the
+/// scenario deadline. Twenty-four steps is several times the popup height.
+const MAX_PAGE_STEPS: usize = 24;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PopupPage {
+    Down,
+    Up,
 }
 
-/// Page Down until `predicate` holds. Each burst is enough to reach the bottom
-/// of the room-info popup on the smoke terminal; repeating it picks up a member
-/// list that lands after the first scroll has already clamped.
-fn page_down_until(
-    driver: &mut PtyDriver,
-    what: &str,
-    timeout: Duration,
-    predicate: impl Fn(&str) -> bool,
-) -> anyhow::Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if predicate(&driver.screen_text()) {
-            return Ok(());
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectionEnd {
+    Found,
+    Clamped,
+    StepCap,
+    Deadline,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WhereamiObservations {
+    encryption: bool,
+    join_rule: bool,
+    room_version: bool,
+    member: bool,
+}
+
+impl WhereamiObservations {
+    fn observe(&mut self, screen: &str, user_ids: &[&str]) {
+        // The absent-state phrase is what Smoke General renders: it has no
+        // `m.room.encryption` event. A dropped encryption key renders the same
+        // words, so this does not prove the event was stored. It does reject
+        // the combined loading line, which has no `Encryption:` field.
+        self.encryption |= field_value_is(screen, "Encryption: ", "no encryption state cached");
+        self.join_rule |= field_value_is(screen, "Join rule: ", "public");
+        self.room_version |= room_version_visible(screen);
+        self.member |= whereami_member_visible(screen, user_ids);
+    }
+
+    fn complete(self) -> bool {
+        self.encryption && self.join_rule && self.room_version && self.member
+    }
+
+    fn missing(self) -> String {
+        let mut missing = Vec::new();
+        if !self.encryption {
+            missing.push("encryption snapshot");
         }
-        if Instant::now() >= deadline {
-            bail!(
-                "timed out after {timeout:?} waiting for {what}\n--- screen ---\n{}",
-                driver.screen_text()
-            );
+        if !self.join_rule {
+            missing.push("join rule");
         }
-        for _ in 0..6 {
-            press_page_down(driver)?;
+        if !self.room_version {
+            missing.push("room version");
         }
-        std::thread::sleep(Duration::from_millis(100));
+        if !self.member {
+            missing.push("member row");
+        }
+        missing.join(", ")
     }
 }
 
-/// Room version, join rule, and encryption from `/metadata`, not the summary
-/// and not the combined "still loading" line.
+enum PagePaint {
+    Changed(String),
+    Unchanged,
+}
+
+/// VT220 Page Down (`CSI 6 ~`) and Page Up (`CSI 5 ~`). The room-info popup
+/// scrolls eight rows per press. The smoke PTY does not answer the keyboard
+/// protocol query, so crossterm reads these classic sequences.
+fn press_popup_page(driver: &mut PtyDriver, page: PopupPage) -> anyhow::Result<()> {
+    let bytes: &[u8] = match page {
+        PopupPage::Down => b"\x1b[6~",
+        PopupPage::Up => b"\x1b[5~",
+    };
+    driver.send_bytes(bytes)
+}
+
+/// Wait until the screen differs from `before` and then sits still, or until
+/// two settle windows pass with no difference. An unchanged screen is the
+/// popup clamp. Page keys are not sent from here.
+fn await_page_paint(driver: &PtyDriver, before: &str, deadline: Instant) -> PagePaint {
+    let mut last = before.to_owned();
+    let mut stable_since = Instant::now();
+    let mut changed = false;
+    let give_up = Instant::now() + PAGE_SETTLE + PAGE_SETTLE;
+    loop {
+        let now = Instant::now();
+        let screen = driver.screen_text();
+        if screen != last {
+            last = screen;
+            stable_since = now;
+            if last != before {
+                changed = true;
+            }
+        }
+        let quiet = now.saturating_duration_since(stable_since) >= PAGE_QUIET;
+        if changed && quiet {
+            return PagePaint::Changed(last);
+        }
+        if now >= deadline || now >= give_up {
+            return if changed {
+                PagePaint::Changed(last)
+            } else {
+                PagePaint::Unchanged
+            };
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn page_direction(
+    driver: &mut PtyDriver,
+    seen: &mut WhereamiObservations,
+    user_ids: &[&str],
+    deadline: Instant,
+    page: PopupPage,
+) -> anyhow::Result<DirectionEnd> {
+    for _ in 0..MAX_PAGE_STEPS {
+        seen.observe(&driver.screen_text(), user_ids);
+        if seen.complete() {
+            return Ok(DirectionEnd::Found);
+        }
+        if Instant::now() >= deadline {
+            return Ok(DirectionEnd::Deadline);
+        }
+        let before = driver.screen_text();
+        press_popup_page(driver, page)?;
+        match await_page_paint(driver, &before, deadline) {
+            PagePaint::Changed(screen) => seen.observe(&screen, user_ids),
+            PagePaint::Unchanged => {
+                return Ok(if Instant::now() >= deadline {
+                    DirectionEnd::Deadline
+                } else {
+                    DirectionEnd::Clamped
+                });
+            }
+        }
+    }
+    seen.observe(&driver.screen_text(), user_ids);
+    if seen.complete() {
+        Ok(DirectionEnd::Found)
+    } else if Instant::now() >= deadline {
+        Ok(DirectionEnd::Deadline)
+    } else {
+        Ok(DirectionEnd::StepCap)
+    }
+}
+
+fn whereami_incomplete(seen: WhereamiObservations, why: &str, screen: &str) -> anyhow::Error {
+    anyhow!(
+        "{why} before /whereami showed every required line; missing {}\n--- screen ---\n{screen}",
+        seen.missing()
+    )
+}
+
+/// Page through the room-info popup and record each required line on the
+/// screen where it appears. Paging starts only after the popup is up, so a
+/// PageDown cannot scroll the timeline. One key, then a wait for that key's
+/// paint. A pass that reaches a scroll stop turns around. A second pass runs
+/// only when the first one learned a new line and still lacks another, which
+/// is a metadata load that arrived after those rows had scrolled by.
+fn collect_whereami_details(
+    driver: &mut PtyDriver,
+    timeout: Duration,
+    user_ids: &[&str],
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let screen = driver.screen_text();
+        if screen.contains("Room Info") {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {timeout:?} waiting for whereami popup to open\n--- screen ---\n{screen}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut seen = WhereamiObservations::default();
+    seen.observe(&driver.screen_text(), user_ids);
+    let mut down_end = DirectionEnd::Deadline;
+    let mut up_end = DirectionEnd::Deadline;
+    for _ in 0..2 {
+        if seen.complete() || Instant::now() >= deadline {
+            break;
+        }
+        let before = seen;
+        down_end = page_direction(driver, &mut seen, user_ids, deadline, PopupPage::Down)?;
+        if seen.complete() || matches!(down_end, DirectionEnd::Deadline) {
+            break;
+        }
+        up_end = page_direction(driver, &mut seen, user_ids, deadline, PopupPage::Up)?;
+        if seen.complete() || matches!(up_end, DirectionEnd::Deadline) || seen == before {
+            break;
+        }
+    }
+    if seen.complete() {
+        return Ok(());
+    }
+    let why = if Instant::now() >= deadline
+        || matches!(down_end, DirectionEnd::Deadline)
+        || matches!(up_end, DirectionEnd::Deadline)
+    {
+        "timed out"
+    } else if matches!(
+        (down_end, up_end),
+        (DirectionEnd::Clamped, DirectionEnd::Clamped)
+    ) {
+        "reached a scroll stop in both directions"
+    } else {
+        "stopped paging in both directions"
+    };
+    Err(whereami_incomplete(seen, why, &driver.screen_text()))
+}
+
+/// Room version, join rule, and the encryption snapshot on one screen.
+///
+/// The scenario records the three fields on whichever pages they occupy.
+/// This helper is the unit-test stand-in for all three being present, and it
+/// still rejects the combined loading line.
+#[cfg(test)]
 fn whereami_room_details_visible(screen: &str) -> bool {
     field_value_is(screen, "Encryption: ", "no encryption state cached")
         && field_value_is(screen, "Join rule: ", "public")
@@ -1135,27 +1329,37 @@ fn field_value_is(screen: &str, label: &str, value: &str) -> bool {
     })
 }
 
-/// A cached room version, such as `10` or `11`. Synapse chooses the number, so
-/// this accepts any numeric token and rejects the unknown/unavailable phrases.
+/// The whole remainder of a `Room version:` line, not the first word. A
+/// one-digit number is rejected: a wrapped fragment such as `2` is not a
+/// version, and synapse:latest is 10 or newer. A custom version carries
+/// `.`, `-`, or `_` (`org.example.custom`).
 fn room_version_visible(screen: &str) -> bool {
     screen.lines().any(|line| {
         line.split_once("Room version: ")
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(is_room_version_token)
+            .is_some_and(|(_, rest)| is_room_version_token(rest))
     })
 }
 
-fn is_room_version_token(token: &str) -> bool {
+fn is_room_version_token(rest: &str) -> bool {
     // A border glyph can sit on the same cell run as the version (`11│`).
-    let token = token.trim_end_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.');
-    !token.is_empty()
-        && token.chars().any(|ch| ch.is_ascii_digit())
-        && token.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+    let token = rest.trim().trim_matches(|ch: char| {
+        !ch.is_ascii_alphanumeric() && ch != '.' && ch != '-' && ch != '_'
+    });
+    if token.is_empty() || !token.chars().any(|ch| ch.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let numeric = token.len() >= 2 && token.chars().all(|ch| ch.is_ascii_digit());
+    let custom = token.chars().any(|ch| matches!(ch, '.' | '-' | '_'))
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'));
+    numeric || custom
 }
 
-/// A row from the `/members` projection: the section heading plus a fixture
-/// user on a member line. The creator line and "Your Matrix ID" also print
-/// that user, without a configured-power phrase.
+/// A row from the `/members` projection. The heading and that user's row are
+/// on the same screen. The user id counts only on its own member line: the
+/// same line as a power phrase, or the line above a wrapped phrase that holds
+/// no other Matrix ID. `Creator:` and `Your Matrix ID:` also print the user.
 fn whereami_member_visible(screen: &str, user_ids: &[&str]) -> bool {
     if !screen.lines().any(|line| line.contains("Members (")) {
         return false;
@@ -1163,18 +1367,30 @@ fn whereami_member_visible(screen: &str, user_ids: &[&str]) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
     user_ids.iter().any(|user_id| {
         lines.iter().enumerate().any(|(index, line)| {
-            if !line.contains(user_id) {
+            if !line.contains(user_id) || is_whereami_summary_line(line) {
                 return false;
             }
-            let from = index.saturating_sub(1);
-            let to = (index + 1).min(lines.len().saturating_sub(1));
-            lines[from..=to].iter().any(|nearby| {
-                nearby.contains("configured power")
-                    || nearby.contains("no per-user power level")
-                    || nearby.contains("creator (power")
-            })
+            if is_power_phrase_line(line) {
+                return true;
+            }
+            lines
+                .get(index + 1)
+                .is_some_and(|next| is_power_phrase_line(next) && !next.contains('@'))
         })
     })
+}
+
+fn is_whereami_summary_line(line: &str) -> bool {
+    let trimmed = line.trim_start_matches(|ch: char| !ch.is_ascii_alphabetic());
+    trimmed.starts_with("Creator:")
+        || trimmed.starts_with("Your Matrix ID:")
+        || trimmed.starts_with("Matrix ID:")
+}
+
+fn is_power_phrase_line(line: &str) -> bool {
+    line.contains("configured power")
+        || line.contains("no per-user power level")
+        || line.contains("creator (power")
 }
 
 /// Send an `Alt`+<char> chord. Terminals encode this as ESC followed by the
@@ -1263,9 +1479,28 @@ Room version: not specified
 │ Room version: 11│
 ";
         assert!(whereami_room_details_visible(ready));
+
+        let custom = "\
+│ Encryption: no encryption state cached          │
+│ Join rule: public                               │
+│ Room version: org.example.custom│
+";
+        assert!(whereami_room_details_visible(custom));
+
+        let stray_digit = "\
+Encryption: no encryption state cached
+Join rule: public
+Room version: 2
+";
+        assert!(!whereami_room_details_visible(stray_digit));
         assert!(is_room_version_token("10"));
+        assert!(is_room_version_token("11│"));
+        assert!(is_room_version_token("org.example.custom"));
+        assert!(!is_room_version_token("2"));
         assert!(!is_room_version_token("unknown"));
         assert!(!is_room_version_token("11abc"));
+        assert!(!is_room_version_token("not specified"));
+        assert!(!is_room_version_token("unknown (not cached)"));
     }
 
     #[test]
@@ -1298,5 +1533,27 @@ Members (3 loaded)
 "
         );
         assert!(whereami_member_visible(&wrapped, &[USER]));
+
+        // The creator summary sits directly above the first member row. The
+        // summary user is not that row.
+        let creator_above = format!(
+            "\
+Members (3 loaded)
+Creator: {USER}
+    unknown  {PEER}  configured power 100
+"
+        );
+        assert!(!whereami_member_visible(&creator_above, &[USER]));
+        assert!(whereami_member_visible(&creator_above, &[PEER]));
+
+        let power_levels_above = format!(
+            "\
+Members (3 loaded)
+    {USER}  100
+    unknown  {PEER}  configured power 100
+"
+        );
+        assert!(!whereami_member_visible(&power_levels_above, &[USER]));
+        assert!(whereami_member_visible(&power_levels_above, &[PEER]));
     }
 }
