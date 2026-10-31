@@ -9,6 +9,7 @@ Everything the shell's sign-in needs: ask what this platform supports, run Sign 
 - `allow-secret-load`
 - `allow-secret-set`
 - `allow-secret-delete`
+- `allow-share`
 
 ## Permission Table
 
@@ -145,6 +146,32 @@ Enables the secret_set command without any pre-configured scope.
 <td>
 
 Denies the secret_set command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-auth:allow-share`
+
+</td>
+<td>
+
+Enables the share command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-auth:deny-share`
+
+</td>
+<td>
+
+Denies the share command without any pre-configured scope.
 
 </td>
 </tr>

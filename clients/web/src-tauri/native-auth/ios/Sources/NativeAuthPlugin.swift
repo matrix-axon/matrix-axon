@@ -1,4 +1,5 @@
 import AuthenticationServices
+import AxonIncomingShare
 import Security
 import SwiftRs
 import Tauri
@@ -23,6 +24,40 @@ struct SecretSetArgs: Decodable {
 /// Errors carry Apple's error codes and OSStatus numbers only. Nothing here
 /// logs or echoes a token, a nonce, or a stored value.
 class NativeAuthPlugin: Plugin {
+  private let shareQueue = DispatchQueue(label: "org.matrixaxon.axon.incoming-share")
+  private let shareTransfers = DispatchQueue(label: "org.matrixaxon.axon.share-transfers", attributes: .concurrent)
+  private let shareTransferSlots = DispatchSemaphore(value: 2)
+  private let sharingSetup = NSLock()
+  private var shareStore: ShareStore?
+  private var sharedSession: SharedSession?
+  private var installation: String?
+  private let shareHTTP = ShareHTTP()
+  private var cleanupStore: ShareStore?
+
+  private func sharingAccessGroup() -> String? {
+    guard let group = Bundle.main.object(forInfoDictionaryKey: "AxonSharedKeychainGroup") as? String,
+          !group.contains("$(") else { return nil }
+    return group
+  }
+
+  // Called under sharingSetup. This app-private protected journal is committed
+  // before touching App Group storage; no UserDefaults flush is assumed.
+  private func cleanupJournal() throws -> ShareStore {
+    if let cleanupStore { return cleanupStore }
+    let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+      appropriateFor: nil, create: true).appendingPathComponent("AxonSharingControl", isDirectory: true)
+    let store = try ShareStore(root: root)
+    cleanupStore = store
+    return store
+  }
+  private func scheduleSharingCleanup(account: String? = nil) throws {
+    guard sharingSetup.lock(before: Date().addingTimeInterval(3)) else { throw ShareFailure.busy }
+    defer { sharingSetup.unlock() }
+    try cleanupJournal().recordCleanup(account: account)
+  }
+  private func reconcileSharingCleanup(_ store: ShareStore) throws {
+    try cleanupJournal().reconcileCleanup(into: store)
+  }
   /// The one Sign in with Apple request in flight. `ASAuthorizationController`
   /// holds its delegate weakly, so without this the delegate is released as
   /// soon as `appleSignIn` returns and the result is never delivered.
@@ -74,6 +109,151 @@ class NativeAuthPlugin: Plugin {
     }
   }
 
+  /// The containing app owns install initialization. This method is never
+  /// linked into the extension-safe module or called by an extension.
+  private func prepareSharing() throws -> (ShareStore, SharedSession, String) {
+    guard sharingSetup.lock(before: Date().addingTimeInterval(3)) else { throw ShareFailure.busy }
+    defer { sharingSetup.unlock() }
+    if let store = shareStore, let session = sharedSession, let install = installation {
+      try reconcileSharingCleanup(store)
+      return (store, session, install)
+    }
+    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedSession.group),
+          let accessGroup = sharingAccessGroup() else { throw ShareFailure.unavailable }
+    let defaults = UserDefaults.standard
+    let markerKey = "org.matrixaxon.axon.sharing.installation"
+    let previous = defaults.string(forKey: markerKey)
+    // The old marker distinguishes an upgrade from a reinstall. It is app
+    // private and is never inferred from inherited Keychain data.
+    let upgraded = defaults.bool(forKey: Keychain.installMarker)
+    let install = previous ?? UUID().uuidString
+    let store = try ShareStore(root: container.appendingPathComponent("IncomingShares", isDirectory: true))
+    let session = SharedSession(store: store, accessGroup: accessGroup)
+    if previous == nil {
+      _ = try session.publish(installation: install, server: "https://unconfigured.invalid",
+                              token: nil, expiresAt: nil, replace: true)
+      if !upgraded { Keychain.forgetPreviousInstall() }
+      defaults.set(install, forKey: markerKey)
+    }
+    try reconcileSharingCleanup(store)
+    shareStore = store; sharedSession = session; installation = install
+    return (store, session, install)
+  }
+
+  @objc public func share(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(ShareArgs.self)
+    let transfer = ["upload", "retain", "cleanup"].contains(args.action)
+    if transfer && shareTransferSlots.wait(timeout: .now()) != .success {
+      invoke.reject("Incoming share: busy", code: "busy")
+      return
+    }
+    let queue = transfer ? shareTransfers : shareQueue
+    queue.async {
+      defer { if transfer { self.shareTransferSlots.signal() } }
+      do {
+        if args.action == "invalidate" {
+          try self.scheduleSharingCleanup()
+          try SharedSession.invalidate(fence: { _ = try self.prepareSharing() }, accessGroup: self.sharingAccessGroup())
+          invoke.resolve(["value": [:]])
+          return
+        }
+        if args.action == "clear_account" {
+          guard let account = args.accountId, UUID(uuidString: account) != nil else { throw ShareFailure.invalid }
+          try self.scheduleSharingCleanup(account: account)
+        }
+        let (store, session, install) = try self.prepareSharing()
+        var result: Any = [:]
+        switch args.action {
+        case "publish":
+          guard let server = args.server else { throw ShareFailure.invalid }
+          result = try self.shareObject(session.publish(installation: install, server: server,
+            token: args.token, expiresAt: args.expiresAt.map { $0 / 1000 }, replace: args.replace ?? false))
+        case "check_transport":
+          guard let descriptor = try store.session(), URL(string: descriptor.server)?.scheme == "https" else { throw ShareFailure.httpsRequired }
+        case "list": result = try self.shareObject(store.list())
+        case "clear_account": break // prepareSharing reconciled the durable intent.
+        case "claim": result = try self.shareObject(store.claim(args.id ?? ""))
+        case "update":
+          guard let manifest = args.manifest else { throw ShareFailure.invalid }
+          result = try self.shareObject(store.update(manifest, release: args.release ?? false))
+        case "discard", "ack":
+          try store.discard(args.id ?? "", owner: args.owner, completed: args.action == "ack")
+        case "read":
+          let data = try store.readFile(args.id ?? "", file: args.file ?? "", owner: args.owner ?? "",
+                                        offset: args.offset ?? 0, count: args.count ?? 0)
+          result = ["bytes": data.base64EncodedString()]
+        case "cleanup":
+          guard let account = args.accountId, UUID(uuidString: account) != nil,
+                let uploads = args.uploadIds, uploads.count <= 18,
+                uploads.allSatisfy({ UUID(uuidString: $0) != nil }),
+                let descriptor = try store.session(), descriptor.generation == args.generation
+          else { throw ShareFailure.stale }
+          let token = try args.token ?? session.credential().1
+          let deadline = Date().addingTimeInterval(30)
+          for upload in uploads {
+            guard Date() < deadline, try store.session()?.generation == descriptor.generation else { break }
+            _ = try? self.shareHTTP.request(descriptor: descriptor, token: token,
+              path: "/v1/accounts/\(account)/media/uploads/\(upload)", method: "DELETE", limit: 4096)
+          }
+        case "upload", "retain":
+          guard let id = args.id, let owner = args.owner, let account = args.accountId,
+                UUID(uuidString: account) != nil else { throw ShareFailure.invalid }
+          let descriptor: ShareSession
+          let token: String
+          if let transient = args.token {
+            // Main-app recovery may use a one-time session. Consume its bearer
+            // only for this request, never publish it to shared credentials.
+            try SharedSession.validateToken(transient)
+            guard let current = try store.session() else { throw ShareFailure.authentication }
+            descriptor = current; token = transient
+          } else {
+            (descriptor, token) = try session.credential()
+          }
+          let manifest = try store.owned(id, owner: owner, account: account)
+          guard manifest.session == descriptor.generation else { throw ShareFailure.stale }
+          if args.action == "upload" {
+            let (url, file) = try store.verifiedFile(id, file: args.file ?? "", owner: owner)
+            let kind = file.thumbnail || file.mime.hasPrefix("image/") ? "image" : "file"
+            let filename = file.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "attachment"
+            let (status, body) = try self.shareHTTP.request(descriptor: descriptor, token: token,
+              path: "/v1/accounts/\(account)/media/uploads?kind=\(kind)&filename=\(filename)",
+              method: "POST", file: url, mime: file.mime)
+            guard (200..<300).contains(status),
+                  let envelope = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  let data = envelope["data"] as? [String: Any], let upload = data["upload_id"] as? String,
+                  UUID(uuidString: upload) != nil else { throw status == 401 ? ShareFailure.authentication : ShareFailure.unavailable }
+            guard try store.session()?.generation == descriptor.generation else { throw ShareFailure.stale }
+            result = ["uploadId": upload]
+          } else {
+            guard let upload = args.uploadId, UUID(uuidString: upload) != nil else { throw ShareFailure.invalid }
+            let (status, body) = try self.shareHTTP.request(descriptor: descriptor, token: token,
+              path: "/v1/accounts/\(account)/media/uploads/\(upload)/preview", limit: ShareLimits.thumbnailBytes)
+            guard status == 200 else { throw status == 404 ? ShareFailure.missingFile : ShareFailure.unavailable }
+            let mime: String
+            if body.starts(with: [0x89, 0x50, 0x4e, 0x47]) { mime = "image/png" }
+            else if body.starts(with: [0xff, 0xd8, 0xff]) { mime = "image/jpeg" }
+            else if body.starts(with: Array("RIFF".utf8)) { mime = "image/webp" }
+            else { throw ShareFailure.invalid }
+            guard let preview = args.preview else { throw ShareFailure.invalid }
+            result = try self.shareObject(store.importThumbnail(id, owner: owner, data: body, mime: mime, preview: preview))
+          }
+        #if DEBUG
+        case "seed": result = try self.shareObject(store.create(text: args.text ?? ""))
+        #endif
+        default: throw ShareFailure.invalid
+        }
+        invoke.resolve(["value": result])
+      } catch {
+        let code = (error as? ShareFailure)?.rawValue ?? (error is DecodingError ? "invalid" : "unavailable")
+        invoke.reject("Incoming share: \(code)", code: code)
+      }
+    }
+  }
+
+  private func shareObject<T: Encodable>(_ value: T) throws -> Any {
+    try JSONSerialization.jsonObject(with: ShareJSON.encode(value), options: [.fragmentsAllowed])
+  }
+
   @objc public func secretSet(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(SecretSetArgs.self)
     let status = Keychain.set(args.key, args.value)
@@ -93,6 +273,27 @@ class NativeAuthPlugin: Plugin {
       invoke.reject("Keychain delete failed (OSStatus \(status))")
     }
   }
+}
+
+private struct ShareArgs: Decodable {
+  let action: String
+  let server: String?
+  let token: String?
+  let expiresAt: Double?
+  let replace: Bool?
+  let id: String?
+  let owner: String?
+  let manifest: ShareManifest?
+  let release: Bool?
+  let file: String?
+  let offset: Int?
+  let count: Int?
+  let text: String?
+  let accountId: String?
+  let uploadId: String?
+  let uploadIds: [String]?
+  let preview: SharePreview?
+  let generation: String?
 }
 
 /// One `ASAuthorizationController` run, owning everything it needs until the

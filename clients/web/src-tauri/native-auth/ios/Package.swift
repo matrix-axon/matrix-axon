@@ -1,13 +1,12 @@
-// swift-tools-version:5.3
+// swift-tools-version:5.7
 
 import PackageDescription
 
 let package = Package(
   name: "tauri-plugin-native-auth",
   platforms: [
-    // Sign in with Apple (AuthenticationServices) arrived in iOS 13; the app
-    // itself requires 15 (`bundle.iOS.minimumSystemVersion`).
-    .iOS(.v13)
+    // Match the app and the extension-safe sharing module.
+    .iOS(.v15), .macOS(.v12)
   ],
   products: [
     .library(
@@ -16,12 +15,14 @@ let package = Package(
       targets: ["tauri-plugin-native-auth"])
   ],
   dependencies: [
+    .package(path: "../../incoming-share"),
     .package(name: "Tauri", path: "../.tauri/tauri-api")
   ],
   targets: [
     .target(
       name: "tauri-plugin-native-auth",
       dependencies: [
+        .product(name: "AxonIncomingShare", package: "incoming-share"),
         .byName(name: "Tauri")
       ],
       path: "Sources")

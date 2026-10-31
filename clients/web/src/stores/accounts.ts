@@ -91,7 +91,10 @@ export interface AccountsStore {
  * not an optimistic local edit. `error` is a plain writable signal so the UI
  * can also dismiss it.
  */
-export function createAccountsStore(api: ApiClient): AccountsStore {
+export function createAccountsStore(
+  api: ApiClient,
+  onDeactivate?: (accountId: string) => Promise<void>,
+): AccountsStore {
   const accounts = signal<Account[]>([])
   const loading = signal(true)
   const error = signal<string | null>(null)
@@ -129,7 +132,18 @@ export function createAccountsStore(api: ApiClient): AccountsStore {
         return false
       }
       error.value = null
+      let cleanupPending = false
+      if (action.kind === 'logout' || action.kind === 'delete') {
+        try {
+          await onDeactivate?.(action.accountId)
+        } catch {
+          cleanupPending = true
+        }
+      }
       await refresh()
+      if (cleanupPending)
+        error.value =
+          'The account change succeeded. Local share cleanup is pending; reopen Pending shares to retry.'
       return true
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : String(cause)

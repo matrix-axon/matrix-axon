@@ -117,6 +117,11 @@ import {
 } from './stores/update-check'
 import { BUILD_INFO } from './build-info'
 import {
+  createIncomingShareStore,
+  type IncomingShareStore,
+} from './incoming-share/store'
+import { connectIncomingShareSession } from './incoming-share/session'
+import {
   createAttachmentStaging,
   type AttachmentStaging,
 } from './media/attachment-staging'
@@ -128,6 +133,7 @@ import { createBrowserQrAdapter, type BrowserQrAdapter } from './qr/browser-qr'
  * an in-memory storage; components never construct services themselves.
  */
 export interface AppServices {
+  incomingShares?: IncomingShareStore | null
   auth: CompositeAuthProvider
   api: ApiClient
   settings: SettingsStore
@@ -1655,6 +1661,28 @@ export function createServices(
     enabled: platform.updatesFromOrigin,
   })
   const timelines = createTimelineStoreCache(api, media)
+  const incomingShares =
+    platform.incomingShare == null
+      ? null
+      : createIncomingShareStore(
+          platform.incomingShare,
+          api,
+          timelines,
+          async () => await auth.getToken(),
+        )
+  if (
+    incomingShares !== null &&
+    platform.incomingShare != null &&
+    platform.secureStorage !== null
+  ) {
+    connectIncomingShareSession(
+      platform.incomingShare,
+      incomingShares,
+      auth,
+      platform.secureStorage,
+      baseUrl,
+    )
+  }
   const attachments = createAttachmentStaging()
   const settings = createSettingsStore(storage)
   // Instrumentation has to be live *before* anything worth measuring happens.
@@ -1669,7 +1697,9 @@ export function createServices(
   if (settings.perfMarks.peek()) {
     setPerfEnabled(true)
   }
-  const accounts = createAccountsStore(api)
+  const accounts = createAccountsStore(api, async (accountId) => {
+    await incomingShares?.invalidateAccount(accountId)
+  })
   const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
     storage: sessionStorage,
   })
@@ -1786,7 +1816,11 @@ export function createServices(
         auth.onAccessTokenRefreshed(listener),
       accessToken: () => auth.getToken(),
       onBeforeSignOut: (hook) => auth.onBeforeSignOut(hook),
-      finishSignOut: () => auth.finishSignOut(),
+      // A push retry may finish after another sign-out hook failed. Re-enter
+      // those barriers; the deleted push record makes its own hook a no-op.
+      finishSignOut: () => {
+        void auth.clearToken()
+      },
       put: (token, body) =>
         putPushRegistration(platform.fetch, baseUrl, token, body),
       remove: (token, id) =>
@@ -1894,6 +1928,7 @@ export function createServices(
     composerFocus,
     platform,
     remotePushError,
+    incomingShares,
   }
 }
 

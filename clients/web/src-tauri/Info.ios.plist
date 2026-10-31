@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>AxonSharedKeychainGroup</key>
+  <string>$(AppIdentifierPrefix)org.matrixaxon.axon.sharing</string>
   <!--
     Merged into the generated iOS Info.plist by Tauri, which picks up both
     Info.plist and Info.ios.plist from beside tauri.conf.json.

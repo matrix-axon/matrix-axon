@@ -16,6 +16,12 @@ import {
   type UploadKind,
 } from '../media/media-service'
 import { perfMark } from '../perf'
+import type { PreviewInput } from '../incoming-share/contract'
+
+export type SendProgress = (
+  state: 'dispatching' | 'sent' | 'failed' | 'unknown',
+  eventId?: string,
+) => Promise<void>
 
 export type EventDto = components['schemas']['EventDto']
 
@@ -27,6 +33,8 @@ export type StickerSend = Pick<
 export type LocalEchoStatus = 'pending' | 'failed'
 
 type SendOptions = {
+  urlPreviews?: PreviewInput[]
+  progress?: SendProgress
   replyTo?: string
   threadRoot?: string
   /** The local account's Matrix user id, for the local echo's sender. */
@@ -128,6 +136,12 @@ const RETAINED_EVENT_LIMIT = PAGE_LIMIT * 12
 export type HeadLoadOutcome = 'applied' | 'declined' | 'failed' | 'superseded'
 
 export interface TimelineStore {
+  /** Resume a native file-backed upload through the ordinary send boundary. */
+  sendStagedMedia(
+    uploadId: string,
+    caption: string,
+    options?: SendOptions,
+  ): Promise<boolean>
   /** Loaded events, oldest first (display order). */
   events: ReadonlySignal<TimelineEvent[]>
   /** True until the first page settles. */
@@ -1180,17 +1194,49 @@ export function createTimelineStore(
     call: () => Promise<{
       data?: { data: { event_id: string } }
       error?: unknown
+      response?: Response
     }>,
+    progress?: SendProgress,
   ): Promise<{ ok: true; eventId: string } | { ok: false }> {
+    // Persistence must succeed BEFORE the request starts. A response received
+    // before its event id is persisted remains dispatching on disk.
     try {
-      const { data, error: apiError } = await call()
+      if (progress !== undefined) await progress('dispatching')
+    } catch {
+      return { ok: false }
+    }
+    try {
+      const { data, error: apiError, response } = await call()
       if (apiError !== undefined || data === undefined) {
+        const code = (apiError as { error?: { code?: unknown } } | undefined)
+          ?.error?.code
+        const codes: Record<number, string[]> = {
+          400: ['bad_request'],
+          401: ['unauthorized'],
+          403: ['forbidden'],
+          404: ['not_found'],
+          413: ['event_too_large', 'preview_too_large', 'payload_too_large'],
+        }
+        const definite =
+          response !== undefined &&
+          typeof code === 'string' &&
+          codes[response.status]?.includes(code) === true
+        if (progress !== undefined)
+          await progress(definite ? 'failed' : 'unknown')
         error.value = apiErrorMessage(apiError)
         return { ok: false }
       }
       error.value = null
+      if (progress !== undefined) await progress('sent', data.data.event_id)
       return { ok: true, eventId: data.data.event_id }
     } catch (cause) {
+      // A failed durable completion may have followed a real success. Keep
+      // its dispatch intent for recovery, never turn it into safe retry.
+      try {
+        if (progress !== undefined) await progress('unknown')
+      } catch {
+        /* Native fence remains authoritative. */
+      }
       error.value = cause instanceof Error ? cause.message : String(cause)
       return { ok: false }
     }
@@ -1345,20 +1391,28 @@ export function createTimelineStore(
   ): Promise<boolean> {
     const targetThread = options.threadRoot ?? threadRoot
     const localId = `local:${randomId()}`
-    events.value = [
-      ...events.value,
-      buildLocalEcho(localId, body, options, options.senderId),
-    ]
+    // Durable recovery owns its outcomes. A matching live echo is never proof
+    // of its delivery, nor may the ordinary echo Retry bypass its unknown gate.
+    if (options.progress === undefined)
+      events.value = [
+        ...events.value,
+        buildLocalEcho(localId, body, options, options.senderId),
+      ]
 
-    const result = await mutateWithResult(() =>
-      api.POST('/v1/accounts/{account_id}/rooms/{room_id}/send', {
-        params: { path: { account_id: accountId, room_id: roomId } },
-        body: {
-          ...formattedParts(body, options.formattedBody),
-          reply_to: options.replyTo ?? null,
-          thread_root: targetThread ?? null,
-        },
-      }),
+    const result = await mutateWithResult(
+      () =>
+        api.POST('/v1/accounts/{account_id}/rooms/{room_id}/send', {
+          params: { path: { account_id: accountId, room_id: roomId } },
+          body: {
+            ...formattedParts(body, options.formattedBody),
+            reply_to: options.replyTo ?? null,
+            thread_root: targetThread ?? null,
+            ...(options.urlPreviews === undefined
+              ? {}
+              : { url_previews: options.urlPreviews }),
+          },
+        }),
+      options.progress,
     )
 
     if (!result.ok) {
@@ -1418,6 +1472,39 @@ export function createTimelineStore(
     senderId?: string
   }
 
+  async function sendStagedMedia(
+    uploadId: string,
+    caption: string,
+    options: SendOptions = {},
+  ): Promise<boolean> {
+    const result = await dispatchMedia(uploadId, caption, options)
+    if (result.ok) await refreshEvent(result.eventId)
+    return result.ok
+  }
+
+  function dispatchMedia(
+    uploadId: string,
+    caption: string | undefined,
+    options: SendOptions,
+  ) {
+    return mutateWithResult(
+      () =>
+        api.POST('/v1/accounts/{account_id}/rooms/{room_id}/send-media', {
+          params: { path: { account_id: accountId, room_id: roomId } },
+          body: {
+            upload_id: uploadId,
+            caption: caption ?? null,
+            reply_to: options.replyTo ?? null,
+            thread_root: options.threadRoot ?? threadRoot ?? null,
+            ...(options.urlPreviews === undefined
+              ? {}
+              : { url_previews: options.urlPreviews }),
+          },
+        }),
+      options.progress,
+    )
+  }
+
   /**
    * Push the local echo for a media send and return its id, without starting
    * the upload.
@@ -1471,7 +1558,6 @@ export function createTimelineStore(
     file: File,
     options: MediaSendOptions,
   ): Promise<boolean> {
-    const targetThread = options.threadRoot ?? threadRoot
     const staged = await media.upload(accountId, file)
     if (!staged.ok) {
       error.value = uploadFailureMessage(staged.error)
@@ -1479,16 +1565,10 @@ export function createTimelineStore(
       return false
     }
 
-    const result = await mutateWithResult(() =>
-      api.POST('/v1/accounts/{account_id}/rooms/{room_id}/send-media', {
-        params: { path: { account_id: accountId, room_id: roomId } },
-        body: {
-          upload_id: staged.uploadId,
-          caption: options.caption ?? null,
-          reply_to: options.replyTo ?? null,
-          thread_root: targetThread ?? null,
-        },
-      }),
+    const result = await dispatchMedia(
+      staged.uploadId,
+      options.caption,
+      options,
     )
 
     if (!result.ok) {
@@ -1619,6 +1699,7 @@ export function createTimelineStore(
     ingestLive,
 
     send,
+    sendStagedMedia,
     sendMedia,
     sendSticker,
     sendMediaBatch,
