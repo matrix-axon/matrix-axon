@@ -4,9 +4,12 @@ allowBuilds:
 
 # Workspace level graph overrides
 overrides:
-  'minimatch': '^11.0.1'
   # CVE-2026-118764: minimatch < 11.0.1 contains an attacker-controlled pattern
   # amplification in firstPhasePreProcess() when optimizationLevel >= 2.
+  'minimatch': '^11.0.1'
+  # This override was added in PR #184 (July 2026) to address a pnpm peer conflict
+  # but may not be necessary as of 2026-10-31. We should revisit next time this file
+  # is updated.
   'openapi-typescript@7.13.0>typescript': '~6.0.3'
   # GHSA-2883-xcg3-v3hh: js-yaml's `maxTotalMergeKeys` did not bound CPU use on
   # a merge-key bomb. Our own dependency is already 4.3.2; this reaches the copy
