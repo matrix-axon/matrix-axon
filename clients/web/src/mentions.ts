@@ -117,11 +117,12 @@ export function formatMessageBody(
   const markdownHtml = markdownToHtmlIfFormatted(expandedBody)
   if (markdownHtml !== null) {
     const linked = linkTextNodes(markdownHtml, context)
+    const rendered = inline.render(linked.html)
     return {
       body: inline.plain(expandedBody),
       format: 'org.matrix.custom.html',
-      formatted_body: sanitizeOutgoingHtml(inline.render(linked.html).html, {
-        inlineEmoji: true,
+      formatted_body: sanitizeOutgoingHtml(rendered.html, {
+        inlineEmoji: rendered.changed,
       }),
     }
   }
@@ -134,7 +135,9 @@ export function formatMessageBody(
   return {
     body: inline.plain(expandedBody),
     format: 'org.matrix.custom.html',
-    formatted_body: sanitizeOutgoingHtml(rendered.html, { inlineEmoji: true }),
+    formatted_body: sanitizeOutgoingHtml(rendered.html, {
+      inlineEmoji: rendered.changed,
+    }),
   }
 }
 

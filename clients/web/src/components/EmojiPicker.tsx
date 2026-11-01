@@ -137,6 +137,10 @@ function EmojiPickerSurface({
     setPosition({ left: measured.left + left, top: measured.top + top })
   }, [anchor, containerRef])
   useLayoutEffect(place, [place])
+  const callbacks = useRef({ onClose, relatedControls })
+  useLayoutEffect(() => {
+    callbacks.current = { onClose, relatedControls }
+  }, [onClose, relatedControls])
   useEffect(() => {
     const observer =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place)
@@ -144,14 +148,16 @@ function EmojiPickerSurface({
     window.visualViewport?.addEventListener('resize', place)
     window.visualViewport?.addEventListener('scroll', place)
     window.addEventListener('resize', place)
-    window.addEventListener('scroll', place, true)
+    // The opening anchor is intentionally a snapshot: reaction callers may
+    // remove their trigger while this picker is open. Viewport changes still
+    // clamp the dialog to the visible area; page scroll cannot refresh it.
     const outside = (event: PointerEvent) => {
       if (
         event.target instanceof Node &&
         !containerRef.current?.contains(event.target) &&
-        !relatedControls?.()?.contains(event.target)
+        !callbacks.current.relatedControls?.()?.contains(event.target)
       )
-        onClose()
+        callbacks.current.onClose()
     }
     document.addEventListener('pointerdown', outside)
     return () => {
@@ -159,10 +165,9 @@ function EmojiPickerSurface({
       window.visualViewport?.removeEventListener('resize', place)
       window.visualViewport?.removeEventListener('scroll', place)
       window.removeEventListener('resize', place)
-      window.removeEventListener('scroll', place, true)
       document.removeEventListener('pointerdown', outside)
     }
-  }, [place, containerRef, onClose, relatedControls])
+  }, [place, containerRef])
   useShortcuts(
     {
       Escape: (event) => {

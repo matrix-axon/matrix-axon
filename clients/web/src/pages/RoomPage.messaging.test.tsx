@@ -3903,6 +3903,29 @@ describe('sending media (M-W8.5, ADR 0065)', () => {
     expect(getByLabelText('Attach a file')).toBeTruthy()
   })
 
+  it('sends Markdown captions with formatting even without inline emoji', async () => {
+    const seen = serveMediaSend()
+    const { getByRole, getByText, container } = renderRoom([event('$a', 100)])
+    await waitFor(() => getByText('body of $a'))
+    fireEvent.drop(container.querySelector('.room-stream')!, {
+      dataTransfer: { files: [png()], types: ['Files'] },
+    })
+    await waitFor(() => getByText('cat.png'))
+    const textarea = getByRole('textbox')
+    fireEvent.input(textarea, { target: { value: '**look** at this' } })
+    fireEvent.submit(textarea.closest('form')!)
+    await waitFor(() =>
+      expect(seen.sendBody()).toEqual({
+        upload_id: UPLOAD_ID,
+        caption: '**look** at this',
+        reply_to: null,
+        thread_root: null,
+        format: 'org.matrix.custom.html',
+        formatted_body: '<p><strong>look</strong> at this</p>',
+      }),
+    )
+  })
+
   it('sends a staged file bare, with no caption, on an empty composer', async () => {
     const seen = serveMediaSend()
     const { getByRole, getByText, container } = renderRoom([event('$a', 100)])

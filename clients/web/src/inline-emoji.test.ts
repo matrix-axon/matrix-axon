@@ -46,6 +46,33 @@ describe('inline custom emoji', () => {
     ).toEqual([ref.mxc])
     expect(doc.querySelector('a[href^="mxc:"]')).toBeNull()
   })
+  it.each([false, true])(
+    'escapes user-typed emoticon HTML with bound emoji: %s',
+    (bound) => {
+      const tags = Array.from(
+        { length: 65 },
+        (_, i) =>
+          `<img data-mx-emoticon src="mxc://hs/unbound-${i}" alt="unbound">`,
+      ).join(' ')
+      const body = `hi :smile: ${tags}`
+      const sent = formatMessageBody(body, {
+        ...context,
+        inlineEmoji: bound ? [ref] : [],
+      })
+      const doc = new DOMParser().parseFromString(
+        sent.formatted_body!,
+        'text/html',
+      )
+      expect(
+        [...doc.querySelectorAll('img[src]')].map((img) =>
+          img.getAttribute('src'),
+        ),
+      ).toEqual(bound ? [ref.mxc] : [])
+      expect(doc.body.textContent).toContain(
+        '<img data-mx-emoticon src="mxc://hs/unbound-64"',
+      )
+    },
+  )
   it('accounts for serialized draft bytes, including long MXCs and multibyte text', () => {
     expect(inlineEmojiDraftFits('hi :smile:', [ref])).toBe(true)
     expect(
