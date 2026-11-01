@@ -1,0 +1,45 @@
+name: iOS sharing foundation
+on:
+  pull_request:
+    paths: &sharing-paths
+      - clients/web/src-tauri/incoming-share/**
+      - clients/web/src-tauri/share-probe/**
+      - clients/web/src-tauri/native-auth/ios/**
+      - clients/web/src/incoming-share/fixtures/**
+      - clients/web/scripts/share-contract.mjs
+      - clients/web/scripts/test-sharing-simulator.mjs
+      - openapi/openapi.json
+      - crates/axon-core/src/link_preview.rs
+      - crates/axon-api/tests/fixtures/*preview*.json
+      - .github/workflows/ios-sharing.yml
+  push:
+    branches: [main]
+    paths: *sharing-paths
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Check OpenAPI and server validation policy drift
+        run: node clients/web/scripts/share-contract.mjs
+      - name: Swift ownership, recovery, and portable server contracts
+        run: swift test --package-path clients/web/src-tauri/incoming-share
+      - name: Install simulator test project generator
+        run: brew install xcodegen
+      - name: Run shared foundation tests under iOS Simulator
+        run: node clients/web/scripts/test-sharing-simulator.mjs
+      - name: Compile shared module with iOS extension API restrictions
+        run: |
+          output=$(mktemp -d)
+          xcrun swiftc -emit-module -module-name AxonIncomingShare \
+            -application-extension -target arm64-apple-ios15.0 \
+            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            clients/web/src-tauri/incoming-share/Sources/AxonIncomingShare/*.swift \
+            -emit-module-path "$output/AxonIncomingShare.swiftmodule"

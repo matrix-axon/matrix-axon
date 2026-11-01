@@ -2,13 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>com.apple.security.application-groups</key>
+  <array><string>group.org.matrixaxon.axon.sharing</string></array>
+  <key>keychain-access-groups</key>
+  <array>
+    <string>$(AppIdentifierPrefix)org.matrixaxon.axon</string>
+    <string>$(AppIdentifierPrefix)org.matrixaxon.axon.sharing</string>
+  </array>
   <!--
     The iOS app's entitlements. Unlike Info.ios.plist, Tauri does not merge
     this file into anything: `tauri ios init` writes an empty
     gen/apple/axon_iOS/axon_iOS.entitlements, and tauri.conf.json has no iOS
-    entitlements setting. `scripts/package-ios.sh` copies this file over the
-    generated one after every regeneration, and the dev loop needs the same
-    copy once after `tauri ios init` (see src-tauri/README.md).
+    entitlements setting. The shared configure-ios-sharing.mjs hook loads this
+    file into XcodeGen's entitlement properties after every regeneration.
+    Packaging invokes that hook; the dev loop does too after tauri ios init.
 
     Sign in with Apple (ADR 0054). Without it the build still compiles and
     signs, and the failure appears only at run time: the Apple sheet never

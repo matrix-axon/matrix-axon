@@ -62,9 +62,9 @@ export interface PushRegistrationDeps {
     hook: (token: string | null) => void | Promise<void>,
   ) => () => void
   /**
-   * Drop the local session without running sign-out hooks again. Used when a
-   * sign-out delete succeeds after the original attempt, once the owning
-   * bearer is no longer sitting in that attempt.
+   * Request completion after a deferred sign-out delete. The app may recheck
+   * other barriers and must surface a refused completion. This callback must
+   * not wait on this module's queue, which may contain those repeated hooks.
    */
   finishSignOut: () => void
   put: (accessToken: string, body: PutPushBody) => Promise<{ id: string }>

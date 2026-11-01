@@ -46,6 +46,7 @@ import { RoomPage } from './pages/RoomPage'
 import { InvitesPage } from './pages/InvitesPage'
 import { RoomsIndex } from './pages/RoomsIndex'
 import { SettingsPage } from './pages/SettingsPage'
+import { PendingSharesPage } from './pages/PendingSharesPage'
 import { applyAppBadge } from './app-badge'
 import { BUILD_INFO } from './build-info'
 import { autoRefreshApplies, startAutoRefresh } from './update-refresh'
@@ -860,6 +861,7 @@ function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
   const {
+    incomingShares,
     accounts,
     favourites,
     rooms,
@@ -1526,6 +1528,29 @@ function ShellChrome() {
               <SearchIcon />
               <span class="topbar-label">Search</span>
             </button>
+            {incomingShares != null && (
+              <a
+                href="/pending-shares"
+                class="ghost topbar-icon-button"
+                aria-label="Pending shares"
+                title={`Pending shares (${incomingShares.pending.value.length})`}
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  aria-hidden="true"
+                >
+                  <path d="M4 14v6h16v-6M12 3v12m-5-5 5 5 5-5" />
+                </svg>
+                <span class="topbar-label">
+                  Pending shares ({incomingShares.pending.value.length})
+                </span>
+              </a>
+            )}
             <a
               href="/settings"
               class="ghost topbar-icon-button"
@@ -1628,6 +1653,7 @@ function ShellChrome() {
               <Route path="/invites" component={InvitesPage} />
               <Route path="/accounts" component={AccountsPage} />
               <Route path="/settings" component={SettingsPage} />
+              <Route path="/pending-shares" component={PendingSharesPage} />
               <Route path="/licenses" component={LicensesPage} />
               <Route path="/privacy" component={PrivacyPage} />
               <Route path="/:accountId/rooms/:roomId" component={RoomPage} />

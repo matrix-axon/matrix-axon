@@ -8,4 +8,5 @@ permissions = [
   "allow-secret-load",
   "allow-secret-set",
   "allow-secret-delete",
+  "allow-share",
 ]

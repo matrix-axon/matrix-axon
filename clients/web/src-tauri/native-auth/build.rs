@@ -4,6 +4,7 @@ const COMMANDS: &[&str] = &[
     "secret_load",
     "secret_set",
     "secret_delete",
+    "share",
 ];
 
 fn main() {
