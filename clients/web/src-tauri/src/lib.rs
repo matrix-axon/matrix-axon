@@ -69,9 +69,15 @@ pub fn run() {
     let builder = builder
         .manage(DroppedPaths::default())
         .invoke_handler(tauri::generate_handler![read_dropped_file, set_icon_badge])
-        // Transport. Both are configured by capability files under
-        // `capabilities/`, not here — the allow-list of reachable origins is
+        // Transport. All three are granted by capability files under
+        // `capabilities/`, not here — what the page may reach is
         // security-relevant and belongs somewhere reviewable.
+        //
+        // `axon-http` is the shell's own pooled HTTP client (ADR 0127), which
+        // every `/v1` and media request uses. `tauri-plugin-http` stays for
+        // one release behind Settings → Debug → "Legacy shell transport", and
+        // goes with that toggle.
+        .plugin(tauri_plugin_axon_http::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_websocket::init())
         // Saving an attachment: a save dialog and a real write, because

@@ -1685,6 +1685,15 @@ export function createServices(
   }
   const attachments = createAttachmentStaging()
   const settings = createSettingsStore(storage)
+  // The shell's fetch reads the choice on every request, so a change applies
+  // to the next one. Applied here, before anything is sent, so boot follows
+  // the stored choice too (ADR 0127 § 5).
+  const shellTransport = platform.shellTransport ?? null
+  if (shellTransport !== null) {
+    effect(() => {
+      shellTransport.setLegacy(settings.legacyShellTransport.value)
+    })
+  }
   // Instrumentation has to be live *before* anything worth measuring happens.
   // The room-list cache marks its read during this function, and `App`'s
   // effect — the other place the stored preference is applied — runs after

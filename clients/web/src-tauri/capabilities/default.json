@@ -22,6 +22,10 @@
       ]
     },
     {
+      "identifier": "axon-http:default",
+      "comment": "The shell's own HTTP transport (ADR 0127): one pooled client for every `/v1` and media request, in place of `http:default`'s client per request. The same reach as `http:default` above, any `http` or `https` URL on any host and port, because the server is the user's own and is chosen at runtime. The command enforces the scheme itself, on the request and on every redirect hop; narrowing the authority is issue 893. `http:default` stays for one release, behind the Settings → Debug toggle that routes requests back through it."
+    },
+    {
       "identifier": "dialog:allow-save",
       "comment": "Ask the user where to put a downloaded attachment. The dialog is the only thing that chooses a path; nothing here can pick one on the user's behalf."
     },

@@ -1,4 +1,8 @@
 import { signal } from '@preact/signals'
+import type {
+  TransportFailureKind,
+  TransportVersion,
+} from './platform/transport-report'
 
 const STORAGE_KEY = 'axon.perf'
 
@@ -77,6 +81,9 @@ const OVERLAY_PREFIXES = [
   // Clipboard writes, ok and failed — the readout is the only console on a
   // phone, and a success is what tells a fix from a lucky run.
   'copy:',
+  // The shell transport's counters, once per room open and per resume. The
+  // reading ADR 0127 is judged by: connections opened should barely move.
+  'transport:',
 ]
 
 /**
@@ -212,6 +219,71 @@ let sink: TelemetrySinkFn | null = null
 
 export function setTelemetrySink(fn: TelemetrySinkFn | null): void {
   sink = fn
+}
+
+/**
+ * The shell transport's counters (`Stats` in `src-tauri/axon-http`), plus
+ * whether the legacy transport is in use, so a reading can say which
+ * transport its numbers describe.
+ */
+export interface TransportStatsReading {
+  connectionsOpened: number
+  requestsSent: number
+  retries: { nack: number; fastReset: number }
+  resets: number
+  liveEntries: number
+  legacy: boolean
+}
+
+/** Why a `transport:stats` line was written. */
+export type TransportStatsReason = 'room-open' | 'resume' | 'online'
+
+/**
+ * Where `transport:stats` reads from, registered by the shell platform.
+ * Inverted for the same reason as the sink: this module cannot import the
+ * shell's IPC. `null` in a browser, which writes no such line.
+ */
+let transportStats: (() => Promise<TransportStatsReading>) | null = null
+
+export function setTransportStatsSource(
+  source: (() => Promise<TransportStatsReading>) | null,
+): void {
+  transportStats = source
+}
+
+/**
+ * Write the shell transport's counters as a `transport:stats` line (ADR 0127
+ * § 5), on each room open and on resume.
+ *
+ * The counters are cumulative and survive a reset, so it is the difference
+ * between two lines that reads: connections opened should move by one or two
+ * per resume, not with the number of requests sent.
+ */
+export function perfMarkTransportStats(why: TransportStatsReason): void {
+  const source = transportStats
+  if (source === null || !perfEnabled()) {
+    return
+  }
+  const count = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null
+  source()
+    .then((stats) => {
+      perfMark('transport:stats', {
+        why,
+        legacy: stats.legacy,
+        conn: count(stats.connectionsOpened),
+        sent: count(stats.requestsSent),
+        nack: count(stats.retries.nack),
+        fastReset: count(stats.retries.fastReset),
+        resets: count(stats.resets),
+        live: count(stats.liveEntries),
+      })
+    })
+    .catch(() => {
+      // The readout is for diagnosis. A shell without the command, or an
+      // answer of the wrong shape, has nothing to report, and that is not an
+      // error worth one.
+    })
 }
 
 interface AxonMark {
@@ -911,6 +983,11 @@ function emitRoomOpen(phase: 'settled' | 'waiting'): void {
   })
   summariseRequests(entries, headEntry)
   summariseApiRequests(open)
+  // Once per open: the first line out, whether that is `settled` or the
+  // first `waiting`, since a stuck open is when the counters matter most.
+  if (open.waits === 0) {
+    perfMarkTransportStats('room-open')
+  }
   if (phase === 'settled') {
     open.emitted = true
     roomOpen = null
@@ -1062,8 +1139,12 @@ export type RequestOutcome = 'ok' | 'timeout' | 'aborted' | 'failed'
  * and the obvious thing to pass instead, the error's message, quotes a URL
  * that names an account and a room. As a plain `string` only a comment stood
  * in the way of that.
+ *
+ * The shell's transport names its own categories (ADR 0127 § 4). `send` is
+ * the legacy shell transport's only word for a failure before headers, and
+ * `fetch` a browser's, which says no more than that.
  */
-export type FailureKind = 'send' | 'body' | 'cancelled' | 'fetch' | 'other'
+export type FailureKind = 'send' | 'fetch' | TransportFailureKind
 
 /**
  * Where a request was when it ended, or where it is now if it has not.
@@ -1081,19 +1162,22 @@ interface RequestRecord {
   endAt: number | null
   outcome: RequestOutcome | null
   status: number | null
+  /** Which HTTP version carried it, where the shell's transport said. */
+  version: TransportVersion | null
 }
 
 /** The API client's handle on one request's record. */
 export interface RequestTrace {
   /** Handed to the transport. */
   sent(): void
-  /** Response headers in. */
-  headers(status: number): void
+  /** Response headers in, and which HTTP version brought them, if known. */
+  headers(status: number, version?: TransportVersion | null): void
   /**
    * Settled: the body is in, or it failed. `kind` is the client's one-word
-   * classification of a failure (`failureKind` in `api/client.ts`).
+   * classification of a failure (`failureKind` in `api/client.ts`), and
+   * `detail` the shell transport's closed-set name for its cause, if any.
    */
-  end(outcome: RequestOutcome, kind?: FailureKind): void
+  end(outcome: RequestOutcome, kind?: FailureKind, detail?: string | null): void
   /**
    * Headers arrived after the request had already been given up on.
    *
@@ -1102,7 +1186,7 @@ export interface RequestTrace {
    * (`api/client.ts`) exists to route around, and seeing it here means a
    * deadline is holding only because the client races it.
    */
-  late(): void
+  late(version?: TransportVersion | null): void
 }
 
 /**
@@ -1133,6 +1217,7 @@ export function perfTraceRequest(url: string): RequestTrace | null {
     endAt: null,
     outcome: null,
     status: null,
+    version: null,
   }
   const open = roomOpen
   if (open !== null && open.requests.length < ROOM_OPEN_REQUESTS_MAX) {
@@ -1143,11 +1228,12 @@ export function perfTraceRequest(url: string): RequestTrace | null {
     sent() {
       record.sentAt ??= performance.now()
     },
-    headers(status) {
+    headers(status, version) {
       record.headersAt ??= performance.now()
       record.status = status
+      record.version = version ?? null
     },
-    end(outcome, kind) {
+    end(outcome, kind, detail) {
       if (record.endAt !== null) {
         return
       }
@@ -1168,15 +1254,20 @@ export function perfTraceRequest(url: string): RequestTrace | null {
           route: shortRoute(url),
           stage: stageOf(record),
           hdr: sinceStart(record, record.headersAt),
+          ver: record.version,
           after: after(),
           inflight,
         })
       } else if (outcome === 'failed') {
-        markFailure(record, kind ?? 'other', after(), inflight)
+        markFailure(record, kind ?? 'other', detail ?? null, after(), inflight)
       }
     },
-    late() {
-      perfMark('api:late', { route: shortRoute(url), after: after() })
+    late(version) {
+      perfMark('api:late', {
+        route: shortRoute(url),
+        ver: version ?? null,
+        after: after(),
+      })
     },
   }
 }
@@ -1258,6 +1349,7 @@ function watchVisibility(): void {
 function markFailure(
   record: RequestRecord,
   kind: FailureKind,
+  detail: string | null,
   after: number,
   inflight: number,
 ): void {
@@ -1276,8 +1368,10 @@ function markFailure(
   perfMark('api:failed', {
     route: shortRoute(record.url),
     kind,
+    detail,
     stage: stageOf(record),
     hdr: sinceStart(record, record.headersAt),
+    ver: record.version,
     after,
     inflight,
     online: navigator.onLine,
@@ -1351,6 +1445,7 @@ function summariseApiRequests(open: RoomOpen): void {
       outcome: record.outcome ?? 'pending',
       stage: record.outcome === 'ok' ? null : stageOf(record),
       status: record.status,
+      ver: record.version,
     })
   }
 }

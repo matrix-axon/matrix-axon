@@ -38,6 +38,7 @@ describe('createSettingsStore', () => {
       persistTelemetry: false,
       perfOverlay: true,
       pageScrollReset: false,
+      legacyShellTransport: false,
       appBadgeEnabled: true,
       cacheRoomList: true,
       messageNotifications: false,
@@ -51,11 +52,13 @@ describe('createSettingsStore', () => {
     first.theme.value = 'dark'
     first.activeAccountId.value = 'acct-1'
     first.messageNotifications.value = true
+    first.legacyShellTransport.value = true
 
     const second = createSettingsStore(storage)
     expect(second.theme.value).toBe('dark')
     expect(second.activeAccountId.value).toBe('acct-1')
     expect(second.messageNotifications.value).toBe(true)
+    expect(second.legacyShellTransport.value).toBe(true)
   })
 
   it.each([

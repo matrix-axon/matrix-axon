@@ -27,9 +27,9 @@ const ENTRY_LIMIT = 200
  * The marks that reach disk, as an explicit allow-list of *names*.
  *
  * Every one of these is a reduced summary: numbers, plus a few enumerated
- * strings (`phase`, `via`, `nav`, `pending`, `outcome`, `stage`, `kind`) and a route
- * shape whose ids are already collapsed by `shortRoute`. None carries an
- * identifier.
+ * strings (`phase`, `via`, `nav`, `pending`, `outcome`, `stage`, `kind`,
+ * `detail`, `ver`, `why`) and a route shape whose ids are already collapsed by
+ * `shortRoute`. None carries an identifier.
  *
  * The raw mark stream very much does — `room-page:initial-load-effect` carries
  * `accountId` and `roomId`, and both `room-list:navigate-to-room` and
@@ -60,6 +60,9 @@ export const PERSISTED_MARKS: readonly string[] = [
   'live:open',
   'live:close',
   'transition:back',
+  // The shell transport's counters and which transport they describe
+  // (ADR 0127 § 5). Numbers, a reason word and a boolean; no ids.
+  'transport:stats',
 ]
 
 export interface TelemetryEntry {

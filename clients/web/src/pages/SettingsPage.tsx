@@ -795,7 +795,7 @@ function TelemetrySettings() {
 }
 
 function DebugSettings() {
-  const { settings } = useServices()
+  const { settings, platform } = useServices()
   const [open, setOpen] = useState(false)
 
   return (
@@ -872,6 +872,27 @@ function DebugSettings() {
             frame. The layout is already correct without it. Turn it on only to
             compare.
           </p>
+          {platform.shellTransport !== null && (
+            <>
+              <label class="setting-row">
+                <input
+                  type="checkbox"
+                  checked={settings.legacyShellTransport.value}
+                  onChange={(event) =>
+                    (settings.legacyShellTransport.value =
+                      event.currentTarget.checked)
+                  }
+                />
+                Legacy shell transport
+              </label>
+              <p class="muted">
+                Off by default. On, requests go through the previous transport,
+                which opens a new connection for every request. Applies from the
+                next request. Kept for one release, to compare and as a
+                fallback.
+              </p>
+            </>
+          )}
         </div>
       )}
     </section>

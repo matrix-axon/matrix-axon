@@ -3,11 +3,14 @@ import {
   perfActive,
   perfMark,
   perfMarkBootRoomList,
+  perfMarkTransportStats,
   perfOverlayEntries,
   perfTraceRequest,
   setPerfEnabled,
   setPerfOverlay,
   setTelemetrySink,
+  setTransportStatsSource,
+  type TransportStatsReading,
 } from './perf'
 
 /** The detail of the one `transition:back` mark, or `null` if none was made. */
@@ -448,6 +451,100 @@ describe('room-open summary', () => {
     expect(summary!.attempts).toBe(2)
   })
 
+  it("writes the shell transport's counters once per room open", async () => {
+    const source = vi.fn(() =>
+      Promise.resolve({
+        connectionsOpened: 1,
+        requestsSent: 12,
+        retries: { nack: 0, fastReset: 0 },
+        resets: 0,
+        liveEntries: 3,
+        legacy: false,
+      }),
+    )
+    setTransportStatsSource(source)
+    try {
+      openRoom()
+      const head = { kind: 'head', roomId: ROOM, thread: false }
+      perfMark('timeline:fetch:start', head)
+      settleCompetitors()
+      perfMark('timeline:fetch:end', { ...head, ok: true })
+      perfMark('timeline:head:settled', {
+        roomId: ROOM,
+        thread: false,
+        outcome: 'applied',
+      })
+      perfMark('room-page:timeline-render', {
+        roomId: ROOM,
+        loading: false,
+        visible: 10,
+        hasRows: true,
+      })
+      await frames()
+      await vi.waitFor(() =>
+        expect(
+          perfOverlayEntries.value.filter(
+            (entry) => entry.name === 'transport:stats',
+          ),
+        ).toHaveLength(1),
+      )
+      expect(roomOpenSummary()).not.toBeNull()
+      expect(source).toHaveBeenCalledTimes(1)
+      expect(
+        perfOverlayEntries.value.find(
+          (entry) => entry.name === 'transport:stats',
+        )?.detail,
+      ).toMatchObject({ why: 'room-open', conn: 1, live: 3 })
+    } finally {
+      setTransportStatsSource(null)
+    }
+  })
+
+  it('writes the counters once for an open that waited, then settled', async () => {
+    const source = vi.fn(() =>
+      Promise.resolve({
+        connectionsOpened: 1,
+        requestsSent: 1,
+        retries: { nack: 0, fastReset: 0 },
+        resets: 0,
+        liveEntries: 1,
+        legacy: false,
+      }),
+    )
+    setTransportStatsSource(source)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      openRoom()
+      const head = { kind: 'head', roomId: ROOM, thread: false }
+      perfMark('timeline:fetch:start', head)
+      vi.advanceTimersByTime(10_000)
+      expect(roomOpenSummary()?.phase).toBe('waiting')
+      // The stuck moment is the reading that matters: it is taken then.
+      expect(source).toHaveBeenCalledTimes(1)
+      vi.useRealTimers()
+
+      settleCompetitors()
+      perfMark('timeline:fetch:end', { ...head, ok: true })
+      perfMark('timeline:head:settled', {
+        roomId: ROOM,
+        thread: false,
+        outcome: 'applied',
+      })
+      perfMark('room-page:timeline-render', {
+        roomId: ROOM,
+        loading: false,
+        visible: 10,
+        hasRows: true,
+      })
+      await frames()
+      expect(roomOpenSummary()?.phase).toBe('settled')
+      expect(source).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+      setTransportStatsSource(null)
+    }
+  })
+
   /**
    * A warm store outlives leaving the room (ADR 0085) and nothing aborts its
    * head load, so a load from an abandoned open can settle during the next open
@@ -603,8 +700,8 @@ describe('room-open summary', () => {
         preview.sent()
         members.sent()
         vi.advanceTimersByTime(640)
-        head.headers(200)
-        preview.headers(200)
+        head.headers(200, 'h2')
+        preview.headers(200, 'h2')
         preview.end('ok')
         vi.advanceTimersByTime(9_360)
       })
@@ -622,6 +719,7 @@ describe('room-open summary', () => {
           outcome: 'pending',
           stage: 'body',
           status: 200,
+          ver: 'h2',
         },
         {
           route: 'accounts/{account}/rooms/{id}/members',
@@ -632,6 +730,7 @@ describe('room-open summary', () => {
           outcome: 'pending',
           stage: 'headers',
           status: null,
+          ver: null,
         },
       ])
     } finally {
@@ -646,7 +745,7 @@ describe('room-open summary', () => {
         const body = perfTraceRequest(timelineUrl(ROOM))!
         body.sent()
         vi.advanceTimersByTime(640)
-        body.headers(200)
+        body.headers(200, 'http/1.1')
         vi.advanceTimersByTime(19_360)
         body.end('timeout')
         body.end('failed') // a second settle is ignored
@@ -660,7 +759,7 @@ describe('room-open summary', () => {
         vi.advanceTimersByTime(20_000)
         late.end('timeout')
         vi.advanceTimersByTime(5_000)
-        late.late()
+        late.late('h2')
       })
 
       expect(
@@ -674,6 +773,7 @@ describe('room-open summary', () => {
             route: 'accounts/{account}/rooms/{id}/timeline',
             stage: 'body',
             hdr: 640,
+            ver: 'http/1.1',
             after: 20_000,
             inflight: 1,
           },
@@ -684,6 +784,7 @@ describe('room-open summary', () => {
             route: 'accounts/{account}/rooms/{id}/timeline',
             stage: 'token',
             hdr: null,
+            ver: null,
             after: 20_000,
             inflight: 1,
           },
@@ -694,13 +795,18 @@ describe('room-open summary', () => {
             route: 'accounts/{account}/rooms/{id}/timeline',
             stage: 'headers',
             hdr: null,
+            ver: null,
             after: 20_000,
             inflight: 1,
           },
         ],
         [
           'api:late',
-          { route: 'accounts/{account}/rooms/{id}/timeline', after: 25_000 },
+          {
+            route: 'accounts/{account}/rooms/{id}/timeline',
+            ver: 'h2',
+            after: 25_000,
+          },
         ],
       ])
     } finally {
@@ -721,7 +827,8 @@ describe('room-open summary', () => {
         const failing = perfTraceRequest(timelineUrl(ROOM))!
         failing.sent()
         vi.advanceTimersByTime(180)
-        failing.end('failed', 'send')
+        // The shell transport's own words for it (ADR 0127 § 4).
+        failing.end('failed', 'reset', 'ConnectionReset')
         others.forEach((other) => other.end('ok'))
 
         const alone = perfTraceRequest(timelineUrl(ROOM))!
@@ -736,9 +843,11 @@ describe('room-open summary', () => {
       ).toEqual([
         {
           route: 'accounts/{account}/rooms/{id}/timeline',
-          kind: 'send',
+          kind: 'reset',
+          detail: 'ConnectionReset',
           stage: 'headers',
           hdr: null,
+          ver: null,
           after: 180,
           inflight: 4,
           online: true,
@@ -1503,5 +1612,78 @@ describe('socket lifecycle on the overlay', () => {
       // and one that merely reopened a socket over stale rooms.
       ['live:open', { reconnect: true }],
     ])
+  })
+})
+
+describe('shell transport counters (ADR 0127 § 5)', () => {
+  const reading: TransportStatsReading = {
+    connectionsOpened: 2,
+    requestsSent: 314,
+    retries: { nack: 1, fastReset: 0 },
+    resets: 4,
+    liveEntries: 0,
+    legacy: false,
+  }
+
+  beforeEach(() => {
+    performance.clearMarks()
+    perfOverlayEntries.value = []
+    setPerfEnabled(true)
+  })
+  afterEach(() => {
+    setTransportStatsSource(null)
+    setTelemetrySink(null)
+    setPerfEnabled(false)
+    performance.clearMarks()
+  })
+
+  it('writes the counters, with why and which transport', async () => {
+    const lines: [string, unknown][] = []
+    setTelemetrySink((name, _at, detail) => lines.push([name, detail]))
+    setTransportStatsSource(() => Promise.resolve(reading))
+
+    perfMarkTransportStats('resume')
+
+    await vi.waitFor(() => expect(lines).toHaveLength(1))
+    expect(lines[0]).toEqual([
+      'transport:stats',
+      {
+        why: 'resume',
+        legacy: false,
+        conn: 2,
+        sent: 314,
+        nack: 1,
+        fastReset: 0,
+        resets: 4,
+        live: 0,
+      },
+    ])
+    // On the readout too: the overlay is the only console on a phone.
+    expect(perfOverlayEntries.value.map((entry) => entry.name)).toEqual([
+      'transport:stats',
+    ])
+  })
+
+  it('writes nothing in a browser, or with instrumentation off', async () => {
+    const source = vi.fn(() => Promise.resolve(reading))
+    perfMarkTransportStats('room-open')
+    setTransportStatsSource(source)
+    setPerfEnabled(false)
+    perfMarkTransportStats('room-open')
+    await Promise.resolve()
+    expect(source).not.toHaveBeenCalled()
+  })
+
+  it('swallows a shell that cannot answer, or answers in the wrong shape', async () => {
+    const lines: string[] = []
+    setTelemetrySink((name) => lines.push(name))
+    setTransportStatsSource(() => Promise.reject(new Error('not allowed')))
+    perfMarkTransportStats('online')
+    setTransportStatsSource(() =>
+      Promise.resolve({ connectionsOpened: 1 } as TransportStatsReading),
+    )
+    perfMarkTransportStats('online')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(lines).toEqual([])
   })
 })
