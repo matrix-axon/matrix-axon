@@ -3,19 +3,25 @@ allowBuilds:
   msw: false
 
 # Workspace level graph overrides
+#
+# Every entry below is a security floor for a transitive dependency. The
+# `minimatch` entry is load-bearing: eslint and typescript-estree resolve 10.x
+# and `@redocly/openapi-core` pins 5.1.9, all below the fixed version. The
+# `js-yaml`, `undici` and `zod` entries are precautionary: the versions they
+# would otherwise resolve to are already patched, so they only guard against a
+# future re-resolve, or a dependent that starts pinning an older release,
+# drifting back to a vulnerable version and failing `pnpm audit`. Remove an
+# entry only once nothing in the graph can resolve below its fixed version.
 overrides:
   # CVE-2026-118764: minimatch < 11.0.1 contains an attacker-controlled pattern
   # amplification in firstPhasePreProcess() when optimizationLevel >= 2.
   'minimatch': '^11.0.1'
-  # This override was added in PR #184 (July 2026) to address a pnpm peer conflict
-  # but may not be necessary as of 2026-10-31. We should revisit next time this file
-  # is updated.
-  'openapi-typescript@7.13.0>typescript': '~6.0.3'
   # GHSA-2883-xcg3-v3hh: js-yaml's `maxTotalMergeKeys` did not bound CPU use on
-  # a merge-key bomb. Our own dependency is already 4.3.2; this reaches the copy
-  # `@redocly/openapi-core` pins, which is a dev-only path (it builds the
-  # generated API client) but still runs on developer machines and in CI. A
-  # patch bump within the same major, so nothing else moves.
+  # a merge-key bomb. Our own dependency is already 4.3.2, and so is the copy
+  # `@redocly/openapi-core` currently pins; this floor covers an older pin in a
+  # future redocly release. That path is dev-only (it builds the generated API
+  # client) but still runs on developer machines and in CI. A patch bump within
+  # the same major, so nothing else moves.
   'js-yaml@<4.3.2': '^4.3.2'
   # CVE-2026-109869: fetch() implementation crashes the Node.js process when a
   # malicious server returns a response with more than five content codings

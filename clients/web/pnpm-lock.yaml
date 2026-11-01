@@ -126,7 +126,6 @@ settings:
 
 overrides:
   minimatch: ^11.0.1
-  openapi-typescript@7.13.0>typescript: ~6.0.3
   js-yaml@<4.3.2: ^4.3.2
   undici: ^7.30.1
   zod: ^4.6.7
@@ -1878,7 +1877,7 @@ packages:
     resolution: {integrity: sha512-EFP392gcqXS7ntPvbhBzbF8TyBA+baIYEm791Hy5YkjDYKTnk/Tn5OQeKm5BIZvJihpp8Zzr4hzx0Irde1LNGQ==}
     hasBin: true
     peerDependencies:
-      typescript: ~6.0.3
+      typescript: ^5.x
 
   optionator@0.9.4:
     resolution: {integrity: sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==}
