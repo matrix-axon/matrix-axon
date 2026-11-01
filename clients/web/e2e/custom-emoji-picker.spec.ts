@@ -263,6 +263,14 @@ test('an older server leaves Unicode reactions usable', async ({ page }) => {
   expect(headerFits).toBe(true)
   await dialog.getByRole('button', { name: 'Emoji', exact: true }).click()
   await expect(dialog.locator('emoji-picker')).toBeVisible()
+  const search = dialog
+    .locator('emoji-picker')
+    .getByRole('combobox', { name: 'Search', exact: true })
+  await search.focus()
+  await search.press('Tab')
+  await expect(
+    dialog.locator('emoji-picker').locator('#skintone-button'),
+  ).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
 })

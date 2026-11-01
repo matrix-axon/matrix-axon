@@ -1,4 +1,4 @@
-import { CustomEmojiPicker } from './CustomEmojiPicker'
+import { EmojiPicker } from './EmojiPicker'
 import {
   useCallback,
   useEffect,
@@ -7,7 +7,6 @@ import {
   useState,
 } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
-import { EMOJI_PICKER_DATA_SOURCE } from '../emoji'
 import { isGestureControlTarget, MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { parseMedia } from '../media/parse-media'
 import { localRoomHref, localThreadEventHref } from '../matrix-to'
@@ -78,54 +77,7 @@ type ReactionTally = NonNullable<EventDto['reactions']>[string] & {
   shortcode?: unknown
 }
 
-type EmojiPickerClickDetail = {
-  unicode?: string
-  emoji?: { unicode?: string }
-}
-
-type PickerPosition = {
-  left: number
-  top: number
-}
-
-interface PickerRect {
-  top: number
-  right: number
-  bottom: number
-}
-
-interface PickerSize {
-  width: number
-  height: number
-}
-
-export function fullReactionPickerPosition({
-  anchor,
-  dialog,
-  viewport,
-  margin = 8,
-  gap = 8,
-}: {
-  anchor: PickerRect
-  dialog: PickerSize
-  viewport: PickerSize
-  margin?: number
-  gap?: number
-}): PickerPosition {
-  const maxLeft = Math.max(margin, viewport.width - dialog.width - margin)
-  const maxTop = Math.max(margin, viewport.height - dialog.height - margin)
-  const left = Math.min(Math.max(anchor.right, margin), maxLeft)
-  const preferredAbove = anchor.top - dialog.height
-  const preferredBelow = anchor.bottom + gap
-  const top =
-    preferredAbove >= margin
-      ? preferredAbove
-      : preferredBelow + dialog.height <= viewport.height - margin
-        ? preferredBelow
-        : Math.min(Math.max(preferredAbove, margin), maxTop)
-
-  return { left, top: Math.min(Math.max(top, margin), maxTop) }
-}
+export { fullReactionPickerPosition } from './EmojiPicker'
 
 /**
  * Can this event be edited? Only our own confirmed, unredacted messages —
@@ -957,476 +909,95 @@ export function ReactionPicker({
   ariaLabel?: string
 }) {
   const { containerRef } = useModalFocus<HTMLDivElement>()
-  const fullPickerDialogRef = useRef<HTMLDivElement>(null)
-  const fullPickerHostRef = useRef<HTMLDivElement>(null)
-  const moreButtonRef = useRef<HTMLButtonElement>(null)
-  const [mode, setMode] = useState<'compact' | 'full'>('compact')
-  const [category, setCategory] = useState<'unicode' | 'custom'>('unicode')
-  const customAvailable = accountId !== undefined && roomId !== undefined
-  const [anchorRect, setAnchorRect] = useState<DOMRectReadOnly | null>(null)
-  const [pickerPosition, setPickerPosition] = useState<PickerPosition | null>(
-    null,
+  const moreButton = useRef<HTMLButtonElement>(null)
+  const shell = useRef<HTMLDivElement>(null)
+  const [full, setFull] = useState(false)
+  // Explicitly relinquish the compact focus trap when the portal takes over.
+  // Exactly one dialog must own Tab, including during the ref transition.
+  const setCompactRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      shell.current = element
+      containerRef.current = full ? null : element
+    },
+    [containerRef, full],
   )
-  const recentReactions = settings.recentReactions.value
-  const quickReactions = [
+  const [anchor, setAnchor] = useState<DOMRectReadOnly | null>(null)
+  const recent = settings.recentReactions.value
+  const quick = [
     ...QUICK_REACTIONS,
-    ...recentReactions.filter((key) => !QUICK_REACTIONS.includes(key)),
+    ...recent.filter((key) => !QUICK_REACTIONS.includes(key)),
   ]
-
-  const openFullPicker = useCallback((anchor: HTMLElement | null) => {
-    setAnchorRect(anchor?.getBoundingClientRect() ?? null)
-    setPickerPosition(null)
-    setMode('full')
-  }, [])
-
+  const open = () => {
+    setAnchor(moreButton.current?.getBoundingClientRect() ?? null)
+    setFull(true)
+  }
   useShortcuts(
     {
       '+': (event) => {
-        if (mode !== 'compact') {
-          return
+        if (!full) {
+          event.preventDefault()
+          open()
         }
-        event.preventDefault()
-        openFullPicker(moreButtonRef.current)
       },
       Escape: (event) => {
-        event.preventDefault()
-        onClose()
+        if (!full) {
+          event.preventDefault()
+          onClose()
+        }
       },
     },
     { whileTyping: true, capture: true },
   )
-
-  const react = useCallback(
-    (key: string, shortcode?: string) => {
-      const trimmed = canonicalReactionKey(key.trim())
-      if (trimmed === '') {
-        return
-      }
-      if (customReactionMxc(trimmed) === null)
-        settings.recordRecentReaction(trimmed)
-      onReact(trimmed, shortcode)
-    },
-    [onReact, settings],
-  )
-  const reactRef = useRef(react)
-
-  useEffect(() => {
-    reactRef.current = react
-  }, [react])
-
+  const react = (key: string, shortcode?: string) => {
+    const trimmed = canonicalReactionKey(key.trim())
+    if (!trimmed) return
+    if (customReactionMxc(trimmed) === null)
+      settings.recordRecentReaction(trimmed)
+    onReact(trimmed, shortcode)
+  }
   useEffect(() => {
     containerRef.current?.scrollIntoView?.({
       block: 'nearest',
       inline: 'nearest',
     })
   }, [containerRef])
-
-  useLayoutEffect(() => {
-    if (mode !== 'full') {
-      return
-    }
-    const dialog = fullPickerDialogRef.current
-    if (dialog === null) {
-      return
-    }
-    document.body.append(dialog)
-    return () => dialog.remove()
-  }, [mode])
-
-  const positionFullPicker = useCallback(() => {
-    if (mode !== 'full') {
-      return
-    }
-    const dialog = fullPickerDialogRef.current
-    if (dialog === null) {
-      return
-    }
-    const dialogBox = dialog.getBoundingClientRect()
-    // Use the shell's visible viewport (which follows the soft keyboard),
-    // then reserve the device safe areas for this body-level popup.
-    const rootStyle = getComputedStyle(document.documentElement)
-    const pixels = (name: string) =>
-      Number.parseFloat(rootStyle.getPropertyValue(name)) || 0
-    const viewportLeft = pixels('--app-viewport-left') + pixels('--safe-left')
-    const viewportTop = pixels('--app-viewport-top') + pixels('--safe-top')
-    const viewportWidth =
-      (pixels('--app-viewport-width') || window.innerWidth) -
-      pixels('--safe-left') -
-      pixels('--safe-right')
-    const viewportHeight =
-      (pixels('--app-viewport-height') || window.innerHeight) -
-      pixels('--safe-top') -
-      pixels('--safe-bottom')
-    const fallbackAnchor = {
-      top: viewportHeight / 2,
-      right: viewportWidth / 2,
-      bottom: viewportHeight / 2,
-    }
-    const anchor =
-      anchorRect === null
-        ? fallbackAnchor
-        : {
-            top: anchorRect.top - viewportTop,
-            right: anchorRect.right - viewportLeft,
-            bottom: anchorRect.bottom - viewportTop,
-          }
-    const position = fullReactionPickerPosition({
-      anchor,
-      dialog: dialogBox,
-      viewport: { width: viewportWidth, height: viewportHeight },
-    })
-    setPickerPosition({
-      left: position.left + viewportLeft,
-      top: position.top + viewportTop,
-    })
-  }, [anchorRect, mode])
-
-  useLayoutEffect(() => {
-    positionFullPicker()
-  }, [positionFullPicker])
-
-  useEffect(() => {
-    if (mode !== 'full') {
-      return
-    }
-    const observer =
-      typeof ResizeObserver === 'undefined'
-        ? null
-        : new ResizeObserver(positionFullPicker)
-    if (fullPickerDialogRef.current !== null) {
-      observer?.observe(fullPickerDialogRef.current)
-    }
-    window.visualViewport?.addEventListener('resize', positionFullPicker)
-    window.visualViewport?.addEventListener('scroll', positionFullPicker)
-    window.addEventListener('resize', positionFullPicker)
-    window.addEventListener('scroll', positionFullPicker, true)
-    return () => {
-      observer?.disconnect()
-      window.visualViewport?.removeEventListener('resize', positionFullPicker)
-      window.visualViewport?.removeEventListener('scroll', positionFullPicker)
-      window.removeEventListener('resize', positionFullPicker)
-      window.removeEventListener('scroll', positionFullPicker, true)
-    }
-  }, [mode, positionFullPicker])
-
-  const setFullPickerDialogRef = useCallback(
-    (element: HTMLDivElement | null) => {
-      fullPickerDialogRef.current = element
-      containerRef.current = element
-    },
-    [containerRef],
-  )
-
-  useEffect(() => {
-    if (mode !== 'full' || category !== 'unicode') {
-      return
-    }
-    const host = fullPickerHostRef.current
-    if (host === null) {
-      return
-    }
-
-    let cancelled = false
-    let picker: HTMLElement | null = null
-    let teardownFocusVisible = () => {}
-    const onEmojiClick = (event: Event) => {
-      const detail = (event as CustomEvent<EmojiPickerClickDetail>).detail
-      reactRef.current(detail.unicode ?? detail.emoji?.unicode ?? '')
-    }
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.key !== 'ArrowLeft' &&
-        event.key !== 'ArrowRight' &&
-        event.key !== 'ArrowUp' &&
-        event.key !== 'ArrowDown'
-      ) {
-        return
-      }
-      if (picker !== null) {
-        moveEmojiPickerFocus(picker, event)
-      }
-    }
-    const mountPicker = (nextPicker: HTMLElement) => {
-      if (cancelled) {
-        return
-      }
-      picker = nextPicker
-      teardownFocusVisible = installEmojiPickerFocusVisible(picker)
-      picker.addEventListener('emoji-click', onEmojiClick)
-      picker.addEventListener('keydown', onKeyDown)
-      host.replaceChildren(picker)
-      focusEmojiPickerSearch(picker)
-    }
-
-    void import('emoji-picker-element').then(({ Picker }) =>
-      mountPicker(new Picker({ dataSource: EMOJI_PICKER_DATA_SOURCE })),
-    )
-
-    return () => {
-      cancelled = true
-      teardownFocusVisible()
-      picker?.removeEventListener('emoji-click', onEmojiClick)
-      picker?.removeEventListener('keydown', onKeyDown)
-      picker?.remove()
-    }
-  }, [mode, category])
-
-  const fullPickerDialog =
-    mode === 'full' ? (
-      <div
-        ref={setFullPickerDialogRef}
-        class="reaction-full-picker"
-        style={
-          pickerPosition === null
-            ? undefined
-            : {
-                left: `${pickerPosition.left}px`,
-                top: `${pickerPosition.top}px`,
-              }
-        }
-        role="dialog"
-        aria-label="Emoji picker"
-      >
-        <div class="reaction-full-picker-head">
-          {customAvailable ? (
-            <div
-              class="reaction-picker-categories"
-              role="group"
-              aria-label="Emoji type"
-            >
-              <button
-                type="button"
-                aria-pressed={category === 'unicode'}
-                onClick={() => setCategory('unicode')}
-              >
-                Emoji
-              </button>
-              <button
-                type="button"
-                aria-pressed={category === 'custom'}
-                onClick={() => setCategory('custom')}
-              >
-                Custom
-              </button>
-            </div>
-          ) : (
-            <span>Emoji picker</span>
-          )}
-          <button type="button" class="ghost" onClick={onClose}>
-            Close
-          </button>
-        </div>
-        {category === 'custom' && customAvailable ? (
-          <CustomEmojiPicker
-            key={`${accountId}\0${roomId}`}
-            accountId={accountId}
-            roomId={roomId}
-            onReact={react}
-          />
-        ) : (
-          <div ref={fullPickerHostRef} class="reaction-full-picker-host" />
-        )}
-      </div>
-    ) : null
-
   return (
     <div
-      ref={mode === 'compact' ? containerRef : null}
+      ref={setCompactRef}
       class="reaction-picker-shell"
       role="group"
       aria-label={ariaLabel}
     >
       <div class="reaction-picker">
-        {quickReactions.map((key) => (
+        {quick.map((key) => (
           <button key={key} type="button" onClick={() => react(key)}>
             {key}
           </button>
         ))}
-        {mode === 'compact' ? (
+        {!full && (
           <button
-            ref={moreButtonRef}
+            ref={moreButton}
             type="button"
             class="reaction-more"
             aria-label="More reactions"
-            onClick={(event) => openFullPicker(event.currentTarget)}
+            onClick={open}
           >
             +
           </button>
-        ) : null}
+        )}
       </div>
-      {fullPickerDialog}
+      {full && (
+        <EmojiPicker
+          anchor={anchor}
+          accountId={accountId}
+          roomId={roomId}
+          onClose={onClose}
+          onSelect={react}
+          relatedControls={() => shell.current}
+        />
+      )}
     </div>
   )
-}
-
-function focusEmojiPickerSearch(picker: HTMLElement): void {
-  const focusSearch = () => {
-    const root = picker.shadowRoot ?? picker
-    const search = root.querySelector<HTMLInputElement>(
-      'input[type="search"], input[aria-label*="search" i], input',
-    )
-    if (search !== null) {
-      search.focus()
-      return true
-    }
-    return false
-  }
-
-  if (focusSearch()) {
-    return
-  }
-  requestAnimationFrame(() => {
-    if (focusSearch()) {
-      return
-    }
-    window.setTimeout(focusSearch, 0)
-  })
-}
-
-function installEmojiPickerFocusVisible(picker: HTMLElement): () => void {
-  const root = picker.shadowRoot
-  if (root === null) {
-    return () => {}
-  }
-
-  picker.setAttribute('data-js-focus-visible', '')
-  const style = document.createElement('style')
-  style.textContent = `
-    [data-focus-visible-added] {
-      outline: 2px solid var(--outline-color) !important;
-      outline-offset: -2px !important;
-    }
-    button[data-focus-visible-added],
-    .nav-button[data-focus-visible-added],
-    .emoji[data-focus-visible-added] {
-      background: var(--button-hover-background) !important;
-      box-shadow: inset 0 0 0 2px var(--outline-color) !important;
-    }
-    input[data-focus-visible-added] {
-      box-shadow: inset 0 0 0 2px var(--outline-color) !important;
-    }
-  `
-  root.append(style)
-  let keyboardMode = false
-
-  const clear = () => {
-    for (const element of root.querySelectorAll('[data-focus-visible-added]')) {
-      element.removeAttribute('data-focus-visible-added')
-    }
-  }
-
-  const mark = (element: HTMLElement | null) => {
-    if (!keyboardMode || element === null) {
-      return
-    }
-    clear()
-    element.setAttribute('data-focus-visible-added', '')
-  }
-
-  const onKeyDown = () => {
-    keyboardMode = true
-    queueMicrotask(() => {
-      mark(
-        root.activeElement instanceof HTMLElement ? root.activeElement : null,
-      )
-    })
-  }
-  const onPointerDown = () => {
-    keyboardMode = false
-    clear()
-  }
-  const onFocusIn = (event: Event) => {
-    mark(event.target instanceof HTMLElement ? event.target : null)
-  }
-
-  document.addEventListener('keydown', onKeyDown, true)
-  root.addEventListener('pointerdown', onPointerDown, true)
-  root.addEventListener('mousedown', onPointerDown, true)
-  root.addEventListener('focusin', onFocusIn)
-
-  return () => {
-    document.removeEventListener('keydown', onKeyDown, true)
-    root.removeEventListener('pointerdown', onPointerDown, true)
-    root.removeEventListener('mousedown', onPointerDown, true)
-    root.removeEventListener('focusin', onFocusIn)
-    clear()
-    style.remove()
-    picker.removeAttribute('data-js-focus-visible')
-  }
-}
-
-function moveEmojiPickerFocus(
-  picker: HTMLElement,
-  event: KeyboardEvent,
-): boolean {
-  const root = picker.shadowRoot
-  if (root === null) {
-    return false
-  }
-  const active = root.activeElement
-  if (!(active instanceof HTMLElement)) {
-    return false
-  }
-
-  const emojiButton = active.closest('button[role="menuitem"]')
-  if (emojiButton instanceof HTMLButtonElement) {
-    const menu = emojiButton.closest('.emoji-menu')
-    if (!(menu instanceof HTMLElement)) {
-      return false
-    }
-    const buttons = [
-      ...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]'),
-    ]
-    const index = buttons.indexOf(emojiButton)
-    if (index === -1) {
-      return false
-    }
-    const columns = Math.max(
-      getComputedStyle(menu)
-        .gridTemplateColumns.split(' ')
-        .filter((value) => value !== '').length,
-      1,
-    )
-    const step =
-      event.key === 'ArrowLeft'
-        ? -1
-        : event.key === 'ArrowRight'
-          ? 1
-          : event.key === 'ArrowUp'
-            ? -columns
-            : event.key === 'ArrowDown'
-              ? columns
-              : 0
-    if (step === 0) {
-      return false
-    }
-    const next = buttons[index + step]
-    if (next === undefined) {
-      return false
-    }
-    event.preventDefault()
-    next.focus()
-    return true
-  }
-
-  const navButton = active.closest('.nav-button')
-  if (
-    navButton instanceof HTMLButtonElement &&
-    (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
-  ) {
-    const buttons = [...root.querySelectorAll<HTMLButtonElement>('.nav-button')]
-    const index = buttons.indexOf(navButton)
-    const next =
-      event.key === 'ArrowLeft' ? buttons[index - 1] : buttons[index + 1]
-    if (next === undefined) {
-      return false
-    }
-    event.preventDefault()
-    next.focus()
-    return true
-  }
-
-  return false
 }
 
 export function canonicalReactionKey(key: string): string {

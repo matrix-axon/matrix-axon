@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify'
 import { linkifyDomTree } from './linkify'
+import { customReactionMxc } from '../custom-reactions'
 
 interface MatrixHtmlRenderContext {
   resolveUserLink?: (
@@ -90,6 +91,7 @@ const ALLOWED_ATTR = [
   'data-mx-color',
   'data-mx-bg-color',
   'data-mx-spoiler',
+  'data-mx-emoticon',
   // `<img>` (mxc-only): `src` is never allowed through — the hook rewrites a
   // safe `mxc://` src into `data-mxc`, which `FormattedBody` resolves.
   'alt',
@@ -149,16 +151,42 @@ function configure(): void {
  * every receiving client must sanitize anyway (ours does), our own output
  * stays honest by never carrying an active scheme.
  */
-export function sanitizeOutgoingHtml(html: string): string {
-  configure()
-  return DOMPurify.sanitize(html, {
+export function sanitizeOutgoingHtml(
+  html: string,
+  { inlineEmoji = false }: { inlineEmoji?: boolean } = {},
+): string {
+  return outgoingPurify.sanitize(html, {
     ALLOWED_TAGS,
-    ALLOWED_ATTR,
+    ALLOWED_ATTR: inlineEmoji
+      ? [...ALLOWED_ATTR, 'src', 'title']
+      : ALLOWED_ATTR,
     FORBID_CONTENTS: ['mx-reply', 'style', 'script'],
     ALLOW_DATA_ATTR: false,
+    // Only generated emoticon src attributes get this exception. The hook
+    // validates each image; links always retain the ordinary URI allowlist.
+    ADD_URI_SAFE_ATTR: inlineEmoji ? ['src'] : [],
     ALLOWED_URI_REGEXP,
   })
 }
+
+// Display sanitization rewrites MXCs to data-mxc. Outgoing HTML must retain
+// real MXC src attributes so other clients and the server can resolve them.
+const outgoingPurify = DOMPurify(window)
+outgoingPurify.addHook('uponSanitizeElement', (node, data) => {
+  if (node.nodeType !== Node.ELEMENT_NODE) return
+  const element = node as Element
+  const src = element.getAttribute('src')
+  const generated =
+    data.tagName === 'img' &&
+    element.hasAttribute('data-mx-emoticon') &&
+    src !== null &&
+    customReactionMxc(src) !== null
+  if (!generated) {
+    element.removeAttribute('src')
+    element.removeAttribute('title')
+  }
+  element.removeAttribute('data-mxc')
+})
 
 /**
  * Sanitize Matrix HTML and apply the Matrix-specific transforms, returning

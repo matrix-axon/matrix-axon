@@ -724,6 +724,52 @@ describe('editing and redacting', () => {
     )
   })
 
+  it('does not resurrect removed image bindings after a failed edit', async () => {
+    const edits: Record<string, unknown>[] = []
+    server.use(
+      http.put(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId`,
+        async ({ request }) => {
+          edits.push((await request.json()) as Record<string, unknown>)
+          return HttpResponse.json(
+            { error: { code: 'internal', message: 'edit unavailable' } },
+            { status: 500 },
+          )
+        },
+      ),
+    )
+    const { services, findAllByRole, getByLabelText, findByText } = renderRoom([
+      event('$custom-edit', 200, {
+        sender: OWN_USER,
+        body: 'hi :custom:',
+        content: {
+          msgtype: 'm.text',
+          body: 'hi :custom:',
+          format: 'org.matrix.custom.html',
+          formatted_body:
+            'hi <img data-mx-emoticon src="mxc://hs/custom" alt=":custom:">',
+        } as unknown as EventDto['content'],
+      }),
+    ])
+    vi.spyOn(services.media, 'acquire').mockResolvedValue({
+      release: vi.fn(),
+      result: { ok: false, reason: 'not_found' },
+    } as never)
+    fireEvent.click((await findAllByRole('button', { name: 'Edit' }))[0])
+    let input = getByLabelText('Message Ops') as HTMLTextAreaElement
+    fireEvent.input(input, { target: { value: 'hi :customX:' } })
+    fireEvent.input(input, { target: { value: 'hi :custom:' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await findByText('edit unavailable')
+    await findByText('Editing')
+    input = getByLabelText('Message Ops') as HTMLTextAreaElement
+    await waitFor(() => expect(input.value).toBe('hi :custom:'))
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(2))
+    expect(edits[0].formatted_body ?? '').not.toContain('mxc://hs/custom')
+    expect(edits[1].formatted_body ?? '').not.toContain('mxc://hs/custom')
+  })
+
   it('redact requires confirmation and masks the row', async () => {
     let deleted: string | null = null
     server.use(
@@ -1218,7 +1264,10 @@ describe('reactions', () => {
     const compactPicker = container.querySelector('.reaction-picker')
     const fullPicker = await findByRole('dialog', { name: 'Emoji picker' })
     expect(fullPicker).toBeTruthy()
-    expect(fullPicker.parentElement).toBe(document.body)
+    // BodyPortal may add a host, but the fixed popup must leave the message
+    // row's layout/containment and remain attached beneath document.body.
+    expect(document.body.contains(fullPicker)).toBe(true)
+    expect(fullPicker.closest('.event-row')).toBeNull()
     expect(shell?.contains(fullPicker)).toBe(false)
     expect(fullPicker.parentElement).not.toBe(compactPicker)
     expect(compactPicker?.contains(fullPicker)).toBe(false)
@@ -3852,6 +3901,29 @@ describe('sending media (M-W8.5, ADR 0065)', () => {
     )
     // The chip is gone once the send is under way.
     expect(getByLabelText('Attach a file')).toBeTruthy()
+  })
+
+  it('sends Markdown captions with formatting even without inline emoji', async () => {
+    const seen = serveMediaSend()
+    const { getByRole, getByText, container } = renderRoom([event('$a', 100)])
+    await waitFor(() => getByText('body of $a'))
+    fireEvent.drop(container.querySelector('.room-stream')!, {
+      dataTransfer: { files: [png()], types: ['Files'] },
+    })
+    await waitFor(() => getByText('cat.png'))
+    const textarea = getByRole('textbox')
+    fireEvent.input(textarea, { target: { value: '**look** at this' } })
+    fireEvent.submit(textarea.closest('form')!)
+    await waitFor(() =>
+      expect(seen.sendBody()).toEqual({
+        upload_id: UPLOAD_ID,
+        caption: '**look** at this',
+        reply_to: null,
+        thread_root: null,
+        format: 'org.matrix.custom.html',
+        formatted_body: '<p><strong>look</strong> at this</p>',
+      }),
+    )
   })
 
   it('sends a staged file bare, with no caption, on an empty composer', async () => {
