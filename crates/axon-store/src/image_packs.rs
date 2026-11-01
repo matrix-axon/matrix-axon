@@ -5,6 +5,7 @@ use serde_json::Value;
 use sqlx_core::row::Row;
 use uuid::Uuid;
 
+use crate::spaces::SPACE_LINK_IS_CURRENT;
 use crate::{Store, StoreError};
 
 #[derive(Debug)]
@@ -38,10 +39,7 @@ const ANCESTORS: &str = r#",
     space_links AS NOT MATERIALIZED (
         SELECT * FROM room_state WHERE account_id=$1
             AND event_type IN ('m.space.parent','m.space.child')
-            AND redacted IS DISTINCT FROM true
-            AND jsonb_typeof(content->'via')='array'
-            AND content->'via'<>'[]'::jsonb
-            AND NOT jsonb_path_exists(content->'via', '$[*] ? (@.type() != "string" || @ == "")')
+            AND {space_link_is_current}
     ), ancestry(room_id, depth, visited, cycle) AS (
         SELECT $2::text, 0, ARRAY[$2::text], false
         UNION ALL
@@ -193,6 +191,7 @@ impl Store {
     ) -> Result<(bool, Vec<ImagePackRow>, bool), StoreError> {
         let hierarchy = if room_id.is_some() {
             ANCESTORS
+                .replace("{space_link_is_current}", SPACE_LINK_IS_CURRENT)
                 .replace("{max_depth}", &(MAX_ANCESTORS + 1).to_string())
                 .replace("{max_ancestors}", &MAX_ANCESTORS.to_string())
         } else {
