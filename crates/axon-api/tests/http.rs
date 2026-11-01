@@ -1998,6 +1998,30 @@ async fn space_hierarchy_endpoint() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
     }
 
+    // The scope tag is not a secret, so a client can re-mint a correctly
+    // scoped cursor around a position the store never issues. A NUL byte would
+    // reach PostgreSQL as a text parameter and fail as a 500; it is a 400.
+    {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let wire: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&cursor).expect("base64")).unwrap();
+        let tampered = [
+            ("r", json!("!a\0b:localhost")),
+            ("r", json!(format!("!{}:localhost", "x".repeat(260)))),
+            ("o", json!("a\0")),
+            ("o", json!("x".repeat(51))),
+            ("o", json!("é")),
+        ];
+        for (field, value) in tampered {
+            let mut minted = wire.clone();
+            minted[field] = value;
+            let minted = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&minted).unwrap());
+            let (status, _) = get(&app, &format!("{base}?cursor={minted}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+        }
+    }
+
     // An unknown space is an empty page, not a 404.
     let (status, body) = get(
         &app,

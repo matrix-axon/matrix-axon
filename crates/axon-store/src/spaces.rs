@@ -305,7 +305,10 @@ impl Store {
     /// so they share a snapshot, and a page past the end still reports the
     /// total. The whole-space scan keeps only each link's sort key; a link's
     /// `via` and `suggested`, and the child's display and membership lookups,
-    /// are read only for the page's rows.
+    /// are read only for the page's rows. Every per-row lookup, `joined`
+    /// included, is a primary-key point lookup: the account's user id is an
+    /// uncorrelated subquery, so the member check never walks a child's
+    /// membership list.
     pub async fn space_hierarchy_page(
         &self,
         account_id: Uuid,
@@ -350,9 +353,10 @@ impl Store {
                       (SELECT rs.content->>'type' FROM room_state rs
                          WHERE rs.account_id = $1 AND rs.room_id = p.child_id
                            AND rs.event_type = 'm.room.create' AND rs.state_key = '') AS room_type,
-                      EXISTS (SELECT 1 FROM room_state m JOIN accounts ac ON ac.account_id = m.account_id
+                      EXISTS (SELECT 1 FROM room_state m
                          WHERE m.account_id = $1 AND m.room_id = p.child_id
-                           AND m.event_type = 'm.room.member' AND m.state_key = ac.user_id
+                           AND m.event_type = 'm.room.member'
+                           AND m.state_key = (SELECT ac.user_id FROM accounts ac WHERE ac.account_id = $1)
                            AND m.content->>'membership' = 'join'
                            AND m.redacted IS DISTINCT FROM true) AS joined
                FROM (SELECT count(*) AS total_children FROM links) t

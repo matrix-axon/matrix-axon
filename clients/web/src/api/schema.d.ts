@@ -1326,7 +1326,8 @@ export interface paths {
          *     Reads only local data and never waits for the homeserver. Each page starts
          *     strictly after the last row of the previous one, so a link added or
          *     removed between pages neither duplicates nor skips any other link; a link
-         *     whose `order` changes between pages may appear twice or not at all in one
+         *     whose `order` or `origin_ts` changes between pages (an edit or a
+         *     replacement `m.space.child` event) may appear twice or not at all in one
          *     walk, so de-duplicate by room id. `next_cursor` is `null` only on the last
          *     page, and `total_children` counts every current link, so nothing is
          *     dropped silently. An unknown `account_id`/`room_id`, or a room with no
