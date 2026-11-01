@@ -1119,3 +1119,243 @@ async fn failed_title_overflow_recovery_allows_a_later_frame_to_retry() {
         LiveFrameAction::RefreshRooms
     );
 }
+
+mod pending_membership {
+    //! A leave or forget axon answered with a `504` (ADR 0121 decision 5,
+    //! issue #743): pending, not failed, and settled by the room list.
+
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::app::room_actions::{
+        RoomActionFailure, RoomActionKind, PENDING_MEMBERSHIP_CHECK_DELAYS,
+    };
+
+    fn timed_out(verb: &str) -> RoomActionFailure {
+        RoomActionFailure {
+            message: format!("HTTP 504 Gateway Timeout: {verb} timed out after 30s"),
+            timed_out: true,
+        }
+    }
+
+    fn action(kind: RoomActionKind, slow: &RoomDto) -> PendingRoomAction {
+        PendingRoomAction {
+            kind,
+            key: RoomKey::from(slow),
+            room_title: slow.title().to_owned(),
+            user_id: None,
+            reason: None,
+        }
+    }
+
+    fn slow_room() -> RoomDto {
+        room("!slow:example.com", None, Some("Slow"))
+    }
+
+    /// An app listing the slow room, selected, whose leave just timed out.
+    async fn app_with_pending(kind: RoomActionKind) -> (App, RoomKey) {
+        let slow = slow_room();
+        let mut app = app_with_rooms(vec![slow.clone()]);
+        app.rooms.selected = Some(0);
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: action(kind, &slow),
+            result: Err(timed_out(kind_verb(kind))),
+        })
+        .await;
+        (app, RoomKey::from(&slow))
+    }
+
+    fn kind_verb(kind: RoomActionKind) -> &'static str {
+        match kind {
+            RoomActionKind::Forget => "forget",
+            _ => "leave",
+        }
+    }
+
+    /// Run every check of the schedule and the grace after it.
+    fn run_schedule(app: &mut App, from: Instant) -> Instant {
+        let mut now = from;
+        for delay in PENDING_MEMBERSHIP_CHECK_DELAYS {
+            now += delay;
+            app.poll_pending_memberships(now);
+        }
+        now += Duration::from_secs(60);
+        app.poll_pending_memberships(now);
+        now
+    }
+
+    #[tokio::test]
+    async fn a_504_from_leave_is_pending_not_a_failure() {
+        let (app, key) = app_with_pending(RoomActionKind::Leave).await;
+
+        let status = app.status.text(false);
+        assert!(status.contains("hasn't finished leaving Slow"), "{status}");
+        assert!(!status.contains("failed"), "{status}");
+        assert!(app
+            .pending_memberships
+            .contains_key(&(key, RoomActionKind::Leave)));
+        // The room stays: only the room list can say the leave went through.
+        assert_eq!(app.rooms.rooms.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_502_from_leave_is_still_a_failure() {
+        let slow = slow_room();
+        let mut app = app_with_rooms(vec![slow.clone()]);
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: action(RoomActionKind::Leave, &slow),
+            result: Err(RoomActionFailure {
+                message: "HTTP 502 Bad Gateway: M_UNKNOWN".to_owned(),
+                timed_out: false,
+            }),
+        })
+        .await;
+
+        assert_eq!(
+            app.status.text(false),
+            "/leave failed in Slow: HTTP 502 Bad Gateway: M_UNKNOWN"
+        );
+        assert!(app.pending_memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_504_from_invite_is_still_a_failure() {
+        let slow = slow_room();
+        let mut app = app_with_rooms(vec![slow.clone()]);
+        let mut invite = action(RoomActionKind::Invite, &slow);
+        invite.user_id = Some("@bob:example.com".to_owned());
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: invite,
+            result: Err(timed_out("invite")),
+        })
+        .await;
+
+        assert!(app.status.text(false).starts_with("/invite failed in Slow"));
+        assert!(app.pending_memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn holds_back_a_second_leave_until_the_first_check() {
+        let (mut app, _) = app_with_pending(RoomActionKind::Leave).await;
+
+        app.start_leave_room();
+        assert_eq!(app.mode, Mode::Compose, "no confirmation, nothing sent");
+        assert!(app.status.text(false).contains("no need to leave again"));
+
+        app.poll_pending_memberships(Instant::now() + PENDING_MEMBERSHIP_CHECK_DELAYS[0]);
+        app.start_leave_room();
+        assert!(
+            matches!(app.mode, Mode::ConfirmRoomAction { .. }),
+            "a deliberate retry goes through after the first check"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_rereads_the_room_list_and_a_missing_room_settles_it() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+        assert!(!app.rooms_fetch_inflight);
+
+        app.poll_pending_memberships(Instant::now() + PENDING_MEMBERSHIP_CHECK_DELAYS[0]);
+        assert!(app.rooms_fetch_inflight, "the check asks for the room list");
+
+        app.apply_room_refresh(Vec::new());
+        assert!(!app
+            .pending_memberships
+            .contains_key(&(key, RoomActionKind::Leave)));
+        assert_eq!(app.status.text(false), "left Slow");
+    }
+
+    #[tokio::test]
+    async fn a_list_read_for_another_account_settles_nothing() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+        app.account_filter = Some(Uuid::from_u128(7));
+
+        app.apply_room_refresh(Vec::new());
+
+        assert!(app
+            .pending_memberships
+            .contains_key(&(key, RoomActionKind::Leave)));
+    }
+
+    #[tokio::test]
+    async fn a_leave_still_listed_after_the_schedule_may_have_failed() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+
+        run_schedule(&mut app, Instant::now());
+
+        assert!(!app
+            .pending_memberships
+            .contains_key(&(key, RoomActionKind::Leave)));
+        let status = app.status.text(false);
+        assert!(status.contains("Slow is still listed"), "{status}");
+    }
+
+    #[tokio::test]
+    async fn a_pending_forget_waits_the_schedule_out_without_reading_the_list() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Forget).await;
+        assert!(app
+            .status
+            .text(false)
+            .contains("hasn't finished forgetting Slow"));
+
+        // A forget changes nothing the list shows, so a refresh settles nothing.
+        app.apply_room_refresh(Vec::new());
+        assert!(app
+            .pending_memberships
+            .contains_key(&(key.clone(), RoomActionKind::Forget)));
+
+        app.rooms_fetch_inflight = false;
+        run_schedule(&mut app, Instant::now());
+        assert!(!app.rooms_fetch_inflight);
+        assert!(!app
+            .pending_memberships
+            .contains_key(&(key, RoomActionKind::Forget)));
+    }
+
+    #[tokio::test]
+    async fn a_forget_timing_out_keeps_a_pending_leave() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+        let slow = slow_room();
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: action(RoomActionKind::Forget, &slow),
+            result: Err(timed_out("forget")),
+        })
+        .await;
+
+        assert!(app
+            .pending_memberships
+            .contains_key(&(key.clone(), RoomActionKind::Leave)));
+        assert!(app
+            .pending_memberships
+            .contains_key(&(key, RoomActionKind::Forget)));
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_a_later_forget_ends_a_pending_leave() {
+        let slow = slow_room();
+        // A lagging list still shows the room, so only the answer itself can
+        // end the pending leave.
+        let base_url = spawn_api_stub(vec![rooms_response_body(std::slice::from_ref(&slow))]).await;
+        let mut app = App::new(
+            AxonClient::new(base_url, None),
+            None,
+            TuiConfig::test_default(),
+            Picker::halfblocks(),
+        );
+        app.rooms.rooms = vec![slow.clone()];
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: action(RoomActionKind::Leave, &slow),
+            result: Err(timed_out("leave")),
+        })
+        .await;
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: action(RoomActionKind::Forget, &slow),
+            result: Ok(()),
+        })
+        .await;
+
+        assert!(app.pending_memberships.is_empty());
+        assert_eq!(app.status.text(false), "forgot Slow");
+    }
+}

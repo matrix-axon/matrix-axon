@@ -2386,6 +2386,13 @@ impl ApiError {
         matches!(self, ApiError::Status { status, .. } if *status == StatusCode::SERVICE_UNAVAILABLE)
     }
 
+    /// `true` for an HTTP 504: axon, or a proxy in front of it, stopped waiting
+    /// for the homeserver, which may still finish the call (ADR 0121
+    /// decision 5).
+    pub fn is_gateway_timeout(&self) -> bool {
+        matches!(self, ApiError::Status { status, .. } if *status == StatusCode::GATEWAY_TIMEOUT)
+    }
+
     /// `true` when the same request might succeed if sent again: no answer at
     /// all (a timeout or connection failure), a 5xx, or a 429.
     pub fn is_transient(&self) -> bool {
@@ -3070,6 +3077,18 @@ mod tests {
         assert!(!status(StatusCode::NOT_FOUND).is_transient());
         assert!(!status(StatusCode::FORBIDDEN).is_transient());
         assert!(!ApiError::Url("x".to_owned()).is_transient());
+    }
+
+    #[test]
+    fn only_a_504_is_a_gateway_timeout() {
+        let status = |status| ApiError::Status {
+            status,
+            message: "x".to_owned(),
+        };
+        assert!(status(StatusCode::GATEWAY_TIMEOUT).is_gateway_timeout());
+        assert!(!status(StatusCode::BAD_GATEWAY).is_gateway_timeout());
+        // The client's own timeout is no answer at all, not axon's 504.
+        assert!(!ApiError::Request("request timed out".to_owned()).is_gateway_timeout());
     }
 
     #[test]

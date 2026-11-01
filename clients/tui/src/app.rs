@@ -815,6 +815,11 @@ pub(crate) struct App {
     /// True while an M19 room membership/moderation action is in flight, so
     /// progress and outcome status are not overwritten by unrelated refreshes.
     pub(crate) room_action_busy: bool,
+    /// Leaves and forgets axon answered with a `504`, by room and verb, still
+    /// being waited out (ADR 0121 decision 5, issue #743). See
+    /// [`room_actions::PENDING_MEMBERSHIP_CHECK_DELAYS`].
+    pub(crate) pending_memberships:
+        HashMap<(RoomKey, room_actions::RoomActionKind), room_actions::PendingMembership>,
     /// Sender for results of in-flight M19 room actions spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
     pub(crate) room_action_tx: Option<mpsc::UnboundedSender<RoomActionOutcome>>,
@@ -1221,6 +1226,7 @@ impl App {
             lifecycle_busy: false,
             media_send_busy: false,
             room_action_busy: false,
+            pending_memberships: HashMap::new(),
             room_action_tx: None,
             tag_write_tx: None,
             tag_write_busy: false,

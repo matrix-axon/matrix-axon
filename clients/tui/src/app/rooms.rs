@@ -179,6 +179,7 @@ impl App {
             self.rooms.selected = None;
         }
         self.maybe_start_pin_migration();
+        self.settle_pending_leaves();
         self.recover_title_overflow();
     }
 
@@ -310,7 +311,7 @@ impl App {
     /// Whether `account_id` is an account we've listed and that is *not* active
     /// (e.g. logged out). Unknown accounts return `false` so we never hide a
     /// room just because our account list is empty or stale.
-    fn is_known_inactive_account(&self, account_id: Uuid) -> bool {
+    pub(super) fn is_known_inactive_account(&self, account_id: Uuid) -> bool {
         self.accounts.inactive_ids.contains(&account_id)
     }
 
