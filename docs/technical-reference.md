@@ -30,6 +30,23 @@ See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and seq
 Personal, current-room, and joined canonical ancestor image packs support custom emoji and sticker discovery.
 The room `emoji-packs` endpoint exposes cached packs, with `usage=sticker` selecting sticker-capable entries.
 The media proxy accepts current pack references before their first use as reactions.
+HTML messages also retain the first 64 distinct inline image references in document order, independent of subsequent pack changes.
+References come from parsed, sanitized `img` elements in HTML bodies of at most 64 KiB.
+Authorization uses the same latest valid edit as the timeline, so stray replacement content, another sender's edits, and superseded edits do not authorize images.
+These references authorize only the owning account while the room is not known left or banned, and an authorized redaction in the same room revokes the reference.
+Redaction checks use SDK-pruned evidence or cached sender/server and current power-level authority, matching the server's existing state-repair policy.
+This fallback does not reconstruct historical authorization: a later promotion can make an earlier pending redaction provable.
+Proven redaction authority is persisted atomically with event ingestion in either arrival order, so later power-level changes cannot restore redacted media.
+A forward migration preserves already-applied same-room redactions for every stored event type, even when the historical moderator state is no longer available.
+Subsequent creation or power-level state writes retry pending authority proofs for that account and room and enqueue search refreshes atomically.
+Event and authority-state writes share a transaction-scoped account/room lock, with the configured SQL lock/statement deadlines, so concurrent arrival cannot lose the proof.
+The inline authorization read has a ten-second overall deadline, including pool acquisition, in addition to configured database deadlines.
+Inline images use the same raster MIME restrictions as pack previews.
+Historical references are repaired in the background in committed batches of at most 32 messages, using the isolated maintenance connection and a ten-second batch deadline.
+The worker waits one second between batches, retries failures, and resumes pending rows after restart; identical re-deliveries can also heal pending references.
+The pacing ceiling is about 32 messages per second before query and parsing time: one million pending messages therefore take at least 8.7 hours, and larger or busy databases take longer.
+Until a historical row is repaired, its previous media authorization behavior applies.
+Historical repair bounds each loaded content object to 128 KiB; oversized objects receive an empty projection.
 Clients may send an optional shortcode with a custom reaction, or send an existing pack image through `send-sticker` as a standalone `m.sticker` event.
 See [Custom emoji discovery](custom-emoji.md) for limits, sync behavior, inheritance, sending, and diagnostics.
 
@@ -86,6 +103,11 @@ A timed-out SQL statement fails and rolls back its writes; a canceled HTTP respo
 
 Upgrades apply schema migrations at startup, before the server accepts requests.
 A migration that adds a column or index to the `events` table holds it locked until the migration commits.
+The inline-media upgrade builds both its pending-row and GIN indexes non-concurrently and seeds historical redaction proofs before accepting traffic.
+The historical proof seed and its search-outbox fanout run as one unbatched startup statement under `migration_statement_secs`, just like the index builds.
+A timeout rolls back that migration and prevents startup; increase the deadline and restart to retry.
+Plan a maintenance window for large event stores; this startup work is separate from the paced inline-media repair afterward.
+After startup, the search worker drains the potentially large new outbox backlog in its normal bounded batches.
 The thread-summary index (#763) took 96 seconds on a 2.7 GB `events` table, of which the backfill and the index build are separate statements under the 600-second deadline.
 On a much larger database, raise `migration_statement_secs` for the upgrade if a statement times out; the failed migration rolls back and runs again at the next start.
 A migration that rewrites many rows, as that one does, leaves index-only scans reading the table itself until autovacuum next processes it.

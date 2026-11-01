@@ -413,10 +413,13 @@ async fn resolve_media_content(
         return Ok((content, raster_only));
     }
     if store
-        .image_pack_authorizes_media(account_id, mxc_url)
+        .inline_message_authorizes_media(account_id, mxc_url)
         .await?
+        || store
+            .image_pack_authorizes_media(account_id, mxc_url)
+            .await?
     {
-        // Packs never provide encrypted descriptors or trusted MIME types.
+        // Inline images and packs never provide encrypted descriptors or trusted MIME types.
         return Ok((serde_json::json!({}), true));
     }
     Err(ApiError::from(MediaError::NotFound(mxc_url.to_owned())))

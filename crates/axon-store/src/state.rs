@@ -337,15 +337,30 @@ impl Store {
         .bind(&s.content)
         .bind(redacted)
         .bind(redaction_event_id);
-        let changed = if purge {
+        let authority = s.state_key.is_empty()
+            && matches!(s.event_type, "m.room.power_levels" | "m.room.create");
+        let changed = if purge || authority {
             let mut tx = self.pool.begin().await?;
+            if authority {
+                crate::event_visibility::lock_redaction_scope(&mut tx, s.account_id, s.room_id)
+                    .await?;
+            }
             // Any accepted leave write advances the purge, including a replay.
             let (written, changed) = query.fetch_one(&mut *tx).await?;
-            if written {
+            if written && authority {
+                // A second statement sees the newly written authority state.
+                let proofs = crate::event_visibility::capture_room_redaction_proofs();
+                sqlx_core::query::query(&proofs)
+                    .bind(s.account_id)
+                    .bind(s.room_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            if written && purge {
                 Self::room_purge_watermark(s.account_id, s.room_id, true, &mut *tx).await?;
             }
             tx.commit().await?;
-            if written {
+            if written && purge {
                 self.purge_wakeup.notify_one();
                 tracing::info!(account_id = %s.account_id, room_id = %s.room_id, "queued room purge with local leave state");
             }
