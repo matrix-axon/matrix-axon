@@ -67,10 +67,16 @@ let nextId = 1
 /**
  * Release a body nobody read once its stream is collected (ADR 0127 § 2).
  *
- * Registered on the body stream rather than the `Response`. A caller that
- * holds a reader and drops the response is still reading, and the stream is
- * what the reader keeps alive. Absent in a webview without the API, where the
- * entry instead waits for the request's signal or the page to go.
+ * What is registered is neither the `Response` nor its stream but a plain
+ * object only the stream's own `pull` and `cancel` hold, so it lives exactly as
+ * long as the stream can still be read. A `Response` and a `ReadableStream` are
+ * the engine's objects, and Chromium (WebView2, Android's WebView) drops and
+ * recreates the script wrapper of one nothing in script refers to, even while a
+ * reader is pulling from it. Registered on the stream, this finalizer fired for
+ * 49 of 50 bodies still being read, and the read then failed as `cancelled`.
+ *
+ * Absent in a webview without the API, where the entry instead waits for the
+ * request's signal or the page to go.
  */
 const unreadBodies =
   typeof FinalizationRegistry === 'function'
@@ -187,6 +193,8 @@ function bodyStream(
   signal: AbortSignal,
   cancel: () => void,
 ): ReadableStream<Uint8Array> {
+  // The finalizer's target (see `unreadBodies`). `settle` refers to it, so the
+  // stream's `pull` and `cancel` keep it alive for as long as the stream is.
   const token = {}
   let done = false
   let controller: ReadableStreamDefaultController<Uint8Array> | null = null
@@ -251,7 +259,7 @@ function bodyStream(
       void invoke('plugin:axon-http|drop_body', { id }).catch(() => {})
     },
   })
-  unreadBodies?.register(stream, id, token)
+  unreadBodies?.register(token, id, token)
   return stream
 }
 

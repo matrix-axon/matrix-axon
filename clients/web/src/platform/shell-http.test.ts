@@ -10,6 +10,29 @@ interface Call {
   args: unknown
   options?: { headers?: Record<string, string> }
 }
+/**
+ * A stand-in for the engine's `FinalizationRegistry`, so a test can see what
+ * the binding registers and run its cleanup as a collection would.
+ */
+const finalizer = vi.hoisted(() => {
+  const state = {
+    cleanup: null as ((held: unknown) => void) | null,
+    live: new Map<object, { target: object; held: unknown }>(),
+  }
+  globalThis.FinalizationRegistry = class<T> {
+    constructor(cleanup: (held: T) => void) {
+      state.cleanup = cleanup as (held: unknown) => void
+    }
+    register(target: object, held: T, token: object) {
+      state.live.set(token, { target, held })
+    }
+    unregister(token: object) {
+      return state.live.delete(token)
+    }
+  } as unknown as FinalizationRegistryConstructor
+  return state
+})
+
 const calls: Call[] = []
 let onInvoke: (call: Call) => Promise<unknown> = () => Promise.resolve(null)
 vi.mock('@tauri-apps/api/core', () => ({
@@ -248,6 +271,41 @@ describe('shellFetch response', () => {
           call.cmd === 'plugin:axon-http|cancel',
       ),
     ).toEqual([])
+  })
+})
+
+describe('shellFetch unread bodies', () => {
+  it('registers an object of its own for release, not an engine object', async () => {
+    // Chromium drops and recreates the script wrapper of a `ReadableStream`
+    // or `Response` nothing in script refers to, even mid-read, and that
+    // wrapper's finalizer then fires. A finalizer on one released bodies that
+    // were still being read.
+    plugin({}, [chunk('a')])
+    finalizer.live.clear()
+    const response = await shellFetch(URL_, undefined, never())
+    const id = lineOf(sends()[0]!).id
+    const entries = [...finalizer.live.values()]
+    expect(entries).toEqual([{ target: expect.any(Object), held: id }])
+    const { target } = entries[0]!
+    expect(target).not.toBeInstanceOf(ReadableStream)
+    expect(target).not.toBeInstanceOf(Response)
+    expect(target).not.toBe(response.body)
+
+    // Read to the end, the body is the plugin's to forget, not the finalizer's.
+    await response.text()
+    expect(finalizer.live.size).toBe(0)
+  })
+
+  it('releases the body when the finalizer runs', async () => {
+    plugin({})
+    finalizer.live.clear()
+    await shellFetch(URL_, undefined, never())
+    const id = lineOf(sends()[0]!).id
+    const [{ held }] = [...finalizer.live.values()]
+    finalizer.cleanup!(held)
+    expect(
+      calls.filter((call) => call.cmd === 'plugin:axon-http|drop_body'),
+    ).toEqual([expect.objectContaining({ args: { id } })])
   })
 })
 
