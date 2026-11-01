@@ -376,7 +376,7 @@ test('a selected image survives draft reload and pack removal without another lo
 for (const thread of [false, true]) {
   test(`touch users can insert custom emoji while editing in the ${thread ? 'thread' : 'room'}`, async ({
     page,
-  }) => {
+  }, info) => {
     const { sent, edits } = await fixtures(page)
     await signIn(page)
     await page.goto(
@@ -402,6 +402,21 @@ for (const thread of [false, true]) {
       .getByRole('button', { name: 'Emoji', exact: true })
       .click()
     const dialog = page.getByRole('dialog', { name: 'Emoji picker' })
+    await expect(dialog).toBeVisible()
+    const trigger = pane
+      .locator('.composer')
+      .getByRole('button', { name: 'Emoji', exact: true })
+    const activateTrigger = () =>
+      info.project.name === 'webkit-iphone' ? trigger.tap() : trigger.click()
+    await activateTrigger()
+    await expect(dialog).toBeHidden()
+    await expect(input).toBeFocused()
+    await expect(input).toHaveValue('edit this message')
+    expect(
+      await input.evaluate((el) => [el.selectionStart, el.selectionEnd]),
+    ).toEqual([5, 9])
+    await activateTrigger()
+    await expect(dialog).toBeVisible()
     await dialog.getByRole('button', { name: 'Custom', exact: true }).click()
     await dialog.getByRole('button', { name: 'Insert :smile:' }).nth(1).click()
     await expect(input).toHaveValue('edit :smile: message')

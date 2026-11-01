@@ -278,6 +278,7 @@ export function Composer({
     parseInlineEmoji(initialValue, initialInlineEmoji),
   )
   const syncedEmoji = useRef(initialEmojiKey)
+  const emojiButton = useRef<HTMLButtonElement>(null)
   const [emojiSelection, setEmojiSelection] = useState<{
     text: string
     start: number
@@ -738,7 +739,11 @@ export function Composer({
     }
   }
 
-  const openEmojiPicker = () => {
+  const toggleEmojiPicker = () => {
+    if (emojiSelection !== null) {
+      setEmojiSelection(null)
+      return
+    }
     const el = textarea.current
     if (!el) return
     setEmojiSelection({
@@ -1442,7 +1447,7 @@ export function Composer({
                 event.keyCode !== 229
               ) {
                 event.preventDefault()
-                openEmojiPicker()
+                toggleEmojiPicker()
                 return
               }
               // Markdown formatting chords (ADR 0123). Claimed here, before the
@@ -1715,7 +1720,8 @@ export function Composer({
         {emojiScope !== undefined && (
           <ComposerEmojiButton
             {...(stickers ?? emojiScope)}
-            onInsertEmoji={openEmojiPicker}
+            buttonRef={emojiButton}
+            onInsertEmoji={toggleEmojiPicker}
           />
         )}
         {emojiSelection !== null && (
@@ -1732,6 +1738,9 @@ export function Composer({
                 : emojiScope?.roomId
             }
             action="insert"
+            relatedControls={() =>
+              stickers === undefined ? emojiButton.current : null
+            }
             restoreTo={() => textarea.current}
             onClose={() => setEmojiSelection(null)}
             onSelect={insertEmoji}

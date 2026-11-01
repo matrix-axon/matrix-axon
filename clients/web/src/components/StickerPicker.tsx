@@ -1,3 +1,4 @@
+import type { RefObject } from 'preact'
 import type { ApiClient } from '../api/client'
 import { useRef, useState } from 'preact/hooks'
 import type { CustomEmoji } from '../emoji-packs'
@@ -36,10 +37,12 @@ export function ComposerEmojiButton(
   options: Pick<StickerPickerOptions, 'api' | 'accountId' | 'roomId'> & {
     onSelect?: StickerPickerOptions['onSelect']
     onInsertEmoji?: () => void
+    buttonRef?: RefObject<HTMLButtonElement>
   },
 ) {
   const [open, setOpen] = useState(false)
-  const button = useRef<HTMLButtonElement>(null)
+  const ownButton = useRef<HTMLButtonElement>(null)
+  const button = options.buttonRef ?? ownButton
   return (
     <>
       <button
