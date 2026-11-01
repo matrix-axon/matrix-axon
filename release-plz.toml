@@ -42,7 +42,9 @@ git_tag_enable = true
 #
 # Add every new test or smoke crate here in the PR that creates it.
 # A new crate that does ship hits the same failure until a release tag
-# includes it; ADR 0106 records that gap.
+# includes it. The way through, used for axon-web (ADR 0106): land it with
+# release = false and a template no tag uses, then delete its entry once a
+# release tag contains it.
 
 [[package]]
 name = "axon-itest"
@@ -78,5 +80,9 @@ git_tag_name = "{{ package }}-v{{ version }}"
 # manifest-only package whose directory covers the web client, so a commit
 # under clients/web opens a release PR like one under a crate. It shares the
 # workspace tag; git_tag_enable = false above keeps it from creating one.
+# Only v0.1.20 and later contain the crate: a run resolving an older tag
+# aborts for every crate, so do not re-cut or re-point tags below v0.1.20.
+# If an entry is ever added back, repeat git_tag_enable = false in it, or
+# axon-web could try to create the same v<version> tag as axon-server.
 # Known gap: clients/web/src-tauri is a nested package, so cargo excludes its
 # files from axon-web and a shell-only commit opens no release PR.

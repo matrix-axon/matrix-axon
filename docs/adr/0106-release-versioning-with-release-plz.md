@@ -65,7 +65,10 @@ This broke `main` the first time it happened: `axon-test-support` landed after `
 
 So every new test or smoke crate goes into `release-plz.toml` with that template, in the PR that creates it.
 
-A new crate that does ship hits the same failure until a release tag includes it, and there is no verified workaround yet.
+A new crate that does ship hits the same failure until a release tag includes it.
+The way through, used for `axon-web` (the package that lets commits under `clients/web` open a release PR), is two steps: land the crate with `release = false` and a template that matches no tag, then delete its entry once a release tag contains it.
+`axon-web` was added that way and became releasable once `v0.1.20` existed.
+A run that resolves a tag older than `v0.1.20` aborts for every crate, so such tags must not be re-cut.
 Inverting the list, so that crates are exempt by default and shipped ones opt in, was measured and rejected: a change confined to a crate that is not opted in then opens no release PR at all, so a forgotten entry would silently hold changes back instead of failing loudly.
 
 Dry-run against `main` at the time of writing: release-plz found `v0.0.16` as every crate's last release, took the committed `0.1.0` as already bumped, and after one more commit proposed `0.1.0 → 0.1.1` across all fourteen crates and `Cargo.lock`; a release dry run then planned exactly one tag, `v0.1.1`, from `axon-server`.
