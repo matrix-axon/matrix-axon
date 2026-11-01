@@ -133,6 +133,13 @@ This replaces the JSON number array.
 The body is still read whole into memory before sending, so streaming uploads stay out of scope.
 But the copy is one buffer of the file's size, not an array and a JSON text several times larger.
 
+**Measured on devices, that holds only for the page's own copy** (added after device testing, #921).
+
+- On iOS, WebKit's custom-protocol fetch and wry/Tauri's conversion of the body add copies of their own. With a file near the 100 MiB upload cap, Axon peaked at about 4× the file size and WebContent at about 5.5×. Axon returned to its baseline afterwards.
+- Android has no raw invoke body at all. Tauri falls back to `postMessage`, which serialises the bytes as a JSON number array. A 95 MiB upload grew the emulator's WebView renderer to 929 MiB, and Android killed it.
+- The legacy transport sends JSON on every platform, so neither is a regression.
+- Sending large bodies in chunks is the fix on both platforms (#921).
+
 ### 4. Errors carry a fixed category
 
 The Rust side walks the error's `source()` chain and reduces it to one of: `dns`, `refused`, `connect_timeout`, `tls`, `reset`, `body`, `cancelled`, `scope`, `other`.
