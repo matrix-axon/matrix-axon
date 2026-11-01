@@ -800,15 +800,18 @@ impl Store {
         .bind(event_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some(room) = room {
-            crate::event_visibility::lock_redaction_scope(&mut tx, account_id, &room).await?;
-        }
+        let Some(room) = room else {
+            // A missing row is a no-op. Do not let a concurrent insertion make
+            // the later UPDATE write without first taking its room scope lock.
+            return Ok(());
+        };
+        crate::event_visibility::lock_redaction_scope(&mut tx, account_id, &room).await?;
         let proofs = crate::event_visibility::capture_redaction_proofs();
         let sql = format!(
             "WITH ins AS ( \
                UPDATE events \
                SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6, inline_media_urls = $7 \
-               WHERE account_id = $1 AND event_id = $2 AND content IS NULL \
+               WHERE account_id = $1 AND event_id = $2 AND room_id = $8 AND content IS NULL \
                RETURNING account_id, event_id, room_id, origin_ts, id, \
                          relates_to, redacts, decrypted_body_text, sender, event_type, raw_event \
              ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), proofs AS ( {proofs} ) \
@@ -825,6 +828,7 @@ impl Store {
                 event_type,
                 Some(content),
             ))
+            .bind(&room)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

@@ -6,18 +6,24 @@ use uuid::Uuid;
 
 use crate::StoreError;
 
+// Stable across binaries: changing this seed would split the lock namespace.
+const REDACTION_SCOPE_LOCK_NAMESPACE: i64 = 895;
+
 /// Serialize event and authority-state writes in one account/room. Take the
 /// transaction lock in its own statement so the following write gets a fresh
 /// READ COMMITTED snapshot after any wait. Otherwise two concurrent statements
 /// can each miss the other's event/state and permanently lose the proof.
-/// The pool's statement/lock deadlines bound acquisition; commit/drop releases it.
+/// Acquire this scope lock before event/state rows or proof rows to keep lock
+/// ordering consistent. The pool's statement/lock deadlines bound acquisition;
+/// commit/drop releases it.
 pub(crate) async fn lock_redaction_scope(
     tx: &mut Transaction<'_, Postgres>,
     account_id: Uuid,
     room_id: &str,
 ) -> Result<(), StoreError> {
-    sqlx_core::query::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 895))")
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2))")
         .bind(format!("{account_id}:{room_id}"))
+        .bind(REDACTION_SCOPE_LOCK_NAMESPACE)
         .execute(&mut **tx)
         .await?;
     Ok(())

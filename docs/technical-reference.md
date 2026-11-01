@@ -34,7 +34,8 @@ HTML messages also retain the first 64 distinct inline image references in docum
 References come from parsed, sanitized `img` elements in HTML bodies of at most 64 KiB.
 Authorization uses the same latest valid edit as the timeline, so stray replacement content, another sender's edits, and superseded edits do not authorize images.
 These references authorize only the owning account while the room is not known left or banned, and an authorized redaction in the same room revokes the reference.
-Redaction checks use SDK-pruned evidence or cached sender/server and power-level authority, matching the server's existing state-repair policy.
+Redaction checks use SDK-pruned evidence or cached sender/server and current power-level authority, matching the server's existing state-repair policy.
+This fallback does not reconstruct historical authorization: a later promotion can make an earlier pending redaction provable.
 Proven redaction authority is persisted atomically with event ingestion in either arrival order, so later power-level changes cannot restore redacted media.
 A forward migration preserves already-applied same-room redactions for every stored event type, even when the historical moderator state is no longer available.
 Subsequent creation or power-level state writes retry pending authority proofs for that account and room and enqueue search refreshes atomically.
@@ -103,7 +104,10 @@ A timed-out SQL statement fails and rolls back its writes; a canceled HTTP respo
 Upgrades apply schema migrations at startup, before the server accepts requests.
 A migration that adds a column or index to the `events` table holds it locked until the migration commits.
 The inline-media upgrade builds both its pending-row and GIN indexes non-concurrently and seeds historical redaction proofs before accepting traffic.
+The historical proof seed and its search-outbox fanout run as one unbatched startup statement under `migration_statement_secs`, just like the index builds.
+A timeout rolls back that migration and prevents startup; increase the deadline and restart to retry.
 Plan a maintenance window for large event stores; this startup work is separate from the paced inline-media repair afterward.
+After startup, the search worker drains the potentially large new outbox backlog in its normal bounded batches.
 The thread-summary index (#763) took 96 seconds on a 2.7 GB `events` table, of which the backfill and the index build are separate statements under the 600-second deadline.
 On a much larger database, raise `migration_statement_secs` for the upgrade if a statement times out; the failed migration rolls back and runs again at the next start.
 A migration that rewrites many rows, as that one does, leaves index-only scans reading the table itself until autovacuum next processes it.

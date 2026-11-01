@@ -2127,3 +2127,74 @@ async fn concurrent_redaction_and_authority_state_cannot_miss_each_other() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn concurrent_redaction_and_ordinary_target_capture_a_durable_proof() {
+    let store = store().await;
+    let account = store
+        .upsert_account(
+            &format!("@concurrent-target-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    for i in 0..8 {
+        let room = format!("!target-arrival-{i}:localhost");
+        let target = format!("$ordinary-target-{i}");
+        let redaction = format!("$target-redaction-{i}");
+        state(
+            &store,
+            account,
+            &room,
+            "m.room.power_levels",
+            "",
+            json!({"users":{"@mod:remote.test":100}}),
+            1,
+        )
+        .await;
+        tokio::join!(
+            inline_event(
+                &store,
+                account,
+                &room,
+                &target,
+                "m.room.message",
+                Some(json!({"body":"ordinary target"}))
+            ),
+            inline_event_as(
+                &store,
+                account,
+                &room,
+                &redaction,
+                "m.room.redaction",
+                Some(json!({"redacts":target})),
+                "@mod:remote.test"
+            )
+        );
+        // Demotion distinguishes a captured proof from a transient read-time mask.
+        state(
+            &store,
+            account,
+            &room,
+            "m.room.power_levels",
+            "",
+            json!({"users":{"@mod:remote.test":0}}),
+            2,
+        )
+        .await;
+        assert!(store
+            .get_event(account, &target)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .is_none());
+    }
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id=$1")
+        .bind(account)
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
