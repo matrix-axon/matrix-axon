@@ -456,7 +456,7 @@ describe('room-open summary', () => {
       Promise.resolve({
         connectionsOpened: 1,
         requestsSent: 12,
-        retries: { nack: 0, fastReset: 0 },
+        retries: { nack: 0, fastReset: 0, requeue: 0 },
         resets: 0,
         liveEntries: 3,
         legacy: false,
@@ -505,7 +505,7 @@ describe('room-open summary', () => {
       Promise.resolve({
         connectionsOpened: 1,
         requestsSent: 1,
-        retries: { nack: 0, fastReset: 0 },
+        retries: { nack: 0, fastReset: 0, requeue: 0 },
         resets: 0,
         liveEntries: 1,
         legacy: false,
@@ -1619,7 +1619,7 @@ describe('shell transport counters (ADR 0127 § 5)', () => {
   const reading: TransportStatsReading = {
     connectionsOpened: 2,
     requestsSent: 314,
-    retries: { nack: 1, fastReset: 0 },
+    retries: { nack: 1, fastReset: 0, requeue: 3 },
     resets: 4,
     liveEntries: 0,
     legacy: false,
@@ -1654,6 +1654,7 @@ describe('shell transport counters (ADR 0127 § 5)', () => {
         sent: 314,
         nack: 1,
         fastReset: 0,
+        requeue: 3,
         resets: 4,
         live: 0,
       },

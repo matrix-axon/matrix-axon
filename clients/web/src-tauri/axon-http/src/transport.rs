@@ -2,18 +2,20 @@
 //! Tauri so it can be tested against a real server without a webview.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use hyper::body::Bytes;
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Method, StatusCode, Url};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{self, ClientOptions, Counters, Stats};
 use crate::error::{
-    classify_body, classify_send, is_protocol_nack, is_reset_failure, Kind, TransportError,
+    classify_body, classify_send, is_protocol_nack, is_requeue, is_reset_failure, Kind,
+    TransportError,
 };
 
 /// How soon after sending a `reset` still reads as the stale-connection race
@@ -27,6 +29,11 @@ const FAST_RESET_WINDOW: Duration = Duration::from_secs(1);
 const EARLY_CANCEL_TTL: Duration = Duration::from_secs(30);
 
 const MAX_REDIRECTS: usize = 10;
+
+/// A backstop on [`Transport::execute`]. Each requeue follows a connection
+/// attempt ending, so this is never reached unless attempts end as fast as
+/// they start.
+const MAX_REQUEUES: usize = 64;
 
 /// A request's place in the table: the webview it came from and the id the
 /// JavaScript side chose for it.
@@ -131,9 +138,89 @@ pub struct Transport {
     counters: Arc<Counters>,
     current: RwLock<Clients>,
     /// Origins known to speak HTTP/2, as `https://host:port`. A property of
-    /// the server rather than of a connection, so it outlives a `reset`.
+    /// the server rather than of a connection, so it outlives a `reset`, and
+    /// with a store, a relaunch.
     h2_origins: Mutex<HashSet<String>>,
+    store: Option<OriginStore>,
     table: Mutex<Table>,
+}
+
+/// Where the origins known to speak HTTP/2 are kept between launches.
+///
+/// Without it, every launch is a first contact: the first request negotiates
+/// on one connection, and the HTTP/2-only client then needs a second one,
+/// straight after the launch burst. On a network that drops new connections
+/// that second one is the likeliest to be dropped, and everything waits behind
+/// it. Kept, a launch goes straight to the HTTP/2-only client and one
+/// connection, and only the first launch against a server pays for two.
+///
+/// It holds origins only: the server the person signed in to, nothing more.
+/// A cache, so losing it costs one extra connection and nothing else.
+struct OriginStore {
+    path: PathBuf,
+    /// Held across a snapshot and its write, so the last write is the latest
+    /// state.
+    writing: Mutex<()>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct StoredOrigins {
+    version: u32,
+    h2: Vec<String>,
+}
+
+const STORED_ORIGINS_VERSION: u32 = 1;
+
+/// A bound on what is read back, against a file that is not ours.
+const MAX_STORED_ORIGINS: usize = 64;
+
+impl OriginStore {
+    /// The origins stored, keeping only well-formed `https` ones. A missing
+    /// or unreadable file is an empty store.
+    fn load(&self) -> HashSet<String> {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return HashSet::new();
+        };
+        let Ok(stored) = serde_json::from_str::<StoredOrigins>(&text) else {
+            return HashSet::new();
+        };
+        if stored.version != STORED_ORIGINS_VERSION {
+            return HashSet::new();
+        }
+        stored
+            .h2
+            .into_iter()
+            .filter(|origin| {
+                Url::parse(origin).is_ok_and(|url| {
+                    url.scheme() == "https" && url.origin().ascii_serialization() == *origin
+                })
+            })
+            .take(MAX_STORED_ORIGINS)
+            .collect()
+    }
+
+    /// Replace the file with `origins`, through a rename so a reader never
+    /// sees half of it. A failure is ignored: the store is only a cache.
+    /// Blocking, but rare: once when an origin is learned or forgotten.
+    fn save(&self, origins: &HashSet<String>) {
+        let mut h2: Vec<String> = origins.iter().cloned().collect();
+        h2.sort();
+        h2.truncate(MAX_STORED_ORIGINS);
+        let stored = StoredOrigins {
+            version: STORED_ORIGINS_VERSION,
+            h2,
+        };
+        let Ok(text) = serde_json::to_string(&stored) else {
+            return;
+        };
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let partial = self.path.with_extension("partial");
+        if std::fs::write(&partial, text).is_ok() {
+            let _ = std::fs::rename(&partial, &self.path);
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -141,16 +228,42 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Transport {
+    /// A transport that remembers nothing between launches.
+    #[cfg(test)]
     pub(crate) fn new(options: ClientOptions) -> reqwest::Result<Self> {
+        Self::with_store(options, None)
+    }
+
+    /// A transport that keeps the origins it learns speak HTTP/2 in the file
+    /// at `store`, and starts from the ones already there.
+    pub(crate) fn with_store(
+        options: ClientOptions,
+        store: Option<PathBuf>,
+    ) -> reqwest::Result<Self> {
         let counters = Arc::new(Counters::default());
         let clients = Self::build(&options, &counters)?;
+        let store = store.map(|path| OriginStore {
+            path,
+            writing: Mutex::new(()),
+        });
+        let h2_origins = store.as_ref().map(OriginStore::load).unwrap_or_default();
         Ok(Self {
             options,
             counters,
             current: RwLock::new(clients),
-            h2_origins: Mutex::new(HashSet::new()),
+            h2_origins: Mutex::new(h2_origins),
+            store,
             table: Mutex::new(Table::default()),
         })
+    }
+
+    /// Write the known origins to the store, if there is one.
+    fn persist_origins(&self) {
+        if let Some(store) = &self.store {
+            let _writing = lock(&store.writing);
+            let origins = lock(&self.h2_origins).clone();
+            store.save(&origins);
+        }
     }
 
     fn build(options: &ClientOptions, counters: &Arc<Counters>) -> reqwest::Result<Clients> {
@@ -346,8 +459,12 @@ impl Transport {
         let sent = self.dispatch(client, request).await;
         if let Some(origin) = origin {
             match &sent {
-                Ok(response) if !via_h2 && response.version() == reqwest::Version::HTTP_2 => {
-                    lock(&self.h2_origins).insert(origin);
+                Ok(response)
+                    if !via_h2
+                        && response.version() == reqwest::Version::HTTP_2
+                        && lock(&self.h2_origins).insert(origin.clone()) =>
+                {
+                    self.persist_origins();
                 }
                 // Anything that went wrong once a connection existed sends the
                 // next request back to negotiating, in case the server stopped
@@ -355,15 +472,20 @@ impl Transport {
                 // HTTP/2 preface with an HTTP/1.1 error, which can look like a
                 // reset. Failures before a connection exists say nothing about
                 // the server, and on a network dropping new connections,
-                // forgetting would bring back the burst this client avoids.
+                // forgetting would bring back the burst this client avoids. A
+                // reset while connecting is one of those; a TLS failure is
+                // not, since a server that stopped offering HTTP/2 refuses
+                // the handshake.
                 Err(err)
                     if via_h2
                         && !matches!(
                             err.kind,
                             Kind::Cancelled | Kind::ConnectTimeout | Kind::Refused | Kind::Dns
-                        ) =>
+                        )
+                        && !(err.connecting && err.kind == Kind::Reset)
+                        && lock(&self.h2_origins).remove(&origin) =>
                 {
-                    lock(&self.h2_origins).remove(&origin);
+                    self.persist_origins();
                 }
                 _ => {}
             }
@@ -380,6 +502,8 @@ impl Transport {
     ///   That is a pooled connection the server closed just as the request
     ///   left. `hyper` drops a connection that errored, so the retry goes out
     ///   on another one.
+    ///
+    /// A request that never left is a different matter (see [`Self::execute`]).
     async fn dispatch(
         &self,
         client: &reqwest::Client,
@@ -389,23 +513,50 @@ impl Transport {
         // Every body is `Bytes`, so any request clones.
         let again = request.try_clone();
         let idempotent = matches!(*request.method(), Method::GET | Method::HEAD);
-        let started = Instant::now();
-        let result = match (client.execute(request).await, again) {
+        let (result, sent_at) = self.execute(client, request).await;
+        let result = match (result, again) {
             (Err(err), Some(again)) if is_protocol_nack(&err) => {
                 Counters::bump(&self.counters.nack_retries);
-                client.execute(again).await
+                self.execute(client, again).await.0
             }
             (Err(err), Some(again))
                 if idempotent
-                    && started.elapsed() < FAST_RESET_WINDOW
+                    && sent_at.elapsed() < FAST_RESET_WINDOW
                     && is_reset_failure(&err) =>
             {
                 Counters::bump(&self.counters.fast_reset_retries);
-                client.execute(again).await
+                self.execute(client, again).await.0
             }
             (result, _) => result,
         };
         result.map_err(|err| classify_send(&err))
+    }
+
+    /// `request` on `client`, sent again for as long as it keeps losing the
+    /// connection attempt it waited behind before anything was written
+    /// ([`is_requeue`]). One of the requests sent again starts the next
+    /// attempt, and the rest wait behind that one. What bounds the wait is the
+    /// caller's own deadline, which cancels the whole send.
+    ///
+    /// Also returns when the request last went out, for the fast-reset window.
+    async fn execute(
+        &self,
+        client: &reqwest::Client,
+        mut request: reqwest::Request,
+    ) -> (reqwest::Result<reqwest::Response>, Instant) {
+        let mut requeues = 0;
+        loop {
+            let again = request.try_clone();
+            let sent_at = Instant::now();
+            match (client.execute(request).await, again) {
+                (Err(err), Some(again)) if requeues < MAX_REQUEUES && is_requeue(&err) => {
+                    requeues += 1;
+                    Counters::bump(&self.counters.requeues);
+                    request = again;
+                }
+                (result, _) => return (result, sent_at),
+            }
+        }
     }
 
     /// The next chunk of a body, or `None` at its end. The entry leaves the

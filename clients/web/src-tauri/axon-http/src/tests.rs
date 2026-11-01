@@ -589,6 +589,281 @@ async fn a_redirect_from_a_known_http2_origin_to_an_http1_origin_is_followed() {
     assert!(!transport.knows_h2(&target.url("/")));
 }
 
+// ===== one HTTP/2 connection attempt, and the requests behind it =====
+
+/// What a [`ScriptedServer`] does with one connection, by the order it
+/// accepted them in.
+#[derive(Clone, Copy)]
+enum Conduct2 {
+    /// Complete the handshake and serve `hello`, over HTTP/2 if offered.
+    Serve,
+    /// The same, after a pause before the handshake.
+    ServeAfter(Duration),
+    /// Close after a pause: the connect fails, as a reset during the
+    /// handshake.
+    CloseAfter(Duration),
+    /// Accept and never answer, as a connect whose SYNs are dropped looks
+    /// to the client until its connect timeout.
+    Hold,
+}
+
+struct ScriptedServer {
+    port: u16,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl ScriptedServer {
+    /// Connection `n` gets `script(n)`.
+    async fn start(script: fn(usize) -> Conduct2) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = accepted.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let conduct = script(counter.fetch_add(1, Ordering::SeqCst));
+                let pause = match conduct {
+                    Conduct2::CloseAfter(pause) => {
+                        tokio::spawn(async move {
+                            tokio::time::sleep(pause).await;
+                            drop(stream);
+                        });
+                        continue;
+                    }
+                    Conduct2::Hold => {
+                        held.push(stream);
+                        continue;
+                    }
+                    Conduct2::Serve => None,
+                    Conduct2::ServeAfter(pause) => Some(pause),
+                };
+                tokio::spawn(async move {
+                    if let Some(pause) = pause {
+                        tokio::time::sleep(pause).await;
+                    }
+                    let Ok(stream) = tls_acceptor(&[b"h2", b"http/1.1"]).accept(stream).await
+                    else {
+                        return;
+                    };
+                    let service = service_fn(|_req| async {
+                        Ok::<_, Infallible>(reply(200, TestBody::text("hello")))
+                    });
+                    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        Self { port, accepted }
+    }
+
+    fn url(&self) -> String {
+        format!("https://localhost:{}/", self.port)
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+/// Send `ids` concurrently, a few milliseconds apart so that the first starts
+/// the connection attempt, and return each one's outcome by id.
+async fn staggered(
+    transport: &Arc<Transport>,
+    url: &str,
+    ids: std::ops::Range<u64>,
+) -> tokio::task::JoinSet<(u64, Result<Head, crate::error::TransportError>)> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for id in ids {
+        let (transport, url) = (transport.clone(), url.to_owned());
+        tasks.spawn(async move { (id, transport.send(key(id), get(&url)).await) });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tasks
+}
+
+#[tokio::test]
+async fn a_cold_burst_shares_the_first_connection_to_complete() {
+    // First contact, on a network dropping new connections: one connect gets
+    // through, and every request takes it rather than waiting on its own.
+    let server = ScriptedServer::start(|n| {
+        if n == 0 {
+            Conduct2::ServeAfter(Duration::from_millis(200))
+        } else {
+            Conduct2::Hold
+        }
+    })
+    .await;
+    let transport = transport();
+    let mut tasks = staggered(&transport, &server.url(), 0..10).await;
+    while let Some(done) = promptly(tasks.join_next()).await {
+        let (id, head) = done.unwrap();
+        assert_eq!(head.unwrap().version, "h2", "request {id}");
+        transport.drop_body(&key(id));
+    }
+    assert_eq!(transport.stats().connections_opened, 1);
+    // The others were attempted, and are the cost of a first contact.
+    assert!(server.accepted() > 1);
+}
+
+#[tokio::test]
+async fn a_cancelled_connect_requeues_the_requests_behind_it() {
+    // Connection 0 is the first contact. Connection 1 is the HTTP/2-only
+    // client's, and is slow enough for the request that started it to be
+    // cancelled first, as a room switch does. hyper-util drops the requests
+    // waiting behind that connect, and each is sent again rather than failing.
+    let server = ScriptedServer::start(|n| match n {
+        1 => Conduct2::ServeAfter(Duration::from_millis(300)),
+        _ => Conduct2::Serve,
+    })
+    .await;
+    let transport = transport();
+    let (head, _) = fetch(&transport, 900, get(&server.url())).await;
+    assert_eq!(head.version, "h2");
+    assert!(transport.knows_h2(&server.url()));
+
+    let mut tasks = staggered(&transport, &server.url(), 0..5).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    transport.cancel(key(0));
+    while let Some(done) = promptly(tasks.join_next()).await {
+        match done.unwrap() {
+            (0, sent) => assert_eq!(sent.unwrap_err().kind, Kind::Cancelled),
+            (id, sent) => {
+                assert_eq!(sent.unwrap().version, "h2", "request {id}");
+                transport.drop_body(&key(id));
+            }
+        }
+    }
+    let stats = transport.stats();
+    assert!(stats.retries.requeue >= 1, "{stats:?}");
+    assert_eq!(stats.retries.nack, 0);
+    assert_eq!(stats.retries.fast_reset, 0);
+    // Requeued requests are not sent twice as far as the caller is concerned.
+    assert_eq!(stats.requests_sent, 6);
+    assert!(transport.knows_h2(&server.url()));
+}
+
+#[tokio::test]
+async fn a_failed_connect_requeues_the_requests_behind_it() {
+    // The HTTP/2-only client's first connect is reset during the handshake.
+    // The `GET` that started it is retried as a fast reset; the ones waiting
+    // behind it are sent again, and one of them starts the next attempt.
+    let server = ScriptedServer::start(|n| match n {
+        1 => Conduct2::CloseAfter(Duration::from_millis(100)),
+        _ => Conduct2::Serve,
+    })
+    .await;
+    let transport = transport();
+    fetch(&transport, 900, get(&server.url())).await;
+
+    let mut tasks = staggered(&transport, &server.url(), 0..5).await;
+    while let Some(done) = promptly(tasks.join_next()).await {
+        let (id, sent) = done.unwrap();
+        assert_eq!(sent.unwrap().version, "h2", "request {id}");
+        transport.drop_body(&key(id));
+    }
+    let stats = transport.stats();
+    assert_eq!(stats.retries.fast_reset, 1, "{stats:?}");
+    assert!(stats.retries.requeue >= 1, "{stats:?}");
+    // A failure before any connection says nothing about the server.
+    assert!(transport.knows_h2(&server.url()));
+}
+
+#[tokio::test]
+async fn a_post_whose_connect_is_reset_fails_as_reset() {
+    // Not retried, since a POST is never resent after a reset, and reported
+    // by what happened rather than as `other`.
+    let server = ScriptedServer::start(|n| match n {
+        1 => Conduct2::CloseAfter(Duration::from_millis(100)),
+        _ => Conduct2::Serve,
+    })
+    .await;
+    let transport = transport();
+    fetch(&transport, 900, get(&server.url())).await;
+    let err = transport
+        .send(key(0), request(Method::POST, &server.url()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, Kind::Reset);
+    assert_eq!(err.detail.as_deref(), Some("ConnectionReset"));
+    // A reset before there was a connection says nothing about the server.
+    assert!(transport.knows_h2(&server.url()));
+}
+
+// ===== origins known from an earlier launch =====
+
+/// A path for a store no other test uses.
+fn store_path(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-http-test-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir.join("h2-origins.json")
+}
+
+fn stored_transport(path: &std::path::Path) -> Arc<Transport> {
+    let mut options = ClientOptions::new("Axon/test (test)".into());
+    options.extra_roots = vec![reqwest::Certificate::from_der(CERT).unwrap()];
+    Arc::new(Transport::with_store(options, Some(path.to_owned())).unwrap())
+}
+
+#[tokio::test]
+async fn an_origin_known_from_an_earlier_launch_opens_one_connection() {
+    let server = Server::start(true, ok_handler()).await;
+    let path = store_path("relaunch");
+
+    let first = stored_transport(&path);
+    fetch(&first, 0, get(&server.url("/"))).await;
+    assert!(first.knows_h2(&server.url("/")));
+    drop(first);
+
+    // A relaunch: a new transport, with nothing pooled, reading the store.
+    let accepted = server.accepted();
+    let relaunched = stored_transport(&path);
+    assert!(relaunched.knows_h2(&server.url("/")));
+    burst(&relaunched, &server, 0).await;
+    assert_eq!(relaunched.stats().connections_opened, 1);
+    assert_eq!(server.accepted(), accepted + 1);
+}
+
+#[tokio::test]
+async fn an_origin_that_stops_offering_http2_is_forgotten_in_the_store_too() {
+    let server = Server::start(true, ok_handler()).await;
+    let path = store_path("forget");
+    let transport = stored_transport(&path);
+    warm(&transport, &server).await;
+    transport.reset().unwrap();
+    server.alpn.store(Alpn::Refuse as u8, Ordering::SeqCst);
+    transport
+        .send(key(0), get(&server.url("/")))
+        .await
+        .unwrap_err();
+    assert!(!transport.knows_h2(&server.url("/")));
+    assert!(!stored_transport(&path).knows_h2(&server.url("/")));
+}
+
+#[test]
+fn the_store_reads_back_only_https_origins() {
+    let path = store_path("foreign");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"version":1,"h2":["https://a.example","http://b.example","https://c.example/path","not a url","https://d.example:8443"]}"#,
+    )
+    .unwrap();
+    let transport = stored_transport(&path);
+    assert!(transport.knows_h2("https://a.example/v1"));
+    assert!(transport.knows_h2("https://d.example:8443/"));
+    assert!(!transport.knows_h2("http://b.example/"));
+    assert!(!transport.knows_h2("https://c.example/"));
+
+    // Anything unreadable is an empty store, not a failure.
+    for text in ["", "{", r#"{"version":2,"h2":["https://a.example"]}"#] {
+        std::fs::write(&path, text).unwrap();
+        assert!(!stored_transport(&path).knows_h2("https://a.example/"));
+    }
+}
+
 // ===== cancel and the table =====
 
 #[tokio::test]

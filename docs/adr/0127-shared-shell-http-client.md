@@ -92,7 +92,14 @@ A cancel, `connect_timeout`, `refused` or `dns` leaves the origin where it is: t
 The set of known origins describes servers, not connections, so it survives a `reset`.
 Each redirect hop takes the client its own origin calls for, so a known HTTP/2 origin can redirect to one that speaks only HTTP/1.1.
 Plain `http` never moves, because there is no ALPN to negotiate.
-First contact in each run of the app still pays the burst once.
+
+**The known origins are kept between launches** (added after device testing).
+Without that, every launch was a first contact: the burst on the negotiating client, then a second connection for the HTTP/2-only client straight after it.
+On a network that drops new connections, that second connection is the one most likely to be dropped, and every request waits behind it.
+The plugin keeps the set in a small file in the app's cache directory, written when an origin is learned or forgotten.
+It holds origins only, the servers already signed in to.
+On reading back it keeps only well-formed `https` origins, at most 64, and treats an unreadable file as empty, since losing it costs one connection.
+So only the first launch against a server pays for two connections.
 
 ### 2. Commands keep the plugin's request lifecycle
 
@@ -148,7 +155,7 @@ So `api/client.ts`'s abort handling is unchanged, and an abort is never logged a
 ### 5. Diagnostics measure the thing that changed
 
 - **`version`** on every response (`h2`, `http/1.1`) is recorded on `api` traces, so a readout shows which protocol each request used.
-- **A `stats` command** returns counters: connections opened (counted by a `connector_layer` around the connector), requests sent, retries by reason (`nack` and `fast_reset`, § 7), resets (§ 6), and live table entries.
+- **A `stats` command** returns counters: connections opened (counted by a `connector_layer` around the connector), requests sent, retries by reason (`nack`, `fast_reset` and `requeue`, § 7), resets (§ 6), and live table entries.
   The counters live in the plugin's state, not in the client, so they carry on across a `reset`.
   The connector layer that counts connections is installed on every client the plugin builds.
   With performance instrumentation on, the client logs a `transport:stats` line on each room open and on resume.
@@ -202,6 +209,15 @@ Nothing else is retried, because a connection that resets after the request was 
   Message sends carry no idempotency key (the timeline offers a manual retry for a failed send), and the API spec says room creation is not idempotent.
 - **`PUT`** is not retried either, although HTTP calls it idempotent.
   The shell's `PUT`s are device-state writes such as drafts and read markers, and a retried older write could land after a newer one and overwrite it.
+
+**A request that never left is sent again: the requeue** (added after device testing).
+The HTTP/2-only client holds every request behind one connection attempt.
+When that attempt ends without a connection (it failed, or the request that started it was cancelled, as a room switch does), `hyper-util` drops the waiting requests with a private pool error ("request was canceled").
+Its own retry for canceled requests does not cover that error, so each waiting request failed as `other`.
+Measured against an in-process server, cancelling the first of five requests 100 ms into a slow handshake failed the other four.
+Nothing was written for those requests, so the plugin sends them again, for any method.
+One of them starts the next connection attempt, and the rest wait behind it, until each request's own deadline cancels it.
+These are counted separately (`requeue`), and do not use up the one retry above.
 
 Timeouts are not retried; the JavaScript deadlines own them.
 Error statuses (5xx, 429, 503) are application policy, and belong with ADR 0122's load gate and the stores that already retry (media, favourites, push registration).
@@ -290,16 +306,18 @@ It helps, but every remaining request still pays a handshake, and the app would 
   On macOS: `lsof -nP -iTCP -a -p "$(pgrep -x axon)"`.
   On Linux: `ss -tnp | grep axon`.
   Expect one to the server plus the WebSocket, where today's build shows a new connection per request in `TIME_WAIT`.
-  On first contact the negotiating client's connection is briefly a second one; it closes after the 25-second idle timeout.
+  On the first launch against a server, the negotiating client's connection is briefly a second one; it closes after the 25-second idle timeout. Later launches start from the stored origins (§ 1) and open one.
 - **The failure mode, reproduced.**
-  On a Linux test box, rate-limit new connections to a local axon:
+  On a Linux box running the shell, drop new outgoing connections above a rate, as the hotel gateway did, to a server behind TLS (so the new transport speaks HTTP/2):
 
   ```sh
-  iptables -I INPUT -p tcp --syn --dport 8080 -m hashlimit --hashlimit-name axon --hashlimit-mode srcip --hashlimit-above 30/min --hashlimit-burst 20 -j DROP
+  iptables -I OUTPUT -p tcp --syn -d <server IP> --dport 443 -m hashlimit --hashlimit-name axon --hashlimit-mode dstip --hashlimit-above 30/min --hashlimit-burst 20 -j DROP
   ```
 
-  Today's build should show `api:late` near 35 s.
-  The new build should show none, with `transport:stats` reporting one connection.
+  The legacy transport stalls: waves of `api:deadline stage=headers` at the 20 s deadline, and rooms left at `heads=pending`.
+  (The iPhone's `api:late` near 35 s does not reproduce here: there WebKit lost the deadline's abort, so the stalled connect finished on Darwin's SYN schedule, while on WebKitGTK the abort reaches the plugin and the connect is dropped.)
+  The new transport shows no stalls, and `transport:stats` connections opened stays flat across room opens.
+  Measured 2026-11-01 against a local Caddy: the legacy transport stalled a room open for 20 s, and the new one opened about twenty rooms in 11 s on three connections.
 
 - **Device.**
   Traces show `version=h2`, and `transport:stats` connections opened stays at one or two per resume.
@@ -318,6 +336,9 @@ It helps, but every remaining request still pays a handshake, and the app would 
 - **Rust tests**, against an in-process server that counts accepted connections:
   - N requests share one connection, both over HTTP/1.1 keep-alive and over HTTP/2.
   - After a `reset`, a burst of concurrent requests to an origin known to speak HTTP/2 opens one connection, and an origin that stops offering HTTP/2 goes back to negotiating.
+  - A first-contact burst whose later connects stall shares the first connection to complete.
+  - Requests waiting behind an HTTP/2 connect are sent again when it is cancelled or fails, rather than failing as `other`.
+  - An origin learned in one launch opens one connection in the next, a forgotten one is forgotten in the store too, and the store reads back only `https` origins.
   - A redirect from a known HTTP/2 origin reaches an HTTP/1.1-only one, and both origins keep their places.
   - Redirect hops rewrite methods, drop credentials and send `Origin: null` across origins, as `fetch` does.
   - A cancel before headers and a cancel mid-body each release their entries.

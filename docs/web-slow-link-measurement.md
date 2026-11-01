@@ -168,7 +168,7 @@ A kept capture also carries the socket's `live:open` and `live:close`, which say
   A run of these on a browser that should honor aborts is worth a report of its own.
 
 The packaged app also writes `transport:stats` on each room open and each return to the foreground (`why` is `room-open`, `resume` or `online`).
-It is the transport's own counters, which only ever grow: `conn` connections opened, `sent` requests sent, `nack` and `fastReset` automatic retries (ADR 0127 § 7), `resets` fresh clients after a resume, and `live` requests whose bodies are still held.
+It is the transport's own counters, which only ever grow: `conn` connections opened, `sent` requests sent, `nack` and `fastReset` automatic retries and `requeue` requests sent again after the connection attempt they waited behind ended (ADR 0127 § 7), `resets` fresh clients after a resume, and `live` requests whose bodies are still held.
 `legacy` says the legacy transport was chosen, whose requests these counters do not see.
 Read it by the difference between two lines: `conn` should go up by one or two per resume, not with `sent`.
 A `live` that keeps growing while nothing is loading is a leak.

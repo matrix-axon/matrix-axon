@@ -500,7 +500,7 @@ describe('shell transport upkeep', () => {
     const stats = {
       connectionsOpened: 1,
       requestsSent: 2,
-      retries: { nack: 0, fastReset: 0 },
+      retries: { nack: 0, fastReset: 0, requeue: 0 },
       resets: 1,
       liveEntries: 0,
     }

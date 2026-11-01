@@ -51,7 +51,7 @@ interface Head {
 export interface TransportStats {
   connectionsOpened: number
   requestsSent: number
-  retries: { nack: number; fastReset: number }
+  retries: { nack: number; fastReset: number; requeue: number }
   resets: number
   liveEntries: number
 }

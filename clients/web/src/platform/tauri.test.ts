@@ -18,7 +18,7 @@ const shellTransportStats = vi.fn(() =>
   Promise.resolve({
     connectionsOpened: 2,
     requestsSent: 40,
-    retries: { nack: 0, fastReset: 1 },
+    retries: { nack: 0, fastReset: 1, requeue: 0 },
     resets: 3,
     liveEntries: 0,
   }),

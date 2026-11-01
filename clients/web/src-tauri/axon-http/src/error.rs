@@ -35,17 +35,27 @@ pub struct TransportError {
     /// `None`, an `io::ErrorKind` name, or a name from [`tls_detail`]. Never
     /// built from an error's text.
     pub detail: Option<String>,
+    /// Whether it failed while connecting, before the request had a
+    /// connection. Not sent to the page: it only decides what the transport
+    /// learns about the server.
+    #[serde(skip)]
+    pub(crate) connecting: bool,
 }
 
 impl TransportError {
     pub(crate) fn new(kind: Kind) -> Self {
-        Self { kind, detail: None }
+        Self {
+            kind,
+            detail: None,
+            connecting: false,
+        }
     }
 
     pub(crate) fn with(kind: Kind, detail: impl Into<String>) -> Self {
         Self {
             kind,
             detail: Some(detail.into()),
+            connecting: false,
         }
     }
 }
@@ -102,6 +112,23 @@ fn causes<'a>(err: &'a (dyn StdError + 'static)) -> Vec<&'a (dyn StdError + 'sta
 
 fn find<'a, T: StdError + 'static>(causes: &[&'a (dyn StdError + 'static)]) -> Option<&'a T> {
     causes.iter().find_map(|err| err.downcast_ref::<T>())
+}
+
+/// The most specific `io::Error` in the chain. A connector wraps the one it
+/// got in another of kind `Other` (a reset during the TLS handshake arrives as
+/// `Other` around `ConnectionReset`), so the first is often not the one that
+/// says what happened.
+fn find_io<'a>(causes: &[&'a (dyn StdError + 'static)]) -> Option<&'a io::Error> {
+    let mut ios = causes
+        .iter()
+        .filter_map(|err| err.downcast_ref::<io::Error>());
+    let first = ios.next()?;
+    Some(
+        std::iter::once(first)
+            .chain(ios)
+            .find(|io| io.kind() != io::ErrorKind::Other)
+            .unwrap_or(first),
+    )
 }
 
 fn io_kind_name(kind: io::ErrorKind) -> String {
@@ -176,8 +203,37 @@ pub(crate) fn is_protocol_nack(err: &(dyn StdError + 'static)) -> bool {
     graceful_goaway || refused
 }
 
+/// The request never left: it was waiting for the HTTP/2-only client's one
+/// connection attempt, and that attempt ended without a connection. Sending it
+/// again is safe for any method, since nothing was written.
+///
+/// hyper-util holds every request behind one HTTP/2 connect, and when that
+/// connect goes (it failed, or the request that started it was cancelled, as a
+/// room switch does) it drops the waiters with a private pool error, "request
+/// was canceled", which its own retry for canceled requests does not cover.
+/// Each waiter would fail as `other` (ADR 0127 § 7). The text is matched only
+/// under hyper-util's `Connect` error, where nothing else carries it, and
+/// `a_cancelled_connect_requeues_the_requests_behind_it` pins it.
+pub(crate) fn is_requeue(err: &reqwest::Error) -> bool {
+    let causes = causes(err);
+    let Some(client) = find::<hyper_util::client::legacy::Error>(&causes) else {
+        return false;
+    };
+    client.is_connect()
+        && client.source().is_some_and(|pool| {
+            pool.source().is_none() && pool.to_string() == "request was canceled"
+        })
+}
+
 /// The category of a failure before a response arrived.
 pub(crate) fn classify_send(err: &reqwest::Error) -> TransportError {
+    TransportError {
+        connecting: err.is_connect(),
+        ..send_kind(err)
+    }
+}
+
+fn send_kind(err: &reqwest::Error) -> TransportError {
     let causes = causes(err);
     if find::<DnsFailure>(&causes).is_some() {
         return TransportError::new(Kind::Dns);
@@ -197,7 +253,7 @@ pub(crate) fn classify_send(err: &reqwest::Error) -> TransportError {
             TransportError::with(Kind::Other, "TimedOut")
         };
     }
-    if let Some(io) = find::<io::Error>(&causes) {
+    if let Some(io) = find_io(&causes) {
         let kind = io.kind();
         if kind == io::ErrorKind::ConnectionRefused {
             return TransportError::with(Kind::Refused, io_kind_name(kind));
@@ -232,7 +288,7 @@ fn is_reset(causes: &[&(dyn StdError + 'static)]) -> bool {
             return is_reset_io(io.kind());
         }
     }
-    if let Some(io) = find::<io::Error>(causes) {
+    if let Some(io) = find_io(causes) {
         return is_reset_io(io.kind());
     }
     false
@@ -247,7 +303,7 @@ pub(crate) fn is_reset_failure(err: &reqwest::Error) -> bool {
 /// The category of a failure while reading a body that had started.
 pub(crate) fn classify_body(err: &reqwest::Error) -> TransportError {
     let causes = causes(err);
-    match find::<io::Error>(&causes) {
+    match find_io(&causes) {
         Some(io) => TransportError::with(Kind::Body, io_kind_name(io.kind())),
         None => TransportError::new(Kind::Body),
     }
@@ -268,6 +324,21 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&err).unwrap(),
             serde_json::json!({ "kind": "dns", "detail": null })
+        );
+    }
+
+    #[test]
+    fn the_most_specific_io_error_wins() {
+        let reset = io::Error::from(io::ErrorKind::ConnectionReset);
+        let wrapped = io::Error::other(reset);
+        assert_eq!(
+            find_io(&causes(&wrapped)).map(io::Error::kind),
+            Some(io::ErrorKind::ConnectionReset)
+        );
+        let plain = io::Error::other("no kind beneath");
+        assert_eq!(
+            find_io(&causes(&plain)).map(io::Error::kind),
+            Some(io::ErrorKind::Other)
         );
     }
 

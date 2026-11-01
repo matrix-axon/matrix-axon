@@ -229,7 +229,7 @@ export function setTelemetrySink(fn: TelemetrySinkFn | null): void {
 export interface TransportStatsReading {
   connectionsOpened: number
   requestsSent: number
-  retries: { nack: number; fastReset: number }
+  retries: { nack: number; fastReset: number; requeue: number }
   resets: number
   liveEntries: number
   legacy: boolean
@@ -275,6 +275,7 @@ export function perfMarkTransportStats(why: TransportStatsReason): void {
         sent: count(stats.requestsSent),
         nack: count(stats.retries.nack),
         fastReset: count(stats.retries.fastReset),
+        requeue: count(stats.retries.requeue),
         resets: count(stats.resets),
         live: count(stats.liveEntries),
       })
