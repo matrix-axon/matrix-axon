@@ -4,7 +4,7 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ServicesContext } from '../services'
-import type { InviteDto } from '../stores/invites'
+import { REJECT_PENDING_MESSAGE, type InviteDto } from '../stores/invites'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { InvitesPage } from './InvitesPage'
 
@@ -147,6 +147,38 @@ describe('InvitesPage', () => {
     await waitFor(() => expect(left).toEqual(['!a:hs']))
     expect(await findByText('No pending invites.')).toBeTruthy()
     expect(queryByText('Alpha')).toBeNull()
+  })
+
+  it('shows a reject axon timed out on as pending, not as an error', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({ data: [invite('!a:hs', 'Alpha')] }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'gateway_timeout',
+                message: 'leave timed out after 30s',
+              },
+            },
+            { status: 504 },
+          ),
+      ),
+    )
+    const { services, findByRole, findByText, queryByRole, queryByText } =
+      renderInbox()
+    fireEvent.click(await findByRole('button', { name: 'Reject' }))
+
+    const notice = await findByText(REJECT_PENDING_MESSAGE)
+    expect(notice.getAttribute('role')).toBe('status')
+    // The row stays, and nothing invites an immediate retry.
+    expect(queryByText('Alpha')).toBeTruthy()
+    expect(queryByText(/leave timed out/)).toBeNull()
+    expect(queryByRole('alert')).toBeNull()
+    services.invites.resetSession()
   })
 
   it('accept posts join and routes into the room', async () => {

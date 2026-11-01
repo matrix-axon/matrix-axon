@@ -6,16 +6,29 @@ import {
 } from '@preact/signals'
 import type { components } from '../api/schema'
 import { apiErrorMessage, type ApiClient } from '../api/client'
-import type { RoomsStore } from './rooms'
+import { PENDING_MEMBERSHIP_REFRESH_DELAYS_MS, type RoomsStore } from './rooms'
 
 export type InviteDto = components['schemas']['InviteDto']
 
-export type InviteMutationResult = { ok: true } | { ok: false; message: string }
+/**
+ * An accept or reject. `pending` marks a reject axon answered with a `504`:
+ * it stopped waiting for the homeserver, which may still finish the leave
+ * (ADR 0121 decision 5, issue #743). That is not a failure, and `message`
+ * says so instead of inviting a retry.
+ */
+export type InviteMutationResult =
+  { ok: true } | { ok: false; message: string; pending?: boolean }
 
 export type InviteBulkResult = {
   succeeded: number
+  /** Rejects axon timed out on, now waiting on the homeserver. */
+  pending: number
   failed: { invite: InviteDto; message: string }[]
 }
+
+/** What a reject that axon timed out on tells the user. */
+export const REJECT_PENDING_MESSAGE =
+  "Your homeserver hasn't finished rejecting this invite yet. It will drop off this list once it has, so there's no need to reject it again."
 
 export interface InvitesStore {
   invites: ReadonlySignal<InviteDto[]>
@@ -29,6 +42,11 @@ export interface InvitesStore {
   reject(invite: InviteDto): Promise<InviteMutationResult>
   acceptAll(): Promise<InviteBulkResult>
   rejectAll(): Promise<InviteBulkResult>
+  /**
+   * Whether a reject of this invite timed out and is still being waited out
+   * (see `PENDING_MEMBERSHIP_REFRESH_DELAYS_MS`). Reactive.
+   */
+  rejectPending(invite: Pick<InviteDto, 'account_id' | 'room_id'>): boolean
   noteAdded(invite: InviteDto): void
   noteRemoved(accountId: string, roomId: string): void
 }
@@ -65,9 +83,91 @@ export function createInvitesStore(
    * reconnect. Reassigned (not mutated) per fetch so a late frame from an
    * abandoned fetch cannot leak into the next one. */
   let liveAdds = new Map<string, InviteDto>()
+  /**
+   * Rejects axon timed out on, by `inviteKey`, each with the timer for its
+   * next step and whether that step is past the first, when a retry may go
+   * out. `pendingKeys` mirrors it for rendering.
+   *
+   * The row stays: axon keeps the invite on a `504` because the leave may
+   * still fail (ADR 0091). Once the homeserver finishes it, the sync engine
+   * drops the invite and sends `invite.removed`; the stepped refreshes cover a
+   * frame missed across a reconnect.
+   */
+  const pendingRejects = new Map<
+    string,
+    { timer: ReturnType<typeof setTimeout>; retryable: boolean }
+  >()
+  const pendingKeys = signal<ReadonlySet<string>>(new Set())
+
+  /** Copy `pendingRejects` into `pendingKeys`, writing only on a change,
+   * because `resetSession` runs inside an effect. */
+  function publishPendingRejects(): void {
+    const current = pendingKeys.peek()
+    if (
+      current.size === pendingRejects.size &&
+      [...pendingRejects.keys()].every((key) => current.has(key))
+    ) {
+      return
+    }
+    pendingKeys.value = new Set(pendingRejects.keys())
+  }
+
+  /** Hold a reject axon timed out on as pending, refreshing the list at each
+   * step until the row is gone or the window ends. A row still listed by then
+   * may really have failed, and rejecting it again is the user's call. */
+  function awaitPendingReject(key: string): void {
+    endPendingReject(key)
+    const step = (index: number) => {
+      const delay = PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[index]
+      if (delay === undefined) {
+        endPendingReject(key)
+        return
+      }
+      const timer = setTimeout(() => {
+        void refresh().then(() => {
+          // Ended while the refresh was out: by `resetSession`, a removal
+          // frame or an answer to a later reject.
+          if (pendingRejects.get(key)?.timer !== timer) {
+            return
+          }
+          if (invites.value.some((row) => inviteKey(row) === key)) {
+            step(index + 1)
+          } else {
+            endPendingReject(key)
+          }
+        })
+      }, delay)
+      pendingRejects.set(key, { timer, retryable: index > 0 })
+      publishPendingRejects()
+    }
+    step(0)
+  }
+
+  function endPendingReject(key: string): void {
+    const entry = pendingRejects.get(key)
+    if (entry === undefined) {
+      return
+    }
+    clearTimeout(entry.timer)
+    pendingRejects.delete(key)
+    publishPendingRejects()
+  }
+
+  function rejectPending(
+    invite: Pick<InviteDto, 'account_id' | 'room_id'>,
+  ): boolean {
+    return pendingKeys.value.has(inviteKey(invite))
+  }
 
   function resetSession(): void {
     sessionGeneration += 1
+    // Above the pristine-store guard: a reject can time out before the list
+    // ever settled, and its refreshes must not run under the next reader.
+    for (const { timer } of pendingRejects.values()) {
+      clearTimeout(timer)
+    }
+    pendingRejects.clear()
+    publishPendingRejects()
     if (
       invites.value.length === 0 &&
       !settled &&
@@ -119,6 +219,13 @@ export function createInvitesStore(
         }
       }
       invites.value = next
+      // A reject the homeserver finished while its removal frame was lost.
+      const listed = new Set(next.map((row) => inviteKey(row)))
+      for (const key of [...pendingRejects.keys()]) {
+        if (!listed.has(key)) {
+          endPendingReject(key)
+        }
+      }
       error.value = null
       settled = true
     } catch (cause) {
@@ -160,6 +267,7 @@ export function createInvitesStore(
   }
 
   function removeLocal(accountId: string, roomId: string): void {
+    endPendingReject(`${accountId}/${roomId}`)
     liveAdds.delete(`${accountId}/${roomId}`)
     invites.value = invites.value.filter(
       (invite) => invite.account_id !== accountId || invite.room_id !== roomId,
@@ -181,8 +289,21 @@ export function createInvitesStore(
     // refresh the joined-room list after every call and coalesce those
     // refreshes, which serialized two bulk rejects behind one GET /v1/rooms
     // and let a stale GET /v1/invites put a just-declined row back.
+    const key = inviteKey(invite)
+    const pending: InviteMutationResult = {
+      ok: false,
+      pending: true,
+      message: REJECT_PENDING_MESSAGE,
+    }
+    // Sending it again straight away would only double the homeserver's work
+    // (issue #743). Past the first step, a retry is the user's call: the 504
+    // may have come from a proxy before axon saw the call.
+    const held = pendingRejects.get(key)
+    if (kind === 'reject' && held !== undefined && !held.retryable) {
+      return pending
+    }
     try {
-      const { error: apiError } =
+      const { error: apiError, response } =
         kind === 'accept'
           ? await api.POST('/v1/accounts/{account_id}/rooms/join', {
               params: { path: { account_id: invite.account_id } },
@@ -196,6 +317,16 @@ export function createInvitesStore(
                 },
               },
             })
+      // A 504 is axon, or a proxy in front of it, giving up on waiting. The
+      // homeserver has not refused, so the reject is pending, not failed.
+      if (
+        kind === 'reject' &&
+        apiError !== undefined &&
+        response.status === 504
+      ) {
+        awaitPendingReject(key)
+        return pending
+      }
       if (apiError !== undefined) {
         return { ok: false, message: apiErrorMessage(apiError) }
       }
@@ -232,11 +363,12 @@ export function createInvitesStore(
       await refresh()
     }
     if (!settled) {
-      return { succeeded: 0, failed: [] }
+      return { succeeded: 0, pending: 0, failed: [] }
     }
     const snapshot = invites.value.slice()
     const failed: InviteBulkResult['failed'] = []
     let succeeded = 0
+    let pending = 0
     // One at a time: two concurrent leaves through the same SDK client
     // on a demo homeserver dropped the second invite. Accept/reject all
     // can wait; losing a row cannot.
@@ -244,6 +376,8 @@ export function createInvitesStore(
       const result = await mutate(invite, kind)
       if (result.ok) {
         succeeded += 1
+      } else if (result.pending === true) {
+        pending += 1
       } else {
         failed.push({ invite, message: result.message })
       }
@@ -252,7 +386,7 @@ export function createInvitesStore(
       void rooms.refresh()
     }
     await refresh()
-    return { succeeded, failed }
+    return { succeeded, pending, failed }
   }
 
   function noteAdded(invite: InviteDto): void {
@@ -295,6 +429,7 @@ export function createInvitesStore(
     reject,
     acceptAll: () => runBulk('accept'),
     rejectAll: () => runBulk('reject'),
+    rejectPending,
     noteAdded,
     noteRemoved,
   }

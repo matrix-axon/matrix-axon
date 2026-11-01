@@ -5,6 +5,7 @@ import { RoomAvatar, roomAvatarColor } from '../components/RoomAvatar'
 import { useServices } from '../services'
 import {
   inviteKey,
+  REJECT_PENDING_MESSAGE,
   type InviteBulkResult,
   type InviteDto,
 } from '../stores/invites'
@@ -90,7 +91,8 @@ export function InvitesPage() {
     setBusyKey(inviteKey(invite))
     const result = await invites.reject(invite)
     setBusyKey(null)
-    if (!result.ok) {
+    // A pending reject is not an error: the row says so itself.
+    if (!result.ok && result.pending !== true) {
       invites.error.value = result.message
     }
   }
@@ -144,7 +146,9 @@ export function InvitesPage() {
       <ErrorBanner error={invites.error} />
       {pendingFailed.length > 0 && bulkResult !== null && (
         <p class="error" role="alert">
-          {bulkResult.succeeded} succeeded, {pendingFailed.length} failed.
+          {`${bulkResult.succeeded} succeeded, ${
+            bulkResult.pending > 0 ? `${bulkResult.pending} pending, ` : ''
+          }${pendingFailed.length} failed.`}
           {pendingFailed
             .map((item) => ` ${inviteTitle(item.invite)}: ${item.message}`)
             .join('')}
@@ -162,6 +166,7 @@ export function InvitesPage() {
               invite={invite}
               showAccount={showAccount}
               busy={mutating}
+              rejectPending={invites.rejectPending(invite)}
               onAccept={() => void onAccept(invite)}
               onReject={() => void onReject(invite)}
             />
@@ -176,12 +181,14 @@ function InviteRow({
   invite,
   showAccount,
   busy,
+  rejectPending,
   onAccept,
   onReject,
 }: {
   invite: InviteDto
   showAccount: boolean
   busy: boolean
+  rejectPending: boolean
   onAccept: () => void
   onReject: () => void
 }) {
@@ -204,6 +211,11 @@ function InviteRow({
           {invite.encrypted ? ' · Encrypted' : ''}
           {showAccount ? ` · ${invite.account_user_id}` : ''}
         </p>
+        {rejectPending && (
+          <p class="muted" role="status">
+            {REJECT_PENDING_MESSAGE}
+          </p>
+        )}
       </div>
       <div class="invite-actions">
         <button type="button" disabled={busy} onClick={onAccept}>
