@@ -73,3 +73,15 @@ git_tag_name = "{{ package }}-v{{ version }}"
 name = "axon-smoke-tui"
 release = false
 git_tag_name = "{{ package }}-v{{ version }}"
+
+# Marks clients/web/ as a package directory so that, once a release tag
+# includes this crate, commits under it can open a release PR (ADR 0106).
+# release = false until then: the shared "v{{ version }}" tag names v0.1.19,
+# which predates the crate, and aborts the whole run. The follow-up that
+# makes it releasable drops this entry after the first tag containing it.
+# Known gap: clients/web/src-tauri is a nested package, so cargo excludes its
+# files from this one and a shell-only commit opens no release PR.
+[[package]]
+name = "axon-web"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"

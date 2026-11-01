@@ -1,0 +1,16 @@
+[package]
+name = "axon-web"
+description = "Release marker for the web client and the Tauri shell; ships no Rust code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# This package exists so release-plz has a package directory that covers the
+# web client. release-plz opens a release PR only when a commit touches the
+# files of a package it releases, and the TypeScript here belongs to no crate
+# (the Tauri shell in src-tauri is excluded from the workspace). See
+# release-plz.toml and ADR 0106.
+[lib]
+path = "release-marker.rs"

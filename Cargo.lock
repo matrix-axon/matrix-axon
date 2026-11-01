@@ -617,6 +617,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "axon-web"
+version = "0.1.19"
+
+[[package]]
 name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
