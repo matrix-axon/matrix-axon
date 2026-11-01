@@ -278,6 +278,30 @@ describe('invites store', () => {
     ])
   })
 
+  it('does not let a GET issued before a removal frame restore the row', async () => {
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(`${BASE}/v1/invites`, async () => {
+        await held
+        return HttpResponse.json({
+          data: [invite('!a:hs', 'Alpha'), invite('!b:hs', 'Beta')],
+        })
+      }),
+    )
+    const invites = store()
+    const pending = invites.refresh()
+    invites.noteRemoved(ACCOUNT, '!a:hs')
+    // Removed and then re-invited within the same fetch: the later frame wins.
+    invites.noteRemoved(ACCOUNT, '!b:hs')
+    invites.noteAdded(invite('!b:hs', 'Beta'))
+    release?.()
+    await pending
+    expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!b:hs'])
+  })
+
   it('does not treat a single live frame as a settled list', async () => {
     // The initial GET fails, then one frame arrives. `rejectAll` must still
     // confirm the list rather than act on the single row it can see.
@@ -556,6 +580,109 @@ describe('invites store', () => {
       expect(result).toEqual({ succeeded: 1, pending: 1, failed: [] })
       expect(left).toEqual(['!b:hs'])
       expect(invites.rejectPending(ALPHA)).toBe(true)
+    })
+
+    it('keeps a row removed while a stepped refresh was in flight', async () => {
+      vi.useFakeTimers()
+      let release: () => void = () => {}
+      let hold = false
+      const calls = { list: 0 }
+      server.use(
+        http.get(`${BASE}/v1/invites`, async () => {
+          calls.list += 1
+          if (hold) {
+            await new Promise<void>((resolve) => {
+              release = resolve
+            })
+          }
+          // Issued before the homeserver finished, so it still lists it.
+          return HttpResponse.json({ data: [ALPHA] })
+        }),
+        http.post(`${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`, () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'gateway_timeout',
+                message: 'leave timed out after 30s',
+              },
+            },
+            { status: 504 },
+          ),
+        ),
+      )
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+      hold = true
+      const before = calls.list
+
+      await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+      expect(calls.list).toBe(before + 1)
+      // The homeserver finishes while that GET is out.
+      invites.noteRemoved(ACCOUNT, '!a:hs')
+      release()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(invites.invites.value).toEqual([])
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+
+      // A GET issued after the removal still decides: one that lists the
+      // invite puts it back.
+      hold = false
+      await invites.refresh()
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+    })
+
+    it('holds an empty-bodied 504 as pending too', async () => {
+      server.use(
+        http.get(`${BASE}/v1/invites`, () =>
+          HttpResponse.json({ data: [ALPHA] }),
+        ),
+        // What a proxy sends: no error envelope, so openapi-fetch reports
+        // `error: undefined`.
+        http.post(
+          `${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+          () =>
+            new HttpResponse(null, {
+              status: 504,
+              headers: { 'Content-Length': '0' },
+            }),
+        ),
+      )
+      const invites = store()
+      await invites.refresh()
+
+      expect(await invites.reject(ALPHA)).toEqual(PENDING)
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+      expect(invites.rejectPending(ALPHA)).toBe(true)
+      invites.resetSession()
+    })
+
+    it('keeps an empty-bodied 502 a failure, not a success', async () => {
+      server.use(
+        http.get(`${BASE}/v1/invites`, () =>
+          HttpResponse.json({ data: [ALPHA] }),
+        ),
+        http.post(
+          `${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+          () =>
+            new HttpResponse(null, {
+              status: 502,
+              headers: { 'Content-Length': '0' },
+            }),
+        ),
+      )
+      const invites = store()
+      await invites.refresh()
+
+      expect(await invites.reject(ALPHA)).toEqual({
+        ok: false,
+        message: 'unexpected server response',
+      })
+      // Not dropped, and not suppressed: the next GET still shows it.
+      await invites.refresh()
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+      expect(invites.rejectPending(ALPHA)).toBe(false)
     })
 
     it('drops a pending reject on a session reset', async () => {

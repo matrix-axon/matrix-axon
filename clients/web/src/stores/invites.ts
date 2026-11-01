@@ -83,6 +83,11 @@ export function createInvitesStore(
    * reconnect. Reassigned (not mutated) per fetch so a late frame from an
    * abandoned fetch cannot leak into the next one. */
   let liveAdds = new Map<string, InviteDto>()
+  /** Invites removed locally or by a live frame since the in-flight GET was
+   * issued. That response predates the removal, so it must not put the row
+   * back; a later GET that still lists the invite does. Reassigned per fetch,
+   * like `liveAdds`, so a late frame from an abandoned fetch cannot leak. */
+  let liveRemovals = new Set<string>()
   /**
    * Rejects axon timed out on, by `inviteKey`, each with the timer for its
    * next step and whether that step is past the first, when a retry may go
@@ -179,6 +184,7 @@ export function createInvitesStore(
     invites.value = []
     resolvedKeys.clear()
     liveAdds = new Map()
+    liveRemovals = new Set()
     settled = false
     error.value = null
     loading.value = true
@@ -189,6 +195,8 @@ export function createInvitesStore(
     loading.value = invites.value.length === 0
     const added = new Map<string, InviteDto>()
     liveAdds = added
+    const removed = new Set<string>()
+    liveRemovals = removed
     try {
       const { data, error: apiError } = await api.GET('/v1/invites')
       if (generation !== sessionGeneration) {
@@ -207,7 +215,10 @@ export function createInvitesStore(
           resolvedKeys.delete(key)
         }
       }
-      const next = data.data.filter((row) => !resolvedKeys.has(inviteKey(row)))
+      const next = data.data.filter(
+        (row) =>
+          !resolvedKeys.has(inviteKey(row)) && !removed.has(inviteKey(row)),
+      )
       // Frames that arrived after this GET was issued describe invites the
       // response cannot know about. Keep them rather than let a list fetched
       // moments earlier delete the row.
@@ -269,6 +280,7 @@ export function createInvitesStore(
   function removeLocal(accountId: string, roomId: string): void {
     endPendingReject(`${accountId}/${roomId}`)
     liveAdds.delete(`${accountId}/${roomId}`)
+    liveRemovals.add(`${accountId}/${roomId}`)
     invites.value = invites.value.filter(
       (invite) => invite.account_id !== accountId || invite.room_id !== roomId,
     )
@@ -319,15 +331,17 @@ export function createInvitesStore(
             })
       // A 504 is axon, or a proxy in front of it, giving up on waiting. The
       // homeserver has not refused, so the reject is pending, not failed.
-      if (
-        kind === 'reject' &&
-        apiError !== undefined &&
-        response.status === 504
-      ) {
+      // Checked on the status alone: a proxy's empty-bodied 504 parses to no
+      // error envelope at all (openapi-fetch yields `error: undefined` for
+      // `Content-Length: 0`).
+      if (kind === 'reject' && response.status === 504) {
         awaitPendingReject(key)
         return pending
       }
-      if (apiError !== undefined) {
+      // Any other non-2xx is a failure, including one whose empty body left
+      // `apiError` undefined; treating that as success would drop the row and
+      // suppress it for the rest of the session.
+      if (apiError !== undefined || !response.ok) {
         return { ok: false, message: apiErrorMessage(apiError) }
       }
       dropLocal(invite.account_id, invite.room_id)
@@ -403,6 +417,8 @@ export function createInvitesStore(
     next.unshift(invite)
     invites.value = next
     liveAdds.set(key, invite)
+    // A re-invite after a removal in the same fetch: the later frame wins.
+    liveRemovals.delete(key)
     // Deliberately not `settled = true`: one frame is content, not a
     // complete list, and `settled` is what lets `runBulk` skip its
     // confirming refresh and act on everything it can see.
