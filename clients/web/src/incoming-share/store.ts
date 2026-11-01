@@ -632,6 +632,7 @@ export function createIncomingShareStore(
     },
     async invalidateAccount(accountId: string) {
       if (selected.peek()?.accountId === accountId) {
+        stopRequested = true
         clearEditTimers()
         const kept = { ...drafts.peek() }
         delete kept[selected.peek()!.id]

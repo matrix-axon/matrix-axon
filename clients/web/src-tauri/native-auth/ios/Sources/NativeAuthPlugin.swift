@@ -152,8 +152,12 @@ class NativeAuthPlugin: Plugin {
       defer { if transfer { self.shareTransferSlots.signal() } }
       do {
         if args.action == "invalidate" {
-          try self.scheduleSharingCleanup()
-          try SharedSession.invalidate(fence: { _ = try self.prepareSharing() }, accessGroup: self.sharingAccessGroup())
+          try SharedSession.invalidate(fence: {
+            let (store, _, _) = try self.prepareSharing()
+            try store.invalidateSession()
+          }, accessGroup: self.sharingAccessGroup(), recordCleanup: {
+            try self.scheduleSharingCleanup()
+          })
           invoke.resolve(["value": [:]])
           return
         }

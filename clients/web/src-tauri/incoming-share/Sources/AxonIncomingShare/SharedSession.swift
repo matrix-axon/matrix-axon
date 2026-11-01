@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import os
 
 public protocol ShareCredentialVault {
   func read() throws -> String
@@ -52,6 +53,7 @@ private final class KeychainVault: ShareCredentialVault {
 /// A dedicated item exposes an access token only. OAuth refresh credentials
 /// remain in the containing app's existing private Keychain service.
 public final class SharedSession {
+  private static let log = Logger(subsystem: "org.matrixaxon.axon", category: "incoming-share")
   public static let group = "group.org.matrixaxon.axon.sharing"
   public static let service = "org.matrixaxon.axon.sharing.access"
   private let store: ShareStore
@@ -64,21 +66,29 @@ public final class SharedSession {
 
   /// Either barrier suffices: extensions require both a published descriptor
   /// and its credential. Cleanup may fail after dispatch authority is revoked.
-  /// The app persists a retry breadcrumb before invoking this operation.
+  /// Journal faults must never prevent either authority barrier being attempted.
   public static func invalidate(
-    fence: () throws -> Void, accessGroup: String?, vault: ShareCredentialVault? = nil
+    fence: () throws -> Void, accessGroup: String?, vault: ShareCredentialVault? = nil,
+    recordCleanup: () throws -> Void = {}
   ) throws {
     var revoked = false
     if let vault = vault ?? accessGroup.map({ KeychainVault(accessGroup: $0) }) {
       do {
         try vault.write(nil)
         revoked = true
-      } catch { /* Try the file barrier below. */  }
+      } catch {
+        // Try the file barrier below.
+      }
     }
+    do {
+      try recordCleanup()
+    } catch { Self.log.error("share_cleanup_journal_unavailable") }
     do {
       try fence()
       revoked = true
-    } catch { /* Retry on next app access. */  }
+    } catch {
+      // Retry on next app access.
+    }
     guard revoked else { throw ShareFailure.invalidation }
   }
 

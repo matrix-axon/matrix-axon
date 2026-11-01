@@ -17,6 +17,88 @@ final class ShareStoreTests: XCTestCase {
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+  func testFailedImportPublicationRemovesMovedFileAndAllowsRetry() throws {
+    let fm = FileManager.default
+    let source = root.appendingPathComponent("provider.txt")
+    try Data("provider bytes".utf8).write(to: source)
+    let item = try store.claim(store.create(text: "caption").id)
+    let directory = root.appendingPathComponent(item.id)
+    let metadata = directory.appendingPathComponent("manifest.json")
+    let original = try Data(contentsOf: metadata)
+    var checks = 0
+    var fault: Error?
+    // The second owner check occurs after loading metadata, immediately before
+    // the copied file is moved and its manifest is published.
+    let failing = try ShareStore(
+      root: root,
+      now: {
+        checks += 1
+        if checks == 2 {
+          do {
+            try fm.removeItem(at: metadata)
+            try fm.createDirectory(at: metadata, withIntermediateDirectories: false)
+          } catch { fault = error }
+        }
+        return self.time
+      })
+    XCTAssertThrowsError(
+      try failing.importFile(
+        item.id, owner: item.owner!, source: source, name: "file.txt", mime: "text/plain"))
+    XCTAssertNil(fault)
+    XCTAssertEqual(checks, 2)
+    XCTAssertEqual(try fm.contentsOfDirectory(atPath: directory.path), ["manifest.json"])
+    try fm.removeItem(at: metadata)
+    try original.write(to: metadata)
+    XCTAssertTrue(try store.list().first!.files.isEmpty)
+    let retried = try store.importFile(
+      item.id, owner: item.owner!, source: source, name: "file.txt", mime: "text/plain")
+    XCTAssertEqual(retried.files.count, 1)
+    XCTAssertEqual(
+      try Data(contentsOf: directory.appendingPathComponent(retried.files[0].id)),
+      Data("provider bytes".utf8))
+  }
+
+  func testCorruptCleanupJournalRepairsDurableResetBeforeRetry() throws {
+    let control = root.appendingPathComponent("../" + UUID().uuidString).standardizedFileURL
+    defer { try? FileManager.default.removeItem(at: control) }
+    let path = control.appendingPathComponent("cleanup.json")
+    let journal = try ShareStore(root: control)
+    let corrupt = [
+      Data("{\"reset\":".utf8), Data("garbage".utf8),
+      try ShareJSON.encode(CleanupFixture(reset: false, accounts: ["not-a-uuid"])),
+      try ShareJSON.encode(
+        CleanupFixture(reset: false, accounts: Array(repeating: UUID().uuidString, count: 129))),
+    ]
+    for bytes in corrupt {
+      try store.publish(
+        ShareSession(
+          installation: "install", server: "https://axon.example",
+          credentialAvailable: true, expiresAt: nil), credential: {})
+      _ = try store.create(text: "must be fenced")
+      try bytes.write(to: path)
+      // A busy destination must leave a repaired, durable full-reset intent.
+      try store.coordinated { XCTAssertThrowsError(try journal.reconcileCleanup(into: store)) }
+      let repaired = try JSONDecoder().decode(CleanupFixture.self, from: Data(contentsOf: path))
+      XCTAssertTrue(repaired.reset)
+      XCTAssertTrue(repaired.accounts.isEmpty)
+      try ShareStore(root: control).reconcileCleanup(into: store)
+      XCTAssertNil(try store.session())
+      XCTAssertTrue(try store.list().isEmpty)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+    }
+    try Data("truncated".utf8).write(to: path)
+    try journal.recordCleanup(account: UUID().uuidString)
+    let repaired = try JSONDecoder().decode(CleanupFixture.self, from: Data(contentsOf: path))
+    XCTAssertTrue(repaired.reset)
+    try journal.reconcileCleanup(into: store)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+  }
+
+  private struct CleanupFixture: Codable {
+    let reset: Bool
+    let accounts: [String]
+  }
+
   func testVerifiedUploadSnapshotSurvivesRetainedFileMutationAndCleansUp() throws {
     let source = root.appendingPathComponent("provider.txt")
     try Data("original".utf8).write(to: source)

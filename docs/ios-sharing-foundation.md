@@ -54,6 +54,8 @@ Identity replacement/sign-out invalidates pending content; token renewal preserv
 Account removal invalidates matching records.
 Native account cleanup records private retry intent before accessing shared storage; a successful server logout/removal remains successful when local cleanup must be retried.
 Sign-out revokes the shared credential or commits a durable session fence before completing.
+The Keychain revocation attempt precedes the best-effort cleanup journal write; journal failure never skips the independent file-fence attempt.
+An unreadable or malformed cleanup journal is durably replaced with a full-reset intent, which remains pending until shared cleanup succeeds.
 File deletion and inaccessible Keychain cleanup can be deferred; if neither revocation barrier can be committed, sign-out reports that specific failure and keeps the session active.
 Late import, upload, and bridge completions cannot recreate invalidated records.
 An aborted sign-out waits for every revocation barrier to settle before republishing the still-active session; concurrent sign-out attempts share one completion.
@@ -64,6 +66,7 @@ Files and manifests are published atomically with filesystem synchronization.
 Network and provider waits run outside that lock, and all locks, leases, copies, transfers, and response bodies are bounded.
 Resume reconciliation reports incomplete imports, removes orphaned temporary data, and turns interrupted dispatches into unknown outcomes without replay.
 Heartbeats and delivery-state changes avoid global quota scans; growing content still checks authoritative cross-process totals under the lock.
+Failed file imports remove unreferenced moved bytes immediately; once the manifest rename publishes a file reference, rollback preserves its bytes even if the final directory sync fails.
 Unreadable published metadata is retained and listed for explicit discard rather than silently erased.
 Native uploads use a protected APFS copy-on-write snapshot of the retained file; hashing runs outside the shared lock and the HTTP request uses those exact verified bytes.
 Snapshot creation does not duplicate file data extents; normal completion removes it and expired-owner reconciliation removes remnants of interrupted transfers.

@@ -119,6 +119,23 @@ public final class ShareStore {
     var accounts: [String] = []
   }
 
+  private func readCleanup(from path: URL) throws -> Cleanup {
+    do {
+      let state = try decode(Cleanup.self, from: path)
+      guard state.accounts.count <= 128,
+        state.accounts.allSatisfy({ UUID(uuidString: $0) != nil })
+      else { throw ShareFailure.invalid }
+      return state
+    } catch {
+      // Never infer an empty journal from lost cleanup intent. Persist the
+      // conservative replacement before attempting any shared-container work.
+      let reset = Cleanup(reset: true)
+      try write(reset, to: path)
+      Self.log.error("share_cleanup_journal_repaired_full_reset")
+      return reset
+    }
+  }
+
   /// The app uses a separate private root for this bounded, credential-free
   /// journal. It remains writable when the shared container is unavailable.
   public func recordCleanup(account: String? = nil) throws {
@@ -126,9 +143,9 @@ public final class ShareStore {
     try coordinated {
       let path = root.appendingPathComponent("cleanup.json")
       var state =
-        fm.fileExists(atPath: path.path) ? try decode(Cleanup.self, from: path) : Cleanup()
+        fm.fileExists(atPath: path.path) ? try readCleanup(from: path) : Cleanup()
       if let account {
-        if !state.accounts.contains(account) { state.accounts.append(account) }
+        if !state.reset && !state.accounts.contains(account) { state.accounts.append(account) }
         if state.accounts.count > 128 {
           state.reset = true
           state.accounts = []
@@ -145,8 +162,7 @@ public final class ShareStore {
     try coordinated {
       let path = root.appendingPathComponent("cleanup.json")
       guard fm.fileExists(atPath: path.path) else { return }
-      var state = try decode(Cleanup.self, from: path)
-      guard state.accounts.count <= 128 else { throw ShareFailure.invalid }
+      var state = try readCleanup(from: path)
       if state.reset {
         try destination.invalidateSession()
         state.reset = false
@@ -406,13 +422,15 @@ public final class ShareStore {
       guard manifest.bytes + bytes <= ShareLimits.batchBytes else { throw ShareFailure.quota }
       let destination = try directory(id).appendingPathComponent(fileId)
       try fm.moveItem(at: reservation, to: destination)
+      var committed = false
+      defer { if !committed { try? fm.removeItem(at: destination) } }
       manifest.files.append(
         ShareFile(
           id: fileId, name: Self.displayName(name), mime: mime,
           bytes: bytes, digest: hash.finalize().map { String(format: "%02x", $0) }.joined(),
           thumbnail: thumbnail, operation: thumbnail ? nil : ShareOperation()))
       manifest.revision += 1
-      try save(manifest)
+      try save(manifest, didPublish: { committed = true })
       return manifest
     }
   }
@@ -499,8 +517,7 @@ public final class ShareStore {
           thumbnail: true))
       manifest.revision += 1
       let removed = removeUnusedThumbnails(from: original, next: &manifest)
-      try save(manifest)
-      committed = true
+      try save(manifest, didPublish: { committed = true })
       deleteFiles(removed, share: id)
       return manifest
     }
@@ -767,8 +784,10 @@ public final class ShareStore {
     else { throw ShareFailure.invalid }
     return value
   }
-  private func save(_ manifest: ShareManifest) throws {
-    try write(manifest, to: directory(manifest.id).appendingPathComponent("manifest.json"))
+  private func save(_ manifest: ShareManifest, didPublish: () -> Void = {}) throws {
+    try write(
+      manifest, to: directory(manifest.id).appendingPathComponent("manifest.json"),
+      didPublish: didPublish)
   }
   private func decode<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {
     let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
@@ -783,12 +802,12 @@ public final class ShareStore {
     let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
     return try JSONDecoder().decode(type, from: handle.readData(ofLength: Int(info.st_size)))
   }
-  private func write<T: Encodable>(_ value: T, to url: URL) throws {
+  private func write<T: Encodable>(_ value: T, to url: URL, didPublish: () -> Void = {}) throws {
     let data = try ShareJSON.encode(value)
     guard data.count <= ShareLimits.manifestBytes else { throw ShareFailure.quota }
-    try writeBytes(data, to: url)
+    try writeBytes(data, to: url, didPublish: didPublish)
   }
-  private func writeBytes(_ data: Data, to url: URL) throws {
+  private func writeBytes(_ data: Data, to url: URL, didPublish: () -> Void = {}) throws {
     let temporary = url.deletingLastPathComponent().appendingPathComponent(
       UUID().uuidString + ".part")
     let fd = open(temporary.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600)
@@ -809,6 +828,9 @@ public final class ShareStore {
     guard fsync(fd) == 0, rename(temporary.path, url.path) == 0 else {
       throw ShareFailure.unavailable
     }
+    // Rename publishes the reference even if the subsequent directory sync
+    // fails. Import rollback must preserve bytes already named by metadata.
+    didPublish()
     let directory = open(url.deletingLastPathComponent().path, O_RDONLY | O_NOFOLLOW)
     guard directory >= 0 else { throw ShareFailure.unavailable }
     defer { close(directory) }

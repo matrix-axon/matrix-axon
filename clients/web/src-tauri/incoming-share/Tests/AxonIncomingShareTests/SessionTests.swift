@@ -60,6 +60,37 @@ final class SessionTests: XCTestCase {
       fence: { throw ShareFailure.unavailable }, accessGroup: "test", vault: vault)
     XCTAssertNil(vault.token)
   }
+
+  func testCleanupJournalFailureNeverSkipsEitherRevocationBarrier() throws {
+    for keychainAvailable in [false, true] {
+      for fenceAvailable in [false, true] {
+        let vault = Vault()
+        vault.token = "synthetic-access"
+        vault.unavailable = !keychainAvailable
+        var fenceAttempted = false
+        let revoke = {
+          try SharedSession.invalidate(
+            fence: {
+              fenceAttempted = true
+              if !fenceAvailable { throw ShareFailure.busy }
+            }, accessGroup: "test", vault: vault,
+            recordCleanup: {
+              if keychainAvailable { XCTAssertNil(vault.token) }
+              throw ShareFailure.unavailable
+            })
+        }
+        if keychainAvailable || fenceAvailable {
+          XCTAssertNoThrow(try revoke())
+        } else {
+          XCTAssertThrowsError(try revoke()) {
+            XCTAssertEqual($0 as? ShareFailure, .invalidation)
+          }
+        }
+        XCTAssertTrue(fenceAttempted)
+        if keychainAvailable { XCTAssertNil(vault.token) }
+      }
+    }
+  }
   func testHTTPSharingRejectsBeforeAnyNetworkRequest() {
     let descriptor = ShareSession(
       installation: "install", server: "http://example.org", credentialAvailable: true,
