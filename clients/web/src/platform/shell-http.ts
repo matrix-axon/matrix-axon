@@ -134,6 +134,13 @@ export async function shellFetch(
     signal.removeEventListener('abort', cancel)
     throw failure(error)
   }
+  // An abort in the microtasks between `send` answering and this line has
+  // already run `cancel`, which removed the entry, and the stream's listener
+  // below would never hear it. Everything from here to the return is
+  // synchronous, so this is the last gap.
+  if (signal.aborted) {
+    throw signal.reason
+  }
 
   const stream = head.body ? bodyStream(id, signal, cancel) : null
   if (stream === null) {

@@ -383,6 +383,60 @@ describe('shellFetch abort', () => {
   })
 })
 
+describe('shellFetch abort between headers and body', () => {
+  // The abort lands a few microtasks after `send` answers: before, inside or
+  // after the handoff from the headers to the body stream. Wherever it lands,
+  // the caller sees its own reason, from `shellFetch` or from the first read,
+  // and never the plugin's `cancelled` for the entry the cancel removed.
+  const reasons = [
+    () => new DOMException('gone', 'AbortError'),
+    () => new DOMException('deadline', 'TimeoutError'),
+    () => new Error('a custom reason'),
+  ]
+  for (const makeReason of reasons) {
+    for (let hops = 0; hops <= 5; hops++) {
+      it(`keeps the reason (${makeReason().name}, ${hops} hops)`, async () => {
+        const reason = makeReason()
+        const controller = new AbortController()
+        onInvoke = (call) => {
+          switch (call.cmd) {
+            case 'plugin:axon-http|send': {
+              const head = Promise.resolve({
+                status: 200,
+                headers: [],
+                url: URL_,
+                version: 'h2',
+                body: true,
+              })
+              let later: Promise<unknown> = head
+              for (let hop = 0; hop < hops; hop++) {
+                later = later.then(() => undefined)
+              }
+              void later.then(() => controller.abort(reason))
+              return head
+            }
+            case 'plugin:axon-http|read_body':
+              // As the plugin does once a cancel has removed the entry, and
+              // otherwise a read that waits on the socket.
+              return controller.signal.aborted
+                ? Promise.reject({ kind: 'cancelled', detail: null })
+                : new Promise(() => {})
+            default:
+              return Promise.resolve(null)
+          }
+        }
+        const outcome = await shellFetch(URL_, undefined, controller.signal)
+          .then((response) => response.body!.getReader().read())
+          .catch((error: unknown) => error)
+        expect(outcome).toBe(reason)
+        expect(
+          calls.filter((call) => call.cmd === 'plugin:axon-http|cancel'),
+        ).toHaveLength(1)
+      })
+    }
+  }
+})
+
 describe('shell transport upkeep', () => {
   it('resets and reads the counters through the plugin', async () => {
     const stats = {
