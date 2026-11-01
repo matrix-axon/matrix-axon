@@ -525,6 +525,8 @@ pub enum MembershipOutcome {
     Unavailable(String),
     Invalid(String),
     Upstream(String),
+    /// The homeserver never answered within axon's timeout (ADR 0121).
+    Timeout(String),
 }
 
 impl MembershipOutcome {
@@ -536,6 +538,7 @@ impl MembershipOutcome {
             MembershipOutcome::Unavailable(m) => Err(SendError::Unavailable(m.clone())),
             MembershipOutcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
             MembershipOutcome::Upstream(m) => Err(SendError::Upstream(m.clone())),
+            MembershipOutcome::Timeout(m) => Err(SendError::Timeout(m.clone())),
         }
     }
 }
