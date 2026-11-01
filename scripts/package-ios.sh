@@ -259,7 +259,7 @@ if [ "${AXON_SHARE_PROBE:-0}" = "1" ] && [ "$export_method" != "debugging" ]; th
   echo "error: AXON_SHARE_PROBE is development-only; use --export-method debugging" >&2
   exit 1
 fi
-AXON_APS_ENVIRONMENT="$aps_environment" node "$web_dir/scripts/configure-ios-sharing.mjs"
+AXON_APS_ENVIRONMENT="$aps_environment" AXON_IOS_EXPORT_METHOD="$export_method" node "$web_dir/scripts/configure-ios-sharing.mjs"
 # The shared configuration hook installs entitlements, selects the push
 # environment, and regenerates the project after every Tauri regeneration.
 echo "    aps-environment: $aps_environment"

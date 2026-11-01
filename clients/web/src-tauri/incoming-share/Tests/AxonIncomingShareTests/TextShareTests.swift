@@ -1,0 +1,400 @@
+import Foundation
+import XCTest
+
+@testable import AxonIncomingShare
+
+final class TextShareTests: XCTestCase {
+  func testPortablePreviewEligibilityMatchesOldFoundationConstraints() {
+    for url in [
+      "https://example.org/é", "https://example.org/a|b", "https://example.org/{a}",
+      "https://example.org/a^b", "https://u:p@example.org/", "https://example.org/%XX",
+    ] {
+      XCTAssertFalse(TextShare.previewURL(url))
+    }
+    XCTAssertTrue(TextShare.previewURL("https://example.org/%C3%A9?q=a%7Cb"))
+  }
+  func testPreviewCancellationBeforeWorkerStartAndSlotRecovery() throws {
+    let requests = SharePreviewRequests()
+    let first = UUID().uuidString
+    let cancellation = try requests.begin(first)
+    XCTAssertThrowsError(try requests.begin(UUID().uuidString)) {
+      XCTAssertEqual($0 as? ShareFailure, .previewBusy)
+    }
+    requests.cancel(first)
+    XCTAssertThrowsError(try cancellation.check()) {
+      XCTAssertEqual($0 as? ShareFailure, .cancelled)
+    }
+    requests.finish(first)
+    let second = try requests.begin(UUID().uuidString)
+    XCTAssertNoThrow(try second.check())
+    requests.cancel()
+    XCTAssertThrowsError(try second.check())
+  }
+  private var root: URL!
+  private var store: ShareStore!
+  private var session: ShareSession!
+  private let account = "00000000-0000-4000-8000-000000000001"
+  private let room = "!test:example.org"
+  private let link = "https://example.org/"
+  override func setUpWithError() throws {
+    root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    store = try ShareStore(root: root)
+    session = ShareSession(
+      installation: "test", server: "https://axon.example.org", credentialAvailable: true,
+      expiresAt: nil)
+    try store.publish(session, credential: {})
+  }
+  override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
+  private func draft(text: String? = nil) throws -> ShareManifest {
+    var value = try store.claim(store.create(text: text ?? link).id)
+    value.accountId = account
+    value.roomId = room
+    return try store.update(value)
+  }
+  private func response(_ status: Int, _ value: [String: Any]) throws -> (Int, Data) {
+    (status, try JSONSerialization.data(withJSONObject: value))
+  }
+  private func destinations() throws -> (Int, Data) {
+    try response(
+      200,
+      [
+        "data": [
+          [
+            "account_id": account, "account_user_id": "@test:example.org", "room_id": room,
+            "name": "Test",
+          ]
+        ]
+      ])
+  }
+  private func sender(
+    credential: (() throws -> (ShareSession, String))? = nil,
+    _ request: @escaping TextShareSender.Request
+  ) -> TextShareSender {
+    TextShareSender(
+      store: store, credential: credential ?? { (self.session, "synthetic-token") },
+      request: request)
+  }
+  func testNormalizationPreservesProseAndDeduplicatesRepresentations() throws {
+    XCTAssertEqual(
+      try TextShare.normalize(text: ["https://EXAMPLE.org:443", "https://example.org/"], urls: []),
+      "https://EXAMPLE.org:443")
+    XCTAssertEqual(
+      try TextShare.normalize(
+        text: ["Read https://EXAMPLE.org:443", "https://example.org/"],
+        urls: ["https://example.org/"]),
+      "Read https://EXAMPLE.org:443")
+    XCTAssertEqual(
+      try TextShare.normalize(text: ["Useful context " + link, link, link], urls: [link]),
+      "Useful context " + link)
+    XCTAssertEqual(
+      try TextShare.normalize(text: ["Useful context"], urls: [link, link]),
+      "Useful context\n\n" + link)
+    XCTAssertThrowsError(
+      try TextShare.normalize(text: [String(repeating: "😀", count: 17000)], urls: []))
+    for url in [
+      "file:///private/a", "https://user:pass@example.org/", "https://", "javascript:alert(1)",
+    ] {
+      XCTAssertThrowsError(try TextShare.normalize(text: [], urls: [url]))
+    }
+  }
+  func testUnselectedDraftCanFetchPickerWithoutDispatch() throws {
+    let value = try store.claim(store.create(text: link).id)
+    var paths: [String] = []
+    let sender = sender { _, _, path, method, _, _, _, _ in
+      paths.append(path)
+      XCTAssertEqual(method, "GET")
+      return try self.destinations()
+    }
+    XCTAssertEqual(try sender.destinations(value).count, 1)
+    XCTAssertEqual(paths, ["/v1/rooms"])
+    XCTAssertEqual(try store.list().first?.operation.state, .ready)
+    try store.discard(value.id, owner: value.owner)
+    XCTAssertTrue(try store.list().isEmpty)
+  }
+  func testDispatchIntentPrecedesRequestAndSuccessRecordsEvent() throws {
+    let value = try draft()
+    var sends = 0
+    let sender = sender { _, _, path, _, body, _, _, _ in
+      if path.hasPrefix("/v1/rooms") {
+        XCTAssertEqual(path, "/v1/rooms?account_id=" + self.account)
+        return try self.destinations()
+      }
+      sends += 1
+      XCTAssertTrue(path.hasSuffix("/rooms/%21test%3Aexample%2Eorg/send"))
+      XCTAssertEqual(try self.store.list().first?.operation.state, .dispatching)
+      XCTAssertEqual(
+        (try JSONSerialization.jsonObject(with: body!)) as? NSDictionary,
+        TextShare.wire(value) as NSDictionary)
+      return try self.response(200, ["data": ["event_id": "$confirmed"]])
+    }
+    let sent = try sender.send(value)
+    XCTAssertEqual(sent.operation.state, .sent)
+    XCTAssertEqual(sent.operation.eventId, "$confirmed")
+    XCTAssertThrowsError(try sender.send(sent))
+    XCTAssertEqual(sends, 1)
+  }
+  func testResponseLossAndUntrustedErrorsAreUnknownAndNeverReplayed() throws {
+    for status in [0, 200, 400, 500, 504] {
+      let value = try draft()
+      var sends = 0
+      let sender = sender { _, _, path, _, _, _, _, _ in
+        if path.hasPrefix("/v1/rooms") { return try self.destinations() }
+        sends += 1
+        if status == 0 { throw ShareFailure.expired }
+        return try self.response(status, ["error": ["code": "unrecognized"]])
+      }
+      let unknown = try sender.send(value)
+      XCTAssertEqual(unknown.operation.state, .unknown)
+      XCTAssertThrowsError(try sender.send(unknown))
+      XCTAssertEqual(sends, 1)
+      XCTAssertEqual(unknown.text, link)
+      try store.discard(unknown.id, owner: unknown.owner)
+    }
+  }
+  func testExplicitSizeAndAuthRejectionsAreDefiniteAndEditable() throws {
+    for (status, code) in [
+      (413, "event_too_large"), (413, "preview_too_large"), (401, "unauthorized"),
+      (404, "not_found"),
+    ] {
+      let value = try draft()
+      let sender = sender { _, _, path, _, _, _, _, _ in
+        if path.hasPrefix("/v1/rooms") { return try self.destinations() }
+        return try self.response(status, ["error": ["code": code]])
+      }
+      var failed = try sender.send(value)
+      XCTAssertEqual(failed.operation.state, .failed)
+      XCTAssertEqual(failed.operation.failure, code)
+      failed.text += " Edited"
+      failed.operation.state = .ready
+      XCTAssertNoThrow(try store.update(failed))
+      try store.discard(value.id, owner: value.owner)
+    }
+  }
+  func testStaleDestinationMissingAuthenticationAndOversizeNeverDispatch() throws {
+    let value = try draft()
+    var sends = 0
+    let stale = sender { _, _, path, _, _, _, _, _ in
+      if !path.hasPrefix("/v1/rooms") { sends += 1 }
+      return try self.response(200, ["data": []])
+    }
+    XCTAssertThrowsError(try stale.send(value))
+    let unavailable = sender(credential: { throw ShareFailure.authentication }) {
+      _, _, _, _, _, _, _, _ in
+      sends += 1
+      throw ShareFailure.unavailable
+    }
+    XCTAssertThrowsError(try unavailable.send(value))
+    var large = value
+    large.text = String(repeating: "\\\"😀", count: 7000)
+    large = try store.update(large)
+    XCTAssertEqual(TextShare.validation(large), "event_too_large")
+    XCTAssertThrowsError(try stale.send(large))
+    XCTAssertEqual(sends, 0)
+    XCTAssertEqual(try store.list().first?.operation.state, .ready)
+  }
+  func testUnknownGenerationAndMaliciousPreviewStayPlainAndNeverFetchOnArrival() throws {
+    let value = try draft()
+    var requests = 0
+    let sender = sender { _, _, path, _, _, _, _, _ in
+      requests += 1
+      XCTAssertTrue(path.hasSuffix("/link-previews/generate"))
+      return try self.response(200, ["data": ["status": "disabled", "thumbnail_status": "absent"]])
+    }
+    XCTAssertEqual(requests, 0)
+    XCTAssertThrowsError(try sender.generate(value, url: link))
+    XCTAssertNil(try store.list().first?.previews)
+    XCTAssertEqual(requests, 1)
+    let malicious = self.sender { _, _, _, _, _, _, _, _ in
+      try self.response(
+        200,
+        [
+          "data": [
+            "status": "ready", "thumbnail_status": "absent",
+            "preview": ["matched_url": "https://evil.example/", "title": "wrong target"],
+          ]
+        ])
+    }
+    XCTAssertThrowsError(try malicious.generate(value, url: link))
+    XCTAssertNil(try store.list().first?.previews)
+  }
+  func testPreviewFallbackPreservesEachReasonAndKeepsOriginalLinkSendable() throws {
+    for fallback in SharePreviewFallback.allCases {
+      let value = try draft()
+      var requests = 0
+      let sender = sender { _, _, path, _, _, _, _, _ in
+        requests += 1
+        XCTAssertTrue(path.hasSuffix("/link-previews/generate"))
+        return try self.response(
+          200, ["data": ["status": fallback.rawValue, "thumbnail_status": "absent"]])
+      }
+      XCTAssertThrowsError(try sender.generate(value, url: link)) {
+        XCTAssertEqual($0 as? SharePreviewFallback, fallback)
+      }
+      XCTAssertEqual(requests, 1)
+      let saved = try XCTUnwrap(store.list().first(where: { $0.id == value.id }))
+      XCTAssertEqual(saved.text, value.text)
+      XCTAssertNil(saved.previews)
+      XCTAssertNil(TextShare.validation(saved))
+    }
+  }
+  func testMissingLocalImageRequiresExplicitRemoval() throws {
+    var value = try draft()
+    value.previews = [SharePreview(matched_url: link, image_upload_id: UUID().uuidString)]
+    value = try store.update(value)
+    var sends = 0
+    let sender = sender { _, _, path, _, _, _, _, _ in
+      if !path.hasPrefix("/v1/rooms") { sends += 1 }
+      return try self.destinations()
+    }
+    XCTAssertThrowsError(try sender.send(value)) {
+      XCTAssertEqual($0 as? ShareFailure, .missingFile)
+    }
+    XCTAssertEqual(sends, 0)
+    XCTAssertEqual(try store.list().first?.operation.state, .ready)
+  }
+
+  func testRetainedThumbnailGetsFreshAccountHandleWithoutRegeneration() throws {
+    var value = try draft()
+    let png = Data(
+      base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII="
+    )!
+    let expired = UUID().uuidString
+    let fresh = UUID().uuidString
+    value = try store.importThumbnail(
+      value.id, owner: value.owner!, data: png, mime: "image/png",
+      preview: SharePreview(matched_url: link, title: "Retained source", image_upload_id: expired))
+    var paths: [String] = []
+    let sender = sender { _, _, path, method, body, file, mime, _ in
+      paths.append(path)
+      if path.hasPrefix("/v1/rooms") { return try self.destinations() }
+      if path.contains("/media/uploads?") {
+        XCTAssertEqual(method, "POST")
+        XCTAssertEqual(mime, "image/png")
+        XCTAssertEqual(try Data(contentsOf: file!), png)
+        return try self.response(200, ["data": ["upload_id": fresh]])
+      }
+      let wire = try JSONSerialization.jsonObject(with: body!) as! [String: Any]
+      let previews = wire["url_previews"] as! [[String: Any]]
+      XCTAssertEqual(previews[0]["image_upload_id"] as? String, fresh)
+      XCTAssertEqual(try self.store.list().first?.previews?.first?.image_upload_id, fresh)
+      return try self.response(200, ["data": ["event_id": "$card"]])
+    }
+    let sent = try sender.send(value)
+    XCTAssertEqual(sent.operation.state, .sent)
+    XCTAssertEqual(paths.count, 3)
+    XCTAssertFalse(paths.contains(where: { $0.contains("generate") }))
+    XCTAssertEqual(sent.files.filter { !$0.thumbnail }.count, 0)
+    XCTAssertEqual(sent.previews?.first?.thumbnail, value.files[0].id)
+  }
+
+  func testGeneratedImageIsProtectedAndBoundToExactURL() throws {
+    let value = try draft()
+    let png = Data(
+      base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII="
+    )!
+    let upload = UUID().uuidString
+    var calls = 0
+    let sender = sender { _, _, path, _, _, _, _, limit in
+      calls += 1
+      if path.hasSuffix("/generate") {
+        return try self.response(
+          200,
+          [
+            "data": [
+              "status": "ready", "thumbnail_status": "ready",
+              "preview": [
+                "matched_url": self.link, "title": "Generated", "image_upload_id": upload,
+              ],
+            ]
+          ])
+      }
+      XCTAssertTrue(path.hasSuffix("/media/uploads/" + upload + "/preview"))
+      XCTAssertEqual(limit, ShareLimits.thumbnailBytes)
+      return (200, png)
+    }
+    var imageState: SharePreviewImageState?
+    let generated = try sender.generate(value, url: link, imageState: { imageState = $0 })
+    XCTAssertEqual(imageState, .ready)
+    XCTAssertEqual(calls, 2)
+    XCTAssertEqual(generated.previews?.first?.provenance, "generated")
+    XCTAssertEqual(generated.previews?.first?.thumbnail, generated.files.first?.id)
+    XCTAssertTrue(generated.files.first?.thumbnail == true)
+    XCTAssertNil(TextShare.validation(generated))
+  }
+
+  func testGeneratedTextCardReportsAbsentOrUnavailableImageWithoutFetchingOne() throws {
+    for state in [SharePreviewImageState.absent, .unavailable] {
+      let value = try draft()
+      var calls = 0
+      let sender = sender { _, _, path, _, _, _, _, _ in
+        calls += 1
+        XCTAssertTrue(path.hasSuffix("/generate"))
+        return try self.response(
+          200,
+          [
+            "data": [
+              "status": "ready", "thumbnail_status": state.rawValue,
+              "preview": ["matched_url": self.link, "title": "Text card"],
+            ]
+          ])
+      }
+      var reported: SharePreviewImageState?
+      let generated = try sender.generate(value, url: link, imageState: { reported = $0 })
+      XCTAssertEqual(reported, state)
+      XCTAssertEqual(calls, 1)
+      XCTAssertEqual(generated.text, value.text)
+      XCTAssertEqual(generated.previews?.first?.title, "Text card")
+      XCTAssertNil(generated.previews?.first?.image_upload_id)
+      XCTAssertTrue(generated.files.isEmpty)
+      XCTAssertNil(TextShare.validation(generated))
+    }
+  }
+
+  func testCancellationBeforeAndAfterDispatchHasHonestOutcomes() throws {
+    var value = try draft()
+    let cancellation = ShareCancellation()
+    var sends = 0
+    let sender = TextShareSender(
+      store: store, credential: { (self.session, "synthetic-token") }, cancellation: cancellation
+    ) { _, _, path, _, _, _, _, _ in
+      if path.hasPrefix("/v1/rooms") {
+        cancellation.cancel()
+        return try self.destinations()
+      }
+      sends += 1
+      throw ShareFailure.unavailable
+    }
+    XCTAssertThrowsError(try sender.send(value))
+    XCTAssertEqual(sends, 0)
+    XCTAssertEqual(try store.list().first?.operation.state, .ready)
+    try store.discard(value.id, owner: value.owner)
+    value = try draft()
+    let after = ShareCancellation()
+    let inFlight = TextShareSender(
+      store: store, credential: { (self.session, "synthetic-token") }, cancellation: after
+    ) { _, _, path, _, _, _, _, _ in
+      if path.hasPrefix("/v1/rooms") { return try self.destinations() }
+      after.cancel()
+      throw ShareFailure.expired
+    }
+    XCTAssertEqual(try inFlight.send(value).operation.state, .unknown)
+  }
+  func testFailedCompletionPublicationRetainsDispatchCheckpointForCaller() throws {
+    let value = try draft()
+    var checkpoint = value
+    var dispatched = false
+    let sender = sender { _, _, path, _, _, _, _, _ in
+      if path.hasPrefix("/v1/rooms") { return try self.destinations() }
+      dispatched = true
+      // Identity revocation can race a successful remote response. A caller
+      // must never restore its old ready state or claim that nothing was sent.
+      try self.store.invalidateSession()
+      return try self.response(200, ["data": ["event_id": "$accepted"]])
+    }
+    XCTAssertThrowsError(try sender.send(value, checkpoint: { checkpoint = $0 }))
+    XCTAssertTrue(dispatched)
+    XCTAssertEqual(checkpoint.operation.state, .dispatching)
+  }
+}

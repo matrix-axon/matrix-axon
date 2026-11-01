@@ -53,6 +53,67 @@ public final class ShareStore {
     }
   }
 
+  private struct RememberedDestination: Codable {
+    var installation: String
+    var generation: String
+    var server: String
+    var account: String
+    var room: String?
+  }
+  private var destinationPath: URL { root.appendingPathComponent("last-destination.json") }
+
+  /// Suggestions never authorize sending: restore only choices present in a
+  /// fresh destination list, and never substitute a different account or room.
+  public func suggestedDestination(_ manifest: ShareManifest, destinations: [ShareDestination])
+    throws
+    -> (account: String, room: String)
+  {
+    try coordinated {
+      try validateSession(manifest)
+      var account = manifest.accountId
+      var room = manifest.roomId
+      if account == nil, let session = try readSession(),
+        let saved = try? decode(RememberedDestination.self, from: destinationPath),
+        saved.installation == session.installation, saved.generation == session.generation,
+        saved.server == session.server
+      {
+        account = saved.account
+        room = saved.room
+      }
+      guard let account, destinations.contains(where: { $0.account_id == account }) else {
+        return ("", "")
+      }
+      let selectedRoom = destinations.contains { $0.account_id == account && $0.room_id == room }
+      return (account, selectedRoom ? room ?? "" : "")
+    }
+  }
+
+  // Called under the same cross-process lock as the manifest update. This is
+  // a convenience preference, so failure must not hide a committed revision.
+  private func rememberDestination(_ manifest: ShareManifest) {
+    do {
+      guard let account = manifest.accountId, UUID(uuidString: account) != nil,
+        (manifest.roomId?.utf8.count ?? 0) <= 4096,
+        let session = try readSession()
+      else { return }
+      try write(
+        RememberedDestination(
+          installation: session.installation, generation: session.generation,
+          server: session.server, account: account, room: manifest.roomId),
+        to: destinationPath)
+    } catch { Self.log.error("share_destination_preference_save_failed") }
+  }
+
+  private func forgetDestination(account: String? = nil) throws {
+    guard fm.fileExists(atPath: destinationPath.path) else { return }
+    if let account, let saved = try? decode(RememberedDestination.self, from: destinationPath),
+      saved.account != account
+    {
+      return
+    }
+    try fm.removeItem(at: destinationPath)
+  }
+
   /// The app alone calls this. Replacing identity invalidates content before
   /// publishing a descriptor for the replacement; refresh preserves generation.
   public func publish(_ session: ShareSession, credential: () throws -> Void) throws {
@@ -74,6 +135,7 @@ public final class ShareStore {
       if fm.fileExists(atPath: descriptor.path) { try fm.removeItem(at: descriptor) }
       let replaced =
         previous?.generation != session.generation || previous?.installation != session.installation
+      if replaced || previous?.server != session.server { try forgetDestination() }
       for item in try directories() {
         let old = try? load(item.lastPathComponent)
         if replaced || (old != nil && old?.session != session.generation) {
@@ -97,7 +159,12 @@ public final class ShareStore {
       else { throw ShareFailure.authentication }
       guard text.utf8.count <= ShareLimits.textBytes else { throw ShareFailure.quota }
       let records = try reconcileLocked()
-      guard records.count < ShareLimits.pendingCount,
+      guard records.count < ShareLimits.pendingCount else {
+        Self.log.info(
+          "share_pending_limit count=\(records.count) limit=\(ShareLimits.pendingCount)")
+        throw ShareFailure.pendingLimit
+      }
+      guard
         (try usedBytes(records)) + text.utf8.count + ShareLimits.metadataReservation
           <= ShareLimits.pendingBytes
       else { throw ShareFailure.quota }
@@ -187,24 +254,35 @@ public final class ShareStore {
         installation: UUID().uuidString,
         server: "https://unconfigured.invalid", credentialAvailable: false, expiresAt: nil)
       try write(tombstone, to: root.appendingPathComponent("session.pending.json"))
+      do { try forgetDestination() } catch { Self.log.error("share_destination_cleanup_deferred") }
       for directory in (try? directories()) ?? [] {
         do { try fm.removeItem(at: directory) } catch { Self.log.error("share_cleanup_deferred") }
       }
     }
   }
 
-  public func owned(_ id: String, owner: String, account: String) throws -> ShareManifest {
+  public func owned(_ id: String, owner: String, account: String?) throws -> ShareManifest {
     try coordinated {
-      let manifest = try load(id)
-      try validateOwner(manifest, owner)
+      let manifest = try ownedLocked(id, owner: owner)
       guard manifest.accountId == account else { throw ShareFailure.stale }
       return manifest
     }
   }
 
+  /// Refresh a local revision without adopting another consumer's ownership.
+  public func refreshOwned(_ id: String, owner: String) throws -> ShareManifest {
+    try coordinated { try ownedLocked(id, owner: owner) }
+  }
+  private func ownedLocked(_ id: String, owner: String) throws -> ShareManifest {
+    let manifest = try load(id)
+    try validateOwner(manifest, owner)
+    return manifest
+  }
+
   public func clearAccount(_ account: String) throws {
     guard UUID(uuidString: account) != nil else { throw ShareFailure.invalid }
     try coordinated {
+      try forgetDestination(account: account)
       for manifest in try readAll() where manifest.accountId == account {
         try fm.removeItem(at: directory(manifest.id))
       }
@@ -270,6 +348,9 @@ public final class ShareStore {
         release ? nil : min(now() + ShareLimits.lease, next.createdAt + ShareLimits.retention)
       if release { next.owner = nil }
       try save(next)
+      if next.accountId != current.accountId || next.roomId != current.roomId {
+        rememberDestination(next)
+      }
       Self.log.info(
         "share_updated share_id=\(next.id, privacy: .public) state=\(next.operation.state.rawValue, privacy: .public) revision=\(next.revision)"
       )
@@ -335,6 +416,18 @@ public final class ShareStore {
       else { throw ShareFailure.busy }
       if completed && !current.completed { throw ShareFailure.invalid }
       try fm.removeItem(at: directory(id))
+    }
+  }
+
+  /// Closing a completed composer acknowledges its result. Uncertain sends
+  /// keep their delivery record; neither path authorizes replay.
+  public func cancelComposer(_ manifest: ShareManifest) throws {
+    if manifest.completed {
+      try discard(manifest.id, owner: manifest.owner, completed: true)
+    } else if [.dispatching, .unknown].contains(manifest.operation.state) {
+      _ = try update(manifest, release: true)
+    } else {
+      try discard(manifest.id, owner: manifest.owner)
     }
   }
 
@@ -536,7 +629,14 @@ public final class ShareStore {
     } else {
       detected = nil
     }
-    guard detected == mime,
+    guard detected == mime else { throw ShareFailure.invalid }
+    _ = try checkedImageSource(data)
+  }
+
+  /// Inspect encoded bytes and dimensions before any pixel allocation.
+  static func checkedImageSource(_ data: Data) throws -> CGImageSource {
+    guard data.count <= ShareLimits.thumbnailBytes else { throw ShareFailure.quota }
+    guard
       let source = CGImageSourceCreateWithData(
         data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
       let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -545,6 +645,7 @@ public final class ShareStore {
       width > 0, height > 0, width <= 4_000_000, height <= 4_000_000,
       width <= 4_000_000 / height
     else { throw ShareFailure.invalid }
+    return source
   }
 
   /// Hash an APFS copy-on-write snapshot outside the shared lock, then use

@@ -872,6 +872,9 @@ function ShellChrome() {
     verification,
     platform: svcPlatform,
   } = useServices()
+  const pendingShareCount = incomingShares?.pending.value.length ?? 0
+  const pendingSharesUnavailable = incomingShares?.unavailable.value ?? false
+  const sharingSessionError = incomingShares?.sessionError.value ?? null
   const mode = layoutMode(path)
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
@@ -1528,12 +1531,26 @@ function ShellChrome() {
               <SearchIcon />
               <span class="topbar-label">Search</span>
             </button>
-            {incomingShares != null && (
+            {(pendingShareCount > 0 ||
+              pendingSharesUnavailable ||
+              sharingSessionError !== null) && (
               <a
                 href="/pending-shares"
                 class="ghost topbar-icon-button"
-                aria-label="Pending shares"
-                title={`Pending shares (${incomingShares.pending.value.length})`}
+                aria-label={
+                  sharingSessionError !== null
+                    ? 'Sharing needs sign-in refresh'
+                    : pendingSharesUnavailable
+                      ? 'Pending shares unavailable'
+                      : `Pending shares, ${pendingShareCount}`
+                }
+                title={
+                  sharingSessionError !== null
+                    ? 'Sharing credentials are unavailable. Open to refresh sign-in.'
+                    : pendingSharesUnavailable
+                      ? 'Unable to load pending shares. Open to retry.'
+                      : `Pending shares (${pendingShareCount})`
+                }
               >
                 <svg
                   width="20"
@@ -1546,9 +1563,12 @@ function ShellChrome() {
                 >
                   <path d="M4 14v6h16v-6M12 3v12m-5-5 5 5 5-5" />
                 </svg>
-                <span class="topbar-label">
-                  Pending shares ({incomingShares.pending.value.length})
+                <span class="topbar-count-badge" aria-hidden="true">
+                  {pendingSharesUnavailable || sharingSessionError !== null
+                    ? '!'
+                    : pendingShareCount}
                 </span>
+                <span class="topbar-label">Pending shares</span>
               </a>
             )}
             <a

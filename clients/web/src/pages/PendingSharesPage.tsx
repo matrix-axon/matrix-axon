@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks'
 import { useServices } from '../services'
-import { matchUrls } from '../html/linkify'
+import { nativePreviewLinks } from '../incoming-share/urls'
 import { LinkPreviews } from '../components/LinkPreviews'
 import { shareCompleted, shareOperations } from '../incoming-share/types'
 import type { ShareOperation } from '../incoming-share/types'
@@ -57,8 +57,13 @@ function RecoveryThumbnail({
 export function PendingSharesPage() {
   const { incomingShares: store, accounts, rooms, auth } = useServices()
   const [duplicateRisk, setDuplicateRisk] = useState(false)
+  const [homeserverURL, setHomeserverURL] = useState<string | null>(null)
+  const [clearIds, setClearIds] = useState<string[] | null>(null)
   const selectedId = store?.selected.value?.id
-  useEffect(() => setDuplicateRisk(false), [selectedId])
+  useEffect(() => {
+    setDuplicateRisk(false)
+    setHomeserverURL(null)
+  }, [selectedId])
   useEffect(() => {
     if (store == null) return
     void store.refresh()
@@ -115,6 +120,9 @@ export function PendingSharesPage() {
     'og:description': preview.description,
     'og:site_name': preview.site_name,
   }))
+  const previewLinks = [
+    ...new Set(nativePreviewLinks(store.editorText.value)),
+  ].filter((url) => /^https?:/i.test(url))
   const blocked =
     record !== null &&
     shareOperations(record).some((item) =>
@@ -141,6 +149,10 @@ export function PendingSharesPage() {
         it.
       </p>
       {store.error.value !== null && <p role="alert">{store.error.value}</p>}
+      {store.sessionError.value !== null && (
+        <p role="alert">{store.sessionError.value}</p>
+      )}
+      {store.notice.value !== null && <p role="status">{store.notice.value}</p>}
       <button
         type="button"
         disabled={busy}
@@ -155,9 +167,57 @@ export function PendingSharesPage() {
       >
         Refresh sign-in
       </button>
+      {clearIds === null ? (
+        store.pending.value.length > 0 && (
+          <button
+            type="button"
+            class="danger"
+            disabled={busy}
+            onClick={() =>
+              setClearIds(store.pending.value.map((item) => item.id))
+            }
+          >
+            Clear all
+          </button>
+        )
+      ) : (
+        <div role="group" aria-label="Clear pending shares">
+          <p>
+            Delete {clearIds.length} saved{' '}
+            {clearIds.length === 1 ? 'share' : 'shares'} from this device? This
+            removes drafts and saved delivery records. Messages already sent
+            remain in their rooms. Shares currently open elsewhere in Axon will
+            be kept.
+          </p>
+          <button
+            type="button"
+            class="danger"
+            disabled={busy}
+            onClick={() => {
+              act(store.discardAll(clearIds))
+              setClearIds(null)
+            }}
+          >
+            Clear all pending shares
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setClearIds(null)}
+          >
+            Cancel clear all
+          </button>
+        </div>
+      )}
       {record === null ? (
         <>
-          {store.pending.value.length === 0 && <p>No pending shares.</p>}
+          {store.pending.value.length === 0 && (
+            <p>
+              {store.unavailable.value
+                ? 'Pending shares could not be loaded. Refresh to retry.'
+                : 'No pending shares.'}
+            </p>
+          )}
           <ul>
             {store.pending.value.map((item) => (
               <li key={item.id}>
@@ -285,36 +345,62 @@ export function PendingSharesPage() {
                 )}
                 <button
                   type="button"
+                  disabled={!previewLinks.includes(preview.matched_url)}
                   onClick={() => act(store.generate(preview.matched_url))}
-                  disabled={record.accountId === undefined}
                 >
-                  Replace preview
+                  Refresh on this device
                 </button>
               </div>
             ))}
             <p>
-              Include preview asks your homeserver to look up the URL,
-              disclosing it to that server. Opening this review does not fetch
-              the webpage.
+              Include preview looks up the link on this device. The website and
+              its image hosts may receive the request. Device previews require
+              HTTPS; other links remain sendable.
             </p>
-            {[
-              ...new Set(
-                matchUrls(store.editorText.value)
-                  .filter((match) => /^https?:/.test(match.url))
-                  .map((match) => match.url),
-              ),
-            ]
-              .slice(0, 8)
-              .map((url) => (
+            {previewLinks.slice(0, 8).map((url) => (
+              <button
+                type="button"
+                key={url}
+                onClick={() => act(store.generate(url))}
+              >
+                Include preview: {url}
+              </button>
+            ))}
+            <p>
+              The homeserver option discloses the URL to your selected Matrix
+              homeserver, which may log it even for encrypted rooms.
+            </p>
+            {previewLinks.slice(0, 8).map((url) => (
+              <button
+                type="button"
+                key={url}
+                disabled={record.accountId === undefined}
+                onClick={() => setHomeserverURL(url)}
+              >
+                Use homeserver instead: {url}
+              </button>
+            ))}
+            {homeserverURL !== null && previewLinks.includes(homeserverURL) && (
+              <div role="group" aria-label="Confirm homeserver preview lookup">
+                <p>
+                  Send {homeserverURL} to your homeserver to fetch a preview? It
+                  may record the URL in its logs.
+                </p>
                 <button
                   type="button"
-                  key={url}
-                  disabled={record.accountId === undefined}
-                  onClick={() => act(store.generate(url))}
+                  onClick={() => {
+                    const url = homeserverURL
+                    setHomeserverURL(null)
+                    act(store.generateUsingHomeserver(url))
+                  }}
                 >
-                  Include preview: {url}
+                  Fetch using homeserver
                 </button>
-              ))}
+                <button type="button" onClick={() => setHomeserverURL(null)}>
+                  Cancel preview lookup
+                </button>
+              </div>
+            )}
           </fieldset>
           {record.importFailures.length > 0 && (
             <p role="alert">

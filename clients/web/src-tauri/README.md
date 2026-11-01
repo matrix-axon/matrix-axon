@@ -160,11 +160,14 @@ has no effect and the next regeneration overwrites them; change
 
 ## iOS
 
+The production text/link Share Extension is described in [iOS sharing](../../../docs/ios-sharing.md).
 Incoming-share session/staging and the Pending shares recovery UI are described in [the foundation guide](../../../docs/ios-sharing-foundation.md).
-App Group and shared Keychain capabilities must be enabled in the developer portal and included in provisioning profiles.
+App Group and shared Keychain capabilities must be enabled for both `org.matrixaxon.axon` and `org.matrixaxon.axon.Share` in the developer portal and included in their provisioning profiles.
 Run `node scripts/configure-ios-sharing.mjs` from `clients/web` after every manual `tauri ios init`; packaging runs the same hook automatically.
 `AXON_SHARE_PROBE=1` adds the development-only signed access probe; normal distribution builds omit it.
-Native incoming sharing requires an HTTPS Axon server and retains drafts configured for HTTP.
+Native incoming-share sending and homeserver preview lookup require an HTTPS Axon server and retain drafts configured for HTTP.
+Explicit on-device preview lookup is independent of that transport and uses a restricted HTTPS reader before the separately confirmed homeserver option.
+Its shared Swift package pins SwiftSoup 2.14.3 for inert metadata parsing and requires a Swift 6-capable Xcode toolchain; the package remains deployable to iOS 15.
 `pnpm test:sharing:simulator` runs the shared Swift recovery tests under iOS using a separate unsigned test runner; it requires Xcode, an installed iOS runtime, and `xcodegen`.
 
 Needs macOS with Xcode. Everything below is `clients/web` unless it says
@@ -546,16 +549,18 @@ Developer ID certificate and notarization login for the `.dmg`, a different
 certificate type from a store build's, and a store upload authenticates with an API
 key rather than an Apple ID.
 
-| Secret                              | What it is                                                                                             |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `APPLE_STORE_CERTIFICATES`          | Base64 of one `.p12` holding the store signing identities (certificate **and** private key)            |
-| `APPLE_STORE_CERTIFICATES_PASSWORD` | The password that `.p12` was exported with                                                             |
-| `IOS_APPSTORE_PROFILE`              | Base64 of the iOS **App Store** provisioning profile for the bundle ID                                 |
-| `IOS_DEVELOPMENT_PROFILE`           | Base64 of the **Xcode-managed** iOS development profile (`iOS Team Provisioning Profile: <bundle id>`) |
-| `MAC_APPSTORE_PROFILE`              | Base64 of the **Mac App Store** provisioning profile (`.provisionprofile`)                             |
-| `ASC_KEY_ID`                        | The 10-character key ID of an App Store Connect API key                                                |
-| `ASC_ISSUER_ID`                     | The issuer ID, a UUID, shown above the keys list                                                       |
-| `ASC_PRIVATE_KEY`                   | The full contents of that key's `AuthKey_<ID>.p8` file                                                 |
+| Secret                              | What it is                                                                                                       |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `APPLE_STORE_CERTIFICATES`          | Base64 of one `.p12` holding the store signing identities (certificate **and** private key)                      |
+| `APPLE_STORE_CERTIFICATES_PASSWORD` | The password that `.p12` was exported with                                                                       |
+| `IOS_APPSTORE_PROFILE`              | Base64 of the iOS **App Store** provisioning profile for the bundle ID                                           |
+| `IOS_DEVELOPMENT_PROFILE`           | Base64 of the **Xcode-managed** iOS development profile (`iOS Team Provisioning Profile: <bundle id>`)           |
+| `IOS_SHARE_APPSTORE_PROFILE`        | Base64 of the App Store profile for `org.matrixaxon.axon.Share`, with shared App Group and Keychain capabilities |
+| `IOS_SHARE_DEVELOPMENT_PROFILE`     | Base64 of its Xcode-managed development profile, with the same shared capabilities                               |
+| `MAC_APPSTORE_PROFILE`              | Base64 of the **Mac App Store** provisioning profile (`.provisionprofile`)                                       |
+| `ASC_KEY_ID`                        | The 10-character key ID of an App Store Connect API key                                                          |
+| `ASC_ISSUER_ID`                     | The issuer ID, a UUID, shown above the keys list                                                                 |
+| `ASC_PRIVATE_KEY`                   | The full contents of that key's `AuthKey_<ID>.p8` file                                                           |
 
 `ASC_*` are needed only for a run that uploads or uses `auto`. There is also one
 optional **variable** (not a secret): `MAS_APP_IDENTITY`, below.

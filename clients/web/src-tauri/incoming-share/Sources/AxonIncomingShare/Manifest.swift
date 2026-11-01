@@ -2,7 +2,8 @@ import Foundation
 
 public enum ShareFailure: String, Error, Codable {
   case unavailable, invalid, quota, stale, busy, missingFile, expired, authentication, invalidation,
-    httpsRequired
+    httpsRequired, cancelled, previewUnavailable, invalidResponse, pendingLimit, previewBusy,
+    transferBusy
 }
 
 public enum ShareLimits {
@@ -15,6 +16,9 @@ public enum ShareLimits {
   public static let manifestBytes = 1024 * 1024
   public static let metadataReservation = 2 * manifestBytes
   public static let thumbnailBytes = 2 * 1024 * 1024
+  // Room lists include topics and other fields the native picker does not use.
+  public static let roomListBytes = 8 * 1024 * 1024
+  public static let responseBytes = max(roomListBytes, thumbnailBytes)
   public static let retention: TimeInterval = 24 * 60 * 60
   public static let lease: TimeInterval = 300
 }

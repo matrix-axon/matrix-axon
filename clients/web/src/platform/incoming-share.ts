@@ -19,7 +19,9 @@ export function nativeIncomingShare(): IncomingSharePort {
       )
         throw new Error('Incoming share: invalid')
       if (
-        ['claim', 'update', 'retain', 'seed'].includes(action) &&
+        ['claim', 'update', 'retain', 'seed', 'device_preview'].includes(
+          action,
+        ) &&
         !isIncomingShare(result.value)
       )
         throw new Error('Incoming share: invalid')

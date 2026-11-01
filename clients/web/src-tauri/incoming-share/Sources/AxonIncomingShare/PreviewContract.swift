@@ -57,13 +57,7 @@ public enum PreviewContract {
     let body = request[media ? "caption" : "body"] as? String ?? ""
     guard body.utf8.count <= 64 * 1024 else { return "event_too_large" }
     guard previews.count <= 8 else { return "invalid" }
-    let expression = try! NSRegularExpression(pattern: "(?:https?://|matrix:)[^\\s\u{feff}<>\"]+")
-    let nsBody = body as NSString
-    let urls = Set(
-      expression.matches(in: body, range: NSRange(location: 0, length: nsBody.length)).map {
-        nsBody.substring(with: $0.range).trimmingCharacters(
-          in: CharacterSet(charactersIn: ".,;:!?)]'\""))
-      }.filter { !$0.hasPrefix("matrix:") })
+    let urls = Set(TextShare.links(body))
     var seen = Set<String>()
     var entries: [[String: Any]] = []
     for preview in previews {
@@ -115,7 +109,7 @@ public enum PreviewContract {
     return size(content) > 40 * 1024 ? "event_too_large" : nil
   }
 
-  private static func canonicalURL(_ raw: String) -> String? {
+  static func canonicalURL(_ raw: String) -> String? {
     guard var url = URLComponents(string: raw) else { return nil }
     url.scheme = url.scheme?.lowercased()
     url.host = url.host?.lowercased()

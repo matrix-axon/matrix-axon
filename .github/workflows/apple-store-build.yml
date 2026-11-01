@@ -98,6 +98,8 @@ jobs:
           APPLE_STORE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_STORE_CERTIFICATES_PASSWORD }}
           IOS_APPSTORE_PROFILE: ${{ secrets.IOS_APPSTORE_PROFILE }}
           IOS_DEVELOPMENT_PROFILE: ${{ secrets.IOS_DEVELOPMENT_PROFILE }}
+          IOS_SHARE_APPSTORE_PROFILE: ${{ secrets.IOS_SHARE_APPSTORE_PROFILE }}
+          IOS_SHARE_DEVELOPMENT_PROFILE: ${{ secrets.IOS_SHARE_DEVELOPMENT_PROFILE }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -203,6 +205,8 @@ jobs:
           APPLE_STORE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_STORE_CERTIFICATES_PASSWORD }}
           IOS_APPSTORE_PROFILE: ${{ secrets.IOS_APPSTORE_PROFILE }}
           IOS_DEVELOPMENT_PROFILE: ${{ secrets.IOS_DEVELOPMENT_PROFILE }}
+          IOS_SHARE_APPSTORE_PROFILE: ${{ secrets.IOS_SHARE_APPSTORE_PROFILE }}
+          IOS_SHARE_DEVELOPMENT_PROFILE: ${{ secrets.IOS_SHARE_DEVELOPMENT_PROFILE }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         shell: bash
@@ -218,6 +222,10 @@ jobs:
           scripts/ci/store-credentials.sh profile IOS_DEVELOPMENT_PROFILE \
             --ext mobileprovision --expect development --bundle-id "$bundle_id" \
             --entitlements clients/web/src-tauri/Entitlements.ios.plist --install
+          scripts/ci/store-credentials.sh profile IOS_SHARE_APPSTORE_PROFILE \
+            --ext mobileprovision --expect app-store --bundle-id "$bundle_id.Share" --install
+          scripts/ci/store-credentials.sh profile IOS_SHARE_DEVELOPMENT_PROFILE \
+            --ext mobileprovision --expect development --bundle-id "$bundle_id.Share" --install
           if [ "$NEED_ASC" = "yes" ]; then
             scripts/ci/store-credentials.sh asc-key
           fi

@@ -46,6 +46,17 @@ function fixture(
         return structuredClone(record) as T
       }
       if (action === 'upload' && uploadFailure) throw { code: 'missingFile' }
+      if (action === 'device_preview') {
+        record.previews = [
+          {
+            matched_url: args?.url as string,
+            title: 'Device preview',
+            provenance: 'generated',
+          },
+        ]
+        record.revision += 1
+        return structuredClone(record) as T
+      }
       if (action === 'upload')
         return { uploadId: '00000000-0000-4000-8000-000000000002' } as T
       return {} as T
@@ -81,6 +92,270 @@ function fixture(
 }
 
 describe('durable incoming-share recovery', () => {
+  it('keeps credential publication failures separate from successful inbox reads', async () => {
+    const f = fixture()
+    f.store.sessionError.value = 'Sharing credentials are unavailable.'
+    await f.store.refresh()
+    expect(f.store.unavailable.value).toBe(false)
+    expect(f.store.sessionError.value).toBe(
+      'Sharing credentials are unavailable.',
+    )
+  })
+  it('cancels and joins device preview work before releasing a closing draft', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    const original = f.port.call
+    let complete!: () => void
+    f.port.call = async (action, args) => {
+      if (action === 'device_preview') {
+        await new Promise<void>((resolve) => {
+          complete = resolve
+        })
+        throw { code: 'cancelled' }
+      }
+      if (action === 'cancel_preview') {
+        complete()
+        return {} as never
+      }
+      return original(action, args)
+    }
+    const generating = f.store.generate('https://example.org')
+    await vi.waitFor(() => expect(complete).toBeDefined())
+    await f.store.close()
+    await generating
+    expect(f.store.selected.value).toBeNull()
+    expect(
+      f.calls.some(
+        (call) => call.action === 'update' && call.args?.release === true,
+      ),
+    ).toBe(true)
+    expect(f.store.busy.value).toBe(false)
+  })
+  it('explains unsupported preview URLs without marking the text draft invalid', async () => {
+    const f = fixture()
+    f.seed({ text: 'https://user:password@example.org/article' })
+    await f.store.open('share')
+    await f.store.generate(f.record().text)
+    expect(f.store.error.value).toContain('original link remains sendable')
+    expect(f.calls.some((call) => call.action === 'device_preview')).toBe(false)
+  })
+  it('joins a preview closed before its native request starts', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    const generating = f.store.generate('https://example.org')
+    await f.store.close()
+    await generating
+    expect(f.store.selected.value).toBeNull()
+    expect(f.calls.some((call) => call.action === 'device_preview')).toBe(false)
+  })
+  it('joins a late successful preview before releasing its new revision', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    const original = f.port.call
+    let finish!: () => void
+    f.port.call = async (action, args) => {
+      if (action === 'device_preview')
+        await new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      if (action === 'cancel_preview') {
+        finish()
+        return {} as never
+      }
+      return original(action, args)
+    }
+    const generating = f.store.generate('https://example.org')
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    await f.store.close()
+    await generating
+    expect(f.store.selected.value).toBeNull()
+    expect(
+      f.calls.filter((call) => call.action === 'update').at(-1)?.args?.release,
+    ).toBe(true)
+  })
+  function inboxFixture(
+    states: IncomingShare['operation']['state'][] = [
+      'ready',
+      'unknown',
+      'sent',
+    ],
+  ) {
+    const f = fixture()
+    const records = states.map((state, index) => ({
+      ...structuredClone(f.initial),
+      id: `share-${index}`,
+      operation: { id: `operation-${index}`, state },
+    }))
+    const port: IncomingSharePort = {
+      subscribe: () => () => {},
+      call: vi.fn(async (action, args) => {
+        if (action === 'list') return structuredClone(records) as never
+        const index = records.findIndex((record) => record.id === args?.id)
+        if (index < 0) throw { code: 'stale' }
+        if (action === 'claim') {
+          records[index].owner = 'review-owner'
+          return structuredClone(records[index]) as never
+        }
+        if (action === 'discard') {
+          if (
+            records[index].owner !== undefined &&
+            records[index].owner !== args?.owner
+          )
+            throw { code: 'busy' }
+          records.splice(index, 1)
+          return {} as never
+        }
+        throw new Error('unsupported fixture action')
+      }),
+    }
+    const store = createIncomingShareStore(
+      port,
+      f.api,
+      createTimelineStoreCache(f.api, {} as MediaService),
+    )
+    return { store, port, records, post: f.post }
+  }
+
+  it('clears the captured inbox including the reviewed share without sending', async () => {
+    const f = inboxFixture()
+    await f.store.refresh()
+    await f.store.open('share-0')
+    await f.store.discardAll()
+    expect(f.records).toEqual([])
+    expect(f.store.pending.value).toEqual([])
+    expect(f.store.selected.value).toBeNull()
+    expect(f.store.notice.value).toBe('Cleared 3 pending shares.')
+    expect(f.post).not.toHaveBeenCalled()
+  })
+
+  it('keeps active shares and continues clearing the rest after a failure', async () => {
+    const f = inboxFixture()
+    f.records[1].owner = 'extension-owner'
+    await f.store.refresh()
+    await f.store.discardAll()
+    expect(f.records.map((record) => record.id)).toEqual(['share-1'])
+    expect(f.store.pending.value.map((record) => record.id)).toEqual([
+      'share-1',
+    ])
+    expect(f.store.error.value).toContain('1 share could not be cleared')
+    expect(f.store.notice.value).toBe('Cleared 2 pending shares.')
+    expect(f.post).not.toHaveBeenCalled()
+  })
+
+  it('does not clear shares arriving after the confirmed selection', async () => {
+    const f = inboxFixture(['ready'])
+    await f.store.refresh()
+    const ids = f.store.pending.value.map((record) => record.id)
+    f.records.push({ ...structuredClone(f.records[0]), id: 'new-share' })
+    await f.store.discardAll(ids)
+    expect(f.records.map((record) => record.id)).toEqual(['new-share'])
+    expect(f.store.pending.value.map((record) => record.id)).toEqual([
+      'new-share',
+    ])
+  })
+
+  it('stops bulk deletion and ignores its completion after session reset', async () => {
+    const f = inboxFixture()
+    await f.store.refresh()
+    const original = f.port.call
+    let release!: () => void
+    f.port.call = vi.fn(async (action, args) => {
+      if (action === 'discard')
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+      return (await original(action, args)) as never
+    })
+    const clearing = f.store.discardAll()
+    await vi.waitFor(() => expect(release).toBeDefined())
+    f.store.reset()
+    release()
+    await clearing
+    expect(
+      vi
+        .mocked(f.port.call)
+        .mock.calls.filter(([action]) => action === 'discard'),
+    ).toHaveLength(1)
+    expect(f.store.pending.value).toEqual([])
+    expect(f.store.notice.value).toBeNull()
+    expect(f.store.error.value).toBeNull()
+  })
+
+  it('distinguishes an unreadable inbox from an empty inbox and recovers', async () => {
+    const f = inboxFixture([])
+    const original = f.port.call
+    f.port.call = async () => {
+      throw { code: 'unavailable' }
+    }
+    await f.store.refresh()
+    expect(f.store.unavailable.value).toBe(true)
+    f.port.call = original
+    await f.store.refresh()
+    expect(f.store.unavailable.value).toBe(false)
+    expect(f.store.error.value).toBeNull()
+    expect(f.store.pending.value).toEqual([])
+  })
+
+  it('does not let a pre-clear inbox read restore deleted shares', async () => {
+    const f = inboxFixture(['ready'])
+    await f.store.refresh()
+    const snapshot = structuredClone(f.records)
+    const original = f.port.call
+    let finish!: (records: IncomingShare[]) => void
+    let first = true
+    f.port.call = async (action, args) => {
+      if (action === 'list' && first) {
+        first = false
+        return (await new Promise<IncomingShare[]>((resolve) => {
+          finish = resolve
+        })) as never
+      }
+      return original(action, args)
+    }
+    const reading = f.store.refresh()
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    await f.store.discardAll()
+    finish(snapshot)
+    await reading
+    expect(f.store.pending.value).toEqual([])
+    expect(f.records).toEqual([])
+  })
+
+  it('uses the device without account credentials and never falls back automatically', async () => {
+    const f = fixture()
+    f.seed({ accountId: undefined, roomId: undefined })
+    await f.store.open('share')
+    await f.store.generate('https://example.org')
+    expect(
+      f.calls.filter((call) => call.action === 'device_preview'),
+    ).toHaveLength(1)
+    expect(f.store.selected.value?.previews?.[0]?.title).toBe('Device preview')
+    expect(f.post).not.toHaveBeenCalled()
+    const original = f.port.call
+    f.port.call = async (action, args) => {
+      if (action === 'device_preview') throw { code: 'devicePreview_timeout' }
+      return original(action, args)
+    }
+    await f.store.generate('https://example.org')
+    expect(f.store.error.value).toContain('on-device preview lookup timed out')
+    expect(f.post).not.toHaveBeenCalled()
+    expect(f.store.selected.value?.text).toBe('https://example.org')
+  })
+  it('submits a URL to the homeserver only through its separate action', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    f.post.mockResolvedValueOnce({
+      data: { data: { status: 'disabled' } },
+      response: new Response(),
+    })
+    await f.store.generateUsingHomeserver('https://example.org')
+    expect(f.post).toHaveBeenCalledWith(
+      '/v1/accounts/{account_id}/link-previews/generate',
+      expect.anything(),
+    )
+    expect(f.calls.some((call) => call.action === 'device_preview')).toBe(false)
+    expect(f.store.selected.value?.text).toBe('https://example.org')
+  })
   it('discard preserves preview uploads referenced by a sent first attachment', async () => {
     const f = fixture()
     f.seed({

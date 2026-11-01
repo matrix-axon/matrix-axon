@@ -26,6 +26,8 @@ import type { Account } from './stores/accounts'
 import type { EventDto } from './stores/timeline'
 import { memoryStorage } from './test/memory-storage'
 import { TEST_BASE_URL, UNKNOWN_BACKUP, testServices } from './test/services'
+import { createIncomingShareStore } from './incoming-share/store'
+import type { IncomingShare } from './incoming-share/types'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!room:hs'
@@ -92,6 +94,90 @@ afterEach(() => {
 afterAll(() => server.close())
 
 describe('App', () => {
+  it('shows the pending shares entry and its badge only while the inbox has shares', async () => {
+    const services = testServices()
+    let records: IncomingShare[] = []
+    const shares = createIncomingShareStore(
+      {
+        subscribe: () => () => {},
+        call: async () => structuredClone(records) as never,
+      },
+      services.api,
+      services.timelines,
+    )
+    services.incomingShares = shares
+    render(<App services={services} />)
+    expect(screen.queryByRole('link', { name: /^Pending shares/ })).toBeNull()
+    records = Array.from({ length: 2 }, (_, index) => ({
+      version: 1,
+      id: `share-${index}`,
+      createdAt: 1,
+      session: 'fixture',
+      text: 'Saved draft',
+      files: [],
+      importFailures: [],
+      revision: 0,
+      operation: { id: `operation-${index}`, state: 'ready' },
+    }))
+    await shares.refresh()
+    const entry = await screen.findByRole('link', { name: 'Pending shares, 2' })
+    expect(within(entry).getByText('2').className).toBe('topbar-count-badge')
+    records = records.slice(1)
+    await shares.refresh()
+    await screen.findByRole('link', { name: 'Pending shares, 1' })
+    records = []
+    await shares.refresh()
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('link', { name: /^Pending shares/ }),
+      ).toBeNull(),
+    )
+    shares.dispose()
+  })
+
+  it('keeps an unreadable pending inbox reachable with a warning badge', async () => {
+    const services = testServices()
+    let fail = true
+    const shares = createIncomingShareStore(
+      {
+        subscribe: () => () => {},
+        call: async () => {
+          if (fail) throw new Error('unavailable')
+          return [] as never
+        },
+      },
+      services.api,
+      services.timelines,
+    )
+    services.incomingShares = shares
+    await shares.refresh()
+    render(<App services={services} />)
+    const entry = screen.getByRole('link', {
+      name: 'Pending shares unavailable',
+    })
+    expect(within(entry).getByText('!').className).toBe('topbar-count-badge')
+    fail = false
+    await shares.refresh()
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('link', { name: /^Pending shares/ }),
+      ).toBeNull(),
+    )
+    shares.sessionError.value = 'Sharing credentials are unavailable.'
+    const credentialEntry = await screen.findByRole('link', {
+      name: 'Sharing needs sign-in refresh',
+    })
+    expect(credentialEntry.getAttribute('title')).toContain(
+      'Sharing credentials are unavailable',
+    )
+    await shares.refresh()
+    expect(
+      screen.getByRole('link', { name: 'Sharing needs sign-in refresh' }),
+    ).toBeTruthy()
+    expect(shares.unavailable.value).toBe(false)
+    shares.dispose()
+  })
+
   it('gates on the auth provider: signed out renders the login bootstrap', () => {
     const services = testServices({ token: null })
     const { getByRole } = render(<App services={services} />)

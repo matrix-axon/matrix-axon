@@ -3,6 +3,7 @@ import type { ApiClient } from '../api/client'
 import type { TimelineStoreCache } from '../stores/timeline-cache'
 import type { SendProgress } from '../stores/timeline'
 import { matchUrls } from '../html/linkify'
+import { nativePreviewLinks } from './urls'
 import { previewPreflight, type PreviewInput } from './contract'
 import { shareCompleted, shareOperations } from './types'
 import type {
@@ -24,7 +25,23 @@ export function createIncomingShareStore(
   const selected = signal<IncomingShare | null>(null)
   const busy = signal(false)
   const error = signal<string | null>(null)
+  const notice = signal<string | null>(null)
+  const unavailable = signal(false)
+  const sessionError = signal<string | null>(null)
+  let deviceRequest: { id: string; done: Promise<void> } | null = null
+  let previewWork: Promise<void> | null = null
+  let previewClosing = false
+  function cancelPreview() {
+    previewClosing = true
+    const request = deviceRequest
+    if (request !== null)
+      void port
+        .call('cancel_preview', { requestId: request.id })
+        .catch(() => {})
+    return request?.done ?? Promise.resolve()
+  }
   let epoch = 0
+  let refreshVersion = 0
   let tail: Promise<void> = Promise.resolve()
   let sessionReady = () => Promise.resolve()
   let stopRequested = false
@@ -93,9 +110,24 @@ export function createIncomingShareStore(
         'The retained file is missing or corrupt. Replace or remove its preview, or discard this share.',
       quota:
         'A staging or storage limit was exceeded. Keep the draft, reduce its content, or explicitly discard another pending share.',
+      pendingLimit:
+        'Pending shares is full. Send or explicitly discard an existing draft, then share again from the source.',
+      devicePreview_unavailable:
+        'The on-device preview lookup is unavailable. The link remains sendable; you can explicitly choose Use homeserver instead.',
+      devicePreview_timeout:
+        'The on-device preview lookup timed out. The link remains sendable; you can explicitly choose Use homeserver instead.',
+      devicePreview_noMetadata:
+        'The device found no usable preview metadata. The original link remains sendable.',
       invalid:
         'The share contains invalid or over-limit data. Review and edit it before sending.',
       busy: 'Another process still owns this share. Keep the draft and retry after it finishes.',
+      previewBusy:
+        'Another on-device preview is finishing. Wait a moment and try again.',
+      transferBusy: 'Sharing transfers are busy. Wait a moment and try again.',
+      devicePreview_unsupportedURL:
+        'This link cannot be previewed on this device. The original link remains sendable.',
+      cancelled:
+        'Preview lookup cancelled. The original link remains sendable.',
       stale:
         'The share changed or its ownership expired. Refresh pending shares before reviewing it again.',
       expired:
@@ -108,12 +140,19 @@ export function createIncomingShareStore(
   }
   async function refresh() {
     const generation = epoch
+    const version = ++refreshVersion
+    const previousReadFailure = unavailable.peek() ? error.peek() : null
     const reviewed = selected.peek()
     let reclaiming = false
+    let listed = false
     try {
       await tail
       const records = await port.call<IncomingShare[]>('list')
-      if (generation !== epoch) return
+      if (generation !== epoch || version !== refreshVersion) return
+      listed = true
+      unavailable.value = false
+      if (previousReadFailure !== null && error.peek() === previousReadFailure)
+        error.value = null
       pending.value = records
       const current = selected.peek()
       if (busy.peek() || current === null) return
@@ -141,7 +180,10 @@ export function createIncomingShareStore(
           'This share changed or another process owns it. Unsaved edits are kept here; reopen the share when it is available.'
       }
     } catch (cause) {
-      if (generation === epoch) describeFailure(cause)
+      if (generation === epoch && version === refreshVersion) {
+        if (!listed) unavailable.value = true
+        describeFailure(cause)
+      }
     } finally {
       if (reclaiming && generation === epoch) busy.value = false
     }
@@ -207,6 +249,9 @@ export function createIncomingShareStore(
     }
   }
   async function close(fromOpen = false) {
+    const work = previewWork
+    await cancelPreview()
+    if (work !== null) await work
     if (busy.peek() && !fromOpen) return
     if (selected.peek() === null) return
     const generation = epoch
@@ -220,30 +265,79 @@ export function createIncomingShareStore(
       }
     }
   }
+  async function discardRecord(record: IncomingShare, generation: number) {
+    if (generation !== epoch) return
+    const id = record.id
+    const current = selected.peek()
+    await port.call('discard', {
+      id,
+      owner: current?.id === id ? current.owner : undefined,
+    })
+    if (generation !== epoch) return
+    void cleanup(record, generation)
+    const kept = { ...drafts.peek() }
+    delete kept[id]
+    drafts.value = kept
+    if (selected.peek()?.id === id) selected.value = null
+    pending.value = pending.peek().filter((item) => item.id !== id)
+  }
   async function discard(id: string) {
     if (busy.peek()) return
     const generation = epoch
     busy.value = true
     try {
-      clearEditTimers()
+      if (selected.peek()?.id === id) clearEditTimers()
       await tail
       const abandoned =
         selected.peek()?.id === id
           ? selected.peek()
           : pending.peek().find((record) => record.id === id)
-      await port.call('discard', {
-        id,
-        owner: selected.peek()?.id === id ? selected.peek()?.owner : undefined,
-      })
-      if (abandoned !== undefined && abandoned !== null)
-        void cleanup(abandoned, generation)
+      if (abandoned != null) await discardRecord(abandoned, generation)
       if (generation === epoch) {
-        const kept = { ...drafts.peek() }
-        delete kept[id]
-        drafts.value = kept
-        if (selected.peek()?.id === id) selected.value = null
         await refresh()
       }
+    } catch (cause) {
+      if (generation === epoch) describeFailure(cause)
+    } finally {
+      if (generation === epoch) busy.value = false
+    }
+  }
+  async function discardAll(ids = pending.peek().map((record) => record.id)) {
+    if (busy.peek() || ids.length === 0) return
+    const generation = epoch
+    const targets = new Set(ids)
+    busy.value = true
+    error.value = null
+    notice.value = null
+    // Do not let an older inbox read repaint entries removed by this batch.
+    refreshVersion += 1
+    if (targets.has(selected.peek()?.id ?? '')) clearEditTimers()
+    let cleared = 0
+    let failed = 0
+    try {
+      await tail
+      if (generation !== epoch) return
+      const records = await port.call<IncomingShare[]>('list')
+      if (generation !== epoch) return
+      // Each discard uses the native ownership lock. Another active composer
+      // keeps its lease; one rejection must not prevent clearing other shares.
+      for (const record of records) {
+        if (generation !== epoch) return
+        if (!targets.has(record.id)) continue
+        try {
+          await discardRecord(record, generation)
+          if (generation !== epoch) return
+          cleared += 1
+        } catch {
+          if (generation !== epoch) return
+          failed += 1
+        }
+      }
+      await refresh()
+      if (generation !== epoch) return
+      notice.value = `Cleared ${cleared} pending ${cleared === 1 ? 'share' : 'shares'}.`
+      if (failed > 0)
+        error.value = `${failed} ${failed === 1 ? 'share could' : 'shares could'} not be cleared. Shares currently open elsewhere in Axon are kept. Refresh and retry the remaining shares.`
     } catch (cause) {
       if (generation === epoch) describeFailure(cause)
     } finally {
@@ -291,7 +385,18 @@ export function createIncomingShareStore(
       /* Local discard is final; server staging has its own bounded TTL. */
     }
   }
-  async function generate(url: string) {
+  function generate(url: string, homeserver = false): Promise<void> {
+    if (busy.peek()) return Promise.resolve()
+    previewClosing = false
+    const task = performGenerate(url, homeserver)
+    if (homeserver) return task
+    const done = task.finally(() => {
+      if (previewWork === done) previewWork = null
+    })
+    previewWork = done
+    return done
+  }
+  async function performGenerate(url: string, homeserver: boolean) {
     if (busy.peek()) return
     const generation = epoch
     busy.value = true
@@ -299,12 +404,48 @@ export function createIncomingShareStore(
       await flushEdits()
       await tail
       const record = selected.peek()
-      if (!record?.accountId) throw problem('destination')
+      if (record === null || record.owner === undefined) throw problem('stale')
       if (
         (record.previews?.length ?? 0) >= 8 &&
         !record.previews?.some((p) => p.matched_url === url)
       )
         throw problem('quota')
+      if (!nativePreviewLinks(record.text).includes(url))
+        throw problem('devicePreview_unsupportedURL')
+      if (!homeserver) {
+        const requestId = crypto.randomUUID()
+        const task = tail.then(async () => {
+          if (generation !== epoch) throw problem('stale')
+          if (previewClosing) throw problem('cancelled')
+          const result = await port.call<IncomingShare>('device_preview', {
+            id: record.id,
+            owner: record.owner,
+            accountId: record.accountId,
+            url,
+            requestId,
+            refresh:
+              record.previews?.some((preview) => preview.matched_url === url) ??
+              false,
+          })
+          if (
+            generation === epoch &&
+            selected.peek()?.id === record.id &&
+            selected.peek()?.owner === record.owner
+          ) {
+            selected.value = result
+            error.value = null
+          }
+        })
+        tail = task.catch(() => {})
+        deviceRequest = { id: requestId, done: tail }
+        try {
+          await task
+        } finally {
+          if (deviceRequest?.id === requestId) deviceRequest = null
+        }
+        return
+      }
+      if (!record.accountId) throw problem('destination')
       await port.call('check_transport')
       const { data } = await api.POST(
         '/v1/accounts/{account_id}/link-previews/generate',
@@ -568,6 +709,7 @@ export function createIncomingShareStore(
   })
   return {
     dispose() {
+      void cancelPreview()
       unsubscribe()
       clearEditTimers()
       epoch += 1
@@ -578,13 +720,19 @@ export function createIncomingShareStore(
     flushEdits,
     busy,
     error,
+    notice,
+    unavailable,
+    sessionError,
     refresh,
     open,
     close,
     discard,
+    discardAll,
     generate,
+    generateUsingHomeserver: (url: string) => generate(url, true),
     send,
     cancel() {
+      void cancelPreview()
       stopRequested = true
       error.value =
         'Stopping after the current request. A message already dispatched may still be delivered; review the saved outcomes.'
@@ -631,6 +779,7 @@ export function createIncomingShareStore(
       return new Blob([data], { type: file.mime })
     },
     async invalidateAccount(accountId: string) {
+      void cancelPreview()
       if (selected.peek()?.accountId === accountId) {
         stopRequested = true
         clearEditTimers()
@@ -710,6 +859,7 @@ export function createIncomingShareStore(
         await change((record) => record)
     },
     reset() {
+      void cancelPreview()
       clearEditTimers()
       drafts.value = {}
       stopRequested = true
@@ -718,6 +868,9 @@ export function createIncomingShareStore(
       pending.value = []
       busy.value = false
       error.value = null
+      notice.value = null
+      unavailable.value = false
+      sessionError.value = null
     },
   }
 }

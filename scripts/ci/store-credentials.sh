@@ -44,7 +44,7 @@ set -euo pipefail
 # one. A run on a clean runner without it failed with "Xcode couldn't find any iOS
 # App Development provisioning profiles matching <bundle id>", after the keychain,
 # the profiles and the API key had all installed without complaint.
-ios_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID"
+ios_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE IOS_SHARE_APPSTORE_PROFILE IOS_SHARE_DEVELOPMENT_PROFILE APPLE_TEAM_ID"
 macos_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD MAC_APPSTORE_PROFILE"
 asc_required="ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY"
 

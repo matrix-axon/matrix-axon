@@ -31,6 +31,15 @@ Validate signing, actual provider inputs, lifecycle and resource budgets on sign
 
 Common metadata, delivery and rendering semantics span both operating systems while native registration and presentation remain platform-specific.
 The complete feature spans several server and client PRs, each confined to its silo and carrying its own tests and documentation.
-Preview generation depends on homeserver support and explicit user opt-in; a rich card cannot be guaranteed for every shared URL.
+Homeserver preview generation depends on homeserver support and explicit user opt-in; a rich card cannot be guaranteed for every shared URL.
+
+On 2026-11-02, signed-device testing and user review refined the iOS acquisition order for privacy: reuse compatible supplied metadata, then perform an explicit preview request on the device.
+The initial Apple-provider implementation was replaced after network-boundary review with a restricted HTTPS reader that validates and pins public destinations for every page, redirect, and selected image.
+Apple's public provider cannot enforce that boundary; it is not used as an automatic fallback.
+Open Graph, Twitter Card, and ordinary HTML metadata are parsed without executing website scripts.
+The common Axon/homeserver helper remains a separate confirmed option rather than an automatic fallback, because its plaintext URL request can enter a homeserver's logs even for an encrypted destination.
+This applies to both the Share Extension and Pending shares recovery, using the same native adapter and protected-thumbnail contract.
+Device acquisition does not import Safari or publisher-app credentials, and does not promise universal paywall or script-generated metadata access.
+Retained bytes and pixel dimensions remain bounded, and cancellation/session/owner fences precede publication.
 Interrupted work remains recoverable without silently resending confirmed or uncertain items.
 The detailed design records proposed limits and device exit gates; accepting this ADR does not claim implementation or native validation.

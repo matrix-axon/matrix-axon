@@ -34,6 +34,169 @@ test.beforeEach(async ({ page }) => {
       localStorage.setItem('fixture.incoming', JSON.stringify([record]))
   }, record)
 })
+test('pending count badge and confirmed clear all preserve active and newly arriving shares', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem(
+      'fixture.incoming',
+      JSON.stringify([
+        { ...record, id: 'first' },
+        {
+          ...record,
+          id: 'active',
+          owner: 'extension-owner',
+          text: 'Open in another composer',
+        },
+        {
+          ...record,
+          id: 'third',
+          text: 'Another draft',
+          operation: { id: 'third-op', state: 'ready' },
+        },
+      ]),
+    )
+  }, record)
+  const sends: string[] = []
+  page.on('request', (request) => {
+    if (/\/send(?:-media)?$/.test(request.url())) sends.push(request.url())
+  })
+  await page.goto('/e2e/incoming-share.html')
+  const entry = page.getByRole('link', {
+    name: 'Pending shares, 3',
+    exact: true,
+  })
+  await expect(entry.locator('.topbar-count-badge')).toHaveText('3')
+  await expect(entry.locator('.topbar-count-badge')).toBeInViewport()
+  await page.getByRole('button', { name: 'Clear all', exact: true }).click()
+  await expect(
+    page.getByRole('group', { name: 'Clear pending shares' }),
+  ).toContainText('Delete 3 saved shares')
+  await page.screenshot({
+    path: testInfo.outputPath('clear-all-confirmation.png'),
+    fullPage: true,
+  })
+  await page
+    .getByRole('button', { name: 'Cancel clear all', exact: true })
+    .click()
+  await expect(
+    page.getByRole('button', { name: 'Review share', exact: true }),
+  ).toHaveCount(3)
+  await page
+    .getByRole('button', { name: 'Review share', exact: true })
+    .first()
+    .click()
+  await page.getByRole('button', { name: 'Clear all', exact: true }).click()
+  await page.evaluate((record) => {
+    const records = JSON.parse(localStorage.getItem('fixture.incoming')!)
+    records.push({
+      ...record,
+      id: 'arriving',
+      text: 'Arrived after confirmation opened',
+    })
+    localStorage.setItem('fixture.incoming', JSON.stringify(records))
+  }, record)
+  await page
+    .getByRole('button', { name: 'Clear all pending shares', exact: true })
+    .click()
+  await expect(page.getByRole('main').getByRole('status')).toHaveText(
+    'Cleared 2 pending shares.',
+  )
+  await expect(page.getByRole('alert')).toContainText(
+    '1 share could not be cleared',
+  )
+  await expect(
+    page
+      .getByRole('link', { name: 'Pending shares, 2', exact: true })
+      .locator('.topbar-count-badge'),
+  ).toHaveText('2')
+  await expect(
+    page.getByRole('button', { name: 'Review share', exact: true }),
+  ).toHaveCount(2)
+  await page.evaluate(() => {
+    const records = JSON.parse(localStorage.getItem('fixture.incoming')!)
+    delete records.find((item: { id: string }) => item.id === 'active').owner
+    localStorage.setItem('fixture.incoming', JSON.stringify(records))
+    window.dispatchEvent(new Event('focus'))
+  })
+  await page.getByRole('button', { name: 'Clear all', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'Clear all pending shares', exact: true })
+    .click()
+  await expect(
+    page.getByText('No pending shares.', { exact: true }),
+  ).toBeVisible()
+  await expect(page.getByRole('link', { name: /^Pending shares/ })).toHaveCount(
+    0,
+  )
+  await expect(
+    page.getByRole('button', { name: 'Clear all', exact: true }),
+  ).toHaveCount(0)
+  expect(sends).toEqual([])
+})
+
+test('an unreadable inbox keeps a warning entry until retry succeeds', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('fixture.incoming', '[]')
+    localStorage.setItem('fixture.inboxUnavailable', 'true')
+  })
+  await page.goto('/e2e/incoming-share.html')
+  const entry = page.getByRole('link', {
+    name: 'Pending shares unavailable',
+    exact: true,
+  })
+  await expect(entry.locator('.topbar-count-badge')).toHaveText('!')
+  await page.evaluate(() => localStorage.removeItem('fixture.inboxUnavailable'))
+  await page
+    .getByRole('button', { name: 'Refresh pending shares', exact: true })
+    .click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /^Pending shares/ })).toHaveCount(
+    0,
+  )
+})
+test('leaving recovery cancels device acquisition and releases ownership', async ({
+  page,
+}) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem(
+      'fixture.incoming',
+      JSON.stringify([
+        {
+          ...record,
+          previews: [],
+          operation: { ...record.operation, state: 'ready' },
+        },
+      ]),
+    )
+    localStorage.setItem('fixture.waitForPreview', 'true')
+  }, record)
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'Include preview:', exact: false })
+    .click()
+  await expect(
+    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
+  ).toBeDisabled()
+  await page.getByRole('link', { name: 'Settings', exact: true }).click()
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => JSON.parse(localStorage.getItem('fixture.incoming')!)[0].owner,
+      ),
+    )
+    .toBeUndefined()
+  await page
+    .getByRole('link', { name: 'Pending shares, 1', exact: true })
+    .click()
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(
+    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
+  ).toBeEnabled()
+})
 test('preview work disables the caption and preserves its saved text', async ({
   page,
 }) => {
@@ -66,13 +229,65 @@ test('preview work disables the caption and preserves its saved text', async ({
   })
   await expect(caption).toBeEnabled()
   await page
-    .getByRole('button', { name: 'Include preview:', exact: false })
+    .getByRole('button', { name: 'Use homeserver instead:', exact: false })
+    .click()
+  await expect(caption).toBeEnabled()
+  await page
+    .getByRole('button', { name: 'Fetch using homeserver', exact: true })
     .click()
   await expect(caption).toBeDisabled()
   await expect(caption).toHaveValue(record.text)
   release()
   await expect(caption).toBeEnabled()
   await expect(caption).toHaveValue(record.text)
+})
+test('device preview and its failure do not submit a URL to the homeserver', async ({
+  page,
+}) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem(
+      'fixture.incoming',
+      JSON.stringify([
+        {
+          ...record,
+          operation: { ...record.operation, state: 'ready' },
+          previews: [],
+        },
+      ]),
+    )
+  }, record)
+  let lookups = 0
+  await page.route('**/link-previews/generate', async (route) => {
+    lookups += 1
+    await route.fulfill({ json: { data: { status: 'unavailable' } } })
+  })
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'Include preview:', exact: false })
+    .click()
+  await expect(
+    page.getByText('Generated on device', { exact: true }),
+  ).toBeVisible()
+  expect(lookups).toBe(0)
+  await page.evaluate(() =>
+    localStorage.setItem('fixture.devicePreviewFailure', 'true'),
+  )
+  await page
+    .getByRole('button', { name: 'Refresh on this device', exact: true })
+    .click()
+  await expect(page.getByRole('alert')).toContainText(
+    'on-device preview lookup timed out',
+  )
+  expect(lookups).toBe(0)
+  await page
+    .getByRole('button', { name: 'Use homeserver instead:', exact: false })
+    .click()
+  expect(lookups).toBe(0)
+  await page
+    .getByRole('button', { name: 'Fetch using homeserver', exact: true })
+    .click()
+  await expect.poll(() => lookups).toBe(1)
 })
 test('recovery preserves cards and uncertain outcomes until explicit discard', async ({
   page,

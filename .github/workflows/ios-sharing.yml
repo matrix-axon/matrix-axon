@@ -1,9 +1,14 @@
-name: iOS sharing foundation
+name: iOS sharing
 on:
   pull_request:
     paths: &sharing-paths
       - clients/web/src-tauri/incoming-share/**
       - clients/web/src-tauri/share-probe/**
+      - clients/web/src-tauri/share-extension/**
+      - clients/web/src-tauri/share-extension-tests/**
+      - clients/web/scripts/ios-share-activation.json
+      - clients/web/scripts/configure-ios-sharing.mjs
+      - clients/web/scripts/check-ios-sharing.py
       - clients/web/src-tauri/native-auth/ios/**
       - clients/web/src/incoming-share/fixtures/**
       - clients/web/scripts/share-contract.mjs
@@ -33,13 +38,12 @@ jobs:
         run: swift test --package-path clients/web/src-tauri/incoming-share
       - name: Install simulator test project generator
         run: brew install xcodegen
-      - name: Run shared foundation tests under iOS Simulator
+      - name: Run native tests and real share-sheet activation under iOS Simulator
         run: node clients/web/scripts/test-sharing-simulator.mjs
       - name: Compile shared module with iOS extension API restrictions
+        working-directory: clients/web/src-tauri/incoming-share
         run: |
           output=$(mktemp -d)
-          xcrun swiftc -emit-module -module-name AxonIncomingShare \
-            -application-extension -target arm64-apple-ios15.0 \
-            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
-            clients/web/src-tauri/incoming-share/Sources/AxonIncomingShare/*.swift \
-            -emit-module-path "$output/AxonIncomingShare.swiftmodule"
+          xcodebuild -scheme AxonIncomingShare -destination 'generic/platform=iOS' \
+            -derivedDataPath "$output" APPLICATION_EXTENSION_API_ONLY=YES \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0 CODE_SIGNING_ALLOWED=NO build

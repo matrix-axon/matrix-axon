@@ -140,19 +140,19 @@ PY
 
 # --- check-secrets -----------------------------------------------------------
 
-all_ios="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x IOS_DEVELOPMENT_PROFILE=x"
+all_ios="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x IOS_DEVELOPMENT_PROFILE=x IOS_SHARE_DEVELOPMENT_PROFILE=x IOS_SHARE_APPSTORE_PROFILE=x"
 all_macos="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set MAC_APPSTORE_PROFILE=x"
 all_asc="ASC_KEY_ID=x ASC_ISSUER_ID=x ASC_PRIVATE_KEY=x"
 # shellcheck disable=SC2086
 out=$(run $all_ios -- check-secrets ios)
 contains "$out" "rc=0" && contains "$out" "all required secrets for the ios build are set" || fail "ios: everything set passes" "$out"
 
-for missing in APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID; do
+for missing in APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE IOS_SHARE_DEVELOPMENT_PROFILE IOS_SHARE_APPSTORE_PROFILE APPLE_TEAM_ID; do
   set_vars=$(printf '%s' "$all_ios" | tr ' ' '\n' | grep -v "^$missing=" | tr '\n' ' ')
   # shellcheck disable=SC2086
   out=$(run $set_vars -- check-secrets ios)
   contains "$out" "rc=1" && contains "$out" "$missing" || fail "ios: $missing missing is an error naming it" "$out"
-  for other in APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID; do
+  for other in APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE IOS_SHARE_DEVELOPMENT_PROFILE IOS_SHARE_APPSTORE_PROFILE APPLE_TEAM_ID; do
     [ "$other" = "$missing" ] && continue
     contains "$out" "secrets for the ios build: $other" && fail "ios: only the missing secret is named" "$out"
   done

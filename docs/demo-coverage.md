@@ -295,3 +295,8 @@ Attachment card layout and activation are covered by `clients/web/e2e/attachment
 The checks cover full-width caption geometry, top-right 44-pixel download targets, on-demand preview dialogs, keyboard dismissal/focus restoration, independent caption links/downloads/spoilers, desktop text selection without message actions, and swipe/hold arbitration for file, audio, video, and PDF cards.
 Viewer download errors remaining visible on the card after close have component-test coverage; native image/gallery taps with double-tap disabled are covered by `clients/web/e2e/message-gestures.spec.ts` on iPhone/WebKit.
 The existing `media` recording still demonstrates image galleries; a recorded audio/text/PDF/video attachment-card scene remains outstanding.
+
+The native iOS text/link Share Extension adds an account/room picker with validated last-destination restore, editable message/card preview, supplied metadata followed by explicit restricted HTTPS preview acquisition, separately confirmed homeserver lookup, Send, and durable draft/unknown-outcome recovery.
+Recovery now also has a conditional toolbar entry with a count or read-failure badge and confirmed bulk clearing that preserves active and newly arriving shares.
+It is not covered by the browser demo driver or recorded tours.
+Native XCTest and the signed-device checklist in [iOS sharing](ios-sharing.md) cover this separate OS surface; a new native recording remains outstanding.

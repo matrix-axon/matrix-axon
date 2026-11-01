@@ -59,6 +59,8 @@ function fixture(sessionOnly = false, oauth = false) {
     refresh: vi.fn(),
     reset: vi.fn(),
     error: { value: null },
+    unavailable: { value: false },
+    sessionError: { value: null },
   } as unknown as IncomingShareStore
   const stop = connectIncomingShareSession(
     port,
@@ -70,6 +72,20 @@ function fixture(sessionOnly = false, oauth = false) {
   return { call, auth, stop, store, ready: () => ready() }
 }
 describe('shared session publication', () => {
+  it('keeps recovery reachable when native session publication fails', async () => {
+    const f = fixture()
+    f.call.mockRejectedValueOnce(new Error('publication unavailable'))
+    await expect(f.ready()).rejects.toThrow('publication unavailable')
+    expect(f.store.unavailable.value).toBe(false)
+    expect(f.store.sessionError.value).toContain(
+      'Sharing credentials are unavailable',
+    )
+    f.call.mockResolvedValue({})
+    f.auth.tokenPaste.setToken('updated-session')
+    await f.ready()
+    expect(f.store.sessionError.value).toBeNull()
+    f.stop()
+  })
   it('never publishes a hidden pasted credential while clearing an OAuth session', async () => {
     const f = fixture(false, true)
     f.auth.tokenPaste.setToken('hidden-pasted-access')
