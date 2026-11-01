@@ -193,7 +193,7 @@ An explicit subsequent kill/relaunch also retained the draft: claiming it was co
 The record stayed ready throughout, with its edited text intact and no dispatch recorded.
 The synthetic record was explicitly discarded after verification, and Axon was left running normally.
 
-The on-device accessibility audit reported no element-description or text-clipping issues on the audited recovery screen, plus one hit-region advisory in the header area at `{{60, 85}, {26, 18}}`.
+The on-device accessibility audit reported no element-description or text-clipping issues on the audited recovery screen, plus one hit-region advisory in the header area at `x=60 y=85 w=26 h=18`.
 A later iPad XCTest audit classified its corresponding header advisory as static text with the existing connection-status label; it is not an undersized recovery control.
 This is not full accessibility acceptance.
 The host's memory-warning command failed with `NSPOSIXErrorDomain 2`, so no delivered memory-warning result is claimed.
