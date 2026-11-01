@@ -5990,7 +5990,7 @@
           "rooms"
         ],
         "summary": "List a space's children",
-        "description": "List a space's children (`m.space.child`, MSC1772-ordered: `order` string\nascending, absent sorts last, then `origin_ts`, then `room_id`), each\nenriched with the child room's own cached name/avatar/room_type where Axon\nknows that room too (issue #404, ADR 0084). An unknown `account_id`/\n`room_id`, or a room with no children, yields an empty list (200), not a\n404.\n\nThe response is capped at 1,000 children, and a truncated response looks\nexactly like a complete one. Use `space/hierarchy`, which pages through a\nspace of any size and reports its total (ADR 0128). This route is kept\nunchanged for existing clients.",
+        "description": "List a space's children (`m.space.child`, MSC1772-ordered: `order` string\nascending, absent sorts last, then `origin_ts`, then `room_id`), each\nenriched with the child room's own cached name/avatar/room_type where Axon\nknows that room too (issue #404, ADR 0084). An unknown `account_id`/\n`room_id`, or a room with no children, yields an empty list (200), not a\n404.\n\nThe response is capped at 1,000 children, and a truncated response looks\nexactly like a complete one. Use `space/hierarchy`, which pages through a\nspace of any size and reports its total (ADR 0128). This route is kept\nunchanged for existing clients, so its `order` is the raw string from the\nlink, while `space/hierarchy` reports an `order` that MSC1772 treats as\ninvalid (longer than 50 characters, or not printable ASCII) as `null`.",
         "operationId": "space_children",
         "parameters": [
           {
@@ -6114,7 +6114,7 @@
             }
           },
           "400": {
-            "description": "Malformed cursor, or a cursor issued for another account or space",
+            "description": "Malformed cursor, a cursor issued for another account or space, or a room id containing a control character",
             "content": {
               "application/json": {
                 "schema": {

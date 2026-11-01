@@ -383,35 +383,33 @@ impl Store {
             Some(row) => row.try_get::<i64, _>("total_children")?,
             None => 0,
         };
-        let mut page_rows = Vec::with_capacity(rows.len());
+        let mut page = Vec::with_capacity(rows.len().min(limit as usize));
+        let mut has_more = false;
         for row in &rows {
-            if row.try_get::<Option<String>, _>("room_id")?.is_some() {
-                page_rows.push(row);
+            let Some(room_id) = row.try_get::<Option<String>, _>("room_id")? else {
+                continue;
+            };
+            if page.len() as i64 == limit {
+                has_more = true;
+                break;
             }
+            let content: Option<Value> = row.try_get("content")?;
+            page.push(SpaceHierarchyRow {
+                child: SpaceChildRow {
+                    room_id,
+                    via: via_from_content(&content),
+                    order: row.try_get("sort_order")?,
+                    suggested: suggested_from_content(&content),
+                    name: row.try_get("name")?,
+                    avatar_url: row.try_get("avatar_url")?,
+                    room_type: row.try_get("room_type")?,
+                },
+                origin_ts: row.try_get("origin_ts")?,
+                joined: row.try_get("joined")?,
+            });
         }
-        let has_more = page_rows.len() as i64 > limit;
-        let rows = page_rows
-            .into_iter()
-            .take(limit as usize)
-            .map(|row| {
-                let content: Option<Value> = row.try_get("content")?;
-                Ok(SpaceHierarchyRow {
-                    child: SpaceChildRow {
-                        room_id: row.try_get("room_id")?,
-                        via: via_from_content(&content),
-                        order: row.try_get("sort_order")?,
-                        suggested: suggested_from_content(&content),
-                        name: row.try_get("name")?,
-                        avatar_url: row.try_get("avatar_url")?,
-                        room_type: row.try_get("room_type")?,
-                    },
-                    origin_ts: row.try_get("origin_ts")?,
-                    joined: row.try_get("joined")?,
-                })
-            })
-            .collect::<Result<Vec<_>, sqlx_core::Error>>()?;
         Ok(SpaceHierarchyPage {
-            rows,
+            rows: page,
             has_more,
             total_children,
         })

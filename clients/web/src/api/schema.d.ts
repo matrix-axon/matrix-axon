@@ -1297,7 +1297,9 @@ export interface paths {
          *     The response is capped at 1,000 children, and a truncated response looks
          *     exactly like a complete one. Use `space/hierarchy`, which pages through a
          *     space of any size and reports its total (ADR 0128). This route is kept
-         *     unchanged for existing clients.
+         *     unchanged for existing clients, so its `order` is the raw string from the
+         *     link, while `space/hierarchy` reports an `order` that MSC1772 treats as
+         *     invalid (longer than 50 characters, or not printable ASCII) as `null`.
          */
         get: operations["space_children"];
         put?: never;
@@ -10259,7 +10261,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiResponse_SpaceHierarchyPage"];
                 };
             };
-            /** @description Malformed cursor, or a cursor issued for another account or space */
+            /** @description Malformed cursor, a cursor issued for another account or space, or a room id containing a control character */
             400: {
                 headers: {
                     [name: string]: unknown;

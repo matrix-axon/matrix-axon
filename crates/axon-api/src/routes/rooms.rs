@@ -349,7 +349,9 @@ pub async fn thread_timeline(
 /// The response is capped at 1,000 children, and a truncated response looks
 /// exactly like a complete one. Use `space/hierarchy`, which pages through a
 /// space of any size and reports its total (ADR 0128). This route is kept
-/// unchanged for existing clients.
+/// unchanged for existing clients, so its `order` is the raw string from the
+/// link, while `space/hierarchy` reports an `order` that MSC1772 treats as
+/// invalid (longer than 50 characters, or not printable ASCII) as `null`.
 #[utoipa::path(
     get,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/space/children",
@@ -417,7 +419,7 @@ pub struct SpaceHierarchyQuery {
     ),
     responses(
         (status = 200, description = "A page of the space's children, MSC1772-ordered", body = ApiResponse<SpaceHierarchyPage>),
-        (status = 400, description = "Malformed cursor, or a cursor issued for another account or space", body = crate::response::ErrorResponse),
+        (status = 400, description = "Malformed cursor, a cursor issued for another account or space, or a room id containing a control character", body = crate::response::ErrorResponse),
     ),
     tag = "rooms",
 )]
@@ -426,6 +428,12 @@ pub async fn space_hierarchy(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Query(q): Query<SpaceHierarchyQuery>,
 ) -> Result<ApiResponse<SpaceHierarchyPage>, ApiError> {
+    // Postgres `TEXT` rejects a NUL, so a `%00` in the path would otherwise
+    // become a 500 from the query. Other controls cannot be in a room id.
+    // Issue 932 moves this check into a shared extractor for every room route.
+    if room_id.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(ApiError::bad_request("invalid room id"));
+    }
     let after = q
         .cursor
         .as_deref()

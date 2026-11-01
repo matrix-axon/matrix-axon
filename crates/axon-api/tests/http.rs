@@ -2022,6 +2022,15 @@ async fn space_hierarchy_endpoint() {
         }
     }
 
+    // A NUL in the path would reach Postgres as a text parameter and fail as
+    // a 500; it is a 400.
+    let (status, _) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/!a%00b:localhost/space/hierarchy"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     // An unknown space is an empty page, not a 404.
     let (status, body) = get(
         &app,

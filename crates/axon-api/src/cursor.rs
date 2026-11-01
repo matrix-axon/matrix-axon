@@ -154,10 +154,12 @@ pub fn decode_hierarchy(
     let bytes = URL_SAFE_NO_PAD.decode(s).ok()?;
     let wire: HierarchyCursorWire = serde_json::from_slice(&bytes).ok()?;
     // The scope tag is not a secret, so a client can mint a cursor for its own
-    // space. Accept only positions the store could have issued: a normalized
-    // `order` and a bounded room id. Anything else (a NUL byte, which
-    // PostgreSQL refuses in a text parameter, included) stays a 400 here
-    // instead of becoming a 500 from the query.
+    // space. Accept only positions within the bounds the store issues: an
+    // `order` that normalization keeps and a room id within 255 bytes with no
+    // NUL. A minted position inside those bounds is still accepted, and is
+    // harmless: the walk resumes after that key. Anything outside them (a NUL
+    // byte, which PostgreSQL refuses in a text parameter, included) stays a
+    // 400 here instead of becoming a 500 from the query.
     let order_ok = wire.o.as_deref().is_none_or(|o| {
         o.len() <= MAX_HIERARCHY_ORDER_LEN && o.bytes().all(|b| (0x20..=0x7e).contains(&b))
     });

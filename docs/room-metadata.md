@@ -200,6 +200,7 @@ Unjoined children usually have no cached state, so their display fields are `nul
 Set `RUST_LOG=axon_api::routes::rooms=debug` to log each page's account, space, limit, returned rows, and total.
 
 The older `GET …/space/children` is unchanged: a bare array capped at 1,000 children, with no way to tell a truncated response from a complete one.
+Because it is unchanged, it still returns the link's raw `order` string, so the two routes can report a different `order` for the same link when MSC1772 treats that `order` as invalid.
 It stays for existing clients and will be marked deprecated once the web client, the TUI, and the oversized-space work ([issue 553](https://github.com/matrix-axon/matrix-axon/issues/553)) have moved to `space/hierarchy`.
 
 ## Change notification
