@@ -3,6 +3,28 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.20 - 2026-11-01
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* update indirect dependency minimatch to mitigate CVE-2026-118764 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/902
+#### Features
+* feat(web): wait past axon's deadline on calls that have a longer one by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/900
+* feat(web): present a 504 from leave or forget as still pending by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/901
+* feat: retain inline emoji media references after pack changes by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/895
+* feat(ios): add shared sessions and durable incoming-share recovery by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/898
+#### Documentation
+* docs(adr): one shared HTTP client in the native shell (ADR 0127) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/892
+#### Build and CI
+* build(release): add axon-web, a package directory covering clients/web by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/911
+#### Other Changes
+* feat(web): pooled HTTP transport plugin for the native shell (ADR 0127) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/896
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.19...v0.1.20
+
 ## v0.1.19 - 2026-10-29
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
