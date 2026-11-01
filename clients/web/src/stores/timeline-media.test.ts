@@ -91,6 +91,43 @@ function serveSuccess(): { sendBody: () => unknown } {
 
 const png = () => new File(['bytes'], 'cat.png', { type: 'image/png' })
 
+it('sends formatted staged captions with routing, previews, and durable progress', async () => {
+  const store = makeStore('$thread')
+  const progress = vi.fn(async () => {})
+  const formatted = '<img data-mx-emoticon src="mxc://hs/custom" alt=":cat:">'
+  let body: unknown
+  let progressAtRequest: unknown
+  server.use(
+    http.post(SEND_MEDIA_PATH, async ({ request }) => {
+      body = await request.json()
+      progressAtRequest = [...progress.mock.calls]
+      return HttpResponse.json({ data: { event_id: '$staged' } })
+    }),
+    http.get(EVENTS_PATH, () =>
+      HttpResponse.json({ data: confirmed('$staged', ':cat:') }),
+    ),
+  )
+  expect(
+    await store.sendStagedMedia(UPLOAD_ID, ':cat:', {
+      formattedBody: formatted,
+      replyTo: '$reply',
+      urlPreviews: [],
+      progress,
+    }),
+  ).toBe(true)
+  expect(body).toEqual({
+    upload_id: UPLOAD_ID,
+    caption: ':cat:',
+    format: 'org.matrix.custom.html',
+    formatted_body: formatted,
+    reply_to: '$reply',
+    thread_root: '$thread',
+    url_previews: [],
+  })
+  expect(progressAtRequest).toEqual([['dispatching']])
+  expect(progress.mock.calls).toEqual([['dispatching'], ['sent', '$staged']])
+})
+
 it('retains an inline formatted caption through media failure and retry even when the caption equals the filename', async () => {
   const store = makeStore()
   const bodies: Record<string, unknown>[] = []
