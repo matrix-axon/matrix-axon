@@ -267,6 +267,87 @@ describe('InvitesPage', () => {
     expect(alert.textContent).toMatch(/Alpha: room not found/)
   })
 
+  it('summarizes a bulk reject that only timed out as pending, not as an alert', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({
+          data: [invite('!a:hs', 'Alpha'), invite('!b:hs', 'Beta')],
+        }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'gateway_timeout',
+                message: 'leave timed out after 30s',
+              },
+            },
+            { status: 504 },
+          ),
+      ),
+    )
+    const { services, findByText, queryByRole } = renderInbox()
+    fireEvent.click(await findByText('Reject all'))
+
+    const summary = await findByText(
+      '2 rejects are still pending on your homeserver.',
+    )
+    expect(summary.getAttribute('role')).toBe('status')
+    expect(queryByRole('alert')).toBeNull()
+
+    // The line follows the rows: one settled leaves one pending.
+    services.invites.noteRemoved(ACCOUNT, '!a:hs')
+    expect(
+      await findByText('1 reject is still pending on your homeserver.'),
+    ).toBeTruthy()
+    services.invites.noteRemoved(ACCOUNT, '!b:hs')
+    await waitFor(() => {
+      expect(queryByRole('status')).toBeNull()
+    })
+    services.invites.resetSession()
+  })
+
+  it('keeps pending rejects out of a bulk failure alert', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({
+          data: [invite('!a:hs', 'Alpha'), invite('!b:hs', 'Beta')],
+        }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        ({ params }) =>
+          params.roomId === '!a:hs'
+            ? HttpResponse.json(
+                { error: { code: 'not_found', message: 'room not found' } },
+                { status: 404 },
+              )
+            : HttpResponse.json(
+                {
+                  error: {
+                    code: 'gateway_timeout',
+                    message: 'leave timed out after 30s',
+                  },
+                },
+                { status: 504 },
+              ),
+      ),
+    )
+    const { services, findByRole, findByText } = renderInbox()
+    fireEvent.click(await findByRole('button', { name: 'Reject all' }))
+
+    const alert = await findByRole('alert')
+    expect(alert.textContent).toMatch(
+      /^0 succeeded, 1 failed\. Alpha: room not found$/,
+    )
+    expect(
+      await findByText('1 reject is still pending on your homeserver.'),
+    ).toBeTruthy()
+    services.invites.resetSession()
+  })
+
   it('clears a stale bulk banner once the row is rejected on its own', async () => {
     // The banner describes a run that is over. Leaving it up while the user
     // clears the remaining rows one at a time keeps claiming a failure that

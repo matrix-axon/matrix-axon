@@ -492,6 +492,39 @@ describe('invites store', () => {
       expect(calls.leave).toBe(2)
     })
 
+    it('ends when a retry fails outright, so the row shows the error alone', async () => {
+      vi.useFakeTimers()
+      let leaveStatus = 504
+      const calls = useTimedOutReject(() => [ALPHA])
+      server.use(
+        http.post(`${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`, () => {
+          calls.leave += 1
+          return HttpResponse.json(
+            { error: { code: 'bad_gateway', message: 'homeserver said no' } },
+            { status: leaveStatus },
+          )
+        }),
+      )
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+      expect(invites.rejectPending(ALPHA)).toBe(true)
+      await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+      const before = calls.list
+
+      leaveStatus = 502
+      expect(await invites.reject(ALPHA)).toEqual({
+        ok: false,
+        message: 'homeserver said no',
+      })
+
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+      // Its refreshes stop with it.
+      await vi.advanceTimersByTimeAsync(WINDOW_MS)
+      expect(calls.list).toBe(before)
+    })
+
     it('ends on the removal frame the homeserver finishing sends', async () => {
       useTimedOutReject(() => [ALPHA])
       const invites = store()

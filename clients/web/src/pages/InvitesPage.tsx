@@ -62,6 +62,12 @@ export function InvitesPage() {
       : bulkResult.failed.filter((item) =>
           rows.some((row) => inviteKey(row) === inviteKey(item.invite)),
         )
+  // Not an error, so not in the alert. Counted from the rows still pending,
+  // like `pendingFailed`, so the line goes once those rejects settle.
+  const stillPending =
+    bulkResult === null || bulkResult.pending === 0
+      ? 0
+      : rows.filter((row) => invites.rejectPending(row)).length
 
   async function onAccept(invite: InviteDto) {
     if (mutating) {
@@ -146,12 +152,17 @@ export function InvitesPage() {
       <ErrorBanner error={invites.error} />
       {pendingFailed.length > 0 && bulkResult !== null && (
         <p class="error" role="alert">
-          {`${bulkResult.succeeded} succeeded, ${
-            bulkResult.pending > 0 ? `${bulkResult.pending} pending, ` : ''
-          }${pendingFailed.length} failed.`}
+          {`${bulkResult.succeeded} succeeded, ${pendingFailed.length} failed.`}
           {pendingFailed
             .map((item) => ` ${inviteTitle(item.invite)}: ${item.message}`)
             .join('')}
+        </p>
+      )}
+      {stillPending > 0 && (
+        <p class="muted" role="status">
+          {stillPending === 1
+            ? '1 reject is still pending on your homeserver.'
+            : `${stillPending} rejects are still pending on your homeserver.`}
         </p>
       )}
       {invites.loading.value && rows.length === 0 ? (

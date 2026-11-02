@@ -314,6 +314,15 @@ export function createInvitesStore(
     if (kind === 'reject' && held !== undefined && !held.retryable) {
       return pending
     }
+    // A retry that fails outright answers for the row: stop presenting the
+    // earlier reject as pending, or the row would say "still pending" beside
+    // the error. A removal frame still drops the row if the first one lands.
+    const failed = (message: string): InviteMutationResult => {
+      if (kind === 'reject') {
+        endPendingReject(key)
+      }
+      return { ok: false, message }
+    }
     try {
       const { error: apiError, response } =
         kind === 'accept'
@@ -342,15 +351,12 @@ export function createInvitesStore(
       // `apiError` undefined; treating that as success would drop the row and
       // suppress it for the rest of the session.
       if (apiError !== undefined || !response.ok) {
-        return { ok: false, message: apiErrorMessage(apiError) }
+        return failed(apiErrorMessage(apiError))
       }
       dropLocal(invite.account_id, invite.room_id)
       return { ok: true }
     } catch (cause) {
-      return {
-        ok: false,
-        message: cause instanceof Error ? cause.message : String(cause),
-      }
+      return failed(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
