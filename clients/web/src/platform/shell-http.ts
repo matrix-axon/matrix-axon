@@ -159,10 +159,17 @@ export async function shellFetch(
       headers: head.headers,
     })
   } catch {
-    // A status `Response` cannot represent (outside 200–599), or a header
-    // value it will not take. Neither is a `/v1` answer.
+    // The server answered, with a status `Response` cannot represent
+    // (outside 200–599) or a header value it will not take. Neither is a `/v1`
+    // answer, so it stays a failure, but one named apart from the network's.
     void stream?.cancel().catch(() => {})
-    throw failure({ kind: 'other', detail: null })
+    throw failure({
+      kind: 'other',
+      detail:
+        head.status < 200 || head.status > 599
+          ? 'InvalidStatus'
+          : 'InvalidHeader',
+    })
   }
   return finished(response, head)
 }

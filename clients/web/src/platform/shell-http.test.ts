@@ -345,6 +345,27 @@ describe('shellFetch failure', () => {
     expect(warn).toHaveBeenCalled()
   })
 
+  it('names an answer a Response cannot hold, and releases its body', async () => {
+    for (const [head, detail] of [
+      [{ status: 600 }, 'InvalidStatus'],
+      [{ status: 101 }, 'InvalidStatus'],
+      [{ headers: [['x-odd', 'snow \u2603 man']] }, 'InvalidHeader'],
+    ] as const) {
+      calls.length = 0
+      plugin(head)
+      const error = await shellFetch(URL_, undefined, never()).catch(
+        (caught: unknown) => caught,
+      )
+      expect(error).toBeInstanceOf(TypeError)
+      expect(transportFailureOf(error)).toEqual({ kind: 'other', detail })
+      await vi.waitFor(() =>
+        expect(
+          calls.filter((call) => call.cmd === 'plugin:axon-http|drop_body'),
+        ).toHaveLength(1),
+      )
+    }
+  })
+
   it('fails the body read with the kind', async () => {
     plugin({})
     const send = onInvoke

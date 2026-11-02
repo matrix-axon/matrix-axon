@@ -154,7 +154,7 @@ A kept capture also carries the socket's `live:open` and `live:close`, which say
 - `api:failed` — a request failed outright, with no deadline involved: `route`, `kind`, `stage`, `hdr`, `after`, and what was going on around it.
   `kind` is one fixed word.
   The packaged app's transport names the cause (ADR 0127 § 4): `dns`, `refused`, `connect_timeout`, `tls`, `reset`, `body` (headers arrived, the body did not finish), `cancelled` (the transport cancelled it itself, such as on a reload), `scope` (not `http` or `https`, or a redirect that left them) or `other`.
-  `detail` goes with it: an OS error name such as `ConnectionReset`, a certificate or alert name such as `UnknownIssuer`, or `null`.
+  `detail` goes with it: an OS error name such as `ConnectionReset`, a certificate or alert name such as `UnknownIssuer`, `InvalidStatus` or `InvalidHeader` for an answer the page cannot hold (a status outside 200–599, a header value `fetch` would refuse), or `null`.
   With Settings → Debug → "Legacy shell transport" on, the old plugin can only say `send` (never got a response) or `body`.
   A browser says `fetch` (its `TypeError`, which says no more) or `other`.
   `inflight` is how many `/v1` requests were unsettled at that moment, the failed one included.
