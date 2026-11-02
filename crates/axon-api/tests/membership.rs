@@ -207,6 +207,43 @@ async fn leave_drops_pending_invite_and_emits_removed() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn failed_leave_does_not_drop_pending_invite() {
+    assert_failed_leave_keeps_invite(
+        |room_id| MembershipOutcome::NotFound(format!("room not found: {room_id}")),
+        StatusCode::NOT_FOUND,
+        "not_found",
+    )
+    .await;
+}
+
+/// A decline axon timed out on is a `504`, and the invite stays too: the
+/// homeserver may still finish the leave, or may never have started it. Only
+/// the sync watcher can tell, once the homeserver reports the room
+/// (ADR 0091), so deleting here could destroy an invite that is still
+/// pending (ADR 0121 decision 5, issue #743).
+///
+/// This pins the leave handler, which is the only request-path code that
+/// deletes an invite (on a `Left` or `Gone` answer). The sender behind it
+/// never touches invites; the sync engine's `drop_invite_if_known` is the
+/// one other deleter, and it acts on room state, not on this request.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn timed_out_leave_does_not_drop_pending_invite() {
+    assert_failed_leave_keeps_invite(
+        |_| MembershipOutcome::Timeout("leave timed out after 30s".to_owned()),
+        StatusCode::GATEWAY_TIMEOUT,
+        "gateway_timeout",
+    )
+    .await;
+}
+
+/// Decline a seeded invite through a leave that fails with `outcome(room_id)`,
+/// and assert the response is `want_status`/`want_code` while the invite row
+/// stays and no `invite.removed` goes out.
+async fn assert_failed_leave_keeps_invite(
+    outcome: impl Fn(&str) -> MembershipOutcome,
+    want_status: StatusCode,
+    want_code: &str,
+) {
     let store = store().await;
     let pool = store.pool().clone();
     let account_id = store
@@ -237,9 +274,7 @@ async fn failed_leave_does_not_drop_pending_invite() {
         .await
         .expect("seed invite");
 
-    let stub = Arc::new(StubMembership::failing(MembershipOutcome::NotFound(
-        format!("room not found: {room_id}"),
-    )));
+    let stub = Arc::new(StubMembership::failing(outcome(&room_id)));
     let (live, mut rx) = tokio::sync::broadcast::channel(16);
     let app = axon_api::router(
         AppState::new(
@@ -264,8 +299,8 @@ async fn failed_leave_does_not_drop_pending_invite() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"]["code"], "not_found");
+    assert_eq!(status, want_status);
+    assert_eq!(body["error"]["code"], want_code);
 
     let remaining = store.list_invites(Some(account_id)).await.expect("list");
     assert_eq!(remaining.len(), 1);
@@ -639,6 +674,8 @@ async fn membership_error_maps_to_status() {
             StatusCode::BAD_GATEWAY,
             "bad_gateway",
         ),
+        // A timeout's `504` is covered on every route by
+        // `a_timed_out_membership_call_is_a_504_on_every_route`.
     ];
 
     for (outcome, want_status, want_code) in cases {
@@ -646,5 +683,105 @@ async fn membership_error_maps_to_status() {
         let (status, body) = send(&app, "POST", &uri, None).await;
         assert_eq!(status, want_status);
         assert_eq!(body["error"]["code"], want_code);
+    }
+}
+
+/// Every membership route answers a timeout with a `504 gateway_timeout`
+/// carrying the gateway's message, so a client can tell "may still finish"
+/// from "the homeserver refused" (ADR 0121 decision 5, issue #743). This pins
+/// the mapping only: which timeout each verb runs under, and its length, is
+/// the gateway's business (`axon-server` `gateway.rs`), not this route's.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_timed_out_membership_call_is_a_504_on_every_route() {
+    let store = store().await;
+    let account_id = Uuid::new_v4();
+    let room_id = "!room:localhost";
+    let user_id = "@bob:localhost";
+    let target = json!({ "user_id": user_id });
+    let room = || room_id.to_owned();
+    let user = || user_id.to_owned();
+
+    let cases = [
+        (
+            "leave",
+            None,
+            MembershipCall::Leave {
+                account_id,
+                room_id: room(),
+            },
+        ),
+        (
+            "forget",
+            None,
+            MembershipCall::Forget {
+                account_id,
+                room_id: room(),
+            },
+        ),
+        (
+            "invite",
+            Some(target.clone()),
+            MembershipCall::Invite {
+                account_id,
+                room_id: room(),
+                user_id: user(),
+            },
+        ),
+        (
+            "kick",
+            Some(target.clone()),
+            MembershipCall::Kick {
+                account_id,
+                room_id: room(),
+                user_id: user(),
+                reason: None,
+            },
+        ),
+        (
+            "ban",
+            Some(target.clone()),
+            MembershipCall::Ban {
+                account_id,
+                room_id: room(),
+                user_id: user(),
+                reason: None,
+            },
+        ),
+        (
+            "unban",
+            Some(target),
+            MembershipCall::Unban {
+                account_id,
+                room_id: room(),
+                user_id: user(),
+                reason: None,
+            },
+        ),
+    ];
+
+    for (verb, body, want_call) in cases {
+        let message = format!("{verb} timed out");
+        let stub = Arc::new(StubMembership::failing(MembershipOutcome::Timeout(
+            message.clone(),
+        )));
+        let app = app(store.clone(), stub.clone());
+
+        let (status, response) = send(
+            &app,
+            "POST",
+            &format!("/v1/accounts/{account_id}/rooms/{room_id}/{verb}"),
+            body,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{verb}");
+        assert_eq!(response["error"]["code"], "gateway_timeout", "{verb}");
+        assert_eq!(response["error"]["message"], message, "{verb}");
+        assert_eq!(
+            stub.calls(),
+            vec![want_call],
+            "{verb} reached the sender once, through its own method"
+        );
     }
 }
