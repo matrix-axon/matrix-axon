@@ -1,10 +1,22 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { createApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
-import { createInvitesStore, type InviteDto } from './invites'
-import { createRoomsStore } from './rooms'
+import {
+  createInvitesStore,
+  REJECT_PENDING_MESSAGE,
+  type InviteDto,
+} from './invites'
+import { createRoomsStore, PENDING_MEMBERSHIP_REFRESH_DELAYS_MS } from './rooms'
 
 const BASE = 'http://axon.test'
 const ACCOUNT = '11111111-1111-1111-1111-111111111111'
@@ -124,8 +136,9 @@ describe('invites store', () => {
     const invites = store()
     await invites.refresh()
     const result = await invites.reject(invites.invites.value[0])
-    expect(result.ok).toBe(false)
+    expect(result).toEqual({ ok: false, message: 'room not found' })
     expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+    expect(invites.rejectPending(invite('!a:hs', 'Alpha'))).toBe(false)
   })
 
   it('rejectAll leaves every invite even when a later GET is stale', async () => {
@@ -154,7 +167,7 @@ describe('invites store', () => {
     const invites = store()
     await invites.refresh()
     const result = await invites.rejectAll()
-    expect(result).toEqual({ succeeded: 2, failed: [] })
+    expect(result).toEqual({ succeeded: 2, pending: 0, failed: [] })
     expect(left).toEqual(['!a:hs', '!b:hs'])
     expect(inviteReads).toBeGreaterThan(1)
     expect(invites.invites.value).toEqual([])
@@ -265,6 +278,30 @@ describe('invites store', () => {
     ])
   })
 
+  it('does not let a GET issued before a removal frame restore the row', async () => {
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(`${BASE}/v1/invites`, async () => {
+        await held
+        return HttpResponse.json({
+          data: [invite('!a:hs', 'Alpha'), invite('!b:hs', 'Beta')],
+        })
+      }),
+    )
+    const invites = store()
+    const pending = invites.refresh()
+    invites.noteRemoved(ACCOUNT, '!a:hs')
+    // Removed and then re-invited within the same fetch: the later frame wins.
+    invites.noteRemoved(ACCOUNT, '!b:hs')
+    invites.noteAdded(invite('!b:hs', 'Beta'))
+    release?.()
+    await pending
+    expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!b:hs'])
+  })
+
   it('does not treat a single live frame as a settled list', async () => {
     // The initial GET fails, then one frame arrives. `rejectAll` must still
     // confirm the list rather than act on the single row it can see.
@@ -356,5 +393,344 @@ describe('invites store', () => {
     release?.()
     await pending
     expect(invites.invites.value).toEqual([])
+  })
+
+  describe('a reject axon timed out on (ADR 0121, issue #743)', () => {
+    const ALPHA = invite('!a:hs', 'Alpha')
+    /** The whole pending window: every refresh delay, end to end. */
+    const WINDOW_MS = PENDING_MEMBERSHIP_REFRESH_DELAYS_MS.reduce(
+      (sum, ms) => sum + ms,
+      0,
+    )
+    const PENDING = {
+      ok: false,
+      pending: true,
+      message: REJECT_PENDING_MESSAGE,
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** `/v1/invites` listing `listed()`, a leave that answers 504, and a join
+     * that answers 504 too. */
+    function useTimedOutReject(listed: () => InviteDto[]) {
+      const calls = { list: 0, leave: 0 }
+      server.use(
+        http.get(`${BASE}/v1/invites`, () => {
+          calls.list += 1
+          return HttpResponse.json({ data: listed() })
+        }),
+        http.post(`${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`, () => {
+          calls.leave += 1
+          return HttpResponse.json(
+            {
+              error: {
+                code: 'gateway_timeout',
+                message: 'leave timed out after 30s',
+              },
+            },
+            { status: 504 },
+          )
+        }),
+        http.post(`${BASE}/v1/accounts/${ACCOUNT}/rooms/join`, () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'gateway_timeout',
+                message: 'join timed out after 30s',
+              },
+            },
+            { status: 504 },
+          ),
+        ),
+      )
+      return calls
+    }
+
+    it('reports a 504 as pending and keeps the row', async () => {
+      useTimedOutReject(() => [ALPHA])
+      const invites = store()
+      await invites.refresh()
+
+      const result = await invites.reject(ALPHA)
+
+      expect(result).toEqual(PENDING)
+      // Axon keeps the invite on a 504, and so does the list: the leave may
+      // yet fail, and only the homeserver can say it went through.
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+      expect(invites.error.value).toBeNull()
+      expect(invites.rejectPending(ALPHA)).toBe(true)
+    })
+
+    it('keeps a 504 from accept a failure', async () => {
+      useTimedOutReject(() => [ALPHA])
+      const invites = store()
+      await invites.refresh()
+
+      const result = await invites.accept(ALPHA)
+
+      expect(result).toEqual({
+        ok: false,
+        message: 'join timed out after 30s',
+      })
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+    })
+
+    it('holds back a second reject until the first step, then lets one through', async () => {
+      vi.useFakeTimers()
+      const calls = useTimedOutReject(() => [ALPHA])
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+
+      expect(await invites.reject(ALPHA)).toEqual(PENDING)
+      expect(calls.leave).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+      expect(await invites.reject(ALPHA)).toEqual(PENDING)
+      expect(calls.leave).toBe(2)
+    })
+
+    it('ends when a retry fails outright, so the row shows the error alone', async () => {
+      vi.useFakeTimers()
+      let leaveStatus = 504
+      const calls = useTimedOutReject(() => [ALPHA])
+      server.use(
+        http.post(`${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`, () => {
+          calls.leave += 1
+          return HttpResponse.json(
+            { error: { code: 'bad_gateway', message: 'homeserver said no' } },
+            { status: leaveStatus },
+          )
+        }),
+      )
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+      expect(invites.rejectPending(ALPHA)).toBe(true)
+      await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+      const before = calls.list
+
+      leaveStatus = 502
+      expect(await invites.reject(ALPHA)).toEqual({
+        ok: false,
+        message: 'homeserver said no',
+      })
+
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+      // Its refreshes stop with it.
+      await vi.advanceTimersByTimeAsync(WINDOW_MS)
+      expect(calls.list).toBe(before)
+    })
+
+    it('ends on the removal frame the homeserver finishing sends', async () => {
+      useTimedOutReject(() => [ALPHA])
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+
+      invites.noteRemoved(ACCOUNT, '!a:hs')
+
+      expect(invites.invites.value).toEqual([])
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+    })
+
+    it('refreshes until the row is gone, then stops', async () => {
+      vi.useFakeTimers()
+      let listed = [ALPHA]
+      const calls = useTimedOutReject(() => listed)
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+      const before = calls.list
+
+      await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+      expect(calls.list).toBe(before + 1)
+      expect(invites.rejectPending(ALPHA)).toBe(true)
+
+      // The removal frame was lost; the next refresh no longer lists it.
+      listed = []
+      await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[1])
+      expect(calls.list).toBe(before + 2)
+      expect(invites.invites.value).toEqual([])
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(WINDOW_MS)
+      expect(calls.list).toBe(before + 2)
+    })
+
+    it('ends after the last step with the row still listed', async () => {
+      vi.useFakeTimers()
+      const calls = useTimedOutReject(() => [ALPHA])
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+      const before = calls.list
+
+      await vi.advanceTimersByTimeAsync(WINDOW_MS)
+
+      expect(calls.list).toBe(
+        before + PENDING_MEMBERSHIP_REFRESH_DELAYS_MS.length,
+      )
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+    })
+
+    it('counts a 504 in rejectAll as pending and carries on', async () => {
+      const BETA = invite('!b:hs', 'Beta')
+      const left: string[] = []
+      server.use(
+        http.get(`${BASE}/v1/invites`, () =>
+          HttpResponse.json({
+            data: [ALPHA, BETA].filter((row) => !left.includes(row.room_id)),
+          }),
+        ),
+        http.post(
+          `${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+          ({ params }) => {
+            if (params.roomId === '!a:hs') {
+              return HttpResponse.json(
+                {
+                  error: {
+                    code: 'gateway_timeout',
+                    message: 'leave timed out after 30s',
+                  },
+                },
+                { status: 504 },
+              )
+            }
+            left.push(String(params.roomId))
+            return HttpResponse.json({ data: {} })
+          },
+        ),
+      )
+      const invites = store()
+      await invites.refresh()
+
+      const result = await invites.rejectAll()
+
+      expect(result).toEqual({ succeeded: 1, pending: 1, failed: [] })
+      expect(left).toEqual(['!b:hs'])
+      expect(invites.rejectPending(ALPHA)).toBe(true)
+    })
+
+    it('keeps a row removed while a stepped refresh was in flight', async () => {
+      vi.useFakeTimers()
+      let release: () => void = () => {}
+      let hold = false
+      const calls = { list: 0 }
+      server.use(
+        http.get(`${BASE}/v1/invites`, async () => {
+          calls.list += 1
+          if (hold) {
+            await new Promise<void>((resolve) => {
+              release = resolve
+            })
+          }
+          // Issued before the homeserver finished, so it still lists it.
+          return HttpResponse.json({ data: [ALPHA] })
+        }),
+        http.post(`${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`, () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'gateway_timeout',
+                message: 'leave timed out after 30s',
+              },
+            },
+            { status: 504 },
+          ),
+        ),
+      )
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+      hold = true
+      const before = calls.list
+
+      await vi.advanceTimersByTimeAsync(PENDING_MEMBERSHIP_REFRESH_DELAYS_MS[0])
+      expect(calls.list).toBe(before + 1)
+      // The homeserver finishes while that GET is out.
+      invites.noteRemoved(ACCOUNT, '!a:hs')
+      release()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(invites.invites.value).toEqual([])
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+
+      // A GET issued after the removal still decides: one that lists the
+      // invite puts it back.
+      hold = false
+      await invites.refresh()
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+    })
+
+    it('holds an empty-bodied 504 as pending too', async () => {
+      server.use(
+        http.get(`${BASE}/v1/invites`, () =>
+          HttpResponse.json({ data: [ALPHA] }),
+        ),
+        // What a proxy sends: no error envelope, so openapi-fetch reports
+        // `error: undefined`.
+        http.post(
+          `${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+          () =>
+            new HttpResponse(null, {
+              status: 504,
+              headers: { 'Content-Length': '0' },
+            }),
+        ),
+      )
+      const invites = store()
+      await invites.refresh()
+
+      expect(await invites.reject(ALPHA)).toEqual(PENDING)
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+      expect(invites.rejectPending(ALPHA)).toBe(true)
+      invites.resetSession()
+    })
+
+    it('keeps an empty-bodied 502 a failure, not a success', async () => {
+      server.use(
+        http.get(`${BASE}/v1/invites`, () =>
+          HttpResponse.json({ data: [ALPHA] }),
+        ),
+        http.post(
+          `${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+          () =>
+            new HttpResponse(null, {
+              status: 502,
+              headers: { 'Content-Length': '0' },
+            }),
+        ),
+      )
+      const invites = store()
+      await invites.refresh()
+
+      expect(await invites.reject(ALPHA)).toEqual({
+        ok: false,
+        message: 'unexpected server response',
+      })
+      // Not dropped, and not suppressed: the next GET still shows it.
+      await invites.refresh()
+      expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+    })
+
+    it('drops a pending reject on a session reset', async () => {
+      vi.useFakeTimers()
+      const calls = useTimedOutReject(() => [ALPHA])
+      const invites = store()
+      await invites.refresh()
+      await invites.reject(ALPHA)
+      const before = calls.list
+
+      invites.resetSession()
+      await vi.advanceTimersByTimeAsync(WINDOW_MS)
+
+      expect(invites.rejectPending(ALPHA)).toBe(false)
+      expect(calls.list).toBe(before)
+    })
   })
 })

@@ -5,6 +5,7 @@ import { RoomAvatar, roomAvatarColor } from '../components/RoomAvatar'
 import { useServices } from '../services'
 import {
   inviteKey,
+  REJECT_PENDING_MESSAGE,
   type InviteBulkResult,
   type InviteDto,
 } from '../stores/invites'
@@ -61,6 +62,12 @@ export function InvitesPage() {
       : bulkResult.failed.filter((item) =>
           rows.some((row) => inviteKey(row) === inviteKey(item.invite)),
         )
+  // Not an error, so not in the alert. Counted from the rows still pending,
+  // like `pendingFailed`, so the line goes once those rejects settle.
+  const stillPending =
+    bulkResult === null || bulkResult.pending === 0
+      ? 0
+      : rows.filter((row) => invites.rejectPending(row)).length
 
   async function onAccept(invite: InviteDto) {
     if (mutating) {
@@ -90,7 +97,8 @@ export function InvitesPage() {
     setBusyKey(inviteKey(invite))
     const result = await invites.reject(invite)
     setBusyKey(null)
-    if (!result.ok) {
+    // A pending reject is not an error: the row says so itself.
+    if (!result.ok && result.pending !== true) {
       invites.error.value = result.message
     }
   }
@@ -144,10 +152,17 @@ export function InvitesPage() {
       <ErrorBanner error={invites.error} />
       {pendingFailed.length > 0 && bulkResult !== null && (
         <p class="error" role="alert">
-          {bulkResult.succeeded} succeeded, {pendingFailed.length} failed.
+          {`${bulkResult.succeeded} succeeded, ${pendingFailed.length} failed.`}
           {pendingFailed
             .map((item) => ` ${inviteTitle(item.invite)}: ${item.message}`)
             .join('')}
+        </p>
+      )}
+      {stillPending > 0 && (
+        <p class="muted" role="status">
+          {stillPending === 1
+            ? '1 reject is still pending on your homeserver.'
+            : `${stillPending} rejects are still pending on your homeserver.`}
         </p>
       )}
       {invites.loading.value && rows.length === 0 ? (
@@ -162,6 +177,7 @@ export function InvitesPage() {
               invite={invite}
               showAccount={showAccount}
               busy={mutating}
+              rejectPending={invites.rejectPending(invite)}
               onAccept={() => void onAccept(invite)}
               onReject={() => void onReject(invite)}
             />
@@ -176,12 +192,14 @@ function InviteRow({
   invite,
   showAccount,
   busy,
+  rejectPending,
   onAccept,
   onReject,
 }: {
   invite: InviteDto
   showAccount: boolean
   busy: boolean
+  rejectPending: boolean
   onAccept: () => void
   onReject: () => void
 }) {
@@ -204,6 +222,11 @@ function InviteRow({
           {invite.encrypted ? ' · Encrypted' : ''}
           {showAccount ? ` · ${invite.account_user_id}` : ''}
         </p>
+        {rejectPending && (
+          <p class="muted" role="status">
+            {REJECT_PENDING_MESSAGE}
+          </p>
+        )}
       </div>
       <div class="invite-actions">
         <button type="button" disabled={busy} onClick={onAccept}>
