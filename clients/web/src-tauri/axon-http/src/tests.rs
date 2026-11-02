@@ -853,6 +853,14 @@ async fn a_dropped_http2_connection_keeps_the_origin() {
     store_settles(&path, &server.url(), true).await;
 }
 
+#[test]
+fn requeues_go_at_once_and_then_back_off() {
+    use crate::transport::requeue_pause;
+    let pauses: Vec<u128> = (1..=9).map(|n| requeue_pause(n).as_millis()).collect();
+    assert_eq!(pauses, [0, 50, 100, 200, 400, 800, 1600, 2000, 2000]);
+    assert_eq!(requeue_pause(usize::MAX), Duration::from_secs(2));
+}
+
 // ===== origins known from an earlier launch =====
 
 /// A path for a store no other test uses.

@@ -30,10 +30,32 @@ const EARLY_CANCEL_TTL: Duration = Duration::from_secs(30);
 
 const MAX_REDIRECTS: usize = 10;
 
-/// A backstop on [`Transport::execute`]. Each requeue follows a connection
-/// attempt ending, so this is never reached unless attempts end as fast as
-/// they start.
+/// A backstop on the requeues for one request, across its retries
+/// ([`Transport::execute`]). With [`requeue_pause`] between them, it is well
+/// past any caller's deadline.
 const MAX_REQUEUES: usize = 64;
+
+/// The pause before a request's second requeue, doubling for each after it.
+const REQUEUE_PAUSE: Duration = Duration::from_millis(50);
+const MAX_REQUEUE_PAUSE: Duration = Duration::from_secs(2);
+
+/// How long a request waits before it is sent again for the `n`th time.
+///
+/// The first goes at once: the attempt it waited behind was most often
+/// cancelled by its own caller, as a room switch does, and the network is
+/// fine. Each round is one connection attempt, since the waiters line up
+/// behind whichever of them starts the next. But a request still requeueing
+/// has seen attempts end without a connection over and over, as on a network
+/// that resets every new connection, and sending it straight back would turn
+/// those rounds into a stream of attempts.
+pub(crate) fn requeue_pause(n: usize) -> Duration {
+    match n {
+        0 | 1 => Duration::ZERO,
+        n => REQUEUE_PAUSE
+            .saturating_mul(1 << (n - 2).min(16))
+            .min(MAX_REQUEUE_PAUSE),
+    }
+}
 
 /// A request's place in the table: the webview it came from and the id the
 /// JavaScript side chose for it.
@@ -576,11 +598,13 @@ impl Transport {
         // Every body is `Bytes`, so any request clones.
         let again = request.try_clone();
         let idempotent = matches!(*request.method(), Method::GET | Method::HEAD);
-        let (result, sent_at) = self.execute(client, request).await;
+        // One budget for the request, so a retry does not start it over.
+        let mut requeues = 0;
+        let (result, sent_at) = self.execute(client, request, &mut requeues).await;
         let result = match (result, again) {
             (Err(err), Some(again)) if is_protocol_nack(&err) => {
                 Counters::bump(&self.counters.nack_retries);
-                self.execute(client, again).await.0
+                self.execute(client, again, &mut requeues).await.0
             }
             (Err(err), Some(again))
                 if idempotent
@@ -588,7 +612,7 @@ impl Transport {
                     && is_reset_failure(&err) =>
             {
                 Counters::bump(&self.counters.fast_reset_retries);
-                self.execute(client, again).await.0
+                self.execute(client, again, &mut requeues).await.0
             }
             (result, _) => result,
         };
@@ -598,23 +622,26 @@ impl Transport {
     /// `request` on `client`, sent again for as long as it keeps losing the
     /// connection attempt it waited behind before anything was written
     /// ([`is_requeue`]). One of the requests sent again starts the next
-    /// attempt, and the rest wait behind that one. What bounds the wait is the
-    /// caller's own deadline, which cancels the whole send.
+    /// attempt, and the rest wait behind that one, after [`requeue_pause`]
+    /// from the second time on. What bounds the wait is the caller's own
+    /// deadline, which cancels the whole send, with `requeues` across the
+    /// request's retries as a backstop.
     ///
     /// Also returns when the request last went out, for the fast-reset window.
     async fn execute(
         &self,
         client: &reqwest::Client,
         mut request: reqwest::Request,
+        requeues: &mut usize,
     ) -> (reqwest::Result<reqwest::Response>, Instant) {
-        let mut requeues = 0;
         loop {
             let again = request.try_clone();
             let sent_at = Instant::now();
             match (client.execute(request).await, again) {
-                (Err(err), Some(again)) if requeues < MAX_REQUEUES && is_requeue(&err) => {
-                    requeues += 1;
+                (Err(err), Some(again)) if *requeues < MAX_REQUEUES && is_requeue(&err) => {
+                    *requeues += 1;
                     Counters::bump(&self.counters.requeues);
+                    tokio::time::sleep(requeue_pause(*requeues)).await;
                     request = again;
                 }
                 (result, _) => return (result, sent_at),

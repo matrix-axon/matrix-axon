@@ -212,8 +212,16 @@ pub(crate) fn is_protocol_nack(err: &(dyn StdError + 'static)) -> bool {
 /// room switch does) it drops the waiters with a private pool error, "request
 /// was canceled", which its own retry for canceled requests does not cover.
 /// Each waiter would fail as `other` (ADR 0127 § 7). The text is matched only
-/// under hyper-util's `Connect` error, where nothing else carries it, and
-/// `a_cancelled_connect_requeues_the_requests_behind_it` pins it.
+/// under hyper-util's `Connect` error, where nothing else carries it.
+///
+/// hyper-util offers nothing public to match instead, and an exact version pin
+/// in a plugin would hold back the whole shell's dependency graph. What guards
+/// it is `a_cancelled_connect_requeues_the_requests_behind_it` and
+/// `a_failed_connect_requeues_the_requests_behind_it`, which assert the
+/// requeues happened: the gate runs them on any change to the shell's
+/// `Cargo.lock`, so a bump that changes the text fails there, and if it ever
+/// slipped through, the waiters would fail as `other`, as before this was
+/// added, rather than hang. Checked against hyper-util 0.1.20.
 pub(crate) fn is_requeue(err: &reqwest::Error) -> bool {
     let causes = causes(err);
     let Some(client) = find::<hyper_util::client::legacy::Error>(&causes) else {

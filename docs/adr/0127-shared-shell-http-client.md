@@ -229,7 +229,14 @@ Its own retry for canceled requests does not cover that error, so each waiting r
 Measured against an in-process server, cancelling the first of five requests 100 ms into a slow handshake failed the other four.
 Nothing was written for those requests, so the plugin sends them again, for any method.
 One of them starts the next connection attempt, and the rest wait behind it, until each request's own deadline cancels it.
+The first requeue goes at once, since the attempt was most often cancelled by its own caller and the network is fine.
+After that a request waits 50 ms, doubling each time to at most 2 s, so a network that resets every new connection gets a slowing trickle of attempts rather than one after another (added in review).
 These are counted separately (`requeue`), and do not use up the one retry above.
+A request has one budget of 64 requeues across that retry, a backstop the pauses put well past any deadline.
+
+The requeue matches `hyper-util`'s error text, since nothing public identifies the error.
+It is not pinned to one `hyper-util` version, which would hold back the whole shell's dependencies.
+The Rust tests that assert requeues happen run on any change to the shell's `Cargo.lock` instead, and if the text changed unnoticed, waiting requests would fail as `other`, as before.
 
 Timeouts are not retried; the JavaScript deadlines own them.
 Error statuses (5xx, 429, 503) are application policy, and belong with ADR 0122's load gate and the stores that already retry (media, favourites, push registration).
