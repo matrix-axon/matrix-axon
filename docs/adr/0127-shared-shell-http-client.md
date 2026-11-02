@@ -86,9 +86,14 @@ So the plugin builds two clients with the settings above.
 One negotiates by ALPN, offering `h2` and `http/1.1`.
 The other offers only `h2`.
 An `https` origin moves to the HTTP/2-only client once a response from it arrives over HTTP/2.
-It moves back on any failure there once a connection existed, because a server that stops offering HTTP/2 shows up as one: a TLS alert, or, from a server that ignores the ALPN offer, an HTTP/1.1 answer to the HTTP/2 preface that reads as a `reset`.
-That failure is the one request such a server costs.
-A cancel, `connect_timeout`, `refused` or `dns` leaves the origin where it is: those say nothing about the server, and on a network that drops new connections, moving back would bring back the burst.
+It moves back when the server shows it stopped offering HTTP/2.
+A `no_application_protocol` alert, refusing an offer of `h2` alone, says so at once, and costs one request.
+A server that ignores the ALPN offer is less clear: it answers the HTTP/2 preface with HTTP/1.1, which reads as a `reset`, the same as a WiFi-to-cellular handoff ending a working connection.
+Moving back on a handoff would send the next room's burst through the negotiating client, one new connection per request, on the network least able to take it (added in review).
+So any other failure once a connection existed is a strike, and only a second one moves the origin back, from a request sent after the first failed.
+Every request on a connection a handoff ends was sent before the first of them failed, so they count once, and the next request goes out on a new connection and clears the strike by getting a response.
+A server that really stopped offering HTTP/2 costs two failed requests.
+A cancel, `connect_timeout`, `refused`, `dns` or a reset while connecting leaves the origin where it is and adds no strike: those say nothing about the server, and on a network that drops new connections, moving back would bring back the burst.
 The set of known origins describes servers, not connections, so it survives a `reset`.
 Each redirect hop takes the client its own origin calls for, so a known HTTP/2 origin can redirect to one that speaks only HTTP/1.1.
 Plain `http` never moves, because there is no ALPN to negotiate.
@@ -96,7 +101,7 @@ Plain `http` never moves, because there is no ALPN to negotiate.
 **The known origins are kept between launches** (added after device testing).
 Without that, every launch was a first contact: the burst on the negotiating client, then a second connection for the HTTP/2-only client straight after it.
 On a network that drops new connections, that second connection is the one most likely to be dropped, and every request waits behind it.
-The plugin keeps the set in a small file in the app's cache directory, written when an origin is learned or forgotten.
+The plugin keeps the set in a small file in the app's cache directory, written when an origin is learned or forgotten, on the blocking pool so no request waits for the disk.
 It holds origins only, the servers already signed in to.
 On reading back it keeps only well-formed `https` origins, at most 64, and treats an unreadable file as empty, since losing it costs one connection.
 So only the first launch against a server pays for two connections.
@@ -342,7 +347,8 @@ It helps, but every remaining request still pays a handshake, and the app would 
   Android's raw-payload IPC path differs from iOS's and has to be measured, not assumed.
 - **Rust tests**, against an in-process server that counts accepted connections:
   - N requests share one connection, both over HTTP/1.1 keep-alive and over HTTP/2.
-  - After a `reset`, a burst of concurrent requests to an origin known to speak HTTP/2 opens one connection, and an origin that stops offering HTTP/2 goes back to negotiating.
+  - After a `reset`, a burst of concurrent requests to an origin known to speak HTTP/2 opens one connection, and an origin that stops offering HTTP/2 goes back to negotiating: at once on a refused ALPN offer, on the second failure from a server that ignores the offer.
+  - An HTTP/2 connection that closes with two requests on it costs one strike, and the origin keeps its place.
   - A first-contact burst whose later connects stall shares the first connection to complete.
   - Requests waiting behind an HTTP/2 connect are sent again when it is cancelled or fails, rather than failing as `other`.
   - An origin learned in one launch opens one connection in the next, a forgotten one is forgotten in the store too, and the store reads back only `https` origins.

@@ -511,19 +511,27 @@ async fn a_cold_burst_to_a_new_origin_negotiates_on_every_connection() {
 
 #[tokio::test]
 async fn an_origin_that_stops_offering_http2_negotiates_again() {
-    for (alpn, kind) in [(Alpn::Refuse, Kind::Tls), (Alpn::Ignore, Kind::Reset)] {
+    // A refused offer of `h2` alone says so at once. A server that ignores
+    // ALPN answers the HTTP/2 preface with HTTP/1.1, which looks like the
+    // reset a network handoff causes, so it takes a second failure on a newer
+    // connection to be sure.
+    for (alpn, kind, strikes) in [(Alpn::Refuse, Kind::Tls, 1), (Alpn::Ignore, Kind::Reset, 2)] {
         let server = Server::start(true, ok_handler()).await;
         let transport = transport();
         warm(&transport, &server).await;
         transport.reset().unwrap();
         server.alpn.store(alpn as u8, Ordering::SeqCst);
         // The HTTP/2-only client cannot talk to it...
-        let err = transport
-            .send(key(0), get(&server.url("/")))
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind, kind);
+        for strike in 1..=strikes {
+            assert!(transport.knows_h2(&server.url("/")), "{kind:?} {strike}");
+            let err = transport
+                .send(key(0), get(&server.url("/")))
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind, kind);
+        }
         // ...and the next request negotiates, and gets HTTP/1.1.
+        assert!(!transport.knows_h2(&server.url("/")), "{kind:?}");
         let (head, body) = fetch(&transport, 1, get(&server.url("/"))).await;
         assert_eq!(head.version, "http/1.1");
         assert_eq!(body, b"hello");
@@ -605,6 +613,9 @@ enum Conduct2 {
     /// Accept and never answer, as a connect whose SYNs are dropped looks
     /// to the client until its connect timeout.
     Hold,
+    /// Serve, then close the connection after a pause with whatever is still
+    /// on it, as a WiFi-to-cellular handoff ends a working connection.
+    ServeFor(Duration),
 }
 
 struct ScriptedServer {
@@ -636,8 +647,12 @@ impl ScriptedServer {
                         held.push(stream);
                         continue;
                     }
-                    Conduct2::Serve => None,
+                    Conduct2::Serve | Conduct2::ServeFor(_) => None,
                     Conduct2::ServeAfter(pause) => Some(pause),
+                };
+                let lifetime = match conduct {
+                    Conduct2::ServeFor(lifetime) => lifetime,
+                    _ => Duration::MAX,
                 };
                 tokio::spawn(async move {
                     if let Some(pause) = pause {
@@ -647,12 +662,18 @@ impl ScriptedServer {
                     else {
                         return;
                     };
-                    let service = service_fn(|_req| async {
+                    // `/slow` never answers, so a request can still be on the
+                    // connection when it closes.
+                    let service = service_fn(|req: hyper::Request<_>| async move {
+                        if req.uri().path() == "/slow" {
+                            std::future::pending::<()>().await;
+                        }
                         Ok::<_, Infallible>(reply(200, TestBody::text("hello")))
                     });
-                    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                        .serve_connection(TokioIo::new(stream), service)
-                        .await;
+                    let builder =
+                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+                    let serving = builder.serve_connection(TokioIo::new(stream), service);
+                    let _ = tokio::time::timeout(lifetime, serving).await;
                 });
             }
         });
@@ -790,6 +811,46 @@ async fn a_post_whose_connect_is_reset_fails_as_reset() {
     assert_eq!(err.detail.as_deref(), Some("ConnectionReset"));
     // A reset before there was a connection says nothing about the server.
     assert!(transport.knows_h2(&server.url()));
+}
+
+#[tokio::test]
+async fn a_dropped_http2_connection_keeps_the_origin() {
+    // Connection 0 negotiates and teaches the transport the origin speaks
+    // HTTP/2. Connection 1, the HTTP/2-only client's, serves and then goes
+    // away with two requests on it, as a network handoff ends one. Both fail,
+    // but both went out on the one connection, so they are one strike, and
+    // the request after them succeeds on a new connection and clears it.
+    let server = ScriptedServer::start(|n| match n {
+        1 => Conduct2::ServeFor(Duration::from_millis(300)),
+        _ => Conduct2::Serve,
+    })
+    .await;
+    let path = store_path("handoff");
+    let transport = stored_transport(&path);
+    fetch(&transport, 900, get(&server.url())).await;
+    assert!(transport.knows_h2(&server.url()));
+
+    let slow = format!("{}slow", server.url());
+    // POSTs, which nothing retries, so each failure reaches the caller.
+    let (a, b) = tokio::join!(
+        transport.send(key(0), request(Method::POST, &slow)),
+        transport.send(key(1), request(Method::POST, &slow)),
+    );
+    for err in [a.unwrap_err(), b.unwrap_err()] {
+        assert!(
+            !matches!(err.kind, Kind::Cancelled | Kind::Refused | Kind::Dns),
+            "{err:?}"
+        );
+        assert!(!err.connecting, "{err:?}");
+    }
+    assert!(transport.knows_h2(&server.url()));
+
+    let (head, _) = fetch(&transport, 2, get(&server.url())).await;
+    assert_eq!(head.version, "h2");
+    assert_eq!(server.accepted(), 3);
+
+    assert!(transport.knows_h2(&server.url()));
+    store_settles(&path, &server.url(), true).await;
 }
 
 // ===== origins known from an earlier launch =====

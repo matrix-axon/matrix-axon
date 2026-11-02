@@ -143,7 +143,42 @@ pub struct Transport {
     /// Shared with the store's writes, which run on the blocking pool.
     h2_origins: Arc<Mutex<HashSet<String>>>,
     store: Option<Arc<OriginStore>>,
+    /// When a request on the HTTP/2-only client last failed in a way that
+    /// might mean the server stopped offering HTTP/2, per origin, until a
+    /// response or a second such failure settles it ([`Self::forgets`]).
+    h2_strikes: Mutex<HashMap<String, Instant>>,
     table: Mutex<Table>,
+}
+
+/// What a failure on the HTTP/2-only client says about whether its origin
+/// still speaks HTTP/2.
+enum Evidence {
+    /// Nothing: it came before any connection, or from the caller.
+    None,
+    /// The server refused an offer of `h2` alone.
+    Conclusive,
+    /// Something went wrong on a connection, which a server that stopped
+    /// offering HTTP/2 causes and so does a network handoff.
+    Strike,
+}
+
+impl Evidence {
+    fn of(err: &TransportError) -> Self {
+        match err.kind {
+            // A failure before a connection existed says nothing about the
+            // server, and on a network dropping new connections, forgetting
+            // would bring back the burst this client avoids. A reset while
+            // connecting is one of those.
+            Kind::Cancelled | Kind::ConnectTimeout | Kind::Refused | Kind::Dns => Self::None,
+            Kind::Reset if err.connecting => Self::None,
+            Kind::Tls if err.detail.as_deref() == Some("NoApplicationProtocol") => Self::Conclusive,
+            // A server that ignores the ALPN offer answers the HTTP/2 preface
+            // with an HTTP/1.1 error, which looks like a reset. Other TLS
+            // failures, a captive portal's certificate among them, say no
+            // more than a reset does.
+            _ => Self::Strike,
+        }
+    }
 }
 
 /// Where the origins known to speak HTTP/2 are kept between launches.
@@ -257,6 +292,7 @@ impl Transport {
             current: RwLock::new(clients),
             h2_origins: Arc::new(Mutex::new(h2_origins)),
             store,
+            h2_strikes: Mutex::new(HashMap::new()),
             table: Mutex::new(Table::default()),
         })
     }
@@ -467,41 +503,57 @@ impl Transport {
         } else {
             &clients.negotiated
         };
+        let sent_at = Instant::now();
         let sent = self.dispatch(client, request).await;
         if let Some(origin) = origin {
             match &sent {
+                Ok(_) if via_h2 => {
+                    lock(&self.h2_strikes).remove(&origin);
+                }
                 Ok(response)
-                    if !via_h2
-                        && response.version() == reqwest::Version::HTTP_2
+                    if response.version() == reqwest::Version::HTTP_2
                         && lock(&self.h2_origins).insert(origin.clone()) =>
                 {
                     self.persist_origins();
                 }
-                // Anything that went wrong once a connection existed sends the
-                // next request back to negotiating, in case the server stopped
-                // offering HTTP/2: one that ignores the ALPN offer answers the
-                // HTTP/2 preface with an HTTP/1.1 error, which can look like a
-                // reset. Failures before a connection exists say nothing about
-                // the server, and on a network dropping new connections,
-                // forgetting would bring back the burst this client avoids. A
-                // reset while connecting is one of those; a TLS failure is
-                // not, since a server that stopped offering HTTP/2 refuses
-                // the handshake.
-                Err(err)
-                    if via_h2
-                        && !matches!(
-                            err.kind,
-                            Kind::Cancelled | Kind::ConnectTimeout | Kind::Refused | Kind::Dns
-                        )
-                        && !(err.connecting && err.kind == Kind::Reset)
-                        && lock(&self.h2_origins).remove(&origin) =>
-                {
+                Err(err) if via_h2 && self.forgets(&origin, err, sent_at) => {
                     self.persist_origins();
                 }
                 _ => {}
             }
         }
         sent
+    }
+
+    /// Whether `err`, from a request on the HTTP/2-only client that went out
+    /// at `sent_at`, sends `origin` back to negotiating, in case the server
+    /// stopped offering HTTP/2.
+    ///
+    /// A strike alone does not. Every request on a connection a handoff ends
+    /// fails with it, all sent before the first of them failed, so they count
+    /// once. A request sent after that goes out on a new connection, since
+    /// `hyper` drops one that errored. If it gets a response, the strike is
+    /// cleared; if it fails too, the server is the likelier cause. Forgetting
+    /// on the first would send the next room's burst of requests through the
+    /// negotiating client, one new connection each.
+    fn forgets(&self, origin: &str, err: &TransportError, sent_at: Instant) -> bool {
+        match Evidence::of(err) {
+            Evidence::None => return false,
+            Evidence::Conclusive => {}
+            Evidence::Strike => {
+                let mut strikes = lock(&self.h2_strikes);
+                match strikes.get(origin) {
+                    Some(&first) if sent_at > first => {}
+                    Some(_) => return false,
+                    None => {
+                        strikes.insert(origin.to_owned(), Instant::now());
+                        return false;
+                    }
+                }
+            }
+        }
+        lock(&self.h2_strikes).remove(origin);
+        lock(&self.h2_origins).remove(origin)
     }
 
     /// One hop, retried at most once (ADR 0127 § 7), and counted where the
