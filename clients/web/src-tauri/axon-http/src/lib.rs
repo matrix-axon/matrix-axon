@@ -239,7 +239,14 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         ])
         .setup(|app, _api| {
             let options = client::ClientOptions::new(user_agent(&app.package_info().version));
-            app.manage(Transport::new(options)?);
+            // Without a cache directory the transport still works, and only
+            // forgets between launches which servers speak HTTP/2.
+            let store = app
+                .path()
+                .app_cache_dir()
+                .ok()
+                .map(|dir| dir.join("axon-http-h2-origins.json"));
+            app.manage(Transport::with_store(options, store)?);
             Ok(())
         })
         .on_page_load(|webview, payload| {

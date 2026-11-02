@@ -7,6 +7,10 @@ import {
   type RequestTrace,
 } from '../perf'
 import { browserPlatform, type Platform } from '../platform'
+import {
+  transportFailureOf,
+  transportVersion,
+} from '../platform/transport-report'
 import type { paths } from './schema'
 
 /**
@@ -283,7 +287,11 @@ async function fetchWithinDeadline(
     return deadline === null ? byCaller : withinDeadline(byCaller, deadline)
   }
   const fail = (error: unknown): never => {
-    trace?.end(outcomeOf(deadline, request.signal), failureKind(error))
+    trace?.end(
+      outcomeOf(deadline, request.signal),
+      failureKind(error),
+      transportFailureOf(error)?.detail,
+    )
     throw error
   }
   trace?.sent()
@@ -296,14 +304,14 @@ async function fetchWithinDeadline(
     // nothing else will ever read or cancel it.
     pending.then(
       (late) => {
-        trace?.late()
+        trace?.late(transportVersion(late))
         late.body?.cancel().catch(() => {})
       },
       () => {},
     )
     return fail(error)
   }
-  trace?.headers(response.status)
+  trace?.headers(response.status, transportVersion(response))
   if (response.body === null || NULL_BODY_STATUSES.has(response.status)) {
     trace?.end('ok')
     return response
@@ -329,7 +337,9 @@ const CANCELLED = /cancell?ed/i
  * Rethrow a transport's rejection as the `TypeError` the fetch contract
  * promises for one.
  *
- * `tauri-plugin-http` does not keep that contract. Its Rust side serialises a
+ * The shell's own transport keeps that contract (`platform/shell-http.ts`),
+ * so this is for the legacy one behind Settings → Debug, and goes when it does
+ * (ADR 0127 § 5). `tauri-plugin-http` does not keep it. Its Rust side serialises a
  * failed request to a bare string (`reqwest`'s "error sending request for url
  * (…)"), and the plugin rejects with that string as it stands. Nothing
  * downstream recognised it, so `requestFailureMessage` fell through to the
@@ -367,9 +377,14 @@ function asTransportFailure(error: unknown): never {
  *
  * For the readout (`api:failed` in `perf.ts`), which may be kept on disk and
  * so cannot carry the message itself: `reqwest` quotes the request URL, and
- * the URL names an account and a room. The words are `reqwest`'s own
- * categories where the shell produced the error, since those are the only
- * distinction it lets through:
+ * the URL names an account and a room.
+ *
+ * The shell's own transport says why on the error's `cause`: `dns`,
+ * `refused`, `connect_timeout`, `tls`, `reset`, `body`, `cancelled`, `scope`
+ * or `other` (ADR 0127 § 4). That is used as it stands.
+ *
+ * Otherwise the words are the legacy plugin's own categories where the shell
+ * produced the error, since those are the only distinction it lets through:
  *
  * - `send` — never got a response: DNS, connect, TLS, or a connection lost
  *   before the headers.
@@ -384,6 +399,10 @@ function asTransportFailure(error: unknown): never {
  * compiler and not this comment is what keeps a message out of the readout.
  */
 export function failureKind(error: unknown): FailureKind {
+  const transport = transportFailureOf(error)
+  if (transport !== null) {
+    return transport.kind
+  }
   const message = causeField(error, 'message') ?? ''
   if (message.startsWith('error sending request')) {
     return 'send'

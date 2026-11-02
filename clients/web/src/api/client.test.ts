@@ -11,6 +11,7 @@ import {
 } from 'vitest'
 import type { AuthProvider } from '../auth/provider'
 import { setPerfEnabled, setTelemetrySink } from '../perf'
+import { recordTransportVersion } from '../platform/transport-report'
 import {
   API_REQUEST_TIMEOUT_MS,
   apiErrorCode,
@@ -537,6 +538,10 @@ describe('request telemetry', () => {
   })
   afterEach(() => {
     marks.length = 0
+    // Off and on again empties `api:failed`'s rate-limit window, which would
+    // otherwise carry one test's failures into the next.
+    setPerfEnabled(false)
+    setPerfEnabled(true)
   })
   afterAll(() => {
     setTelemetrySink(null)
@@ -650,6 +655,68 @@ describe('request telemetry', () => {
     expect(
       marks.find((mark) => mark.name === 'api:failed')?.detail,
     ).toMatchObject({ kind: 'body', stage: 'body' })
+  })
+
+  /**
+   * The shell's own transport says why on the error's cause (ADR 0127 § 4):
+   * that word, and its closed-set detail, are what the readout records.
+   */
+  it("reports the shell transport's own category and detail", async () => {
+    const refusing: typeof globalThis.fetch = () =>
+      Promise.reject(
+        new TypeError("the shell's transport failed (refused)", {
+          cause: { kind: 'refused', detail: 'ConnectionRefused' },
+        }),
+      )
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
+      fetch: refusing,
+    })
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow(
+      REQUEST_UNREACHABLE_MESSAGE,
+    )
+    expect(
+      marks.find((mark) => mark.name === 'api:failed')?.detail,
+    ).toMatchObject({
+      kind: 'refused',
+      detail: 'ConnectionRefused',
+      stage: 'headers',
+      ver: null,
+    })
+  })
+
+  it('records the version a body failure arrived over', async () => {
+    const truncating: typeof globalThis.fetch = async () => {
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.error(
+              new TypeError("the shell's transport failed (reset)", {
+                cause: { kind: 'reset', detail: 'ConnectionReset' },
+              }),
+            )
+          },
+        }),
+        { status: 200 },
+      )
+      recordTransportVersion(response, 'h2')
+      return response
+    }
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
+      fetch: truncating,
+    })
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow(
+      REQUEST_UNREACHABLE_MESSAGE,
+    )
+    expect(
+      marks.find((mark) => mark.name === 'api:failed')?.detail,
+    ).toMatchObject({
+      kind: 'reset',
+      detail: 'ConnectionReset',
+      stage: 'body',
+      ver: 'h2',
+    })
   })
 
   /**

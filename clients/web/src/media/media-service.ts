@@ -562,11 +562,13 @@ export function createMediaService(deps: {
           } else {
             raw = await res.blob()
           }
-          // The shell's fetch (`@tauri-apps/plugin-http`) builds its
-          // `Response` without headers and attaches them afterwards, so
+          // The legacy shell transport (`@tauri-apps/plugin-http`) builds
+          // its `Response` without headers and attaches them afterwards, so
           // `blob()` comes back untyped though `Content-Type` is readable.
           // Untyped, an image is only half there: WebKit's long-press Copy
           // put the `blob:` URL on the iOS clipboard instead of the picture.
+          // The shell's own transport sets headers at construction (ADR 0127
+          // § 2); this goes with the legacy toggle.
           const type =
             options?.contentType ??
             (raw.type === ''

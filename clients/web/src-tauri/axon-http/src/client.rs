@@ -30,6 +30,7 @@ pub(crate) struct Counters {
     pub(crate) requests_sent: AtomicU64,
     pub(crate) nack_retries: AtomicU64,
     pub(crate) fast_reset_retries: AtomicU64,
+    pub(crate) requeues: AtomicU64,
     pub(crate) resets: AtomicU64,
 }
 
@@ -46,6 +47,7 @@ impl Counters {
             retries: Retries {
                 nack: get(&self.nack_retries),
                 fast_reset: get(&self.fast_reset_retries),
+                requeue: get(&self.requeues),
             },
             resets: get(&self.resets),
             live_entries,
@@ -72,6 +74,9 @@ pub struct Retries {
     pub nack: u64,
     /// A `GET` or `HEAD` reset within a second of being sent (ADR 0127 § 7).
     pub fast_reset: u64,
+    /// A request sent again because the HTTP/2 connection attempt it was
+    /// waiting for ended without a connection, before anything was written.
+    pub requeue: u64,
 }
 
 /// Everything a client is built from. Kept so that `reset` builds an

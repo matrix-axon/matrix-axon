@@ -2,18 +2,20 @@
 //! Tauri so it can be tested against a real server without a webview.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use hyper::body::Bytes;
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Method, StatusCode, Url};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{self, ClientOptions, Counters, Stats};
 use crate::error::{
-    classify_body, classify_send, is_protocol_nack, is_reset_failure, Kind, TransportError,
+    classify_body, classify_send, is_protocol_nack, is_requeue, is_reset_failure, Kind,
+    TransportError,
 };
 
 /// How soon after sending a `reset` still reads as the stale-connection race
@@ -27,6 +29,33 @@ const FAST_RESET_WINDOW: Duration = Duration::from_secs(1);
 const EARLY_CANCEL_TTL: Duration = Duration::from_secs(30);
 
 const MAX_REDIRECTS: usize = 10;
+
+/// A backstop on the requeues for one request, across its retries
+/// ([`Transport::execute`]). With [`requeue_pause`] between them, it is well
+/// past any caller's deadline.
+const MAX_REQUEUES: usize = 64;
+
+/// The pause before a request's second requeue, doubling for each after it.
+const REQUEUE_PAUSE: Duration = Duration::from_millis(50);
+const MAX_REQUEUE_PAUSE: Duration = Duration::from_secs(2);
+
+/// How long a request waits before it is sent again for the `n`th time.
+///
+/// The first goes at once: the attempt it waited behind was most often
+/// cancelled by its own caller, as a room switch does, and the network is
+/// fine. Each round is one connection attempt, since the waiters line up
+/// behind whichever of them starts the next. But a request still requeueing
+/// has seen attempts end without a connection over and over, as on a network
+/// that resets every new connection, and sending it straight back would turn
+/// those rounds into a stream of attempts.
+pub(crate) fn requeue_pause(n: usize) -> Duration {
+    match n {
+        0 | 1 => Duration::ZERO,
+        n => REQUEUE_PAUSE
+            .saturating_mul(1 << (n - 2).min(16))
+            .min(MAX_REQUEUE_PAUSE),
+    }
+}
 
 /// A request's place in the table: the webview it came from and the id the
 /// JavaScript side chose for it.
@@ -131,9 +160,126 @@ pub struct Transport {
     counters: Arc<Counters>,
     current: RwLock<Clients>,
     /// Origins known to speak HTTP/2, as `https://host:port`. A property of
-    /// the server rather than of a connection, so it outlives a `reset`.
-    h2_origins: Mutex<HashSet<String>>,
+    /// the server rather than of a connection, so it outlives a `reset`, and
+    /// with a store, a relaunch.
+    /// Shared with the store's writes, which run on the blocking pool.
+    h2_origins: Arc<Mutex<HashSet<String>>>,
+    store: Option<Arc<OriginStore>>,
+    /// When a request on the HTTP/2-only client last failed in a way that
+    /// might mean the server stopped offering HTTP/2, per origin, until a
+    /// response or a second such failure settles it ([`Self::forgets`]).
+    h2_strikes: Mutex<HashMap<String, Instant>>,
     table: Mutex<Table>,
+}
+
+/// What a failure on the HTTP/2-only client says about whether its origin
+/// still speaks HTTP/2.
+enum Evidence {
+    /// Nothing: it came before any connection, or from the caller.
+    None,
+    /// The server refused an offer of `h2` alone.
+    Conclusive,
+    /// Something went wrong on a connection, which a server that stopped
+    /// offering HTTP/2 causes and so does a network handoff.
+    Strike,
+}
+
+impl Evidence {
+    fn of(err: &TransportError) -> Self {
+        match err.kind {
+            // A failure before a connection existed says nothing about the
+            // server, and on a network dropping new connections, forgetting
+            // would bring back the burst this client avoids. A reset while
+            // connecting is one of those.
+            Kind::Cancelled | Kind::ConnectTimeout | Kind::Refused | Kind::Dns => Self::None,
+            Kind::Reset if err.connecting => Self::None,
+            Kind::Tls if err.detail.as_deref() == Some("NoApplicationProtocol") => Self::Conclusive,
+            // A server that ignores the ALPN offer answers the HTTP/2 preface
+            // with an HTTP/1.1 error, which looks like a reset. Other TLS
+            // failures, a captive portal's certificate among them, say no
+            // more than a reset does.
+            _ => Self::Strike,
+        }
+    }
+}
+
+/// Where the origins known to speak HTTP/2 are kept between launches.
+///
+/// Without it, every launch is a first contact: the first request negotiates
+/// on one connection, and the HTTP/2-only client then needs a second one,
+/// straight after the launch burst. On a network that drops new connections
+/// that second one is the likeliest to be dropped, and everything waits behind
+/// it. Kept, a launch goes straight to the HTTP/2-only client and one
+/// connection, and only the first launch against a server pays for two.
+///
+/// It holds origins only: the server the person signed in to, nothing more.
+/// A cache, so losing it costs one extra connection and nothing else.
+struct OriginStore {
+    path: PathBuf,
+    /// Held across a snapshot and its write. Every change schedules a write
+    /// after it is made, and each write snapshots under this lock, so the last
+    /// write to run holds the latest state whatever order they run in.
+    writing: Mutex<()>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct StoredOrigins {
+    version: u32,
+    h2: Vec<String>,
+}
+
+const STORED_ORIGINS_VERSION: u32 = 1;
+
+/// A bound on what is read back, against a file that is not ours.
+const MAX_STORED_ORIGINS: usize = 64;
+
+impl OriginStore {
+    /// The origins stored, keeping only well-formed `https` ones. A missing
+    /// or unreadable file is an empty store.
+    fn load(&self) -> HashSet<String> {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return HashSet::new();
+        };
+        let Ok(stored) = serde_json::from_str::<StoredOrigins>(&text) else {
+            return HashSet::new();
+        };
+        if stored.version != STORED_ORIGINS_VERSION {
+            return HashSet::new();
+        }
+        stored
+            .h2
+            .into_iter()
+            .filter(|origin| {
+                Url::parse(origin).is_ok_and(|url| {
+                    url.scheme() == "https" && url.origin().ascii_serialization() == *origin
+                })
+            })
+            .take(MAX_STORED_ORIGINS)
+            .collect()
+    }
+
+    /// Replace the file with `origins`, through a rename so a reader never
+    /// sees half of it. A failure is ignored: the store is only a cache.
+    /// Blocking: called only from the blocking pool.
+    fn save(&self, origins: &HashSet<String>) {
+        let mut h2: Vec<String> = origins.iter().cloned().collect();
+        h2.sort();
+        h2.truncate(MAX_STORED_ORIGINS);
+        let stored = StoredOrigins {
+            version: STORED_ORIGINS_VERSION,
+            h2,
+        };
+        let Ok(text) = serde_json::to_string(&stored) else {
+            return;
+        };
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let partial = self.path.with_extension("partial");
+        if std::fs::write(&partial, text).is_ok() {
+            let _ = std::fs::rename(&partial, &self.path);
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -141,16 +287,52 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Transport {
+    /// A transport that remembers nothing between launches.
+    #[cfg(test)]
     pub(crate) fn new(options: ClientOptions) -> reqwest::Result<Self> {
+        Self::with_store(options, None)
+    }
+
+    /// A transport that keeps the origins it learns speak HTTP/2 in the file
+    /// at `store`, and starts from the ones already there.
+    pub(crate) fn with_store(
+        options: ClientOptions,
+        store: Option<PathBuf>,
+    ) -> reqwest::Result<Self> {
         let counters = Arc::new(Counters::default());
         let clients = Self::build(&options, &counters)?;
+        let store = store.map(|path| {
+            Arc::new(OriginStore {
+                path,
+                writing: Mutex::new(()),
+            })
+        });
+        let h2_origins = store.as_deref().map(OriginStore::load).unwrap_or_default();
         Ok(Self {
             options,
             counters,
             current: RwLock::new(clients),
-            h2_origins: Mutex::new(HashSet::new()),
+            h2_origins: Arc::new(Mutex::new(h2_origins)),
+            store,
+            h2_strikes: Mutex::new(HashMap::new()),
             table: Mutex::new(Table::default()),
         })
+    }
+
+    /// Write the known origins to the store, if there is one, on the
+    /// blocking pool: a request that just learned or forgot an origin goes on
+    /// without waiting for the disk, and a slow write blocks no async worker.
+    /// Only a change writes, so a burst of failures writes once.
+    fn persist_origins(&self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let (store, origins) = (store.clone(), self.h2_origins.clone());
+        tokio::task::spawn_blocking(move || {
+            let _writing = lock(&store.writing);
+            let snapshot = lock(&origins).clone();
+            store.save(&snapshot);
+        });
     }
 
     fn build(options: &ClientOptions, counters: &Arc<Counters>) -> reqwest::Result<Clients> {
@@ -343,32 +525,57 @@ impl Transport {
         } else {
             &clients.negotiated
         };
+        let sent_at = Instant::now();
         let sent = self.dispatch(client, request).await;
         if let Some(origin) = origin {
             match &sent {
-                Ok(response) if !via_h2 && response.version() == reqwest::Version::HTTP_2 => {
-                    lock(&self.h2_origins).insert(origin);
+                Ok(_) if via_h2 => {
+                    lock(&self.h2_strikes).remove(&origin);
                 }
-                // Anything that went wrong once a connection existed sends the
-                // next request back to negotiating, in case the server stopped
-                // offering HTTP/2: one that ignores the ALPN offer answers the
-                // HTTP/2 preface with an HTTP/1.1 error, which can look like a
-                // reset. Failures before a connection exists say nothing about
-                // the server, and on a network dropping new connections,
-                // forgetting would bring back the burst this client avoids.
-                Err(err)
-                    if via_h2
-                        && !matches!(
-                            err.kind,
-                            Kind::Cancelled | Kind::ConnectTimeout | Kind::Refused | Kind::Dns
-                        ) =>
+                Ok(response)
+                    if response.version() == reqwest::Version::HTTP_2
+                        && lock(&self.h2_origins).insert(origin.clone()) =>
                 {
-                    lock(&self.h2_origins).remove(&origin);
+                    self.persist_origins();
+                }
+                Err(err) if via_h2 && self.forgets(&origin, err, sent_at) => {
+                    self.persist_origins();
                 }
                 _ => {}
             }
         }
         sent
+    }
+
+    /// Whether `err`, from a request on the HTTP/2-only client that went out
+    /// at `sent_at`, sends `origin` back to negotiating, in case the server
+    /// stopped offering HTTP/2.
+    ///
+    /// A strike alone does not. Every request on a connection a handoff ends
+    /// fails with it, all sent before the first of them failed, so they count
+    /// once. A request sent after that goes out on a new connection, since
+    /// `hyper` drops one that errored. If it gets a response, the strike is
+    /// cleared; if it fails too, the server is the likelier cause. Forgetting
+    /// on the first would send the next room's burst of requests through the
+    /// negotiating client, one new connection each.
+    fn forgets(&self, origin: &str, err: &TransportError, sent_at: Instant) -> bool {
+        match Evidence::of(err) {
+            Evidence::None => return false,
+            Evidence::Conclusive => {}
+            Evidence::Strike => {
+                let mut strikes = lock(&self.h2_strikes);
+                match strikes.get(origin) {
+                    Some(&first) if sent_at > first => {}
+                    Some(_) => return false,
+                    None => {
+                        strikes.insert(origin.to_owned(), Instant::now());
+                        return false;
+                    }
+                }
+            }
+        }
+        lock(&self.h2_strikes).remove(origin);
+        lock(&self.h2_origins).remove(origin)
     }
 
     /// One hop, retried at most once (ADR 0127 § 7), and counted where the
@@ -380,6 +587,8 @@ impl Transport {
     ///   That is a pooled connection the server closed just as the request
     ///   left. `hyper` drops a connection that errored, so the retry goes out
     ///   on another one.
+    ///
+    /// A request that never left is a different matter (see [`Self::execute`]).
     async fn dispatch(
         &self,
         client: &reqwest::Client,
@@ -389,23 +598,55 @@ impl Transport {
         // Every body is `Bytes`, so any request clones.
         let again = request.try_clone();
         let idempotent = matches!(*request.method(), Method::GET | Method::HEAD);
-        let started = Instant::now();
-        let result = match (client.execute(request).await, again) {
+        // One budget for the request, so a retry does not start it over.
+        let mut requeues = 0;
+        let (result, sent_at) = self.execute(client, request, &mut requeues).await;
+        let result = match (result, again) {
             (Err(err), Some(again)) if is_protocol_nack(&err) => {
                 Counters::bump(&self.counters.nack_retries);
-                client.execute(again).await
+                self.execute(client, again, &mut requeues).await.0
             }
             (Err(err), Some(again))
                 if idempotent
-                    && started.elapsed() < FAST_RESET_WINDOW
+                    && sent_at.elapsed() < FAST_RESET_WINDOW
                     && is_reset_failure(&err) =>
             {
                 Counters::bump(&self.counters.fast_reset_retries);
-                client.execute(again).await
+                self.execute(client, again, &mut requeues).await.0
             }
             (result, _) => result,
         };
         result.map_err(|err| classify_send(&err))
+    }
+
+    /// `request` on `client`, sent again for as long as it keeps losing the
+    /// connection attempt it waited behind before anything was written
+    /// ([`is_requeue`]). One of the requests sent again starts the next
+    /// attempt, and the rest wait behind that one, after [`requeue_pause`]
+    /// from the second time on. What bounds the wait is the caller's own
+    /// deadline, which cancels the whole send, with `requeues` across the
+    /// request's retries as a backstop.
+    ///
+    /// Also returns when the request last went out, for the fast-reset window.
+    async fn execute(
+        &self,
+        client: &reqwest::Client,
+        mut request: reqwest::Request,
+        requeues: &mut usize,
+    ) -> (reqwest::Result<reqwest::Response>, Instant) {
+        loop {
+            let again = request.try_clone();
+            let sent_at = Instant::now();
+            match (client.execute(request).await, again) {
+                (Err(err), Some(again)) if *requeues < MAX_REQUEUES && is_requeue(&err) => {
+                    *requeues += 1;
+                    Counters::bump(&self.counters.requeues);
+                    tokio::time::sleep(requeue_pause(*requeues)).await;
+                    request = again;
+                }
+                (result, _) => return (result, sent_at),
+            }
+        }
     }
 
     /// The next chunk of a body, or `None` at its end. The entry leaves the

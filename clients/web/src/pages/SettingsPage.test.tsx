@@ -269,6 +269,33 @@ describe('SettingsPage', () => {
     expect(box.checked).toBe(true)
   })
 
+  it('offers the legacy shell transport only in the shell', () => {
+    const browser = render(
+      <ServicesContext.Provider value={testServices()}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    fireEvent.click(browser.getByRole('button', { name: 'Debug' }))
+    // A browser has only its own `fetch`: there is nothing to switch.
+    expect(browser.queryByLabelText('Legacy shell transport')).toBeNull()
+    browser.unmount()
+
+    const services = testServices({
+      platform: { shellTransport: { setLegacy: () => {} } },
+    })
+    const { getByLabelText, getByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    fireEvent.click(getByRole('button', { name: 'Debug' }))
+    const box = getByLabelText('Legacy shell transport') as HTMLInputElement
+
+    expect(box.checked).toBe(false)
+    fireEvent.click(box)
+    expect(services.settings.legacyShellTransport.value).toBe(true)
+  })
+
   it('links to unified account management and keeps browser sign-out', () => {
     const services = testServices()
     const { getByRole, queryByRole } = render(

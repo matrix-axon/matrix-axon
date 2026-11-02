@@ -60,7 +60,7 @@ boot:room-open:api  route=accounts/{account}/rooms/{id}/timeline head=true at=2 
 **Check the session header first.**
 `shell` says which client wrote the capture: `tauri` for the packaged app, `browser` for everything else, with `display` telling a home-screen web app (`standalone`) from a browser tab (`tab`).
 The two share an icon, and they measure differently.
-The packaged app sends `/v1` through `tauri-plugin-http`, outside the webview, so Resource Timing never sees those requests: in the shell the `:req` lines are absent and `q`/`conn`/`ttfb`/`xfer`/`reqs`/`kb` read `null`, and only the `:api` lines describe requests.
+The packaged app sends `/v1` through its own transport (ADR 0127), outside the webview, so Resource Timing never sees those requests: in the shell the `:req` lines are absent and `q`/`conn`/`ttfb`/`xfer`/`reqs`/`kb` read `null`, and only the `:api` lines describe requests.
 `build` is the release plus the build hash, which settles whether a fix was deployed before anyone debugs it.
 Sessions recorded before these fields existed have a bare header.
 
@@ -141,18 +141,24 @@ A request that finished normally and is not the room's timeline is left to the `
 - `outcome` — `ok`, `timeout` (the 20 s API deadline), `aborted` (its caller gave up), `failed` (the transport refused), or `pending`.
 - `stage` — for anything but `ok`, where the request was: `token` (waiting for an access token, which can itself be a network round trip), `headers`, or `body`.
 - `status` — the HTTP status, once the headers are in.
+- `ver` — in the packaged app, the HTTP version that carried the response (`h2`, `http/1.1`); `null` in a browser, or before headers.
 
 **`outcome=pending stage=body` with a small `hdr` is a response whose headers arrived and whose body stalled.**
 That was the 2026-09-25 stuck "Loading messages…": a timeline with its headers at 640 ms and its 6.7 KB body 107 s later.
 
 Three marks stand alone, outside any room open, because each is worth seeing whenever it happens.
+All three carry `ver` as above, where it is known.
 A kept capture also carries the socket's `live:open` and `live:close`, which say whether the link itself dropped around a failure:
 
 - `api:deadline` — the request deadline failed a request: `route`, the `stage` it died in, `hdr` if its headers had arrived, `after`, how long it had run, and `inflight` (see `api:failed`).
 - `api:failed` — a request failed outright, with no deadline involved: `route`, `kind`, `stage`, `hdr`, `after`, and what was going on around it.
-  `kind` is one fixed word: `send` (the packaged app never got a response: DNS, connect, TLS, or a connection lost before the headers), `body` (headers arrived, the body did not finish), `cancelled`, `fetch` (a browser's `TypeError`, which says no more), or `other`.
+  `kind` is one fixed word.
+  The packaged app's transport names the cause (ADR 0127 § 4): `dns`, `refused`, `connect_timeout`, `tls`, `reset`, `body` (headers arrived, the body did not finish), `cancelled` (the transport cancelled it itself, such as on a reload), `scope` (not `http` or `https`, or a redirect that left them) or `other`.
+  `detail` goes with it: an OS error name such as `ConnectionReset`, a certificate or alert name such as `UnknownIssuer`, `InvalidStatus` or `InvalidHeader` for an answer the page cannot hold (a status outside 200–599, a header value `fetch` would refuse), or `null`.
+  With Settings → Debug → "Legacy shell transport" on, the old plugin can only say `send` (never got a response) or `body`.
+  A browser says `fetch` (its `TypeError`, which says no more) or `other`.
   `inflight` is how many `/v1` requests were unsettled at that moment, the failed one included.
-  The packaged app opens a new connection for every request, so a failure with `inflight` in the hundreds is the client crowding its own link, and one with `inflight=1` is the network.
+  A failure with `inflight` in the hundreds is the client crowding its own link, and one with `inflight=1` is the network.
   `resumed` is the milliseconds since the app last returned to the foreground (`null` if it never left, or if that was more than 30 s ago): a failure a few milliseconds after a resume is iOS having reclaimed a suspended app's sockets.
   `online` and `hidden` are the browser's own view of the link and of the page.
   At most five are written per ten seconds; `skipped` on a line counts the failures dropped since the previous line.
@@ -160,6 +166,12 @@ A kept capture also carries the socket's `live:open` and `live:close`, which say
   The transport ignored the abort and carried on.
   In WebKit that is expected, and the deadline holds only because the client races it (`fetchWithinDeadline` in `src/api/client.ts`).
   A run of these on a browser that should honor aborts is worth a report of its own.
+
+The packaged app also writes `transport:stats` on each room open and each return to the foreground (`why` is `room-open`, `resume` or `online`).
+It is the transport's own counters, which only ever grow: `conn` connections opened, `sent` requests sent, `nack` and `fastReset` automatic retries and `requeue` requests sent again after the connection attempt they waited behind ended (ADR 0127 § 7), `resets` fresh clients after a resume, and `live` requests whose bodies are still held.
+`legacy` says the legacy transport was chosen, whose requests these counters do not see.
+Read it by the difference between two lines: `conn` should go up by one or two per resume, not with `sent`.
+A `live` that keeps growing while nothing is loading is a leak.
 
 ## Getting a bad enough link
 

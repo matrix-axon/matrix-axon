@@ -158,6 +158,14 @@ export interface SettingsV1 {
    */
   pageScrollReset: boolean
   /**
+   * Whether the packaged app sends its requests through `tauri-plugin-http`,
+   * the transport before ADR 0127, instead of the shell's pooled one. **Off by
+   * default**, and only offered in the shell. Kept for one release, for A/B
+   * comparison on a device and as an escape hatch, and removed with the
+   * plugin after that.
+   */
+  legacyShellTransport: boolean
+  /**
    * Whether the installed app's icon shows a badge with the number of unread
    * messages. On by default, matching how other messaging apps badge without
    * asking. A browser uses the Badging API (ADR 0080), which needs no
@@ -223,6 +231,7 @@ const DEFAULTS: SettingsV1 = {
   persistTelemetry: false,
   perfOverlay: true,
   pageScrollReset: false,
+  legacyShellTransport: false,
   appBadgeEnabled: true,
   cacheRoomList: true,
   messageNotifications: false,
@@ -410,6 +419,10 @@ function parse(raw: string | null): SettingsV1 {
       typeof v1.pageScrollReset === 'boolean'
         ? v1.pageScrollReset
         : DEFAULTS.pageScrollReset,
+    legacyShellTransport:
+      typeof v1.legacyShellTransport === 'boolean'
+        ? v1.legacyShellTransport
+        : DEFAULTS.legacyShellTransport,
     appBadgeEnabled:
       typeof v1.appBadgeEnabled === 'boolean'
         ? v1.appBadgeEnabled
@@ -454,6 +467,7 @@ export interface SettingsStore {
   persistTelemetry: Signal<boolean>
   perfOverlay: Signal<boolean>
   pageScrollReset: Signal<boolean>
+  legacyShellTransport: Signal<boolean>
   appBadgeEnabled: Signal<boolean>
   cacheRoomList: Signal<boolean>
   messageNotifications: Signal<boolean>
@@ -513,6 +527,7 @@ export function createSettingsStore(
   const persistTelemetry = signal<boolean>(initial.persistTelemetry)
   const perfOverlay = signal<boolean>(initial.perfOverlay)
   const pageScrollReset = signal<boolean>(initial.pageScrollReset)
+  const legacyShellTransport = signal<boolean>(initial.legacyShellTransport)
   const appBadgeEnabled = signal<boolean>(initial.appBadgeEnabled)
   const cacheRoomList = signal<boolean>(initial.cacheRoomList)
   const messageNotifications = signal<boolean>(initial.messageNotifications)
@@ -544,6 +559,7 @@ export function createSettingsStore(
       persistTelemetry: persistTelemetry.value,
       perfOverlay: perfOverlay.value,
       pageScrollReset: pageScrollReset.value,
+      legacyShellTransport: legacyShellTransport.value,
       appBadgeEnabled: appBadgeEnabled.value,
       cacheRoomList: cacheRoomList.value,
       messageNotifications: messageNotifications.value,
@@ -581,6 +597,7 @@ export function createSettingsStore(
     persistTelemetry,
     perfOverlay,
     pageScrollReset,
+    legacyShellTransport,
     appBadgeEnabled,
     cacheRoomList,
     messageNotifications,

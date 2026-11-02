@@ -25,6 +25,10 @@ h2 = "0.4"
 # Only to recognise a connection closed under a request (`is_incomplete_message`)
 # in an error chain. No features of its own: reqwest's decide what is built.
 hyper = { version = "1", default-features = false }
+# Only to recognise a request whose wait for an HTTP/2 connection was cut short
+# (`is_requeue`). The same 0.1 that reqwest links; `client-legacy` is the client
+# reqwest builds on, so this adds nothing reqwest does not already compile.
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy"] }
 percent-encoding = "2"
 # The features `tauri-plugin-http` 2.5 turns on by default, minus cookies and
 # charset, which nothing here uses. `macos-system-configuration` is what makes
@@ -42,7 +46,7 @@ rustls = { version = "0.23", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
-tokio = { version = "1", features = ["macros", "net", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 tokio-util = "0.7"
 tower-layer = "0.3"
 tower-service = "0.3"

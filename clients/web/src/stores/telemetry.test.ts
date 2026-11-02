@@ -46,6 +46,32 @@ describe('telemetry store', () => {
     ])
   })
 
+  it("keeps the shell transport's counters and failure words", async () => {
+    // The field readings ADR 0127 is judged by, on a phone with no console.
+    store.record('transport:stats', 10, {
+      why: 'resume',
+      legacy: false,
+      conn: 2,
+      sent: 40,
+    })
+    store.record('api:failed', 20, {
+      route: 'accounts',
+      kind: 'tls',
+      detail: 'UnknownIssuer',
+      ver: null,
+    })
+    await flushed()
+
+    const [session] = await store.read()
+    expect(session.entries.map((entry) => [entry.name, entry.detail])).toEqual([
+      ['transport:stats', { why: 'resume', legacy: false, conn: 2, sent: 40 }],
+      [
+        'api:failed',
+        { route: 'accounts', kind: 'tls', detail: 'UnknownIssuer', ver: null },
+      ],
+    ])
+  })
+
   it('drops an identifier-shaped value even from an allowed mark', async () => {
     // The allow-list stops a *mark* leaking; it cannot stop a field being
     // added to one of the four later. Matrix ids and UUIDs have distinct

@@ -6,6 +6,32 @@ const tauriFetch = vi.fn<
 vi.mock('@tauri-apps/plugin-http', () => ({
   fetch: (input: unknown, init?: RequestInit) => tauriFetch(input, init),
 }))
+const shellFetch = vi.fn<
+  (
+    input: unknown,
+    init: RequestInit | undefined,
+    signal: AbortSignal,
+  ) => Promise<Response>
+>(() => Promise.resolve(new Response('')))
+const resetShellTransport = vi.fn(() => Promise.resolve())
+const shellTransportStats = vi.fn(() =>
+  Promise.resolve({
+    connectionsOpened: 2,
+    requestsSent: 40,
+    retries: { nack: 0, fastReset: 1, requeue: 0 },
+    resets: 3,
+    liveEntries: 0,
+  }),
+)
+vi.mock('./shell-http', () => ({
+  shellFetch: (
+    input: unknown,
+    init: RequestInit | undefined,
+    signal: AbortSignal,
+  ) => shellFetch(input, init, signal),
+  resetShellTransport: () => resetShellTransport(),
+  shellTransportStats: () => shellTransportStats(),
+}))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn() }))
 vi.mock('@tauri-apps/plugin-fs', () => ({ writeFile: vi.fn() }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
@@ -46,6 +72,7 @@ import {
   resetMessageNotificationStartupForTests,
   tauriPlatform,
 } from './tauri'
+import { setPerfEnabled, setTelemetrySink } from '../perf'
 
 /**
  * A stand-in for the websocket plugin's client. Only `addListener` and
@@ -266,15 +293,19 @@ describe('the shell save dialog', () => {
 })
 
 describe('the shell request bound', () => {
-  it('abandons a request the caller left unbounded', async () => {
-    // `reqwest` behind the http plugin applies no timeout, so a server that
-    // accepts the connection and never answers held one of `media-service`'s
-    // bounded permits for the life of the session.
+  beforeEach(() => {
     tauriFetch.mockClear()
+    shellFetch.mockClear()
+  })
+
+  it('abandons a request the caller left unbounded', async () => {
+    // `reqwest` applies no whole-request timeout, so a server that accepts
+    // the connection and never answers held one of `media-service`'s bounded
+    // permits for the life of the session.
     await tauriPlatform().fetch('https://axon.example/v1/accounts')
 
-    const init = tauriFetch.mock.calls[0]?.[1]
-    expect(init?.signal).toBeInstanceOf(AbortSignal)
+    expect(tauriFetch).not.toHaveBeenCalled()
+    expect(shellFetch.mock.calls[0]?.[2]).toBeInstanceOf(AbortSignal)
   })
 
   it('bounds a request that arrives as a Request object', async () => {
@@ -283,9 +314,20 @@ describe('the shell request bound', () => {
     // exposes a signal even when nobody asked for one -- so treating a
     // non-null `input.signal` as the caller's own bound silently exempted
     // every /v1 call the API client makes.
-    tauriFetch.mockClear()
-    await tauriPlatform().fetch(new Request('https://axon.example/v1/rooms'))
+    const request = new Request('https://axon.example/v1/rooms')
+    await tauriPlatform().fetch(request)
 
+    const signal = shellFetch.mock.calls[0]?.[2]
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(signal).not.toBe(request.signal)
+  })
+
+  it('puts the bound in init for the legacy transport', async () => {
+    const platform = tauriPlatform()
+    platform.shellTransport!.setLegacy(true)
+    await platform.fetch(new Request('https://axon.example/v1/rooms'))
+
+    expect(shellFetch).not.toHaveBeenCalled()
     const init = tauriFetch.mock.calls[0]?.[1]
     expect(init?.signal).toBeInstanceOf(AbortSignal)
     // In `init`, because the plugin reads `init?.signal` and never looks at
@@ -293,6 +335,23 @@ describe('the shell request bound', () => {
     expect(init?.signal).not.toBe(
       (tauriFetch.mock.calls[0]?.[0] as Request).signal,
     )
+  })
+
+  it('switches transport from the next request', async () => {
+    const platform = tauriPlatform()
+    await platform.fetch('https://axon.example/v1/a')
+    platform.shellTransport!.setLegacy(true)
+    await platform.fetch('https://axon.example/v1/b')
+    platform.shellTransport!.setLegacy(false)
+    await platform.fetch('https://axon.example/v1/c')
+
+    expect(shellFetch.mock.calls.map((call) => call[0])).toEqual([
+      'https://axon.example/v1/a',
+      'https://axon.example/v1/c',
+    ])
+    expect(tauriFetch.mock.calls.map((call) => call[0])).toEqual([
+      'https://axon.example/v1/b',
+    ])
   })
 
   it('abandons a Request the plugin never answers', async () => {
@@ -316,6 +375,130 @@ describe('the shell request bound', () => {
     )
     controller.abort(new DOMException('probe gave up', 'AbortError'))
     await expect(aborted(signal)).resolves.toBe('AbortError')
+  })
+})
+
+describe('the shell transport on resume (ADR 0127 § 6)', () => {
+  // The resume watcher is installed once per module and remembers when it
+  // last reset, so each test starts a minute after the one before.
+  let now = 1_000_000_000
+  let visibility: DocumentVisibilityState = 'visible'
+  beforeEach(() => {
+    resetShellTransport.mockClear()
+    now += 60_000
+    visibility = 'visible'
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(
+      () => visibility,
+    )
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    setTelemetrySink(null)
+    setPerfEnabled(false)
+  })
+
+  /** Background the app for `ms`, then bring it back. */
+  function away(ms: number): void {
+    visibility = 'hidden'
+    document.dispatchEvent(new Event('visibilitychange'))
+    now += ms
+    visibility = 'visible'
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  it('resets when the app comes back after a suspension', async () => {
+    tauriPlatform()
+    away(6_000)
+    await vi.waitFor(() => expect(resetShellTransport).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps the pool after a quick app switch, and still writes the counters', async () => {
+    const lines: [string, unknown][] = []
+    setPerfEnabled(true)
+    setTelemetrySink((name, _at, detail) => lines.push([name, detail]))
+    tauriPlatform()
+    away(1_000)
+    await vi.waitFor(() => expect(lines).toHaveLength(1))
+    expect(lines[0]).toEqual([
+      'transport:stats',
+      expect.objectContaining({ why: 'resume' }),
+    ])
+    expect(resetShellTransport).not.toHaveBeenCalled()
+  })
+
+  it('resets when online on its own', async () => {
+    tauriPlatform()
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(resetShellTransport).toHaveBeenCalledTimes(1))
+  })
+
+  it('resets once when online arrives with the return', async () => {
+    const lines: string[] = []
+    setPerfEnabled(true)
+    setTelemetrySink((name) => lines.push(name))
+    tauriPlatform()
+    away(6_000)
+    now += 300
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(lines).toHaveLength(2))
+    expect(resetShellTransport).toHaveBeenCalledTimes(1)
+
+    // Past the window, online resets again.
+    now += 2_000
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(resetShellTransport).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not reset on hiding', async () => {
+    tauriPlatform()
+    visibility = 'hidden'
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+    expect(resetShellTransport).not.toHaveBeenCalled()
+  })
+
+  it('leaves the transport alone while the legacy one is chosen', async () => {
+    const platform = tauriPlatform()
+    platform.shellTransport!.setLegacy(true)
+    away(6_000)
+    await Promise.resolve()
+    expect(resetShellTransport).not.toHaveBeenCalled()
+  })
+
+  it('writes the counters after the reset, saying which transport', async () => {
+    const lines: [string, unknown][] = []
+    setPerfEnabled(true)
+    setTelemetrySink((name, _at, detail) => lines.push([name, detail]))
+    const platform = tauriPlatform()
+    away(6_000)
+    await vi.waitFor(() => expect(lines).toHaveLength(1))
+    platform.shellTransport!.setLegacy(true)
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(lines).toHaveLength(2))
+
+    expect(lines).toEqual([
+      [
+        'transport:stats',
+        expect.objectContaining({ why: 'resume', legacy: false, conn: 2 }),
+      ],
+      [
+        'transport:stats',
+        expect.objectContaining({ why: 'online', legacy: true }),
+      ],
+    ])
+  })
+
+  it('still writes the counters when the reset fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    resetShellTransport.mockRejectedValueOnce(new Error('build failed'))
+    const lines: string[] = []
+    setPerfEnabled(true)
+    setTelemetrySink((name) => lines.push(name))
+    tauriPlatform()
+    away(6_000)
+    await vi.waitFor(() => expect(lines).toEqual(['transport:stats']))
+    expect(warn).toHaveBeenCalled()
   })
 })
 
