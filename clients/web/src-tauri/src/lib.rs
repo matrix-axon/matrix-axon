@@ -123,6 +123,7 @@ pub fn run() {
         .setup(|app| {
             let window = main_window(app.handle())?;
             allow_camera_capture(&window);
+            enable_spell_checking(&window);
             watch_dropped_paths(&window);
             claim_deep_link_schemes(app.handle());
             // The menu bar is already installed by now: Tauri sets it while
@@ -481,6 +482,76 @@ fn allow_camera_capture<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 /// prompts, and WKWebView asks a delegate wry answers.
 #[cfg(not(target_os = "linux"))]
 fn allow_camera_capture<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
+
+/// Turn on spell checking while typing, which WebKitGTK ships switched off
+/// (ADR 0107).
+///
+/// WebKitGTK leaves it to the embedding application: Epiphany switches it on,
+/// and neither Tauri nor wry does, so the composer never underlined anything on
+/// Linux while macOS and Windows did. WebView2 has its own checker and macOS is
+/// handled by `macos_text`.
+///
+/// Two settings, and both are needed. Switching it on alone underlines
+/// nothing: WebKit does not fall back to the locale when no languages are set,
+/// it just has no dictionary. So the languages are set from the user's locale
+/// too (see [`spell_checking_languages`]). The checking itself is done by
+/// enchant, so a machine with no dictionary installed still underlines nothing;
+/// the `.deb` recommends one for that reason.
+///
+/// These are settings on the web *context*, not the view, so they cover every
+/// webview the shell opens, and they can be set after the view exists: WebKit
+/// consults them when text is next checked.
+#[cfg(target_os = "linux")]
+fn enable_spell_checking<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use webkit2gtk::{WebContextExt, WebViewExt};
+
+    let result = window.with_webview(|webview| {
+        let Some(context) = webview.inner().context() else {
+            return;
+        };
+        context.set_spell_checking_enabled(true);
+        let names = webkit2gtk::glib::language_names();
+        let languages = spell_checking_languages(&names);
+        if !languages.is_empty() {
+            let languages: Vec<&str> = languages.iter().map(String::as_str).collect();
+            context.set_spell_checking_languages(&languages);
+        }
+    });
+    if let Err(error) = result {
+        eprintln!(
+            "could not turn on spell checking ({error}); the composer will not underline typos"
+        );
+    }
+}
+
+/// The dictionaries to ask enchant for, from the names GLib derives from the
+/// user's locale (`LANGUAGE`, `LC_ALL`, `LANG`), most specific first.
+///
+/// GLib returns `["en_US.UTF-8", "en_US", "en", "C"]` for `en_US.UTF-8`. Enchant
+/// names dictionaries `en_US`, so the encoding and `@modifier` are dropped, the
+/// repeats that leaves are folded away, and the `C`/`POSIX` locale, which names
+/// no language, is skipped. WebKit ignores a name that has no dictionary, so
+/// listing `en` after `en_US` costs nothing where only `en_US` is installed.
+#[cfg(target_os = "linux")]
+fn spell_checking_languages<S: AsRef<str>>(names: &[S]) -> Vec<String> {
+    let mut languages: Vec<String> = Vec::new();
+    for name in names {
+        let name = name.as_ref();
+        let base = name.split(['.', '@']).next().unwrap_or_default();
+        if base.is_empty() || base == "C" || base == "POSIX" {
+            continue;
+        }
+        if !languages.iter().any(|seen| seen == base) {
+            languages.push(base.to_string());
+        }
+    }
+    languages
+}
+
+/// macOS switches it on through `macos_text` and WebView2 checks spelling on
+/// its own.
+#[cfg(not(target_os = "linux"))]
+fn enable_spell_checking<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
 
 /// The paths the user has actually dropped on this window.
 ///
@@ -1264,9 +1335,32 @@ fn route<A>(path: &str, resolve: impl Fn(&str) -> Option<A>) -> Route<A> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::spell_checking_languages;
     use super::{
         asset_response, loggable_target, navigation_allowed, route, within_upload_limit, Route,
     };
+
+    /// Switching spell checking on without naming a language underlines
+    /// nothing in WebKitGTK, which is what shipped first. The names come from
+    /// GLib with the encoding still attached and a trailing `C`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spell_checking_languages_come_from_the_locale_names_enchant_knows() {
+        assert_eq!(
+            spell_checking_languages(&["en_US.UTF-8", "en_US", "en", "C"]),
+            ["en_US", "en"]
+        );
+        assert_eq!(
+            spell_checking_languages(&["de_DE@euro", "de_DE.ISO-8859-15@euro", "de"]),
+            ["de_DE", "de"]
+        );
+        // `LANGUAGE=fr:en` lists several, in the user's order.
+        assert_eq!(spell_checking_languages(&["fr", "en", "C"]), ["fr", "en"]);
+        // No language at all: nothing to set, so the caller sets nothing.
+        assert!(spell_checking_languages(&["C", "POSIX"]).is_empty());
+        assert!(spell_checking_languages::<&str>(&[]).is_empty());
+    }
 
     /// The bug this covers shipped: `serve` answered with the bytes and the
     /// content type and dropped the policy, so the release build enforced no

@@ -42,6 +42,7 @@
     "linux": {
       "deb": {
         "desktopTemplate": "bundle/axon.desktop",
+        "recommends": ["hunspell-dictionary"],
         "conflicts": ["axon-desktop"],
         "replaces": ["axon-desktop"]
       }

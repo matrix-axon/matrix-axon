@@ -162,3 +162,26 @@ checking, so it was off with it.
   WKWebView implements each one, shows its checkmark state and saves a toggle
   as the app's default. The menu lets users change these settings; the
   defaults above are what make them work out of the box.
+
+## Linux spell checking
+
+The composer underlined nothing on Linux, although it does on macOS and
+Windows. The Linux shell runs on WebKitGTK, which ships with spell checking
+switched off and leaves the embedding application to switch it on, as Epiphany
+does. Neither Tauri nor wry does, so nothing in the shell had.
+
+- **The shell switches it on and sets the languages, and both are needed.**
+  It calls `set_spell_checking_enabled(true)` on the web context at startup.
+  Under Xvfb with a typed `wrold` and `teh`, that alone underlined nothing:
+  WebKitGTK does not fall back to the locale when no languages are set. So the
+  shell also calls `set_spell_checking_languages` with the dictionaries named
+  by the user's locale (`en_US`, then `en`, and `LANGUAGE=fr:en` in that
+  order). With them, both words are underlined.
+- **The checking itself is done by enchant**, which needs a dictionary
+  installed. WebKitGTK already pulls in the enchant library, so the `.deb`
+  only *recommends* `hunspell-dictionary`, a virtual package every hunspell
+  dictionary provides. A machine with no dictionary underlines nothing, and
+  that is a system setting rather than something the shell can fix.
+- **Not verified:** the AppImage, whose bundled WebKitGTK may not find the
+  host's dictionaries, and whether a right-click offers suggestions, since
+  Tauri gives WebKitGTK no context menu of its own.
