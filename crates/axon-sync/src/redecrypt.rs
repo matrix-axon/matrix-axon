@@ -499,6 +499,49 @@ async fn redecrypt_one(
     true
 }
 
+/// The pending row for an event that was just persisted, or `None` when it was
+/// not stored as a UTD. Pure; the live ingest path uses it to hand
+/// [`recheck_persisted_utd`] exactly what the table now holds.
+pub(crate) fn pending_utd_for_persisted(
+    event_type: &str,
+    event_id: &str,
+    room_id: &str,
+    raw_event: &Value,
+) -> Option<PendingUtd> {
+    // Only a UTD with a readable session id is findable by the key-arrival
+    // drain, so only that one can be missed by it.
+    (event_type == "m.room.encrypted" && megolm_session_id(raw_event).is_some()).then(|| {
+        PendingUtd {
+            event_id: event_id.to_owned(),
+            room_id: room_id.to_owned(),
+            raw_event: raw_event.clone(),
+        }
+    })
+}
+
+/// Make one local decryption attempt for a UTD that was just persisted.
+///
+/// [`run`] drains the pending rows for a session when its key arrives. A row
+/// written *after* that drain is invisible to it, and the SDK's decryption
+/// result for that event was computed before the key landed -- so the row is
+/// stored as a UTD although its key is already in the crypto store, and nothing
+/// would look at it again until the next restart (#938). This closes that window
+/// from the other side: whichever of "key arrives" and "row is written" finishes
+/// second now sees the other.
+///
+/// Local only: no backup download, no homeserver traffic. A key that has not
+/// arrived leaves the row pending for [`run`] to find when it does. Returns
+/// whether the row was back-filled.
+pub(crate) async fn recheck_persisted_utd(
+    room: &Room,
+    store: &Store,
+    account_id: Uuid,
+    row: &PendingUtd,
+    index: Option<&IndexHandle>,
+) -> bool {
+    redecrypt_one(room, store, account_id, row, index).await
+}
+
 /// Parse a room ID string and look up its `Room` handle on the client.
 fn room_handle(client: &Client, room_id: &str) -> Option<Room> {
     let room_id = RoomId::parse(room_id).ok()?;
@@ -676,6 +719,26 @@ mod tests {
         let raw: Raw<AnyTimelineEvent> =
             serde_json::from_value(json!({ "type": "m.room.message" })).expect("raw");
         assert!(extract_content_and_type(&raw).is_none());
+    }
+
+    #[test]
+    fn a_persisted_utd_becomes_a_pending_row_for_recheck() {
+        let envelope: Value = serde_json::from_str(UTD_ENCRYPTED).expect("fixture");
+        let row = pending_utd_for_persisted("m.room.encrypted", "$e", "!r:x", &envelope)
+            .expect("a UTD with a session id is rechecked");
+        assert_eq!(row.event_id, "$e");
+        assert_eq!(row.room_id, "!r:x");
+        assert_eq!(row.raw_event, envelope);
+    }
+
+    #[test]
+    fn a_decrypted_or_sessionless_event_is_not_rechecked() {
+        let envelope: Value = serde_json::from_str(UTD_ENCRYPTED).expect("fixture");
+        // Decrypted by the SDK before dispatch: stored with its real type.
+        assert!(pending_utd_for_persisted("m.room.message", "$e", "!r:x", &envelope).is_none());
+        // The drain could never match this row either, so a recheck cannot help.
+        let malformed: Value = serde_json::from_str(MALFORMED).expect("fixture");
+        assert!(pending_utd_for_persisted("m.room.encrypted", "$e", "!r:x", &malformed).is_none());
     }
 
     #[test]

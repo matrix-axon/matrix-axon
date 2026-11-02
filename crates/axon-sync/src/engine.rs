@@ -20,8 +20,8 @@ use axon_core::{
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{
-    Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, NewEvent, RoomInviteSnapshot,
-    RoomStateRedaction, RoomStateUpsert, Store,
+    Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, NewEvent, PendingUtd,
+    RoomInviteSnapshot, RoomStateRedaction, RoomStateUpsert, Store,
 };
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::deserialized_responses::EncryptionInfo;
@@ -772,7 +772,7 @@ async fn persist_timeline_event(
     .then(|| crate::meta::redacts(&raw_val).map(str::to_owned))
     .flatten();
     // The live sync path: persist and emit the fresh event to `/v1/ws`.
-    persist_event_core(
+    let pending_utd = persist_event_core(
         &ctx,
         &ev,
         raw_val,
@@ -781,6 +781,21 @@ async fn persist_timeline_event(
         true,
     )
     .await;
+    // The SDK decrypted this event before the row was written. If its megolm key
+    // landed in between (a backup download or a to-device key racing the event),
+    // the key-arrival drain in `redecrypt::run` ran against a table that did not
+    // have the row yet and will not run again, so the row would stay a UTD until
+    // the next restart. One local attempt closes that window (#938).
+    if let Some(row) = pending_utd {
+        redecrypt::recheck_persisted_utd(
+            &room,
+            &ctx.store,
+            ctx.account_id,
+            &row,
+            ctx.index.as_ref(),
+        )
+        .await;
+    }
     if let Some(target) = redaction_target {
         crate::state_redaction::queue_redaction_hint(&ctx, room.room_id(), &target).await;
     }
@@ -816,7 +831,10 @@ pub(crate) async fn persist_backfilled_event(
     let Some(raw_val) = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event") else {
         return;
     };
-    persist_event_core(
+    // No re-check here, unlike the live path: a backfill can store thousands of
+    // permanently undecryptable rows, and each re-check would be another SDK
+    // decrypt attempt (and warning) for a row that cannot succeed.
+    let _ = persist_event_core(
         ctx,
         &ev,
         raw_val,
@@ -835,6 +853,10 @@ pub(crate) async fn persist_backfilled_event(
 /// with old events mislabeled as just-arrived, and backfilled history reaches
 /// clients through timeline reads (M8) and search (M9) instead — both driven by
 /// `upsert_event`, not the emit.
+///
+/// Returns the stored row when the event was persisted as a UTD, so a caller
+/// that can reach the crypto store may re-check whether its key arrived while
+/// the row was being written (see [`redecrypt::recheck_persisted_utd`]).
 async fn persist_event_core(
     ctx: &PersistContext,
     ev: &AnySyncTimelineEvent,
@@ -842,7 +864,7 @@ async fn persist_event_core(
     room_id: &str,
     enc_info: Option<&EncryptionInfo>,
     emit_live: bool,
-) {
+) -> Option<PendingUtd> {
     // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
     let event_type: String = raw_val
         .get("type")
@@ -887,6 +909,12 @@ async fn persist_event_core(
     } else {
         None
     };
+    let pending_utd = redecrypt::pending_utd_for_persisted(
+        &event_type,
+        ev.event_id().as_str(),
+        room_id,
+        &raw_val,
+    );
     let origin_ts = saturating_i64(u64::from(ev.origin_server_ts().0));
     let event_id = ev.event_id().as_str().to_owned();
     let room_id = room_id.to_owned();
@@ -923,7 +951,7 @@ async fn persist_event_core(
                 error = %err,
                 "failed to persist event"
             );
-            return;
+            return None;
         }
     };
     tracing::debug!(
@@ -977,6 +1005,7 @@ async fn persist_event_core(
             sender_trust: stored_trust,
         }));
     }
+    pending_utd
 }
 
 /// Write the crypto sibling rows for an event already persisted to `events`.
