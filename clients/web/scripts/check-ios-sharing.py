@@ -3,6 +3,7 @@
 import argparse
 import pathlib
 import plistlib
+import re
 import subprocess
 
 parser = argparse.ArgumentParser()
@@ -32,10 +33,11 @@ def inspect(bundle):
         "NSAllowsArbitraryLoadsForMedia",
     ]), "Native sharing must retain default ATS protections"
     keychain = info.get("AxonSharedKeychainGroup", "")
-    assert keychain.endswith(".org.matrixaxon.axon.sharing"), (
+    assert re.fullmatch(r"[A-Z0-9]{10}\.org\.matrixaxon\.axon\.sharing", keychain), (
         f"Shared Keychain group in Info.plist is {keychain!r}, expected "
-        "'<team id>.org.matrixaxon.axon.sharing'. A value with no team id means "
-        "the build setting it is made from was empty when Info.plist was processed; "
+        "'<10-character team id>.org.matrixaxon.axon.sharing'. A value with no team id, or "
+        "one still containing '$(', means the build setting it is made from was empty "
+        "or unset when Info.plist was processed; "
         "see AxonSharedKeychainGroup in Info.ios.plist and configure-ios-sharing.mjs"
     )
     assert keychain in entitlements.get("keychain-access-groups", []), "Signed shared Keychain entitlement missing"

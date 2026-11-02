@@ -414,11 +414,20 @@ cmd_profile() {
   # profile ("Xcode couldn't find any iOS App Development provisioning profiles") and a
   # hand-made App Store one in IOS_APPSTORE_PROFILE. Fatal, since the build cannot succeed.
   # Which profile names Xcode accepts is inferred from those failures, not documented.
+  #
+  # After the swap check, so a profile of the wrong kind is told that first, and the name
+  # to look for comes from what this secret should hold, not from what the file is.
+  if [ -n "$expect" ] && [ "$kind" != "$expect" ]; then
+    die "$var is a $kind profile, but this secret should hold an $expect one. Check the two profile secrets are not swapped."
+  fi
   if [ "$ext" = "mobileprovision" ] \
       && [ "$(plutil -extract IsXcodeManaged raw -o - "$plist" 2>/dev/null || echo false)" != "true" ]; then
-    local want="iOS Team Provisioning Profile"
-    [ "$kind" = "app-store" ] && want="iOS Team Store Provisioning Profile"
-    die "$var holds \"$name\", a $kind profile that is not Xcode-managed. The Xcode project signs automatically and looks the profile up by Xcode's own name (\"$want: ${bundle_id:-<bundle id>}\"), so a profile made by hand in the developer portal fails the build with \"No profiles for ... were found\". Use the Xcode-managed one: \`store-credentials.sh list-profiles\` marks it. Steps: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
+    local want="an Xcode-managed profile"
+    case ${expect:-$kind} in
+      app-store) want="\"iOS Team Store Provisioning Profile: ${bundle_id:-<bundle id>}\"" ;;
+      development) want="\"iOS Team Provisioning Profile: ${bundle_id:-<bundle id>}\"" ;;
+    esac
+    die "$var holds \"$name\", a $kind profile that is not Xcode-managed. The Xcode project signs automatically and looks the profile up by Xcode's own name ($want), so a profile made by hand in the developer portal fails the build with \"No profiles for ... were found\". Use the Xcode-managed one: \`store-credentials.sh list-profiles\` marks it. Steps: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
   fi
 
   if [ -n "$expires" ]; then
@@ -437,15 +446,15 @@ PY
       *) die "$var is for '$appid', not for $bundle_id" ;;
     esac
   fi
-  if [ -n "$expect" ] && [ "$kind" != "$expect" ]; then
-    die "$var is a $kind profile, but this secret should hold an $expect one. Check the two profile secrets are not swapped."
-  fi
 
   # Every capability the app asks for must be in the profile. A profile made before a
   # capability was enabled on the App ID lacks it, and Xcode reports that minutes into
-  # the build. Keychain groups are skipped: the app's use "$(AppIdentifierPrefix)", and
-  # a profile lists "<team>.*". A value that is a list must be covered, wildcard
-  # included; anything else only has to be present, because aps-environment is
+  # the build. A list must be covered item by item: an entry matches exactly, or when it
+  # ends in "*" and is a prefix of the item ("<team>.*"). A lone "*" covers nothing, so
+  # it cannot excuse an unrelated entitlement. The app's keychain groups start with
+  # "$(AppIdentifierPrefix)", which is the team id and a dot, so that is expanded first
+  # and an absent keychain-access-groups fails like any other absent capability.
+  # Anything that is not a list only has to be present, because aps-environment is
   # "development" in the app and "production" in the Store profile.
   if [ -n "$entitlements" ]; then
     [ -f "$entitlements" ] || die "profile: --entitlements $entitlements is not a file"
@@ -453,16 +462,23 @@ PY
     missing=$(python3 - "$entitlements" "$plist" <<'PY'
 import plistlib, sys
 want = plistlib.load(open(sys.argv[1], "rb"))
-have = plistlib.load(open(sys.argv[2], "rb")).get("Entitlements", {})
+profile = plistlib.load(open(sys.argv[2], "rb"))
+have = profile.get("Entitlements", {})
+team = (profile.get("ApplicationIdentifierPrefix") or [have.get("application-identifier", "").split(".")[0]])[0]
+
+
+def covers(entry, item):
+    return entry == item or (entry != "*" and entry.endswith("*") and item.startswith(entry[:-1]))
+
+
 for key, value in want.items():
-    if key == "keychain-access-groups":
-        continue
     if key not in have:
         print(key)
     elif isinstance(value, list):
         got = have[key] if isinstance(have[key], list) else [have[key]]
         for item in value:
-            if item not in got and "*" not in got:
+            item = item.replace("$(AppIdentifierPrefix)", team + ".")
+            if not any(covers(entry, item) for entry in got):
                 print("%s = %s" % (key, item))
 PY
     ) || die "profile: could not compare $var with $entitlements"
@@ -624,11 +640,14 @@ cmd_explain() {
   [ -n "$log" ] && [ -f "$log" ] || die "explain needs the path of a build log"
   local readme="clients/web/src-tauri/README.md"
   local runbook="\"When a capability change invalidates the iOS profiles\" in $readme"
-  local caps notfound accounts
-  caps=$(grep -E "Provisioning profile \".*\" (doesn't include|doesn't support)" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  local caps notfound accounts cert mismatch nodev
+  caps=$(grep -E "Provisioning profile \".*\" (doesn't include the .*(capability|entitlement)|doesn't support the .*(capability|App Group))" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  cert=$(grep -E "Provisioning profile \".*\" doesn't include signing certificate" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  mismatch=$(grep -E "doesn't match the entitlements file's value for the .* entitlement" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  nodev=$(grep -E "couldn't find any iOS App Development provisioning profiles" "$log" | sed -E 's/^.*error: //' | sort -u || true)
   notfound=$(grep -E "No profiles for '.*' were found" "$log" | sed -E 's/^.*error: //' | sort -u || true)
   accounts=$(grep -E "error: (exportArchive )?No Accounts" "$log" | head -1 || true)
-  [ -n "$caps$notfound$accounts" ] || return 1
+  [ -n "$caps$cert$mismatch$nodev$notfound$accounts" ] || return 1
 
   {
     echo
@@ -647,6 +666,32 @@ cmd_explain() {
       echo "     \`scripts/ci/store-credentials.sh list-profiles\` finds them."
       echo "  Steps: $runbook"
     fi
+    if [ -n "$cert" ]; then
+      echo
+      echo "$cert" | sed 's/^/    /'
+      echo
+      echo "  The profile does not list the distribution certificate in APPLE_STORE_CERTIFICATES. An"
+      echo "  Xcode-managed profile lists every certificate on the account, so regenerate it and"
+      echo "  replace the secret (or check the certificate secret is the current one)."
+      echo "  Steps: $runbook"
+    fi
+    if [ -n "$mismatch" ]; then
+      echo
+      echo "$mismatch" | sed 's/^/    /'
+      echo
+      echo "  The app asks for a different value than the profile grants (push is the usual one:"
+      echo "  development in the app and production in the Store profile, set by package-ios.sh"
+      echo "  from the export method), or a keychain group the profile does not cover. Compare"
+      echo "  clients/web/src-tauri/Entitlements.ios.plist with the profile in that secret."
+    fi
+    if [ -n "$nodev" ]; then
+      echo
+      echo "$nodev" | sed 's/^/    /'
+      echo
+      echo "  The archive step needs the Xcode-managed development profile, \"iOS Team Provisioning"
+      echo "  Profile: <bundle id>\", in IOS_DEVELOPMENT_PROFILE. A profile made by hand in the portal"
+      echo "  is not found, and neither is a missing or empty secret. Steps: $runbook"
+    fi
     if [ -n "$notfound" ]; then
       echo
       echo "$notfound" | sed 's/^/    /'
@@ -662,9 +707,18 @@ cmd_explain() {
       echo
       echo "  \"No Accounts\" on its own is not the cause. Xcode prints it when it cannot ask Apple for"
       echo "  a new profile, after it has already rejected the one it has. Read the other errors."
-      echo "  It is the cause only when nothing else is listed above: then this Mac has no Apple ID"
-      echo "  in Xcode > Settings > Accounts and no APPLE_API_KEY, APPLE_API_ISSUER and"
-      echo "  APPLE_API_KEY_PATH (an App Store Connect API key) to fetch profiles with."
+      if [ -n "$caps$cert$mismatch$nodev$notfound" ]; then
+        echo "  The errors above are the cause."
+      elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        echo "  Nothing else is listed. The workflow gives Xcode no account, only the profiles that"
+        echo "  \"Install the signing credentials\" installed: check the names that step printed are"
+        echo "  \"iOS Team Store Provisioning Profile: <bundle id>\" and \"iOS Team Provisioning"
+        echo "  Profile: <bundle id>\", and that both secrets are newer than the last capability change."
+      else
+        echo "  Nothing else is listed: then this Mac has no Apple ID in Xcode > Settings > Accounts"
+        echo "  and no APPLE_API_KEY, APPLE_API_ISSUER and APPLE_API_KEY_PATH (an App Store Connect"
+        echo "  API key) to fetch profiles with."
+      fi
     fi
     echo
   } >&2

@@ -319,9 +319,12 @@ for d in pd1 pd2; do
 done
 grep -q '^SOME_PATH=.*IOS_APPSTORE_PROFILE\.mobileprovision$' "$work/penv" || fail "profile: the decoded path is exported when asked" "$(cat "$work/penv" 2>/dev/null)"
 
-adhoc=$(make_profile adhoc.mobileprovision 'ProvisionedDevices=["A","B"]' 'IsXcodeManaged=True')
+adhoc=$(make_profile adhoc.mobileprovision 'ProvisionedDevices=["A","B"]')
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$adhoc" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store)
-contains "$out" "rc=1" && contains "$out" "is a ad-hoc profile" && contains "$out" "not swapped" || fail "profile: an Ad Hoc profile in the App Store slot is refused as a likely swap" "$out"
+contains "$out" "rc=1" && contains "$out" "is a ad-hoc profile" && contains "$out" "not swapped" || fail "profile: an Ad Hoc profile in the App Store slot is refused as a likely swap, even when hand-made" "$out"
+contains "$out" "iOS Team Provisioning Profile" && fail "profile: the swap is not reported as a missing development profile" "$out"
+out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$adhoc" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --bundle-id org.example.app)
+contains "$out" "rc=1" && contains "$out" "an Xcode-managed profile" && ! contains "$out" "iOS Team Store Provisioning Profile" || fail "profile: with no --expect an Ad Hoc profile is not told to use the development or Store name" "$out"
 
 dev=$(make_profile dev.mobileprovision 'Entitlements.get-task-allow=True' 'ProvisionedDevices=["A"]')
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_DEVELOPMENT_PROFILE="$dev" -- profile IOS_DEVELOPMENT_PROFILE --ext mobileprovision --expect development)
@@ -336,8 +339,10 @@ dev_managed=$(make_profile devmanaged.mobileprovision 'Entitlements.get-task-all
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_DEVELOPMENT_PROFILE="$dev_managed" -- profile IOS_DEVELOPMENT_PROFILE --ext mobileprovision --expect development --bundle-id org.example.app)
 contains "$out" "rc=0" && contains "$out" "(development)" && ! contains "$out" "warning:" || fail "profile: an Xcode-managed development profile gets no warning" "$out"
 
+out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$dev" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store)
+contains "$out" "rc=1" && contains "$out" "is a development profile" || fail "profile: a hand-made development profile in the App Store slot is refused as a swap, not as a missing Store profile" "$out"
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$dev_managed" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store)
-contains "$out" "rc=1" && contains "$out" "is a development profile" || fail "profile: a development profile in the App Store slot is refused" "$out"
+contains "$out" "rc=1" && contains "$out" "is a development profile" || fail "profile: a managed development profile in the App Store slot is refused" "$out"
 
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$appstore" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --bundle-id org.other.app)
 contains "$out" "rc=1" && contains "$out" "not for org.other.app" || fail "profile: a profile for another app is refused" "$out"
@@ -393,6 +398,30 @@ wronggroup=$(make_profile wronggroup.mobileprovision 'IsXcodeManaged=True' \
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$wronggroup" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --entitlements "$work/app.entitlements")
 contains "$out" "rc=1" && contains "$out" "group.org.example.app.sharing" || fail "profile --entitlements: a profile with a different group is refused, naming the missing one" "$out"
 
+nokeychain=$(make_profile nokeychain.mobileprovision 'IsXcodeManaged=True' \
+  'Entitlements.com.apple.security.application-groups=["group.org.example.app.sharing"]' \
+  'Entitlements.com.apple.developer.applesignin=["Default"]' 'Entitlements.aps-environment="production"')
+out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$nokeychain" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --entitlements "$work/app.entitlements")
+contains "$out" "rc=1" && contains "$out" "keychain-access-groups" || fail "profile --entitlements: a profile with no keychain-access-groups is refused" "$out"
+otherteam=$(make_profile otherteam.mobileprovision 'IsXcodeManaged=True' \
+  'Entitlements.com.apple.security.application-groups=["group.org.example.app.sharing"]' \
+  'Entitlements.com.apple.developer.applesignin=["Default"]' 'Entitlements.aps-environment="production"' \
+  'Entitlements.keychain-access-groups=["OTHERTEAM1.*"]')
+out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$otherteam" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --entitlements "$work/app.entitlements")
+contains "$out" "rc=1" && contains "$out" "TEAM123456.org.example.app" || fail "profile --entitlements: a keychain wildcard for another team does not cover the app's group, and the message shows it expanded" "$out"
+prefixgroup=$(make_profile prefixgroup.mobileprovision 'IsXcodeManaged=True' \
+  'Entitlements.com.apple.security.application-groups=["group.org.example.*"]' \
+  'Entitlements.com.apple.developer.applesignin=["Default"]' 'Entitlements.aps-environment="production"' \
+  'Entitlements.keychain-access-groups=["TEAM123456.org.example.app"]')
+out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$prefixgroup" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --entitlements "$work/app.entitlements")
+contains "$out" "rc=0" || fail "profile --entitlements: a 'prefix*' entry covers an item it is a prefix of, and an exact keychain entry covers its group" "$out"
+lonestar=$(make_profile lonestar.mobileprovision 'IsXcodeManaged=True' \
+  'Entitlements.com.apple.security.application-groups=["*"]' \
+  'Entitlements.com.apple.developer.applesignin=["Default"]' 'Entitlements.aps-environment="production"' \
+  'Entitlements.keychain-access-groups=["TEAM123456.*"]')
+out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$lonestar" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --entitlements "$work/app.entitlements")
+contains "$out" "rc=1" && contains "$out" "group.org.example.app.sharing" || fail "profile --entitlements: a lone '*' covers nothing" "$out"
+
 nopush=$(make_profile nopush.mobileprovision 'IsXcodeManaged=True' \
   'Entitlements.com.apple.security.application-groups=["group.org.example.app.sharing"]' \
   'Entitlements.com.apple.developer.applesignin=["Default"]')
@@ -425,6 +454,27 @@ contains "$out" "rc=0" && contains "$out" "No profiles for 'org.example.app' wer
 printf 'error: exportArchive No Accounts\n' >"$work/acc.log"
 out=$(run -- explain "$work/acc.log")
 contains "$out" "rc=0" && contains "$out" "APPLE_API_KEY" || fail "explain: a lone No Accounts points at the missing Apple ID or API key" "$out"
+
+cat >"$work/cert.log" <<'LOG'
+error: exportArchive Provisioning profile "iOS Team Store Provisioning Profile: org.example.app" doesn't include signing certificate "Apple Distribution: Someone (TEAM123456)".
+LOG
+out=$(run -- explain "$work/cert.log")
+contains "$out" "rc=0" && contains "$out" "does not list the distribution certificate" || fail "explain: a missing certificate is explained as a certificate problem" "$out"
+contains "$out" "enabled on the App ID" && fail "explain: a missing certificate is not explained as a missing capability" "$out"
+
+cat >"$work/mm.log" <<'LOG'
+error: exportArchive "Axon.app" requires a provisioning profile with the Push Notifications feature.
+error: Provisioning profile "x" doesn't match the entitlements file's value for the aps-environment entitlement. (in target 'axon_iOS' from project 'axon')
+LOG
+out=$(run -- explain "$work/mm.log")
+contains "$out" "rc=0" && contains "$out" "different value than the profile grants" || fail "explain: an entitlement value mismatch is explained" "$out"
+
+printf "error: Xcode couldn't find any iOS App Development provisioning profiles matching 'org.example.app'\nerror: exportArchive No Accounts\n" >"$work/nodev.log"
+out=$(run -- explain "$work/nodev.log")
+contains "$out" "rc=0" && contains "$out" "IOS_DEVELOPMENT_PROFILE" && contains "$out" "The errors above are the cause" && ! contains "$out" "APPLE_API_KEY" || fail "explain: a missing development profile is explained, and No Accounts is not blamed on the API key" "$out"
+
+out=$(run GITHUB_ACTIONS=true -- explain "$work/acc.log")
+contains "$out" "rc=0" && contains "$out" "Install the signing credentials" && ! contains "$out" "APPLE_API_KEY, APPLE_API_ISSUER" || fail "explain: on a runner a lone No Accounts points at the installed profile names, not at an API key" "$out"
 
 printf 'error: something unrelated\n' >"$work/other.log"
 out=$(run -- explain "$work/other.log")

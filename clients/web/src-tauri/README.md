@@ -615,26 +615,32 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
   second time, one by one, which restores the missing identity, so the `.p12` needs
   no special treatment.
 
-- **The profiles** are checked when they are installed: it is an error for
-  `IOS_APPSTORE_PROFILE` to hold a development or Ad Hoc profile, for a profile to
-  be for another app or to have expired. That is the check for the two being
-  swapped, which otherwise fails inside `xcodebuild` as
-  `No profiles for … were found`. `list-profiles` finds the iOS profiles because
-  Xcode installs them, and marks each `Xcode-managed` or `manual`. The development
-  profile must be an Xcode-managed one. The Xcode project signs automatically, and
-  as far as we can tell automatic signing does not pick up a profile made by hand in
-  the developer portal. That is an inference. A run with the manual `Matrix-axon`
-  profile in `IOS_DEVELOPMENT_PROFILE` failed with this error:
+- **The profiles** are checked when they are installed, and each of these fails the
+  job there, naming the secret: a development or Ad Hoc profile in
+  `IOS_APPSTORE_PROFILE` (the two swapped, which otherwise fails inside `xcodebuild`
+  as `No profiles for … were found`), a profile for another app or one that has
+  expired, a profile that lacks a capability in `Entitlements.ios.plist`, and
+  **any iOS profile that is not Xcode-managed**, in either secret. `list-profiles`
+  finds the iOS profiles because Xcode installs them, and marks each
+  `Xcode-managed` or `manual`. Both secrets must hold the Xcode-managed ones. The
+  Xcode project signs automatically, and as far as we can tell automatic signing
+  does not pick up a profile made by hand in the developer portal. That is an
+  inference, from two failures: a manual `Matrix-axon` profile in
+  `IOS_DEVELOPMENT_PROFILE`, which failed with
 
   ```
   Xcode couldn't find any iOS App Development provisioning profiles matching '<bundle id>'
   ```
 
-  and that profile differed from the one that works on the Mac this was developed
-  on only in not being Xcode-managed (both list the same certificate and carry the
-  same entitlements). The job warns when it is given a manual one. The Mac App Store profile is a file downloaded from the
-  developer portal and never installed, so it is found only when you name the
-  folder, or the file, it is in; when no macOS profile turns up it says so.
+  and a manual `Axon Sharing App Store` profile in `IOS_APPSTORE_PROFILE`, which
+  failed at export with `No profiles for … were found`. The development one
+  differed from the one that works on the Mac this was developed on only in not
+  being Xcode-managed (both list the same certificate and carry the same
+  entitlements). This used to be a warning for the development profile; it is an
+  error now, because the build cannot pass with one. The Mac App Store profile is a
+  file downloaded from the developer portal and never installed, so it is found
+  only when you name the folder, or the file, it is in; when no macOS profile turns
+  up it says so.
 
 - **The API key** needs the App Manager role or above (App Store Connect > Users
   and Access > Integrations > Team Keys). A key made for CI, rather than the one on
