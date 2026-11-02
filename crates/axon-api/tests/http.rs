@@ -1885,6 +1885,170 @@ async fn room_state_read_endpoints() {
         .expect("cleanup");
 }
 
+/// `GET …/space/hierarchy` (ADR 0128 decision 1): pages to the end with an
+/// honest total, carries `parent_room_id` and `joined`, accepts `enrich`
+/// without contacting anything, clamps `limit`, and rejects a malformed
+/// cursor or one issued for another space or account.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn space_hierarchy_endpoint() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let user_id = format!("@hier-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user_id, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let space_id = format!("!hier-space-{}:localhost", Uuid::new_v4());
+    let other_space = format!("!hier-other-{}:localhost", Uuid::new_v4());
+    let children: Vec<String> = (0..5)
+        .map(|i| format!("!hier-child-{i}:localhost"))
+        .collect();
+    for (i, child) in children.iter().enumerate() {
+        for space in [&space_id, &other_space] {
+            store
+                .upsert_room_state(&RoomStateUpsert {
+                    account_id,
+                    room_id: space,
+                    event_type: "m.space.child",
+                    state_key: child,
+                    event_id: &format!("$hier-{}:localhost", Uuid::new_v4()),
+                    sender: "@alice:localhost",
+                    origin_ts: i as i64,
+                    content: Some(json!({ "via": ["hs.example.org"], "suggested": i == 0 })),
+                })
+                .await
+                .expect("space child state");
+        }
+    }
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &children[0],
+            event_type: "m.room.member",
+            state_key: &user_id,
+            event_id: "$hier-member:localhost",
+            sender: &user_id,
+            origin_ts: 1,
+            content: Some(json!({ "membership": "join" })),
+        })
+        .await
+        .expect("membership");
+    let app = read_app(store);
+    let base = format!("/v1/accounts/{account_id}/rooms/{space_id}/space/hierarchy");
+
+    let mut seen = Vec::new();
+    let mut uri = format!("{base}?limit=2&enrich=true");
+    let mut first_cursor = None;
+    loop {
+        let (status, body) = get(&app, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["room_id"], space_id.as_str());
+        assert_eq!(data["total_children"], 5);
+        for child in data["children"].as_array().expect("children") {
+            assert_eq!(child["parent_room_id"], space_id.as_str());
+            assert_eq!(child["via"], json!(["hs.example.org"]));
+            seen.push(child.clone());
+        }
+        match data["next_cursor"].as_str() {
+            Some(cursor) => {
+                assert_eq!(data["children"].as_array().unwrap().len(), 2);
+                first_cursor.get_or_insert_with(|| cursor.to_owned());
+                uri = format!("{base}?limit=2&cursor={cursor}");
+            }
+            None => break,
+        }
+    }
+    let ids: Vec<&str> = seen
+        .iter()
+        .map(|c| c["room_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, children.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(seen[0]["joined"], true);
+    assert_eq!(seen[0]["suggested"], true);
+    assert_eq!(seen[1]["joined"], false);
+    assert_eq!(seen[1]["order"], Value::Null);
+
+    // Out-of-range limits are clamped, not rejected.
+    for (limit, expected) in [("0", 1), ("-3", 1), ("100000", 5)] {
+        let (status, body) = get(&app, &format!("{base}?limit={limit}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["data"]["children"].as_array().unwrap().len(),
+            expected,
+            "limit {limit}"
+        );
+    }
+
+    // A cursor is bound to its account and space.
+    let cursor = first_cursor.expect("a cursor");
+    let foreign = [
+        format!("/v1/accounts/{account_id}/rooms/{other_space}/space/hierarchy?cursor={cursor}"),
+        format!(
+            "/v1/accounts/{}/rooms/{space_id}/space/hierarchy?cursor={cursor}",
+            Uuid::new_v4()
+        ),
+        format!("{base}?cursor=not-a-cursor"),
+        format!("{base}?cursor={}", "A".repeat(5000)),
+    ];
+    for uri in foreign {
+        let (status, _) = get(&app, &uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+    }
+
+    // The scope tag is not a secret, so a client can re-mint a correctly
+    // scoped cursor around a position the store never issues. A NUL byte would
+    // reach PostgreSQL as a text parameter and fail as a 500; it is a 400.
+    {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let wire: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&cursor).expect("base64")).unwrap();
+        let tampered = [
+            ("r", json!("!a\0b:localhost")),
+            ("r", json!(format!("!{}:localhost", "x".repeat(260)))),
+            ("o", json!("a\0")),
+            ("o", json!("x".repeat(51))),
+            ("o", json!("é")),
+        ];
+        for (field, value) in tampered {
+            let mut minted = wire.clone();
+            minted[field] = value;
+            let minted = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&minted).unwrap());
+            let (status, _) = get(&app, &format!("{base}?cursor={minted}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+        }
+    }
+
+    // A NUL in the path would reach Postgres as a text parameter and fail as
+    // a 500; it is a 400.
+    let (status, _) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/!a%00b:localhost/space/hierarchy"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // An unknown space is an empty page, not a 404.
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/!hier-unknown:localhost/space/hierarchy"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["data"]["children"].as_array().unwrap().is_empty());
+    assert_eq!(body["data"]["next_cursor"], Value::Null);
+    assert_eq!(body["data"]["total_children"], 0);
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn accounts_read_api() {

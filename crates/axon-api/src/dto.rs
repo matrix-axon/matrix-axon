@@ -11,7 +11,8 @@ use axon_core::{
 };
 use axon_store::{
     Account, AccountState, DeviceStateRow, ReactionTally, RoomInvite, RoomSummary,
-    RoomTag as StoreRoomTag, SpaceChildRow, SpaceParentRow, ThreadSummary, TimelineRow,
+    RoomTag as StoreRoomTag, SpaceChildRow, SpaceHierarchyRow, SpaceParentRow, ThreadSummary,
+    TimelineRow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -663,6 +664,51 @@ impl From<SpaceChildRow> for SpaceChildDto {
             room_type: r.room_type,
         }
     }
+}
+
+/// One child in a page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128
+/// decision 1): every [`SpaceChildDto`] field, from local synced state, plus
+/// where the row came from and whether the account is joined to the child.
+///
+/// `order` is the normalized MSC1772 order the row was sorted by: an `order`
+/// that is not a string of at most 50 printable ASCII characters is `null`
+/// here, because the spec treats it as absent.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SpaceHierarchyChildDto {
+    #[serde(flatten)]
+    pub child: SpaceChildDto,
+    /// The space whose `m.space.child` link produced this row. Always the
+    /// requested space for now; nested reads may add rows from subspaces.
+    pub parent_room_id: String,
+    /// Whether the account's own membership in the child is `join`.
+    pub joined: bool,
+}
+
+impl SpaceHierarchyChildDto {
+    pub fn from_row(parent_room_id: &str, row: SpaceHierarchyRow) -> Self {
+        SpaceHierarchyChildDto {
+            child: SpaceChildDto::from(row.child),
+            parent_room_id: parent_room_id.to_owned(),
+            joined: row.joined,
+        }
+    }
+}
+
+/// A page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128 decision 1).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SpaceHierarchyPage {
+    /// The space that was read.
+    pub room_id: String,
+    /// Up to `limit` children in MSC1772 order, strictly after the request's
+    /// `cursor`.
+    pub children: Vec<SpaceHierarchyChildDto>,
+    /// Pass as `cursor` to read the next page; `null` only on the last page.
+    /// Nothing is dropped silently: a space of any size pages to the end.
+    pub next_cursor: Option<String>,
+    /// The space's current child links (an `m.space.child` with a valid
+    /// `via`), counted in the same snapshot as the page, so a client can show
+    /// "120 of 1,340".
+    pub total_children: i64,
 }
 
 /// One space-parent entry (`GET …/rooms/{room_id}/space/parents`, issue #404,

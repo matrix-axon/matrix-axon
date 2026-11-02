@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use crate::cursor;
 use crate::dto::{
-    EventDto, MemberDto, RoomDto, RoomInfoDto, RoomUpgradeDto, SpaceChildDto, SpaceParentDto,
-    ThreadSummaryDto, TimelinePage,
+    EventDto, MemberDto, RoomDto, RoomInfoDto, RoomUpgradeDto, SpaceChildDto,
+    SpaceHierarchyChildDto, SpaceHierarchyPage, SpaceParentDto, ThreadSummaryDto, TimelinePage,
 };
 use crate::extract::{Path, Query};
 use crate::member_profiles::{MemberProfile, MemberProfileService};
@@ -344,9 +344,14 @@ pub async fn thread_timeline(
 /// enriched with the child room's own cached name/avatar/room_type where Axon
 /// knows that room too (issue #404, ADR 0084). An unknown `account_id`/
 /// `room_id`, or a room with no children, yields an empty list (200), not a
-/// 404. The store caps this at a fixed row count against a room with a
-/// pathological number of children (`SPACE_HIERARCHY_CAP` in
-/// `axon-store::spaces`).
+/// 404.
+///
+/// The response is capped at 1,000 children, and a truncated response looks
+/// exactly like a complete one. Use `space/hierarchy`, which pages through a
+/// space of any size and reports its total (ADR 0128). This route is kept
+/// unchanged for existing clients, so its `order` is the raw string from the
+/// link, while `space/hierarchy` reports an `order` that MSC1772 treats as
+/// invalid (longer than 50 characters, or not printable ASCII) as `null`.
 #[utoipa::path(
     get,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/space/children",
@@ -367,6 +372,110 @@ pub async fn space_children(
     Ok(ApiResponse::new(
         rows.into_iter().map(SpaceChildDto::from).collect(),
     ))
+}
+
+/// Default `space/hierarchy` page size when `limit` is omitted.
+const HIERARCHY_DEFAULT_LIMIT: i64 = 100;
+
+/// Query parameters for the paged space hierarchy read.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct SpaceHierarchyQuery {
+    /// Page size (default 100, max 500; out-of-range values are clamped).
+    pub limit: Option<i64>,
+    /// Opaque cursor from a previous page's `next_cursor`; omit for the first
+    /// page. A cursor is bound to the account and space it was issued for.
+    pub cursor: Option<String>,
+    /// Ask Axon to fill in unjoined children's names from the homeserver.
+    /// Accepted and currently ignored: discovery is not implemented yet
+    /// (ADR 0128), so this read never contacts the homeserver.
+    pub enrich: Option<bool>,
+}
+
+/// Page through a space's children
+///
+/// Page through a space's children (`m.space.child` links with a valid
+/// `via`) in MSC1772 order: `order` ascending by code point with absent
+/// last, then the link's `origin_ts`, then child room id (ADR 0128). Each
+/// child carries the same synced fields as `space/children`, plus
+/// `parent_room_id` and whether the account is `joined` to it.
+///
+/// Reads only local data and never waits for the homeserver. Each page starts
+/// strictly after the last row of the previous one, so a link added or
+/// removed between pages neither duplicates nor skips any other link; a link
+/// whose `order` or `origin_ts` changes between pages (an edit or a
+/// replacement `m.space.child` event) may appear twice or not at all in one
+/// walk, so de-duplicate by room id. `next_cursor` is `null` only on the last
+/// page, and `total_children` counts every current link, so nothing is
+/// dropped silently. An unknown `account_id`/`room_id`, or a room with no
+/// children, is an empty page (200), not a 404.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+        ("room_id" = String, Path, description = "Matrix room id of the space"),
+        SpaceHierarchyQuery,
+    ),
+    responses(
+        (status = 200, description = "A page of the space's children, MSC1772-ordered", body = ApiResponse<SpaceHierarchyPage>),
+        (status = 400, description = "Malformed cursor, a cursor issued for another account or space, or a room id containing a control character", body = crate::response::ErrorResponse),
+    ),
+    tag = "rooms",
+)]
+pub async fn space_hierarchy(
+    State(store): State<Store>,
+    Path((account_id, room_id)): Path<(Uuid, String)>,
+    Query(q): Query<SpaceHierarchyQuery>,
+) -> Result<ApiResponse<SpaceHierarchyPage>, ApiError> {
+    // Postgres `TEXT` rejects a NUL, so a `%00` in the path would otherwise
+    // become a 500 from the query. Other controls cannot be in a room id.
+    // Issue 932 moves this check into a shared extractor for every room route.
+    if room_id.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(ApiError::bad_request("invalid room id"));
+    }
+    let after = q
+        .cursor
+        .as_deref()
+        .map(|c| {
+            cursor::decode_hierarchy(account_id, &room_id, c)
+                .ok_or_else(|| ApiError::bad_request("invalid cursor"))
+        })
+        .transpose()?;
+    let limit = q
+        .limit
+        .unwrap_or(HIERARCHY_DEFAULT_LIMIT)
+        .clamp(1, axon_store::SPACE_HIERARCHY_MAX_PAGE);
+    let page = store
+        .space_hierarchy_page(account_id, &room_id, after.as_ref(), limit)
+        .await?;
+    let next_cursor = page
+        .has_more
+        .then(|| page.rows.last())
+        .flatten()
+        .map(|row| cursor::encode_hierarchy(account_id, &room_id, &row.cursor()));
+    tracing::debug!(
+        %account_id,
+        %room_id,
+        limit,
+        resumed = after.is_some(),
+        enrich = q.enrich.unwrap_or(false),
+        returned = page.rows.len(),
+        total_children = page.total_children,
+        has_more = page.has_more,
+        "space hierarchy page"
+    );
+    let children = page
+        .rows
+        .into_iter()
+        .map(|row| SpaceHierarchyChildDto::from_row(&room_id, row))
+        .collect();
+    Ok(ApiResponse::new(SpaceHierarchyPage {
+        room_id,
+        children,
+        next_cursor,
+        total_children: page.total_children,
+    }))
 }
 
 /// List a room's parent spaces

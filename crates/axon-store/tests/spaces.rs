@@ -460,3 +460,520 @@ async fn space_parents_are_capped_at_space_hierarchy_cap() {
 
     cleanup_account(&pool, account_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// Paged hierarchy read (ADR 0128 decision 1).
+// ---------------------------------------------------------------------------
+
+/// A valid link: the spec ignores `m.space.child` content without a `via`.
+fn link(order: Option<&str>) -> Value {
+    match order {
+        Some(order) => json!({ "via": ["localhost"], "order": order }),
+        None => json!({ "via": ["localhost"] }),
+    }
+}
+
+/// Walk every page of `space_room_id` at `limit`, returning the room ids in
+/// read order and checking the per-page invariants on the way.
+async fn walk_hierarchy(
+    store: &Store,
+    account_id: Uuid,
+    space_room_id: &str,
+    limit: i64,
+) -> Vec<String> {
+    let mut seen = Vec::new();
+    let mut after = None;
+    loop {
+        let page = store
+            .space_hierarchy_page(account_id, space_room_id, after.as_ref(), limit)
+            .await
+            .expect("space_hierarchy_page");
+        assert!(page.rows.len() as i64 <= limit);
+        if page.has_more {
+            assert_eq!(page.rows.len() as i64, limit, "only the last page is short");
+        }
+        seen.extend(page.rows.iter().map(|r| r.child.room_id.clone()));
+        if !page.has_more {
+            return seen;
+        }
+        after = Some(
+            page.rows
+                .last()
+                .expect("a page with more is non-empty")
+                .cursor(),
+        );
+    }
+}
+
+/// Bulk-insert `count` valid links, `!h-<g>:localhost`, whose `order` is
+/// `o-<g mod 7>` for two of every three rows and absent for the third, and
+/// whose `origin_ts` collides in groups of five, so all three sort keys
+/// decide some boundary.
+async fn bulk_insert_valid_links(
+    pool: &sqlx_postgres::PgPool,
+    account_id: Uuid,
+    space_room_id: &str,
+    count: i64,
+) {
+    sqlx_core::query::query(
+        "INSERT INTO room_state \
+             (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content) \
+         SELECT $1, $2, 'm.space.child', '!h-' || g || ':localhost', \
+                '$h-' || g || ':localhost', '@alice:localhost', g / 5, \
+                CASE WHEN g % 3 = 0 THEN '{\"via\":[\"localhost\"]}'::jsonb \
+                     ELSE jsonb_build_object('via', jsonb_build_array('localhost'), \
+                                             'order', 'o-' || (g % 7)) END \
+         FROM generate_series(1, $3) AS g",
+    )
+    .bind(account_id)
+    .bind(space_room_id)
+    .bind(count)
+    .execute(pool)
+    .await
+    .expect("bulk insert valid links");
+}
+
+/// Paging a large space at several page sizes yields every link exactly once,
+/// in the same order as one page holding all of them, with the absent-`order`
+/// group last and an honest total — including a size that divides the space
+/// exactly, where the last full page must still report no more.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn space_hierarchy_pages_every_link_once_in_msc1772_order() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "space-hier-paging").await;
+    let space_room_id = format!("!space-hier-{}:localhost", Uuid::new_v4());
+    let count = 1_200;
+    bulk_insert_valid_links(&pool, account_id, &space_room_id, count).await;
+
+    let whole = store
+        .space_hierarchy_page(account_id, &space_room_id, None, 500)
+        .await
+        .expect("first page");
+    assert_eq!(whole.total_children, count);
+    assert!(whole.has_more);
+
+    let reference = walk_hierarchy(&store, account_id, &space_room_id, 500).await;
+    assert_eq!(reference.len() as i64, count);
+    let mut unique = reference.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len() as i64, count, "no link appears twice");
+
+    // Ordered groups first, then the absent group (every third id).
+    let first_absent = reference
+        .iter()
+        .position(|id| {
+            id.trim_start_matches("!h-")
+                .trim_end_matches(":localhost")
+                .parse::<i64>()
+                .unwrap()
+                % 3
+                == 0
+        })
+        .expect("an absent-order link");
+    assert_eq!(first_absent as i64, count - count / 3);
+
+    // 1,200 = 8 × 150 exactly; 7 and 1 do not divide into the same pages.
+    for limit in [150, 7, 1] {
+        assert_eq!(
+            walk_hierarchy(&store, account_id, &space_room_id, limit).await,
+            reference,
+            "limit {limit}"
+        );
+    }
+
+    cleanup_account(&pool, account_id).await;
+}
+
+/// The key decides each boundary on its own: `order` by code point (so "B"
+/// sorts before "a", whatever the database collation), then `origin_ts`, then
+/// room id by code point. A non-string, overlong, or non-printable `order` is
+/// absent, sorts last, and reads back as `None`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn space_hierarchy_sort_key_and_order_normalization() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "space-hier-order").await;
+    let space = format!("!space-hier-order-{}:localhost", Uuid::new_v4());
+
+    let cases: [(&str, i64, Value); 9] = [
+        ("!lower:localhost", 1, link(Some("a"))),
+        ("!upper:localhost", 9, link(Some("B"))),
+        ("!same-order-late:localhost", 5, link(Some("m"))),
+        ("!same-order-early:localhost", 2, link(Some("m"))),
+        ("!tie-Z:localhost", 3, link(Some("t"))),
+        ("!tie-a:localhost", 3, link(Some("t"))),
+        (
+            "!numeric-order:localhost",
+            0,
+            json!({ "via": ["localhost"], "order": 5 }),
+        ),
+        ("!long-order:localhost", 1, link(Some(&"x".repeat(51)))),
+        ("!unicode-order:localhost", 2, link(Some("é"))),
+    ];
+    for (child, ts, content) in &cases {
+        set_space_child(&store, account_id, &space, child, *ts, content.clone()).await;
+    }
+
+    let page = store
+        .space_hierarchy_page(account_id, &space, None, 100)
+        .await
+        .expect("page");
+    let ids: Vec<&str> = page.rows.iter().map(|r| r.child.room_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "!upper:localhost",
+            "!lower:localhost",
+            "!same-order-early:localhost",
+            "!same-order-late:localhost",
+            "!tie-Z:localhost",
+            "!tie-a:localhost",
+            // Absent group, by origin_ts.
+            "!numeric-order:localhost",
+            "!long-order:localhost",
+            "!unicode-order:localhost",
+        ]
+    );
+    let orders: Vec<Option<&str>> = page.rows.iter().map(|r| r.child.order.as_deref()).collect();
+    assert_eq!(
+        orders,
+        [
+            Some("B"),
+            Some("a"),
+            Some("m"),
+            Some("m"),
+            Some("t"),
+            Some("t"),
+            None,
+            None,
+            None
+        ]
+    );
+    // A 50-character order is still valid.
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!fifty:localhost",
+        0,
+        link(Some(&"0".repeat(50))),
+    )
+    .await;
+    let page = store
+        .space_hierarchy_page(account_id, &space, None, 1)
+        .await
+        .expect("page");
+    assert_eq!(page.rows[0].child.room_id, "!fifty:localhost");
+
+    cleanup_account(&pool, account_id).await;
+}
+
+/// Only current links count: no `via`, an empty or malformed `via`, a
+/// redacted link, and an id over the spec's 255-byte room-id limit are left
+/// out of both the rows and `total_children`. The legacy read still returns
+/// the removed links, unchanged.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn space_hierarchy_counts_only_current_links() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "space-hier-links").await;
+    let space = format!("!space-hier-links-{}:localhost", Uuid::new_v4());
+
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!valid:localhost",
+        1,
+        link(None),
+    )
+    .await;
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!removed:localhost",
+        2,
+        json!({}),
+    )
+    .await;
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!empty-via:localhost",
+        3,
+        json!({ "via": [] }),
+    )
+    .await;
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!string-via:localhost",
+        4,
+        json!({ "via": "localhost" }),
+    )
+    .await;
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!number-via:localhost",
+        5,
+        json!({ "via": [1] }),
+    )
+    .await;
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!blank-via:localhost",
+        6,
+        json!({ "via": [""] }),
+    )
+    .await;
+    let long_id = format!("!{}:localhost", "x".repeat(250));
+    set_space_child(&store, account_id, &space, &long_id, 7, link(None)).await;
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!redacted:localhost",
+        8,
+        link(None),
+    )
+    .await;
+    sqlx_core::query::query(
+        "UPDATE room_state SET redacted = true, redaction_event_id = '$r:localhost' \
+         WHERE account_id = $1 AND room_id = $2 AND state_key = '!redacted:localhost'",
+    )
+    .bind(account_id)
+    .bind(&space)
+    .execute(&pool)
+    .await
+    .expect("mark redacted");
+
+    let page = store
+        .space_hierarchy_page(account_id, &space, None, 100)
+        .await
+        .expect("page");
+    let ids: Vec<&str> = page.rows.iter().map(|r| r.child.room_id.as_str()).collect();
+    assert_eq!(ids, ["!valid:localhost"]);
+    assert_eq!(page.total_children, 1);
+    assert!(!page.has_more);
+
+    let legacy = store
+        .space_children(account_id, &space)
+        .await
+        .expect("legacy");
+    assert_eq!(legacy.len(), 8, "the legacy read is unchanged");
+
+    cleanup_account(&pool, account_id).await;
+}
+
+/// Links added and removed between pages never duplicate or skip a link that
+/// was present for the whole walk, and the total tracks the change.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn space_hierarchy_is_stable_while_links_change_between_pages() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "space-hier-churn").await;
+    let space = format!("!space-hier-churn-{}:localhost", Uuid::new_v4());
+    for i in 0..10 {
+        let order = format!("{i:02}");
+        set_space_child(
+            &store,
+            account_id,
+            &space,
+            &format!("!c{i:02}:localhost"),
+            1,
+            link(Some(&order)),
+        )
+        .await;
+    }
+
+    let first = store
+        .space_hierarchy_page(account_id, &space, None, 4)
+        .await
+        .expect("first page");
+    let mut seen: Vec<String> = first.rows.iter().map(|r| r.child.room_id.clone()).collect();
+    assert_eq!(
+        seen,
+        [
+            "!c00:localhost",
+            "!c01:localhost",
+            "!c02:localhost",
+            "!c03:localhost"
+        ]
+    );
+
+    // Between pages: remove an already-read link and an unread one, add one
+    // before the cursor and one after it.
+    set_space_child(&store, account_id, &space, "!c01:localhost", 2, json!({})).await;
+    set_space_child(&store, account_id, &space, "!c06:localhost", 2, json!({})).await;
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!new-early:localhost",
+        2,
+        link(Some("00a")),
+    )
+    .await;
+    set_space_child(
+        &store,
+        account_id,
+        &space,
+        "!new-late:localhost",
+        2,
+        link(Some("07a")),
+    )
+    .await;
+
+    let mut after = first.rows.last().map(|r| r.cursor());
+    loop {
+        let page = store
+            .space_hierarchy_page(account_id, &space, after.as_ref(), 4)
+            .await
+            .expect("page");
+        assert_eq!(page.total_children, 10);
+        seen.extend(page.rows.iter().map(|r| r.child.room_id.clone()));
+        if !page.has_more {
+            break;
+        }
+        after = page.rows.last().map(|r| r.cursor());
+    }
+    assert_eq!(
+        seen,
+        [
+            "!c00:localhost",
+            "!c01:localhost",
+            "!c02:localhost",
+            "!c03:localhost",
+            "!c04:localhost",
+            "!c05:localhost",
+            "!c07:localhost",
+            "!new-late:localhost",
+            "!c08:localhost",
+            "!c09:localhost",
+        ]
+    );
+
+    // A cursor past the last row is an empty page that still reports the
+    // total.
+    let past = store
+        .space_hierarchy_page(account_id, &space, after.as_ref(), 4)
+        .await
+        .expect("past the end");
+    let end = past.rows.last().map(|r| r.cursor()).or(after);
+    let empty = store
+        .space_hierarchy_page(account_id, &space, end.as_ref(), 4)
+        .await
+        .expect("empty page");
+    assert!(empty.rows.is_empty());
+    assert!(!empty.has_more);
+    assert_eq!(empty.total_children, 10);
+
+    cleanup_account(&pool, account_id).await;
+}
+
+/// `joined` reflects the account's own positive membership in the child, and
+/// the synced display fields are filled for children Axon knows.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn space_hierarchy_reports_membership_and_synced_fields() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let user_id = format!("@space-hier-member-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user_id, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let space = format!("!space-hier-member-{}:localhost", Uuid::new_v4());
+    for (i, child) in [
+        "!joined:localhost",
+        "!left:localhost",
+        "!other-joined:localhost",
+        "!unknown:localhost",
+    ]
+    .iter()
+    .enumerate()
+    {
+        set_space_child(&store, account_id, &space, child, i as i64, link(None)).await;
+    }
+    for (room, member, membership) in [
+        ("!joined:localhost", user_id.as_str(), "join"),
+        ("!left:localhost", user_id.as_str(), "leave"),
+        ("!other-joined:localhost", "@someone-else:localhost", "join"),
+    ] {
+        store
+            .upsert_room_state(&RoomStateUpsert {
+                account_id,
+                room_id: room,
+                event_type: "m.room.member",
+                state_key: member,
+                event_id: &format!("$member-{}:localhost", Uuid::new_v4()),
+                sender: member,
+                origin_ts: 1,
+                content: Some(json!({ "membership": membership })),
+            })
+            .await
+            .expect("membership");
+    }
+    set_room_display(
+        &store,
+        account_id,
+        "!joined:localhost",
+        "Joined",
+        "mxc://localhost/j",
+        Some("m.space"),
+    )
+    .await;
+
+    let page = store
+        .space_hierarchy_page(account_id, &space, None, 100)
+        .await
+        .expect("page");
+    let joined: Vec<(&str, bool)> = page
+        .rows
+        .iter()
+        .map(|r| (r.child.room_id.as_str(), r.joined))
+        .collect();
+    assert_eq!(
+        joined,
+        [
+            ("!joined:localhost", true),
+            ("!left:localhost", false),
+            ("!other-joined:localhost", false),
+            ("!unknown:localhost", false),
+        ]
+    );
+    let first = &page.rows[0].child;
+    assert_eq!(first.name.as_deref(), Some("Joined"));
+    assert_eq!(first.avatar_url.as_deref(), Some("mxc://localhost/j"));
+    assert_eq!(first.room_type.as_deref(), Some("m.space"));
+    assert_eq!(first.via, ["localhost"]);
+    assert!(page.rows[3].child.name.is_none());
+
+    // An unknown space, or another account's, is an empty page.
+    let other = test_account(&store, "space-hier-other").await;
+    for (account, room) in [(account_id, "!nope:localhost"), (other, space.as_str())] {
+        let page = store
+            .space_hierarchy_page(account, room, None, 100)
+            .await
+            .expect("empty");
+        assert!(page.rows.is_empty());
+        assert_eq!(page.total_children, 0);
+    }
+
+    cleanup_account(&pool, account_id).await;
+    cleanup_account(&pool, other).await;
+}

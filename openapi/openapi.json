@@ -5990,7 +5990,7 @@
           "rooms"
         ],
         "summary": "List a space's children",
-        "description": "List a space's children (`m.space.child`, MSC1772-ordered: `order` string\nascending, absent sorts last, then `origin_ts`, then `room_id`), each\nenriched with the child room's own cached name/avatar/room_type where Axon\nknows that room too (issue #404, ADR 0084). An unknown `account_id`/\n`room_id`, or a room with no children, yields an empty list (200), not a\n404. The store caps this at a fixed row count against a room with a\npathological number of children (`SPACE_HIERARCHY_CAP` in\n`axon-store::spaces`).",
+        "description": "List a space's children (`m.space.child`, MSC1772-ordered: `order` string\nascending, absent sorts last, then `origin_ts`, then `room_id`), each\nenriched with the child room's own cached name/avatar/room_type where Axon\nknows that room too (issue #404, ADR 0084). An unknown `account_id`/\n`room_id`, or a room with no children, yields an empty list (200), not a\n404.\n\nThe response is capped at 1,000 children, and a truncated response looks\nexactly like a complete one. Use `space/hierarchy`, which pages through a\nspace of any size and reports its total (ADR 0128). This route is kept\nunchanged for existing clients, so its `order` is the raw string from the\nlink, while `space/hierarchy` reports an `order` that MSC1772 treats as\ninvalid (longer than 50 characters, or not printable ASCII) as `null`.",
         "operationId": "space_children",
         "parameters": [
           {
@@ -6020,6 +6020,105 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiResponse_Vec_SpaceChildDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Page through a space's children",
+        "description": "Page through a space's children (`m.space.child` links with a valid\n`via`) in MSC1772 order: `order` ascending by code point with absent\nlast, then the link's `origin_ts`, then child room id (ADR 0128). Each\nchild carries the same synced fields as `space/children`, plus\n`parent_room_id` and whether the account is `joined` to it.\n\nReads only local data and never waits for the homeserver. Each page starts\nstrictly after the last row of the previous one, so a link added or\nremoved between pages neither duplicates nor skips any other link; a link\nwhose `order` or `origin_ts` changes between pages (an edit or a\nreplacement `m.space.child` event) may appear twice or not at all in one\nwalk, so de-duplicate by room id. `next_cursor` is `null` only on the last\npage, and `total_children` counts every current link, so nothing is\ndropped silently. An unknown `account_id`/`room_id`, or a room with no\nchildren, is an empty page (200), not a 404.",
+        "operationId": "space_hierarchy",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id of the space",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 100, max 500; out-of-range values are clamped).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page's `next_cursor`; omit for the first\npage. A cursor is bound to the account and space it was issued for.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "enrich",
+            "in": "query",
+            "description": "Ask Axon to fill in unjoined children's names from the homeserver.\nAccepted and currently ignored: discovery is not implemented yet\n(ADR 0128), so this read never contacts the homeserver.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the space's children, MSC1772-ordered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SpaceHierarchyPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed cursor, a cursor issued for another account or space, or a room id containing a control character",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -11376,6 +11475,49 @@
           }
         }
       },
+      "ApiResponse_SpaceHierarchyPage": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128 decision 1).",
+            "required": [
+              "room_id",
+              "children",
+              "total_children"
+            ],
+            "properties": {
+              "children": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SpaceHierarchyChildDto"
+                },
+                "description": "Up to `limit` children in MSC1772 order, strictly after the request's\n`cursor`."
+              },
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Pass as `cursor` to read the next page; `null` only on the last page.\nNothing is dropped silently: a space of any size pages to the end."
+              },
+              "room_id": {
+                "type": "string",
+                "description": "The space that was read."
+              },
+              "total_children": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The space's current child links (an `m.space.child` with a valid\n`via`), counted in the same snapshot as the page, so a client can show\n\"120 of 1,340\"."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_StagedUploadDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -16348,6 +16490,65 @@
               "type": "string"
             },
             "description": "Federation-resolution hints (`content.via`) for a child Axon has no\ndirect path to."
+          }
+        }
+      },
+      "SpaceHierarchyChildDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SpaceChildDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "parent_room_id",
+              "joined"
+            ],
+            "properties": {
+              "joined": {
+                "type": "boolean",
+                "description": "Whether the account's own membership in the child is `join`."
+              },
+              "parent_room_id": {
+                "type": "string",
+                "description": "The space whose `m.space.child` link produced this row. Always the\nrequested space for now; nested reads may add rows from subspaces."
+              }
+            }
+          }
+        ],
+        "description": "One child in a page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128\ndecision 1): every [`SpaceChildDto`] field, from local synced state, plus\nwhere the row came from and whether the account is joined to the child.\n\n`order` is the normalized MSC1772 order the row was sorted by: an `order`\nthat is not a string of at most 50 printable ASCII characters is `null`\nhere, because the spec treats it as absent."
+      },
+      "SpaceHierarchyPage": {
+        "type": "object",
+        "description": "A page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128 decision 1).",
+        "required": [
+          "room_id",
+          "children",
+          "total_children"
+        ],
+        "properties": {
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpaceHierarchyChildDto"
+            },
+            "description": "Up to `limit` children in MSC1772 order, strictly after the request's\n`cursor`."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` to read the next page; `null` only on the last page.\nNothing is dropped silently: a space of any size pages to the end."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "The space that was read."
+          },
+          "total_children": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The space's current child links (an `m.space.child` with a valid\n`via`), counted in the same snapshot as the page, so a client can show\n\"120 of 1,340\"."
           }
         }
       },

@@ -71,7 +71,10 @@ pub use search::{
     room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,
     SEARCH_OUTBOX_ROOM_PURGE_PREFIX,
 };
-pub use spaces::{SpaceChildRow, SpaceParentRow};
+pub use spaces::{
+    SpaceChildRow, SpaceHierarchyCursor, SpaceHierarchyPage, SpaceHierarchyRow, SpaceParentRow,
+    SPACE_HIERARCHY_MAX_PAGE,
+};
 pub use state::{
     AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRedaction, RoomStateRow,
     RoomStateUpsert, UnappliedStateRedaction,

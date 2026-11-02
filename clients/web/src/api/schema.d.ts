@@ -1292,11 +1292,50 @@ export interface paths {
          *     enriched with the child room's own cached name/avatar/room_type where Axon
          *     knows that room too (issue #404, ADR 0084). An unknown `account_id`/
          *     `room_id`, or a room with no children, yields an empty list (200), not a
-         *     404. The store caps this at a fixed row count against a room with a
-         *     pathological number of children (`SPACE_HIERARCHY_CAP` in
-         *     `axon-store::spaces`).
+         *     404.
+         *
+         *     The response is capped at 1,000 children, and a truncated response looks
+         *     exactly like a complete one. Use `space/hierarchy`, which pages through a
+         *     space of any size and reports its total (ADR 0128). This route is kept
+         *     unchanged for existing clients, so its `order` is the raw string from the
+         *     link, while `space/hierarchy` reports an `order` that MSC1772 treats as
+         *     invalid (longer than 50 characters, or not printable ASCII) as `null`.
          */
         get: operations["space_children"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Page through a space's children
+         * @description Page through a space's children (`m.space.child` links with a valid
+         *     `via`) in MSC1772 order: `order` ascending by code point with absent
+         *     last, then the link's `origin_ts`, then child room id (ADR 0128). Each
+         *     child carries the same synced fields as `space/children`, plus
+         *     `parent_room_id` and whether the account is `joined` to it.
+         *
+         *     Reads only local data and never waits for the homeserver. Each page starts
+         *     strictly after the last row of the previous one, so a link added or
+         *     removed between pages neither duplicates nor skips any other link; a link
+         *     whose `order` or `origin_ts` changes between pages (an edit or a
+         *     replacement `m.space.child` event) may appear twice or not at all in one
+         *     walk, so de-duplicate by room id. `next_cursor` is `null` only on the last
+         *     page, and `total_children` counts every current link, so nothing is
+         *     dropped silently. An unknown `account_id`/`room_id`, or a room with no
+         *     children, is an empty page (200), not a 404.
+         */
+        get: operations["space_hierarchy"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3009,6 +3048,31 @@ export interface components {
             data: {
                 /** @description The created Matrix event id. */
                 event_id: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_SpaceHierarchyPage: {
+            /** @description A page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128 decision 1). */
+            data: {
+                /**
+                 * @description Up to `limit` children in MSC1772 order, strictly after the request's
+                 *     `cursor`.
+                 */
+                children: components["schemas"]["SpaceHierarchyChildDto"][];
+                /**
+                 * @description Pass as `cursor` to read the next page; `null` only on the last page.
+                 *     Nothing is dropped silently: a space of any size pages to the end.
+                 */
+                next_cursor?: string | null;
+                /** @description The space that was read. */
+                room_id: string;
+                /**
+                 * Format: int64
+                 * @description The space's current child links (an `m.space.child` with a valid
+                 *     `via`), counted in the same snapshot as the page, so a client can show
+                 *     "120 of 1,340".
+                 */
+                total_children: number;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -5585,6 +5649,46 @@ export interface components {
              *     direct path to.
              */
             via: string[];
+        };
+        /**
+         * @description One child in a page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128
+         *     decision 1): every [`SpaceChildDto`] field, from local synced state, plus
+         *     where the row came from and whether the account is joined to the child.
+         *
+         *     `order` is the normalized MSC1772 order the row was sorted by: an `order`
+         *     that is not a string of at most 50 printable ASCII characters is `null`
+         *     here, because the spec treats it as absent.
+         */
+        SpaceHierarchyChildDto: components["schemas"]["SpaceChildDto"] & {
+            /** @description Whether the account's own membership in the child is `join`. */
+            joined: boolean;
+            /**
+             * @description The space whose `m.space.child` link produced this row. Always the
+             *     requested space for now; nested reads may add rows from subspaces.
+             */
+            parent_room_id: string;
+        };
+        /** @description A page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128 decision 1). */
+        SpaceHierarchyPage: {
+            /**
+             * @description Up to `limit` children in MSC1772 order, strictly after the request's
+             *     `cursor`.
+             */
+            children: components["schemas"]["SpaceHierarchyChildDto"][];
+            /**
+             * @description Pass as `cursor` to read the next page; `null` only on the last page.
+             *     Nothing is dropped silently: a space of any size pages to the end.
+             */
+            next_cursor?: string | null;
+            /** @description The space that was read. */
+            room_id: string;
+            /**
+             * Format: int64
+             * @description The space's current child links (an `m.space.child` with a valid
+             *     `via`), counted in the same snapshot as the page, so a client can show
+             *     "120 of 1,340".
+             */
+            total_children: number;
         };
         /**
          * @description One space-parent entry (`GET …/rooms/{room_id}/space/parents`, issue #404,
@@ -10105,6 +10209,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiResponse_Vec_SpaceChildDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    space_hierarchy: {
+        parameters: {
+            query?: {
+                /** @description Page size (default 100, max 500; out-of-range values are clamped). */
+                limit?: number;
+                /**
+                 * @description Opaque cursor from a previous page's `next_cursor`; omit for the first
+                 *     page. A cursor is bound to the account and space it was issued for.
+                 */
+                cursor?: string;
+                /**
+                 * @description Ask Axon to fill in unjoined children's names from the homeserver.
+                 *     Accepted and currently ignored: discovery is not implemented yet
+                 *     (ADR 0128), so this read never contacts the homeserver.
+                 */
+                enrich?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id of the space */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of the space's children, MSC1772-ordered */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_SpaceHierarchyPage"];
+                };
+            };
+            /** @description Malformed cursor, a cursor issued for another account or space, or a room id containing a control character */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Missing, malformed, or revoked bearer token */

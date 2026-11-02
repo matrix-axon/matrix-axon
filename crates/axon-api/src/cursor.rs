@@ -1,4 +1,5 @@
-//! Opaque timeline-pagination cursor.
+//! Opaque pagination cursors: the timeline's, search's, and the space
+//! hierarchy's.
 //!
 //! The store's [`TimelineCursor`] is a `(origin_ts, id)` sort key with public
 //! fields. We don't expose those on the wire — instead a cursor is the
@@ -9,9 +10,12 @@
 //! form is ASCII digits with at most a leading `-` — never a `.` — so
 //! `split_once('.')` always cleaves the two fields cleanly (negatives included).
 
-use axon_store::TimelineCursor;
+use axon_store::{SpaceHierarchyCursor, TimelineCursor};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 /// Upper bound on the encoded length of any cursor we'll even attempt to decode.
 /// Every cursor this module emits is the base64url of a short decimal string, so
@@ -82,6 +86,93 @@ pub fn decode_offset_bounded(s: &str, max: usize) -> Option<usize> {
     (offset <= max).then_some(offset)
 }
 
+/// Upper bound on an encoded hierarchy cursor. Unlike the numeric cursors it
+/// carries strings: a normalized `order` (at most 50 printable ASCII
+/// characters) and a child room id (at most 255 bytes, which the store
+/// enforces on the links it returns). Even with every room-id byte
+/// JSON-escaped, an honest cursor stays well under this.
+const MAX_HIERARCHY_ENCODED_LEN: usize = 4096;
+
+/// MSC1772's limit on a valid `order`: at most 50 printable ASCII characters.
+/// The store treats any other `order` as absent, so it never issues one.
+const MAX_HIERARCHY_ORDER_LEN: usize = 50;
+
+/// The store pages only children whose room id fits Matrix's 255-byte limit.
+const MAX_HIERARCHY_ROOM_ID_BYTES: usize = 255;
+
+/// Wire form of a [`SpaceHierarchyCursor`]. `s` binds the cursor to the
+/// account and space it was issued for, so a cursor from another space is
+/// rejected instead of silently paging that space from an unrelated key.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HierarchyCursorWire {
+    s: String,
+    o: Option<String>,
+    t: i64,
+    r: String,
+}
+
+/// A short, stable tag for (account, space). Not a secret: it only tells a
+/// cursor that belongs here from one that does not.
+fn hierarchy_scope(account_id: Uuid, space_room_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(account_id.as_bytes());
+    hasher.update(space_room_id.as_bytes());
+    let digest = hasher.finalize();
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Encode a hierarchy keyset position for `space_room_id` into an opaque
+/// cursor string.
+pub fn encode_hierarchy(
+    account_id: Uuid,
+    space_room_id: &str,
+    cursor: &SpaceHierarchyCursor,
+) -> String {
+    let wire = HierarchyCursorWire {
+        s: hierarchy_scope(account_id, space_room_id),
+        o: cursor.order.clone(),
+        t: cursor.origin_ts,
+        r: cursor.room_id.clone(),
+    };
+    // Serializing a struct of strings and an integer cannot fail.
+    let json = serde_json::to_vec(&wire).expect("hierarchy cursor serializes");
+    URL_SAFE_NO_PAD.encode(json)
+}
+
+/// Decode a hierarchy cursor issued for `space_room_id`. Returns `None` for
+/// malformed input or a cursor issued for another account or space, so the
+/// handler can map either to a `400`.
+pub fn decode_hierarchy(
+    account_id: Uuid,
+    space_room_id: &str,
+    s: &str,
+) -> Option<SpaceHierarchyCursor> {
+    if s.len() > MAX_HIERARCHY_ENCODED_LEN {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(s).ok()?;
+    let wire: HierarchyCursorWire = serde_json::from_slice(&bytes).ok()?;
+    // The scope tag is not a secret, so a client can mint a cursor for its own
+    // space. Accept only positions within the bounds the store issues: an
+    // `order` that normalization keeps and a room id within 255 bytes with no
+    // NUL. A minted position inside those bounds is still accepted, and is
+    // harmless: the walk resumes after that key. Anything outside them (a NUL
+    // byte, which PostgreSQL refuses in a text parameter, included) stays a
+    // 400 here instead of becoming a 500 from the query.
+    let order_ok = wire.o.as_deref().is_none_or(|o| {
+        o.len() <= MAX_HIERARCHY_ORDER_LEN && o.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    });
+    let room_ok = wire.r.len() <= MAX_HIERARCHY_ROOM_ID_BYTES && !wire.r.contains('\0');
+    (order_ok && room_ok && wire.s == hierarchy_scope(account_id, space_room_id)).then_some(
+        SpaceHierarchyCursor {
+            order: wire.o,
+            origin_ts: wire.t,
+            room_id: wire.r,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +231,85 @@ mod tests {
         assert!(decode_offset_bounded(&encode_offset(usize::MAX), 10_000).is_none());
         // Still rejects plain garbage.
         assert!(decode_offset_bounded("not base64!!!", 10_000).is_none());
+    }
+
+    fn hierarchy_cursor(order: Option<&str>) -> SpaceHierarchyCursor {
+        SpaceHierarchyCursor {
+            order: order.map(str::to_owned),
+            origin_ts: 1_700_000_000_000,
+            room_id: "!child:example.org".to_owned(),
+        }
+    }
+
+    #[test]
+    fn hierarchy_round_trips_both_order_groups() {
+        let account = Uuid::new_v4();
+        for order in [Some("a"), Some(""), None] {
+            let c = hierarchy_cursor(order);
+            let encoded = encode_hierarchy(account, "!space:example.org", &c);
+            assert_eq!(
+                decode_hierarchy(account, "!space:example.org", &encoded),
+                Some(c)
+            );
+        }
+    }
+
+    #[test]
+    fn hierarchy_rejects_a_cursor_from_another_space_or_account() {
+        let account = Uuid::new_v4();
+        let encoded = encode_hierarchy(account, "!space:example.org", &hierarchy_cursor(None));
+        assert!(decode_hierarchy(account, "!other:example.org", &encoded).is_none());
+        assert!(decode_hierarchy(Uuid::new_v4(), "!space:example.org", &encoded).is_none());
+    }
+
+    #[test]
+    fn hierarchy_rejects_garbage_and_overlong_input() {
+        let account = Uuid::new_v4();
+        assert!(decode_hierarchy(account, "!s:x", "not base64!!!").is_none());
+        assert!(decode_hierarchy(account, "!s:x", &URL_SAFE_NO_PAD.encode("{}")).is_none());
+        // A timeline cursor is not a hierarchy cursor.
+        let timeline = encode(TimelineCursor {
+            origin_ts: 1,
+            id: 2,
+        });
+        assert!(decode_hierarchy(account, "!s:x", &timeline).is_none());
+        let long = "A".repeat(MAX_HIERARCHY_ENCODED_LEN + 1);
+        assert!(decode_hierarchy(account, "!s:x", &long).is_none());
+    }
+
+    #[test]
+    fn hierarchy_cursor_at_the_store_bounds_fits_the_length_guard() {
+        // The longest honest cursor: a 50-character order and a 255-byte room
+        // id made entirely of characters JSON must escape.
+        let c = SpaceHierarchyCursor {
+            order: Some("~".repeat(50)),
+            origin_ts: i64::MIN,
+            room_id: "\u{1}".repeat(255),
+        };
+        let encoded = encode_hierarchy(Uuid::new_v4(), "!s:x", &c);
+        assert!(encoded.len() <= MAX_HIERARCHY_ENCODED_LEN);
+    }
+
+    #[test]
+    fn hierarchy_accepts_only_positions_the_store_can_issue() {
+        let account = Uuid::new_v4();
+        let decodes = |order: Option<String>, room_id: String| {
+            let c = SpaceHierarchyCursor {
+                order,
+                origin_ts: 1,
+                room_id,
+            };
+            decode_hierarchy(account, "!s:x", &encode_hierarchy(account, "!s:x", &c)).is_some()
+        };
+        // The bounds themselves are honest positions.
+        assert!(decodes(Some(" ~".repeat(25)), "x".repeat(255)));
+        assert!(decodes(Some(String::new()), String::new()));
+        // Orders the store normalizes to absent, and room ids it never pages.
+        assert!(!decodes(Some("x".repeat(51)), "!c:x".to_owned()));
+        assert!(!decodes(Some("\u{e9}".to_owned()), "!c:x".to_owned()));
+        assert!(!decodes(Some("a\0".to_owned()), "!c:x".to_owned()));
+        assert!(!decodes(Some("\t".to_owned()), "!c:x".to_owned()));
+        assert!(!decodes(None, "x".repeat(256)));
+        assert!(!decodes(None, "!a\0b:x".to_owned()));
     }
 }

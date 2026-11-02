@@ -174,6 +174,35 @@ That includes the first fill after the upgrade, one frame per room at the sweep'
 Clients should title a room `name`, then `canonical_alias`, then `display_name`, then its room ID: the state fields change as soon as their events arrive, while the calculated name follows the reconciler.
 Warnings carry `source = "sdk_display_name"`; set `RUST_LOG=warn,axon_sync::display_names=trace` to see each stored value's account and room, never the name itself.
 
+## Space children
+
+`GET /v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy` pages through a space's children ([ADR 0128](adr/0128-paged-space-hierarchy-and-unjoined-room-discovery.md) decision 1).
+It reads only local synced state and never contacts the homeserver.
+
+| Query    | Meaning                                                                                       |
+| -------- | --------------------------------------------------------------------------------------------- |
+| `limit`  | Page size; default 100, maximum 500, out-of-range values clamped                              |
+| `cursor` | The previous page's `next_cursor`; bound to the account and space it was issued for, else 400 |
+| `enrich` | Accepted and ignored until unjoined-room discovery lands (issue 622)                          |
+
+The response is `{ room_id, children, next_cursor, total_children }`.
+`next_cursor` is `null` only on the last page, so a space of any size reads to the end, and `total_children` counts every current link in the same snapshot as the page.
+A child counts only when its `m.space.child` content has a non-empty `via` list of server names, as the Matrix spec requires; this is also how a removed link (empty content) drops out.
+Child ids longer than the spec's 255-byte room-id limit are left out.
+
+Children are in MSC1772 order: `order` ascending by code point with absent last, then the link's `origin_ts`, then child room id by code point.
+An `order` that is not a string of at most 50 printable ASCII characters counts as absent, and the row's `order` field reads `null`.
+Each page starts strictly after the last row of the previous one, so links added or removed between pages never duplicate or skip another link.
+A link whose `order` or `origin_ts` changes between pages moves in the sort and can appear twice or not at all in one walk; clients de-duplicate by room id.
+
+Each child carries the `space/children` fields (`room_id`, `via`, `order`, `suggested`, and the child's cached `name`, `avatar_url`, and `room_type`), plus `parent_room_id` (always the requested space for now) and `joined`, whether the account's own membership in the child is `join`.
+Unjoined children usually have no cached state, so their display fields are `null` until discovery (ADR 0128 delivery steps 3 and 4) adds a separate `discovered` summary.
+Set `RUST_LOG=axon_api::routes::rooms=debug` to log each page's account, space, limit, returned rows, and total.
+
+The older `GET …/space/children` is unchanged: a bare array capped at 1,000 children, with no way to tell a truncated response from a complete one.
+Because it is unchanged, it still returns the link's raw `order` string, so the two routes can report a different `order` for the same link when MSC1772 treats that `order` as invalid.
+It stays for existing clients and will be marked deprecated once the web client, the TUI, and the oversized-space work ([issue 553](https://github.com/matrix-axon/matrix-axon/issues/553)) have moved to `space/hierarchy`.
+
 ## Change notification
 
 A `room_details.changed` WebSocket frame tells a client which of a room's reads to repeat ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 5).
@@ -231,7 +260,7 @@ The API deliberately does not hide these gaps with default values or perform a r
 [Issue 621](https://github.com/matrix-axon/matrix-axon/issues/621) tracks the rest of ADR 0126: confirming known absence through the room-state endpoint, and acquiring homeserver-local aliases and directory publication.
 
 Authoritative member counts are cached separately as described above; the lazily loaded member list is not an authoritative count.
-Paginated unjoined-room discovery and summary enrichment are [issue 622](https://github.com/matrix-axon/matrix-axon/issues/622).
+Unjoined-room discovery and summary enrichment are [issue 622](https://github.com/matrix-axon/matrix-axon/issues/622); its paged local read is in place (see [Space children](#space-children)).
 The discovery cache, progressive updates, and acquisition budgets follow ADR 0111 and are not implemented by the cached state endpoint.
 Web and TUI consumption are [issue 623](https://github.com/matrix-axon/matrix-axon/issues/623) and [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
 
@@ -254,6 +283,9 @@ DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-st
 cargo test -p axon-sync --lib room_details
 cargo test -p axon-api --lib room_details_changed
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_state_read_endpoints -- --ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http space_hierarchy_endpoint -- --ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test spaces -- --ignored
+cargo test -p axon-api --lib cursor
 cargo test -p axon-sync --lib room_sweep
 cargo test -p axon-api --test openapi
 ```

@@ -265,7 +265,8 @@ It never logs names, topics, aliases, response bodies, or tokens.
 
 Each step is one server-silo PR, with OpenAPI, the regenerated web schema, `docs/room-metadata.md`, and `docs/client-parity.md` updated in the same PR:
 
-1. **Paged hierarchy read:** decisions 1 and 7, local only; `enrich` is accepted and ignored, and `discovery` is `null`.
+1. **Paged hierarchy read:** decisions 1 and 7, local only; `enrich` is accepted and ignored.
+   The response omits `discovery` and each child's `discovered` until step 3 adds them: a property published as `null` cannot later become an object without breaking the OpenAPI compatibility check, while adding a property can.
    Needs nothing else, and unblocks issue 553.
 2. **ADR 0126 step 2 (issue 621):** the acquisition worker, homeserver details, absence confirmation, and `membership_epoch`.
 3. **Hierarchy discovery:** decisions 2, 3, 4, 6, 9 (`space_hierarchy`), 10, and 11.
