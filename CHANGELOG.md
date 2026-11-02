@@ -3,6 +3,24 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.21 - 2026-11-02
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(web): insert standard and custom emoji from the composer by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/894
+* feat(api): add a paged space/hierarchy read (ADR 0128 step 1) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/925
+* feat(web): present a 504 from an invite reject as still pending by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/926
+#### Documentation
+* escape documentation so jekyl won't choke on {{}} Markdown text when generating site docs by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/924
+#### Other Changes
+* rescue lost ADR 0128 commit by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/922
+* feat(web): route the shell's requests through the pooled transport (ADR 0127) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/918
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.20...v0.1.21
+
 ## v0.1.20 - 2026-11-01
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
