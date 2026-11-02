@@ -34,8 +34,11 @@ app.entitlements = {
   path: 'axon_iOS/axon_iOS.entitlements',
   properties: entitlements,
 }
+// Info.plist is expanded while compiling, before a profile is resolved, so
+// $(AppIdentifierPrefix) can come out empty there; the entitlements are
+// expanded at signing and are fine. The team id is a project setting.
 app.info.properties.AxonSharedKeychainGroup =
-  '$(AppIdentifierPrefix)org.matrixaxon.axon.sharing'
+  '$(DEVELOPMENT_TEAM).org.matrixaxon.axon.sharing'
 // Keep native sharing under default ATS; configured HTTP drafts remain local.
 delete app.info.properties.NSAppTransportSecurity
 app.settings.base = {
@@ -77,7 +80,7 @@ if (process.env.AXON_SHARE_PROBE === '1') {
           app.info.properties.CFBundleShortVersionString,
         CFBundleVersion: app.info.properties.CFBundleVersion,
         AxonSharedKeychainGroup:
-          '$(AppIdentifierPrefix)org.matrixaxon.axon.sharing',
+          '$(DEVELOPMENT_TEAM).org.matrixaxon.axon.sharing',
         NSExtension: {
           NSExtensionPointIdentifier: 'com.apple.share-services',
           NSExtensionPrincipalClass:
