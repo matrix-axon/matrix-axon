@@ -533,6 +533,9 @@ async fn run_app(
                 app.prune_typing(now);
                 // `/whereami` polls while it is open and cancels once it closes.
                 app.poll_open_room_info(now);
+                // Re-read the room list for a leave axon timed out on, until
+                // the room drops off it (ADR 0121 decision 5, #743).
+                app.poll_pending_memberships(now);
                 // Pull in list titles for rooms scrolling or filtering has just
                 // brought on screen. Bounded and idempotent — already-titled
                 // rooms are skipped (#189).

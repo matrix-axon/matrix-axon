@@ -88,7 +88,11 @@ impl AxonClient {
             request = request.query(&[("account_id", account_id)]);
         }
         let rooms = self.send(read_request(request)).await?;
-        Ok(RoomListSnapshot { rooms, started })
+        Ok(RoomListSnapshot {
+            rooms,
+            started,
+            account_filter: account_id,
+        })
     }
 
     pub async fn list_accounts(&self) -> Result<Vec<AccountDto>, ApiError> {
@@ -1871,6 +1875,9 @@ pub struct AccountDataChangedDto {
 pub struct RoomListSnapshot {
     pub rooms: Vec<RoomDto>,
     pub started: Instant,
+    /// The account the list was read for, or `None` for every account. A
+    /// room missing from a read for another account says nothing about it.
+    pub account_filter: Option<Uuid>,
 }
 
 #[cfg(test)]
@@ -1879,6 +1886,7 @@ impl From<Vec<RoomDto>> for RoomListSnapshot {
         Self {
             rooms,
             started: Instant::now(),
+            account_filter: None,
         }
     }
 }
@@ -2384,6 +2392,13 @@ impl ApiError {
 
     pub fn is_service_unavailable(&self) -> bool {
         matches!(self, ApiError::Status { status, .. } if *status == StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    /// `true` for an HTTP 504: axon, or a proxy in front of it, stopped waiting
+    /// for the homeserver, which may still finish the call (ADR 0121
+    /// decision 5).
+    pub fn is_gateway_timeout(&self) -> bool {
+        matches!(self, ApiError::Status { status, .. } if *status == StatusCode::GATEWAY_TIMEOUT)
     }
 
     /// `true` when the same request might succeed if sent again: no answer at
@@ -3070,6 +3085,18 @@ mod tests {
         assert!(!status(StatusCode::NOT_FOUND).is_transient());
         assert!(!status(StatusCode::FORBIDDEN).is_transient());
         assert!(!ApiError::Url("x".to_owned()).is_transient());
+    }
+
+    #[test]
+    fn only_a_504_is_a_gateway_timeout() {
+        let status = |status| ApiError::Status {
+            status,
+            message: "x".to_owned(),
+        };
+        assert!(status(StatusCode::GATEWAY_TIMEOUT).is_gateway_timeout());
+        assert!(!status(StatusCode::BAD_GATEWAY).is_gateway_timeout());
+        // The client's own timeout is no answer at all, not axon's 504.
+        assert!(!ApiError::Request("request timed out".to_owned()).is_gateway_timeout());
     }
 
     #[test]
