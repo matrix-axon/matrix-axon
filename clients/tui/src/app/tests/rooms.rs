@@ -856,6 +856,7 @@ fn equal_live_title_survives_an_older_room_response() {
     app.apply_room_refresh(crate::api::RoomListSnapshot {
         rooms: vec![listed],
         started,
+        account_filter: None,
     });
     assert_eq!(app.rooms.rooms[0].title(), "Current");
     assert_eq!(app.room_title_updates.len(), 1);
@@ -873,6 +874,7 @@ fn unknown_title_frame_survives_initial_load_without_triggering_a_fetch() {
     app.apply_room_refresh(crate::api::RoomListSnapshot {
         rooms: vec![listed],
         started,
+        account_filter: None,
     });
     assert_eq!(app.rooms.rooms[0].title(), "Alice, Bob");
 }
@@ -899,6 +901,7 @@ fn an_older_concurrent_response_cannot_regress_a_newer_snapshot() {
     app.apply_room_refresh(crate::api::RoomListSnapshot {
         rooms: vec![listed],
         started,
+        account_filter: None,
     });
     assert_eq!(app.rooms.rooms[0].title(), "Latest");
 }
@@ -956,6 +959,7 @@ fn state_title_updates_are_immediate_and_survive_stale_responses() {
     app.apply_room_refresh(crate::api::RoomListSnapshot {
         rooms: vec![listed],
         started,
+        account_filter: None,
     });
     assert_eq!(app.rooms.rooms[0].title(), "Alice, Bob");
 }
@@ -1047,6 +1051,7 @@ async fn title_overflow_after_recovery_start_queues_a_covering_read() {
     app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(crate::api::RoomListSnapshot {
         rooms: vec![dropped.clone()],
         started,
+        account_filter: None,
     })))
     .await;
     assert_eq!(app.rooms.rooms[0].title(), "First drop");
@@ -1082,6 +1087,7 @@ async fn stale_title_overflow_response_queues_recovery_and_rearms_overflow() {
     app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(crate::api::RoomListSnapshot {
         rooms: Vec::new(),
         started: stale_started,
+        account_filter: None,
     })))
     .await;
     assert!(
@@ -1150,6 +1156,25 @@ mod pending_membership {
 
     fn slow_room() -> RoomDto {
         room("!slow:example.com", None, Some("Slow"))
+    }
+
+    /// Another room on the slow room's account, so a read without the slow
+    /// room is not an empty one.
+    fn other_room() -> RoomDto {
+        room("!other:example.com", None, Some("Other"))
+    }
+
+    /// A room-list read started now, for `account_filter`.
+    fn read(rooms: Vec<RoomDto>, account_filter: Option<Uuid>) -> crate::api::RoomListSnapshot {
+        crate::api::RoomListSnapshot {
+            rooms,
+            started: Instant::now(),
+            account_filter,
+        }
+    }
+
+    fn is_pending(app: &App, key: &RoomKey, kind: RoomActionKind) -> bool {
+        app.pending_memberships.contains_key(&(key.clone(), kind))
     }
 
     /// An app listing the slow room, selected, whose leave just timed out.
@@ -1258,28 +1283,81 @@ mod pending_membership {
         app.poll_pending_memberships(Instant::now() + PENDING_MEMBERSHIP_CHECK_DELAYS[0]);
         assert!(app.rooms_fetch_inflight, "the check asks for the room list");
 
-        app.apply_room_refresh(Vec::new());
-        assert!(!app
-            .pending_memberships
-            .contains_key(&(key, RoomActionKind::Leave)));
+        app.apply_room_refresh(vec![other_room()]);
+        assert!(!is_pending(&app, &key, RoomActionKind::Leave));
         assert_eq!(app.status.text(false), "left Slow");
     }
 
     #[tokio::test]
     async fn a_list_read_for_another_account_settles_nothing() {
         let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+        let elsewhere = Uuid::from_u128(7);
+        let mut theirs = other_room();
+        theirs.account_id = elsewhere;
+        // The filter the read went out with decides, not the one now in force:
+        // the user cleared it while that read was in flight.
+        app.account_filter = None;
+
+        app.apply_room_refresh(read(vec![theirs], Some(elsewhere)));
+
+        assert!(is_pending(&app, &key, RoomActionKind::Leave));
+    }
+
+    #[tokio::test]
+    async fn a_read_for_every_account_settles_whatever_the_filter_is_now() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
         app.account_filter = Some(Uuid::from_u128(7));
+
+        app.apply_room_refresh(read(vec![other_room()], None));
+
+        assert!(!is_pending(&app, &key, RoomActionKind::Leave));
+    }
+
+    #[tokio::test]
+    async fn an_empty_room_list_settles_nothing() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
 
         app.apply_room_refresh(Vec::new());
 
-        assert!(app
-            .pending_memberships
-            .contains_key(&(key, RoomActionKind::Leave)));
+        assert!(is_pending(&app, &key, RoomActionKind::Leave));
+    }
+
+    #[tokio::test]
+    async fn a_read_started_before_the_504_settles_nothing() {
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("a monotonic clock a second past its origin");
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+
+        app.apply_room_refresh(crate::api::RoomListSnapshot {
+            rooms: vec![other_room()],
+            started,
+            account_filter: None,
+        });
+
+        assert!(is_pending(&app, &key, RoomActionKind::Leave));
+    }
+
+    #[tokio::test]
+    async fn checks_follow_the_schedule_not_the_tick_that_ran_them() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+        let since = app.pending_memberships[&(key.clone(), RoomActionKind::Leave)].since;
+
+        // The first check runs 5 s late.
+        app.poll_pending_memberships(
+            since + PENDING_MEMBERSHIP_CHECK_DELAYS[0] + Duration::from_secs(5),
+        );
+
+        assert_eq!(
+            app.pending_memberships[&(key, RoomActionKind::Leave)].next_check,
+            since + PENDING_MEMBERSHIP_CHECK_DELAYS[0] + PENDING_MEMBERSHIP_CHECK_DELAYS[1]
+        );
     }
 
     #[tokio::test]
     async fn a_leave_still_listed_after_the_schedule_may_have_failed() {
         let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+        app.apply_room_refresh(vec![slow_room()]);
 
         run_schedule(&mut app, Instant::now());
 
@@ -1288,6 +1366,44 @@ mod pending_membership {
             .contains_key(&(key, RoomActionKind::Leave)));
         let status = app.status.text(false);
         assert!(status.contains("Slow is still listed"), "{status}");
+    }
+
+    #[tokio::test]
+    async fn a_window_with_no_read_of_the_room_ends_silently() {
+        let (mut app, key) = app_with_pending(RoomActionKind::Leave).await;
+        let elsewhere = Uuid::from_u128(7);
+        let mut theirs = other_room();
+        theirs.account_id = elsewhere;
+        // Every read went out for another account, so none could list Slow.
+        app.apply_room_refresh(read(vec![theirs], Some(elsewhere)));
+        app.status = Status::from("unrelated".to_owned());
+
+        run_schedule(&mut app, Instant::now());
+
+        assert!(!is_pending(&app, &key, RoomActionKind::Leave));
+        assert_eq!(app.status.text(false), "unrelated");
+    }
+
+    #[tokio::test]
+    async fn holds_back_a_forget_while_the_leave_is_held_back() {
+        let (mut app, _) = app_with_pending(RoomActionKind::Leave).await;
+
+        app.start_forget_room(None);
+        assert_eq!(app.mode, Mode::Compose, "no confirmation, nothing sent");
+        assert!(
+            app.status
+                .text(false)
+                .contains("only be forgotten once it is left"),
+            "{}",
+            app.status.text(false)
+        );
+
+        app.poll_pending_memberships(Instant::now() + PENDING_MEMBERSHIP_CHECK_DELAYS[0]);
+        app.start_forget_room(None);
+        assert!(
+            matches!(app.mode, Mode::ConfirmRoomAction { .. }),
+            "past the first check, a forget is the user's call"
+        );
     }
 
     #[tokio::test]

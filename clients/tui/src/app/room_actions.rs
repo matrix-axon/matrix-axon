@@ -4,13 +4,15 @@ use std::collections::HashSet;
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use uuid::Uuid;
+
 use crate::api::RoomDto;
 use crate::command::UserReasonCommand;
 
 use super::{App, Mode, RoomKey, RoomTargetResolution, Status};
 
 /// Room-list checks after a leave axon answered with a `504`, each counted
-/// from the one before: 30 s, 90 s, 210 s and 450 s after it. The live bus
+/// from the one before's scheduled time: 30 s, 90 s, 210 s and 450 s after it. The live bus
 /// carries no membership change (#103), so nothing else would show the room
 /// going. On prod a leave of a 36,000-member space took Synapse 194 s and its
 /// retry 328 s (#743). The web client uses the same schedule
@@ -31,6 +33,9 @@ const PENDING_MEMBERSHIP_FINAL_GRACE: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingMembership {
     pub(crate) room_title: String,
+    /// When the `504` arrived. A room-list read started earlier cannot speak
+    /// for the leave.
+    pub(crate) since: Instant,
     /// Checks run so far. Equal to the number of delays once the last has run
     /// and only the grace period is left.
     pub(crate) step: usize,
@@ -40,6 +45,19 @@ pub(crate) struct PendingMembership {
     /// Synapse more than the original. After it a deliberate retry goes out,
     /// since the `504` may have come from a proxy before axon saw the call.
     pub(crate) retryable: bool,
+    /// Whether a room-list read that could speak for this room has listed it
+    /// since the `504`. Only then can the window's end say it is still listed.
+    pub(crate) seen_listed: bool,
+}
+
+/// What a room-list read covered, for judging pending leaves by it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RoomListRead {
+    pub(crate) started: Instant,
+    /// The account it was read for; `None` for all of them.
+    pub(crate) account_filter: Option<Uuid>,
+    /// Axon listed no rooms at all.
+    pub(crate) empty: bool,
 }
 
 /// Why a room action failed. `timed_out` marks a `504`.
@@ -202,12 +220,22 @@ impl App {
     }
 
     fn request_or_perform_room_action(&mut self, action: PendingRoomAction) {
-        if self
-            .pending_memberships
-            .get(&(action.key.clone(), action.kind))
-            .is_some_and(|pending| !pending.retryable)
-        {
+        let held_back = |kind: RoomActionKind| {
+            self.pending_memberships
+                .get(&(action.key.clone(), kind))
+                .is_some_and(|pending| !pending.retryable)
+        };
+        if held_back(action.kind) {
             self.status = Status::from(pending_status(action.kind, &action.room_title));
+            return;
+        }
+        // Axon refuses a forget until the room is left, so one sent while the
+        // leave is still running can only fail.
+        if action.kind == RoomActionKind::Forget && held_back(RoomActionKind::Leave) {
+            self.status = Status::from(format!(
+                "your homeserver hasn't finished leaving {} yet, and a room can only be forgotten once it is left",
+                action.room_title
+            ));
             return;
         }
         if self.room_action_busy {
@@ -366,9 +394,11 @@ impl App {
             (action.key.clone(), action.kind),
             PendingMembership {
                 room_title: action.room_title.clone(),
+                since: now,
                 step: 0,
                 next_check: now + PENDING_MEMBERSHIP_CHECK_DELAYS[0],
                 retryable: false,
+                seen_listed: false,
             },
         );
     }
@@ -394,18 +424,22 @@ impl App {
             }
             pending.step += 1;
             pending.retryable = true;
-            pending.next_check = now
-                + PENDING_MEMBERSHIP_CHECK_DELAYS
-                    .get(pending.step)
-                    .copied()
-                    .unwrap_or(PENDING_MEMBERSHIP_FINAL_GRACE);
+            // From the scheduled time, not the tick that noticed it, so the
+            // checks land 30/90/210/450 s after the `504`.
+            pending.next_check += PENDING_MEMBERSHIP_CHECK_DELAYS
+                .get(pending.step)
+                .copied()
+                .unwrap_or(PENDING_MEMBERSHIP_FINAL_GRACE);
             refresh |= *kind == RoomActionKind::Leave;
         }
         for (key, kind) in expired {
             let Some(pending) = self.pending_memberships.remove(&(key, kind)) else {
                 continue;
             };
-            if kind == RoomActionKind::Leave && !self.is_mid_command() {
+            // Unless a read that covered the room listed it, the window ran
+            // out without evidence either way (its account filtered out or
+            // logged out, or every read empty), so say nothing.
+            if kind == RoomActionKind::Leave && pending.seen_listed && !self.is_mid_command() {
                 self.status = Status::from(format!(
                     "{} is still listed; the leave may not have gone through, so /leave again to retry",
                     pending.room_title
@@ -417,28 +451,33 @@ impl App {
         }
     }
 
-    /// End each pending leave whose room a room-list refresh no longer lists
-    /// (ADR 0037 drops left rooms). A room missing only because the list was
-    /// read for another account, or because its account is logged out, says
-    /// nothing about the leave.
-    pub(super) fn settle_pending_leaves(&mut self) {
-        if self.pending_memberships.is_empty() {
+    /// End each pending leave whose room `read` no longer lists (ADR 0037
+    /// drops left rooms). Only a read that covered the room counts: one for
+    /// another account (judged by the filter it was read with, not the one in
+    /// force now), one for a logged-out account, one started before the
+    /// `504`, or one that listed no rooms at all says nothing about the leave.
+    pub(super) fn settle_pending_leaves(&mut self, read: RoomListRead) {
+        if self.pending_memberships.is_empty() || read.empty {
             return;
         }
         let listed: HashSet<RoomKey> = self.rooms.rooms.iter().map(RoomKey::from).collect();
-        let settled: Vec<_> = self
-            .pending_memberships
-            .iter()
-            .filter(|((key, kind), _)| {
-                *kind == RoomActionKind::Leave
-                    && !listed.contains(key)
-                    && self
-                        .account_filter
-                        .is_none_or(|account_id| account_id == key.account_id)
-                    && !self.is_known_inactive_account(key.account_id)
-            })
-            .map(|((key, kind), pending)| ((key.clone(), *kind), pending.room_title.clone()))
-            .collect();
+        let mut settled = Vec::new();
+        for ((key, kind), pending) in &mut self.pending_memberships {
+            let covers = *kind == RoomActionKind::Leave
+                && read.started >= pending.since
+                && read
+                    .account_filter
+                    .is_none_or(|account_id| account_id == key.account_id)
+                && !self.accounts.inactive_ids.contains(&key.account_id);
+            if !covers {
+                continue;
+            }
+            if listed.contains(key) {
+                pending.seen_listed = true;
+            } else {
+                settled.push(((key.clone(), *kind), pending.room_title.clone()));
+            }
+        }
         for (entry, room_title) in settled {
             self.pending_memberships.remove(&entry);
             if !self.is_mid_command() {

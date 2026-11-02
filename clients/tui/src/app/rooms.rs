@@ -99,7 +99,11 @@ impl App {
     }
 
     pub(crate) fn apply_room_refresh(&mut self, snapshot: impl Into<crate::api::RoomListSnapshot>) {
-        let crate::api::RoomListSnapshot { mut rooms, started } = snapshot.into();
+        let crate::api::RoomListSnapshot {
+            mut rooms,
+            started,
+            account_filter: read_for,
+        } = snapshot.into();
         if self
             .room_snapshot_started
             .is_some_and(|last| started < last)
@@ -108,6 +112,11 @@ impl App {
             return;
         }
         self.room_snapshot_started = Some(started);
+        let read = super::room_actions::RoomListRead {
+            started,
+            account_filter: read_for,
+            empty: rooms.is_empty(),
+        };
         for room in &mut rooms {
             let key = RoomKey::from(&*room);
             for field in [TitleField::Name, TitleField::Alias, TitleField::DisplayName] {
@@ -179,7 +188,7 @@ impl App {
             self.rooms.selected = None;
         }
         self.maybe_start_pin_migration();
-        self.settle_pending_leaves();
+        self.settle_pending_leaves(read);
         self.recover_title_overflow();
     }
 
@@ -311,7 +320,7 @@ impl App {
     /// Whether `account_id` is an account we've listed and that is *not* active
     /// (e.g. logged out). Unknown accounts return `false` so we never hide a
     /// room just because our account list is empty or stale.
-    pub(super) fn is_known_inactive_account(&self, account_id: Uuid) -> bool {
+    fn is_known_inactive_account(&self, account_id: Uuid) -> bool {
         self.accounts.inactive_ids.contains(&account_id)
     }
 

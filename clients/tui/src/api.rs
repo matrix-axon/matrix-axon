@@ -88,7 +88,11 @@ impl AxonClient {
             request = request.query(&[("account_id", account_id)]);
         }
         let rooms = self.send(read_request(request)).await?;
-        Ok(RoomListSnapshot { rooms, started })
+        Ok(RoomListSnapshot {
+            rooms,
+            started,
+            account_filter: account_id,
+        })
     }
 
     pub async fn list_accounts(&self) -> Result<Vec<AccountDto>, ApiError> {
@@ -1871,6 +1875,9 @@ pub struct AccountDataChangedDto {
 pub struct RoomListSnapshot {
     pub rooms: Vec<RoomDto>,
     pub started: Instant,
+    /// The account the list was read for, or `None` for every account. A
+    /// room missing from a read for another account says nothing about it.
+    pub account_filter: Option<Uuid>,
 }
 
 #[cfg(test)]
@@ -1879,6 +1886,7 @@ impl From<Vec<RoomDto>> for RoomListSnapshot {
         Self {
             rooms,
             started: Instant::now(),
+            account_filter: None,
         }
     }
 }
