@@ -801,14 +801,32 @@ let watchingResume = false
 let resumeIsLegacy: () => boolean = () => false
 
 /**
- * Swap in a fresh client when the app comes back to the foreground, or the
- * webview says it is online again (ADR 0127 § 6).
+ * How long the page must have been hidden for a return to reset the
+ * transport: about when iOS suspends an app it has backgrounded. A shorter
+ * absence, an app switch and straight back, keeps the pool.
+ */
+const RESET_AFTER_HIDDEN_MS = 5_000
+
+/**
+ * How soon after one reset another is skipped. A return and `online` often
+ * arrive back to back, and the second would discard the connection the
+ * first just opened.
+ */
+const RESET_COALESCE_MS = 2_000
+
+/**
+ * Swap in a fresh client when the app comes back to the foreground after a
+ * suspension, or the webview says it is online again (ADR 0127 § 6).
  *
  * iOS tears down sockets while an app is suspended, and a WiFi-to-cellular
  * handoff strands connections on the old interface. A pooled connection that
  * died silently still looks open, so the first request after resume would
  * wait on it until a keepalive or the deadline gave up. A reset costs one
  * handshake per resume.
+ *
+ * Measured with `Date.now()`, since iOS stops `performance.now()` while the
+ * app is suspended, which is the absence being measured. The counters are
+ * written on every return, reset or not.
  *
  * Skipped while the legacy transport is chosen: it pools nothing, so there is
  * nothing to refresh, and a reset would only count one that did no work. The
@@ -820,8 +838,16 @@ function watchResume(isLegacy: () => boolean): void {
     return
   }
   watchingResume = true
-  const resume = (why: 'resume' | 'online') => {
-    const reset = resumeIsLegacy() ? Promise.resolve() : resetShellTransport()
+  let hiddenAt: number | null = null
+  let lastResetAt = -Infinity
+  const resume = (why: 'resume' | 'online', wanted: boolean) => {
+    const now = Date.now()
+    const due =
+      wanted && !resumeIsLegacy() && now - lastResetAt >= RESET_COALESCE_MS
+    if (due) {
+      lastResetAt = now
+    }
+    const reset = due ? resetShellTransport() : Promise.resolve()
     void reset
       .catch((error: unknown) => {
         console.warn(
@@ -834,12 +860,18 @@ function watchResume(isLegacy: () => boolean): void {
       })
   }
   document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      hiddenAt = Date.now()
+      return
+    }
     if (document.visibilityState === 'visible') {
-      resume('resume')
+      const away = hiddenAt === null ? 0 : Date.now() - hiddenAt
+      hiddenAt = null
+      resume('resume', away >= RESET_AFTER_HIDDEN_MS)
     }
   })
   window.addEventListener('online', () => {
-    resume('online')
+    resume('online', true)
   })
 }
 

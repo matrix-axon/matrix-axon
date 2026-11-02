@@ -80,7 +80,7 @@ Until then, a burst of requests to a cold pool opens one TCP and TLS connection 
 The first to negotiate `h2` is kept and the rest are discarded, but every one of them was a handshake.
 Only a client built HTTP/2-only takes `hyper-util`'s per-origin connecting lock, which holds every request in the burst until the first connection is ready.
 Measured against an in-process server, ten concurrent requests after a `reset` opened ten connections on the negotiating client and one on the HTTP/2-only client.
-Since § 6 resets on every resume, that difference repeats with every resume.
+Since § 6 resets on resume, that difference repeats with every resume.
 
 So the plugin builds two clients with the settings above.
 One negotiates by ALPN, offering `h2` and `http/1.1`.
@@ -178,7 +178,7 @@ So `api/client.ts`'s abort handling is unchanged, and an abort is never logged a
 
 ### 6. A fresh client after resume
 
-When the app returns to the foreground, or the webview fires `online`, the binding calls `reset`.
+When the app returns to the foreground after at least 5 s hidden, or the webview fires `online`, the binding calls `reset`.
 That swaps in newly built clients (both of § 1's), while requests already in flight finish on the old ones.
 The origins known to speak HTTP/2 are kept, so the first burst after resume opens one connection.
 
@@ -189,6 +189,12 @@ New requests always take the current client.
 iOS tears down sockets while an app is suspended, and a WiFi-to-cellular handoff strands connections on the old interface.
 A pooled connection that died silently is not "closed" as far as `hyper` knows, so the first request after resume would wait for a keepalive or the deadline.
 Resetting costs one handshake per resume, which is cheap next to hundreds a minute.
+
+Not every return is a resume (added in review).
+A shorter absence, an app switch and straight back, comes before iOS suspends the app, so the pool is kept.
+The absence is timed with `Date.now()`, since iOS stops `performance.now()` while the app is suspended.
+A return and `online` often arrive back to back, and a reset within 2 s of another is skipped, since it would only discard the connection the first just opened.
+The `transport:stats` line is written on every return either way, and its `resets` count says whether one ran.
 
 ### 7. Retry what provably never reached the server, and one narrow race
 

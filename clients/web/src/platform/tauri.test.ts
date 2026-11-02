@@ -379,9 +379,18 @@ describe('the shell request bound', () => {
 })
 
 describe('the shell transport on resume (ADR 0127 § 6)', () => {
+  // The resume watcher is installed once per module and remembers when it
+  // last reset, so each test starts a minute after the one before.
+  let now = 1_000_000_000
+  let visibility: DocumentVisibilityState = 'visible'
   beforeEach(() => {
     resetShellTransport.mockClear()
-    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    now += 60_000
+    visibility = 'visible'
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(
+      () => visibility,
+    )
   })
   afterEach(() => {
     vi.restoreAllMocks()
@@ -389,16 +398,61 @@ describe('the shell transport on resume (ADR 0127 § 6)', () => {
     setPerfEnabled(false)
   })
 
-  it('resets when the app comes back to the foreground, and when online', async () => {
-    tauriPlatform()
+  /** Background the app for `ms`, then bring it back. */
+  function away(ms: number): void {
+    visibility = 'hidden'
     document.dispatchEvent(new Event('visibilitychange'))
+    now += ms
+    visibility = 'visible'
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  it('resets when the app comes back after a suspension', async () => {
+    tauriPlatform()
+    away(6_000)
+    await vi.waitFor(() => expect(resetShellTransport).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps the pool after a quick app switch, and still writes the counters', async () => {
+    const lines: [string, unknown][] = []
+    setPerfEnabled(true)
+    setTelemetrySink((name, _at, detail) => lines.push([name, detail]))
+    tauriPlatform()
+    away(1_000)
+    await vi.waitFor(() => expect(lines).toHaveLength(1))
+    expect(lines[0]).toEqual([
+      'transport:stats',
+      expect.objectContaining({ why: 'resume' }),
+    ])
+    expect(resetShellTransport).not.toHaveBeenCalled()
+  })
+
+  it('resets when online on its own', async () => {
+    tauriPlatform()
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(resetShellTransport).toHaveBeenCalledTimes(1))
+  })
+
+  it('resets once when online arrives with the return', async () => {
+    const lines: string[] = []
+    setPerfEnabled(true)
+    setTelemetrySink((name) => lines.push(name))
+    tauriPlatform()
+    away(6_000)
+    now += 300
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(lines).toHaveLength(2))
+    expect(resetShellTransport).toHaveBeenCalledTimes(1)
+
+    // Past the window, online resets again.
+    now += 2_000
     window.dispatchEvent(new Event('online'))
     await vi.waitFor(() => expect(resetShellTransport).toHaveBeenCalledTimes(2))
   })
 
   it('does not reset on hiding', async () => {
     tauriPlatform()
-    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    visibility = 'hidden'
     document.dispatchEvent(new Event('visibilitychange'))
     await Promise.resolve()
     expect(resetShellTransport).not.toHaveBeenCalled()
@@ -407,7 +461,7 @@ describe('the shell transport on resume (ADR 0127 § 6)', () => {
   it('leaves the transport alone while the legacy one is chosen', async () => {
     const platform = tauriPlatform()
     platform.shellTransport!.setLegacy(true)
-    document.dispatchEvent(new Event('visibilitychange'))
+    away(6_000)
     await Promise.resolve()
     expect(resetShellTransport).not.toHaveBeenCalled()
   })
@@ -417,7 +471,7 @@ describe('the shell transport on resume (ADR 0127 § 6)', () => {
     setPerfEnabled(true)
     setTelemetrySink((name, _at, detail) => lines.push([name, detail]))
     const platform = tauriPlatform()
-    document.dispatchEvent(new Event('visibilitychange'))
+    away(6_000)
     await vi.waitFor(() => expect(lines).toHaveLength(1))
     platform.shellTransport!.setLegacy(true)
     window.dispatchEvent(new Event('online'))
@@ -442,7 +496,7 @@ describe('the shell transport on resume (ADR 0127 § 6)', () => {
     setPerfEnabled(true)
     setTelemetrySink((name) => lines.push(name))
     tauriPlatform()
-    document.dispatchEvent(new Event('visibilitychange'))
+    away(6_000)
     await vi.waitFor(() => expect(lines).toEqual(['transport:stats']))
     expect(warn).toHaveBeenCalled()
   })
