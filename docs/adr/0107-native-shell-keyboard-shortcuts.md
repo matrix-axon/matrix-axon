@@ -182,6 +182,13 @@ does. Neither Tauri nor wry does, so nothing in the shell had.
   only *recommends* `hunspell-dictionary`, a virtual package every hunspell
   dictionary provides. A machine with no dictionary underlines nothing, and
   that is a system setting rather than something the shell can fix.
-- **Not verified:** the AppImage, whose bundled WebKitGTK may not find the
-  host's dictionaries, and whether a right-click offers suggestions, since
-  Tauri gives WebKitGTK no context menu of its own.
+- **Silent cases are logged.** A locale that names no language (`LANG=C` or
+  unset, as in a container) or a missing web context leaves nothing to check
+  with, so the shell writes a line to stderr saying why. It does not guess a
+  language. The locale is read once at startup, so a change of language needs
+  a restart.
+- **Known gaps, each filed.** The `.deb` is the only package that declares a
+  dictionary, and the AppImage is unverified (issue 945). The `@modifier` of a
+  locale such as `sr_RS@latin` is dropped, so its dictionary is not requested
+  (issue 946). Whether a right-click offers suggestions is also unverified,
+  since Tauri gives WebKitGTK no context menu of its own.

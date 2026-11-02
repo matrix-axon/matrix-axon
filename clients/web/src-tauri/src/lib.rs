@@ -498,24 +498,37 @@ fn allow_camera_capture<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
 /// enchant, so a machine with no dictionary installed still underlines nothing;
 /// the `.deb` recommends one for that reason.
 ///
-/// These are settings on the web *context*, not the view, so they cover every
-/// webview the shell opens, and they can be set after the view exists: WebKit
-/// consults them when text is next checked.
+/// These are settings on the web *context*, not the view, and they can be set
+/// after the view exists: WebKit consults them when text is next checked. They
+/// reach the main window's context, which is the only webview the shell opens
+/// (`main_window`); a second window with its own context or data directory
+/// would need this called for it too. The locale is read once, here, so a
+/// change of language needs a restart.
 #[cfg(target_os = "linux")]
 fn enable_spell_checking<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     use webkit2gtk::{WebContextExt, WebViewExt};
 
     let result = window.with_webview(|webview| {
         let Some(context) = webview.inner().context() else {
+            eprintln!("the webview has no web context; the composer will not underline typos");
             return;
         };
         context.set_spell_checking_enabled(true);
         let names = webkit2gtk::glib::language_names();
         let languages = spell_checking_languages(&names);
-        if !languages.is_empty() {
-            let languages: Vec<&str> = languages.iter().map(String::as_str).collect();
-            context.set_spell_checking_languages(&languages);
+        if languages.is_empty() {
+            // `LANG=C` or unset, as in a container or a minimal session. There
+            // is no language to guess, and WebKit has no dictionary without
+            // one, so say why nothing is underlined rather than leave it a
+            // mystery.
+            eprintln!(
+                "the locale ({names:?}) names no language; the composer will not underline \
+                 typos until LANG or LANGUAGE does"
+            );
+            return;
         }
+        let languages: Vec<&str> = languages.iter().map(String::as_str).collect();
+        context.set_spell_checking_languages(&languages);
     });
     if let Err(error) = result {
         eprintln!(
