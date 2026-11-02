@@ -285,7 +285,16 @@ if [ "${AXON_SHARE_PROBE:-0}" = "1" ]; then
 fi
 
 echo "==> building (export method: $export_method)"
-pnpm "${build_args[@]}"
+# Kept in a file so a signing failure can be explained afterwards: Xcode's first
+# error line is usually a follow-up ("No Accounts"), and the cause is further up.
+build_log=$(mktemp "${TMPDIR:-/var/tmp}/package-ios-build.XXXXXX")
+if ! pnpm "${build_args[@]}" 2>&1 | tee "$build_log"; then
+  "$repo_root/scripts/ci/store-credentials.sh" explain "$build_log" \
+    || echo "==> the build failed; no signing error in the log was recognised, so the errors above are the whole story" >&2
+  echo "==> full log: $build_log" >&2
+  exit 1
+fi
+rm -f "$build_log"
 
 # `|| true` is load-bearing, not defensive noise. Under `set -euo pipefail` a
 # command substitution whose pipeline fails aborts the script *at this line*,

@@ -32,7 +32,12 @@ def inspect(bundle):
         "NSAllowsArbitraryLoadsForMedia",
     ]), "Native sharing must retain default ATS protections"
     keychain = info.get("AxonSharedKeychainGroup", "")
-    assert keychain.endswith(".org.matrixaxon.axon.sharing"), "Shared Keychain group missing"
+    assert keychain.endswith(".org.matrixaxon.axon.sharing"), (
+        f"Shared Keychain group in Info.plist is {keychain!r}, expected "
+        "'<team id>.org.matrixaxon.axon.sharing'. A value with no team id means "
+        "the build setting it is made from was empty when Info.plist was processed; "
+        "see AxonSharedKeychainGroup in Info.ios.plist and configure-ios-sharing.mjs"
+    )
     assert keychain in entitlements.get("keychain-access-groups", []), "Signed shared Keychain entitlement missing"
     assert any(keychain == item or (item.endswith("*") and keychain.startswith(item[:-1]))
                for item in allowed.get("keychain-access-groups", [])), "Profile denies shared Keychain group"

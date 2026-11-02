@@ -661,9 +661,9 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
 
 ### When a capability change invalidates the iOS profiles
 
-Enabling a capability on the App ID (Push Notifications, Sign in with Apple)
-invalidates every provisioning profile made before it. The stored secrets are
-frozen copies, so the store build fails until they are replaced, although it
+Enabling a capability on the App ID (Push Notifications, Sign in with Apple, App
+Groups) invalidates every provisioning profile made before it. The stored secrets
+are frozen copies, so the store build fails until they are replaced, although it
 worked the day before. Two profiles are involved, and both secrets must be
 replaced from **Xcode's own copies**, not from the portal:
 
@@ -696,6 +696,24 @@ replaced from **Xcode's own copies**, not from the portal:
 3. **Replace the secrets** with
    `base64 -i '<file>' | gh secret set IOS_APPSTORE_PROFILE` (and the same for
    `IOS_DEVELOPMENT_PROFILE`), then rerun the workflow.
+
+The signs of this, on a runner, in the order you will see them: "Install the
+signing credentials" refuses a profile that is missing a capability the app asks
+for (it compares the profile with `Entitlements.ios.plist`) or that is not
+Xcode-managed, and says which secret. Failing that, `xcodebuild` prints "doesn't
+include the ... capability" or "No profiles for ... were found", and
+`package-ios.sh` follows the log with what to do. Xcode's first line, "No
+Accounts", is only its follow-up to those; it is the cause on its own only when no
+Apple ID is signed in to Xcode and no `APPLE_API_*` key is set.
+`gh secret list` shows when each secret was last set: after a capability change
+both should be newer than the change. Two mistakes seen in practice: setting only
+one of the two secrets, and putting a hand-made portal profile (`Axon Sharing App
+Store`) in `IOS_APPSTORE_PROFILE`.
+
+If the capability is an App Group, the group must also be registered under
+Identifiers > App Groups and assigned to the App ID (Configure). A group that is
+"not available" when you try to create it is already registered, in your team
+(assign it) or in another (choose another identifier).
 
 Do not make the Store profile by hand in the portal. The name above is Xcode's, it
 is longer than the portal allows (it cuts off after `org.matrixaxo`), and the
