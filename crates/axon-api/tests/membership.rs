@@ -220,6 +220,11 @@ async fn failed_leave_does_not_drop_pending_invite() {
 /// the sync watcher can tell, once the homeserver reports the room
 /// (ADR 0091), so deleting here could destroy an invite that is still
 /// pending (ADR 0121 decision 5, issue #743).
+///
+/// This pins the leave handler, which is the only request-path code that
+/// deletes an invite (on a `Left` or `Gone` answer). The sender behind it
+/// never touches invites; the sync engine's `drop_invite_if_known` is the
+/// one other deleter, and it acts on room state, not on this request.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn timed_out_leave_does_not_drop_pending_invite() {
@@ -669,13 +674,8 @@ async fn membership_error_maps_to_status() {
             StatusCode::BAD_GATEWAY,
             "bad_gateway",
         ),
-        (
-            // ADR 0121 decision 5: no answer in time is a distinct 504, not
-            // the 502 above, because the homeserver may still finish it.
-            MembershipOutcome::Timeout("x".into()),
-            StatusCode::GATEWAY_TIMEOUT,
-            "gateway_timeout",
-        ),
+        // A timeout's `504` is covered on every route by
+        // `a_timed_out_membership_call_is_a_504_on_every_route`.
     ];
 
     for (outcome, want_status, want_code) in cases {
@@ -688,28 +688,80 @@ async fn membership_error_maps_to_status() {
 
 /// Every membership route answers a timeout with a `504 gateway_timeout`
 /// carrying the gateway's message, so a client can tell "may still finish"
-/// from "the homeserver refused" (ADR 0121 decision 5, issue #743). Leave and
-/// forget run under the room-entry timeout and the rest under the
-/// membership-mutation one, but the gateway reports both the same way.
+/// from "the homeserver refused" (ADR 0121 decision 5, issue #743). This pins
+/// the mapping only: which timeout each verb runs under, and its length, is
+/// the gateway's business (`axon-server` `gateway.rs`), not this route's.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn a_timed_out_membership_call_is_a_504_on_every_route() {
     let store = store().await;
     let account_id = Uuid::new_v4();
     let room_id = "!room:localhost";
-    let target = json!({ "user_id": "@bob:localhost" });
+    let user_id = "@bob:localhost";
+    let target = json!({ "user_id": user_id });
+    let room = || room_id.to_owned();
+    let user = || user_id.to_owned();
 
     let cases = [
-        ("leave", None, 30),
-        ("forget", None, 30),
-        ("invite", Some(target.clone()), 15),
-        ("kick", Some(target.clone()), 15),
-        ("ban", Some(target.clone()), 15),
-        ("unban", Some(target), 15),
+        (
+            "leave",
+            None,
+            MembershipCall::Leave {
+                account_id,
+                room_id: room(),
+            },
+        ),
+        (
+            "forget",
+            None,
+            MembershipCall::Forget {
+                account_id,
+                room_id: room(),
+            },
+        ),
+        (
+            "invite",
+            Some(target.clone()),
+            MembershipCall::Invite {
+                account_id,
+                room_id: room(),
+                user_id: user(),
+            },
+        ),
+        (
+            "kick",
+            Some(target.clone()),
+            MembershipCall::Kick {
+                account_id,
+                room_id: room(),
+                user_id: user(),
+                reason: None,
+            },
+        ),
+        (
+            "ban",
+            Some(target.clone()),
+            MembershipCall::Ban {
+                account_id,
+                room_id: room(),
+                user_id: user(),
+                reason: None,
+            },
+        ),
+        (
+            "unban",
+            Some(target),
+            MembershipCall::Unban {
+                account_id,
+                room_id: room(),
+                user_id: user(),
+                reason: None,
+            },
+        ),
     ];
 
-    for (verb, body, secs) in cases {
-        let message = format!("{verb} timed out after {secs}s");
+    for (verb, body, want_call) in cases {
+        let message = format!("{verb} timed out");
         let stub = Arc::new(StubMembership::failing(MembershipOutcome::Timeout(
             message.clone(),
         )));
@@ -726,6 +778,10 @@ async fn a_timed_out_membership_call_is_a_504_on_every_route() {
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{verb}");
         assert_eq!(response["error"]["code"], "gateway_timeout", "{verb}");
         assert_eq!(response["error"]["message"], message, "{verb}");
-        assert_eq!(stub.calls().len(), 1, "{verb} reached the sender once");
+        assert_eq!(
+            stub.calls(),
+            vec![want_call],
+            "{verb} reached the sender once, through its own method"
+        );
     }
 }
