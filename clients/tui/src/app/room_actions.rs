@@ -425,7 +425,9 @@ impl App {
             pending.step += 1;
             pending.retryable = true;
             // From the scheduled time, not the tick that noticed it, so the
-            // checks land 30/90/210/450 s after the `504`.
+            // checks land 30/90/210/450 s after the `504`. After a long stall
+            // (a suspended laptop) the overdue checks catch up one per tick,
+            // which is intended: each asks for one coalesced room-list read.
             pending.next_check += PENDING_MEMBERSHIP_CHECK_DELAYS
                 .get(pending.step)
                 .copied()
