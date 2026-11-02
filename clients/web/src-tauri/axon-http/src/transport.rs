@@ -140,8 +140,9 @@ pub struct Transport {
     /// Origins known to speak HTTP/2, as `https://host:port`. A property of
     /// the server rather than of a connection, so it outlives a `reset`, and
     /// with a store, a relaunch.
-    h2_origins: Mutex<HashSet<String>>,
-    store: Option<OriginStore>,
+    /// Shared with the store's writes, which run on the blocking pool.
+    h2_origins: Arc<Mutex<HashSet<String>>>,
+    store: Option<Arc<OriginStore>>,
     table: Mutex<Table>,
 }
 
@@ -158,8 +159,9 @@ pub struct Transport {
 /// A cache, so losing it costs one extra connection and nothing else.
 struct OriginStore {
     path: PathBuf,
-    /// Held across a snapshot and its write, so the last write is the latest
-    /// state.
+    /// Held across a snapshot and its write. Every change schedules a write
+    /// after it is made, and each write snapshots under this lock, so the last
+    /// write to run holds the latest state whatever order they run in.
     writing: Mutex<()>,
 }
 
@@ -201,7 +203,7 @@ impl OriginStore {
 
     /// Replace the file with `origins`, through a rename so a reader never
     /// sees half of it. A failure is ignored: the store is only a cache.
-    /// Blocking, but rare: once when an origin is learned or forgotten.
+    /// Blocking: called only from the blocking pool.
     fn save(&self, origins: &HashSet<String>) {
         let mut h2: Vec<String> = origins.iter().cloned().collect();
         h2.sort();
@@ -242,28 +244,37 @@ impl Transport {
     ) -> reqwest::Result<Self> {
         let counters = Arc::new(Counters::default());
         let clients = Self::build(&options, &counters)?;
-        let store = store.map(|path| OriginStore {
-            path,
-            writing: Mutex::new(()),
+        let store = store.map(|path| {
+            Arc::new(OriginStore {
+                path,
+                writing: Mutex::new(()),
+            })
         });
-        let h2_origins = store.as_ref().map(OriginStore::load).unwrap_or_default();
+        let h2_origins = store.as_deref().map(OriginStore::load).unwrap_or_default();
         Ok(Self {
             options,
             counters,
             current: RwLock::new(clients),
-            h2_origins: Mutex::new(h2_origins),
+            h2_origins: Arc::new(Mutex::new(h2_origins)),
             store,
             table: Mutex::new(Table::default()),
         })
     }
 
-    /// Write the known origins to the store, if there is one.
+    /// Write the known origins to the store, if there is one, on the
+    /// blocking pool: a request that just learned or forgot an origin goes on
+    /// without waiting for the disk, and a slow write blocks no async worker.
+    /// Only a change writes, so a burst of failures writes once.
     fn persist_origins(&self) {
-        if let Some(store) = &self.store {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let (store, origins) = (store.clone(), self.h2_origins.clone());
+        tokio::task::spawn_blocking(move || {
             let _writing = lock(&store.writing);
-            let origins = lock(&self.h2_origins).clone();
-            store.save(&origins);
-        }
+            let snapshot = lock(&origins).clone();
+            store.save(&snapshot);
+        });
     }
 
     fn build(options: &ClientOptions, counters: &Arc<Counters>) -> reqwest::Result<Clients> {

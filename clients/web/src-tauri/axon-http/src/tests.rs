@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper::body::{Body as HttpBody, Bytes, Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
@@ -807,6 +807,19 @@ fn stored_transport(path: &std::path::Path) -> Arc<Transport> {
     Arc::new(Transport::with_store(options, Some(path.to_owned())).unwrap())
 }
 
+/// Wait for the store at `path` to say `known` about `url`. The store is
+/// written on the blocking pool, after the request that changed it returned.
+async fn store_settles(path: &std::path::Path, url: &str, known: bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while stored_transport(path).knows_h2(url) != known {
+        assert!(
+            Instant::now() < deadline,
+            "the store never said {known} for {url}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn an_origin_known_from_an_earlier_launch_opens_one_connection() {
     let server = Server::start(true, ok_handler()).await;
@@ -816,6 +829,7 @@ async fn an_origin_known_from_an_earlier_launch_opens_one_connection() {
     fetch(&first, 0, get(&server.url("/"))).await;
     assert!(first.knows_h2(&server.url("/")));
     drop(first);
+    store_settles(&path, &server.url("/"), true).await;
 
     // A relaunch: a new transport, with nothing pooled, reading the store.
     let accepted = server.accepted();
@@ -839,7 +853,7 @@ async fn an_origin_that_stops_offering_http2_is_forgotten_in_the_store_too() {
         .await
         .unwrap_err();
     assert!(!transport.knows_h2(&server.url("/")));
-    assert!(!stored_transport(&path).knows_h2(&server.url("/")));
+    store_settles(&path, &server.url("/"), false).await;
 }
 
 #[test]
