@@ -434,6 +434,12 @@ impl SyncEngine {
         self.manager.homeserver_gates()
     }
 
+    /// Each running account's room-detail acquisition queue (ADR 0126), for
+    /// the API's room detail reads. Cheap to clone (an `Arc` internally).
+    pub fn room_detail_acquisitions(&self) -> crate::acquisition::RoomDetailAcquisitions {
+        self.manager.room_detail_acquisitions()
+    }
+
     /// Per-account sync-service state, for the API status surface
     /// (`GET /v1/status`). Cheap to clone (an `Arc` internally).
     pub fn sync_health(&self) -> SyncHealth {
@@ -2032,6 +2038,23 @@ async fn run_account(
         room_details.clone(),
     ));
 
+    // Room-detail acquisition (ADR 0126): one paced worker per account run,
+    // behind the homeserver gate. Reads reach it through the registration.
+    let acquisition = manager
+        .room_detail_acquisitions()
+        .register(account.account_id);
+    let acquisition_cancel = cancel.child_token();
+    let acquisition_handle = tokio::spawn(
+        crate::acquisition::Worker::new(
+            crate::acquisition::Homeserver::new(client.clone(), Arc::clone(&gate)),
+            store.clone(),
+            account.account_id,
+            room_details.clone(),
+            acquisition.queue(),
+        )
+        .run(acquisition_cancel.clone()),
+    );
+
     // Subscribe before `start`, so the first response is not missed on the
     // capacity-32 broadcast. This run owns the task: a child token and a join
     // below, the same as the other watchers. The engine tracker must not hold
@@ -2355,6 +2378,12 @@ async fn run_account(
     if let Err(err) = member_counts_handle.await {
         tracing::warn!(account_id = %account.account_id, error = %err, "member count worker did not shut down cleanly");
     }
+
+    acquisition_cancel.cancel();
+    if let Err(err) = acquisition_handle.await {
+        tracing::warn!(account_id = %account.account_id, error = %err, "room detail acquisition worker did not shut down cleanly");
+    }
+    drop(acquisition);
 
     state_redaction_cancel.cancel();
     if let Err(err) = state_redaction_handle.await {

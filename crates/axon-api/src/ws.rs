@@ -17,7 +17,8 @@
 //! `room_display_name.changed` carries a room's newly stored SDK-calculated
 //! display name (ADR 0118).
 //! `room_details.changed` names which per-room reads to repeat — `metadata`,
-//! `member_counts` — after a real change; it carries no values (ADR 0126).
+//! `member_counts`, `homeserver_details` — after a real change; it carries no
+//! values (ADR 0126).
 //! `invite.added` / `invite.removed` carry the pending-invite inbox (ADR 0091).
 //! `account_data.changed` carries persisted Matrix account data (`m.tag`,
 //! `m.direct`, …; ADR 0103). `preferences.changed` carries instance-wide
@@ -275,8 +276,9 @@ const ROOM_DETAILS_CHANGED: &str = "room_details.changed";
 #[derive(Debug, Serialize)]
 struct RoomDetailsFramePayload {
     room_id: String,
-    /// `metadata` (`GET …/metadata`) and `member_counts` (`GET …/info`), in
-    /// that order; never empty. Clients ignore values they do not know.
+    /// `metadata` (`GET …/metadata`), `member_counts` (`GET …/info`), and
+    /// `homeserver_details` (`GET …/homeserver_details`), in that order; never
+    /// empty. Clients ignore values they do not know.
     sources: Vec<&'static str>,
 }
 
@@ -285,6 +287,7 @@ fn room_detail_source(source: RoomDetailSource) -> &'static str {
     match source {
         RoomDetailSource::Metadata => "metadata",
         RoomDetailSource::MemberCounts => "member_counts",
+        RoomDetailSource::HomeserverDetails => "homeserver_details",
     }
 }
 
@@ -965,13 +968,18 @@ mod tests {
         let v = decode(LiveFrame::RoomDetailsChanged(RoomDetailsFrame {
             account_id,
             room_id: "!r:localhost".to_owned(),
-            sources: [RoomDetailSource::MemberCounts, RoomDetailSource::Metadata].into(),
+            sources: [
+                RoomDetailSource::HomeserverDetails,
+                RoomDetailSource::MemberCounts,
+                RoomDetailSource::Metadata,
+            ]
+            .into(),
         }));
         assert_eq!(v["type"], "room_details.changed");
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(
             v["payload"],
-            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts"]})
+            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details"]})
         );
     }
 
