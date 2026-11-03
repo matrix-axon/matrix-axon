@@ -173,6 +173,10 @@ Open the existing **Send sticker** picker and choose **Emoji** on desktop or the
 While editing, the smiley-face composer control toggles the emoji picker directly; the number of composer buttons stays the same.
 Tapping it again closes the picker and returns to the draft without changing the text or selection.
 The shortcut is also listed in keyboard help.
+Standard emoji appear immediately when selected from the picker or shortcode suggestions, or when you type the closing colon of a recognized shortcode such as `:+1:`.
+Undo/Redo uses the textarea's native history, and `\:+1:` keeps a shortcode literal.
+Pasted and restored shortcodes retain their text while composing and still expand when sent.
+Typing a recognized standard name chooses Unicode; to use a custom emoji or sticker with the same name, select its custom suggestion or picker entry.
 Custom emoji remain readable `:shortcodes:` while composing and become inline images in sent messages, replies, thread replies, edits, and attachment captions.
 Their plain-text fallback retains the shortcode.
 Room drafts preserve the selected image identity across reloads and pack changes, including different images with the same name.

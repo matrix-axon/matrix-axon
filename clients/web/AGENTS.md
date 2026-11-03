@@ -210,6 +210,8 @@ before starting a milestone.
   bare body; detected formatting sends `org.matrix.custom.html`. The server
   never interprets Markdown. Raw inline HTML in composer input is escaped.
 - **Inline composer emoji** (`src/inline-emoji.ts`, `components/EmojiPicker.tsx`): the full picker is shared by reactions and composers.
+  Standard shortcode completion and typing a recognized closing colon insert Unicode through the native editing helper; skip active IME, paste, escaped tokens, and slash commands.
+  Typing a standard name chooses Unicode; custom suggestions and picker entries retain their selected image even when names collide.
   Composer insertion uses the native textarea editing helper and saves bounded UTF-16 ranges with the chosen MXC and shortcode.
   Room draft values retain their interoperable `text` field and optionally carry `inline_emoji` bindings in the same atomic device-state value.
   Bindings must validate against the exact text and remain scoped to the composer/account/room.

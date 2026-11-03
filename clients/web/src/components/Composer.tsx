@@ -865,16 +865,24 @@ export function Composer({
     if (option === undefined || emojiQuery === null) {
       return
     }
+    const regularMessage = !commandsEnabled || !isSlashCommandDraft(draft)
+    const value =
+      !option.image && regularMessage
+        ? (resolveEmojiShortcode(option.value) ?? option.value)
+        : option.value
     const suffix = draft.slice(emojiQuery.end)
     const spacer = suffix === '' || !/^[\s.,!?;:)\]}]/.test(suffix) ? ' ' : ''
-    const next = `${draft.slice(0, emojiQuery.start)}${option.value}${spacer}${suffix}`
-    const nextCaret = emojiQuery.start + option.value.length + spacer.length
-    if (option.image && reactionEmojiQuery === null && stickerQuery === null) {
+    const next = `${draft.slice(0, emojiQuery.start)}${value}${spacer}${suffix}`
+    const nextCaret = emojiQuery.start + value.length + spacer.length
+    if (
+      (!option.image && regularMessage) ||
+      (option.image && reactionEmojiQuery === null && stickerQuery === null)
+    ) {
       if (
         !insertEmojiText(
           emojiQuery.start,
           emojiQuery.end,
-          option.value,
+          value,
           option.image,
           spacer,
         )
@@ -1351,6 +1359,28 @@ export function Composer({
                 start: el.selectionStart,
                 end: el.selectionEnd,
                 type: event.inputType,
+              }
+              // Replace the token in the same native edit as the closing
+              // colon, retaining undo and avoiding edits during IME or paste.
+              if (
+                event.cancelable &&
+                event.inputType === 'insertText' &&
+                event.data === ':' &&
+                !event.isComposing &&
+                el.selectionStart === el.selectionEnd &&
+                !(commandsEnabled && isSlashCommandDraft(el.value))
+              ) {
+                const query = referenceTokenQuery(el.value, el.selectionStart)
+                const unicode =
+                  query?.kind === 'emoji'
+                    ? resolveEmojiShortcode(query.query)
+                    : null
+                if (
+                  query &&
+                  unicode !== null &&
+                  insertEmojiText(query.start, query.end, unicode)
+                )
+                  event.preventDefault()
               }
             }}
             onInput={(event) => {

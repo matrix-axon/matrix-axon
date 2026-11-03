@@ -773,7 +773,7 @@ describe('Composer slash command autocomplete', () => {
     expect(menu.textContent).toContain(':+1:')
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
-    expect(textarea.value).toBe('send :+1: ')
+    expect(textarea.value).toBe('send 👍 ')
     expect(queryByRole('listbox', { name: 'Emoji matches' })).toBeNull()
   })
 
