@@ -7450,7 +7450,7 @@ DEALINGS IN THE SOFTWARE.
   - adler2 2.0.1
   - anyhow 1.0.104
   - async-channel 2.5.0
-  - async-executor 1.14.0
+  - async-executor 1.14.1
   - async-io 2.6.0
   - async-lock 3.4.2
   - async-process 2.5.0
