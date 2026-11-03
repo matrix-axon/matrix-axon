@@ -136,6 +136,9 @@ Debug exports use those development profiles; App Store exports default to `iOS 
 Override custom distribution profiles with `AXON_IOS_APP_EXPORT_PROFILE` and `AXON_IOS_SHARE_EXPORT_PROFILE`; debugging always uses the development profiles even when distribution overrides are present.
 Manual hook invocations can select the export method with `AXON_IOS_EXPORT_METHOD`.
 Manual exports require manually managed profiles for both bundles; Xcode rejects a managed containing-app profile in a manual export.
+Tauri archives with signing disabled and blanks `CODE_SIGN_ENTITLEMENTS`, then signs only the app binary; export takes an archived item's entitlements from its signature.
+The generator therefore adds a post-build script to the extension target that ad-hoc signs it with `Share/Share.entitlements` when the archive is unsigned, and export replaces that signature.
+Without it the extension is exported with no App Group or shared Keychain, and `check-ios-sharing.py` fails with "Signed App Group missing".
 The Apple Store workflow selects both targets' archive and export profiles explicitly by validated UUID.
 Its four effective iOS profile inputs must contain manually managed profiles with the required shared capabilities; the credential check rejects Xcode-managed profiles before building.
 Optional `IOS_MANUAL_APPSTORE_PROFILE` and `IOS_MANUAL_DEVELOPMENT_PROFILE` repository secrets take precedence over the containing-app profile secrets, allowing older automatic-signing branches to keep using their existing Xcode-managed profiles.
