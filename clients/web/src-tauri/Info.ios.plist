@@ -47,9 +47,11 @@
     that talks to it over TLS and nothing else.
 
     Recorded because the "no encryption at all" reading would be wrong, and
-    someone will check: the shell routes `fetch` through
-    `@tauri-apps/plugin-http` (`src/platform/tauri.ts`), so it links rustls
-    rather than using Apple's TLS.
+    someone will check: the shell routes `fetch` through its own transport,
+    `tauri-plugin-axon-http` (`src-tauri/axon-http`, built on `reqwest` with
+    the `rustls-tls` feature), and the live socket through
+    `tauri-plugin-websocket`, so it links rustls rather than using Apple's
+    TLS.
 
     That last part is why this basis is not settled. In Apple's questionnaire,
     "standard algorithms instead of, or in addition to, the OS's" is a

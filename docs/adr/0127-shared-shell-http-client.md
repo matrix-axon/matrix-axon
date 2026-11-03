@@ -250,16 +250,17 @@ Error statuses (5xx, 429, 503) are application policy, and belong with ADR 0122'
 
 ### 8. Authority is unchanged
 
-The new commands accept any `http` or `https` URL on any host and port: the same reach the plugin's `http(s)://*:*` scope grants today.
+The new commands accept any `http` or `https` URL on any host and port: the same reach `tauri-plugin-http`'s `http(s)://*:*` scope granted.
 The bearer token stays in JavaScript.
 This is a transport change, not the narrower design ADR 0102 § 2 records (paths instead of URLs, and a credential the shell holds).
 
 It is that design's prerequisite, though.
 Once the transport is an in-repo command, narrowing it means changing the command's arguments, not replacing its plumbing.
 That step stays sequenced with the keychain work ([issue 481](https://github.com/matrix-axon/matrix-axon/issues/481)), as ADR 0102 says, and is tracked in [issue 893](https://github.com/matrix-axon/matrix-axon/issues/893).
-Until it lands, the any-URL reach exists through two paths during the toggle release: the old plugin and the new commands.
+Until it lands, any `http` or `https` URL is reachable, through one path: the new commands.
 
-`tauri-plugin-http` and its capability entry are removed in the release after this ships, when the developer toggle goes ([issue 956](https://github.com/matrix-axon/matrix-axon/issues/956)), which leaves the new commands as the only path.
+During the toggle release (v0.1.21 and v0.1.22) there were two, the old plugin and the new commands.
+`tauri-plugin-http` and its `http:default` capability entry were removed with the developer toggle in delivery step 3 ([PR 957](https://github.com/matrix-axon/matrix-axon/pull/957), [issue 956](https://github.com/matrix-axon/matrix-axon/issues/956)).
 The WebSocket stays on `tauri-plugin-websocket`: it is one long-lived connection, so it was never part of the problem.
 
 ## What this does not decide
@@ -323,7 +324,9 @@ It helps, but every remaining request still pays a handshake, and the app would 
 2. The plugin, its JavaScript binding, the `Platform.fetch` swap behind the developer toggle, the new failure kinds, `version` on traces and `transport:stats`.
    All of it is in the web silo (`clients/web`, including `src-tauri`).
    It may land as two PRs: the Rust plugin with its tests, then the client wiring.
+   Done: [PR 896](https://github.com/matrix-axon/matrix-axon/pull/896) (the plugin) and [PR 918](https://github.com/matrix-axon/matrix-axon/pull/918) (the wiring), shipped in v0.1.21.
 3. After one release with field readings: remove `tauri-plugin-http`, its capability entry and the toggle.
+   Done: [PR 957](https://github.com/matrix-axon/matrix-axon/pull/957), with the readings recorded on [issue 956](https://github.com/matrix-axon/matrix-axon/issues/956).
 
 ## Verification
 
