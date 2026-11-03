@@ -94,8 +94,20 @@ impl Entry {
 #[derive(Default)]
 struct QueueState {
     queued: VecDeque<Entry>,
+    /// The job the worker has taken. It reads as `queued` while it waits for
+    /// its pacing interval or a gate permit, and as `running` only while a
+    /// request is in flight (`sending`).
     running: Option<Entry>,
+    sending: bool,
+    /// Jobs whose last run could not read or record the cache, with when they
+    /// may queue again. A read cannot turn such a job straight into another
+    /// homeserver request; bounded by [`COOLDOWN_CAPACITY`].
+    cooldown: VecDeque<(OwnedRoomId, RoomDetailJob, Instant)>,
 }
+
+/// The most jobs held back after a local failure; the oldest is forgotten
+/// first.
+const COOLDOWN_CAPACITY: usize = 2 * QUEUE_CAPACITY;
 
 /// One account's job queue. Queue membership and activity live in memory
 /// only, so a restart cannot leave a job permanently pending.
@@ -124,8 +136,14 @@ impl Queue {
     ) -> Option<(OwnedRoomId, RoomDetailJob)> {
         let mut state = self.lock();
         let room = room_id.as_str();
+        let now = Instant::now();
+        state.cooldown.retain(|(_, _, until)| *until > now);
         if state.running.as_ref().is_some_and(|e| e.is(room, job))
             || state.queued.iter().any(|e| e.is(room, job))
+            || state
+                .cooldown
+                .iter()
+                .any(|(id, kind, _)| *kind == job && id.as_str() == room)
         {
             return None;
         }
@@ -146,9 +164,16 @@ impl Queue {
     /// Where `job` stands, recording that a read saw it.
     fn observe(&self, room_id: &str, job: RoomDetailJob) -> JobActivity {
         let mut state = self.lock();
+        let sending = state.sending;
         if let Some(entry) = state.running.as_mut().filter(|e| e.is(room_id, job)) {
             entry.observed = true;
-            return JobActivity::Running;
+            // Waiting for the pacing interval or a gate permit is queueing,
+            // never running (ADR 0126 decision 3).
+            return if sending {
+                JobActivity::Running
+            } else {
+                JobActivity::Queued
+            };
         }
         if let Some(entry) = state.queued.iter_mut().find(|e| e.is(room_id, job)) {
             entry.observed = true;
@@ -157,7 +182,8 @@ impl Queue {
         JobActivity::Idle
     }
 
-    /// Wait for the next job and mark it running.
+    /// Wait for the next job and take it. It reads as queued until
+    /// [`sending`](Self::sending) marks a request in flight.
     async fn next(&self) -> (OwnedRoomId, RoomDetailJob) {
         loop {
             {
@@ -174,9 +200,32 @@ impl Queue {
         }
     }
 
-    /// End the running job; whether a read saw it.
-    fn finish(&self) -> bool {
-        self.lock().running.take().is_some_and(|e| e.observed)
+    /// Whether the taken job has a request in flight: set once it holds a
+    /// gate permit, cleared when the request ends.
+    fn sending(&self, sending: bool) {
+        self.lock().sending = sending;
+    }
+
+    /// End the taken job; whether a read saw it. A job that could not read
+    /// or record the cache is held back for [`FAILURE_BACKOFF_MIN`], so the
+    /// frame that answers its observer cannot requeue it at once.
+    fn finish(&self, local_failure: bool) -> bool {
+        let mut state = self.lock();
+        state.sending = false;
+        let Some(entry) = state.running.take() else {
+            return false;
+        };
+        if local_failure {
+            if state.cooldown.len() >= COOLDOWN_CAPACITY {
+                state.cooldown.pop_front();
+            }
+            state.cooldown.push_back((
+                entry.room_id,
+                entry.job,
+                Instant::now() + FAILURE_BACKOFF_MIN,
+            ));
+        }
+        entry.observed
     }
 
     fn depth(&self) -> usize {
@@ -306,8 +355,9 @@ pub(crate) enum Reply {
 #[async_trait]
 pub(crate) trait Upstream: Send + Sync {
     /// `GET` the client-server API path made of `segments`, reading a `200`
-    /// body only when `read_body` is set.
-    async fn get(&self, segments: &[&str], read_body: bool) -> Reply;
+    /// body only when `read_body` is set. Calls `admitted` once the request
+    /// may go out, after any wait for a gate permit.
+    async fn get(&self, segments: &[&str], read_body: bool, admitted: &(dyn Fn() + Sync)) -> Reply;
 }
 
 /// The account's homeserver, behind its load gate.
@@ -318,25 +368,26 @@ pub(crate) struct Homeserver {
 }
 
 impl Homeserver {
-    pub(crate) fn new(client: Client, gate: Arc<HomeserverGate>) -> Self {
-        Self {
+    /// Fails only if the HTTP client cannot initialize (TLS, say); the caller
+    /// then runs the account without acquisition.
+    pub(crate) fn new(client: Client, gate: Arc<HomeserverGate>) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             client,
-            http: http_client(),
+            http: http_client()?,
             gate,
-        }
+        })
     }
 }
 
 /// Match the SDK's production HTTP defaults, without redirects, so the body
 /// limit and the access token stay with the homeserver.
-fn http_client() -> reqwest::Client {
+fn http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .user_agent(crate::client::user_agent())
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(4))
         .build()
-        .expect("acquisition HTTP client must build")
 }
 
 fn endpoint(homeserver: &Url, segments: &[&str]) -> Option<Url> {
@@ -353,10 +404,11 @@ fn endpoint(homeserver: &Url, segments: &[&str]) -> Option<Url> {
 
 #[async_trait]
 impl Upstream for Homeserver {
-    async fn get(&self, segments: &[&str], read_body: bool) -> Reply {
+    async fn get(&self, segments: &[&str], read_body: bool, admitted: &(dyn Fn() + Sync)) -> Reply {
         // Waiting for a permit is not part of the request's timeout, and a
-        // closed gate is never a failure.
+        // closed gate is never a failure: the job still reads as queued.
         let permit = self.gate.acquire(REQUEST_TIMEOUT).await;
+        admitted();
         let Some(token) = self.client.access_token() else {
             permit.finish(Outcome::Local);
             return Reply::Failed(NoAnswer::Unauthorized);
@@ -416,8 +468,7 @@ async fn send(http: &reqwest::Client, url: Url, token: &str, read_body: bool) ->
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|seconds| ms(Duration::from_secs(seconds)));
+        .and_then(|value| retry_after(value, chrono::Utc::now()));
     let body: Option<Value> = read_bounded_body(response, MAX_ERROR_BYTES)
         .await
         .ok()
@@ -439,6 +490,17 @@ async fn send(http: &reqwest::Client, url: Url, token: &str, read_body: bool) ->
         errcode,
         retry_after_ms,
     }
+}
+
+/// A `Retry-After` value as milliseconds from `now`: delta-seconds, or an
+/// HTTP-date (IMF-fixdate). A date in the past is no delay.
+fn retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(ms(Duration::from_secs(seconds)));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some((at.timestamp_millis() - now.timestamp_millis()).max(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +545,7 @@ pub(crate) fn interpret(kind: DetailKind, reply: Reply) -> DetailOutcome {
             errcode,
             retry_after_ms,
         } => match (status, errcode.as_deref()) {
-            (401, _) => failure("unauthorized", None),
+            (401, _) => failure("unauthorized", retry_after_ms),
             (403, _) => answer("forbidden", None, CONCLUSIVE_DENIAL_TTL),
             (404, Some("M_NOT_FOUND")) if kind == DetailKind::Absence => {
                 answer("absent", None, ABSENCE_TTL)
@@ -591,12 +653,15 @@ impl<U: Upstream> Worker<U> {
         }
     }
 
-    /// Run the job [`Queue::next`] just marked running, end it, and announce
-    /// it when it changed something or a read saw it queued or running.
+    /// Run the job [`Queue::next`] just took, end it, and announce it when it
+    /// changed something or a read saw it queued or running.
     async fn step(&mut self, room_id: &RoomId, job: RoomDetailJob) {
-        let changed = self.run_job(room_id, job).await;
-        let observed = self.queue.finish();
-        if changed || observed {
+        let ran = self.run_job(room_id, job).await;
+        let observed = self.queue.finish(ran.local_failure);
+        // An observer hears the job ended even after a local failure: the
+        // job is held back, so its re-read sees `idle` rather than queueing
+        // another request.
+        if ran.changed || observed {
             let source = match job {
                 RoomDetailJob::Absence => RoomDetailSource::Metadata,
                 RoomDetailJob::LocalAliases | RoomDetailJob::DirectoryVisibility => {
@@ -607,18 +672,20 @@ impl<U: Upstream> Worker<U> {
         }
     }
 
-    /// Run one job; whether it changed something a client reads.
-    async fn run_job(&mut self, room_id: &RoomId, job: RoomDetailJob) -> bool {
+    /// Run one job.
+    async fn run_job(&mut self, room_id: &RoomId, job: RoomDetailJob) -> Ran {
         let account_id = self.account_id;
+        let mut ran = Ran::default();
         let epoch = match self.store.joined_epoch(account_id, room_id.as_str()).await {
             Ok(Some(epoch)) => epoch,
             Ok(None) => {
                 tracing::debug!(target: "axon_sync::acquisition", %account_id, %room_id, kind = ?job, outcome = "not_joined", "skipped room detail acquisition");
-                return false;
+                return ran;
             }
             Err(error) => {
                 tracing::warn!(target: "axon_sync::acquisition", %account_id, %room_id, kind = ?job, reason = error.diagnostic_reason(), "room detail acquisition could not read membership");
-                return false;
+                ran.local_failure = true;
+                return ran;
             }
         };
         match job {
@@ -641,16 +708,17 @@ impl<U: Upstream> Worker<U> {
                     .await
                 {
                     Ok(snapshot) if snapshot.rows.first().is_some_and(|row| !row.due) => {
-                        return false
+                        return ran
                     }
                     Ok(_) => {}
                     Err(error) => {
                         tracing::warn!(target: "axon_sync::acquisition", %account_id, %room_id, kind = kind.as_str(), reason = error.diagnostic_reason(), "room detail acquisition could not read its cache");
-                        return false;
+                        ran.local_failure = true;
+                        return ran;
                     }
                 }
-                self.request(room_id, epoch, kind, "", &segments).await
-                    == Some(DetailWrite::Changed)
+                ran.record(self.request(room_id, epoch, kind, "", &segments).await);
+                ran
             }
             RoomDetailJob::Absence => {
                 let types = match self
@@ -661,39 +729,36 @@ impl<U: Upstream> Worker<U> {
                     Ok(types) => types,
                     Err(error) => {
                         tracing::warn!(target: "axon_sync::acquisition", %account_id, %room_id, kind = "absence", reason = error.diagnostic_reason(), "room detail acquisition could not read its cache");
-                        return false;
+                        ran.local_failure = true;
+                        return ran;
                     }
                 };
-                let mut changed = false;
                 for state_type in &types {
                     let segments = ["rooms", room_id.as_str(), "state", state_type.as_str(), ""];
-                    match self
+                    let write = self
                         .request(room_id, epoch, DetailKind::Absence, state_type, &segments)
-                        .await
-                    {
-                        Some(DetailWrite::Changed) => changed = true,
-                        // State that arrived during the request fences only
-                        // its own type; a membership change fences the rest.
-                        Some(DetailWrite::Fenced)
-                            if self
-                                .store
-                                .joined_epoch(account_id, room_id.as_str())
-                                .await
-                                .ok()
-                                .flatten()
-                                != Some(epoch) =>
-                        {
-                            break
+                        .await;
+                    ran.record(write);
+                    // State that arrived during the request fences only its
+                    // own type; a membership change fences the rest. A failed
+                    // membership read is not a membership change.
+                    if write == Some(DetailWrite::Fenced) {
+                        match self.store.joined_epoch(account_id, room_id.as_str()).await {
+                            Ok(current) if current != Some(epoch) => break,
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::warn!(target: "axon_sync::acquisition", %account_id, %room_id, kind = "absence", reason = error.diagnostic_reason(), "room detail acquisition could not re-read membership; continuing");
+                            }
                         }
-                        _ => {}
                     }
                 }
-                changed
+                ran
             }
         }
     }
 
-    /// Send one paced request and record its outcome.
+    /// Send one paced request and record its outcome; `None` when the outcome
+    /// could not be recorded.
     async fn request(
         &mut self,
         room_id: &RoomId,
@@ -705,13 +770,25 @@ impl<U: Upstream> Worker<U> {
         if let Some(last) = self.last_request {
             tokio::time::sleep_until(last + JOB_INTERVAL).await;
         }
-        let started = Instant::now();
-        self.last_request = Some(started);
+        self.last_request = Some(Instant::now());
+        // The job reads as running only from admission, and the request's
+        // elapsed time excludes the wait for a gate permit.
+        let admitted_at = Mutex::new(None);
+        let queue = Arc::clone(&self.queue);
         let reply = self
             .upstream
-            .get(segments, kind != DetailKind::Absence)
+            .get(segments, kind != DetailKind::Absence, &|| {
+                *admitted_at
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+                queue.sending(true);
+            })
             .await;
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        self.queue.sending(false);
+        let elapsed_ms = admitted_at
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map_or(0, |at| at.elapsed().as_millis() as u64);
         let outcome = interpret(kind, reply);
         let account_id = self.account_id;
         let label = outcome_label(&outcome);
@@ -744,6 +821,26 @@ impl<U: Upstream> Worker<U> {
             tracing::warn!(target: "axon_sync::acquisition", %account_id, %room_id, kind = kind_name, state_type, outcome = label, elapsed_ms, "room detail acquisition keeps failing; backing off");
         }
         Some(write)
+    }
+}
+
+/// What one job did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Ran {
+    /// Something a client reads changed.
+    changed: bool,
+    /// The cache could not be read or a result could not be recorded, so no
+    /// backoff was stored; the queue holds the job back instead.
+    local_failure: bool,
+}
+
+impl Ran {
+    fn record(&mut self, write: Option<DetailWrite>) {
+        match write {
+            Some(DetailWrite::Changed) => self.changed = true,
+            Some(_) => {}
+            None => self.local_failure = true,
+        }
     }
 }
 

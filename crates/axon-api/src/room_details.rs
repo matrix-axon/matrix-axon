@@ -9,7 +9,7 @@
 
 use axon_core::{JobActivity, RoomDetailJob};
 use axon_store::DetailRow;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -259,7 +259,7 @@ pub(crate) fn local_aliases(
         status,
         HomeserverDetailStatus::Available | HomeserverDetailStatus::Partial
     )
-    .then(|| row.and_then(|row| serde_json::from_value(row.value.clone()?).ok()))
+    .then(|| row.and_then(|row| Vec::<String>::deserialize(row.value.as_ref()?).ok()))
     .flatten();
     LocalAliasesDetailDto {
         status: if aliases.is_none()

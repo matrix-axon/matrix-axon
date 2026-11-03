@@ -84,8 +84,8 @@ impl<T: ToSchema> AbsenceFields for CachedRoomMetadata<T> {
     }
 
     fn set_absence(&mut self, confirmed_at: Option<i64>, check: Option<DetailRefreshDto>) {
-        // A confirmation beside a tuple (one that raced the tuple's insert)
-        // is never shown: the tuple describes the type.
+        // A confirmation is never shown beside a tuple, which describes the
+        // type. The store already keeps the two from committing together.
         if self.has_no_tuple() {
             self.absence_confirmed_at = confirmed_at;
             self.absence_check = check;

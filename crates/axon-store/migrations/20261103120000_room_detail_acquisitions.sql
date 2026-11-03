@@ -82,11 +82,24 @@ CREATE TRIGGER room_summaries_delete_left_acquisitions
     WHEN (NEW.hidden_left AND NOT OLD.hidden_left)
     EXECUTE FUNCTION delete_left_room_detail_acquisitions();
 
+-- Serializes a tuple's insert with an absence confirmation of the same type.
+-- Under READ COMMITTED neither can see the other's uncommitted row, so without
+-- it both could commit: the tuple's delete finds no confirmation yet, and the
+-- confirmation's check finds no tuple yet. Whichever takes the lock second
+-- runs its next statement on a snapshot that includes the first's commit.
+CREATE FUNCTION lock_room_absence(p_account_id UUID, p_room_id TEXT, p_state_type TEXT)
+RETURNS VOID AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_account_id::text || '/' || p_room_id || '/' || p_state_type, 0));
+END;
+$$ LANGUAGE plpgsql;
+
 -- A tuple of a confirmed-absent type supersedes the confirmation. Reads also
--- ignore a confirmation beside a tuple, which covers a confirmation committed
--- concurrently with the tuple's insert.
+-- ignore a confirmation beside a tuple, as a second line of defence.
 CREATE FUNCTION delete_superseded_absence() RETURNS TRIGGER AS $$
 BEGIN
+    PERFORM lock_room_absence(NEW.account_id, NEW.room_id, NEW.event_type);
     DELETE FROM room_detail_acquisitions
     WHERE account_id = NEW.account_id AND room_id = NEW.room_id
       AND kind = 'absence' AND state_type = NEW.event_type;

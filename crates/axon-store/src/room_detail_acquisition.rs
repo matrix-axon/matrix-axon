@@ -235,7 +235,8 @@ impl Store {
     /// Record how a request ended, if the room's membership epoch is still
     /// `epoch` and the account is still an active member. An absence
     /// confirmation also requires that no tuple of its type exists, so state
-    /// sync delivered during the request wins. Takes a share lock on the
+    /// sync delivered during the request wins; it serializes with that
+    /// tuple's insert on an advisory lock, so the two cannot both commit. Takes a share lock on the
     /// summary row for the commit only; nothing is held across the request.
     pub async fn record_room_detail(
         &self,
@@ -265,6 +266,15 @@ impl Store {
             }
         );
         if confirms_absence {
+            // Taken before the check, in its own statement, so the check's
+            // snapshot includes any tuple whose insert held the lock first,
+            // and a tuple inserted after this commits sees the confirmation.
+            sqlx_core::query::query("SELECT lock_room_absence($1, $2, $3)")
+                .bind(account_id)
+                .bind(room_id)
+                .bind(state_type)
+                .execute(&mut *tx)
+                .await?;
             let (present,): (bool,) = sqlx_core::query_as::query_as(
                 "SELECT EXISTS (SELECT 1 FROM room_state WHERE account_id = $1 \
                  AND room_id = $2 AND event_type = $3 AND state_key = '')",

@@ -488,3 +488,63 @@ async fn absence_confirmations_yield_to_state() {
 
     common::cleanup_account(store.pool(), account_id).await;
 }
+
+/// A confirmation racing an uncommitted tuple of its type waits for it and
+/// then loses, rather than committing beside it: neither side can see the
+/// other's uncommitted row, so they serialize on an advisory lock.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_confirmation_cannot_commit_beside_a_concurrent_tuple() {
+    let store = common::migrated_store().await;
+    let (account_id, user) = account(&store).await;
+    common::insert_message(&store, account_id, ROOM, 1, "fixture").await;
+    membership(&store, account_id, &user, "join").await;
+    let epoch = store.joined_epoch(account_id, ROOM).await.unwrap().unwrap();
+
+    // The tuple's insert holds its transaction open, past its trigger.
+    let pool = common::raw_pool().await;
+    let mut tuple = pool.begin().await.unwrap();
+    sqlx_core::query::query(
+        "INSERT INTO room_state (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content) \
+         VALUES ($1, $2, 'm.room.server_acl', '', '$acl', $3, 1, '{\"allow\": [\"*\"]}')",
+    )
+    .bind(account_id)
+    .bind(ROOM)
+    .bind(&user)
+    .execute(&mut *tuple)
+    .await
+    .unwrap();
+    let confirm = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .record_room_detail(
+                    account_id,
+                    ROOM,
+                    epoch,
+                    DetailKind::Absence,
+                    "m.room.server_acl",
+                    &answer("absent", None),
+                )
+                .await
+                .unwrap()
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !confirm.is_finished(),
+        "the confirmation waits for the tuple"
+    );
+    tuple.commit().await.unwrap();
+    assert_eq!(confirm.await.unwrap(), DetailWrite::Fenced);
+    let (rows,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT count(*) FROM room_detail_acquisitions WHERE account_id = $1 AND kind = 'absence'",
+    )
+    .bind(account_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows, 0);
+
+    common::cleanup_account(store.pool(), account_id).await;
+}

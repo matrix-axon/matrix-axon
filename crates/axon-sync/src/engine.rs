@@ -2040,20 +2040,31 @@ async fn run_account(
 
     // Room-detail acquisition (ADR 0126): one paced worker per account run,
     // behind the homeserver gate. Reads reach it through the registration.
-    let acquisition = manager
-        .room_detail_acquisitions()
-        .register(account.account_id);
+    // If its HTTP client cannot initialize, the account runs without it and
+    // reads leave every detail unknown.
     let acquisition_cancel = cancel.child_token();
-    let acquisition_handle = tokio::spawn(
-        crate::acquisition::Worker::new(
-            crate::acquisition::Homeserver::new(client.clone(), Arc::clone(&gate)),
-            store.clone(),
-            account.account_id,
-            room_details.clone(),
-            acquisition.queue(),
-        )
-        .run(acquisition_cancel.clone()),
-    );
+    let acquisition = match crate::acquisition::Homeserver::new(client.clone(), Arc::clone(&gate)) {
+        Ok(homeserver) => {
+            let registration = manager
+                .room_detail_acquisitions()
+                .register(account.account_id);
+            let handle = tokio::spawn(
+                crate::acquisition::Worker::new(
+                    homeserver,
+                    store.clone(),
+                    account.account_id,
+                    room_details.clone(),
+                    registration.queue(),
+                )
+                .run(acquisition_cancel.clone()),
+            );
+            Some((registration, handle))
+        }
+        Err(error) => {
+            tracing::warn!(target: "axon_sync::acquisition", account_id = %account.account_id, error = %error, "room detail acquisition disabled for this run: its HTTP client did not initialize");
+            None
+        }
+    };
 
     // Subscribe before `start`, so the first response is not missed on the
     // capacity-32 broadcast. This run owns the task: a child token and a join
@@ -2380,10 +2391,12 @@ async fn run_account(
     }
 
     acquisition_cancel.cancel();
-    if let Err(err) = acquisition_handle.await {
-        tracing::warn!(account_id = %account.account_id, error = %err, "room detail acquisition worker did not shut down cleanly");
+    if let Some((registration, handle)) = acquisition {
+        if let Err(err) = handle.await {
+            tracing::warn!(account_id = %account.account_id, error = %err, "room detail acquisition worker did not shut down cleanly");
+        }
+        drop(registration);
     }
-    drop(acquisition);
 
     state_redaction_cancel.cancel();
     if let Err(err) = state_redaction_handle.await {

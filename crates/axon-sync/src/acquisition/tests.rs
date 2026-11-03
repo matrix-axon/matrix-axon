@@ -195,7 +195,7 @@ async fn a_running_job_is_not_queued_again_and_reads_are_remembered() {
         None
     );
     assert_eq!(queue.depth(), 0, "the running job answers this read too");
-    assert!(!queue.finish(), "nobody read it");
+    assert!(!queue.finish(false), "nobody read it");
     queue.push(room.clone(), RoomDetailJob::DirectoryVisibility);
     assert_eq!(
         queue.observe("!r:localhost", RoomDetailJob::DirectoryVisibility),
@@ -204,13 +204,117 @@ async fn a_running_job_is_not_queued_again_and_reads_are_remembered() {
     queue.next().await;
     assert_eq!(
         queue.observe("!r:localhost", RoomDetailJob::DirectoryVisibility),
+        JobActivity::Queued,
+        "taken but waiting for its interval or a gate permit"
+    );
+    queue.sending(true);
+    assert_eq!(
+        queue.observe("!r:localhost", RoomDetailJob::DirectoryVisibility),
         JobActivity::Running
     );
-    assert!(queue.finish(), "a read saw it");
+    queue.sending(false);
+    assert_eq!(
+        queue.observe("!r:localhost", RoomDetailJob::DirectoryVisibility),
+        JobActivity::Queued,
+        "between an absence job's requests"
+    );
+    assert!(queue.finish(false), "a read saw it");
     assert_eq!(
         queue.observe("!r:localhost", RoomDetailJob::DirectoryVisibility),
         JobActivity::Idle
     );
+}
+
+/// A job that could not read or record the cache stored no backoff, so the
+/// queue holds it back; otherwise its observer's re-read would requeue it at
+/// once and send another request.
+#[tokio::test(start_paused = true)]
+async fn a_local_failure_holds_the_job_back_for_a_minute() {
+    let queue = Queue::default();
+    let room = room_id!("!r:localhost").to_owned();
+    queue.push(room.clone(), RoomDetailJob::Absence);
+    queue.next().await;
+    queue.finish(true);
+    queue.push(room.clone(), RoomDetailJob::Absence);
+    queue.push(room.clone(), RoomDetailJob::LocalAliases);
+    assert_eq!(queue.depth(), 1, "only the failed job is held back");
+    assert_eq!(
+        queue.observe("!r:localhost", RoomDetailJob::Absence),
+        JobActivity::Idle
+    );
+    tokio::time::advance(FAILURE_BACKOFF_MIN).await;
+    queue.push(room.clone(), RoomDetailJob::Absence);
+    assert_eq!(queue.depth(), 2);
+    // The hold-back list is bounded.
+    for i in 0..COOLDOWN_CAPACITY + 5 {
+        let room = OwnedRoomId::try_from(format!("!c{i}:localhost")).unwrap();
+        queue.lock().running = Some(Entry {
+            room_id: room,
+            job: RoomDetailJob::Absence,
+            observed: false,
+        });
+        queue.finish(true);
+    }
+    assert_eq!(queue.lock().cooldown.len(), COOLDOWN_CAPACITY);
+}
+
+#[test]
+fn retry_after_accepts_seconds_and_http_dates() {
+    let now = chrono::DateTime::parse_from_rfc2822("Tue, 03 Nov 2026 12:00:00 GMT")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert_eq!(retry_after(" 120 ", now), Some(120_000));
+    assert_eq!(
+        retry_after("Tue, 03 Nov 2026 12:02:30 GMT", now),
+        Some(150_000)
+    );
+    assert_eq!(
+        retry_after("Tue, 03 Nov 2026 11:00:00 GMT", now),
+        Some(0),
+        "a past date is no delay"
+    );
+    assert_eq!(retry_after("soon", now), None);
+    match interpret(
+        DetailKind::LocalAliases,
+        Reply::Status {
+            status: 401,
+            errcode: Some("M_UNKNOWN_TOKEN".into()),
+            retry_after_ms: Some(30_000),
+        },
+    ) {
+        DetailOutcome::Failure {
+            category,
+            retry_after_ms,
+            ..
+        } => assert_eq!((category, retry_after_ms), ("unauthorized", Some(30_000))),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A request waiting for a gate permit has not been admitted, so its job
+/// still reads as queued (ADR 0126 decision 3).
+#[tokio::test]
+async fn a_request_is_admitted_only_with_a_gate_permit() {
+    let (address, _) = mock_homeserver().await;
+    let gate = HomeserverGate::for_test();
+    gate.open_for_test();
+    let homeserver =
+        Arc::new(Homeserver::new(sdk_client(address).await, Arc::clone(&gate)).unwrap());
+    let admitted = Arc::new(AtomicBool::new(false));
+    let waiting = tokio::spawn({
+        let (homeserver, admitted) = (Arc::clone(&homeserver), Arc::clone(&admitted));
+        async move {
+            homeserver
+                .get(&["rooms", "!r:localhost", "aliases"], true, &|| {
+                    admitted.store(true, Ordering::SeqCst)
+                })
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(gate.snapshot().waiting, 1, "parked at the gate");
+    assert!(!admitted.load(Ordering::SeqCst));
+    waiting.abort();
 }
 
 #[test]
@@ -333,10 +437,11 @@ async fn mock_homeserver() -> (std::net::SocketAddr, Arc<AtomicBool>) {
 #[tokio::test]
 async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
     let (address, unauthorized) = mock_homeserver().await;
-    let homeserver = Homeserver::new(sdk_client(address).await, HomeserverGate::for_test());
+    let homeserver =
+        Homeserver::new(sdk_client(address).await, HomeserverGate::for_test()).unwrap();
     assert_eq!(
         homeserver
-            .get(&["rooms", "!r:localhost", "aliases"], true)
+            .get(&["rooms", "!r:localhost", "aliases"], true, &|| {})
             .await,
         Reply::Ok(serde_json::to_vec(&json!({"aliases": ["#a:localhost"]})).unwrap())
     );
@@ -347,7 +452,7 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
     for room in ["!big:localhost", "!stream:localhost"] {
         assert_eq!(
             homeserver
-                .get(&["directory", "list", "room", room], true)
+                .get(&["directory", "list", "room", room], true, &|| {})
                 .await,
             Reply::TooLarge
         );
@@ -358,7 +463,8 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
         homeserver
             .get(
                 &["rooms", "!r:localhost", "state", "m.room.encryption", ""],
-                false
+                false,
+                &|| {}
             )
             .await,
         status(404, Some("M_NOT_FOUND"))
@@ -367,7 +473,8 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
         homeserver
             .get(
                 &["rooms", "!r:localhost", "state", "m.room.server_acl", ""],
-                false
+                false,
+                &|| {}
             )
             .await,
         Reply::Status {
@@ -385,11 +492,11 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
 async fn a_hung_homeserver_times_out_and_holds_its_gate_slot() {
     let (address, _) = mock_homeserver().await;
     let gate = HomeserverGate::for_test();
-    let homeserver = Homeserver::new(sdk_client(address).await, Arc::clone(&gate));
+    let homeserver = Homeserver::new(sdk_client(address).await, Arc::clone(&gate)).unwrap();
     tokio::time::pause();
     let started = Instant::now();
     assert_eq!(
-        homeserver.get(&["hang"], true).await,
+        homeserver.get(&["hang"], true, &|| {}).await,
         Reply::Failed(NoAnswer::Timeout)
     );
     // Paused time advances to the deadline, give or take a timer tick.
@@ -417,7 +524,13 @@ struct Script {
 
 #[async_trait]
 impl Upstream for Arc<Script> {
-    async fn get(&self, segments: &[&str], _read_body: bool) -> Reply {
+    async fn get(
+        &self,
+        segments: &[&str],
+        _read_body: bool,
+        admitted: &(dyn Fn() + Sync),
+    ) -> Reply {
+        admitted();
         let path = segments.join("/");
         self.calls.lock().unwrap().push(path.clone());
         if self.hang.load(Ordering::SeqCst) {

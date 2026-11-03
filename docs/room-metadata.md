@@ -64,7 +64,7 @@ The job confirms the room's due types in a fixed order, encryption first because
 | Anything else     | A failure with backoff (see [Acquisition](#acquisition))                                                   |
 
 A confirmation is deleted when a tuple of its type arrives, when the account leaves the room, when the room is purged, and when the account is removed.
-A confirmation committed concurrently with its tuple is never shown, because a snapshot with a tuple never reports one.
+A confirmation and a tuple of the same type serialize on an advisory lock, so a confirmation cannot commit beside a tuple that arrived during its request; a snapshot with a tuple never reports one in any case.
 
 Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, `redacted`, `redaction_event_id`, and `content`.
 `origin_ts` is the upstream event timestamp, not the time of the last successful sync or an access-freshness guarantee.
@@ -282,7 +282,7 @@ Each detail keeps the last conclusive answer separate from the state of attempts
 `fetched_at` and `expires_at` are Unix ms from the PostgreSQL clock; an `expires_at` in the past means stale.
 `refresh` is the refresh object `/metadata`'s `absence_check` also uses:
 
-- `state`: `idle`, `queued`, or `running`. A job waiting for a homeserver gate permit is `queued`; the gate's own state is in `GET /v1/status` (ADR 0122), and waiting is never a failure. Queue membership lives in memory only, so after a restart every refresh is `idle`.
+- `state`: `idle`, `queued`, or `running`. A job is `running` only while its request is in flight; while it waits for the pacing interval or a homeserver gate permit it is `queued`; the gate's own state is in `GET /v1/status` (ADR 0122), and waiting is never a failure. Queue membership lives in memory only, so after a restart every refresh is `idle`.
 - `failure`: the last attempt's category, `null` after a conclusive answer: `timeout`, `server_error` (5xx), `rate_limited` (429), `transport`, `unauthorized` (401), or `invalid_response` (any other status, or a body of the wrong shape).
 - `next_attempt_at`: Unix ms before which no attempt is made, while a backoff is in force.
 
@@ -301,9 +301,11 @@ The API reaches it through a consumer-owned port; it never waits for it.
 - **Gate:** each request takes a `HomeserverGate` permit as background work (ADR 0122).
   Waiting for the permit is not part of the request's 10-second timeout, and a timed-out request keeps its gate slot, which is what stops a slow homeserver from accumulating abandoned work.
 - **Request:** sent with reqwest and the account's current access token rather than the SDK's `send`, without redirects.
-  A successful body is read through the same bounded reader as Matrix OAuth responses and refused past 64 KiB before parsing; an absence check's body is never read.
+  A successful body is read through the same bounded reader as Matrix OAuth responses and refused past 64 KiB before parsing; a successful absence check is discarded unread.
+  An error body of any request is read under a 4 KiB cap, for its `errcode` and `retry_after_ms` only.
   A `401` is a failure to back off from: token refresh stays with the account's sync.
-- **Backoff:** one minute after the first consecutive failure, doubling to 30 minutes, and never sooner than a `Retry-After` header or `retry_after_ms`, capped at 24 hours.
+- **Backoff:** one minute after the first consecutive failure, doubling to 30 minutes, and never sooner than a `Retry-After` header (delta-seconds or an HTTP date) or `retry_after_ms`, capped at 24 hours.
+  A job that could not read or record the cache stores no backoff, so the worker holds it back in memory for one minute instead.
 - **Fencing:** `room_summaries.membership_epoch` takes a fresh value from a sequence on every leave and rejoin.
   A job records the epoch before its request and commits only if the account is still active and joined in that same epoch, under a share lock on the summary row for the commit alone.
   A leave during a request therefore rejects its result even if a rejoin follows before it completes.
