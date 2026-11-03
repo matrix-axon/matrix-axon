@@ -89,7 +89,7 @@ nothing tells it this app handles a URL scheme; the `deep-link` plugin
 contributes the `MimeType` line but not the argument. The two halves have to
 agree or the association is decoration.
 
-`Name` is fixed rather than `{{name}}`. That variable is `productName`, which
+`Name` is fixed rather than taken from the `name` placeholder. That placeholder is `productName`, which
 is now `Axon` and would give the same answer — but it also names the deb
 package and the macOS bundle, so pinning the launcher's `Name` keeps a future
 packaging rename out of what the user reads in their menu.

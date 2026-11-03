@@ -53,6 +53,17 @@ repos:
     hooks:
       # Cheapest first: these three are git plumbing and shell, seconds at most,
       # and they fail before anything spends a build on the same push.
+      # Jekyll runs Liquid over every markdown file when it builds the Pages site,
+      # and Jekyll 3.10 (the github-pages pin) cannot be told not to. `{{` either
+      # breaks that build or silently deletes the text, so refuse it here, where
+      # the whole tree is checked in the required lint job. See the script.
+      - id: markdown-no-liquid
+        name: markdown has no Liquid syntax
+        language: system
+        entry: scripts/check-liquid.sh
+        files: '\.md$'
+        pass_filenames: true
+        stages: [pre-push]
       - id: adr-numbers
         name: ADR numbers are unique
         language: system

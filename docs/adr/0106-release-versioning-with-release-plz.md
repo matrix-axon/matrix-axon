@@ -48,18 +48,18 @@ That tag is the only thing a release now needs a person for: review and merge a 
 Configuration (`release-plz.toml`):
 
 - `git_only = true`: nothing here is on crates.io, so the last release is read from the `v*` git tags rather than a registry.
-- `git_tag_name = "v{{ version }}"`, the existing tag format.
+- `git_tag_name` is `v` followed by the `version` placeholder, the existing tag format.
 - Every crate inherits the workspace version, so only `axon-server` creates the tag; with tagging on for all fourteen, every crate would try to create the same one.
 - `git_release_enable = false`: the tag workflows already create and fill the GitHub Release, and a second writer would race them.
 - `changelog_update = false`: commit subjects here are only partly conventional, so a generated changelog would be mostly noise. ADR 0108 generates the notes and `CHANGELOG.md` from PR labels instead.
 - `semver_check = false`: these are binaries; there is no library API for cargo-semver-checks to compare.
-- Crates that ship in no artifact (`axon-itest`, `axon-test-support`, the four `axon-smoke-*`) get `release = false` and a tag template no tag uses, `{{ package }}-v{{ version }}`.
+- Crates that ship in no artifact (`axon-itest`, `axon-test-support`, the four `axon-smoke-*`) get `release = false` and a tag template no tag uses: the `package` placeholder, then `-v`, then the `version` placeholder.
   See "New crates" below for why the template is the part that matters.
 
 ### New crates
 
 In `git_only` mode release-plz resolves every workspace crate at the last tag matching that crate's template, whether or not the crate is released.
-Under the shared `v{{ version }}`, a crate added after the last tag still matches it, is absent from that tag's checkout, and the whole run aborts.
+Under the shared `v` plus `version` template, a crate added after the last tag still matches it, is absent from that tag's checkout, and the whole run aborts.
 This broke `main` the first time it happened: `axon-test-support` landed after `v0.1.0`, and `release-pr` failed with `cannot find package "axon-test-support" in workspace` (release-plz 0.3.169, `process_git_only_package` in `next_ver.rs`).
 `release = false` alone does not avoid it; a template that matches no tag does, because a crate with no matching tag is treated as a first release instead.
 

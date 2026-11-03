@@ -68,4 +68,11 @@ before=$(cat "$CHANGELOG")
 "$script" changelog v0.1.2 "$work/notes2" 2026-10-03 >/dev/null
 check "second run is a no-op" "$before" "$(cat "$CHANGELOG")"
 
+# Liquid delimiters in a PR title become entities, so the Pages build (Jekyll
+# runs Liquid over CHANGELOG.md) cannot choke on them or drop the text.
+printf '## Bug Fixes\n* escape {{}} and {%% raw %%} in docs by @c in #930\n' >"$work/notes3"
+"$script" changelog v0.1.3 "$work/notes3" 2026-10-04 >/dev/null
+check "no literal Liquid delimiter in changelog" "0" "$(grep -c -E '\{\{|\{%' "$CHANGELOG" || true)"
+check "braces become entities" "1" "$(grep -c 'escape &#123;&#123;}} and &#123;% raw %} in docs' "$CHANGELOG")"
+
 exit "$fail"
