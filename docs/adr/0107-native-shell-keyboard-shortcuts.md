@@ -162,3 +162,33 @@ checking, so it was off with it.
   WKWebView implements each one, shows its checkmark state and saves a toggle
   as the app's default. The menu lets users change these settings; the
   defaults above are what make them work out of the box.
+
+## Linux spell checking
+
+The composer underlined nothing on Linux, although it does on macOS and
+Windows. The Linux shell runs on WebKitGTK, which ships with spell checking
+switched off and leaves the embedding application to switch it on, as Epiphany
+does. Neither Tauri nor wry does, so nothing in the shell had.
+
+- **The shell switches it on and sets the languages, and both are needed.**
+  It calls `set_spell_checking_enabled(true)` on the web context at startup.
+  Under Xvfb with a typed `wrold` and `teh`, that alone underlined nothing:
+  WebKitGTK does not fall back to the locale when no languages are set. So the
+  shell also calls `set_spell_checking_languages` with the dictionaries named
+  by the user's locale (`en_US`, then `en`, and `LANGUAGE=fr:en` in that
+  order). With them, both words are underlined.
+- **The checking itself is done by enchant**, which needs a dictionary
+  installed. WebKitGTK already pulls in the enchant library, so the `.deb`
+  only *recommends* `hunspell-dictionary`, a virtual package every hunspell
+  dictionary provides. A machine with no dictionary underlines nothing, and
+  that is a system setting rather than something the shell can fix.
+- **Silent cases are logged.** A locale that names no language (`LANG=C` or
+  unset, as in a container) or a missing web context leaves nothing to check
+  with, so the shell writes a line to stderr saying why. It does not guess a
+  language. The locale is read once at startup, so a change of language needs
+  a restart.
+- **Known gaps, each filed.** The `.deb` is the only package that declares a
+  dictionary, and the AppImage is unverified (issue 945). The `@modifier` of a
+  locale such as `sr_RS@latin` is dropped, so its dictionary is not requested
+  (issue 946). Whether a right-click offers suggestions is also unverified,
+  since Tauri gives WebKitGTK no context menu of its own.
