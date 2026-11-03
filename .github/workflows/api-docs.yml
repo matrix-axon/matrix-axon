@@ -41,6 +41,7 @@ on:
       - 'docs/img/**'
       - '.github/workflows/api-docs.yml'
       - 'scripts/check-site-links.py'
+      - '_layouts/**'
   # Build and link-check only, so a broken link fails the PR that introduces it
   # instead of failing the deploy after merge. The `deploy` job is skipped here.
   # Jekyll renders every markdown file in the repository, so any of them can
@@ -53,6 +54,7 @@ on:
       - 'openapi/openapi.json'
       - '.github/workflows/api-docs.yml'
       - 'scripts/check-site-links.py'
+      - '_layouts/**'
   workflow_dispatch:
     inputs:
       demo_release_tag:
