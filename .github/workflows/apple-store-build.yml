@@ -211,11 +211,13 @@ jobs:
           bundle_id=$(python3 -c 'import json; print(json.load(open("clients/web/src-tauri/tauri.conf.json"))["identifier"])')
           scripts/ci/store-credentials.sh keychain --require "Apple Distribution"
           scripts/ci/store-credentials.sh profile IOS_APPSTORE_PROFILE \
-            --ext mobileprovision --expect app-store --bundle-id "$bundle_id" --install
+            --ext mobileprovision --expect app-store --bundle-id "$bundle_id" \
+            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install
           # Required: the archive step looks for a development profile, and a run
           # without one failed there. It must be the Xcode-managed one.
           scripts/ci/store-credentials.sh profile IOS_DEVELOPMENT_PROFILE \
-            --ext mobileprovision --expect development --bundle-id "$bundle_id" --install
+            --ext mobileprovision --expect development --bundle-id "$bundle_id" \
+            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install
           if [ "$NEED_ASC" = "yes" ]; then
             scripts/ci/store-credentials.sh asc-key
           fi

@@ -9,9 +9,20 @@
 #   store-credentials.sh profile <ENV_VAR> --ext <mobileprovision|provisionprofile>
 #                                [--expect <app-store|development>] [--bundle-id <id>]
 #                                [--install] [--export-path <VAR>]
+#                                [--entitlements <plist>]
 #   store-credentials.sh asc-key
 #   store-credentials.sh cleanup
 #   store-credentials.sh list-profiles [--bundle-id <id>] [<file-or-directory>...]
+#   store-credentials.sh explain <build-log>
+#
+# `profile` is strict about iOS profiles: any `.mobileprovision` that is not Xcode-managed
+# is an error, with or without `--expect`, because the build cannot succeed with one. A
+# caller that needs to accept an Ad Hoc or portal-made profile (none does today) would
+# have to bypass that check, not just omit `--expect`.
+#
+# `explain` reads the log of a failed iOS build and says what the signing errors in it
+# mean and what to do. `profile --entitlements` fails early when a profile lacks a
+# capability the app's entitlements ask for.
 #
 # `list-profiles` is for the person making the secrets, not for CI: it shows the
 # provisioning profiles on this Mac, with what kind each is, so the right file
@@ -348,7 +359,7 @@ EOF
 # --- profile -----------------------------------------------------------------
 
 cmd_profile() {
-  local var=${1:-} ext="" expect="" bundle_id="" install=0 export_as=""
+  local var=${1:-} ext="" expect="" bundle_id="" install=0 export_as="" entitlements=""
   [ -n "$var" ] || die "profile needs the name of the environment variable holding the base64"
   shift
   while [ $# -gt 0 ]; do
@@ -358,6 +369,7 @@ cmd_profile() {
       --bundle-id) bundle_id=${2:?--bundle-id needs a value}; shift ;;
       --install) install=1 ;;
       --export-path) export_as=${2:?--export-path needs a variable name}; shift ;;
+      --entitlements) entitlements=${2:?--entitlements needs a plist path}; shift ;;
       *) die "profile: unknown option $1" ;;
     esac
     shift
@@ -398,16 +410,29 @@ cmd_profile() {
   fi
   echo "$var: \"$name\" ($kind), app id $appid, expires $expires"
 
-  # The generated Xcode project signs automatically, and automatic signing picks up
-  # Xcode-managed profiles ("iOS Team Provisioning Profile: <bundle id>") and not one
-  # made by hand in the developer portal, even when that one lists the same
-  # certificate and entitlements. A run with such a profile in IOS_DEVELOPMENT_PROFILE
-  # failed with "Xcode couldn't find any iOS App Development provisioning profiles".
-  # A warning and not an error: that rests on how Xcode behaves, not on a check here.
-  # Development only, because that is the case that was observed.
-  if [ "$kind" = "development" ] && [ "$ext" = "mobileprovision" ] \
+  # The generated Xcode project signs automatically, and automatic signing looks a
+  # profile up by Xcode's own name for it, "iOS Team Provisioning Profile: <bundle id>"
+  # (development) or "iOS Team Store Provisioning Profile: <bundle id>" (app-store). A
+  # profile made by hand in the developer portal fails even when it lists the same
+  # certificate and entitlements, and only at export or archive, as "No profiles for ...
+  # were found" under a misleading "No Accounts". Seen twice: a hand-made development
+  # profile ("Xcode couldn't find any iOS App Development provisioning profiles") and a
+  # hand-made App Store one in IOS_APPSTORE_PROFILE. Fatal, since the build cannot succeed.
+  # Which profile names Xcode accepts is inferred from those failures, not documented.
+  #
+  # After the swap check, so a profile of the wrong kind is told that first, and the name
+  # to look for comes from what this secret should hold, not from what the file is.
+  if [ -n "$expect" ] && [ "$kind" != "$expect" ]; then
+    die "$var is a $kind profile, but this secret should hold an $expect one. Check the two profile secrets are not swapped."
+  fi
+  if [ "$ext" = "mobileprovision" ] \
       && [ "$(plutil -extract IsXcodeManaged raw -o - "$plist" 2>/dev/null || echo false)" != "true" ]; then
-    warn "$var holds \"$name\", a development profile that is not Xcode-managed. The Xcode project signs automatically, and automatic signing appears to pick up only Xcode-managed profiles (named \"iOS Team Provisioning Profile: ${bundle_id:-<bundle id>}\"), not one made by hand in the developer portal; the build then fails with \"No profiles for ... were found\". Use the Xcode-managed one: \`store-credentials.sh list-profiles\` marks it."
+    local want="an Xcode-managed profile"
+    case ${expect:-$kind} in
+      app-store) want="\"iOS Team Store Provisioning Profile: ${bundle_id:-<bundle id>}\"" ;;
+      development) want="\"iOS Team Provisioning Profile: ${bundle_id:-<bundle id>}\"" ;;
+    esac
+    die "$var holds \"$name\", a $kind profile that is not Xcode-managed. The Xcode project signs automatically and looks the profile up by Xcode's own name ($want), so a profile made by hand in the developer portal fails the build with \"No profiles for ... were found\". Use the Xcode-managed one: \`store-credentials.sh list-profiles\` marks it. Steps: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
   fi
 
   if [ -n "$expires" ]; then
@@ -426,8 +451,45 @@ PY
       *) die "$var is for '$appid', not for $bundle_id" ;;
     esac
   fi
-  if [ -n "$expect" ] && [ "$kind" != "$expect" ]; then
-    die "$var is a $kind profile, but this secret should hold an $expect one. Check the two profile secrets are not swapped."
+
+  # Every capability the app asks for must be in the profile. A profile made before a
+  # capability was enabled on the App ID lacks it, and Xcode reports that minutes into
+  # the build. A list must be covered item by item: an entry matches exactly, or when it
+  # ends in "*" and is a prefix of the item ("<team>.*"). A lone "*" covers nothing, so
+  # it cannot excuse an unrelated entitlement. The app's keychain groups start with
+  # "$(AppIdentifierPrefix)", which is the team id and a dot, so that is expanded first
+  # and an absent keychain-access-groups fails like any other absent capability.
+  # Anything that is not a list only has to be present, because aps-environment is
+  # "development" in the app and "production" in the Store profile.
+  if [ -n "$entitlements" ]; then
+    [ -f "$entitlements" ] || die "profile: --entitlements $entitlements is not a file"
+    local missing
+    missing=$(python3 - "$entitlements" "$plist" <<'PY'
+import plistlib, sys
+want = plistlib.load(open(sys.argv[1], "rb"))
+profile = plistlib.load(open(sys.argv[2], "rb"))
+have = profile.get("Entitlements", {})
+team = (profile.get("ApplicationIdentifierPrefix") or [have.get("application-identifier", "").split(".")[0]])[0]
+
+
+def covers(entry, item):
+    return entry == item or (entry != "*" and entry.endswith("*") and item.startswith(entry[:-1]))
+
+
+for key, value in want.items():
+    if key not in have:
+        print(key)
+    elif isinstance(value, list):
+        got = have[key] if isinstance(have[key], list) else [have[key]]
+        for item in value:
+            item = item.replace("$(AppIdentifierPrefix)", team + ".")
+            if not any(covers(entry, item) for entry in got):
+                print("%s = %s" % (key, item))
+PY
+    ) || die "profile: could not compare $var with $entitlements"
+    if [ -n "$missing" ]; then
+      die "$var (\"$name\") does not have what the app asks for in $entitlements: $(printf '%s' "$missing" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). It was made before that capability was enabled on the App ID. Enable it in the developer portal if it is not yet, then regenerate the Xcode-managed profile and replace the secret: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
+    fi
   fi
 
   if [ "$install" -eq 1 ]; then
@@ -571,10 +633,114 @@ cmd_cleanup() {
   echo "cleaned up"
 }
 
+# --- explain -----------------------------------------------------------------
+
+# Reads the log of a failed xcodebuild/tauri run and says what to do about the
+# signing failures it recognises. Xcode's first line is usually "No Accounts", which is
+# only its follow-up to the real cause listed after it, and the real cause is a stale or
+# wrong provisioning profile, not a missing account. Prints nothing and returns 1 when
+# it recognises nothing, so a caller can say so instead of implying the log was read.
+cmd_explain() {
+  local log=${1:-}
+  [ -n "$log" ] && [ -f "$log" ] || die "explain needs the path of a build log"
+  local readme="clients/web/src-tauri/README.md"
+  local runbook="\"When a capability change invalidates the iOS profiles\" in $readme"
+  local caps notfound accounts cert mismatch nodev
+  caps=$(grep -E "Provisioning profile \".*\" (doesn't include the .*(capability|entitlement)|doesn't support the .*(capability|App Group))" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  cert=$(grep -E "Provisioning profile \".*\" doesn't include signing certificate" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  mismatch=$(grep -E "doesn't match the entitlements file's value for the .* entitlement" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  nodev=$(grep -E "couldn't find any iOS App Development provisioning profiles" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  notfound=$(grep -E "No profiles for '.*' were found" "$log" | sed -E 's/^.*error: //' | sort -u || true)
+  accounts=$(grep -E "error: (exportArchive )?No Accounts" "$log" | head -1 || true)
+  [ -n "$caps$cert$mismatch$nodev$notfound$accounts" ] || return 1
+
+  {
+    echo
+    echo "==> iOS signing failed. What the log says, and what to do:"
+    if [ -n "$caps" ]; then
+      echo
+      echo "$caps" | sed 's/^/    /'
+      echo
+      echo "  The provisioning profile was made before that capability was enabled on the App ID,"
+      echo "  so it does not carry it. Enabling a capability invalidates every profile made earlier."
+      echo "  1. In the developer portal, check the App ID has the capability (and, for an App"
+      echo "     Group, that the group is assigned to it)."
+      echo "  2. Regenerate the Xcode-managed profiles on a Mac signed in to the account"
+      echo "     (scripts/package-ios.sh does it), then replace BOTH secrets,"
+      echo "     IOS_APPSTORE_PROFILE and IOS_DEVELOPMENT_PROFILE, from those files."
+      echo "     \`scripts/ci/store-credentials.sh list-profiles\` finds them."
+      echo "  Steps: $runbook"
+    fi
+    if [ -n "$cert" ]; then
+      echo
+      echo "$cert" | sed 's/^/    /'
+      echo
+      echo "  The profile does not list the distribution certificate in APPLE_STORE_CERTIFICATES. An"
+      echo "  Xcode-managed profile lists every certificate on the account, so regenerate it and"
+      echo "  replace the secret (or check the certificate secret is the current one)."
+      echo "  Steps: $runbook"
+    fi
+    if [ -n "$mismatch" ]; then
+      echo
+      echo "$mismatch" | sed 's/^/    /'
+      echo
+      echo "  The app asks for a different value than the profile grants (push is the usual one:"
+      echo "  development in the app and production in the Store profile, set by package-ios.sh"
+      echo "  from the export method), or a keychain group the profile does not cover. Compare"
+      echo "  clients/web/src-tauri/Entitlements.ios.plist with the profile in that secret."
+    fi
+    if [ -n "$nodev" ]; then
+      echo
+      echo "$nodev" | sed 's/^/    /'
+      echo
+      echo "  The archive step needs the Xcode-managed development profile, \"iOS Team Provisioning"
+      echo "  Profile: <bundle id>\", in IOS_DEVELOPMENT_PROFILE. A profile made by hand in the portal"
+      echo "  is not found, and neither is a missing or empty secret. Steps: $runbook"
+    fi
+    if [ -n "$notfound" ]; then
+      echo
+      echo "$notfound" | sed 's/^/    /'
+      echo
+      echo "  Xcode looks the profile up by its own name (\"iOS Team Store Provisioning Profile: <bundle id>\""
+      echo "  to export, \"iOS Team Provisioning Profile: <bundle id>\" to archive). A profile made by"
+      echo "  hand in the portal, or one that is missing, is not found."
+      echo "  On CI, the \"Install the signing credentials\" step prints the name of each profile it"
+      echo "  installed: it should be those two names. If it is not, replace the secret."
+      echo "  Steps: $runbook"
+    fi
+    if [ -n "$accounts" ]; then
+      echo
+      echo "  \"No Accounts\" on its own is not the cause. Xcode prints it when it cannot ask Apple for"
+      echo "  a new profile, after it has already rejected the one it has. Read the other errors."
+      if [ -n "$caps$cert$mismatch$nodev$notfound" ]; then
+        echo "  The errors above are the cause."
+      elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        echo "  Nothing else is listed. The workflow gives Xcode no account, only the profiles that"
+        echo "  \"Install the signing credentials\" installed: check the names that step printed are"
+        echo "  \"iOS Team Store Provisioning Profile: <bundle id>\" and \"iOS Team Provisioning"
+        echo "  Profile: <bundle id>\", and that both secrets are newer than the last capability change."
+      else
+        echo "  Nothing else is listed: then this Mac has no Apple ID in Xcode > Settings > Accounts"
+        echo "  and no APPLE_API_KEY, APPLE_API_ISSUER and APPLE_API_KEY_PATH (an App Store Connect"
+        echo "  API key) to fetch profiles with."
+      fi
+    fi
+    echo
+  } >&2
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "### iOS signing failed"
+      [ -n "$caps" ] && printf 'The profile lacks a capability the app asks for:\n\n```\n%s\n```\n\nRegenerate both Xcode-managed profiles and replace `IOS_APPSTORE_PROFILE` and `IOS_DEVELOPMENT_PROFILE`. See %s.\n\n' "$caps" "$runbook"
+      [ -n "$notfound" ] && printf 'Xcode did not find a profile by its managed name:\n\n```\n%s\n```\n\nA hand-made or missing profile is not found. See %s.\n\n' "$notfound" "$runbook"
+      true
+    } >>"$GITHUB_STEP_SUMMARY"
+  fi
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 cmd=${1:-}
-[ -n "$cmd" ] || die "usage: store-credentials.sh <check-secrets|xcode|keychain|profile|asc-key|cleanup|list-profiles> ..."
+[ -n "$cmd" ] || die "usage: store-credentials.sh <check-secrets|xcode|keychain|profile|asc-key|cleanup|list-profiles|explain> ..."
 shift
 case $cmd in
   check-secrets) cmd_check_secrets "$@" ;;
@@ -584,5 +750,6 @@ case $cmd in
   asc-key) cmd_asc_key ;;
   cleanup) cmd_cleanup ;;
   list-profiles) cmd_list_profiles "$@" ;;
+  explain) cmd_explain "$@" ;;
   *) die "unknown command '$cmd'" ;;
 esac
