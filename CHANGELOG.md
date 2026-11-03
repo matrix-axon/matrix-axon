@@ -3,6 +3,24 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](../../releases) page.
 
+## v0.1.22 - 2026-11-03
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(tui): present a 504 from leave or forget as still pending by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/928
+* feat(web): turn on spell checking in the Linux shell by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/942
+#### Bug Fixes
+* fix(sync): re-decrypt a UTD whose key arrived before it was stored by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/940
+#### Dependencies
+* update async-executor with minor version bump by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/943
+#### Other Changes
+* test(api): pin the 504 for a membership call that times out by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/927
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.21...v0.1.22
+
 ## v0.1.21 - 2026-11-02
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
