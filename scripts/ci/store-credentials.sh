@@ -15,6 +15,11 @@
 #   store-credentials.sh list-profiles [--bundle-id <id>] [<file-or-directory>...]
 #   store-credentials.sh explain <build-log>
 #
+# `profile` is strict about iOS profiles: any `.mobileprovision` that is not Xcode-managed
+# is an error, with or without `--expect`, because the build cannot succeed with one. A
+# caller that needs to accept an Ad Hoc or portal-made profile (none does today) would
+# have to bypass that check, not just omit `--expect`.
+#
 # `explain` reads the log of a failed iOS build and says what the signing errors in it
 # mean and what to do. `profile --entitlements` fails early when a profile lacks a
 # capability the app's entitlements ask for.

@@ -463,7 +463,6 @@ contains "$out" "rc=0" && contains "$out" "does not list the distribution certif
 contains "$out" "enabled on the App ID" && fail "explain: a missing certificate is not explained as a missing capability" "$out"
 
 cat >"$work/mm.log" <<'LOG'
-error: exportArchive "Axon.app" requires a provisioning profile with the Push Notifications feature.
 error: Provisioning profile "x" doesn't match the entitlements file's value for the aps-environment entitlement. (in target 'axon_iOS' from project 'axon')
 LOG
 out=$(run -- explain "$work/mm.log")
