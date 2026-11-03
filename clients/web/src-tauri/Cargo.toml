@@ -44,20 +44,13 @@ tauri-build = { version = "2", features = [] }
 # carries a `plugins` section, so it has to be nameable here.
 serde_json = "1"
 tauri = { version = "2", features = [] }
-# Pinned to 2.5.x rather than "2". The Tauri CLI requires the Rust crate and
-# its npm counterpart to agree on major.minor, and @tauri-apps/plugin-http
-# 2.6.0 is too new for pnpm's minimumReleaseAge supply-chain guard to install
-# (published 2026-08-31). Taking 2.6.0 on the npm side means writing a
-# minimumReleaseAgeExclude entry, i.e. deliberately installing a hours-old
-# package to settle a version-alignment nit. Pinning down here keeps both sides
-# on the aged release; lift it once 2.6.0 ages past the threshold.
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
-tauri-plugin-http = "~2.5"
-# Same pin shape as http, and the same reason: stay on 2.5 so the Rust crate
-# and `@tauri-apps/plugin-notification` agree on major.minor without taking a
-# release pnpm's minimumReleaseAge guard will refuse. 2.5 requires Rust 1.90
+# Pinned to 2.5.x rather than "2". The Tauri CLI requires the Rust crate and
+# `@tauri-apps/plugin-notification` to agree on major.minor, and a newer
+# release can be too young for pnpm's minimumReleaseAge supply-chain guard to
+# install. Pinning down here keeps both sides on the aged release. 2.5 requires Rust 1.90
 # (see `rust-version` above) and fixes the Windows permission check that 2.4
 # short-circuited to denied.
 tauri-plugin-notification = "~2.5"

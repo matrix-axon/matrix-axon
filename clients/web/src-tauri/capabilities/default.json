@@ -7,23 +7,11 @@
     "core:default",
     {
       "identifier": "websocket:default",
-      "comment": "Unscoped because the plugin has no scope to give: its `connect` command takes the URL and dials it, with no allow-list consulted anywhere in `tauri-plugin-websocket`. The bare grant is therefore the only form available, not a laxer one chosen over `http:default`-style narrowing. The URL is the client's own construction (`wsUrl` over the configured server), so nothing a room can carry reaches it."
-    },
-    {
-      "identifier": "http:default",
-      "comment": "Any host and any port, because the server is the user's own and is chosen at runtime (ADR 0102 \u00a7 3) \u2014 there is no build-time host to narrow this to. Note ':*' is load-bearing: 'http://*' alone means port 80, so a LAN axon on :8080 is denied.",
-      "allow": [
-        {
-          "url": "http://*:*"
-        },
-        {
-          "url": "https://*:*"
-        }
-      ]
+      "comment": "Unscoped because the plugin has no scope to give: its `connect` command takes the URL and dials it, with no allow-list consulted anywhere in `tauri-plugin-websocket`. The bare grant is therefore the only form available, not a laxer one chosen over a scoped one. The URL is the client's own construction (`wsUrl` over the configured server), so nothing a room can carry reaches it."
     },
     {
       "identifier": "axon-http:default",
-      "comment": "The shell's own HTTP transport (ADR 0127): one pooled client for every `/v1` and media request, in place of `http:default`'s client per request. The same reach as `http:default` above, any `http` or `https` URL on any host and port, because the server is the user's own and is chosen at runtime. The command enforces the scheme itself, on the request and on every redirect hop; narrowing the authority is issue 893. `http:default` stays for one release, behind the Settings → Debug toggle that routes requests back through it."
+      "comment": "The shell's own HTTP transport (ADR 0127): one pooled client for every `/v1` and media request. Any `http` or `https` URL on any host and port, because the server is the user's own and is chosen at runtime (ADR 0102 \u00a7 3), so there is no build-time host to narrow this to. The command enforces the scheme itself, on the request and on every redirect hop; narrowing the authority is issue 893."
     },
     {
       "identifier": "dialog:allow-save",
@@ -35,7 +23,7 @@
     },
     {
       "identifier": "opener:allow-open-url",
-      "comment": "The command grant alone is scopeless, and a scopeless opener denies every URL -- that is why links did nothing at first. NOTE the pattern syntax differs from `http:default` above: the opener matches with `glob::Pattern` (default MatchOptions, so `*` spans `/`), NOT the URL Pattern standard. So `https://*` already covers any port and path, and writing `https://*:*` by analogy with the http scope silently denies every ordinary URL -- there is no literal `:` after the host to match. http(s) only, deliberately narrower than the plugin's own `allow-default-urls`, which also admits `mailto:` and `tel:`: `isExternalHref` in app.tsx passes neither.",
+      "comment": "The command grant alone is scopeless, and a scopeless opener denies every URL -- that is why links did nothing at first. NOTE the opener matches with `glob::Pattern` (default MatchOptions, so `*` spans `/`), NOT the URL Pattern standard that other plugins' scopes use. So `https://*` already covers any port and path, and writing `https://*:*` by analogy with a URL Pattern scope silently denies every ordinary URL -- there is no literal `:` after the host to match. http(s) only, deliberately narrower than the plugin's own `allow-default-urls`, which also admits `mailto:` and `tel:`: `isExternalHref` in app.tsx passes neither.",
       "allow": [
         {
           "url": "http://*"

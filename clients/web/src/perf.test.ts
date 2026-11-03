@@ -459,7 +459,6 @@ describe('room-open summary', () => {
         retries: { nack: 0, fastReset: 0, requeue: 0 },
         resets: 0,
         liveEntries: 3,
-        legacy: false,
       }),
     )
     setTransportStatsSource(source)
@@ -508,7 +507,6 @@ describe('room-open summary', () => {
         retries: { nack: 0, fastReset: 0, requeue: 0 },
         resets: 0,
         liveEntries: 1,
-        legacy: false,
       }),
     )
     setTransportStatsSource(source)
@@ -833,7 +831,7 @@ describe('room-open summary', () => {
 
         const alone = perfTraceRequest(timelineUrl(ROOM))!
         alone.end('aborted') // a caller's own abort is not a failure
-        alone.end('failed', 'send')
+        alone.end('failed', 'fetch')
       })
 
       expect(
@@ -868,7 +866,7 @@ describe('room-open summary', () => {
         const trace = perfTraceRequest(timelineUrl(ROOM))!
         document.dispatchEvent(new Event('visibilitychange'))
         vi.advanceTimersByTime(35)
-        trace.end('failed', 'send')
+        trace.end('failed', 'fetch')
       })
 
       expect(
@@ -886,7 +884,7 @@ describe('room-open summary', () => {
         const trace = perfTraceRequest(timelineUrl(ROOM))!
         document.dispatchEvent(new Event('visibilitychange'))
         vi.advanceTimersByTime(30_001)
-        trace.end('failed', 'send')
+        trace.end('failed', 'fetch')
       })
 
       expect(
@@ -909,8 +907,8 @@ describe('room-open summary', () => {
 
     const marks = captured(() => {
       const current = [1, 2].map(() => perfTraceRequest(timelineUrl(ROOM))!)
-      stale.forEach((trace) => trace.end('failed', 'send'))
-      current[0].end('failed', 'send')
+      stale.forEach((trace) => trace.end('failed', 'fetch'))
+      current[0].end('failed', 'fetch')
       current[1].end('ok')
     })
 
@@ -932,9 +930,9 @@ describe('room-open summary', () => {
         const burst = Array.from({ length: 12 }, () =>
           perfTraceRequest(timelineUrl(ROOM))!,
         )
-        burst.forEach((trace) => trace.end('failed', 'send'))
+        burst.forEach((trace) => trace.end('failed', 'fetch'))
         vi.advanceTimersByTime(10_000)
-        perfTraceRequest(timelineUrl(ROOM))!.end('failed', 'send')
+        perfTraceRequest(timelineUrl(ROOM))!.end('failed', 'fetch')
       })
 
       const failed = marks.filter((mark) => mark.name === 'api:failed')
@@ -1622,7 +1620,6 @@ describe('shell transport counters (ADR 0127 § 5)', () => {
     retries: { nack: 1, fastReset: 0, requeue: 3 },
     resets: 4,
     liveEntries: 0,
-    legacy: false,
   }
 
   beforeEach(() => {
@@ -1637,7 +1634,7 @@ describe('shell transport counters (ADR 0127 § 5)', () => {
     performance.clearMarks()
   })
 
-  it('writes the counters, with why and which transport', async () => {
+  it('writes the counters, with why', async () => {
     const lines: [string, unknown][] = []
     setTelemetrySink((name, _at, detail) => lines.push([name, detail]))
     setTransportStatsSource(() => Promise.resolve(reading))
@@ -1649,7 +1646,6 @@ describe('shell transport counters (ADR 0127 § 5)', () => {
       'transport:stats',
       {
         why: 'resume',
-        legacy: false,
         conn: 2,
         sent: 314,
         nack: 1,

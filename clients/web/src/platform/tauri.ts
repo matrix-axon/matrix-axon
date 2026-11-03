@@ -4,7 +4,6 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import {
   createChannel,
   Importance,
@@ -29,13 +28,7 @@ import {
   shellFetch,
   shellTransportStats,
 } from './shell-http'
-import type {
-  LiveSocket,
-  Platform,
-  SaveOutcome,
-  SaveRequest,
-  ShellTransport,
-} from './index'
+import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
 import { nativeIncomingShare } from './incoming-share'
 import {
@@ -68,9 +61,10 @@ export { isMobileShell }
  * A backstop, not a latency target — generous enough that a large attachment on
  * a slow link finishes, short enough that a blackholed server cannot hold
  * resources for the life of the session. A browser applies its own network
- * timeouts; `reqwest` applies none to a whole request, in the shell's
- * transport or behind the legacy http plugin, so without this a request to a
- * host that accepts the connection and never answers simply never settles. `media-service.ts` runs downloads through a bounded permit pool, so
+ * timeouts; the shell's transport applies none to a whole request, so
+ * without this a request to a host that accepts the connection and never
+ * answers simply never settles. `media-service.ts` runs downloads through a
+ * bounded permit pool, so
  * such a request does not merely hang itself: it retains a permit, and enough
  * of them stall media for everything else.
  */
@@ -367,7 +361,7 @@ export function tauriPlatform(
 ): Platform {
   const iconBadgeSupport = iconBadgeSupportFor(shellPlatform)
   const remotePush = remotePushFor(shellPlatform)
-  const transport = shellTransport()
+  watchShellTransport()
   if (remotePush !== null && isTauriRuntime()) {
     // The plugin stores a cold-start wake and also emits it. The listener
     // dedupes those two deliveries. Desktop never reaches this: it has no
@@ -409,18 +403,9 @@ export function tauriPlatform(
     secureStorage: native.secureStorage,
     incomingShare: native.secureStorage === null ? null : nativeIncomingShare(),
     appleSignIn: native.appleSignIn,
-    // Neither transport has a whole-request timeout of its own; see
-    // `REQUEST_TIMEOUT_MS`. The legacy plugin needs the signal in `init`, not
-    // on the `Request`: it reads `init?.signal` alone and never consults
-    // `input.signal`, so a bound left on the request object is a bound it
-    // will never honour. The shell's transport takes it as an argument.
-    fetch: (input, init) => {
-      const signal = boundedSignal(input, init)
-      return transport.legacy
-        ? tauriFetch(input, { ...init, signal })
-        : shellFetch(input, init, signal)
-    },
-    shellTransport: transport,
+    // The shell's transport has no whole-request timeout of its own; see
+    // `REQUEST_TIMEOUT_MS`. It takes the bounded signal as an argument.
+    fetch: (input, init) => shellFetch(input, init, boundedSignal(input, init)),
     openSocket: (url, token) =>
       adapt(
         // A real `Authorization` header, not the `Sec-WebSocket-Protocol`
@@ -771,34 +756,15 @@ function isAndroidShell(userAgent = navigator.userAgent): boolean {
 }
 
 /**
- * Which transport `fetch` uses, and the shell transport's upkeep: a fresh
- * client on resume, and its counters for the readout (ADR 0127 §§ 5–6).
+ * The shell transport's upkeep: a fresh client on resume, and its counters
+ * for the readout (ADR 0127 §§ 5–6).
  */
-function shellTransport(): ShellTransport & { readonly legacy: boolean } {
-  let legacy = false
-  const transport = {
-    get legacy() {
-      return legacy
-    },
-    setLegacy(on: boolean) {
-      legacy = on
-    },
-  }
-  setTransportStatsSource(async () => ({
-    ...(await shellTransportStats()),
-    legacy,
-  }))
-  watchResume(() => legacy)
-  return transport
+function watchShellTransport(): void {
+  setTransportStatsSource(shellTransportStats)
+  watchResume()
 }
 
 let watchingResume = false
-
-/**
- * Whether the platform built last has the legacy transport chosen. A page
- * builds one; tests build several, and the newest is the one in use.
- */
-let resumeIsLegacy: () => boolean = () => false
 
 /**
  * How long the page must have been hidden for a return to reset the
@@ -827,13 +793,8 @@ const RESET_COALESCE_MS = 2_000
  * Measured with `Date.now()`, since iOS stops `performance.now()` while the
  * app is suspended, which is the absence being measured. The counters are
  * written on every return, reset or not.
- *
- * Skipped while the legacy transport is chosen: it pools nothing, so there is
- * nothing to refresh, and a reset would only count one that did no work. The
- * counters are still written, so an A/B reading has both halves.
  */
-function watchResume(isLegacy: () => boolean): void {
-  resumeIsLegacy = isLegacy
+function watchResume(): void {
   if (watchingResume) {
     return
   }
@@ -842,8 +803,7 @@ function watchResume(isLegacy: () => boolean): void {
   let lastResetAt = -Infinity
   const resume = (why: 'resume' | 'online', wanted: boolean) => {
     const now = Date.now()
-    const due =
-      wanted && !resumeIsLegacy() && now - lastResetAt >= RESET_COALESCE_MS
+    const due = wanted && now - lastResetAt >= RESET_COALESCE_MS
     if (due) {
       lastResetAt = now
     }

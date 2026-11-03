@@ -1,11 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const tauriFetch = vi.fn<
-  (input: unknown, init?: RequestInit) => Promise<Response>
->(() => Promise.resolve(new Response('')))
-vi.mock('@tauri-apps/plugin-http', () => ({
-  fetch: (input: unknown, init?: RequestInit) => tauriFetch(input, init),
-}))
 const shellFetch = vi.fn<
   (
     input: unknown,
@@ -294,7 +288,6 @@ describe('the shell save dialog', () => {
 
 describe('the shell request bound', () => {
   beforeEach(() => {
-    tauriFetch.mockClear()
     shellFetch.mockClear()
   })
 
@@ -304,7 +297,6 @@ describe('the shell request bound', () => {
     // permits for the life of the session.
     await tauriPlatform().fetch('https://axon.example/v1/accounts')
 
-    expect(tauriFetch).not.toHaveBeenCalled()
     expect(shellFetch.mock.calls[0]?.[2]).toBeInstanceOf(AbortSignal)
   })
 
@@ -320,38 +312,6 @@ describe('the shell request bound', () => {
     const signal = shellFetch.mock.calls[0]?.[2]
     expect(signal).toBeInstanceOf(AbortSignal)
     expect(signal).not.toBe(request.signal)
-  })
-
-  it('puts the bound in init for the legacy transport', async () => {
-    const platform = tauriPlatform()
-    platform.shellTransport!.setLegacy(true)
-    await platform.fetch(new Request('https://axon.example/v1/rooms'))
-
-    expect(shellFetch).not.toHaveBeenCalled()
-    const init = tauriFetch.mock.calls[0]?.[1]
-    expect(init?.signal).toBeInstanceOf(AbortSignal)
-    // In `init`, because the plugin reads `init?.signal` and never looks at
-    // the request's own -- a bound left on the `Request` would not be honoured.
-    expect(init?.signal).not.toBe(
-      (tauriFetch.mock.calls[0]?.[0] as Request).signal,
-    )
-  })
-
-  it('switches transport from the next request', async () => {
-    const platform = tauriPlatform()
-    await platform.fetch('https://axon.example/v1/a')
-    platform.shellTransport!.setLegacy(true)
-    await platform.fetch('https://axon.example/v1/b')
-    platform.shellTransport!.setLegacy(false)
-    await platform.fetch('https://axon.example/v1/c')
-
-    expect(shellFetch.mock.calls.map((call) => call[0])).toEqual([
-      'https://axon.example/v1/a',
-      'https://axon.example/v1/c',
-    ])
-    expect(tauriFetch.mock.calls.map((call) => call[0])).toEqual([
-      'https://axon.example/v1/b',
-    ])
   })
 
   it('abandons a Request the plugin never answers', async () => {
@@ -458,34 +418,19 @@ describe('the shell transport on resume (ADR 0127 § 6)', () => {
     expect(resetShellTransport).not.toHaveBeenCalled()
   })
 
-  it('leaves the transport alone while the legacy one is chosen', async () => {
-    const platform = tauriPlatform()
-    platform.shellTransport!.setLegacy(true)
-    away(6_000)
-    await Promise.resolve()
-    expect(resetShellTransport).not.toHaveBeenCalled()
-  })
-
-  it('writes the counters after the reset, saying which transport', async () => {
+  it('writes the counters after the reset', async () => {
     const lines: [string, unknown][] = []
     setPerfEnabled(true)
     setTelemetrySink((name, _at, detail) => lines.push([name, detail]))
-    const platform = tauriPlatform()
+    tauriPlatform()
     away(6_000)
     await vi.waitFor(() => expect(lines).toHaveLength(1))
-    platform.shellTransport!.setLegacy(true)
     window.dispatchEvent(new Event('online'))
     await vi.waitFor(() => expect(lines).toHaveLength(2))
 
     expect(lines).toEqual([
-      [
-        'transport:stats',
-        expect.objectContaining({ why: 'resume', legacy: false, conn: 2 }),
-      ],
-      [
-        'transport:stats',
-        expect.objectContaining({ why: 'online', legacy: true }),
-      ],
+      ['transport:stats', expect.objectContaining({ why: 'resume', conn: 2 })],
+      ['transport:stats', expect.objectContaining({ why: 'online', conn: 2 })],
     ])
   })
 

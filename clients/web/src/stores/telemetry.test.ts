@@ -50,7 +50,6 @@ describe('telemetry store', () => {
     // The field readings ADR 0127 is judged by, on a phone with no console.
     store.record('transport:stats', 10, {
       why: 'resume',
-      legacy: false,
       conn: 2,
       sent: 40,
     })
@@ -64,7 +63,7 @@ describe('telemetry store', () => {
 
     const [session] = await store.read()
     expect(session.entries.map((entry) => [entry.name, entry.detail])).toEqual([
-      ['transport:stats', { why: 'resume', legacy: false, conn: 2, sent: 40 }],
+      ['transport:stats', { why: 'resume', conn: 2, sent: 40 }],
       [
         'api:failed',
         { route: 'accounts', kind: 'tls', detail: 'UnknownIssuer', ver: null },
