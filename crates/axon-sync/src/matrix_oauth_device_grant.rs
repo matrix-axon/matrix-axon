@@ -17,7 +17,7 @@ use matrix_sdk::ruma::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::matrix_oauth::{read_bounded_body, BoundedBodyError};
+use crate::bounded_body::{read_bounded_body, BoundedBodyError};
 
 /// Scope granting full client-server API access.
 ///

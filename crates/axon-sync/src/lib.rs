@@ -20,6 +20,7 @@
 
 mod backfill;
 mod backup;
+mod bounded_body;
 mod client;
 mod devices;
 mod discovery;
