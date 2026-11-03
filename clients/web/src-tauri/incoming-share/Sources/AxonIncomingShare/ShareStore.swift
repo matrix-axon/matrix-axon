@@ -411,11 +411,17 @@ public final class ShareStore {
         try fm.removeItem(at: directory(id))
         return
       }
-      try validateSession(current)
+      // Explicit local deletion also recovers orphaned drafts after a lost
+      // session descriptor. Acknowledgment still requires the original session.
+      if completed { try validateSession(current) }
       guard current.owner == nil || current.owner == owner || (current.leaseUntil ?? 0) <= now()
-      else { throw ShareFailure.busy }
+      else {
+        Self.log.info("share_discard_busy share_id=\(id, privacy: .public)")
+        throw ShareFailure.busy
+      }
       if completed && !current.completed { throw ShareFailure.invalid }
       try fm.removeItem(at: directory(id))
+      Self.log.info("share_discarded share_id=\(id, privacy: .public)")
     }
   }
 

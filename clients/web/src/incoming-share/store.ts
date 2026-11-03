@@ -90,11 +90,16 @@ export function createIncomingShareStore(
     }
   }
 
+  function failureCode(cause: unknown): string | null {
+    return typeof cause === 'object' &&
+      cause !== null &&
+      'code' in cause &&
+      typeof cause.code === 'string'
+      ? cause.code
+      : null
+  }
   function describeFailure(cause: unknown) {
-    const code =
-      typeof cause === 'object' && cause !== null && 'code' in cause
-        ? cause.code
-        : null
+    const code = failureCode(cause)
     const messages: Record<string, string> = {
       destination: 'Choose a sending account and joined room before sending.',
       incomplete:
@@ -120,7 +125,7 @@ export function createIncomingShareStore(
         'The device found no usable preview metadata. The original link remains sendable.',
       invalid:
         'The share contains invalid or over-limit data. Review and edit it before sending.',
-      busy: 'Another process still owns this share. Keep the draft and retry after it finishes.',
+      busy: 'Another share operation is active. Close other Share → Axon composers, wait up to five minutes, then retry.',
       previewBusy:
         'Another on-device preview is finishing. Wait a moment and try again.',
       transferBusy: 'Sharing transfers are busy. Wait a moment and try again.',
@@ -314,6 +319,8 @@ export function createIncomingShareStore(
     if (targets.has(selected.peek()?.id ?? '')) clearEditTimers()
     let cleared = 0
     let failed = 0
+    let blocked = 0
+    let firstFailure: unknown
     try {
       await tail
       if (generation !== epoch) return
@@ -328,16 +335,31 @@ export function createIncomingShareStore(
           await discardRecord(record, generation)
           if (generation !== epoch) return
           cleared += 1
-        } catch {
+        } catch (cause) {
           if (generation !== epoch) return
           failed += 1
+          if (failureCode(cause) === 'busy') blocked += 1
+          else {
+            firstFailure ??= cause
+            console.warn('Incoming share discard failed', {
+              code: failureCode(cause) ?? 'unknown',
+            })
+          }
         }
       }
       await refresh()
       if (generation !== epoch) return
       notice.value = `Cleared ${cleared} pending ${cleared === 1 ? 'share' : 'shares'}.`
-      if (failed > 0)
-        error.value = `${failed} ${failed === 1 ? 'share could' : 'shares could'} not be cleared. Shares currently open elsewhere in Axon are kept. Refresh and retry the remaining shares.`
+      if (failed > 0) {
+        const summary = `${failed} ${failed === 1 ? 'share could' : 'shares could'} not be cleared.`
+        if (blocked === failed) describeFailure({ code: 'busy' })
+        else describeFailure(firstFailure)
+        const busyMessage =
+          blocked > 0 && blocked < failed
+            ? ' Other shares are busy; close other Share → Axon composers and wait up to five minutes before retrying them.'
+            : ''
+        error.value = `${summary} ${error.peek()}${busyMessage}`
+      }
     } catch (cause) {
       if (generation === epoch) describeFailure(cause)
     } finally {

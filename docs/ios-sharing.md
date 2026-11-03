@@ -45,6 +45,11 @@ Open Axon → **Pending shares** to resume it under the [shared recovery policy]
 The inbox holds at most 20 pending shares, including failed imports retained from earlier attempts.
 If it is full, send or explicitly discard existing drafts before sharing again; Axon preserves those drafts rather than dropping them to make room.
 The extension reports the full inbox separately from oversized source text.
+**Clear all** removes the confirmed set of pending shares; an individual **Discard share** removes one saved record.
+A share open in another composer remains protected until that composer releases it or its five-minute ownership lease expires.
+If clearing reports a busy share, close any open **Share → Axon** composers, wait five full minutes, then retry; refreshing the inbox or sign-in does not shorten that lease.
+Explicit discard can remove a saved record even if its local sharing-session descriptor is missing; sending, resuming, and acknowledging delivery still require the correct session.
+Other deletion failures show their own error rather than being described as another open composer.
 Text edits are saved after 400 milliseconds of idle time, and Keep draft/Send flush current edits.
 An abrupt termination can lose edits still inside this batching window.
 **Cancel** discards an undispatched share and sends nothing; cancellation during a request stops subsequent work after that bounded request finishes.

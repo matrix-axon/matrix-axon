@@ -242,6 +242,44 @@ describe('durable incoming-share recovery', () => {
     expect(f.post).not.toHaveBeenCalled()
   })
 
+  it.each(['stale', 'unavailable', 'authentication'])(
+    'reports a %s discard failure without claiming another composer owns it',
+    async (code) => {
+      const f = inboxFixture()
+      const original = f.port.call
+      f.port.call = vi.fn(async (action, args) => {
+        if (action === 'discard' && args?.id === 'share-1') throw { code }
+        return (await original(action, args)) as never
+      })
+      await f.store.refresh()
+      await f.store.discardAll()
+      expect(f.records.map((record) => record.id)).toEqual(['share-1'])
+      expect(f.store.error.value).toContain('1 share could not be cleared')
+      expect(f.store.error.value).not.toContain('open elsewhere')
+      expect(f.store.error.value).not.toContain('five minutes')
+      expect(f.store.notice.value).toBe('Cleared 2 pending shares.')
+    },
+  )
+
+  it('keeps busy and inaccessible shares and reports both reasons', async () => {
+    const f = inboxFixture()
+    f.records[1].owner = 'extension-owner'
+    const original = f.port.call
+    f.port.call = vi.fn(async (action, args) => {
+      if (action === 'discard' && args?.id === 'share-2')
+        throw { code: 'authentication' }
+      return (await original(action, args)) as never
+    })
+    await f.store.refresh()
+    await f.store.discardAll()
+    expect(f.records.map((record) => record.id)).toEqual(['share-1', 'share-2'])
+    expect(f.store.notice.value).toBe('Cleared 1 pending share.')
+    expect(f.store.error.value).toContain('2 shares could not be cleared')
+    expect(f.store.error.value).toContain('sign in or refresh your session')
+    expect(f.store.error.value).toContain('Other shares are busy')
+    expect(f.post).not.toHaveBeenCalled()
+  })
+
   it('does not clear shares arriving after the confirmed selection', async () => {
     const f = inboxFixture(['ready'])
     await f.store.refresh()

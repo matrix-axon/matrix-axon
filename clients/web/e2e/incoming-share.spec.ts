@@ -105,6 +105,7 @@ test('pending count badge and confirmed clear all preserve active and newly arri
   await expect(page.getByRole('alert')).toContainText(
     '1 share could not be cleared',
   )
+  await expect(page.getByRole('alert')).toContainText('five minutes')
   await expect(
     page
       .getByRole('link', { name: 'Pending shares, 2', exact: true })

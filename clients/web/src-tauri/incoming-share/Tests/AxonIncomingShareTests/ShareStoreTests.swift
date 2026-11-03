@@ -36,6 +36,48 @@ final class ShareStoreTests: XCTestCase {
     XCTAssertNil(retained.owner)
   }
 
+  func testExplicitDiscardWorksWithoutSessionButCannotAcknowledgeOrResume() throws {
+    var draft = try store.claim(store.create(text: "orphaned draft").id)
+    draft.operation.state = .dispatching
+    draft = try store.update(draft)
+    draft.operation.state = .unknown
+    draft = try store.update(draft, release: true)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("session.json"))
+    let reopened = try ShareStore(root: root, now: { self.time })
+    XCTAssertEqual(try reopened.list().first?.operation.state, .unknown)
+    XCTAssertThrowsError(try reopened.claim(draft.id))
+    XCTAssertThrowsError(try reopened.discard(draft.id, completed: true))
+    try reopened.discard(draft.id)
+    XCTAssertTrue(try reopened.list().isEmpty)
+  }
+
+  func testOrphanedSuccessRequiresExplicitDiscardInsteadOfAcknowledgment() throws {
+    var draft = try store.claim(store.create(text: "confirmed share").id)
+    draft.operation.state = .dispatching
+    draft = try store.update(draft)
+    draft.operation.state = .sent
+    draft.operation.eventId = "$confirmed"
+    draft = try store.update(draft, release: true)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("session.json"))
+    XCTAssertThrowsError(try store.discard(draft.id, completed: true)) { error in
+      XCTAssertEqual(error as? ShareFailure, .stale)
+    }
+    XCTAssertEqual(try store.list().first?.operation.eventId, "$confirmed")
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+  }
+
+  func testOrphanedDraftStillProtectsAnotherOwnerUntilLeaseExpires() throws {
+    let draft = try store.claim(store.create(text: "active draft").id)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("session.json"))
+    XCTAssertThrowsError(try store.discard(draft.id)) { error in
+      XCTAssertEqual(error as? ShareFailure, .busy)
+    }
+    time += ShareLimits.lease + 1
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+  }
+
   private func destination(_ account: String, _ room: String) -> ShareDestination {
     ShareDestination(
       account_id: account, account_user_id: "@fixture:example.org", room_id: room,
