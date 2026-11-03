@@ -29,6 +29,43 @@ An oversized state keeps its provenance but withholds its content; other fields 
 Creation content maps Matrix `m.federate` to API `federate` and Matrix `type` to API `room_type`.
 These names deliberately differ from the stored Matrix keys.
 
+### Known absence
+
+A missing tuple reads as `unknown`: Axon has not been told, and nothing can be inferred ([ADR 0111](adr/0111-cached-progressive-room-metadata.md)).
+Sync cannot say a room has no such state, because Sliding Sync does not guarantee complete required state.
+Only the account's homeserver can: `GET /rooms/{roomId}/state/{type}/` answering `404 M_NOT_FOUND` is the specification's statement that the room has none ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 2).
+
+Every snapshot therefore carries two more fields, both `null` for a type with a tuple:
+
+- `absence_confirmed_at`: Unix ms when the homeserver last confirmed the type absent, from the PostgreSQL clock; `null` without a confirmation.
+- `absence_check`: the state of confirming it, the same refresh object `homeserver_details` uses (below), or `null` when no attempt has been made and none is queued.
+
+| `status`  | `absence_confirmed_at` | `absence_check`                                     | Meaning                                                             |
+| --------- | ---------------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
+| `unknown` | `null`                 | `null`                                              | Not attempted; nothing can be inferred                              |
+| `unknown` | `null`                 | `queued` or `running`                               | A confirmation is coming                                            |
+| `unknown` | `null`                 | `idle` with a `failure` or future `next_attempt_at` | The attempt failed or was denied; nothing can be inferred           |
+| `unknown` | present                | any                                                 | The homeserver confirmed the room has no such state as of that time |
+| any other | `null`                 | `null`                                              | A tuple exists and describes the type                               |
+
+The `status` enum is unchanged, so existing clients keep working.
+Known absence is a statement about the room's current state, not a manufactured value: `content` stays `null`.
+A client may apply a Matrix default only where the specification defines what the absent state means, such as no `m.room.encryption` meaning the room is not encrypted, or no `m.room.server_acl` meaning no servers are denied.
+
+The read itself stays local and never waits.
+For a room the account has joined, when a type with no tuple has no confirmation row, an expired confirmation, or a passed backoff, the read queues one `absence` job for the room on the account's acquisition worker and reports it as `queued`.
+The job confirms the room's due types in a fixed order, encryption first because a false "unencrypted" is the costliest mistake: encryption, server ACL, join rules, history visibility, guest access, power levels, canonical alias, creation.
+
+| Answer            | Recorded                                                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------------------- |
+| `404 M_NOT_FOUND` | A confirmation, valid for 24 hours                                                                         |
+| `200`             | No confirmation, and the body is never read; a warning names a sync coverage gap; asked again after 1 hour |
+| `403`             | No confirmation (the account may no longer be joined); not asked again for 1 hour                          |
+| Anything else     | A failure with backoff (see [Acquisition](#acquisition))                                                   |
+
+A confirmation is deleted when a tuple of its type arrives, when the account leaves the room, when the room is purged, and when the account is removed.
+A confirmation committed concurrently with its tuple is never shown, because a snapshot with a tuple never reports one.
+
 Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, `redacted`, `redaction_event_id`, and `content`.
 `origin_ts` is the upstream event timestamp, not the time of the last successful sync or an access-freshness guarantee.
 
@@ -203,6 +240,83 @@ The older `GET …/space/children` is unchanged: a bare array capped at 1,000 ch
 Because it is unchanged, it still returns the link's raw `order` string, so the two routes can report a different `order` for the same link when MSC1772 treats that `order` as invalid.
 It stays for existing clients and will be marked deprecated once the web client, the TUI, and the oversized-space work ([issue 553](https://github.com/matrix-axon/matrix-axon/issues/553)) have moved to `space/hierarchy`.
 
+## Homeserver details
+
+`GET /v1/accounts/{account_id}/rooms/{room_id}/homeserver_details` returns two details only the account's homeserver knows, from Axon's cache ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 3):
+
+- `local_aliases`: the aliases the homeserver maintains for the room ([`GET /rooms/{roomId}/aliases`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3roomsroomidaliases)), as `aliases`.
+  These are distinct from the advertised aliases in `/metadata` (see [Alias scope](#alias-scope)).
+- `directory_visibility`: whether its directory publishes the room ([`GET /directory/list/room/{roomId}`](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3directorylistroomroomid)), as `visibility`: `public` or `private`.
+
+```json
+{
+  "local_aliases": {
+    "status": "available",
+    "aliases": ["#room:example.org"],
+    "fetched_at": 1762200000000,
+    "expires_at": 1762200900000,
+    "refresh": { "state": "idle", "failure": null, "next_attempt_at": null }
+  },
+  "directory_visibility": {
+    "status": "unknown",
+    "visibility": null,
+    "fetched_at": null,
+    "expires_at": null,
+    "refresh": { "state": "queued", "failure": null, "next_attempt_at": null }
+  }
+}
+```
+
+Each detail keeps the last conclusive answer separate from the state of attempts to refresh it, so a failed refresh leaves the stale value visible.
+
+| `status`      | Meaning                                                         | Fresh for  |
+| ------------- | --------------------------------------------------------------- | ---------- |
+| `unknown`     | Never answered, or the room is not eligible                     | —          |
+| `available`   | The value is in `aliases` or `visibility`                       | 15 minutes |
+| `partial`     | Aliases that do not parse as room aliases were withheld         | 15 minutes |
+| `too_large`   | More than 256 aliases, or a body over 64 KiB; withheld, not cut | 15 minutes |
+| `forbidden`   | `403`; a lost permission replaces a cached list                 | 1 hour     |
+| `not_found`   | `404 M_NOT_FOUND`                                               | 1 hour     |
+| `unsupported` | `404`/`405 M_UNRECOGNIZED`, or `405`                            | 24 hours   |
+
+`fetched_at` and `expires_at` are Unix ms from the PostgreSQL clock; an `expires_at` in the past means stale.
+`refresh` is the refresh object `/metadata`'s `absence_check` also uses:
+
+- `state`: `idle`, `queued`, or `running`. A job waiting for a homeserver gate permit is `queued`; the gate's own state is in `GET /v1/status` (ADR 0122), and waiting is never a failure. Queue membership lives in memory only, so after a restart every refresh is `idle`.
+- `failure`: the last attempt's category, `null` after a conclusive answer: `timeout`, `server_error` (5xx), `rate_limited` (429), `transport`, `unauthorized` (401), or `invalid_response` (any other status, or a body of the wrong shape).
+- `next_attempt_at`: Unix ms before which no attempt is made, while a backoff is in force.
+
+The read schedules a refresh for a detail that is unknown or expired once any backoff has passed, and is otherwise a pure read, so repeated reads and polling cannot amplify upstream traffic beyond the expiration and backoff schedule.
+Only rooms the account has joined are acquired; any other room, including retained rooms after a leave and unknown room IDs, reads as `unknown` with no request, so neither endpoint can probe arbitrary rooms through the homeserver.
+A change made elsewhere to a room's aliases or publication is not seen until the cached answer expires, so 15 minutes is the staleness bound.
+
+## Acquisition
+
+Absence confirmation and homeserver details share one acquisition worker per account run, canceled and joined with the run like the member-count worker ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 4).
+The API reaches it through a consumer-owned port; it never waits for it.
+
+- **Queue:** at most 32 jobs per account, keyed by room and kind (`local_aliases`, `directory_visibility`, `absence`), so a duplicate request coalesces, including with the running job.
+  When the queue is full the oldest job is dropped: the newest request is the panel a user is looking at now, and the next read of the dropped room asks again.
+- **Pacing:** one request at a time per account, at least 250 ms apart, so one account's large room list cannot crowd out another account's work, and a room with every type absent fills in about 2.5 seconds.
+- **Gate:** each request takes a `HomeserverGate` permit as background work (ADR 0122).
+  Waiting for the permit is not part of the request's 10-second timeout, and a timed-out request keeps its gate slot, which is what stops a slow homeserver from accumulating abandoned work.
+- **Request:** sent with reqwest and the account's current access token rather than the SDK's `send`, without redirects.
+  A successful body is read through the same bounded reader as Matrix OAuth responses and refused past 64 KiB before parsing; an absence check's body is never read.
+  A `401` is a failure to back off from: token refresh stays with the account's sync.
+- **Backoff:** one minute after the first consecutive failure, doubling to 30 minutes, and never sooner than a `Retry-After` header or `retry_after_ms`, capped at 24 hours.
+- **Fencing:** `room_summaries.membership_epoch` takes a fresh value from a sequence on every leave and rejoin.
+  A job records the epoch before its request and commits only if the account is still active and joined in that same epoch, under a share lock on the summary row for the commit alone.
+  A leave during a request therefore rejects its result even if a rejoin follows before it completes.
+  An absence confirmation also commits only while no tuple of its type exists.
+  A sequence rather than a counter matters because a purge rebuild deletes and re-inserts summary rows; a restarted counter could hand a rejoined room the epoch an in-flight job recorded.
+- **Restart:** values, expirations, and backoff persist in `room_detail_acquisitions`; queue membership does not.
+- **Cleanup:** rows are deleted on leave (the `hidden_left` transition), on purge and on account removal (through the `room_summaries` foreign key), and, for a confirmation, when a tuple of its type arrives.
+  The table is bounded by the account's joined rooms times ten kinds.
+
+Set `RUST_LOG=axon_sync::acquisition=debug` to log each request with `account_id`, `room_id`, `kind`, `state_type`, `outcome`, `elapsed_ms`, and queue depth.
+Repeated failures and `200` absence checks (a sync coverage gap) log at warn.
+No log line contains alias values, state content, response bodies, or tokens; outcomes and failure categories are allowlisted.
+
 ## Change notification
 
 A `room_details.changed` WebSocket frame tells a client which of a room's reads to repeat ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 5).
@@ -213,17 +327,20 @@ A `room_details.changed` WebSocket frame tells a client which of a room's reads 
   "account_id": "…",
   "payload": {
     "room_id": "!room:example.org",
-    "sources": ["metadata", "member_counts"]
+    "sources": ["metadata", "member_counts", "homeserver_details"]
   }
 }
 ```
 
-| Source          | Re-read          | Published when                                                                                        |
-| --------------- | ---------------- | ----------------------------------------------------------------------------------------------------- |
-| `metadata`      | `GET …/metadata` | A tuple of one of the eight types is inserted, replaced, or changes its content or redaction evidence |
-| `member_counts` | `GET …/info`     | The member-count worker stores a different pair or clears one                                         |
+| Source               | Re-read                    | Published when                                                                                                                                                                   |
+| -------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `metadata`           | `GET …/metadata`           | A tuple of one of the eight types is inserted, replaced, or changes its content or redaction evidence; or an absence job recorded or removed a confirmation or changed a failure |
+| `member_counts`      | `GET …/info`               | The member-count worker stores a different pair or clears one                                                                                                                    |
+| `homeserver_details` | `GET …/homeserver_details` | A detail's value, freshness, or failure changed                                                                                                                                  |
 
-`sources` is never empty and lists sources in the order above; clients must ignore values they do not know, because later steps of issue 621 add `homeserver_details`.
+An acquisition job also publishes its source when it ends if a read reported it as `queued` or `running`, so a panel showing a refresh in progress learns it finished even when nothing changed.
+A job dropped from a full queue publishes nothing; the panel's next read asks again.
+`sources` is never empty and lists sources in the order above; clients must ignore values they do not know.
 The frame is a signal, not a payload: a client never applies a diff from it.
 The store reports whether each write changed the stored row, so identical rewrites, redeliveries after a restart, and writes the freshness guard refuses publish nothing.
 Two concurrent writes of the same tuple can both report a change; that costs one extra re-read.
@@ -243,7 +360,7 @@ After the upgrade that added the frame, the first sweep of the supplementary con
 Advertised aliases are the canonical `alias` and `alt_aliases` in `m.room.canonical_alias`.
 These can be read locally when that state tuple is cached.
 They are not a complete federation-wide alias enumeration.
-The separate Matrix `/rooms/{roomId}/aliases` endpoint lists aliases maintained by the account's homeserver and requires its own permission-aware acquisition and cache.
+The separate Matrix `/rooms/{roomId}/aliases` endpoint lists aliases maintained by the account's homeserver; Axon serves its cached answer as `local_aliases` in [Homeserver details](#homeserver-details), never merged with the advertised aliases.
 Client follow-ups should use "Advertised aliases" and "Aliases on your homeserver" rather than "Full alias list."
 See the [Matrix alias API](https://spec.matrix.org/v1.19/client-server-api/#get_matrixclientv3roomsroomidaliases).
 
@@ -257,7 +374,7 @@ It feeds the same state projection, so these two snapshots fill after its first 
 What either connection delivers is positive evidence only: a type it does not deliver stays `unknown`, because Sliding Sync does not guarantee complete required state.
 Even a requested state type can be unknown before room hydration or if no tuple was supplied.
 The API deliberately does not hide these gaps with default values or perform a remote fetch on every detail read.
-[Issue 621](https://github.com/matrix-axon/matrix-axon/issues/621) tracks the rest of ADR 0126: confirming known absence through the room-state endpoint, and acquiring homeserver-local aliases and directory publication.
+Instead the homeserver confirms absence in the background (see [Known absence](#known-absence)), and a `200` from that check is logged as a coverage gap.
 
 Authoritative member counts are cached separately as described above; the lazily loaded member list is not an authoritative count.
 Unjoined-room discovery and summary enrichment are [issue 622](https://github.com/matrix-axon/matrix-axon/issues/622); its paged local read is in place (see [Space children](#space-children)).
@@ -282,6 +399,10 @@ DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sy
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test state room_state_upsert_reports_only_real_changes -- --ignored
 cargo test -p axon-sync --lib room_details
 cargo test -p axon-api --lib room_details_changed
+cargo test -p axon-api --lib room_details
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test room_detail_acquisition -- --ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib acquisition -- --include-ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_details -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_state_read_endpoints -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http space_hierarchy_endpoint -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test spaces -- --ignored
@@ -313,6 +434,13 @@ Do not point these tests at an operator database or use production credentials.
    Repeat with Axon stopped, then restart against the same SDK store and verify startup recovery.
 6. Redact power-level state before a second account joins the room.
    Its first hydrated snapshot must preserve protected fields and report positive evidence.
+
+7. With `RUST_LOG=axon_sync::acquisition=debug`, read `/metadata` for a room with no server ACL and no guest access.
+   Both snapshots must report `absence_check.state` `queued`, then, after one `room_details.changed` naming `metadata`, a non-null `absence_confirmed_at`; the log must show one request per absent type, encryption first.
+   Set a server ACL and guest access; both snapshots must turn `available` with `null` absence fields.
+8. Read `/homeserver_details`, add a local alias and publish the room in the directory through Matrix, wait out the 15-minute expiration (or expire the rows in the disposable database), and read again: after a frame naming `homeserver_details`, the new alias and `public` appear.
+   Remove both and repeat.
+9. Leave the room while a request is held at a slow homeserver: no row may survive, and the rejoined room must start with no confirmation or details.
 
 The fixture homeserver may reject creation-event redactions; verify that a rejected request leaves Axon's evidence unchanged rather than treating the attempt as an applied redaction.
 These small-room checks validate reconciliation and recovery, not throughput for hundreds of rooms.

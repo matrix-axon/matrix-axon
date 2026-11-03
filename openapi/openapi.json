@@ -4460,6 +4460,69 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms/{room_id}/homeserver_details": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Get room homeserver details",
+        "description": "Read the room details only the account's homeserver knows, from Axon's\naccount-scoped cache: the aliases the homeserver maintains for the room,\nwhich are distinct from the advertised aliases in `GET …/metadata`, and\nwhether its directory publishes the room.\nReturns immediately and never waits for the homeserver. When a detail is\nunknown or expired and no backoff is in force, the read schedules a\nrefresh in the background; `refresh` reports it, and a failed refresh\nleaves the last answer visible with its `expires_at` in the past.\nOnly rooms the account has joined are acquired; any other room, including\nunknown room IDs, reads as `unknown` and makes no request.\nRe-read on reopen, on reconnect, and on a `room_details.changed` WebSocket\nframe whose `sources` include `homeserver_details`, which follows every\nchange and the end of any refresh a read saw queued or running.",
+        "operationId": "room_homeserver_details",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached homeserver details with freshness and refresh state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RoomHomeserverDetailsDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/info": {
       "get": {
         "tags": [
@@ -4971,7 +5034,7 @@
           "rooms"
         ],
         "summary": "Get room metadata",
-        "description": "Read typed room metadata from account-scoped cached state.\nNo upstream requests or membership aggregation occur on this route.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nContent is limited to 128 KiB per state tuple before transfer and decoding.\nRe-read on reopen, on reconnect, and on a `room_details.changed` WebSocket\nframe whose `sources` include `metadata`, which follows every change to a\nstored snapshot; open panels need no polling.\nEvent `origin_ts` is provenance, not a sync-freshness timestamp.",
+        "description": "Read typed room metadata from account-scoped cached state.\nNo upstream request is made on this route, and it never waits for one.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nFor a joined room, a snapshot with no tuple also reports whether the\naccount's homeserver has confirmed the room has no such state\n(`absence_confirmed_at`) and the state of confirming it (`absence_check`);\na read schedules the confirmation in the background when it is due.\nContent is limited to 128 KiB per state tuple before transfer and decoding.\nRe-read on reopen, on reconnect, and on a `room_details.changed` WebSocket\nframe whose `sources` include `metadata`, which follows every change to a\nstored snapshot or confirmation and the end of any confirmation a read saw\nqueued or running; open panels need no polling.\nEvent `origin_ts` is provenance, not a sync-freshness timestamp.",
         "operationId": "room_metadata",
         "parameters": [
           {
@@ -11288,6 +11351,31 @@
           }
         }
       },
+      "ApiResponse_RoomHomeserverDetailsDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Room details only the account's homeserver knows, from Axon's cache.",
+            "required": [
+              "local_aliases",
+              "directory_visibility"
+            ],
+            "properties": {
+              "directory_visibility": {
+                "$ref": "#/components/schemas/DirectoryVisibilityDetailDto"
+              },
+              "local_aliases": {
+                "$ref": "#/components/schemas/LocalAliasesDetailDto"
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_RoomInfoDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -12834,6 +12922,25 @@
           "invalid_fields"
         ],
         "properties": {
+          "absence_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailRefreshDto",
+                "description": "The state of confirming absence: `null` when the type has a tuple, or\nhas never been attempted and no attempt is queued. `queued` or\n`running` means a confirmation is coming; `idle` with a `failure` or a\nfuture `next_attempt_at` means it failed or was denied."
+              }
+            ]
+          },
+          "absence_confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the account's homeserver last confirmed that the room has\nno such state (`404 M_NOT_FOUND` from the room-state endpoint). Only\never set while `status` is `unknown`; `null` when Axon has no such\nconfirmation. A client may then apply a Matrix default only where the\nspecification defines what the absent state means."
+          },
           "content": {
             "oneOf": [
               {
@@ -12915,6 +13022,25 @@
           "invalid_fields"
         ],
         "properties": {
+          "absence_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailRefreshDto",
+                "description": "The state of confirming absence: `null` when the type has a tuple, or\nhas never been attempted and no attempt is queued. `queued` or\n`running` means a confirmation is coming; `idle` with a `failure` or a\nfuture `next_attempt_at` means it failed or was denied."
+              }
+            ]
+          },
+          "absence_confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the account's homeserver last confirmed that the room has\nno such state (`404 M_NOT_FOUND` from the room-state endpoint). Only\never set while `status` is `unknown`; `null` when Axon has no such\nconfirmation. A client may then apply a Matrix default only where the\nspecification defines what the absent state means."
+          },
           "content": {
             "oneOf": [
               {
@@ -13026,6 +13152,25 @@
           "invalid_fields"
         ],
         "properties": {
+          "absence_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailRefreshDto",
+                "description": "The state of confirming absence: `null` when the type has a tuple, or\nhas never been attempted and no attempt is queued. `queued` or\n`running` means a confirmation is coming; `idle` with a `failure` or a\nfuture `next_attempt_at` means it failed or was denied."
+              }
+            ]
+          },
+          "absence_confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the account's homeserver last confirmed that the room has\nno such state (`404 M_NOT_FOUND` from the room-state endpoint). Only\never set while `status` is `unknown`; `null` when Axon has no such\nconfirmation. A client may then apply a Matrix default only where the\nspecification defines what the absent state means."
+          },
           "content": {
             "oneOf": [
               {
@@ -13113,6 +13258,25 @@
           "invalid_fields"
         ],
         "properties": {
+          "absence_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailRefreshDto",
+                "description": "The state of confirming absence: `null` when the type has a tuple, or\nhas never been attempted and no attempt is queued. `queued` or\n`running` means a confirmation is coming; `idle` with a `failure` or a\nfuture `next_attempt_at` means it failed or was denied."
+              }
+            ]
+          },
+          "absence_confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the account's homeserver last confirmed that the room has\nno such state (`404 M_NOT_FOUND` from the room-state endpoint). Only\never set while `status` is `unknown`; `null` when Axon has no such\nconfirmation. A client may then apply a Matrix default only where the\nspecification defines what the absent state means."
+          },
           "content": {
             "oneOf": [
               {
@@ -13184,6 +13348,25 @@
           "invalid_fields"
         ],
         "properties": {
+          "absence_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailRefreshDto",
+                "description": "The state of confirming absence: `null` when the type has a tuple, or\nhas never been attempted and no attempt is queued. `queued` or\n`running` means a confirmation is coming; `idle` with a `failure` or a\nfuture `next_attempt_at` means it failed or was denied."
+              }
+            ]
+          },
+          "absence_confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the account's homeserver last confirmed that the room has\nno such state (`404 M_NOT_FOUND` from the room-state endpoint). Only\never set while `status` is `unknown`; `null` when Axon has no such\nconfirmation. A client may then apply a Matrix default only where the\nspecification defines what the absent state means."
+          },
           "content": {
             "oneOf": [
               {
@@ -13255,6 +13438,25 @@
           "invalid_fields"
         ],
         "properties": {
+          "absence_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailRefreshDto",
+                "description": "The state of confirming absence: `null` when the type has a tuple, or\nhas never been attempted and no attempt is queued. `queued` or\n`running` means a confirmation is coming; `idle` with a `failure` or a\nfuture `next_attempt_at` means it failed or was denied."
+              }
+            ]
+          },
+          "absence_confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the account's homeserver last confirmed that the room has\nno such state (`404 M_NOT_FOUND` from the room-state endpoint). Only\never set while `status` is `unknown`; `null` when Axon has no such\nconfirmation. A client may then apply a Matrix default only where the\nspecification defines what the absent state means."
+          },
           "content": {
             "oneOf": [
               {
@@ -13336,6 +13538,25 @@
           "invalid_fields"
         ],
         "properties": {
+          "absence_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailRefreshDto",
+                "description": "The state of confirming absence: `null` when the type has a tuple, or\nhas never been attempted and no attempt is queued. `queued` or\n`running` means a confirmation is coming; `idle` with a `failure` or a\nfuture `next_attempt_at` means it failed or was denied."
+              }
+            ]
+          },
+          "absence_confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the account's homeserver last confirmed that the room has\nno such state (`404 M_NOT_FOUND` from the room-state endpoint). Only\never set while `status` is `unknown`; `null` when Axon has no such\nconfirmation. A client may then apply a Matrix default only where the\nspecification defines what the absent state means."
+          },
           "content": {
             "oneOf": [
               {
@@ -13487,6 +13708,25 @@
           "invalid_fields"
         ],
         "properties": {
+          "absence_check": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DetailRefreshDto",
+                "description": "The state of confirming absence: `null` when the type has a tuple, or\nhas never been attempted and no attempt is queued. `queued` or\n`running` means a confirmation is coming; `idle` with a `failure` or a\nfuture `next_attempt_at` means it failed or was denied."
+              }
+            ]
+          },
+          "absence_confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the account's homeserver last confirmed that the room has\nno such state (`404 M_NOT_FOUND` from the room-state endpoint). Only\never set while `status` is `unknown`; `null` when Axon has no such\nconfirmation. A client may then apply a Matrix default only where the\nspecification defines what the absent state means."
+          },
           "content": {
             "oneOf": [
               {
@@ -13799,6 +14039,37 @@
           }
         }
       },
+      "DetailRefreshDto": {
+        "type": "object",
+        "description": "The state of attempts to refresh a cached value, separate from the value\nitself, so a failed refresh leaves usable stale data visible.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "failure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RefreshFailure",
+                "description": "The last attempt's failure; `null` after a conclusive answer."
+              }
+            ]
+          },
+          "next_attempt_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms before which no refresh is attempted, when one is set."
+          },
+          "state": {
+            "$ref": "#/components/schemas/RefreshState"
+          }
+        }
+      },
       "DeviceDto": {
         "type": "object",
         "description": "One Matrix device of a user, as reported by `GET …/devices` — the picker a\nclient shows before starting SAS verification (M16, ADR 0060).",
@@ -13904,6 +14175,57 @@
           },
           "value": {
             "description": "The opaque value the winning device wrote. Axon never interprets it."
+          }
+        }
+      },
+      "DirectoryVisibility": {
+        "type": "string",
+        "description": "Whether the account's homeserver publishes the room in its directory.",
+        "enum": [
+          "public",
+          "private"
+        ]
+      },
+      "DirectoryVisibilityDetailDto": {
+        "type": "object",
+        "description": "The room's publication in the account's homeserver directory (`GET\n/directory/list/room/{roomId}`).",
+        "required": [
+          "status",
+          "refresh"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when that answer goes stale; a past value means stale."
+          },
+          "fetched_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms of the last conclusive answer, from the server clock."
+          },
+          "refresh": {
+            "$ref": "#/components/schemas/DetailRefreshDto"
+          },
+          "status": {
+            "$ref": "#/components/schemas/HomeserverDetailStatus"
+          },
+          "visibility": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DirectoryVisibility",
+                "description": "`null` unless status is `available`."
+              }
+            ]
           }
         }
       },
@@ -14330,6 +14652,19 @@
           "probing"
         ]
       },
+      "HomeserverDetailStatus": {
+        "type": "string",
+        "description": "What Axon last learned about a homeserver detail.",
+        "enum": [
+          "unknown",
+          "available",
+          "partial",
+          "too_large",
+          "forbidden",
+          "not_found",
+          "unsupported"
+        ]
+      },
       "HomeserverGateDto": {
         "type": "object",
         "description": "One homeserver's load gate (ADR 0122): how many of axon's background\nrequests (backfill, upstream room probes, key-backup downloads, DM\nauto-joins) it admits at once, and whether its circuit breaker has stopped\nthem. In-memory state, reset on restart.",
@@ -14620,6 +14955,48 @@
           }
         },
         "additionalProperties": false
+      },
+      "LocalAliasesDetailDto": {
+        "type": "object",
+        "description": "The aliases the account's homeserver maintains for the room (`GET\n/rooms/{roomId}/aliases`). Distinct from the advertised aliases in\n`m.room.canonical_alias`, which `GET …/metadata` serves.",
+        "required": [
+          "status",
+          "refresh"
+        ],
+        "properties": {
+          "aliases": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "`null` unless status is `available` or `partial`."
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when that answer goes stale; a past value means stale."
+          },
+          "fetched_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms of the last conclusive answer, from the server clock."
+          },
+          "refresh": {
+            "$ref": "#/components/schemas/DetailRefreshDto"
+          },
+          "status": {
+            "$ref": "#/components/schemas/HomeserverDetailStatus"
+          }
+        }
       },
       "LoginRequest": {
         "type": "object",
@@ -15800,6 +16177,27 @@
           }
         }
       },
+      "RefreshFailure": {
+        "type": "string",
+        "description": "Why the last refresh attempt failed. Allowlisted; never upstream text.",
+        "enum": [
+          "timeout",
+          "server_error",
+          "rate_limited",
+          "transport",
+          "unauthorized",
+          "invalid_response"
+        ]
+      },
+      "RefreshState": {
+        "type": "string",
+        "description": "Whether a refresh is waiting for, or using, the account's worker. In\nmemory only: after a restart every refresh is `idle`.",
+        "enum": [
+          "idle",
+          "queued",
+          "running"
+        ]
+      },
       "RoomDto": {
         "type": "object",
         "description": "A room in the cross-account list (`GET /v1/rooms`). Identity is\n`(account_id, room_id)` — a room joined by two accounts appears twice.",
@@ -15932,6 +16330,22 @@
         "properties": {
           "room_id": {
             "type": "string"
+          }
+        }
+      },
+      "RoomHomeserverDetailsDto": {
+        "type": "object",
+        "description": "Room details only the account's homeserver knows, from Axon's cache.",
+        "required": [
+          "local_aliases",
+          "directory_visibility"
+        ],
+        "properties": {
+          "directory_visibility": {
+            "$ref": "#/components/schemas/DirectoryVisibilityDetailDto"
+          },
+          "local_aliases": {
+            "$ref": "#/components/schemas/LocalAliasesDetailDto"
           }
         }
       },
