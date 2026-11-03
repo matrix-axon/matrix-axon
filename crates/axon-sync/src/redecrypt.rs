@@ -532,6 +532,15 @@ pub(crate) fn pending_utd_for_persisted(
 /// Local only: no backup download, no homeserver traffic. A key that has not
 /// arrived leaves the row pending for [`run`] to find when it does. Returns
 /// whether the row was back-filled.
+///
+/// Safe on a duplicate delivery of an event that is already decrypted. The row
+/// is built from the incoming envelope, so this can run for it, but
+/// `upsert_event` never rewrites an existing row's `content` (its conflict
+/// clause touches only `inline_media_urls`), and `update_decrypted_event` writes
+/// only `WHERE content IS NULL`, so the second back-fill is a no-op and queues no
+/// search-outbox entry. The cost is one local decrypt plus that guarded no-op
+/// update. A lookup to skip them would add a database round trip to every new
+/// UTD to save work on a rare re-delivery.
 pub(crate) async fn recheck_persisted_utd(
     room: &Room,
     store: &Store,
