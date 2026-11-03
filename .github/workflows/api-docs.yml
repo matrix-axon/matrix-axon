@@ -40,6 +40,19 @@ on:
       - 'docs/PRIVACY_POLICY.md'
       - 'docs/img/**'
       - '.github/workflows/api-docs.yml'
+      - 'scripts/check-site-links.py'
+  # Build and link-check only, so a broken link fails the PR that introduces it
+  # instead of failing the deploy after merge. The `deploy` job is skipped here.
+  # Jekyll renders every markdown file in the repository, so any of them can
+  # change what the site links to.
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'demo.html'
+      - 'docs/img/**'
+      - 'openapi/openapi.json'
+      - '.github/workflows/api-docs.yml'
+      - 'scripts/check-site-links.py'
   workflow_dispatch:
     inputs:
       demo_release_tag:
@@ -57,9 +70,12 @@ permissions:
 
 # Serialize deployments; let an in-flight publish finish rather than cancelling
 # it, so the live site is never left mid-deploy.
+#
+# A pull request only builds, so it gets its own group per ref and may cancel its
+# own superseded runs without ever queueing behind (or cancelling) a deploy.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -70,6 +86,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Configure Pages
+        id: pages
         uses: actions/configure-pages@v6
 
       - name: Build the Jekyll site
@@ -132,6 +149,18 @@ jobs:
             --pattern '*.mp4' \
             --dir _site/demo
 
+      - name: Check every link reachable from the homepage works
+        # Jekyll renders what it can and silently copies the rest verbatim, so a
+        # link that works on github.com can be a 404 or raw markdown here:
+        # README, LICENSE and CONTRIBUTING are never rendered, a directory link
+        # needs an index.html, and a README beside a Vite index.html is not an
+        # index. This runs after the API page and demo recordings are in place,
+        # since the homepage and demo page link to both. The script says exactly
+        # what it flags, and why it crawls from index.html.
+        run: |
+          python3 -I scripts/check-site-links.py _site \
+            --site-url "${{ steps.pages.outputs.base_url }}/"
+
       - name: Check the site has the required pages
         # Cheap guard against the silent-success failure mode this workflow has
         # already hit twice: a deploy step that "succeeds" while publishing the
@@ -159,6 +188,7 @@ jobs:
   deploy:
     name: Publish to GitHub Pages
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

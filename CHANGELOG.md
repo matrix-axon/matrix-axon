@@ -1,7 +1,7 @@
 # Changelog
 
 Notable changes to each release, newest first.
-The same notes are on the [GitHub Releases](../../releases) page.
+The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
 ## v0.1.22 - 2026-11-03
 

@@ -2,7 +2,7 @@
 
 How to build and run the server and the terminal client from a checkout, and where to find the web client's build instructions.
 If you only want to _use_ Axon, [install.md](install.md) is quicker.
-If you plan to send a pull request, also read [CONTRIBUTING.md](../CONTRIBUTING.md) for the pre-push gate and conventions.
+If you plan to send a pull request, also read [CONTRIBUTING.md](https://github.com/matrix-axon/matrix-axon/blob/main/CONTRIBUTING.md) for the pre-push gate and conventions.
 
 Short version, with Rust installed and either a local Postgres or Docker:
 
@@ -39,7 +39,7 @@ Take Rust plus whichever client you plan to build.
 
 ## Platform install commands
 
-`pre-commit` below is only needed if you will contribute; see [CONTRIBUTING.md](../CONTRIBUTING.md).
+`pre-commit` below is only needed if you will contribute; see [CONTRIBUTING.md](https://github.com/matrix-axon/matrix-axon/blob/main/CONTRIBUTING.md).
 
 ### Ubuntu / WSL2
 
@@ -69,7 +69,7 @@ You likely need to start Docker from the desktop the first time and grant it adm
 
 > On older Intel Macs, `pnpm` may fail to verify the identity of the `@pnpm/exe.darwin-x64` native binary.
 > That is an upstream bug;
-> use corepack instead — see [clients/web/README.md](../clients/web/README.md).
+> use corepack instead — see [clients/web/README.md](https://github.com/matrix-axon/matrix-axon/blob/main/clients/web/README.md).
 
 ### Windows (PowerShell)
 
@@ -183,7 +183,7 @@ The code is six unambiguous characters, and the bootstrap locks for the rest of 
 Once any account, token, or OAuth identity exists it closes permanently;
 use the CLI/admin paths for later credentials.
 
-For the web client, see [clients/web/README.md](../clients/web/README.md) — it has its own dev server, proxy configuration, and test lanes.
+For the web client, see [clients/web/README.md](https://github.com/matrix-axon/matrix-axon/blob/main/clients/web/README.md) — it has its own dev server, proxy configuration, and test lanes.
 
 ## Start over
 

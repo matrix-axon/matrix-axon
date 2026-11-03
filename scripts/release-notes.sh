@@ -113,7 +113,7 @@ changelog)
 		exit 0
 	fi
 	if [ ! -f "$file" ]; then
-		printf '# Changelog\n\nNotable changes to each release, newest first.\nThe same notes are on the [GitHub Releases](../../releases) page.\n' >"$file"
+		printf '# Changelog\n\nNotable changes to each release, newest first.\nThe same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.\n' >"$file"
 	fi
 	tmp=$(mktemp)
 	trap 'rm -f "$tmp"' EXIT

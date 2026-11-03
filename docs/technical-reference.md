@@ -12,18 +12,18 @@ Homeserver(s)  →  Axon (single binary)  →  axon-web · axon-tui
 ```
 
 One Rust binary, one Postgres database, media cached to local disk.
-See the [architecture section of the tech spec](mvp/tech-spec.md#architecture-overview) for detail, and the [ADRs](adr/) for the reasoning behind individual decisions.
+See the [architecture section of the tech spec](mvp/tech-spec.md#architecture-overview) for detail, and the [ADRs](https://github.com/matrix-axon/matrix-axon/tree/main/docs/adr) for the reasoning behind individual decisions.
 
 ## Clients
 
-| Client                                            | Platform                                              | Status                                                                   |
-| ------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
-| [`axon-tui`](clients/tui/README.md)               | Terminal                                              | Active (MVP reference client)                                            |
-| [`axon-web`](clients/web/README.md)               | Web browser (desktop + mobile)                        | Active (nearing MVP)                                                     |
-| [`axon-desktop`](clients/web/src-tauri/README.md) | Linux, macOS, Windows (Tauri shell around `axon-web`) | Active ([download](https://github.com/matrix-axon/matrix-axon/releases)) |
-| `axon-mobile`                                     | iOS + Android (the same shell)                        | Planned (ADR 0102)                                                       |
+| Client                                                                                   | Platform                                              | Status                                                                   |
+| ---------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| [`axon-tui`](../clients/tui/README.md)                                                   | Terminal                                              | Active (MVP reference client)                                            |
+| [`axon-web`](https://github.com/matrix-axon/matrix-axon/blob/main/clients/web/README.md) | Web browser (desktop + mobile)                        | Active (nearing MVP)                                                     |
+| [`axon-desktop`](../clients/web/src-tauri/README.md)                                     | Linux, macOS, Windows (Tauri shell around `axon-web`) | Active ([download](https://github.com/matrix-axon/matrix-axon/releases)) |
+| `axon-mobile`                                                                            | iOS + Android (the same shell)                        | Planned (ADR 0102)                                                       |
 
-See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and sequencing.
+See [ADR 0031](adr/0031-client-strategy.md) for the client strategy and sequencing.
 
 ### Reaction images
 
@@ -181,4 +181,4 @@ TUI-specific display vars (`AXON_FONT_SIZE`, `AXON_IMAGE_PROTOCOL`, `AXON_NO_IMA
 Precedence (lowest to highest): built-in defaults < `axon.toml` < bare `DATABASE_URL` < `AXON_`-prefixed vars.
 
 [`axon.toml.example`](../axon.toml.example) is the full reference for every section and field, with the corresponding env var noted alongside each one.
-[`.env.example`](../.env.example) mirrors the same fields in env-var form for anyone who prefers configuring entirely through the environment.
+[`.env.example`](https://github.com/matrix-axon/matrix-axon/blob/main/.env.example) mirrors the same fields in env-var form for anyone who prefers configuring entirely through the environment.

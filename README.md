@@ -52,17 +52,17 @@ Every download is on the [latest release page](https://github.com/matrix-axon/ma
 
 ## Documentation
 
-| I want to…                                              | Read                                                                                                       |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Install Axon on my machine                              | [Installing Axon](docs/install.md)                                                                         |
-| Run it with Docker, add TLS or Tailscale, back it up    | [Docker guide](deploy/README.md)                                                                           |
-| Sign in, add accounts, manage tokens, enable push       | [Administering the server](docs/server-admin.md)                                                           |
-| Look up a config option, environment variable, or limit | [Technical reference](docs/technical-reference.md)                                                         |
-| Use the terminal client                                 | [axon-tui](clients/tui/README.md)                                                                          |
-| Use or develop the web and desktop client               | [axon-web](clients/web/README.md), [desktop app](clients/web/src-tauri/README.md)                          |
-| Build from source or contribute                         | [Building](docs/building.md), [CONTRIBUTING](CONTRIBUTING.md)                                              |
-| Build my own client                                     | [OpenAPI spec](https://matrix-axon.github.io/matrix-axon/api.html), [client parity](docs/client-parity.md) |
-| Understand why it works the way it does                 | [Product description](docs/mvp/prd.md), [tech spec](docs/mvp/tech-spec.md), [ADRs](docs/adr/)              |
+| I want to…                                              | Read                                                                                                                                              |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Install Axon on my machine                              | [Installing Axon](docs/install.md)                                                                                                                |
+| Run it with Docker, add TLS or Tailscale, back it up    | [Docker guide](deploy/README.md)                                                                                                                  |
+| Sign in, add accounts, manage tokens, enable push       | [Administering the server](docs/server-admin.md)                                                                                                  |
+| Look up a config option, environment variable, or limit | [Technical reference](docs/technical-reference.md)                                                                                                |
+| Use the terminal client                                 | [axon-tui](clients/tui/README.md)                                                                                                                 |
+| Use or develop the web and desktop client               | [axon-web](https://github.com/matrix-axon/matrix-axon/blob/main/clients/web/README.md), [desktop app](clients/web/src-tauri/README.md)            |
+| Build from source or contribute                         | [Building](docs/building.md), [CONTRIBUTING](https://github.com/matrix-axon/matrix-axon/blob/main/CONTRIBUTING.md)                                |
+| Build my own client                                     | [OpenAPI spec](https://matrix-axon.github.io/matrix-axon/api.html), [client parity](docs/client-parity.md)                                        |
+| Understand why it works the way it does                 | [Product description](docs/mvp/prd.md), [tech spec](docs/mvp/tech-spec.md), [ADRs](https://github.com/matrix-axon/matrix-axon/tree/main/docs/adr) |
 
 The [documentation index](docs/README.md) lists everything else.
 
@@ -72,4 +72,4 @@ The [documentation index](docs/README.md) lists everything else.
 - Questions and ideas: [GitHub Discussions](https://github.com/matrix-axon/matrix-axon/discussions). Bugs: [GitHub Issues](https://github.com/matrix-axon/matrix-axon/issues).
 - More options, including email, are on the [support page](https://matrix-axon.github.io/matrix-axon/support/).
 
-[Privacy policy](https://matrix-axon.github.io/matrix-axon/privacy/) · [Third-party components](THIRDPARTY.md) · [License](LICENSE.md) · [Changelog](CHANGELOG.md)
+[Privacy policy](https://matrix-axon.github.io/matrix-axon/privacy/) · [Third-party components](THIRDPARTY.md) · [License](https://github.com/matrix-axon/matrix-axon/blob/main/LICENSE.md) · [Changelog](CHANGELOG.md)
