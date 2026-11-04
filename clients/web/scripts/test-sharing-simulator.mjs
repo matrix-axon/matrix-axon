@@ -132,6 +132,23 @@ const project = {
         },
       },
     },
+    ComposerTests: {
+      type: 'bundle.unit-test',
+      platform: 'iOS',
+      sources: [
+        join(source, '../share-extension/ShareViewController.swift'),
+        join(source, '../share-extension-tests/ComposerLifecycleTests.swift'),
+      ],
+      dependencies: [{ package: 'AxonIncomingShare' }],
+      settings: {
+        base: {
+          PRODUCT_BUNDLE_IDENTIFIER: 'org.matrixaxon.composer.tests',
+          GENERATE_INFOPLIST_FILE: 'YES',
+          CODE_SIGNING_ALLOWED: 'NO',
+          SWIFT_VERSION: '5.0',
+        },
+      },
+    },
     FoundationTests: {
       type: 'bundle.unit-test',
       platform: 'iOS',
@@ -149,8 +166,14 @@ const project = {
   },
   schemes: {
     FoundationTests: {
-      build: { targets: { FoundationTests: 'test', ShareExtension: 'all' } },
-      test: { targets: ['FoundationTests'] },
+      build: {
+        targets: {
+          FoundationTests: 'test',
+          ComposerTests: 'test',
+          ShareExtension: 'all',
+        },
+      },
+      test: { targets: ['FoundationTests', 'ComposerTests'] },
     },
     ActivationTests: {
       build: { targets: { ShareSource: 'all', ActivationTests: 'all' } },

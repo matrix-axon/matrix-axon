@@ -186,8 +186,8 @@ export function PendingSharesPage() {
             Delete {clearIds.length} saved{' '}
             {clearIds.length === 1 ? 'share' : 'shares'} from this device? This
             removes drafts and saved delivery records. Messages already sent
-            remain in their rooms. Shares currently open elsewhere in Axon will
-            be kept.
+            remain in their rooms. Drafts open in another share window may also
+            be removed. Shares currently sending will be kept.
           </p>
           <button
             type="button"

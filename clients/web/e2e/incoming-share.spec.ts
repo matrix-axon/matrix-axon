@@ -34,7 +34,7 @@ test.beforeEach(async ({ page }) => {
       localStorage.setItem('fixture.incoming', JSON.stringify([record]))
   }, record)
 })
-test('pending count badge and confirmed clear all preserve active and newly arriving shares', async ({
+test('clear all fences idle composers while preserving live sends and new arrivals', async ({
   page,
 }, testInfo) => {
   await page.addInitScript((record) => {
@@ -46,12 +46,14 @@ test('pending count badge and confirmed clear all preserve active and newly arri
           ...record,
           id: 'active',
           owner: 'extension-owner',
-          text: 'Open in another composer',
+          text: 'Sending in another composer',
+          operation: { id: 'sending-op', state: 'dispatching' },
         },
         {
           ...record,
           id: 'third',
-          text: 'Another draft',
+          text: 'Idle in another composer',
+          owner: 'idle-owner',
           operation: { id: 'third-op', state: 'ready' },
         },
       ]),
@@ -105,7 +107,7 @@ test('pending count badge and confirmed clear all preserve active and newly arri
   await expect(page.getByRole('alert')).toContainText(
     '1 share could not be cleared',
   )
-  await expect(page.getByRole('alert')).toContainText('five minutes')
+  await expect(page.getByRole('alert')).toContainText('still sending')
   await expect(
     page
       .getByRole('link', { name: 'Pending shares, 2', exact: true })
@@ -116,7 +118,9 @@ test('pending count badge and confirmed clear all preserve active and newly arri
   ).toHaveCount(2)
   await page.evaluate(() => {
     const records = JSON.parse(localStorage.getItem('fixture.incoming')!)
-    delete records.find((item: { id: string }) => item.id === 'active').owner
+    records.find(
+      (item: { id: string }) => item.id === 'active',
+    ).operation.state = 'sent'
     localStorage.setItem('fixture.incoming', JSON.stringify(records))
     window.dispatchEvent(new Event('focus'))
   })

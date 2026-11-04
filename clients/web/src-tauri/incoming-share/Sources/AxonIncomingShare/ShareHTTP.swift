@@ -33,6 +33,7 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
   private let lock = NSLock()
   private let slots = DispatchSemaphore(value: 2)
   private var requests: [Int: Pending] = [:]
+  private var closed = false
   private var session: URLSession!
   public override init() {
     super.init()
@@ -51,7 +52,13 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
   }
 
-  public func close() { session.invalidateAndCancel() }
+  public func close() {
+    lock.lock()
+    guard !closed else { lock.unlock(); return }
+    closed = true
+    lock.unlock()
+    session.invalidateAndCancel()
+  }
 
   public func request(
     descriptor: ShareSession, token: String, path: String,
@@ -87,13 +94,16 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     if let mime, !mime.isEmpty { request.setValue(mime, forHTTPHeaderField: "Content-Type") }
     request.httpBody = body
     let pending = Pending(limit: limit)
+    // Closing and task creation/resume share one lock. Invalidation can race
+    // a caller that already passed its ownership/cancellation checks.
+    lock.lock()
+    guard !closed else { lock.unlock(); throw ShareFailure.cancelled }
     let task: URLSessionTask =
       file.map { session.uploadTask(with: request, fromFile: $0) }
       ?? session.dataTask(with: request)
-    lock.lock()
     requests[task.taskIdentifier] = pending
-    lock.unlock()
     task.resume()
+    lock.unlock()
     guard pending.done.wait(timeout: .now() + deadline + 5) == .success else {
       task.cancel()
       lock.lock()

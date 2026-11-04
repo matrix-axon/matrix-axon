@@ -67,6 +67,15 @@ final class ShareHTTPTests: XCTestCase {
         installation: "synthetic", server: "https://" + host, credentialAvailable: true,
         expiresAt: nil))
   }
+  func testClosedHTTPRejectsNewRequestsWithoutCreatingATask() throws {
+    try withHTTP(body: Data(), declaredBytes: 0) { http, session in
+      http.close()
+      http.close()
+      XCTAssertThrowsError(try http.request(descriptor: session, token: "synthetic-token", path: "/v1/rooms")) {
+        XCTAssertEqual($0 as? ShareFailure, .cancelled)
+      }
+    }
+  }
   func testSmallResponsePassesThroughRealDelegate() throws {
     let body = Data("{\"data\":[]}".utf8)
     try withHTTP(body: body, declaredBytes: body.count) { http, session in

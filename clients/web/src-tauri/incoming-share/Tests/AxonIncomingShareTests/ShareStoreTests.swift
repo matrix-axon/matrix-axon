@@ -67,13 +67,41 @@ final class ShareStoreTests: XCTestCase {
     XCTAssertTrue(try store.list().isEmpty)
   }
 
-  func testOrphanedDraftStillProtectsAnotherOwnerUntilLeaseExpires() throws {
+  func testOrphanedIdleDraftCanBeExplicitlyDiscardedWithoutWaitingForLease() throws {
     let draft = try store.claim(store.create(text: "active draft").id)
     try FileManager.default.removeItem(at: root.appendingPathComponent("session.json"))
-    XCTAssertThrowsError(try store.discard(draft.id)) { error in
-      XCTAssertEqual(error as? ShareFailure, .busy)
-    }
-    time += ShareLimits.lease + 1
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+    XCTAssertThrowsError(try store.update(draft))
+  }
+
+  func testExplicitDiscardFencesAnIdleComposerWithoutWaitingForLease() throws {
+    let draft = try store.claim(store.create(text: "idle composer").id)
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+    XCTAssertThrowsError(try store.update(draft))
+  }
+
+  func testCancelUsesFreshDispatchStateInsteadOfDeletingAnUncertainOutcome() throws {
+    let idle = try store.claim(store.create(text: "cancel during send").id)
+    var dispatching = idle
+    dispatching.operation.state = .dispatching
+    _ = try store.update(dispatching)
+    try store.cancelComposer(idle)
+    let retained = try XCTUnwrap(store.list().first)
+    XCTAssertEqual(retained.operation.state, .unknown)
+    XCTAssertNil(retained.owner)
+  }
+
+  func testExplicitDiscardKeepsAnActiveDispatch() throws {
+    var draft = try store.claim(store.create(text: "sending").id)
+    draft.operation.state = .dispatching
+    draft = try store.update(draft)
+    XCTAssertThrowsError(try store.discard(draft.id))
+    XCTAssertEqual(try store.refreshOwned(draft.id, owner: draft.owner!), draft)
+    draft.operation.state = .sent
+    draft.operation.eventId = "$confirmed"
+    _ = try store.update(draft)
     try store.discard(draft.id)
     XCTAssertTrue(try store.list().isEmpty)
   }

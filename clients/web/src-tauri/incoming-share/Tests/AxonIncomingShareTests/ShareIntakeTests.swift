@@ -38,6 +38,37 @@
           expiresAt: nil), credential: {})
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
+    func testCancelledIntakeNeverCreatesOrClaimsADraft() throws {
+      let cancellation = ShareCancellation()
+      cancellation.cancel()
+      let item = NSExtensionItem()
+      item.attachments = [NSItemProvider(object: URL(string: link)! as NSURL)]
+      XCTAssertThrowsError(try ShareIntake.importItems([item], store: store, cancellation: cancellation)) {
+        XCTAssertEqual($0 as? ShareFailure, .cancelled)
+      }
+      XCTAssertTrue(try store.list().isEmpty)
+    }
+    func testCancellationInterruptsAProviderBeforeItCanPublishADraft() async throws {
+      let cancellation = ShareCancellation()
+      let started = expectation(description: "provider read started")
+      let provider = NSItemProvider()
+      provider.registerDataRepresentation(forTypeIdentifier: UTType.url.identifier, visibility: .all) { _ in
+        started.fulfill()
+        return Progress(totalUnitCount: 1)
+      }
+      let item = NSExtensionItem()
+      item.attachments = [provider]
+      let task = Task.detached {
+        try ShareIntake.importItems([item], store: self.store, cancellation: cancellation)
+      }
+      await fulfillment(of: [started], timeout: 3)
+      cancellation.cancel()
+      switch await task.result {
+      case .success: XCTFail("Cancelled provider must not publish a draft")
+      case .failure(let error): XCTAssertEqual(error as? ShareFailure, .cancelled)
+      }
+      XCTAssertTrue(try store.list().isEmpty)
+    }
     func testPublicURLAndAccompanyingTextImportOnceWithoutFetching() async throws {
       let item = NSExtensionItem()
       item.attributedContentText = NSAttributedString(string: "Useful accompanying prose " + link)

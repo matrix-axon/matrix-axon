@@ -197,11 +197,13 @@ describe('durable incoming-share recovery', () => {
           return structuredClone(records[index]) as never
         }
         if (action === 'discard') {
+          if (args?.owner !== undefined && records[index].owner !== args.owner)
+            throw { code: 'stale' }
           if (
-            records[index].owner !== undefined &&
-            records[index].owner !== args?.owner
+            records[index].owner &&
+            records[index].operation.state === 'dispatching'
           )
-            throw { code: 'busy' }
+            throw { code: 'sending' }
           records.splice(index, 1)
           return {} as never
         }
@@ -228,9 +230,10 @@ describe('durable incoming-share recovery', () => {
     expect(f.post).not.toHaveBeenCalled()
   })
 
-  it('keeps active shares and continues clearing the rest after a failure', async () => {
+  it('keeps in-flight sends and continues clearing the rest after a failure', async () => {
     const f = inboxFixture()
     f.records[1].owner = 'extension-owner'
+    f.records[1].operation.state = 'dispatching'
     await f.store.refresh()
     await f.store.discardAll()
     expect(f.records.map((record) => record.id)).toEqual(['share-1'])
@@ -264,8 +267,10 @@ describe('durable incoming-share recovery', () => {
   it('keeps busy and inaccessible shares and reports both reasons', async () => {
     const f = inboxFixture()
     f.records[1].owner = 'extension-owner'
+    f.records[1].operation.state = 'dispatching'
     const original = f.port.call
     f.port.call = vi.fn(async (action, args) => {
+      if (action === 'discard' && args?.id === 'share-1') throw { code: 'busy' }
       if (action === 'discard' && args?.id === 'share-2')
         throw { code: 'authentication' }
       return (await original(action, args)) as never
@@ -276,8 +281,37 @@ describe('durable incoming-share recovery', () => {
     expect(f.store.notice.value).toBe('Cleared 1 pending share.')
     expect(f.store.error.value).toContain('2 shares could not be cleared')
     expect(f.store.error.value).toContain('sign in or refresh your session')
-    expect(f.store.error.value).toContain('Other shares are busy')
+    expect(f.store.error.value).toContain(
+      'Other saved shares are temporarily busy',
+    )
     expect(f.post).not.toHaveBeenCalled()
+  })
+
+  it('clears seven idle composers without waiting for their leases or adopting their owners', async () => {
+    const f = inboxFixture(Array(7).fill('ready'))
+    for (const record of f.records) record.owner = 'retained-composer'
+    await f.store.refresh()
+    await f.store.discardAll()
+    expect(f.records).toEqual([])
+    expect(f.store.error.value).toBeNull()
+    expect(f.store.notice.value).toBe('Cleared 7 pending shares.')
+    expect(
+      vi
+        .mocked(f.port.call)
+        .mock.calls.filter(([action]) => action === 'discard')
+        .every(([, args]) => args?.owner === undefined),
+    ).toBe(true)
+    expect(f.post).not.toHaveBeenCalled()
+  })
+
+  it('clears an idle reviewed draft after its previous claim has been replaced', async () => {
+    const f = inboxFixture(['ready'])
+    await f.store.refresh()
+    await f.store.open('share-0')
+    f.records[0].owner = 'replacement-review-owner'
+    await f.store.discardAll()
+    expect(f.records).toEqual([])
+    expect(f.store.error.value).toBeNull()
   })
 
   it('does not clear shares arriving after the confirmed selection', async () => {

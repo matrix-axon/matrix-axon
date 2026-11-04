@@ -29,7 +29,7 @@ final class ShareViewController: UIViewController {
 }
 
 /// UI state lives on main; all storage/network work has one serial owner.
-private final class ShareComposer: ObservableObject {
+final class ShareComposer: ObservableObject {
   private static let log = Logger(subsystem: "org.matrixaxon.axon", category: "share-extension")
   @Published var text = ""
   @Published var account = ""
@@ -44,7 +44,8 @@ private final class ShareComposer: ObservableObject {
   private var store: ShareStore?
   private var sender: TextShareSender?
   private var devicePreview: DevicePreview?
-  private var transport: ShareHTTP?
+  private let transport: ShareHTTP
+  private let prepare: () throws -> Session
   private let cancellation = ShareCancellation()
   // Only accessed on queue.
   private var current: ShareManifest?
@@ -52,9 +53,32 @@ private final class ShareComposer: ObservableObject {
   private var editSave: DispatchWorkItem?
   private let close: () -> Void
   private var closing = false
-  init(close: @escaping () -> Void) { self.close = close }
+  private var completed = false
+  struct Session {
+    let store: ShareStore
+    let credential: () throws -> (ShareSession, String)
+
+    static func live() throws -> Session {
+      guard let root = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: SharedSession.group),
+        let group = Bundle.main.object(forInfoDictionaryKey: "AxonSharedKeychainGroup") as? String
+      else { throw ShareFailure.unavailable }
+      let store = try ShareStore(root: root.appendingPathComponent("IncomingShares", isDirectory: true))
+      let session = SharedSession(store: store, accessGroup: group)
+      return Session(store: store, credential: { try session.credential() })
+    }
+  }
+
+  init(
+    transport: ShareHTTP = ShareHTTP(), prepare: @escaping () throws -> Session = Session.live,
+    close: @escaping () -> Void
+  ) {
+    self.transport = transport
+    self.prepare = prepare
+    self.close = close
+  }
   deinit {
-    transport?.close()
+    transport.close()
     heartbeat?.invalidate()
     editSave?.cancel()
   }
@@ -110,27 +134,22 @@ private final class ShareComposer: ObservableObject {
   }
 
   func start(_ items: [NSExtensionItem]) {
+    guard !closing else { return }
     run {
-      guard
-        let root = FileManager.default.containerURL(
-          forSecurityApplicationGroupIdentifier: SharedSession.group),
-        let group = Bundle.main.object(forInfoDictionaryKey: "AxonSharedKeychainGroup") as? String
-      else { throw ShareFailure.unavailable }
-      let store = try ShareStore(
-        root: root.appendingPathComponent("IncomingShares", isDirectory: true))
+      let session = try self.prepare()
+      let store = session.store
       self.store = store
       self.devicePreview = DevicePreview(store: store, cancellation: self.cancellation)
-      let session = SharedSession(store: store, accessGroup: group)
-      let http = ShareHTTP()
-      self.transport = http
+      let http = self.transport
       self.sender = TextShareSender(
-        store: store, credential: { try session.credential() }, cancellation: self.cancellation,
+        store: store, credential: session.credential, cancellation: self.cancellation,
         request: { descriptor, token, path, method, body, file, mime, limit in
           try http.request(
             descriptor: descriptor, token: token, path: path, method: method, body: body,
             file: file, mime: mime, limit: limit)
         })
-      self.current = try ShareIntake.importItems(items, store: store, staged: { self.current = $0 })
+      self.current = try ShareIntake.importItems(
+        items, store: store, cancellation: self.cancellation, staged: { self.current = $0 })
       let importedText = self.current!.text
       DispatchQueue.main.async { self.text = importedText }
       let rooms = try self.sender!.destinations(self.current!)
@@ -152,42 +171,72 @@ private final class ShareComposer: ObservableObject {
       self.renew()
     }
   }
+  // Runs on the worker queue. A peer may explicitly discard an idle draft.
+  private func refreshAfterFailure() -> Bool {
+    guard let record = current, let owner = record.owner, let store else { return false }
+    do {
+      current = try store.refreshOwned(record.id, owner: owner)
+      return false
+    } catch {
+      guard let failure = error as? ShareFailure, [.stale, .missingFile].contains(failure) else {
+        return false
+      }
+      var fenced = record
+      fenced.owner = nil
+      fenced.leaseUntil = nil
+      current = fenced
+      return true
+    }
+  }
+
   private func renew() {
     queue.async {
-      guard let current = self.current, let store = self.store else { return }
+      guard let current = self.current, current.owner != nil, let store = self.store else { return }
       do {
+        try self.cancellation.check()
         let renewed = try store.update(current)
         self.current = renewed
         DispatchQueue.main.async { if !self.closing { self.record = renewed } }
       } catch {
-        DispatchQueue.main.async { if !self.closing { self.status = Self.explain(error) } }
+        let fenced = self.refreshAfterFailure()
+        let record = self.current
+        DispatchQueue.main.async {
+          guard !self.closing else { return }
+          self.record = record
+          if fenced { self.heartbeat?.invalidate() }
+          self.status = Self.explain(fenced ? ShareFailure.stale : error)
+        }
       }
     }
   }
   private func run(blocking: Bool = true, _ action: @escaping () throws -> String) {
+    guard !closing else { return }
     if blocking { busy = true }
     queue.async {
       let message: String
-      do { message = try action() } catch {
-        Self.log.error(
-          "share_extension_failed category=\((error as? ShareFailure)?.rawValue ?? (error as? SharePreviewFallback)?.rawValue ?? (error as? DevicePreviewFailure)?.rawValue ?? "unexpected", privacy: .public)"
-        )
-        // A thumbnail upload may have saved a newer revision before failing.
-        if let record = self.current, let owner = record.owner,
-          let saved = try? self.store?.refreshOwned(record.id, owner: owner)
-        {
-          self.current = saved
+      do {
+        try self.cancellation.check()
+        message = try action()
+      } catch {
+        if (try? self.cancellation.check()) != nil {
+          Self.log.error(
+            "share_extension_failed category=\((error as? ShareFailure)?.rawValue ?? (error as? SharePreviewFallback)?.rawValue ?? (error as? DevicePreviewFailure)?.rawValue ?? "unexpected", privacy: .public)"
+          )
         }
+        // A thumbnail upload may have saved a newer revision, or a peer may
+        // have discarded the draft. Never leave stale Send authority enabled.
+        let fenced = self.refreshAfterFailure()
         if let state = self.current?.operation.state, [.dispatching, .unknown].contains(state) {
           message =
             "Delivery outcome unknown. A dispatched message may have been delivered. Check the destination before any explicit resend in Axon."
         } else {
-          message = Self.explain(error, draftSaved: self.current != nil)
+          message = Self.explain(fenced ? ShareFailure.stale : error, draftSaved: self.current != nil)
         }
       }
       let record = self.current
       var images: [String: UIImage] = [:]
       for preview in record?.previews ?? [] {
+        do { try self.cancellation.check() } catch { break }
         if let record, let owner = record.owner, let file = preview.thumbnail,
           let store = self.store
         {
@@ -210,6 +259,7 @@ private final class ShareComposer: ObservableObject {
       DispatchQueue.main.async {
         guard !self.closing else { return }
         self.record = record
+        if record?.owner == nil { self.heartbeat?.invalidate() }
         self.images = images
         // An empty completed action clears routine status; background
         // autosave must preserve actionable errors and delivery outcomes.
@@ -492,14 +542,27 @@ private final class ShareComposer: ObservableObject {
           self.current = try store.update(self.current!, release: true)
         }
       }
-      DispatchQueue.main.async { self.close() }
+      DispatchQueue.main.async { self.complete() }
       return "Closed."
     }
   }
+  private func complete() {
+    guard !completed else { return }
+    completed = true
+    closing = true
+    heartbeat?.invalidate()
+    editSave?.cancel()
+    cancellation.cancel()
+    transport.close()
+    close()
+  }
+
   func cancel() {
     guard !closing else { return }
     closing = true
     cancellation.cancel()
+    transport.close()
+    Self.log.info("share_cancel_requested")
     heartbeat?.invalidate()
     editSave?.cancel()
     busy = true
@@ -507,9 +570,11 @@ private final class ShareComposer: ObservableObject {
       "Stopping after the current request. A dispatched message may already be delivered; saved outcomes remain in Pending shares."
     queue.async {
       if let record = self.current, let store = self.store {
-        try? store.cancelComposer(record)
+        do { try store.cancelComposer(record) } catch {
+          Self.log.error("share_cancel_cleanup_failed category=\((error as? ShareFailure)?.rawValue ?? "storage", privacy: .public)")
+        }
       }
-      DispatchQueue.main.async { self.close() }
+      DispatchQueue.main.async { self.complete() }
     }
   }
 }

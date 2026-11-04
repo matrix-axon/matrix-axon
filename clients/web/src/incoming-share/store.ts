@@ -98,7 +98,7 @@ export function createIncomingShareStore(
       ? cause.code
       : null
   }
-  function describeFailure(cause: unknown) {
+  function describeFailure(cause: unknown, clearing = false) {
     const code = failureCode(cause)
     const messages: Record<string, string> = {
       destination: 'Choose a sending account and joined room before sending.',
@@ -126,6 +126,8 @@ export function createIncomingShareStore(
       invalid:
         'The share contains invalid or over-limit data. Review and edit it before sending.',
       busy: 'Another share operation is active. Close other Share → Axon composers, wait up to five minutes, then retry.',
+      sending:
+        'A share is still sending. Wait for it to finish, then refresh and retry clearing it.',
       previewBusy:
         'Another on-device preview is finishing. Wait a moment and try again.',
       transferBusy: 'Sharing transfers are busy. Wait a moment and try again.',
@@ -137,6 +139,11 @@ export function createIncomingShareStore(
         'The share changed or its ownership expired. Refresh pending shares before reviewing it again.',
       expired:
         'The request timed out. The draft is retained; inspect the saved delivery outcomes before retrying.',
+    }
+    if (clearing && code === 'busy') {
+      error.value =
+        'Saved shares are temporarily busy. Wait a moment and retry clearing.'
+      return
     }
     error.value =
       typeof code === 'string' && messages[code] !== undefined
@@ -273,11 +280,9 @@ export function createIncomingShareStore(
   async function discardRecord(record: IncomingShare, generation: number) {
     if (generation !== epoch) return
     const id = record.id
-    const current = selected.peek()
-    await port.call('discard', {
-      id,
-      owner: current?.id === id ? current.owner : undefined,
-    })
+    // This is an explicit user discard, not an old composer's completion.
+    // The native lock fences idle writers and protects any live dispatch.
+    await port.call('discard', { id })
     if (generation !== epoch) return
     void cleanup(record, generation)
     const kept = { ...drafts.peek() }
@@ -302,7 +307,7 @@ export function createIncomingShareStore(
         await refresh()
       }
     } catch (cause) {
-      if (generation === epoch) describeFailure(cause)
+      if (generation === epoch) describeFailure(cause, true)
     } finally {
       if (generation === epoch) busy.value = false
     }
@@ -327,7 +332,7 @@ export function createIncomingShareStore(
       const records = await port.call<IncomingShare[]>('list')
       if (generation !== epoch) return
       // Each discard uses the native ownership lock. Another active composer
-      // keeps its lease; one rejection must not prevent clearing other shares.
+      // keeps its dispatch outcome; one rejection must not stop other deletions.
       for (const record of records) {
         if (generation !== epoch) return
         if (!targets.has(record.id)) continue
@@ -352,16 +357,16 @@ export function createIncomingShareStore(
       notice.value = `Cleared ${cleared} pending ${cleared === 1 ? 'share' : 'shares'}.`
       if (failed > 0) {
         const summary = `${failed} ${failed === 1 ? 'share could' : 'shares could'} not be cleared.`
-        if (blocked === failed) describeFailure({ code: 'busy' })
-        else describeFailure(firstFailure)
+        if (blocked === failed) describeFailure({ code: 'busy' }, true)
+        else describeFailure(firstFailure, true)
         const busyMessage =
           blocked > 0 && blocked < failed
-            ? ' Other shares are busy; close other Share → Axon composers and wait up to five minutes before retrying them.'
+            ? ' Other saved shares are temporarily busy; wait a moment and retry clearing them.'
             : ''
         error.value = `${summary} ${error.peek()}${busyMessage}`
       }
     } catch (cause) {
-      if (generation === epoch) describeFailure(cause)
+      if (generation === epoch) describeFailure(cause, true)
     } finally {
       if (generation === epoch) busy.value = false
     }

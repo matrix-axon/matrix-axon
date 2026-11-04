@@ -413,13 +413,22 @@ public final class ShareStore {
       }
       // Explicit local deletion also recovers orphaned drafts after a lost
       // session descriptor. Acknowledgment still requires the original session.
-      if completed { try validateSession(current) }
-      guard current.owner == nil || current.owner == owner || (current.leaseUntil ?? 0) <= now()
-      else {
-        Self.log.info("share_discard_busy share_id=\(id, privacy: .public)")
-        throw ShareFailure.busy
+      let active = current.owner != nil && (current.leaseUntil ?? 0) > now()
+      if completed {
+        try validateSession(current)
+        guard !active || current.owner == owner else { throw ShareFailure.busy }
+        guard current.completed else { throw ShareFailure.invalid }
+      } else {
+        // An obsolete composer must never delete a newly claimed draft.
+        if let owner, current.owner != owner { throw ShareFailure.stale }
+        // This lock also guards the durable dispatch transition. Removing an
+        // idle draft fences all old writers before any subsequent send; once
+        // dispatch intent exists, keep its outcome until the request settles.
+        if active && Self.operations(current).contains(where: { $0.state == .dispatching }) {
+          Self.log.info("share_discard_sending share_id=\(id, privacy: .public)")
+          throw ShareFailure.sending
+        }
       }
-      if completed && !current.completed { throw ShareFailure.invalid }
       try fm.removeItem(at: directory(id))
       Self.log.info("share_discarded share_id=\(id, privacy: .public)")
     }
@@ -428,12 +437,44 @@ public final class ShareStore {
   /// Closing a completed composer acknowledges its result. Uncertain sends
   /// keep their delivery record; neither path authorizes replay.
   public func cancelComposer(_ manifest: ShareManifest) throws {
-    if manifest.completed {
-      try discard(manifest.id, owner: manifest.owner, completed: true)
-    } else if [.dispatching, .unknown].contains(manifest.operation.state) {
-      _ = try update(manifest, release: true)
-    } else {
-      try discard(manifest.id, owner: manifest.owner)
+    try coordinated {
+      var current: ShareManifest
+      do { current = try load(manifest.id) } catch ShareFailure.missingFile { return }
+      guard let owner = manifest.owner, current.owner == owner,
+        current.session == manifest.session
+      else { throw ShareFailure.stale }
+      if current.completed {
+        try validateSession(current)
+      } else if Self.operations(current).contains(where: {
+        [.dispatching, .unknown].contains($0.state)
+      }) {
+        Self.releaseForRecovery(&current)
+        current.revision += 1
+        try save(current)
+        Self.log.info("share_cancel_retained share_id=\(current.id, privacy: .public)")
+        return
+      }
+      try fm.removeItem(at: directory(current.id))
+      Self.log.info("share_cancel_discarded share_id=\(current.id, privacy: .public)")
+    }
+  }
+
+  private static func operations(_ manifest: ShareManifest) -> [ShareOperation] {
+    [manifest.operation] + manifest.files.compactMap(\.operation)
+  }
+
+  private static func releaseForRecovery(_ manifest: inout ShareManifest) {
+    manifest.owner = nil
+    manifest.leaseUntil = nil
+    if manifest.operation.state == .dispatching { manifest.operation.state = .unknown }
+    if manifest.operation.state == .uploading { manifest.operation.state = .ready }
+    for index in manifest.files.indices {
+      if manifest.files[index].operation?.state == .dispatching {
+        manifest.files[index].operation?.state = .unknown
+      }
+      if manifest.files[index].operation?.state == .uploading {
+        manifest.files[index].operation?.state = .ready
+      }
     }
   }
 
@@ -773,18 +814,7 @@ public final class ShareStore {
         // a preview attachment failed. An active import keeps its ownership.
         let thumbnails = Set(manifest.previews?.compactMap(\.thumbnail) ?? [])
         manifest.files.removeAll { $0.thumbnail && !thumbnails.contains($0.id) }
-        manifest.owner = nil
-        manifest.leaseUntil = nil
-        if manifest.operation.state == .dispatching { manifest.operation.state = .unknown }
-        if manifest.operation.state == .uploading { manifest.operation.state = .ready }
-        for index in manifest.files.indices {
-          if manifest.files[index].operation?.state == .dispatching {
-            manifest.files[index].operation?.state = .unknown
-          }
-          if manifest.files[index].operation?.state == .uploading {
-            manifest.files[index].operation?.state = .ready
-          }
-        }
+        Self.releaseForRecovery(&manifest)
         let retained = Set(manifest.files.map(\.id) + ["manifest.json"])
         let stagedFiles = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         if stagedFiles.contains(where: { $0.pathExtension == "reservation" })

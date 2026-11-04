@@ -83,8 +83,14 @@ const port: IncomingSharePort = {
       return records[index] as T
     }
     if (action === 'ack' || action === 'discard') {
-      if (record?.owner !== undefined && record.owner !== args.owner)
-        throw { code: 'busy' }
+      if (args.owner !== undefined && record?.owner !== args.owner)
+        throw { code: 'stale' }
+      if (
+        action === 'discard' &&
+        record?.owner &&
+        record.operation.state === 'dispatching'
+      )
+        throw { code: 'sending' }
       localStorage.setItem(
         'fixture.incoming',
         JSON.stringify(records.filter((item) => item.id !== args.id)),

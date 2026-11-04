@@ -74,6 +74,43 @@ final class TextShareTests: XCTestCase {
       store: store, credential: credential ?? { (self.session, "synthetic-token") },
       request: request)
   }
+  func testDiscardBetweenRoomCheckAndDispatchFencesTheSend() throws {
+    let value = try draft()
+    var sends = 0
+    let sender = sender { _, _, path, _, _, _, _, _ in
+      if path.hasPrefix("/v1/rooms?") {
+        try self.store.discard(value.id)
+        return try self.destinations()
+      }
+      sends += 1
+      return try self.response(200, ["data": ["event_id": "$unexpected"]])
+    }
+    XCTAssertThrowsError(try sender.send(value))
+    XCTAssertTrue(try store.list().isEmpty)
+    XCTAssertEqual(sends, 0)
+  }
+
+  func testDiscardAfterDispatchIntentKeepsTheResultRecord() throws {
+    let value = try draft()
+    var sends = 0
+    let sender = sender { _, _, path, _, _, _, _, _ in
+      if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+      sends += 1
+      return try self.response(200, ["data": ["event_id": "$confirmed"]])
+    }
+    let sent = try sender.send(value) { checkpoint in
+      if checkpoint.operation.state == .dispatching {
+        do {
+          try self.store.discard(value.id)
+          XCTFail("A live dispatch must keep its outcome record")
+        } catch {}
+      }
+    }
+    XCTAssertEqual(sends, 1)
+    XCTAssertEqual(sent.operation.eventId, "$confirmed")
+    XCTAssertEqual(try store.list().first?.operation.state, .sent)
+  }
+
   func testNormalizationPreservesProseAndDeduplicatesRepresentations() throws {
     XCTAssertEqual(
       try TextShare.normalize(text: ["https://EXAMPLE.org:443", "https://example.org/"], urls: []),

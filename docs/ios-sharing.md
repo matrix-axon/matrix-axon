@@ -49,13 +49,15 @@ The inbox holds at most 20 pending shares, including failed imports retained fro
 If it is full, send or explicitly discard existing drafts before sharing again; Axon preserves those drafts rather than dropping them to make room.
 The extension reports the full inbox separately from oversized source text.
 **Clear all** removes the confirmed set of pending shares; an individual **Discard share** removes one saved record.
-A share open in another composer remains protected until that composer releases it or its five-minute ownership lease expires.
-If clearing reports a busy share, close any open **Share → Axon** composers, wait five full minutes, then retry; refreshing the inbox or sign-in does not shorten that lease.
+Explicit discard can remove an idle draft immediately, including one still claimed by another composer; subsequent edits and sends from that composer are fenced out.
+A share with a live dispatch remains protected until that request settles, so its delivery outcome is retained.
+Automatic expiry and quota cleanup still preserve actively owned shares.
 Explicit discard can remove a saved record even if its local sharing-session descriptor is missing; sending, resuming, and acknowledging delivery still require the correct session.
 Other deletion failures show their own error rather than being described as another open composer.
 Text edits are saved after 400 milliseconds of idle time, and Keep draft/Send flush current edits.
 An abrupt termination can lose edits still inside this batching window.
-**Cancel** discards an undispatched share and sends nothing; cancellation during a request stops subsequent work after that bounded request finishes.
+**Cancel** interrupts provider reads and HTTP requests, stops queued work and heartbeats, and discards an undispatched share without sending it.
+Cancellation reconciles the latest saved delivery state under the shared lock; an uncertain dispatch is retained without ownership for explicit recovery.
 A message already dispatched may have been delivered; its saved outcome remains in Pending shares.
 Cancel after confirmed success acknowledges and removes that completed record, as Done does; unknown delivery outcomes remain recoverable.
 Confirmed success records the Matrix event ID.
@@ -126,6 +128,8 @@ scripts/package-ios.sh --export-method debugging --install --device <device-iden
 The simulator lane compiles the actual extension UI with extension-safe APIs and runs the shared native XCTest suite.
 It also installs a disposable source app and the real extension controller under unique test identities, without shared credentials or App Group access.
 UI tests open the system share sheet for text, URLs, sender-decorated links, standalone images, and URL/PNG alternatives, then check destination availability and cancellation from the real composer.
+The simulator lane also exercises the production composer against a private staging root and stubbed HTTP.
+It covers a stalled request, repeated cancellations, and loss of Send authority after another window discards the draft.
 Native contract tests consume the existing server fixtures checked against OpenAPI; sender tests inspect durable intent before dispatch, confirmed event IDs, stale destinations, rejected authentication, explicit size rejection, missing thumbnail copies, response loss, and refusal to replay unknown operations.
 These tests do not establish signed-device provider behavior or accessibility.
 Diagnostics record share IDs, states, counts, and known representation flags; content, filenames, source URLs, credentials, and arbitrary provider errors are excluded.
@@ -261,7 +265,7 @@ The user installed 818.9 and confirmed that account and room restoration works c
 
 The toolbar entry now appears only for a nonempty inbox, with a count badge, or an unreadable inbox, with a warning badge and a path to retry.
 Recovery offers confirmed **Clear all** for the captured set of drafts and saved delivery records.
-The existing native ownership checks protect another active composer; new arrivals are excluded, failures do not stop other deletions, and session changes stop the remaining batch.
+The native dispatch checks protect in-flight sends; idle composers are fenced when explicitly discarded, new arrivals are excluded, failures do not stop other deletions, and session changes stop the remaining batch.
 Verification passed 2,921 web unit tests with two skipped and all seven recovery browser checks in Chromium and the iPhone WebKit profile.
 The broader Chromium run had 257 passing checks and eight skipped; two trace-output collisions and an ambiguous new status locator were resolved and the affected cases passed in the isolated twelve-case rerun.
 Lint, formatting, and the production web build passed.

@@ -17,7 +17,9 @@
     }
     typealias ResultBox<T> = ShareIntakeResult<T>
 
-    private static func item(_ provider: NSItemProvider, type: String) throws -> NSSecureCoding {
+    private static func item(
+      _ provider: NSItemProvider, type: String, cancellation: ShareCancellation
+    ) throws -> NSSecureCoding {
       // Foundation may vend an archived NSURL through untyped loadItem. Ask
       // its public typed reader to decode it; never inspect that archive.
       if provider.canLoadObject(ofClass: NSURL.self) {
@@ -29,7 +31,7 @@
             typed.finish(.failure(ShareFailure.invalid))
           }
         }
-        do { return try typed.wait() } catch { progress.cancel() }
+        do { return try typed.wait(cancellation: cancellation) } catch { progress.cancel() }
       }
       let box = ResultBox<NSSecureCoding>()
       provider.loadItem(forTypeIdentifier: type, options: nil) { value, _ in
@@ -39,7 +41,7 @@
           box.finish(.failure(ShareFailure.unavailable))
         }
       }
-      return try box.wait()
+      return try box.wait(cancellation: cancellation)
     }
 
     static func bytes(
@@ -70,7 +72,7 @@
       }
     }
 
-    private static func text(_ provider: NSItemProvider) throws -> String {
+    private static func text(_ provider: NSItemProvider, cancellation: ShareCancellation) throws -> String {
       // Ask for the concrete public representation when available. Some
       // cross-process providers cannot vend a file for its abstract parent.
       let type =
@@ -80,7 +82,7 @@
           UTType($0)?.conforms(to: .plainText) == true
         } ?? UTType.plainText.identifier
       do {
-        let data = try bytes(provider, type: type, limit: ShareLimits.textBytes)
+        let data = try bytes(provider, type: type, limit: ShareLimits.textBytes, cancellation: cancellation)
         let encoding: String.Encoding =
           UTType(type)?.conforms(to: .utf16PlainText) == true ? .utf16 : .utf8
         guard let value = String(data: data, encoding: encoding) else {
@@ -105,7 +107,7 @@
         box.finish(Result { try boundedString(string) })
       }
       do {
-        let value = try box.wait()
+        let value = try box.wait(cancellation: cancellation)
         log.info("share_text_imported representation=string")
         return value
       } catch {
@@ -137,7 +139,7 @@
           legacy.finish(.failure(ShareFailure.unavailable))
         }
       }
-      let value = try legacy.wait()
+      let value = try legacy.wait(cancellation: cancellation)
       log.info("share_text_imported representation=item")
       return value
     }
@@ -152,10 +154,12 @@
     }
 
     public static func importItems(
-      _ items: [NSExtensionItem], store: ShareStore, staged: (ShareManifest) -> Void = { _ in }
+      _ items: [NSExtensionItem], store: ShareStore,
+      cancellation: ShareCancellation = ShareCancellation(), staged: (ShareManifest) -> Void = { _ in }
     ) throws
       -> ShareManifest
     {
+      try cancellation.check()
       guard items.count <= 16, items.reduce(0, { $0 + ($1.attachments?.count ?? 0) }) <= 32 else {
         throw ShareFailure.quota
       }
@@ -165,12 +169,14 @@
       var failures: [String] = []
       let deadline = Date().addingTimeInterval(20)
       for input in items {
+        try cancellation.check()
         let urlStart = urls.count
         log.info(
           "share_item public_title=\(input.attributedTitle != nil) public_text=\(input.attributedContentText != nil)"
         )
         if let content = input.attributedContentText?.string { text.append(content) }
         for provider in input.attachments ?? [] {
+          try cancellation.check()
           guard Date() < deadline else {
             failures.append("provider_timeout")
             break
@@ -184,7 +190,7 @@
             if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
               let urlStart = urls.count
               do {
-                let value = try item(provider, type: UTType.url.identifier)
+                let value = try item(provider, type: UTType.url.identifier, cancellation: cancellation)
                 log.info(
                   "share_url_representation url=\(value is URL) nsurl=\(value is NSURL) text=\(value is String) bytes=\(value is Data) metadata=\(value is LPLinkMetadata)"
                 )
@@ -236,10 +242,10 @@
               }
               // Some providers expose useful accompanying prose separately.
               if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
-                text.append(try Self.text(provider))
+                text.append(try Self.text(provider, cancellation: cancellation))
               }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
-              text.append(try Self.text(provider))
+              text.append(try Self.text(provider, cancellation: cancellation))
             } else {
               failures.append("unsupported_input")
             }
@@ -260,12 +266,14 @@
           }
         }
       }
+      try cancellation.check()
       let normalized = try TextShare.normalize(text: text, urls: urls)
       var manifest = try store.claim(store.create(text: normalized).id)
       staged(manifest)
       manifest.importFailures = failures
       manifest = try store.update(manifest)
       for link in metadata {
+        try cancellation.check()
         guard let raw = TextShare.matchedLink(link.url, in: normalized) else { continue }
         if (manifest.previews?.count ?? 0) >= 8
           && manifest.previews?.contains(where: { $0.matched_url == raw }) != true
@@ -287,7 +295,8 @@
           where image.hasItemConformingToTypeIdentifier(type.identifier) {
             guard Date() < deadline else { break }
             if let data = try? bytes(
-              image, type: type.identifier, limit: ShareLimits.thumbnailBytes),
+              image, type: type.identifier, limit: ShareLimits.thumbnailBytes,
+              cancellation: cancellation),
               let next = try? store.importThumbnail(
                 manifest.id, owner: manifest.owner!, data: data, mime: type.preferredMIMEType!,
                 preview: preview)
@@ -298,11 +307,13 @@
             }
           }
         }
+        try cancellation.check()
         if !imported {
           manifest.previews = (manifest.previews ?? []).filter { $0.matched_url != raw } + [preview]
           manifest = try store.update(manifest)
         }
       }
+      try cancellation.check()
       return manifest
     }
   }

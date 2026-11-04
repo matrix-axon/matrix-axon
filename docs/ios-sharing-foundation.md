@@ -20,7 +20,7 @@ After ownership expires, resume or Refresh reclaims an available share and prese
 Unfinished records expire after 24 hours, and **Discard share** explicitly removes local content.
 **Clear all** asks you to confirm bulk deletion of the shares listed when the confirmation opened.
 It removes saved drafts and delivery outcomes from this device; it does not remove messages already delivered to rooms.
-Shares owned by another active composer and shares arriving after that confirmation opened are kept.
+Explicit clearing fences idle composers immediately; shares with live dispatches and shares arriving after that confirmation opened are kept.
 If a share cannot be removed, the others are still cleared and the remaining shares stay available for review.
 
 Compatible supplied metadata is reused first.
