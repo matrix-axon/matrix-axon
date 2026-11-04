@@ -743,8 +743,10 @@ private struct ShareComposeView: View {
               Button("Remove preview images") { model.removePreview(imageOnly: true) }.disabled(
                 !model.editable)
             }
-            Button("Remove previews, keep links") { model.removePreview(imageOnly: false) }
-              .disabled(!model.editable)
+            if previews.count > 1 {
+              Button("Remove previews, keep links") { model.removePreview(imageOnly: false) }
+                .disabled(!model.editable)
+            }
           }
         }
         Section {
