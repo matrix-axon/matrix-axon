@@ -771,20 +771,27 @@ private struct ShareComposeView: View {
       }
       .sheet(isPresented: $editingCard) {
         NavigationView {
-          Form {
-            TextField("Preview title", text: $cardTitle)
-            TextField("Preview description", text: $cardDescription)
-            if cardTitle.utf16.count > 300 || cardDescription.utf16.count > 1000 {
-              Text(
-                "Title limit: 300 UTF-16 units; description limit: 1000. Shorten these fields before saving."
-              ).foregroundColor(.red)
+          GeometryReader { geometry in
+            Form {
+              TextField("Preview title", text: $cardTitle)
+              Section(header: Text("Description")) {
+                TextEditor(text: $cardDescription)
+                  .frame(height: max(160, geometry.size.height * 0.5))
+                  .accessibilityLabel("Preview description")
+                  .accessibilityIdentifier("share-preview-description")
+              }
+              if cardTitle.utf16.count > 300 || cardDescription.utf16.count > 1000 {
+                Text(
+                  "Title limit: 300 UTF-16 units; description limit: 1000. Shorten these fields before saving."
+                ).foregroundColor(.red)
+              }
+              Button("Save card") {
+                model.editPreview(url: cardURL, title: cardTitle, description: cardDescription)
+                editingCard = false
+              }
+              .disabled(cardTitle.utf16.count > 300 || cardDescription.utf16.count > 1000)
+              Button("Cancel") { editingCard = false }
             }
-            Button("Save card") {
-              model.editPreview(url: cardURL, title: cardTitle, description: cardDescription)
-              editingCard = false
-            }
-            .disabled(cardTitle.utf16.count > 300 || cardDescription.utf16.count > 1000)
-            Button("Cancel") { editingCard = false }
           }.navigationTitle("Edit preview")
         }.navigationViewStyle(.stack)
       }

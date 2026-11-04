@@ -300,5 +300,6 @@ The native iOS text/link Share Extension adds an account/room picker with valida
 Recovery now also has a conditional toolbar entry with a count or read-failure badge and confirmed bulk clearing that fences idle composers and preserves in-flight sends and newly arriving shares.
 The native composer omits routine introductory instructions, places an accessible reload icon beside Destination, and shows image removal only for previews that contain an image.
 Bulk preview removal appears only for multiple included previews.
+Preview descriptions use a multiline editor sized to the available display height.
 It is not covered by the browser demo driver or recorded tours.
 Native XCTest and the signed-device checklist in [iOS sharing](ios-sharing.md) cover this separate OS surface; a new native recording remains outstanding.

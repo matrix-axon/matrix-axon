@@ -39,6 +39,7 @@ After generation, the status distinguishes an included image, metadata without a
 An absent or unavailable image leaves a sendable text card; **Include preview** can be explicitly retried.
 For messages with many links, **Find link for preview** searches all links while displaying at most eight choices at a time.
 Cards support editing their title/description, removing their image, or removing the entire preview while retaining the URL.
+**Edit preview** provides a multiline description editor that grows with the available display height and adjusts when the keyboard is shown.
 The bulk **Remove previews, keep links** action appears only when more than one preview is included.
 **Remove preview images** appears only when an included preview contains an image, including an unavailable retained image that needs removal.
 Changing a URL invalidates its previous card.
