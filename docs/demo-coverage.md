@@ -302,5 +302,6 @@ The native composer omits routine introductory instructions, places an accessibl
 Bulk preview removal appears only for multiple included previews.
 Preview descriptions use a multiline editor sized to the available display height.
 Link preview controls place the preview action beside the link-only status, with device and homeserver privacy explanations behind adjacent information buttons.
+Homeserver preview confirmation is anchored to the corresponding link's button.
 It is not covered by the browser demo driver or recorded tours.
 Native XCTest and the signed-device checklist in [iOS sharing](ios-sharing.md) cover this separate OS surface; a new native recording remains outstanding.

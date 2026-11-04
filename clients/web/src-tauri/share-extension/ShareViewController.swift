@@ -598,9 +598,7 @@ private enum SharePreviewInformation: String, Identifiable {
 private struct ShareComposeView: View {
   @ObservedObject var model: ShareComposer
   @Environment(\.sizeCategory) private var sizeCategory
-  @State private var homeserverConsent = false
   @State private var previewInformation: SharePreviewInformation?
-  @State private var previewURL = ""
   @State private var previewSearch = ""
   @State private var editingCard = false
   @State private var cardURL = ""
@@ -690,16 +688,7 @@ private struct ShareComposeView: View {
                   }
                 }
                 HStack(spacing: 0) {
-                  Button("Use homeserver instead…") {
-                    previewURL = url
-                    homeserverConsent = true
-                  }
-                  .buttonStyle(.borderless).frame(minHeight: 44)
-                  .accessibilityIdentifier("share-homeserver-preview")
-                  .accessibilityHint(
-                    "Shares the URL with your selected homeserver only after confirmation"
-                  )
-                  .disabled(!model.editable || model.account.isEmpty)
+                  ShareHomeserverPreviewButton(model: model, url: url)
                   informationButton(.homeserver)
                 }
               }
@@ -779,14 +768,6 @@ private struct ShareComposeView: View {
           title: Text(information.title), message: Text(information.message),
           dismissButton: .default(Text("OK")))
       }
-      .confirmationDialog(
-        "Send this URL to your homeserver to fetch a preview?", isPresented: $homeserverConsent,
-        titleVisibility: .visible
-      ) {
-        Button("Fetch using homeserver") { model.generateUsingHomeserver(previewURL) }
-      } message: {
-        Text("Your homeserver may record this URL in its logs, including for encrypted rooms.")
-      }
       .sheet(isPresented: $editingCard) {
         NavigationView {
           GeometryReader { geometry in
@@ -854,6 +835,28 @@ private struct ShareComposeView: View {
       (included ? "Refresh on-device preview for " : "Include on-device preview for ") + url)
     .accessibilityHint("Uses this device to fetch a title and optional image")
     .disabled(!model.editable)
+  }
+}
+
+private struct ShareHomeserverPreviewButton: View {
+  @ObservedObject var model: ShareComposer
+  let url: String
+  @State private var homeserverConsent = false
+
+  var body: some View {
+    Button("Use homeserver instead…") { homeserverConsent = true }
+      .buttonStyle(.borderless).frame(minHeight: 44)
+      .accessibilityIdentifier("share-homeserver-preview")
+      .accessibilityHint("Shares the URL with your selected homeserver only after confirmation")
+      .disabled(!model.editable || model.account.isEmpty)
+      .confirmationDialog(
+        "Send this URL to your homeserver to fetch a preview?", isPresented: $homeserverConsent,
+        titleVisibility: .visible
+      ) {
+        Button("Fetch using homeserver") { model.generateUsingHomeserver(url) }
+      } message: {
+        Text("Your homeserver may record this URL in its logs, including for encrypted rooms.")
+      }
   }
 }
 

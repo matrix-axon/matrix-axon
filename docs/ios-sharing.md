@@ -25,6 +25,7 @@ Compatible supplied metadata appears first without a lookup.
 The website and its selected image host may receive that request; Safari and publisher-app cookies are not used.
 The reader extracts Open Graph, Twitter Card, and ordinary HTML title/description fields without executing scripts.
 **Use homeserver instead** is a separate action requiring an account and a confirmation that its Matrix homeserver may log the URL, including for encrypted rooms.
+Its confirmation is anchored to the selected link's homeserver button.
 Neither a device lookup failure nor a missing image automatically invokes that fallback.
 The same order applies in the native share composer and the containing app's Pending shares recovery view.
 Refreshing a card keeps its verified retained image if no usable replacement image is available; removing that image remains an explicit action.
