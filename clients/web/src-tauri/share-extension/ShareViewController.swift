@@ -558,8 +558,9 @@ private struct ShareComposeView: View {
             Spacer()
             Button { model.reloadDestinations() } label: {
               Image(systemName: "arrow.clockwise").font(.body)
+                .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
             }
-            .buttonStyle(.borderless).frame(minWidth: 44, minHeight: 44)
+            .buttonStyle(.borderless)
             .accessibilityLabel("Reload accounts and rooms")
             .accessibilityIdentifier("share-reload-destinations")
           }
