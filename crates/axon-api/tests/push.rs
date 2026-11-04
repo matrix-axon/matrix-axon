@@ -161,6 +161,10 @@ async fn registration_routes_reject_a_bad_body_and_upsert_without_echoing_the_to
         ),
         (json!({"provider": "fcm", "token": &device}), "bad_request"),
         (
+            json!({"provider": "fcm", "token": &device, "disclosure": "activity", "badge": "yes"}),
+            "bad_request",
+        ),
+        (
             json!({"provider": "apns", "token": &device, "disclosure": "activity"}),
             "push_environment_invalid",
         ),
@@ -222,6 +226,8 @@ async fn registration_routes_reject_a_bad_body_and_upsert_without_echoing_the_to
     assert_eq!(body["data"]["provider"], "fcm");
     assert_eq!(body["data"]["disclosure"], "activity");
     assert!(body["data"]["environment"].is_null());
+    // ADR 0129: an omitted badge is off.
+    assert_eq!(body["data"]["badge"], false);
     assert!(!body.to_string().contains(&device));
 
     let (status, again) = call(
@@ -250,7 +256,8 @@ async fn registration_routes_reject_a_bad_body_and_upsert_without_echoing_the_to
             "provider": "apns",
             "token": &device,
             "disclosure": "sender_and_room",
-            "environment": "sandbox"
+            "environment": "sandbox",
+            "badge": true
         })),
     )
     .await;
@@ -258,6 +265,7 @@ async fn registration_routes_reject_a_bad_body_and_upsert_without_echoing_the_to
     assert_eq!(status, StatusCode::OK, "{rehomed}");
     assert_ne!(rehomed["data"]["id"], id);
     assert_eq!(rehomed["data"]["environment"], "sandbox");
+    assert_eq!(rehomed["data"]["badge"], true);
 
     let (status, rehomed) = call(
         &router,

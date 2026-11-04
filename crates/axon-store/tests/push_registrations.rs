@@ -30,6 +30,7 @@ async fn register(store: &Store, session_id: Uuid, token_id: Uuid, token: &str) 
             token,
             environment: None,
             disclosure: "activity",
+            badge: false,
         })
         .await
         .expect("upsert")
@@ -613,6 +614,7 @@ async fn reap_drops_a_session_only_when_no_live_credential_remains() {
             token: &format!("after-revoke-{}", Uuid::new_v4()),
             environment: None,
             disclosure: "activity",
+            badge: false,
         })
         .await
         .expect("upsert after revoke");
@@ -688,4 +690,74 @@ async fn send_check_reports_liveness_and_reap_drops_only_a_dead_session() {
         .execute(&pool)
         .await
         .expect("delete tokens");
+}
+
+/// ADR 0129: `badge` is stored, returned, read by the router's snapshot and
+/// the send-time check, and rewritten by every upsert, so a repeat that sends
+/// `false` turns it off.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn badge_round_trips_and_every_upsert_rewrites_it() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let cli = store.issue_token("badge").await.expect("token");
+    let device = format!("badge-device-{}", Uuid::new_v4());
+    let upsert = |badge: bool| NewPushRegistration {
+        session_id: cli.id,
+        token_id: cli.id,
+        provider: "apns",
+        token: &device,
+        environment: Some("sandbox"),
+        disclosure: "activity",
+        badge,
+    };
+
+    let on = match store
+        .upsert_push_registration(&upsert(true))
+        .await
+        .expect("upsert on")
+    {
+        PushRegistrationOutcome::Stored(row) => row,
+        other => panic!("expected a stored registration, got {other:?}"),
+    };
+    assert!(on.badge);
+    let snapshot = store.list_push_targets().await.expect("targets");
+    assert!(
+        snapshot
+            .iter()
+            .find(|target| target.id == on.id)
+            .expect("in snapshot")
+            .badge
+    );
+    let checked = store
+        .push_send_check(on.id)
+        .await
+        .expect("check")
+        .expect("row");
+    assert!(checked.target.badge);
+    assert!(checked.session_live);
+
+    let off = match store
+        .upsert_push_registration(&upsert(false))
+        .await
+        .expect("upsert off")
+    {
+        PushRegistrationOutcome::Stored(row) => row,
+        other => panic!("expected a stored registration, got {other:?}"),
+    };
+    assert_eq!(off.id, on.id, "same device keeps its id");
+    assert!(!off.badge);
+    let checked = store
+        .push_send_check(on.id)
+        .await
+        .expect("check")
+        .expect("row");
+    assert!(!checked.target.badge);
+
+    delete_registration(&pool, on.id).await;
+    sqlx_core::query::query("DELETE FROM tokens WHERE id = $1")
+        .bind(cli.id)
+        .execute(&pool)
+        .await
+        .expect("delete token");
 }

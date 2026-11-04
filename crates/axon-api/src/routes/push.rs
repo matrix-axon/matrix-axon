@@ -51,7 +51,7 @@ pub(crate) const MAX_BODY_BYTES: usize = 16 * 1024;
 /// Register or re-home a device token.
 ///
 /// Upsert on `(provider, token)`. The same session updates disclosure,
-/// environment, and the access token that last wrote the row. A different
+/// environment, badge, and the access token that last wrote the row. A different
 /// session becomes the owner and keeps the same id. The response does not
 /// include the token.
 #[utoipa::path(
@@ -123,6 +123,7 @@ pub async fn put_registration(
             token: &body.token,
             environment,
             disclosure: &body.disclosure,
+            badge: body.badge,
         })
         .await?;
     let registration = match outcome {
@@ -148,6 +149,7 @@ pub async fn put_registration(
     tracing::info!(
         registration_id = %registration.id,
         provider = %registration.provider,
+        badge = registration.badge,
         "push registration upserted"
     );
     changed.notify_one();
@@ -156,6 +158,7 @@ pub async fn put_registration(
         provider: registration.provider,
         disclosure: registration.disclosure,
         environment: registration.environment,
+        badge: registration.badge,
     }))
 }
 

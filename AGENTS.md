@@ -262,6 +262,7 @@ this table is the orientation copy.
 - **What not to build:** no Web Push, no multi-human-per-process, no federation, no S3 media backend — see `docs/mvp/implementation.md` "What not to build" for the full list.
   APNs and FCM delivery is ADR 0113.
   The server router wakes a registered iOS, iPadOS, or Android device.
+  When a room's count falls, badge-enabled APNs devices get a badge-only push, and a fall to zero also sends FCM devices a room-read message (ADR 0129).
   macOS, Windows, Linux, and the browser stay on local notifications.
 - **Management API (ADR 0109).**
   Routes that administer the instance live under `/v1/management/`, in their own sub-router behind one layer for the `[server] management_api` switch — add a management route there, never beside it.

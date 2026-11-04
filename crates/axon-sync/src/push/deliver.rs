@@ -1,8 +1,9 @@
-//! APNs and FCM sends (ADR 0113).
+//! APNs and FCM sends (ADR 0113, ADR 0129).
 //!
 //! A failure records the HTTP status and, when the body parses, the APNs
 //! `reason` or the FCM `error.status`. A success records the provider, the
-//! registration, the account, the room, and the status at debug. Neither
+//! registration, the account, the room, and the status at debug. A badge-only
+//! push has no account or room, and records the total instead. None of them
 //! records the URL, the device token, the authorization header, the alert, or
 //! the raw body. `reqwest`'s `Display` includes the URL, so it is never logged.
 
@@ -25,6 +26,26 @@ const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 const APNS_JWT_TTL: Duration = Duration::from_secs(50 * 60);
 const FCM_REFRESH_SLACK: Duration = Duration::from_secs(60);
 const BODY_CAP: usize = 64 * 1024;
+
+/// What a send is about, for its log lines. The badge-only push is about the
+/// device, not a room.
+#[derive(Debug, Clone, Copy)]
+enum Subject<'a> {
+    Room { account_id: Uuid, room_id: &'a str },
+    Badge { total: u64 },
+}
+
+/// The APNs headers that differ between an alert and a badge-only push.
+///
+/// Both use `apns-push-type: alert`, which Apple requires for a badge. The
+/// alert is priority 10 and collapses per room. The badge-only push is
+/// priority 5, so the device's power policy may batch it, and has no collapse
+/// id (ADR 0129).
+#[derive(Debug, Clone, Copy)]
+struct ApnsHeaders<'a> {
+    priority: &'static str,
+    collapse: Option<&'a str>,
+}
 
 /// What a provider response means for the registration row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +250,11 @@ impl LiveTransport {
             return;
         }
         let (room_name, sender_display) = banner.resolve(&self.store).await;
+        let badge = if target.provider == "apns" && target.badge {
+            banner.badge_total(&self.store).await
+        } else {
+            None
+        };
         let account = account_id.to_string();
         let Some((body, collapse)) = payload::fit_outbound(&payload::OutboundRequest {
             provider: &target.provider,
@@ -239,6 +265,7 @@ impl LiveTransport {
             room_id,
             message,
             fcm_token: &target.token,
+            badge,
         }) else {
             tracing::warn!(
                 registration_id = %target.id,
@@ -249,15 +276,20 @@ impl LiveTransport {
             );
             return;
         };
+        let subject = Subject::Room {
+            account_id,
+            room_id,
+        };
         let verdict = match target.provider.as_str() {
             "apns" => {
-                self.send_configured_apns(account_id, &target, room_id, body, &collapse)
+                let headers = ApnsHeaders {
+                    priority: "10",
+                    collapse: Some(&collapse),
+                };
+                self.send_configured_apns(&target, subject, headers, body)
                     .await
             }
-            "fcm" => {
-                self.send_configured_fcm(account_id, &target, room_id, body)
-                    .await
-            }
+            "fcm" => self.send_configured_fcm(&target, subject, body).await,
             other => {
                 tracing::warn!(
                     registration_id = %target.id,
@@ -267,6 +299,91 @@ impl LiveTransport {
                 return;
             }
         };
+        if verdict == ProviderVerdict::Delete {
+            self.delete_registration(target.id, "provider rejected the device token")
+                .await;
+        }
+    }
+
+    /// Send the instance unread total as a badge-only APNs push (ADR 0129).
+    ///
+    /// The total is read here, after the liveness check, so a burst that
+    /// coalesced into this one send carries the newest number. A registration
+    /// that has since turned the badge off, or that is not APNs, sends nothing.
+    /// A failed or slow total read skips the push: a guessed number is worse
+    /// than the one already on the icon.
+    pub(crate) async fn deliver_badge(&self, snapshot: &PushTarget, cancel: &CancellationToken) {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let Some(target) = self.resolve_target(snapshot).await else {
+            return;
+        };
+        if target.provider != "apns" || !target.badge {
+            tracing::debug!(
+                registration_id = %target.id,
+                "push badge skipped; the registration no longer wants a badge"
+            );
+            return;
+        }
+        if cancel.is_cancelled() {
+            return;
+        }
+        let Some(total) = read_badge_total(&self.store).await else {
+            return;
+        };
+        let headers = ApnsHeaders {
+            priority: "5",
+            collapse: None,
+        };
+        let verdict = self
+            .send_configured_apns(
+                &target,
+                Subject::Badge { total },
+                headers,
+                payload::apns_badge_body(total),
+            )
+            .await;
+        if verdict == ProviderVerdict::Delete {
+            self.delete_registration(target.id, "provider rejected the device token")
+                .await;
+        }
+    }
+
+    /// Tell an Android device that a room was read, so it cancels that room's
+    /// notification (ADR 0129). APNs registrations send nothing.
+    pub(crate) async fn deliver_room_read(
+        &self,
+        snapshot: &PushTarget,
+        account_id: Uuid,
+        room_id: &str,
+        cancel: &CancellationToken,
+    ) {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let Some(target) = self.resolve_target(snapshot).await else {
+            return;
+        };
+        if target.provider != "fcm" {
+            return;
+        }
+        if cancel.is_cancelled() {
+            return;
+        }
+        let collapse = payload::collapse_id(room_id);
+        let body =
+            payload::fcm_room_read_body(&target.token, &account_id.to_string(), room_id, &collapse);
+        let verdict = self
+            .send_configured_fcm(
+                &target,
+                Subject::Room {
+                    account_id,
+                    room_id,
+                },
+                body,
+            )
+            .await;
         if verdict == ProviderVerdict::Delete {
             self.delete_registration(target.id, "provider rejected the device token")
                 .await;
@@ -303,11 +420,10 @@ impl LiveTransport {
 
     async fn send_configured_apns(
         &self,
-        account_id: Uuid,
         target: &PushTarget,
-        room_id: &str,
+        subject: Subject<'_>,
+        headers: ApnsHeaders<'_>,
         body: Vec<u8>,
-        collapse: &str,
     ) -> ProviderVerdict {
         let Some(apns) = self.material.apns().cloned() else {
             self.warn_unconfigured("apns");
@@ -315,22 +431,17 @@ impl LiveTransport {
         };
         match tokio::time::timeout(
             PROVIDER_TIMEOUT,
-            self.send_apns(account_id, &apns, target, room_id, body, collapse),
+            self.send_apns(&apns, target, subject, headers, body),
         )
         .await
         {
             Ok(Ok(verdict)) => verdict,
             Ok(Err(err)) => {
-                tracing::warn!(
-                    registration_id = %target.id,
-                    room_id,
-                    error = %err,
-                    "APNs send failed"
-                );
+                log_send_failure("APNs", target.id, subject, &err.to_string());
                 ProviderVerdict::Keep
             }
             Err(_) => {
-                tracing::warn!(registration_id = %target.id, room_id, "APNs send timed out");
+                log_send_failure("APNs", target.id, subject, "timed out");
                 ProviderVerdict::Keep
             }
         }
@@ -338,33 +449,24 @@ impl LiveTransport {
 
     async fn send_configured_fcm(
         &self,
-        account_id: Uuid,
         target: &PushTarget,
-        room_id: &str,
+        subject: Subject<'_>,
         body: Vec<u8>,
     ) -> ProviderVerdict {
         let Some(fcm) = self.material.fcm().cloned() else {
             self.warn_unconfigured("fcm");
             return ProviderVerdict::Keep;
         };
-        match tokio::time::timeout(
-            PROVIDER_TIMEOUT,
-            self.send_fcm(account_id, &fcm, target, room_id, body),
-        )
-        .await
+        match tokio::time::timeout(PROVIDER_TIMEOUT, self.send_fcm(&fcm, target, subject, body))
+            .await
         {
             Ok(Ok(verdict)) => verdict,
             Ok(Err(err)) => {
-                tracing::warn!(
-                    registration_id = %target.id,
-                    room_id,
-                    error = %err,
-                    "FCM send failed"
-                );
+                log_send_failure("FCM", target.id, subject, &err.to_string());
                 ProviderVerdict::Keep
             }
             Err(_) => {
-                tracing::warn!(registration_id = %target.id, room_id, "FCM send timed out");
+                log_send_failure("FCM", target.id, subject, "timed out");
                 ProviderVerdict::Keep
             }
         }
@@ -489,12 +591,11 @@ impl LiveTransport {
 
     async fn send_apns(
         &self,
-        account_id: Uuid,
         apns: &LoadedApns,
         target: &PushTarget,
-        room_id: &str,
+        subject: Subject<'_>,
+        headers: ApnsHeaders<'_>,
         body: Vec<u8>,
-        collapse: &str,
     ) -> Result<ProviderVerdict, ProviderFailure> {
         let host = match target.environment.as_deref() {
             Some("sandbox") => "https://api.sandbox.push.apple.com",
@@ -509,31 +610,13 @@ impl LiveTransport {
         };
         let jwt = self.apns_jwt(apns)?;
         let url = format!("{host}/3/device/{}", form_encode(&target.token));
-        let (status, response_body) = post_json(
-            &self.http,
-            url,
-            "bearer",
-            jwt,
-            &[
-                ("apns-topic", apns.bundle_id.as_str()),
-                ("apns-push-type", "alert"),
-                ("apns-priority", "10"),
-                ("apns-collapse-id", collapse),
-            ],
-            body,
-        )
-        .await?;
+        let request_headers = apns_request_headers(&apns.bundle_id, headers);
+        let (status, response_body) =
+            post_json(&self.http, url, "bearer", jwt, &request_headers, body).await?;
         if apns_provider_token_rejected(status, &response_body) {
             self.invalidate_apns_jwt();
         }
-        log_provider_response(
-            "APNs",
-            account_id,
-            target.id,
-            room_id,
-            status,
-            &response_body,
-        );
+        log_provider_response("APNs", target.id, subject, status, &response_body);
         Ok(apns_verdict(status, &response_body, target.updated_at))
     }
 
@@ -547,10 +630,9 @@ impl LiveTransport {
 
     async fn send_fcm(
         &self,
-        account_id: Uuid,
         fcm: &LoadedFcm,
         target: &PushTarget,
-        room_id: &str,
+        subject: Subject<'_>,
         body: Vec<u8>,
     ) -> Result<ProviderVerdict, ProviderFailure> {
         let bearer = self.fcm_bearer(fcm).await?;
@@ -565,46 +647,119 @@ impl LiveTransport {
         if fcm_bearer_rejected(status) {
             self.invalidate_fcm_token();
         }
-        log_provider_response(
-            "FCM",
-            account_id,
-            target.id,
-            room_id,
-            status,
-            &response_body,
-        );
+        log_provider_response("FCM", target.id, subject, status, &response_body);
         Ok(fcm_verdict(status, &response_body))
+    }
+}
+
+/// The APNs request headers, in a fixed order. A badge-only push has no
+/// collapse id.
+fn apns_request_headers<'a>(topic: &'a str, headers: ApnsHeaders<'a>) -> Vec<(&'a str, &'a str)> {
+    let mut out = vec![
+        ("apns-topic", topic),
+        ("apns-push-type", "alert"),
+        ("apns-priority", headers.priority),
+    ];
+    if let Some(collapse) = headers.collapse {
+        out.push(("apns-collapse-id", collapse));
+    }
+    out
+}
+
+fn log_send_failure(provider: &str, registration_id: Uuid, subject: Subject<'_>, error: &str) {
+    match subject {
+        Subject::Room {
+            account_id,
+            room_id,
+        } => tracing::warn!(
+            provider,
+            registration_id = %registration_id,
+            %account_id,
+            room_id,
+            error,
+            "push send failed"
+        ),
+        Subject::Badge { total } => tracing::warn!(
+            provider,
+            registration_id = %registration_id,
+            total,
+            error,
+            "push badge send failed"
+        ),
     }
 }
 
 fn log_provider_response(
     provider: &str,
-    account_id: Uuid,
     registration_id: Uuid,
-    room_id: &str,
+    subject: Subject<'_>,
     status: u16,
     body: &[u8],
 ) {
     if (200..300).contains(&status) {
-        tracing::debug!(
+        match subject {
+            Subject::Room {
+                account_id,
+                room_id,
+            } => tracing::debug!(
+                provider,
+                registration_id = %registration_id,
+                %account_id,
+                room_id,
+                status,
+                "push send accepted"
+            ),
+            Subject::Badge { total } => tracing::debug!(
+                provider,
+                registration_id = %registration_id,
+                total,
+                status,
+                "push badge send accepted"
+            ),
+        }
+        return;
+    }
+    let reason = parse_reason(body).reason;
+    let reason = reason.as_deref().unwrap_or("");
+    match subject {
+        Subject::Room {
+            account_id,
+            room_id,
+        } => tracing::warn!(
             provider,
             registration_id = %registration_id,
             %account_id,
             room_id,
             status,
-            "push send accepted"
-        );
-        return;
+            reason,
+            "push send was not accepted"
+        ),
+        Subject::Badge { total } => tracing::warn!(
+            provider,
+            registration_id = %registration_id,
+            total,
+            status,
+            reason,
+            "push badge send was not accepted"
+        ),
     }
-    let reason = parse_reason(body).reason;
-    tracing::warn!(
-        provider,
-        registration_id = %registration_id,
-        room_id,
-        status,
-        reason = reason.as_deref().unwrap_or(""),
-        "push send was not accepted"
-    );
+}
+
+/// The instance unread total, or `None` when it cannot be read in time.
+///
+/// Bounded like the liveness check. The caller skips the badge on `None`.
+async fn read_badge_total(store: &Store) -> Option<u64> {
+    match tokio::time::timeout(LIVENESS_TIMEOUT, store.unread_badge_total()).await {
+        Ok(Ok(total)) => Some(total),
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "push badge total unavailable; badge skipped");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("push badge total timed out; badge skipped");
+            None
+        }
+    }
 }
 
 fn push_http_client() -> reqwest::Client {
@@ -651,12 +806,14 @@ async fn limited_body(response: reqwest::Response) -> Result<Vec<u8>, ProviderFa
     Ok(bytes.to_vec())
 }
 
-/// One name lookup shared by every device that receives the same message.
+/// One name lookup, and one badge total read, shared by every device that
+/// receives the same message.
 pub(crate) struct SharedBanner {
     account_id: Uuid,
     room_id: String,
     sender: String,
     once: tokio::sync::OnceCell<(Option<String>, String)>,
+    badge: tokio::sync::OnceCell<Option<u64>>,
 }
 
 impl SharedBanner {
@@ -666,6 +823,7 @@ impl SharedBanner {
             room_id: room_id.to_owned(),
             sender: sender.to_owned(),
             once: tokio::sync::OnceCell::new(),
+            badge: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -674,6 +832,13 @@ impl SharedBanner {
             .get_or_init(|| banner_names(store, self.account_id, &self.room_id, &self.sender))
             .await
             .clone()
+    }
+
+    /// The unread total for this alert's `aps.badge`. Read by the first
+    /// badge-enabled device to need it. A failed read leaves the badge off the
+    /// alert, which still sends.
+    async fn badge_total(&self, store: &Store) -> Option<u64> {
+        *self.badge.get_or_init(|| read_badge_total(store)).await
     }
 }
 

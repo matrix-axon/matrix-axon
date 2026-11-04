@@ -1,8 +1,13 @@
-//! The process-wide push router (ADR 0113).
+//! The process-wide push router (ADR 0113, ADR 0129).
 //!
 //! Account tasks `try_send` observations. This task applies the case list and
 //! fans out. It does not await Postgres or a provider. At most four sends run
 //! at once, and each provider call has its own timeout.
+//!
+//! A fall in a room's `notification_count` (ADR 0129) queues a badge-only push
+//! for each badge-enabled APNs device, and a fall to zero queues a room-read
+//! message for each FCM device. Neither reads Postgres here: the total is read
+//! inside the spawned send.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -27,13 +32,25 @@ const OBSERVATION_CAPACITY: usize = 64;
 /// How many provider calls may run at once. The scheduler is the only cap.
 const SEND_PERMITS: usize = 4;
 
-/// One in-flight or waiting send. The account is part of the key: two accounts
-/// in the same room must not share a slot on one device.
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct FlightKey {
-    account_id: Uuid,
-    registration_id: Uuid,
-    room_id: String,
+/// One in-flight or waiting send.
+///
+/// At most one send per key runs, and at most one waits. A newer job replaces
+/// the waiting one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FlightKey {
+    /// Alerts and room-read messages for one room on one device. They share a
+    /// key so they never run at once, and so a read replaces an alert that is
+    /// still waiting. The account is part of the key: two accounts in the same
+    /// room must not share a slot on one device.
+    Room {
+        account_id: Uuid,
+        registration_id: Uuid,
+        room_id: String,
+    },
+    /// Badge-only pushes for one device. A burst of reads coalesces into one
+    /// running push and one waiting push, and the waiting one reads the total
+    /// when it starts.
+    Badge { registration_id: Uuid },
 }
 
 /// One room's counts and eligible messages, handed off the sync loop.
@@ -193,20 +210,54 @@ impl Memory {
     }
 }
 
+/// What a job sends.
+enum Work {
+    /// An ADR 0113 alert for one message.
+    Alert {
+        account_id: Uuid,
+        room_id: String,
+        message: PushMessage,
+        banner: Arc<SharedBanner>,
+    },
+    /// An ADR 0129 room-read message: the room's count fell to zero.
+    RoomRead { account_id: Uuid, room_id: String },
+    /// An ADR 0129 badge-only push: some room's count fell.
+    Badge,
+}
+
 struct Job {
     target: PushTarget,
-    account_id: Uuid,
-    room_id: String,
-    message: PushMessage,
-    banner: Arc<SharedBanner>,
+    work: Work,
 }
 
 impl Job {
     fn key(&self) -> FlightKey {
-        FlightKey {
-            account_id: self.account_id,
-            registration_id: self.target.id,
-            room_id: self.room_id.clone(),
+        match self.room() {
+            Some((account_id, room_id)) => FlightKey::Room {
+                account_id,
+                registration_id: self.target.id,
+                room_id: room_id.to_owned(),
+            },
+            None => FlightKey::Badge {
+                registration_id: self.target.id,
+            },
+        }
+    }
+
+    /// The account and room a job belongs to. A badge-only push has neither,
+    /// so dropping an account or a room never drops it.
+    fn room(&self) -> Option<(Uuid, &str)> {
+        match &self.work {
+            Work::Alert {
+                account_id,
+                room_id,
+                ..
+            }
+            | Work::RoomRead {
+                account_id,
+                room_id,
+            } => Some((*account_id, room_id.as_str())),
+            Work::Badge => None,
         }
     }
 }
@@ -273,14 +324,15 @@ impl Scheduler {
     }
 
     fn drop_account(&mut self, account_id: Uuid) {
-        self.waiting.retain(|_, job| job.account_id != account_id);
+        self.waiting
+            .retain(|_, job| job.room().map(|(id, _)| id) != Some(account_id));
         self.order
             .retain(|key| self.waiting.contains_key(key) || self.in_flight.contains(key));
     }
 
     fn drop_room(&mut self, account_id: Uuid, room_id: &str) {
         self.waiting
-            .retain(|_, job| !(job.account_id == account_id && job.room_id == room_id));
+            .retain(|_, job| job.room() != Some((account_id, room_id)));
         self.order
             .retain(|key| self.waiting.contains_key(key) || self.in_flight.contains(key));
     }
@@ -564,26 +616,82 @@ fn apply_observation(
         Stamped { value: pair, at }
     });
 
-    let Some(message) = decision.send else {
-        return;
-    };
     let targets = router.snapshot.read().expect("push snapshot").clone();
-    let banner = Arc::new(SharedBanner::new(
-        observation.account_id,
-        &observation.room_id,
-        &message.sender,
-    ));
-    for target in targets.iter() {
-        if let Some(job) = scheduler.enqueue(Job {
-            target: target.clone(),
-            account_id: observation.account_id,
-            room_id: observation.room_id.clone(),
-            message: message.clone(),
-            banner: Arc::clone(&banner),
-        }) {
+    let jobs = jobs_for(
+        &observation,
+        decision.send,
+        decision.notification_fell_to,
+        &targets,
+    );
+    if decision.notification_fell_to.is_some() && !jobs.is_empty() {
+        tracing::debug!(
+            account_id = %observation.account_id,
+            room_id = %observation.room_id,
+            notification_count = decision.notification_fell_to,
+            jobs = jobs.len(),
+            "unread count fell; queueing push clears"
+        );
+    }
+    for job in jobs {
+        if let Some(job) = scheduler.enqueue(job) {
             start_job(job, account_cancels, router);
         }
     }
+}
+
+/// The sends one decided observation produces, one per device that gets one.
+///
+/// An alert goes to every device. Without an alert, a fall queues a badge-only
+/// push for each badge-enabled APNs device, and a fall to zero queues a
+/// room-read message for each FCM device (ADR 0129). An alert in the same
+/// observation already carries the total, so it suppresses the badge-only
+/// push. ADR 0113 never sends an alert on a fall to zero, so the room-read
+/// message cannot be suppressed by one.
+fn jobs_for(
+    observation: &Observation,
+    send: Option<PushMessage>,
+    notification_fell_to: Option<u64>,
+    targets: &[PushTarget],
+) -> Vec<Job> {
+    if let Some(message) = send {
+        let banner = Arc::new(SharedBanner::new(
+            observation.account_id,
+            &observation.room_id,
+            &message.sender,
+        ));
+        return targets
+            .iter()
+            .map(|target| Job {
+                target: target.clone(),
+                work: Work::Alert {
+                    account_id: observation.account_id,
+                    room_id: observation.room_id.clone(),
+                    message: message.clone(),
+                    banner: Arc::clone(&banner),
+                },
+            })
+            .collect();
+    }
+    let Some(count) = notification_fell_to else {
+        return Vec::new();
+    };
+    targets
+        .iter()
+        .filter_map(|target| {
+            let work = match target.provider.as_str() {
+                "apns" if target.badge => Work::Badge,
+                "fcm" if count == 0 => Work::RoomRead {
+                    account_id: observation.account_id,
+                    room_id: observation.room_id.clone(),
+                },
+                _ => return None,
+            };
+            Some(Job {
+                target: target.clone(),
+                work,
+            })
+        })
+        .collect()
 }
 
 fn start_job(
@@ -591,10 +699,15 @@ fn start_job(
     account_cancels: &mut HashMap<Uuid, CancellationToken>,
     router: &RouterLoop,
 ) {
-    let cancel = account_cancels
-        .entry(job.account_id)
-        .or_insert_with(|| router.shutdown.child_token())
-        .clone();
+    // A room's sends stop when its account is removed. A badge-only push
+    // belongs to the device and stops only at shutdown.
+    let cancel = match job.room() {
+        Some((account_id, _)) => account_cancels
+            .entry(account_id)
+            .or_insert_with(|| router.shutdown.child_token())
+            .clone(),
+        None => router.shutdown.child_token(),
+    };
     let finish = Finish {
         key: job.key(),
         control: Arc::clone(&router.control),
@@ -627,16 +740,32 @@ async fn run_send(
     cancel: CancellationToken,
     finish: Finish,
 ) {
+    let send = async {
+        match &job.work {
+            Work::Alert {
+                account_id,
+                room_id,
+                message,
+                banner,
+            } => {
+                transport
+                    .deliver(&job.target, *account_id, room_id, message, banner, &cancel)
+                    .await;
+            }
+            Work::RoomRead {
+                account_id,
+                room_id,
+            } => {
+                transport
+                    .deliver_room_read(&job.target, *account_id, room_id, &cancel)
+                    .await;
+            }
+            Work::Badge => transport.deliver_badge(&job.target, &cancel).await,
+        }
+    };
     tokio::select! {
         _ = cancel.cancelled() => return,
-        _ = transport.deliver(
-            &job.target,
-            job.account_id,
-            &job.room_id,
-            &job.message,
-            &job.banner,
-            &cancel,
-        ) => {}
+        _ = send => {}
     }
     drop(finish);
 }
@@ -647,27 +776,77 @@ mod tests {
     use crate::push::message::PushClass;
     use chrono::{TimeZone, Utc};
 
+    fn target(registration_id: Uuid, provider: &str, badge: bool) -> PushTarget {
+        PushTarget {
+            id: registration_id,
+            provider: provider.to_owned(),
+            token: "device".to_owned(),
+            environment: (provider == "apns").then(|| "sandbox".to_owned()),
+            disclosure: "activity".to_owned(),
+            badge,
+            updated_at: Utc.timestamp_millis_opt(0).single().unwrap(),
+        }
+    }
+
+    fn message() -> PushMessage {
+        PushMessage {
+            event_id: "$e".to_owned(),
+            sender: "@bob:example".to_owned(),
+            body: "hi".to_owned(),
+            thread_root_id: None,
+            class: PushClass::Notify,
+        }
+    }
+
     fn job(account_id: Uuid, registration_id: Uuid, room_id: &str) -> Job {
         Job {
-            target: PushTarget {
-                id: registration_id,
-                provider: "fcm".to_owned(),
-                token: "device".to_owned(),
-                environment: None,
-                disclosure: "activity".to_owned(),
-                updated_at: Utc.timestamp_millis_opt(0).single().unwrap(),
+            target: target(registration_id, "fcm", false),
+            work: Work::Alert {
+                account_id,
+                room_id: room_id.to_owned(),
+                message: message(),
+                banner: Arc::new(SharedBanner::new(account_id, room_id, "@bob:example")),
             },
-            account_id,
-            room_id: room_id.to_owned(),
-            message: PushMessage {
-                event_id: "$e".to_owned(),
-                sender: "@bob:example".to_owned(),
-                body: "hi".to_owned(),
-                thread_root_id: None,
-                class: PushClass::Notify,
-            },
-            banner: Arc::new(SharedBanner::new(account_id, room_id, "@bob:example")),
         }
+    }
+
+    fn room_read(account_id: Uuid, registration_id: Uuid, room_id: &str) -> Job {
+        Job {
+            target: target(registration_id, "fcm", false),
+            work: Work::RoomRead {
+                account_id,
+                room_id: room_id.to_owned(),
+            },
+        }
+    }
+
+    fn badge(registration_id: Uuid) -> Job {
+        Job {
+            target: target(registration_id, "apns", true),
+            work: Work::Badge,
+        }
+    }
+
+    fn observation(account_id: Uuid) -> Observation {
+        Observation {
+            account_id,
+            room_id: "!r".to_owned(),
+            after: None,
+            messages: Vec::new(),
+        }
+    }
+
+    fn kinds(jobs: &[Job]) -> Vec<(&'static str, Uuid)> {
+        jobs.iter()
+            .map(|job| {
+                let kind = match job.work {
+                    Work::Alert { .. } => "alert",
+                    Work::RoomRead { .. } => "room_read",
+                    Work::Badge => "badge",
+                };
+                (kind, job.target.id)
+            })
+            .collect()
     }
 
     #[test]
@@ -691,5 +870,141 @@ mod tests {
         let device = Uuid::new_v4();
         assert!(scheduler.enqueue(job(account, device, "!r")).is_some());
         assert!(scheduler.enqueue(job(account, device, "!r")).is_none());
+    }
+
+    #[test]
+    fn an_alert_goes_to_every_device_and_suppresses_the_clears() {
+        let account = Uuid::new_v4();
+        let (phone, android, plain) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let targets = [
+            target(phone, "apns", true),
+            target(android, "fcm", false),
+            target(plain, "apns", false),
+        ];
+        let jobs = jobs_for(&observation(account), Some(message()), Some(3), &targets);
+        assert_eq!(
+            kinds(&jobs),
+            vec![("alert", phone), ("alert", android), ("alert", plain)]
+        );
+    }
+
+    #[test]
+    fn a_partial_read_badges_opted_in_iphones_and_leaves_android_alone() {
+        let account = Uuid::new_v4();
+        let (phone, android, plain) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let targets = [
+            target(phone, "apns", true),
+            target(android, "fcm", true),
+            target(plain, "apns", false),
+        ];
+        let jobs = jobs_for(&observation(account), None, Some(2), &targets);
+        assert_eq!(kinds(&jobs), vec![("badge", phone)]);
+    }
+
+    #[test]
+    fn a_fall_to_zero_also_tells_every_android_device_the_room_was_read() {
+        let account = Uuid::new_v4();
+        let (phone, android, android_off) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let targets = [
+            target(phone, "apns", true),
+            target(android, "fcm", true),
+            // The badge flag is a badge preference, not a notification one.
+            target(android_off, "fcm", false),
+        ];
+        let jobs = jobs_for(&observation(account), None, Some(0), &targets);
+        assert_eq!(
+            kinds(&jobs),
+            vec![
+                ("badge", phone),
+                ("room_read", android),
+                ("room_read", android_off)
+            ]
+        );
+    }
+
+    #[test]
+    fn no_fall_and_no_alert_sends_nothing() {
+        let targets = [
+            target(Uuid::new_v4(), "apns", true),
+            target(Uuid::new_v4(), "fcm", true),
+        ];
+        assert!(jobs_for(&observation(Uuid::new_v4()), None, None, &targets).is_empty());
+    }
+
+    #[test]
+    fn a_room_read_shares_the_room_key_and_replaces_a_waiting_alert() {
+        let mut scheduler = Scheduler::new();
+        let account = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        assert!(scheduler.enqueue(job(account, device, "!r")).is_some());
+        // The read cannot run beside the alert in flight for the same room.
+        assert!(scheduler.enqueue(job(account, device, "!r")).is_none());
+        assert!(scheduler
+            .enqueue(room_read(account, device, "!r"))
+            .is_none());
+
+        let key = job(account, device, "!r").key();
+        let started = scheduler.finished(key);
+        assert_eq!(started.len(), 1);
+        assert!(matches!(started[0].work, Work::RoomRead { .. }));
+    }
+
+    #[test]
+    fn a_burst_of_reads_holds_one_running_and_one_waiting_badge() {
+        let mut scheduler = Scheduler::new();
+        let device = Uuid::new_v4();
+        assert!(scheduler.enqueue(badge(device)).is_some());
+        for _ in 0..20 {
+            assert!(scheduler.enqueue(badge(device)).is_none());
+        }
+        assert_eq!(scheduler.waiting.len(), 1);
+
+        let started = scheduler.finished(FlightKey::Badge {
+            registration_id: device,
+        });
+        assert_eq!(started.len(), 1);
+        assert!(scheduler
+            .finished(FlightKey::Badge {
+                registration_id: device
+            })
+            .is_empty());
+    }
+
+    #[test]
+    fn a_badge_does_not_wait_behind_a_room_send_on_the_same_device() {
+        let mut scheduler = Scheduler::new();
+        let device = Uuid::new_v4();
+        assert!(scheduler
+            .enqueue(job(Uuid::new_v4(), device, "!r"))
+            .is_some());
+        assert!(scheduler.enqueue(badge(device)).is_some());
+    }
+
+    #[test]
+    fn dropping_an_account_or_a_room_keeps_a_waiting_badge() {
+        let mut scheduler = Scheduler::new();
+        let account = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        // Fill the permits so every later job waits.
+        for _ in 0..SEND_PERMITS {
+            assert!(scheduler
+                .enqueue(job(Uuid::new_v4(), Uuid::new_v4(), "!busy"))
+                .is_some());
+        }
+        assert!(scheduler.enqueue(badge(device)).is_none());
+        assert!(scheduler
+            .enqueue(room_read(account, device, "!r"))
+            .is_none());
+        assert!(scheduler
+            .enqueue(room_read(account, device, "!other"))
+            .is_none());
+
+        scheduler.drop_room(account, "!r");
+        assert_eq!(scheduler.waiting.len(), 2);
+        scheduler.drop_account(account);
+        assert_eq!(scheduler.waiting.len(), 1);
+        assert!(scheduler.waiting.contains_key(&FlightKey::Badge {
+            registration_id: device
+        }));
     }
 }

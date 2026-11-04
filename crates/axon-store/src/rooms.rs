@@ -26,6 +26,25 @@ pub struct RoomTag {
     pub order: Option<f64>,
 }
 
+/// The rooms `GET /v1/rooms` lists, joined to their unread counts.
+///
+/// [`Store::list_rooms`] and [`Store::unread_badge_total`] both read through
+/// these two fragments, so the push badge (ADR 0129) is the sum of exactly the
+/// counts the client's room list shows. A join or predicate that decides which
+/// rooms are listed belongs here, not in either query. A caller may add its
+/// own joins between the two fragments and its own `AND` filters after the
+/// second.
+const LISTED_ROOMS_FROM: &str = "\
+ FROM room_summaries a \
+ JOIN accounts ac ON ac.account_id = a.account_id AND ac.state = 'active' \
+ LEFT JOIN room_unread_counts ruc \
+   ON ruc.account_id = a.account_id AND ruc.room_id = a.room_id ";
+
+/// See [`LISTED_ROOMS_FROM`].
+const LISTED_ROOMS_WHERE: &str = "\
+ WHERE NOT a.hidden_left \
+   AND NOT a.hidden_tombstoned ";
+
 /// Incremental `room_summaries` write (ADR 0095). Prepended with a
 /// `WITH ins AS ( <event write> RETURNING account_id, room_id, event_id,
 /// origin_ts, id, decrypted_body_text )`, it upserts one row per inserted or
@@ -220,7 +239,7 @@ impl Store {
         &self,
         account_id: Option<Uuid>,
     ) -> Result<Vec<RoomSummary>, StoreError> {
-        let mut rows = sqlx_core::query_as::query_as::<Postgres, RoomSummary>(
+        let sql = format!(
             "SELECT a.account_id, ac.user_id AS account_user_id, a.room_id, \
                     a.last_activity_ts, a.last_event_id, \
                     a.name, a.topic, a.avatar_url, a.canonical_alias, a.room_type, \
@@ -228,24 +247,41 @@ impl Store {
                     COALESCE(ruc.notification_count, 0) AS notification_count, \
                     COALESCE(ruc.highlight_count, 0) AS highlight_count, \
                     ad_tag.content AS tag_content \
-             FROM room_summaries a \
-             JOIN accounts ac ON ac.account_id = a.account_id AND ac.state = 'active' \
-             LEFT JOIN room_unread_counts ruc \
-               ON ruc.account_id = a.account_id AND ruc.room_id = a.room_id \
+             {LISTED_ROOMS_FROM} \
              LEFT JOIN account_data ad_tag \
                ON ad_tag.account_id = a.account_id \
               AND ad_tag.room_id = a.room_id \
               AND ad_tag.event_type = 'm.tag' \
-             WHERE ($1::uuid IS NULL OR a.account_id = $1) \
-               AND NOT a.hidden_left \
-               AND NOT a.hidden_tombstoned \
-             ORDER BY a.last_activity_ts DESC, a.room_id",
-        )
-        .bind(account_id)
-        .fetch_all(&self.pool)
-        .await?;
+             {LISTED_ROOMS_WHERE} \
+               AND ($1::uuid IS NULL OR a.account_id = $1) \
+             ORDER BY a.last_activity_ts DESC, a.room_id"
+        );
+        let mut rows = sqlx_core::query_as::query_as::<Postgres, RoomSummary>(&sql)
+            .bind(account_id)
+            .fetch_all(&self.pool)
+            .await?;
         self.apply_is_direct(&mut rows).await?;
         Ok(rows)
+    }
+
+    /// The instance's unread total: the sum of `notification_count` over the
+    /// rooms [`list_rooms`](Self::list_rooms) returns for every account.
+    ///
+    /// This is the number the web client keeps as `RoomsStore.unreadTotal`,
+    /// and the number an APNs push carries as `aps.badge` (ADR 0129). Both
+    /// queries read [`LISTED_ROOMS_FROM`] and [`LISTED_ROOMS_WHERE`], so a room hidden from the list can
+    /// never hold the badge up.
+    pub async fn unread_badge_total(&self) -> Result<u64, StoreError> {
+        let sql = format!(
+            "SELECT COALESCE(SUM(ruc.notification_count), 0)::bigint AS total \
+             {LISTED_ROOMS_FROM} {LISTED_ROOMS_WHERE}"
+        );
+        let total: i64 = sqlx_core::query::query(&sql)
+            .fetch_one(&self.pool)
+            .await?
+            .try_get("total")?;
+        // A negative count is not written, but a corrupt row must not wrap.
+        Ok(u64::try_from(total).unwrap_or(0))
     }
 
     /// Mark rooms whose id appears in any array of the account's global
