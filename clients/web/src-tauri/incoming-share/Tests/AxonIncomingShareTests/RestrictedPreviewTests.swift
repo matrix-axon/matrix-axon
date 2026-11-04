@@ -48,10 +48,10 @@ final class RestrictedPreviewTests: XCTestCase {
         initial, kind: .page, deadline: .now() + 2, cancellation: ShareCancellation(),
         resolve: { host, _, _ in
           lookups += 1
-          return PreviewNetwork.Address.parse(lookups == 1 ? "8.8.8.8" : "127.0.0.1")!
+          return [PreviewNetwork.Address.parse(lookups == 1 ? "8.8.8.8" : "127.0.0.1")!]
         },
         exchange: { url, host, address, _, _, _ in
-          connections.append(address.text)
+          connections.append(contentsOf: address.map(\.text))
           XCTAssertEqual(host, "page.example.org")
           return .init(status: 302, headers: ["location": "/redirected"], body: Data(), url: url)
         }))
@@ -66,7 +66,7 @@ final class RestrictedPreviewTests: XCTestCase {
         cancellation: ShareCancellation(),
         resolve: { _, _, _ in
           lookups += 1
-          return PreviewNetwork.Address.parse("8.8.8.8")!
+          return [PreviewNetwork.Address.parse("8.8.8.8")!]
         },
         exchange: { url, _, _, _, _, _ in
           .init(
@@ -93,7 +93,7 @@ final class RestrictedPreviewTests: XCTestCase {
       target, kind, deadline, cancellation in
       try PreviewNetwork.fetch(
         target, kind: kind, deadline: deadline, cancellation: cancellation,
-        resolve: { _, _, _ in PreviewNetwork.Address.parse("8.8.8.8")! },
+        resolve: { _, _, _ in [PreviewNetwork.Address.parse("8.8.8.8")!] },
         exchange: { target, _, _, _, _, _ in
           connections += 1
           return .init(

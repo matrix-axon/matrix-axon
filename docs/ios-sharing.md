@@ -44,7 +44,7 @@ An absent or unavailable image leaves a sendable text card; **Include preview** 
 For messages with many links, **Find link for preview** searches all links while displaying at most eight choices at a time.
 Cards support editing their title/description, removing their image, or removing the entire preview while retaining the URL.
 **Edit preview** provides a multiline description editor that grows with the available display height and adjusts when the keyboard is shown.
-The bulk **Remove previews, keep links** action appears only when more than one preview is included.
+The bulk **Remove previews** action appears only when more than one preview is included; both individual and bulk preview removal keep the links.
 **Remove preview images** appears only when an included preview contains an image, including an unavailable retained image that needs removal.
 Changing a URL invalidates its previous card.
 Rendering cards never performs a webpage lookup or downloads an external image URL.
@@ -77,6 +77,10 @@ Authenticated Axon requests require HTTPS and retain default App Transport Secur
 Room-list responses have an 8 MiB ceiling; thumbnail responses retain their separate 2 MiB ceiling.
 An oversized response is reported with its limit and observed byte count, separately from connectivity errors.
 Device preview acquisition admits one lookup per process with a shared 25-second page/image deadline and cancellable DNS waits of at most four seconds.
+IPv6 and IPv4 are queried together under that DNS budget, retaining at most one validated address per family.
+The preferred IPv6 TLS connection starts first; an available IPv4 alternate starts after 250 milliseconds, or immediately if the first connection fails.
+The first TLS-ready connection wins and cancels its competitor; only the winner sends an HTTP request, avoiding duplicate page or image requests.
+Single-family and NAT64 networks remain supported, and DNS, connection racing, redirects, page reads, and image reads never reset the original deadline.
 Every page, redirect, and selected-image request requires HTTPS and resolves to a validated global-unicast address; private, loopback, link-local, multicast, reserved, and documentation ranges are rejected.
 The TLS socket connects to that numeric address while certificate and hostname validation still use the original DNS name, preventing a second unchecked DNS resolution.
 There are at most six requests in each redirect chain, and no cookies, credentials, referrers, proxy fetches, JavaScript, frames, stylesheets, or arbitrary subresources are used.
@@ -87,6 +91,8 @@ Selected images must complete within 2 MiB; ImageIO inspects dimensions against 
 Generic public image formats such as TIFF/HEIC are converted to a bounded JPEG when needed for the existing upload contract.
 Source-provided image reads retain their ten-second deadline and the same byte/pixel limits.
 There is no fallback to Apple's network-managed `LPMetadataProvider`: supplied `LPLinkMetadata` remains a supported input, but preview acquisition is controlled by Axon.
+The `device-preview` log category records DNS family availability, connection start/readiness/waiting/failure, numeric network error codes, response status/byte counts, and the stage of a timeout.
+These diagnostics omit URLs, hostnames, IP addresses, headers, credentials, and page content.
 Main-app preview acquisition uses one cancellable worker independently of the two upload/retention slots.
 Closing recovery cancels and joins that work before releasing the draft, and late completions cannot restore a closed editor.
 

@@ -4,19 +4,21 @@ import Foundation
 import Network
 import Security
 import dnssd
+import os
 
 /// Dedicated, credential-free preview transport. DNS is cancellable; the TLS
 /// connection receives only a validated numeric endpoint, never the hostname.
 /// Hostname authentication still uses the original name. No URLSession, proxy,
 /// cookies, certificate network fetches, script engine or automatic redirects.
 enum PreviewNetwork {
+  private static let log = Logger(subsystem: "org.matrixaxon.axon", category: "device-preview")
   struct Response {
     let status: Int
     let headers: [String: String]
     let body: Data
     let url: URL
   }
-  enum Kind { case page, image }
+  enum Kind: String { case page, image }
   static let headBytes = 256 * 1024
   static let headerBytes = 32 * 1024
 
@@ -96,21 +98,36 @@ enum PreviewNetwork {
     return host
   }
 
-  typealias Resolve = (String, TimeInterval, ShareCancellation) throws -> Address
-  typealias Exchange = (URL, String, Address, Kind, TimeInterval, ShareCancellation) throws ->
+  typealias Resolve = (String, TimeInterval, ShareCancellation) throws -> [Address]
+  typealias Exchange = (URL, String, [Address], Kind, DispatchTime, ShareCancellation) throws ->
     Response
 
   static func fetch(
     _ initial: URL, kind: Kind, deadline: DispatchTime, cancellation: ShareCancellation,
     resolve: Resolve = resolve, exchange: Exchange = exchange
   ) throws -> Response {
+    log.info("device_preview_fetch_start kind=\(kind.rawValue, privacy: .public)")
     var url = initial
-    for _ in 0..<6 {
+    for hop in 0..<6 {
       try cancellation.check()
       let host = try validate(url)
-      let address = try resolve(host, min(4, remaining(deadline)), cancellation)
-      guard address.isPublic else { throw ShareFailure.previewUnavailable }
-      let response = try exchange(url, host, address, kind, remaining(deadline), cancellation)
+      let addresses: [Address]
+      log.info("device_preview_dns_start kind=\(kind.rawValue, privacy: .public) hop=\(hop)")
+      do { addresses = try resolve(host, min(4, remaining(deadline)), cancellation) } catch {
+        log.info(
+          "device_preview_dns_failed category=\((error as? ShareFailure)?.rawValue ?? "network", privacy: .public)"
+        )
+        throw error
+      }
+      guard (1...2).contains(addresses.count), addresses.allSatisfy(\.isPublic) else {
+        throw ShareFailure.previewUnavailable
+      }
+      try cancellation.check()
+      _ = try remaining(deadline)
+      let response = try exchange(url, host, addresses, kind, deadline, cancellation)
+      log.info(
+        "device_preview_response kind=\(kind.rawValue, privacy: .public) hop=\(hop) status=\(response.status) bytes=\(response.body.count)"
+      )
       if [301, 302, 303, 307, 308].contains(response.status) {
         guard let location = response.headers["location"], location.utf8.count <= 4096,
           let next = URL(string: location, relativeTo: url)?.absoluteURL
@@ -132,75 +149,190 @@ enum PreviewNetwork {
   }
 
   private final class DNSResult {
-    let result = ShareIntakeResult<Address>()
+    let result = ShareIntakeResult<Address?>()
+    let family: DNSServiceProtocol
     var reference: DNSServiceRef?
+    init(_ family: DNSServiceProtocol) { self.family = family }
   }
   // One worker per active lookup; deallocation is serialized with callbacks.
   static func resolve(_ host: String, timeout: TimeInterval, cancellation: ShareCancellation) throws
-    -> Address
+    -> [Address]
   {
     let queue = DispatchQueue(label: "org.matrixaxon.axon.preview-dns")
-    let state = DNSResult()
+    // Query both families together, with at most one pinned address per family.
+    // One absent/broken DNS family must not discard an available other family.
+    let queries = [
+      DNSResult(DNSServiceProtocol(kDNSServiceProtocol_IPv6)),
+      DNSResult(DNSServiceProtocol(kDNSServiceProtocol_IPv4)),
+    ]
     let deadline = DispatchTime.now() + timeout
     queue.async {
-      do { try cancellation.check() } catch {
-        state.result.finish(.failure(error))
-        return
-      }
-      guard DispatchTime.now() < deadline else {
-        state.result.finish(.failure(ShareFailure.expired))
-        return
-      }
-      let status = DNSServiceGetAddrInfo(
-        &state.reference, 0, 0,
-        DNSServiceProtocol(kDNSServiceProtocol_IPv4 | kDNSServiceProtocol_IPv6), host,
-        { _, flags, _, error, _, address, _, context in
-          guard let context else { return }
-          let state = Unmanaged<DNSResult>.fromOpaque(context).takeUnretainedValue()
-          if error == kDNSServiceErr_NoSuchRecord { return }
-          guard error == 0, flags & kDNSServiceFlagsAdd != 0, let address else {
+      for state in queries {
+        do { try cancellation.check() } catch {
+          state.result.finish(.failure(error))
+          return
+        }
+        guard DispatchTime.now() < deadline else {
+          state.result.finish(.failure(ShareFailure.expired))
+          return
+        }
+        let status = DNSServiceGetAddrInfo(
+          &state.reference, 0, 0,
+          state.family, host,
+          { _, flags, _, error, _, address, _, context in
+            guard let context else { return }
+            let state = Unmanaged<DNSResult>.fromOpaque(context).takeUnretainedValue()
+            if error == kDNSServiceErr_NoSuchRecord {
+              state.result.finish(.success(nil))
+              return
+            }
+            guard error == 0, flags & kDNSServiceFlagsAdd != 0, let address else {
+              state.result.finish(.failure(ShareFailure.unavailable))
+              return
+            }
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard
+              getnameinfo(
+                address, socklen_t(address.pointee.sa_len), &buffer, socklen_t(buffer.count), nil,
+                0,
+                NI_NUMERICHOST) == 0,
+              let parsed = Address.parse(String(cString: buffer)), parsed.isPublic
+            else {
+              state.result.finish(.failure(ShareFailure.previewUnavailable))
+              return
+            }
+            state.result.finish(.success(parsed))
+          }, Unmanaged.passUnretained(state).toOpaque())
+        if status == 0, let reference = state.reference {
+          if DNSServiceSetDispatchQueue(reference, queue) != 0 {
             state.result.finish(.failure(ShareFailure.unavailable))
-            return
           }
-          var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-          guard
-            getnameinfo(
-              address, socklen_t(address.pointee.sa_len), &buffer, socklen_t(buffer.count), nil, 0,
-              NI_NUMERICHOST) == 0,
-            let parsed = Address.parse(String(cString: buffer)), parsed.isPublic
-          else {
-            state.result.finish(.failure(ShareFailure.previewUnavailable))
-            return
-          }
-          state.result.finish(.success(parsed))
-        }, Unmanaged.passUnretained(state).toOpaque())
-      if status == 0, let reference = state.reference {
-        if DNSServiceSetDispatchQueue(reference, queue) != 0 {
+        } else {
           state.result.finish(.failure(ShareFailure.unavailable))
         }
-      } else {
-        state.result.finish(.failure(ShareFailure.unavailable))
       }
     }
     defer {
       queue.async {
-        if let reference = state.reference {
-          DNSServiceRefDeallocate(reference)
-          state.reference = nil
+        for state in queries {
+          if let reference = state.reference {
+            DNSServiceRefDeallocate(reference)
+            state.reference = nil
+          }
         }
       }
     }
-    return try state.result.wait(timeout: timeout, cancellation: cancellation)
+    return try resolvedAddresses(
+      queries.map(\.result), deadline: deadline, cancellation: cancellation)
+  }
+
+  static func resolvedAddresses(
+    _ queries: [ShareIntakeResult<Address?>], deadline: DispatchTime,
+    cancellation: ShareCancellation
+  ) throws -> [Address] {
+    guard queries.count == 2 else { throw ShareFailure.previewUnavailable }
+    var addresses: [Address] = []
+    var expired = false
+    for query in queries {
+      do {
+        if let address = try query.wait(until: deadline, cancellation: cancellation) {
+          guard address.isPublic else { throw ShareFailure.previewUnavailable }
+          addresses.append(address)
+        }
+      } catch ShareFailure.cancelled {
+        throw ShareFailure.cancelled
+      } catch ShareFailure.previewUnavailable {
+        throw ShareFailure.previewUnavailable
+      } catch { expired = expired || (error as? ShareFailure) == .expired }
+    }
+    guard !addresses.isEmpty else {
+      throw expired ? ShareFailure.expired : ShareFailure.unavailable
+    }
+    log.info(
+      "device_preview_dns_complete ipv6=\(addresses.contains { $0.bytes.count == 16 }) ipv4=\(addresses.contains { $0.bytes.count == 4 })"
+    )
+    return addresses
   }
 
   static func exchange(
-    _ url: URL, host: String, address: Address, kind: Kind,
-    timeout: TimeInterval, cancellation: ShareCancellation
+    _ url: URL, host: String, addresses: [Address], kind: Kind,
+    deadline: DispatchTime, cancellation: ShareCancellation
   ) throws -> Response {
     try cancellation.check()
-    guard try validate(url) == host, address.isPublic,
+    _ = try remaining(deadline)
+    guard try validate(url) == host, (1...2).contains(addresses.count),
+      addresses.allSatisfy(\.isPublic),
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
     else { throw ShareFailure.previewUnavailable }
+    let queue = DispatchQueue(label: "org.matrixaxon.axon.preview-http")
+    let port = NWEndpoint.Port(rawValue: UInt16(components.port ?? 443))!
+    let connections = addresses.map { address in
+      (address: address, connection: makeConnection(host: host, address: address, port: port))
+    }
+    let race = PreviewConnectionRace(connections, queue: queue) { candidate, queue, complete in
+      let family = candidate.address.bytes.count == 4 ? "ipv4" : "ipv6"
+      log.info("device_preview_connect_start family=\(family, privacy: .public)")
+      candidate.connection.stateUpdateHandler = { state in
+        switch state {
+        case .ready:
+          log.info("device_preview_connect_ready family=\(family, privacy: .public)")
+          complete(.success(()))
+        case .failed(let error):
+          log.info(
+            "device_preview_connect_failed family=\(family, privacy: .public) code=\(networkCode(error))"
+          )
+          complete(.failure(ShareFailure.unavailable))
+        case .waiting(let error):
+          log.info(
+            "device_preview_connect_waiting family=\(family, privacy: .public) code=\(networkCode(error))"
+          )
+        default: break
+        }
+      }
+      candidate.connection.start(queue: queue)
+    } stop: { candidate in
+      candidate.connection.stateUpdateHandler = nil
+      candidate.connection.cancel()
+    }
+    let connection: NWConnection
+    do {
+      let winner = try race.connect(deadline: deadline, cancellation: cancellation)
+      connection = winner.connection
+      let family = winner.address.bytes.count == 4 ? "ipv4" : "ipv6"
+      log.info("device_preview_connect_winner family=\(family, privacy: .public)")
+    } catch {
+      log.info(
+        "device_preview_connect_ended category=\((error as? ShareFailure)?.rawValue ?? "network", privacy: .public)"
+      )
+      throw error
+    }
+    queue.sync { connection.stateUpdateHandler = nil }
+    let target =
+      (components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath)
+      + (components.percentEncodedQuery.map { "?" + $0 } ?? "")
+    let authority = host + (components.port.map { ":\($0)" } ?? "")
+    let request = Data(
+      "GET \(target) HTTP/1.1\r\nHost: \(authority)\r\nUser-Agent: AxonLinkPreview/1.0\r\nAccept: text/html,application/xhtml+xml,image/*;q=0.8\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+        .utf8)
+    let reader = Reader(
+      connection: connection, queue: queue, url: url, kind: kind, request: request,
+      cancellation: cancellation)
+    reader.start(deadline: deadline)
+    defer { reader.cancel() }
+    return try reader.result.wait(until: deadline, cancellation: cancellation)
+  }
+
+  private static func networkCode(_ error: NWError) -> Int32 {
+    switch error {
+    case .posix(let value): return value.rawValue
+    case .dns(let value), .tls(let value): return value
+    default: return 0
+    }
+  }
+
+  private static func makeConnection(host: String, address: Address, port: NWEndpoint.Port)
+    -> NWConnection
+  {
     let tls = NWProtocolTLS.Options()
     sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, host)
     sec_protocol_options_add_tls_application_protocol(tls.securityProtocolOptions, "http/1.1")
@@ -214,20 +346,7 @@ enum PreviewNetwork {
       }, verifyQueue)
     let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
     parameters.preferNoProxies = true
-    let port = NWEndpoint.Port(rawValue: UInt16(components.port ?? 443))!
-    let connection = NWConnection(host: address.endpoint, port: port, using: parameters)
-    let target =
-      (components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath)
-      + (components.percentEncodedQuery.map { "?" + $0 } ?? "")
-    let authority = host + (components.port.map { ":\($0)" } ?? "")
-    let request = Data(
-      "GET \(target) HTTP/1.1\r\nHost: \(authority)\r\nUser-Agent: AxonLinkPreview/1.0\r\nAccept: text/html,application/xhtml+xml,image/*;q=0.8\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
-        .utf8)
-    let reader = Reader(
-      connection: connection, url: url, kind: kind, request: request, cancellation: cancellation)
-    reader.start(timeout: timeout)
-    defer { reader.cancel() }
-    return try reader.result.wait(timeout: timeout, cancellation: cancellation)
+    return NWConnection(host: address.endpoint, port: port, using: parameters)
   }
 
   static func verify(_ trust: SecTrust, host: String) -> Bool {
@@ -240,7 +359,7 @@ enum PreviewNetwork {
 
   private final class Reader {
     let result = ShareIntakeResult<Response>()
-    private let queue = DispatchQueue(label: "org.matrixaxon.axon.preview-http")
+    private let queue: DispatchQueue
     private let connection: NWConnection
     private let url: URL
     private let request: Data
@@ -249,17 +368,22 @@ enum PreviewNetwork {
     private var done = false
     private var timer: DispatchWorkItem?
     init(
-      connection: NWConnection, url: URL, kind: Kind, request: Data, cancellation: ShareCancellation
+      connection: NWConnection, queue: DispatchQueue, url: URL, kind: Kind, request: Data,
+      cancellation: ShareCancellation
     ) {
       self.connection = connection
+      self.queue = queue
       self.url = url
       self.request = request
       self.cancellation = cancellation
       parser = PreviewHTTPParser(kind: kind)
     }
-    func start(timeout: TimeInterval) {
+    func start(deadline: DispatchTime) {
       queue.async {
-        do { try self.cancellation.check() } catch {
+        do {
+          try self.cancellation.check()
+          _ = try remaining(deadline)
+        } catch {
           self.finish(.failure(error))
           return
         }
@@ -270,24 +394,26 @@ enum PreviewNetwork {
             return
           }
           switch state {
-          case .ready:
-            self.connection.send(
-              content: self.request,
-              completion: .contentProcessed { error in
-                if error != nil {
-                  self.finish(.failure(ShareFailure.unavailable))
-                } else {
-                  self.receive()
-                }
-              })
           case .failed: self.finish(.failure(ShareFailure.unavailable))
           default: break
           }
         }
-        let timer = DispatchWorkItem { [weak self] in self?.finish(.failure(ShareFailure.expired)) }
+        let timer = DispatchWorkItem { [weak self] in
+          guard let self else { return }
+          log.info("device_preview_http_timeout headers_received=\(self.parser.status != 0)")
+          self.finish(.failure(ShareFailure.expired))
+        }
         self.timer = timer
-        self.queue.asyncAfter(deadline: .now() + timeout, execute: timer)
-        self.connection.start(queue: self.queue)
+        self.queue.asyncAfter(deadline: deadline, execute: timer)
+        self.connection.send(
+          content: self.request,
+          completion: .contentProcessed { error in
+            if error != nil {
+              self.finish(.failure(ShareFailure.unavailable))
+            } else {
+              self.receive()
+            }
+          })
       }
     }
     func cancel() { queue.async { self.finish(.failure(ShareFailure.cancelled)) } }
@@ -338,12 +464,14 @@ final class ShareIntakeResult<T> {
     ready.signal()
   }
   func wait(timeout: TimeInterval = 10, cancellation: ShareCancellation? = nil) throws -> T {
+    try wait(until: .now() + max(0, timeout), cancellation: cancellation)
+  }
+  func wait(until deadline: DispatchTime, cancellation: ShareCancellation? = nil) throws -> T {
     defer {
       lock.lock()
       finished = true
       lock.unlock()
     }
-    let deadline = DispatchTime.now() + max(0, timeout)
     while true {
       try cancellation?.check()
       if ready.wait(timeout: min(deadline, .now() + 0.1)) == .success {

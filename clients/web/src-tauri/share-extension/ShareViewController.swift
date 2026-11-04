@@ -588,9 +588,9 @@ private enum SharePreviewInformation: String, Identifiable {
   var message: String {
     switch self {
     case .device:
-      return "Include preview looks up HTTPS links on this device. The website and its image hosts may receive the request. Other links remain sendable."
+      return "Generate a link preview on this device, sending a request to the server hosting the link."
     case .homeserver:
-      return "The homeserver option sends the URL to your selected Matrix homeserver, which may log it even for an encrypted room."
+      return "Generate a link preview from your account's Matrix homeserver, which may log the URL even for an encrypted room."
     }
   }
 }
@@ -736,7 +736,7 @@ private struct ShareComposeView: View {
                   cardDescription = preview.description ?? ""
                   editingCard = true
                 }.buttonStyle(.borderless).frame(minHeight: 44).disabled(!model.editable)
-                Button("Remove this preview, keep link") {
+                Button("Remove preview") {
                   model.removePreview(imageOnly: false, url: preview.matched_url)
                 }.buttonStyle(.borderless).frame(minHeight: 44).disabled(!model.editable)
               }
@@ -746,7 +746,7 @@ private struct ShareComposeView: View {
                 !model.editable)
             }
             if previews.count > 1 {
-              Button("Remove previews, keep links") { model.removePreview(imageOnly: false) }
+              Button("Remove previews") { model.removePreview(imageOnly: false) }
                 .disabled(!model.editable)
             }
           }
