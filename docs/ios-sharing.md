@@ -30,7 +30,9 @@ The same order applies in the native share composer and the containing app's Pen
 Refreshing a card keeps its verified retained image if no usable replacement image is available; removing that image remains an explicit action.
 Optional source titles that exceed the preview contract are dropped rather than making the original text unsendable.
 Preview acquisition accepts an escaped ASCII URL subset supported by Foundation on iOS 15 and later; other links remain ordinary message text without an unusable preview action.
-The **Link preview** section appears above the message editor and explicitly shows **Link only — no preview added** until a preview is included.
+The **Link preview** section appears above the message editor and shows **Link only** beside **Include preview** until a preview is included.
+Information buttons beside **Link preview** and **Use homeserver instead** explain the corresponding network requests and privacy implications.
+Viewing this information performs no lookup; homeserver lookup still requires separate confirmation.
 **Send** stays in the navigation bar; after confirmed delivery it becomes **Done**.
 Disabled or unavailable previews leave the original plain link editable and sendable.
 Device status distinguishes unavailable metadata, a timeout, and a text card with an absent/unavailable image.

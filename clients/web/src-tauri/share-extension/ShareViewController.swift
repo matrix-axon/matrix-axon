@@ -579,9 +579,26 @@ final class ShareComposer: ObservableObject {
   }
 }
 
+private enum SharePreviewInformation: String, Identifiable {
+  case device, homeserver
+  var id: String { rawValue }
+  var title: String {
+    self == .device ? "On-device previews" : "Homeserver previews"
+  }
+  var message: String {
+    switch self {
+    case .device:
+      return "Include preview looks up HTTPS links on this device. The website and its image hosts may receive the request. Other links remain sendable."
+    case .homeserver:
+      return "The homeserver option sends the URL to your selected Matrix homeserver, which may log it even for an encrypted room."
+    }
+  }
+}
+
 private struct ShareComposeView: View {
   @ObservedObject var model: ShareComposer
   @State private var homeserverConsent = false
+  @State private var previewInformation: SharePreviewInformation?
   @State private var previewURL = ""
   @State private var previewSearch = ""
   @State private var editingCard = false
@@ -631,26 +648,11 @@ private struct ShareComposeView: View {
           }
         }.disabled(!model.editable)
         if !links.isEmpty {
-          Section(header: Text("Link preview")) {
+          Section {
             let included = model.record?.previews?.filter { links.contains($0.matched_url) } ?? []
-            if included.isEmpty {
-              Label("Link only — no preview added", systemImage: "link")
-              Text(
-                matchingLinks.isEmpty
-                  ? "These links can be sent without a device preview."
-                  : "To include a title and image when available, choose Include preview."
-              )
-              .font(.subheadline)
-            } else {
-              Label(
-                included.count == 1
-                  ? "Preview included below" : "\(included.count) previews included below",
-                systemImage: "checkmark.circle")
+            if matchingLinks.isEmpty {
+              Label("Link only", systemImage: "link")
             }
-            Text(
-              "Include preview looks up HTTPS links on this device. The website and its image hosts may receive the request. Other links remain sendable."
-            )
-            .font(.caption).foregroundColor(.secondary)
             if links.count > 8 {
               TextField("Find link for preview", text: $previewSearch).autocapitalization(.none)
             }
@@ -661,43 +663,52 @@ private struct ShareComposeView: View {
               .font(.caption)
             }
             ForEach(Array(matchingLinks.prefix(8)), id: \.self) { url in
+              let hasPreview = included.contains(where: { $0.matched_url == url })
               VStack(alignment: .leading, spacing: 8) {
                 Text(url).font(.caption).foregroundColor(.secondary)
-                Button {
-                  model.generateOnDevice(
-                    url, refresh: included.contains(where: { $0.matched_url == url }))
-                } label: {
+                HStack {
                   Label(
-                    included.contains(where: { $0.matched_url == url })
-                      ? "Refresh on this device" : "Include preview",
-                    systemImage: "photo.on.rectangle")
+                    hasPreview ? "Preview included" : "Link only",
+                    systemImage: hasPreview ? "checkmark.circle" : "link")
+                  Spacer()
+                  Button {
+                    model.generateOnDevice(url, refresh: hasPreview)
+                  } label: {
+                    Label(
+                      hasPreview ? "Refresh on this device" : "Include preview",
+                      systemImage: "photo.on.rectangle")
+                  }
+                  .buttonStyle(.bordered).frame(minHeight: 44)
+                  .accessibilityIdentifier("share-device-preview")
+                  .accessibilityLabel(
+                    (hasPreview ? "Refresh on-device preview for " : "Include on-device preview for ")
+                      + url
+                  )
+                  .accessibilityHint("Uses this device to fetch a title and optional image")
+                  .disabled(!model.editable)
                 }
-                .buttonStyle(.bordered).frame(minHeight: 44)
-                .accessibilityIdentifier("share-device-preview")
-                .accessibilityLabel(
-                  (included.contains(where: { $0.matched_url == url })
-                    ? "Refresh on-device preview for " : "Include on-device preview for ") + url
-                )
-                .accessibilityHint("Uses this device to fetch a title and optional image")
-                .disabled(!model.editable)
-                Button("Use homeserver instead…") {
-                  previewURL = url
-                  homeserverConsent = true
+                HStack(spacing: 0) {
+                  Button("Use homeserver instead…") {
+                    previewURL = url
+                    homeserverConsent = true
+                  }
+                  .buttonStyle(.borderless).frame(minHeight: 44)
+                  .accessibilityIdentifier("share-homeserver-preview")
+                  .accessibilityHint(
+                    "Shares the URL with your selected homeserver only after confirmation"
+                  )
+                  .disabled(!model.editable || model.account.isEmpty)
+                  informationButton(.homeserver)
                 }
-                .buttonStyle(.borderless).frame(minHeight: 44)
-                .accessibilityIdentifier("share-homeserver-preview")
-                .accessibilityHint(
-                  "Shares the URL with your selected homeserver only after confirmation"
-                )
-                .disabled(!model.editable || model.account.isEmpty)
               }
             }
-            Text(
-              "The homeserver option sends the URL to your selected Matrix homeserver, which may log it even for an encrypted room."
-            )
-            .font(.caption).foregroundColor(.secondary)
             if model.account.isEmpty {
               Text("Choose a sending account to enable the homeserver option.").font(.caption)
+            }
+          } header: {
+            HStack(spacing: 0) {
+              Text("Link preview")
+              informationButton(.device)
             }
           }
         }
@@ -761,6 +772,11 @@ private struct ShareComposeView: View {
         }
       }
       .navigationTitle("Share to Axon")
+      .alert(item: $previewInformation) { information in
+        Alert(
+          title: Text(information.title), message: Text(information.message),
+          dismissButton: .default(Text("OK")))
+      }
       .confirmationDialog(
         "Send this URL to your homeserver to fetch a preview?", isPresented: $homeserverConsent,
         titleVisibility: .visible
@@ -809,6 +825,16 @@ private struct ShareComposeView: View {
         }
       }
     }.navigationViewStyle(.stack)
+  }
+
+  private func informationButton(_ information: SharePreviewInformation) -> some View {
+    Button { previewInformation = information } label: {
+      Image(systemName: "info.circle")
+        .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+    }
+    .buttonStyle(.borderless)
+    .accessibilityLabel("About \(information.title.lowercased())")
+    .accessibilityIdentifier("share-\(information.rawValue)-preview-info")
   }
 }
 
