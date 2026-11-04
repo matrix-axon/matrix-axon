@@ -597,6 +597,7 @@ private enum SharePreviewInformation: String, Identifiable {
 
 private struct ShareComposeView: View {
   @ObservedObject var model: ShareComposer
+  @Environment(\.sizeCategory) private var sizeCategory
   @State private var homeserverConsent = false
   @State private var previewInformation: SharePreviewInformation?
   @State private var previewURL = ""
@@ -666,26 +667,20 @@ private struct ShareComposeView: View {
               let hasPreview = included.contains(where: { $0.matched_url == url })
               VStack(alignment: .leading, spacing: 8) {
                 Text(url).font(.caption).foregroundColor(.secondary)
-                HStack {
-                  Label(
-                    hasPreview ? "Preview included" : "Link only",
-                    systemImage: hasPreview ? "checkmark.circle" : "link")
-                  Spacer()
-                  Button {
-                    model.generateOnDevice(url, refresh: hasPreview)
-                  } label: {
-                    Label(
-                      hasPreview ? "Refresh on this device" : "Include preview",
-                      systemImage: "photo.on.rectangle")
+                let status = Label(
+                  hasPreview ? "Preview included" : "Link only",
+                  systemImage: hasPreview ? "checkmark.circle" : "link")
+                if sizeCategory.isAccessibilityCategory {
+                  VStack(alignment: .leading, spacing: 8) {
+                    status
+                    devicePreviewButton(url, included: hasPreview)
                   }
-                  .buttonStyle(.bordered).frame(minHeight: 44)
-                  .accessibilityIdentifier("share-device-preview")
-                  .accessibilityLabel(
-                    (hasPreview ? "Refresh on-device preview for " : "Include on-device preview for ")
-                      + url
-                  )
-                  .accessibilityHint("Uses this device to fetch a title and optional image")
-                  .disabled(!model.editable)
+                } else {
+                  HStack {
+                    status
+                    Spacer()
+                    devicePreviewButton(url, included: hasPreview)
+                  }
                 }
                 HStack(spacing: 0) {
                   Button("Use homeserver instead…") {
@@ -835,6 +830,23 @@ private struct ShareComposeView: View {
     .buttonStyle(.borderless)
     .accessibilityLabel("About \(information.title.lowercased())")
     .accessibilityIdentifier("share-\(information.rawValue)-preview-info")
+  }
+
+  private func devicePreviewButton(_ url: String, included: Bool) -> some View {
+    Button {
+      model.generateOnDevice(url, refresh: included)
+    } label: {
+      Label(
+        included ? "Refresh on this device" : "Include preview",
+        systemImage: "photo.on.rectangle")
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    .buttonStyle(.bordered).frame(minHeight: 44)
+    .accessibilityIdentifier("share-device-preview")
+    .accessibilityLabel(
+      (included ? "Refresh on-device preview for " : "Include on-device preview for ") + url)
+    .accessibilityHint("Uses this device to fetch a title and optional image")
+    .disabled(!model.editable)
   }
 }
 

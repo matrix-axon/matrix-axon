@@ -31,6 +31,7 @@ Refreshing a card keeps its verified retained image if no usable replacement ima
 Optional source titles that exceed the preview contract are dropped rather than making the original text unsendable.
 Preview acquisition accepts an escaped ASCII URL subset supported by Foundation on iOS 15 and later; other links remain ordinary message text without an unusable preview action.
 The **Link preview** section appears above the message editor and shows **Link only** beside **Include preview** until a preview is included.
+At accessibility text sizes, the action moves below the status so its full label remains readable.
 Information buttons beside **Link preview** and **Use homeserver instead** explain the corresponding network requests and privacy implications.
 Viewing this information performs no lookup; homeserver lookup still requires separate confirmation.
 **Send** stays in the navigation bar; after confirmed delivery it becomes **Done**.
