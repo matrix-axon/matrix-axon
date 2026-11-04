@@ -8,7 +8,8 @@ use axon_store::Store;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{
-    AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, RegexQuery, TermQuery,
+    AllQuery, BooleanQuery, Occur, PhraseQuery, Query, QueryParser, QueryParserError, RangeQuery,
+    RegexQuery, TermQuery,
 };
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
@@ -195,9 +196,59 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Build a query that treats `text` as ordinary words, ignoring all query syntax
+    /// except balanced double quotes. A balanced `"..."` span must match as a phrase;
+    /// every other whitespace-separated word is analyzed with the body tokenizer, and a
+    /// word that yields several tokens (`they're` -> `they`, `re`) also matches as a
+    /// phrase. All parts are required. An unbalanced `"` is an ordinary character, and
+    /// text with no indexable tokens matches nothing.
+    fn literal_query(&self, text: &str) -> Result<Box<dyn Query>, SearchError> {
+        let mut analyzer = self
+            .index
+            .tokenizer_for_field(self.schema.body)
+            .map_err(|e| SearchError::BadQuery(e.to_string()))?;
+
+        let mut parts: Vec<&str> = Vec::new();
+        let mut rest = text;
+        while let Some(open) = rest.find('"') {
+            let Some(len) = rest[open + 1..].find('"') else {
+                break; // unbalanced: the remainder is plain text
+            };
+            parts.extend(rest[..open].split_whitespace());
+            parts.push(&rest[open + 1..open + 1 + len]);
+            rest = &rest[open + 1 + len + 1..];
+        }
+        parts.extend(rest.split_whitespace());
+
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for part in parts {
+            // Keep the analyzer's positions: a dropped over-long token leaves a gap
+            // that the indexed document has too.
+            let mut terms = Vec::new();
+            analyzer.token_stream(part).process(&mut |token| {
+                terms.push((
+                    token.position,
+                    Term::from_field_text(self.schema.body, &token.text),
+                ))
+            });
+            let query: Box<dyn Query> = match terms.len() {
+                0 => continue,
+                1 => Box::new(TermQuery::new(
+                    terms.remove(0).1,
+                    IndexRecordOption::WithFreqsAndPositions,
+                )),
+                _ => Box::new(PhraseQuery::new_with_offset(terms)),
+            };
+            clauses.push((Occur::Must, query));
+        }
+        Ok(Box::new(BooleanQuery::new(clauses)))
+    }
+
     /// Run a full-text or filter-only search, ordering matches before pagination.
-    /// Returns the requested page of hits plus the total match count. A malformed `text`
-    /// query is a [`SearchError::BadQuery`].
+    /// Returns the requested page of hits plus the total match count. A `text` query that
+    /// does not parse as prose-with-quotes is retried as plain words; one that parses but
+    /// cannot run (such as an exclusion with nothing to exclude from) is a
+    /// [`SearchError::BadQuery`].
     pub fn search(&self, params: &SearchParams<'_>) -> Result<SearchResults, SearchError> {
         let searcher = self.reader.searcher();
 
@@ -208,9 +259,17 @@ impl SearchIndex {
         } else {
             let mut parser = QueryParser::for_index(&self.index, vec![self.schema.body]);
             parser.set_conjunction_by_default(); // all terms required (AND), the intuitive default
-            parser
-                .parse_query(text)
-                .map_err(|e| SearchError::BadQuery(e.to_string()))?
+            match parser.parse_query(text) {
+                Ok(query) => query,
+                // Users type prose, not query syntax: `they're`, `10:30`, `(x` and
+                // `a AND` fail to parse (`10:30` as a nonexistent field), so retry
+                // them as plain words. Any other error means the query parsed but is
+                // unusable (`-coming` excludes everything), and stays a BadQuery.
+                Err(QueryParserError::SyntaxError(_) | QueryParserError::FieldDoesNotExist(_)) => {
+                    self.literal_query(text)?
+                }
+                Err(e) => return Err(SearchError::BadQuery(e.to_string())),
+            }
         };
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text_query)];
         if let Some(account_id) = params.account_id {
@@ -1016,10 +1075,127 @@ mod tests {
     }
 
     #[test]
-    fn malformed_query_is_bad_query() {
+    fn parsed_but_unusable_queries_stay_bad_query() {
         let (index, _dir) = open_tmp();
-        // An unbalanced quote / illegal syntax should surface as BadQuery, not panic.
-        let err = index.search(&params("\"unterminated")).err();
-        assert!(matches!(err, Some(SearchError::BadQuery(_))) || err.is_none());
+        let account = Uuid::new_v4();
+        index.index_for_test(&[ev(account, "$a", "!r", "@u:x", 1, "hello world coming")]);
+        index.reload().unwrap();
+        for query in ["-coming", "NOT coming", "-\"hello world\""] {
+            assert!(
+                matches!(index.search(&params(query)), Err(SearchError::BadQuery(_))),
+                "query {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_phrase_keeps_gaps_left_by_dropped_long_tokens() {
+        let (index, _dir) = open_tmp();
+        let account = Uuid::new_v4();
+        let long = "x".repeat(41);
+        index.index_for_test(&[ev(
+            account,
+            "$a",
+            "!r",
+            "@u:x",
+            1,
+            &format!("see {long} end"),
+        )]);
+        index.reload().unwrap();
+        // `see:` is a nonexistent field, so this takes the fallback; the 41-byte
+        // segment is dropped from the query as it was from the index.
+        let found = index.search(&params(&format!("see:{long}:end"))).unwrap();
+        assert_eq!(found.total, 1);
+    }
+
+    #[test]
+    fn fallback_is_literal_for_leftover_operators_and_single_quotes() {
+        let (index, _dir) = open_tmp();
+        let account = Uuid::new_v4();
+        index.index_for_test(&[
+            ev(
+                account,
+                "$a",
+                "!r",
+                "@u:x",
+                1,
+                "dinner dessert they're here",
+            ),
+            ev(account, "$b", "!r", "@u:x", 2, "dinner they're here"),
+            ev(account, "$c", "!r", "@u:x", 3, "hello world they're here"),
+            ev(account, "$d", "!r", "@u:x", 4, "world hello they're here"),
+        ]);
+        index.reload().unwrap();
+        let ids = |q: &str| {
+            let mut ids: Vec<_> = index
+                .search(&params(q))
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|h| h.event_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        // Policy: once a query falls back, `-` is punctuation, not an exclusion.
+        assert_eq!(ids("dinner -dessert they're"), vec!["$a"]);
+        // Only double quotes make phrases on the fallback path.
+        assert_eq!(ids("'hello world' they're"), vec!["$c", "$d"]);
+    }
+
+    #[test]
+    fn invalid_query_syntax_falls_back_to_plain_words() {
+        let (index, _dir) = open_tmp();
+        let account = Uuid::new_v4();
+        index.index_for_test(&[
+            ev(
+                account,
+                "$a",
+                "!r",
+                "@u:x",
+                1,
+                "they're coming at 10:30 (maybe) and more",
+            ),
+            ev(account, "$b", "!r", "@u:x", 2, "they left early"),
+            ev(
+                account,
+                "$c",
+                "!r",
+                "@u:x",
+                3,
+                "hello world they're here at 10:30",
+            ),
+            ev(
+                account,
+                "$d",
+                "!r",
+                "@u:x",
+                4,
+                "world hello they're here at 10:30",
+            ),
+        ]);
+        index.reload().unwrap();
+        for (query, expect) in [
+            ("they're", vec!["$a", "$c", "$d"]),
+            ("they're coming", vec!["$a"]),
+            ("10:30", vec!["$a", "$c", "$d"]),
+            ("\"hello world\" they're", vec!["$c"]),
+            ("\"hello world\" 10:30", vec!["$c"]),
+            ("\"hello world", vec!["$c", "$d"]),
+            ("(maybe", vec!["$a"]),
+            ("maybe)", vec!["$a"]),
+            ("((coming maybe)", vec!["$a"]),
+            ("\"unterminated", vec![]),
+            ("coming AND", vec!["$a"]),
+            ("'", vec![]),
+            ("\\", vec![]),
+        ] {
+            let found = index
+                .search(&params(query))
+                .unwrap_or_else(|e| panic!("{query}: {e}"));
+            let mut ids: Vec<_> = found.hits.iter().map(|h| h.event_id.as_str()).collect();
+            ids.sort();
+            assert_eq!(ids, expect, "query {query:?}");
+        }
     }
 }
