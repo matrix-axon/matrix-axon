@@ -3,6 +3,8 @@
 In Safari or another text/link app, choose **Share → Axon**.
 Choose a sending Matrix account, use **Find room** to filter its destinations if needed, choose a room, review or edit the message, then explicitly choose **Send**.
 Account and room choices open separate native list screens.
+The destination header includes a reload icon for refreshing accounts and rooms, with a spoken label for VoiceOver.
+Routine introductory instructions are hidden; loading, errors, and delivery outcomes remain visible when relevant.
 The composer remembers the last selected account and room on this device, including a selection made before cancelling a share.
 Each new share restores that destination only after checking the current room list; an unavailable room leaves its account selected and asks you to choose another room.
 Changing accounts clears the room selection, and signing out, changing servers, or removing the remembered account clears the saved preference.
@@ -37,6 +39,7 @@ After generation, the status distinguishes an included image, metadata without a
 An absent or unavailable image leaves a sendable text card; **Include preview** can be explicitly retried.
 For messages with many links, **Find link for preview** searches all links while displaying at most eight choices at a time.
 Cards support editing their title/description, removing their image, or removing the entire preview while retaining the URL.
+**Remove preview images** appears only when an included preview contains an image, including an unavailable retained image that needs removal.
 Changing a URL invalidates its previous card.
 Rendering cards never performs a webpage lookup or downloads an external image URL.
 

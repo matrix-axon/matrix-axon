@@ -145,9 +145,7 @@ private final class ShareComposer: ObservableObject {
         return
           "No joined rooms are available. Open Axon to join a room; this draft is saved without sending."
       }
-      return selected.room.isEmpty
-        ? "Choose an account and room, review, then Send. Nothing has been sent."
-        : "Last destination selected. Review the account, room, and message before Send. Nothing has been sent."
+      return ""
     }
     heartbeat = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
       guard let self, !self.busy else { return }
@@ -213,7 +211,9 @@ private final class ShareComposer: ObservableObject {
         guard !self.closing else { return }
         self.record = record
         self.images = images
-        if !message.isEmpty { self.status = message }
+        // An empty completed action clears routine status; background
+        // autosave must preserve actionable errors and delivery outcomes.
+        if blocking || !message.isEmpty { self.status = message }
         if blocking { self.busy = false }
         if !message.isEmpty { UIAccessibility.post(notification: .announcement, argument: message) }
       }
@@ -362,7 +362,7 @@ private final class ShareComposer: ObservableObject {
       }
       return rooms.isEmpty
         ? "No joined rooms are available. This draft is saved without sending."
-        : "Rooms refreshed. Choose a destination and review before Send."
+        : ""
     }
   }
   func send() {
@@ -531,13 +531,15 @@ private struct ShareComposeView: View {
     }
     NavigationView {
       Form {
-        Section {
-          Text(model.status).accessibilityIdentifier("share-status")
-          if model.busy { ProgressView() }
-          Button("Reload accounts and rooms") { model.reloadDestinations() }.disabled(
-            !model.editable)
+        if model.busy || !model.status.isEmpty {
+          Section {
+            if !model.status.isEmpty {
+              Text(model.status).accessibilityIdentifier("share-status")
+            }
+            if model.busy { ProgressView() }
+          }
         }
-        Section(header: Text("Destination")) {
+        Section {
           NavigationLink(destination: ShareAccountPicker(model: model)) {
             VStack(alignment: .leading) {
               Text("Sending account")
@@ -550,6 +552,17 @@ private struct ShareComposeView: View {
               Text(model.roomTitle).foregroundColor(.secondary)
             }
           }.disabled(model.account.isEmpty)
+        } header: {
+          HStack {
+            Text("Destination")
+            Spacer()
+            Button { model.reloadDestinations() } label: {
+              Image(systemName: "arrow.clockwise").font(.body)
+            }
+            .buttonStyle(.borderless).frame(minWidth: 44, minHeight: 44)
+            .accessibilityLabel("Reload accounts and rooms")
+            .accessibilityIdentifier("share-reload-destinations")
+          }
         }.disabled(!model.editable)
         if !links.isEmpty {
           Section(header: Text("Link preview")) {
@@ -660,8 +673,10 @@ private struct ShareComposeView: View {
                 }.buttonStyle(.borderless).frame(minHeight: 44).disabled(!model.editable)
               }
             }
-            Button("Remove preview images") { model.removePreview(imageOnly: true) }.disabled(
-              !model.editable)
+            if previews.contains(where: { $0.thumbnail != nil || $0.image_upload_id != nil }) {
+              Button("Remove preview images") { model.removePreview(imageOnly: true) }.disabled(
+                !model.editable)
+            }
             Button("Remove previews, keep links") { model.removePreview(imageOnly: false) }
               .disabled(!model.editable)
           }
