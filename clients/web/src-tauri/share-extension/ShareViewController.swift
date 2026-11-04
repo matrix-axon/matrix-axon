@@ -652,7 +652,14 @@ private struct ShareComposeView: View {
           Section {
             let included = model.record?.previews?.filter { links.contains($0.matched_url) } ?? []
             if matchingLinks.isEmpty {
-              Label("Link only", systemImage: "link")
+              if included.isEmpty {
+                Label("Link only", systemImage: "link")
+              } else {
+                Label(
+                  included.count == 1
+                    ? "Preview included below" : "\(included.count) previews included below",
+                  systemImage: "checkmark.circle")
+              }
             }
             if links.count > 8 {
               TextField("Find link for preview", text: $previewSearch).autocapitalization(.none)
