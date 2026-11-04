@@ -16,7 +16,7 @@ const hostId = `org.matrixaxon.sharingtest.x${basename(output).replaceAll('-', '
 const activation = JSON.parse(
   readFileSync(new URL('ios-share-activation.json', import.meta.url), 'utf8'),
 )
-const run = (command, args, timeout = 300_000) =>
+const run = (command, args, timeout = 600_000) =>
   execFileSync(command, args, { stdio: 'inherit', timeout })
 const sdk = execFileSync(
   'xcrun',
@@ -59,7 +59,7 @@ console.log(
 if (device.state !== 'Booted')
   run('xcrun', ['simctl', 'boot', device.udid], 30_000)
 // A fresh CI simulator migrates OS data on first boot; allow the same bounded
-// five-minute budget as the test build instead of timing out mid-migration.
+// ten-minute budget as each test build instead of timing out mid-migration.
 run('xcrun', ['simctl', 'bootstatus', device.udid, '-b'])
 const project = {
   name: 'SharingFoundationTests',
