@@ -36,6 +36,7 @@ export function createIncomingShareStore(
   }
   let deviceRequest: DeviceRequest | null = null
   let previewWork: Promise<void> | null = null
+  let thumbnailWork: Promise<void> = Promise.resolve()
   function cancelPreview() {
     const request = deviceRequest
     if (request !== null) request.cancelled = true
@@ -210,6 +211,7 @@ export function createIncomingShareStore(
   function change(
     update: (record: IncomingShare) => IncomingShare,
     release = false,
+    removeFile?: string,
   ): Promise<void> {
     const generation = epoch
     const id = selected.peek()?.id
@@ -217,10 +219,14 @@ export function createIncomingShareStore(
       if (generation !== epoch) throw problem('stale')
       const record = selected.peek()
       if (record === null || record.id !== id) throw problem('stale')
-      const next = await port.call<IncomingShare>('update', {
-        manifest: update(structuredClone(record)),
-        release,
-      })
+      const next = await port.call<IncomingShare>(
+        removeFile === undefined ? 'update' : 'remove_file',
+        {
+          manifest: update(structuredClone(record)),
+          release,
+          ...(removeFile === undefined ? {} : { file: removeFile }),
+        },
+      )
       if (generation !== epoch) throw problem('stale')
       selected.value = next
     })
@@ -778,17 +784,46 @@ export function createIncomingShareStore(
     async thumbnail(fileId: string): Promise<Blob> {
       const record = selected.peek()
       const generation = epoch
-      const file = record?.files.find(
-        (candidate) => candidate.id === fileId && candidate.thumbnail,
-      )
+      const file = record?.files.find((candidate) => candidate.id === fileId)
       if (
         record === null ||
         file === undefined ||
-        !['image/png', 'image/jpeg', 'image/webp'].includes(file.mime) ||
+        !file.mime.startsWith('image/') ||
         file.bytes <= 0 ||
-        file.bytes > 2 * 1024 * 1024
+        (file.thumbnail && file.bytes > 2 * 1024 * 1024)
       )
         throw new Error('thumbnail unavailable')
+      if (!file.thumbnail) {
+        // Ten photo views can mount together. Admit one decode at a time,
+        // leaving the native transfer pool available for a concurrent send.
+        const task = thumbnailWork.then(async () => {
+          if (
+            generation !== epoch ||
+            selected.peek()?.id !== record.id ||
+            selected.peek()?.owner !== record.owner
+          )
+            throw problem('stale')
+          return port.call<{ bytes: string }>('photo_thumbnail', {
+            id: record.id,
+            owner: record.owner,
+            file: fileId,
+          })
+        })
+        thumbnailWork = task.then(
+          () => {},
+          () => {},
+        )
+        const result = await task
+        if (generation !== epoch || selected.peek()?.id !== record.id)
+          throw problem('stale')
+        if (typeof result.bytes !== 'string' || result.bytes.length > 2_796_204)
+          throw problem('invalid')
+        const bytes = Uint8Array.from(atob(result.bytes), (character) =>
+          character.charCodeAt(0),
+        )
+        if (bytes.length > 2 * 1024 * 1024) throw problem('invalid')
+        return new Blob([bytes], { type: 'image/jpeg' })
+      }
       const data = new Uint8Array(file.bytes)
       for (let offset = 0; offset < file.bytes; offset += 64 * 1024) {
         const result = await port.call<{ bytes: string }>('read', {
@@ -859,6 +894,11 @@ export function createIncomingShareStore(
                 image_upload_id: undefined,
               })),
       }))
+    },
+    async removeFile(file: string) {
+      if (busy.peek()) return
+      await flushEdits()
+      await change((record) => record, false, file)
     },
     async removePreview(url: string, imageOnly = false) {
       await flushEdits()

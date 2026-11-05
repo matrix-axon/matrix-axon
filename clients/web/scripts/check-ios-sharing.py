@@ -60,7 +60,7 @@ assert set((args.app / "PlugIns").glob("*.appex")) == set(shares + probes), "Une
 share_info = plistlib.loads((shares[0] / "Info.plist").read_bytes())
 assert share_info["CFBundleIdentifier"] == "org.matrixaxon.axon.Share"
 activation = json.loads(pathlib.Path(__file__).with_name("ios-share-activation.json").read_text())
-assert share_info["NSExtension"]["NSExtensionAttributes"]["NSExtensionActivationRule"] == activation, "Share activation differs from the OS-tested text/URL rule"
+assert share_info["NSExtension"]["NSExtensionAttributes"]["NSExtensionActivationRule"] == activation, "Share activation differs from the OS-tested text/URL/photo rule"
 subprocess.run(["codesign", "--verify", "--deep", "--strict", str(args.app)], check=True, capture_output=True)
 for probe in probes + shares:
     extension, extension_keychain = inspect(probe)

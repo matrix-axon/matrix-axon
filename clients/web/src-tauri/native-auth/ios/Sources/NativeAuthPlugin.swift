@@ -161,7 +161,7 @@ class NativeAuthPlugin: Plugin {
       invoke.reject("Incoming share: preview busy", code: (error as? ShareFailure)?.rawValue ?? "invalid")
       return
     }
-    let transfer = ["upload", "retain", "cleanup"].contains(args.action)
+    let transfer = ["upload", "retain", "cleanup", "photo_thumbnail"].contains(args.action)
     if transfer && shareTransferSlots.wait(timeout: .now()) != .success {
       invoke.reject("Incoming share: transfers busy", code: "transferBusy")
       return
@@ -208,6 +208,15 @@ class NativeAuthPlugin: Plugin {
         case "update":
           guard let manifest = args.manifest else { throw ShareFailure.invalid }
           result = try self.shareObject(store.update(manifest, release: args.release ?? false))
+        case "remove_file":
+          guard let manifest = args.manifest, let file = args.file else { throw ShareFailure.invalid }
+          result = try self.shareObject(store.removeFile(manifest, file: file))
+        case "photo_thumbnail":
+          let data = try store.withVerifiedFile(args.id ?? "", file: args.file ?? "", owner: args.owner ?? "") { url, file in
+            guard !file.thumbnail, file.mime.hasPrefix("image/") else { throw ShareFailure.invalid }
+            return try PhotoShare.thumbnail(url)
+          }
+          result = ["bytes": data.base64EncodedString()]
         case "discard", "ack":
           try store.discard(args.id ?? "", owner: args.owner, completed: args.action == "ack")
         case "read":

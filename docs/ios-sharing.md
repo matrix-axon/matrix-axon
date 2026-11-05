@@ -1,6 +1,6 @@
-# Share text and links to Axon on iOS
+# Share text, links, and photos to Axon on iOS
 
-In Safari or another text/link app, choose **Share → Axon**.
+In Photos, Safari, or another supported source app, choose **Share → Axon**.
 If you have multiple active Matrix accounts, choose a sending account; a sole active account is selected automatically and its picker is hidden.
 Use **Find room** to filter its destinations if needed, choose a room, review or edit the message, then explicitly choose **Send**.
 Account and room choices open separate native list screens.
@@ -15,7 +15,24 @@ Always review the displayed destination before choosing **Send**.
 The room screen displays at most 100 matches; searching covers every loaded destination.
 Axon does not send to the room currently open in the containing app.
 The native extension works independently of the app's WebView; open Axon once and sign in before using it.
-Text and web URLs are supported in this stage; photos, files, and mixed batches remain stage 7 of [the sharing plan](mobile-incoming-sharing.md).
+Text, web URLs, and up to ten photos are supported.
+Video and general-file intake remain outstanding work in stage 7 of [the sharing plan](mobile-incoming-sharing.md).
+Photos appear in provider order with bounded display thumbnails, filenames, and saved delivery states.
+Before sending, edit the first photo's optional caption or remove individual photos.
+The first photo carries that caption and any included link cards; subsequent photos send without repeating them.
+Preview thumbnails belonging to links never become separate photo messages.
+After any photo has been sent or its delivery becomes uncertain, the destination, caption, cards, and selection are fixed.
+Use Pending shares to explicitly prepare failed items for retry or consent to resending an uncertain item.
+Confirmed photos are skipped when continuing a batch.
+Cancellation after partial delivery retains the remaining originals and confirmed event IDs for recovery.
+Original photo bytes, including HEIC, are retained without conversion; recipient support for the original format varies.
+Axon derives only display thumbnails (at most 480 pixels on either edge) and never loads a full photo batch into memory.
+ImageIO checks the copied bytes' format, dimensions, and a bounded thumbnail decode rather than trusting provider MIME declarations or filename extensions.
+Sources above 200 million pixels or 65,535 pixels on either edge are refused before decoding.
+A photo may be up to 100 MiB, and all staged content in one share, including text and link thumbnails, must fit within 100 MiB.
+The server may impose a lower upload limit; a rejected upload retains the photo for explicit recovery.
+Provider import has a two-minute batch deadline and at most one minute per photo, including copying while provider access is valid.
+An unsupported, unreadable, oversized, or interrupted import blocks the entire share from sending as a partial selection; re-share the intended selection from the source.
 
 The extension imports public URL/text representations without opening the linked website.
 Text import prefers a bounded file representation and can fall back to Apple's public string and item readers when a source cannot supply a usable text file.
@@ -73,7 +90,7 @@ If closing fails, lease renewal and editing remain available for retry; transien
 Cancellation reconciles the latest saved delivery state under the shared lock; an uncertain dispatch is retained without ownership for explicit recovery.
 A message already dispatched may have been delivered; its saved outcome remains in Pending shares.
 Cancel after confirmed success acknowledges and removes that completed record, as Done does; unknown delivery outcomes remain recoverable.
-Confirmed success records the Matrix event ID.
+Confirmed success records the Matrix event ID for the message or each delivered photo.
 An interrupted request or missing success response is **outcome unknown**, never automatically resent.
 Inspect the destination before explicitly consenting to a possible duplicate in recovery.
 
@@ -81,7 +98,7 @@ The extension uses the app's eligible persisted access credential and never rota
 Expired, inaccessible, or session-only credentials require opening Axon to refresh/sign in; an imported draft remains in Pending shares.
 Before first launch, or while signed out, new staging is refused rather than saved under an invalid identity.
 Authenticated Axon requests require HTTPS and retain default App Transport Security, certificate validation, bounded responses, and no redirects.
-Room-list responses have an 8 MiB ceiling; thumbnail responses retain their separate 2 MiB ceiling.
+Room-list responses have an 8 MiB ceiling; thumbnail responses retain their separate 2 MiB ceiling, which does not limit original shared photos.
 An oversized response is reported with its limit and observed byte count, separately from connectivity errors.
 Device preview acquisition admits one lookup per process with a shared 25-second page/image deadline and cancellable DNS waits of at most four seconds.
 Every origin, redirect, and selected-image host must supply a validated public IPv4 A record.
@@ -145,11 +162,11 @@ Optional `IOS_MANUAL_APPSTORE_PROFILE` and `IOS_MANUAL_DEVELOPMENT_PROFILE` repo
 The Share Extension always uses `IOS_SHARE_APPSTORE_PROFILE` and `IOS_SHARE_DEVELOPMENT_PROFILE`.
 The Apple Store workflow also requires `IOS_SHARE_DEVELOPMENT_PROFILE` and `IOS_SHARE_APPSTORE_PROFILE` repository secrets for that extension ID; the credential check fails early when either is absent.
 It also checks each Share profile against `clients/web/src-tauri/Entitlements.share.ios.plist`, the file the generator writes the extension's entitlements from, so a profile made before the App Group or shared Keychain was enabled fails there and not after the archive.
-The exported-artifact checker verifies signatures, capabilities against embedded profiles, versions, default ATS, and text/web-URL-only activation rules.
-Activation uses Apple's version 2 dictionary with strict text and single-web-URL matching.
+The exported-artifact checker verifies signatures, capabilities against embedded profiles, versions, default ATS, and text/web-URL/photo activation rules.
+Activation uses Apple's version 2 dictionary with strict text, single-web-URL, and up-to-ten-image matching.
 The policy in `clients/web/scripts/ios-share-activation.json` is shared by generation, artifact checks, and simulator share-sheet tests.
-UIKit can filter out a URL provider that also registers a full PNG representation; this is a media representation, not thumbnail metadata.
-Standalone images and files remain outside this stage.
+URL/PNG alternatives are eligible alongside standalone images; intake still treats a valid web URL and its image alternative as one link.
+Standalone videos and general files remain outside this increment.
 When the OS offers Axon for a mixed batch, intake rejects unsupported attachments and prevents sending a partial import.
 
 ```sh
@@ -164,7 +181,8 @@ scripts/package-ios.sh --export-method debugging --install --device <device-iden
 
 The simulator lane compiles the actual extension UI with extension-safe APIs and runs the shared native XCTest suite.
 It also installs a disposable source app and the real extension controller under unique test identities, without shared credentials or App Group access.
-UI tests open the system share sheet for text, URLs, sender-decorated links, standalone images, and URL/PNG alternatives, then check destination availability and cancellation from the real composer.
+UI tests open the system share sheet for text, URLs, sender-decorated links, single/multiple images, and URL/PNG alternatives, then check destination availability and cancellation from the real composer.
+Separate negative cases verify that video and PDF providers do not advertise support.
 The simulator lane also exercises the production composer against a private staging root and stubbed HTTP.
 It covers a stalled request, repeated cancellations, and loss of Send authority after another window discards the draft.
 Native contract tests consume the existing server fixtures checked against OpenAPI; sender tests inspect durable intent before dispatch, confirmed event IDs, stale destinations, rejected authentication, explicit size rejection, missing thumbnail copies, response loss, and refusal to replay unknown operations.
@@ -321,3 +339,34 @@ The opt-in NYT fetch was run separately on macOS and iOS; deterministic certific
 The web suite passed 2,938 tests with two skipped, and all eight recovery cases passed in Chromium and the iPhone WebKit profile.
 API drift, lint/formatting, and the production build passed.
 Clean development build 818.12 passed signing, provisioning, activation, and exported-artifact checks and is available for remote phone installation.
+
+## Photo-sharing acceptance
+
+The photo increment implements the Photos path of issue [819](https://github.com/matrix-axon/matrix-axon/issues/819); it does not complete that issue's video, general-file, or mixed-file acceptance.
+Signed-device photo acceptance has not yet been recorded for this increment.
+Use manual interaction on the signed iPhone and iPad; keep XCTest UI automation on Simulator because earlier physical XCTest automation crashed the iPad automation service.
+
+1. From Photos, share one JPEG/PNG, one HEIC, and an ordered multiple-photo selection with Axon cold, warm, and suspended.
+   Review thumbnails and destination, remove a photo, edit the first caption, and explicitly send only to Axon Testing.
+   Verify recipient byte format, order, and first-caption/card semantics, including an encrypted room.
+2. Share a cloud-backed photo, a photo above the preview-thumbnail ceiling, and a selection exceeding ten photos or 100 MiB.
+   Exercise low storage, unreadable content, cancellation during import, and termination during import; no incomplete selection may send.
+3. Interrupt after the first confirmed photo, during a later upload, and after message acceptance but before its response.
+   Verify saved per-item states and event IDs in Pending shares, explicit duplicate-risk consent, and no repeated confirmed first caption or card.
+4. Check photo removal and recovery on iPad in split view, large Dynamic Type, VoiceOver, and with the keyboard visible.
+   Verify sign-out/account removal fences pending work and discard/expiry cleans protected originals.
+
+## Photo verification recorded on 2026-11-05
+
+Local verification on the Intel Mac with Xcode 26.6 passed the 119-test macOS native suite (one skipped), 155 shared iOS Simulator tests (one skipped), 12 composer lifecycle tests, and a focused interrupted-photo-import test.
+The simulator's two system share-sheet tests passed, covering text/links, single/multiple images, URL/PNG alternatives, and exclusion of PDF/video providers.
+The native package also compiled for arm64 iOS 15 with extension-safe APIs.
+The current web client passed lint, OpenAPI/preview-contract checks, the production build, and 2,981 unit tests (two skipped).
+Recovery passed 22 browser checks across Chromium and Firefox; the broader Chromium suite passed 257 tests with 19 skips.
+Browser checks used separate output directories and mock-server ports while the signed app was being built, retaining the production build mode and the repository's browser projects.
+
+Playwright WebKit build 2359 timed out before opening a page, both through its launcher and when launching the engine executable directly.
+Desktop WebKit and iPhone WebKit recovery checks remain unverified on this host; no production browser workaround was added.
+The signed debugging export passed the artifact checker for shared capabilities, profiles, default ATS, matching app/extension versions, production extension embedding, and photo activation.
+The final debugging build was installed on the paired iPhone and iPad, both running iOS 27.0.1; installation alone does not establish Photos.app delivery acceptance.
+This records automated verification and packaging, not signed Photos.app send acceptance; the manual checklist above remains outstanding.

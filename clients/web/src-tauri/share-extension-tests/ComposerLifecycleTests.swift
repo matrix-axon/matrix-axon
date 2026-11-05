@@ -43,6 +43,36 @@ private final class ComposerRoomsProtocol: URLProtocol {
 }
 
 final class ComposerLifecycleTests: XCTestCase {
+  func testPhotoOnlyComposerAllowsEmptyCaptionRemovalAndDraftRecovery() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 24)).image { context in
+      UIColor.systemBlue.setFill()
+      context.fill(CGRect(x: 0, y: 0, width: 32, height: 24))
+    }
+    let item = NSExtensionItem()
+    item.attachments = [NSItemProvider(object: image), NSItemProvider(object: image)]
+    let model = fixture.composer()
+    load(model) { model.start([item]) }
+    XCTAssertEqual(model.record?.files.filter { !$0.thumbnail }.count, 2)
+    XCTAssertEqual(model.images.count, 2)
+    XCTAssertEqual(model.text, "")
+    XCTAssertNil(model.validation)
+    model.chooseRoom("!first:example.org")
+    XCTAssertTrue(model.canSend)
+    let first = try XCTUnwrap(model.record?.files.first?.id)
+    load(model) { model.removePhoto(first) }
+    XCTAssertEqual(model.record?.files.count, 1)
+    XCTAssertEqual(model.images.count, 1)
+    model.text = "Keep this first-photo caption"
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
+    let saved = try XCTUnwrap(fixture.store.list().first)
+    XCTAssertEqual(saved.files.count, 1)
+    XCTAssertEqual(saved.text, "Keep this first-photo caption")
+    XCTAssertEqual(saved.files[0].operation?.state, .ready)
+    XCTAssertNil(saved.owner)
+  }
+
   func testFailedFinishKeepsHeartbeatAndAllowsRetry() throws {
     let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
     let model = fixture.composer(heartbeatInterval: 0.05)
@@ -88,7 +118,9 @@ final class ComposerLifecycleTests: XCTestCase {
     let gate = DispatchSemaphore(value: 0)
     let saved = expectation(description: "edit persisted after blocking work")
     let edited = "Edited while an action was busy"
-    let subscription = model.$record.filter { $0?.text == edited }.prefix(1).sink { _ in saved.fulfill() }
+    let subscription = model.$record.filter { $0?.text == edited }.prefix(1).sink { _ in
+      saved.fulfill()
+    }
     model.run {
       guard gate.wait(timeout: .now() + 3) == .success else { throw ShareFailure.expired }
       return ""
@@ -199,7 +231,7 @@ final class ComposerLifecycleTests: XCTestCase {
       load(first) { first.start([fixture.item]) }
       if multiple { first.chooseAccount(fixture.first) }
       first.chooseRoom("!first:example.org")
-      load(first) { first.reloadDestinations() } // Flush and verify the persisted selection.
+      load(first) { first.reloadDestinations() }  // Flush and verify the persisted selection.
       first.cancel()
       wait(for: [fixture.closed], timeout: 3)
       let closed = expectation(description: "second composer closed")
@@ -337,9 +369,13 @@ private final class ComposerFixture {
     try FileManager.default.removeItem(at: lock)
     try FileManager.default.createDirectory(at: lock, withIntermediateDirectories: false)
   }
-  func restoreStorage() throws { try FileManager.default.removeItem(at: root.appendingPathComponent(".lock")) }
-  func composer(transport: ShareHTTP? = nil, heartbeatInterval: TimeInterval = 60,
-                close: @escaping () -> Void = {}) -> ShareComposer {
+  func restoreStorage() throws {
+    try FileManager.default.removeItem(at: root.appendingPathComponent(".lock"))
+  }
+  func composer(
+    transport: ShareHTTP? = nil, heartbeatInterval: TimeInterval = 60,
+    close: @escaping () -> Void = {}
+  ) -> ShareComposer {
     let store = store
     let session = session
     let closed = closed

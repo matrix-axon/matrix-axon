@@ -434,3 +434,93 @@ test('HTTP native sharing explains the restriction and retains the draft', async
   ).toHaveValue(record.text)
   expect(sends).toEqual([])
 })
+
+for (const partial of [false, true]) {
+  test(`photo recovery ${partial ? 'protects a confirmed caption and uncertain outcomes' : 'previews and removes photos in order'}`, async ({
+    page,
+  }) => {
+    await page.addInitScript(
+      ({ record, partial }) => {
+        if (localStorage.getItem('fixture.photoSeeded') === 'true') return
+        localStorage.setItem('fixture.photoSeeded', 'true')
+        localStorage.setItem(
+          'fixture.incoming',
+          JSON.stringify([
+            {
+              ...record,
+              text: 'Photo caption',
+              previews: [],
+              operation: { id: 'batch', state: 'ready' },
+              files: ['first.heic', 'second.png'].map((name, index) => ({
+                id: `photo-${index}`,
+                name,
+                mime: index === 0 ? 'image/heic' : 'image/png',
+                bytes: 3 * 1024 * 1024,
+                digest: 'fixture',
+                thumbnail: false,
+                operation: {
+                  id: `operation-${index}`,
+                  state: partial ? (index === 0 ? 'sent' : 'unknown') : 'ready',
+                  ...(partial && index === 0 ? { eventId: '$confirmed' } : {}),
+                },
+              })),
+            },
+          ]),
+        )
+      },
+      { record, partial },
+    )
+    await page.goto('/e2e/incoming-share.html')
+    await page
+      .getByRole('button', { name: 'Review share', exact: true })
+      .click()
+    const photos = page.getByRole('group', { name: 'Photos in sending order' })
+    await expect(photos.getByRole('img', { name: 'Shared photo' })).toHaveCount(
+      2,
+    )
+    await expect(photos.getByRole('img').first()).toBeVisible()
+    expect(await photos.getByRole('button').allTextContents()).toEqual([
+      'Remove photo: first.heic',
+      'Remove photo: second.png',
+    ])
+    const caption = page.getByRole('textbox', {
+      name: 'Message or first attachment caption',
+    })
+    if (partial) {
+      await expect(caption).toBeDisabled()
+      for (const button of await photos.getByRole('button').all())
+        await expect(button).toBeDisabled()
+      const retry = page.getByRole('button', {
+        name: 'Allow explicit resend',
+        exact: true,
+      })
+      await expect(retry).toBeDisabled()
+      await page.getByRole('checkbox').check()
+      await retry.click()
+      await expect(
+        page.getByRole('list', { name: 'Delivery outcomes' }),
+      ).toContainText('$confirmed')
+      await expect(
+        page.getByRole('list', { name: 'Delivery outcomes' }),
+      ).toContainText('second.png: ready')
+    } else {
+      await photos
+        .getByRole('button', { name: 'Remove photo: first.heic', exact: true })
+        .click()
+      await expect(photos.getByRole('button')).toHaveCount(1)
+      await expect(caption).toHaveValue('Photo caption')
+      await page
+        .getByRole('button', { name: 'Keep draft', exact: true })
+        .click()
+      await page.goto('/e2e/incoming-share.html')
+      await page
+        .getByRole('button', { name: 'Review share', exact: true })
+        .click()
+      await expect(
+        page
+          .getByRole('group', { name: 'Photos in sending order' })
+          .getByRole('button'),
+      ).toHaveText('Remove photo: second.png')
+    }
+  })
+}

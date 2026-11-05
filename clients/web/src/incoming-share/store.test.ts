@@ -35,7 +35,7 @@ function fixture(
         record.owner = 'owner'
         return structuredClone(record) as T
       }
-      if (action === 'update') {
+      if (action === 'update' || action === 'remove_file') {
         const next = args?.manifest as IncomingShare
         if (
           next.session !== record.session ||
@@ -43,6 +43,8 @@ function fixture(
         )
           throw new Error('stale')
         record = { ...structuredClone(next), revision: next.revision + 1 }
+        if (action === 'remove_file')
+          record.files = record.files.filter((file) => file.id !== args?.file)
         return structuredClone(record) as T
       }
       if (action === 'upload' && uploadFailure) throw { code: 'missingFile' }
@@ -903,5 +905,70 @@ describe('durable incoming-share recovery', () => {
     resolve([f.initial])
     await reading
     expect(store.pending.value).toEqual([])
+  })
+})
+
+describe('photo recovery', () => {
+  const photo = {
+    id: 'photo',
+    name: 'photo.heic',
+    mime: 'image/heic',
+    bytes: 90 * 1024 * 1024,
+    digest: 'fixture',
+    thumbnail: false,
+    operation: { id: 'photo-op', state: 'ready' as const },
+  }
+  it('requests a bounded native thumbnail instead of reading the full original', async () => {
+    const f = fixture()
+    f.seed({ files: [photo] })
+    const call = f.port.call.bind(f.port)
+    f.port.call = async <T>(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> =>
+      action === 'photo_thumbnail'
+        ? ({ bytes: btoa('bounded JPEG fixture') } as T)
+        : call<T>(action, args)
+    await f.store.open('share')
+    const image = await f.store.thumbnail('photo')
+    expect(image.type).toBe('image/jpeg')
+    expect(image.size).toBe(20)
+    expect(f.calls.filter(({ action }) => action === 'read')).toHaveLength(0)
+    f.store.dispose()
+  })
+  it('serializes a mounted batch of photo previews', async () => {
+    const f = fixture()
+    f.seed({ files: [photo, { ...photo, id: 'second' }] })
+    const call = f.port.call.bind(f.port)
+    let active = 0
+    let maximum = 0
+    f.port.call = async <T>(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => {
+      if (action !== 'photo_thumbnail') return call<T>(action, args)
+      active += 1
+      maximum = Math.max(maximum, active)
+      await Promise.resolve()
+      active -= 1
+      return { bytes: btoa('bounded JPEG fixture') } as T
+    }
+    await f.store.open('share')
+    await Promise.all([f.store.thumbnail('photo'), f.store.thumbnail('second')])
+    expect(maximum).toBe(1)
+    f.store.dispose()
+  })
+  it('flushes the caption before atomically removing a photo', async () => {
+    const f = fixture()
+    f.seed({ files: [photo] })
+    await f.store.open('share')
+    await f.store.edit('Keep this caption')
+    await f.store.removeFile('photo')
+    expect(f.record().text).toBe('Keep this caption')
+    expect(f.record().files).toEqual([])
+    expect(
+      f.calls.filter(({ action }) => action === 'remove_file'),
+    ).toHaveLength(1)
+    f.store.dispose()
   })
 })
