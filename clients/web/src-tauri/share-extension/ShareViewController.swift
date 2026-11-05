@@ -51,6 +51,7 @@ final class ShareComposer: ObservableObject {
   // Only accessed on queue.
   private var current: ShareManifest?
   private var heartbeat: Timer?
+  private let heartbeatInterval: TimeInterval
   private var editSave: DispatchWorkItem?
   private let close: () -> Void
   private var closing = false
@@ -72,10 +73,12 @@ final class ShareComposer: ObservableObject {
 
   init(
     transport: ShareHTTP = ShareHTTP(), prepare: @escaping () throws -> Session = Session.live,
+    heartbeatInterval: TimeInterval = 60,
     close: @escaping () -> Void
   ) {
     self.transport = transport
     self.prepare = prepare
+    self.heartbeatInterval = heartbeatInterval
     self.close = close
   }
   deinit {
@@ -154,7 +157,7 @@ final class ShareComposer: ObservableObject {
       DispatchQueue.main.async { self.text = importedText }
       return try self.loadDestinations(text: importedText)
     }
-    heartbeat = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+    heartbeat = Timer.scheduledTimer(withTimeInterval: heartbeatInterval, repeats: true) { [weak self] _ in
       guard let self, !self.busy else { return }
       self.renew()
     }
@@ -188,16 +191,19 @@ final class ShareComposer: ObservableObject {
       } catch {
         let fenced = self.refreshAfterFailure()
         let record = self.current
+        Self.log.error("share_heartbeat_failed fenced=\(fenced) category=\((error as? ShareFailure)?.rawValue ?? "storage", privacy: .public)")
         DispatchQueue.main.async {
           guard !self.closing else { return }
           self.record = record
-          if fenced { self.heartbeat?.invalidate() }
-          self.status = Self.explain(fenced ? ShareFailure.stale : error)
+          if fenced {
+            self.heartbeat?.invalidate()
+            self.status = Self.explain(ShareFailure.stale)
+          }
         }
       }
     }
   }
-  private func run(blocking: Bool = true, _ action: @escaping () throws -> String) {
+  func run(blocking: Bool = true, _ action: @escaping () throws -> String) {
     guard !closing else { return }
     if blocking { busy = true }
     queue.async {
@@ -253,6 +259,9 @@ final class ShareComposer: ObservableObject {
         // autosave must preserve actionable errors and delivery outcomes.
         if blocking || !message.isEmpty { self.status = message }
         if blocking { self.busy = false }
+        // A debounce can fire while a blocking action disables saving. Retry
+        // the current editor text after it settles; never revive a fenced draft.
+        if blocking && self.editable && self.text != record?.text { self.edited() }
         if !message.isEmpty { UIAccessibility.post(notification: .announcement, argument: message) }
       }
     }
@@ -533,8 +542,6 @@ final class ShareComposer: ObservableObject {
   }
   func finish(discard: Bool) {
     guard !busy else { return }
-    heartbeat?.invalidate()
-    editSave?.cancel()
     let text = text
     let account = account
     let room = room
@@ -614,7 +621,7 @@ private struct ShareComposeView: View {
   @State private var cardDescription = ""
   var body: some View {
     let links = Array(Set(TextShare.links(model.text))).sorted()
-    let matchingLinks = links.filter(TextShare.previewURL).filter {
+    let matchingLinks = links.filter(TextShare.devicePreviewURL).filter {
       links.count <= 8 || previewSearch.isEmpty
         || $0.localizedCaseInsensitiveContains(previewSearch)
     }

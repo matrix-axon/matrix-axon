@@ -297,6 +297,7 @@ Viewer download errors remaining visible on the card after close have component-
 The existing `media` recording still demonstrates image galleries; a recorded audio/text/PDF/video attachment-card scene remains outstanding.
 
 The native iOS text/link Share Extension adds an account/room picker with validated last-destination restore, editable message/card preview, supplied metadata followed by explicit restricted HTTPS preview acquisition, separately confirmed homeserver lookup, Send, and durable draft/unknown-outcome recovery.
+Settings → Sharing keeps a recovery link available when the inbox is empty.
 Recovery now also has a conditional toolbar entry with a count or read-failure badge and confirmed bulk clearing that fences idle composers and preserves in-flight sends and newly arriving shares.
 The native composer omits routine introductory instructions, places an accessible reload icon beside Destination, and shows image removal only for previews that contain an image.
 Bulk preview removal appears only for multiple included previews.

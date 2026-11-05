@@ -4,6 +4,14 @@ import XCTest
 @testable import AxonIncomingShare
 
 final class RestrictedPreviewTests: XCTestCase {
+  func testSharedStaticURLFixturesMatchRecoveryUI() throws {
+    struct Case: Decodable { let url: String; let eligible: Bool }
+    let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .appendingPathComponent("../../../../src/incoming-share/fixtures/device-preview-urls.json")
+    for entry in try JSONDecoder().decode([Case].self, from: Data(contentsOf: path)) {
+      XCTAssertEqual(TextShare.devicePreviewURL(entry.url), entry.eligible, entry.url)
+    }
+  }
   func testAddressScopeBoundaries() throws {
     for text in [
       "0.1.2.3", "10.0.0.1", "100.64.0.1", "100.127.255.255", "127.1.2.3", "169.254.169.254",

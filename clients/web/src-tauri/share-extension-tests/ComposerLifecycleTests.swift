@@ -43,6 +43,64 @@ private final class ComposerRoomsProtocol: URLProtocol {
 }
 
 final class ComposerLifecycleTests: XCTestCase {
+  func testFailedFinishKeepsHeartbeatAndAllowsRetry() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer(heartbeatInterval: 0.05)
+    load(model) { model.start([fixture.item]) }
+    try fixture.blockStorage()
+    load(model) { model.finish(discard: false) }
+    XCTAssertTrue(model.editable)
+    let revision = try XCTUnwrap(model.record?.revision)
+    try fixture.restoreStorage()
+    let renewed = expectation(description: "heartbeat survives failed finish")
+    let subscription = model.$record.filter { ($0?.revision ?? 0) > revision }.prefix(1).sink { _ in
+      renewed.fulfill()
+    }
+    wait(for: [renewed], timeout: 1)
+    subscription.cancel()
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
+    XCTAssertNil(try fixture.store.list().first?.owner)
+  }
+
+  func testTransientHeartbeatFailurePreservesDeliveryStatus() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer(heartbeatInterval: 0.05)
+    load(model) { model.start([fixture.item]) }
+    let status = "Delivery outcome unknown. Check the destination before resending."
+    model.status = status
+    try fixture.blockStorage()
+    let checked = expectation(description: "heartbeat attempted while storage unavailable")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+      XCTAssertEqual(model.status, status)
+      checked.fulfill()
+    }
+    wait(for: [checked], timeout: 1)
+    try fixture.restoreStorage()
+    model.cancel()
+    wait(for: [fixture.closed], timeout: 3)
+  }
+
+  func testEditDebounceDuringBlockingWorkIsRetriedWhenItSettles() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer()
+    load(model) { model.start([fixture.item]) }
+    let gate = DispatchSemaphore(value: 0)
+    let saved = expectation(description: "edit persisted after blocking work")
+    let edited = "Edited while an action was busy"
+    let subscription = model.$record.filter { $0?.text == edited }.prefix(1).sink { _ in saved.fulfill() }
+    model.run {
+      guard gate.wait(timeout: .now() + 3) == .success else { throw ShareFailure.expired }
+      return ""
+    }
+    model.text = edited
+    model.edited()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { gate.signal() }
+    wait(for: [saved], timeout: 2)
+    subscription.cancel()
+    model.cancel()
+    wait(for: [fixture.closed], timeout: 3)
+  }
   func testCancelInterruptsBlockedRoomRequestAndRemovesItsDraft() throws {
     try checkCancellation(stalled: true)
   }
@@ -274,13 +332,21 @@ private final class ComposerFixture {
     config.protocolClasses = [ComposerRoomsProtocol.self]
     return ShareHTTP(configuration: config)
   }
-  func composer(transport: ShareHTTP? = nil, close: @escaping () -> Void = {}) -> ShareComposer {
+  func blockStorage() throws {
+    let lock = root.appendingPathComponent(".lock")
+    try FileManager.default.removeItem(at: lock)
+    try FileManager.default.createDirectory(at: lock, withIntermediateDirectories: false)
+  }
+  func restoreStorage() throws { try FileManager.default.removeItem(at: root.appendingPathComponent(".lock")) }
+  func composer(transport: ShareHTTP? = nil, heartbeatInterval: TimeInterval = 60,
+                close: @escaping () -> Void = {}) -> ShareComposer {
     let store = store
     let session = session
     let closed = closed
     return ShareComposer(
       transport: transport ?? http,
       prepare: { .init(store: store, credential: { (session, "synthetic-token") }) },
+      heartbeatInterval: heartbeatInterval,
       close: {
         closed.fulfill()
         close()

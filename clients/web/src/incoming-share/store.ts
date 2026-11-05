@@ -28,13 +28,18 @@ export function createIncomingShareStore(
   const notice = signal<string | null>(null)
   const unavailable = signal(false)
   const sessionError = signal<string | null>(null)
-  let deviceRequest: { id: string; done: Promise<void> } | null = null
+  type DeviceRequest = {
+    id: string
+    cancelled: boolean
+    started: boolean
+    done: Promise<void>
+  }
+  let deviceRequest: DeviceRequest | null = null
   let previewWork: Promise<void> | null = null
-  let previewClosing = false
   function cancelPreview() {
-    previewClosing = true
     const request = deviceRequest
-    if (request !== null)
+    if (request !== null) request.cancelled = true
+    if (request?.started)
       void port
         .call('cancel_preview', { requestId: request.id })
         .catch(() => {})
@@ -98,7 +103,7 @@ export function createIncomingShareStore(
       ? cause.code
       : null
   }
-  function describeFailure(cause: unknown, clearing = false) {
+  function failureMessage(cause: unknown, clearing = false): string {
     const code = failureCode(cause)
     const messages: Record<string, string> = {
       destination: 'Choose a sending account and joined room before sending.',
@@ -141,14 +146,14 @@ export function createIncomingShareStore(
         'The request timed out. The draft is retained; inspect the saved delivery outcomes before retrying.',
     }
     if (clearing && code === 'busy') {
-      error.value =
-        'Saved shares are temporarily busy. Wait a moment and retry clearing.'
-      return
+      return 'Saved shares are temporarily busy. Wait a moment and retry clearing.'
     }
-    error.value =
-      typeof code === 'string' && messages[code] !== undefined
-        ? messages[code]
-        : 'Could not complete this operation. The draft is retained; refresh pending shares and retry.'
+    return typeof code === 'string' && messages[code] !== undefined
+      ? messages[code]
+      : 'Could not complete this operation. The draft is retained; refresh pending shares and retry.'
+  }
+  function describeFailure(cause: unknown, clearing = false) {
+    error.value = failureMessage(cause, clearing)
   }
   async function refresh() {
     const generation = epoch
@@ -324,8 +329,7 @@ export function createIncomingShareStore(
     if (targets.has(selected.peek()?.id ?? '')) clearEditTimers()
     let cleared = 0
     let failed = 0
-    let blocked = 0
-    let firstFailure: unknown
+    const failures = new Set<string>()
     try {
       await tail
       if (generation !== epoch) return
@@ -343,9 +347,8 @@ export function createIncomingShareStore(
         } catch (cause) {
           if (generation !== epoch) return
           failed += 1
-          if (failureCode(cause) === 'busy') blocked += 1
-          else {
-            firstFailure ??= cause
+          failures.add(failureMessage(cause, true))
+          if (!['busy', 'sending'].includes(failureCode(cause) ?? '')) {
             console.warn('Incoming share discard failed', {
               code: failureCode(cause) ?? 'unknown',
             })
@@ -357,13 +360,11 @@ export function createIncomingShareStore(
       notice.value = `Cleared ${cleared} pending ${cleared === 1 ? 'share' : 'shares'}.`
       if (failed > 0) {
         const summary = `${failed} ${failed === 1 ? 'share could' : 'shares could'} not be cleared.`
-        if (blocked === failed) describeFailure({ code: 'busy' }, true)
-        else describeFailure(firstFailure, true)
-        const busyMessage =
-          blocked > 0 && blocked < failed
-            ? ' Other saved shares are temporarily busy; wait a moment and retry clearing them.'
-            : ''
-        error.value = `${summary} ${error.peek()}${busyMessage}`
+        // Refresh may clear an older error or add its own read failure. Keep
+        // this batch's reasons independent of that shared UI signal.
+        const refreshFailure = unavailable.peek() ? error.peek() : null
+        if (refreshFailure !== null) failures.add(refreshFailure)
+        error.value = [summary, ...failures].join(' ')
       }
     } catch (cause) {
       if (generation === epoch) describeFailure(cause, true)
@@ -414,16 +415,28 @@ export function createIncomingShareStore(
   }
   function generate(url: string, homeserver = false): Promise<void> {
     if (busy.peek()) return Promise.resolve()
-    previewClosing = false
-    const task = performGenerate(url, homeserver)
-    if (homeserver) return task
+    if (homeserver) return performGenerate(url, true, null)
+    const request: DeviceRequest = {
+      id: crypto.randomUUID(),
+      cancelled: false,
+      started: false,
+      done: Promise.resolve(),
+    }
+    deviceRequest = request
+    const task = performGenerate(url, false, request)
     const done = task.finally(() => {
       if (previewWork === done) previewWork = null
+      if (deviceRequest === request) deviceRequest = null
     })
+    request.done = done
     previewWork = done
     return done
   }
-  async function performGenerate(url: string, homeserver: boolean) {
+  async function performGenerate(
+    url: string,
+    homeserver: boolean,
+    request: DeviceRequest | null,
+  ) {
     if (busy.peek()) return
     const generation = epoch
     busy.value = true
@@ -440,16 +453,17 @@ export function createIncomingShareStore(
       if (!nativePreviewLinks(record.text).includes(url))
         throw problem('devicePreview_unsupportedURL')
       if (!homeserver) {
-        const requestId = crypto.randomUUID()
+        if (request === null) throw problem('stale')
         const task = tail.then(async () => {
           if (generation !== epoch) throw problem('stale')
-          if (previewClosing) throw problem('cancelled')
+          if (request.cancelled) throw problem('cancelled')
+          request.started = true
           const result = await port.call<IncomingShare>('device_preview', {
             id: record.id,
             owner: record.owner,
             accountId: record.accountId,
             url,
-            requestId,
+            requestId: request.id,
             refresh:
               record.previews?.some((preview) => preview.matched_url === url) ??
               false,
@@ -464,12 +478,7 @@ export function createIncomingShareStore(
           }
         })
         tail = task.catch(() => {})
-        deviceRequest = { id: requestId, done: tail }
-        try {
-          await task
-        } finally {
-          if (deviceRequest?.id === requestId) deviceRequest = null
-        }
+        await task
         return
       }
       if (!record.accountId) throw problem('destination')

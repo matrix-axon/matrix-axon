@@ -82,6 +82,18 @@ final class ShareStoreTests: XCTestCase {
     XCTAssertThrowsError(try store.update(draft))
   }
 
+  func testExplicitDiscardFencesAnUploadingComposerBeforeDispatch() throws {
+    var draft = try store.claim(store.create(text: "uploading composer").id)
+    draft.operation.state = .uploading
+    draft = try store.update(draft)
+    XCTAssertGreaterThan(try XCTUnwrap(draft.leaseUntil), time)
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+    draft.operation.state = .dispatching
+    XCTAssertThrowsError(try store.update(draft))
+    XCTAssertThrowsError(try store.refreshOwned(draft.id, owner: draft.owner!))
+  }
+
   func testCancelUsesFreshDispatchStateInsteadOfDeletingAnUncertainOutcome() throws {
     let idle = try store.claim(store.create(text: "cancel during send").id)
     var dispatching = idle

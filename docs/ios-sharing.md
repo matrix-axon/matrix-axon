@@ -26,6 +26,7 @@ No private metadata archives or property formats are read.
 Compatible supplied metadata appears first without a lookup.
 **Include preview** explicitly fetches missing metadata on the device through a restricted HTTPS reader, independently of account selection.
 The website and its selected image host may receive that request; Safari and publisher-app cookies are not used.
+The preview controls hide statically ineligible hosts, including IP literals and local/reserved names; DNS and every redirect/image address still undergo native validation before any connection.
 The reader extracts Open Graph, Twitter Card, and ordinary HTML title/description fields without executing scripts.
 **Use homeserver instead** is a separate action requiring an account and a confirmation that its Matrix homeserver may log the URL, including for encrypted rooms.
 Its confirmation is anchored to the selected link's homeserver button.
@@ -53,18 +54,21 @@ Changing a URL invalidates its previous card.
 Rendering cards never performs a webpage lookup or downloads an external image URL.
 
 **Keep draft in Axon** saves local work without sending it.
-Open Axon → **Pending shares** to resume it under the [shared recovery policy](ios-sharing-foundation.md).
+Open Axon → **Pending shares** (also available in **Settings → Sharing** when the inbox is empty) to resume it under the [shared recovery policy](ios-sharing-foundation.md).
 The inbox holds at most 20 pending shares, including failed imports retained from earlier attempts.
 If it is full, send or explicitly discard existing drafts before sharing again; Axon preserves those drafts rather than dropping them to make room.
 The extension reports the full inbox separately from oversized source text.
 **Clear all** removes the confirmed set of pending shares; an individual **Discard share** removes one saved record.
 Explicit discard can remove an idle draft immediately, including one still claimed by another composer; subsequent edits and sends from that composer are fenced out.
 A share with a live dispatch remains protected until that request settles, so its delivery outcome is retained.
+Discard during a thumbnail upload also fences the old composer before message dispatch; an upload already accepted by the server may remain there until its staging expiry.
 Automatic expiry and quota cleanup still preserve actively owned shares.
 Explicit discard can remove a saved record even if its local sharing-session descriptor is missing; sending, resuming, and acknowledging delivery still require the correct session.
 Other deletion failures show their own error rather than being described as another open composer.
 Text edits are saved after 400 milliseconds of idle time, and Keep draft/Send flush current edits.
 An abrupt termination can lose edits still inside this batching window.
+A debounce that fires during a blocking action is retried when the action settles while the draft is still owned.
+If closing fails, lease renewal and editing remain available for retry; transient renewal errors preserve delivery-status messages.
 **Cancel** interrupts provider reads and HTTP requests, stops queued work and heartbeats, and discards an undispatched share without sending it.
 Cancellation reconciles the latest saved delivery state under the shared lock; an uncertain dispatch is retained without ownership for explicit recovery.
 A message already dispatched may have been delivered; its saved outcome remains in Pending shares.
@@ -121,7 +125,8 @@ Explicit signing also generates Tauri's `ExportOptions.plist` with profiles for 
 Debug exports use those development profiles; App Store exports default to `iOS Team Store Provisioning Profile: <bundle ID>` names.
 Override custom names with `AXON_IOS_APP_EXPORT_PROFILE` and `AXON_IOS_SHARE_EXPORT_PROFILE`; manual hook invocations can select the export method with `AXON_IOS_EXPORT_METHOD`.
 Manual exports require manually managed profiles for both bundles; Xcode rejects a managed containing-app profile in a manual export.
-The Apple Store workflow retains automatic signing and expects Xcode-managed profiles with the required shared capabilities.
+The Apple Store workflow selects both targets' archive and export profiles explicitly by validated UUID.
+Its four iOS profile secrets must contain manually managed profiles with the required shared capabilities; the credential check rejects Xcode-managed profiles before building.
 The Apple Store workflow also requires `IOS_SHARE_DEVELOPMENT_PROFILE` and `IOS_SHARE_APPSTORE_PROFILE` repository secrets for that extension ID; the credential check fails early when either is absent.
 The exported-artifact checker verifies signatures, capabilities against embedded profiles, versions, default ATS, and text/web-URL-only activation rules.
 Activation uses Apple's version 2 dictionary with strict text and single-web-URL matching.

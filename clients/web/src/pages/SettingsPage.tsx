@@ -108,7 +108,8 @@ export function SettingsPage() {
 }
 
 function SettingsPageContents() {
-  const { auth, settings, rooms, deviceState, platform } = useServices()
+  const { auth, settings, rooms, deviceState, platform, incomingShares } =
+    useServices()
   const [markingRead, setMarkingRead] = useState(false)
   const [protocolMessage, setProtocolMessage] = useState<string | null>(null)
   const [signOutFailed, setSignOutFailed] = useState(false)
@@ -176,6 +177,12 @@ function SettingsPageContents() {
           ))}
         </div>
       </section>
+      {incomingShares != null && (
+        <section class="panel">
+          <h2>Sharing</h2>
+          <a href="/pending-shares">Pending shares</a>
+        </section>
+      )}
       <section class="panel">
         <h2>Messages</h2>
         <MessageGestureSettings />

@@ -9,6 +9,19 @@
   @testable import AxonIncomingShare
 
   final class ShareIntakeTests: XCTestCase {
+    private final class MetadataAndURLProvider: NSItemProvider {
+      let metadata: LPLinkMetadata
+      init(metadata: LPLinkMetadata) {
+        self.metadata = metadata
+        super.init()
+        registerObject(metadata.originalURL! as NSURL, visibility: .all)
+      }
+      override func loadItem(forTypeIdentifier typeIdentifier: String,
+                             options: [AnyHashable: Any]? = nil,
+                             completionHandler: NSItemProvider.CompletionHandler? = nil) {
+        completionHandler?(metadata, nil)
+      }
+    }
     private final class StringProvider: NSItemProvider {
       var offeredFile: URL?
       override func loadFileRepresentation(
@@ -38,6 +51,30 @@
           expiresAt: nil), credential: {})
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
+    func testSuppliedPublicMetadataWinsOverAnAvailableURLReader() async throws {
+      let metadata = LPLinkMetadata()
+      metadata.originalURL = URL(string: link)
+      metadata.title = "Source title"
+      let image = NSItemProvider()
+      let data = png
+      image.registerDataRepresentation(forTypeIdentifier: UTType.png.identifier, visibility: .all) {
+        completion in
+        completion(data, nil)
+        return nil
+      }
+      metadata.imageProvider = image
+      let provider = MetadataAndURLProvider(metadata: metadata)
+      XCTAssertTrue(provider.canLoadObject(ofClass: NSURL.self))
+      let item = NSExtensionItem()
+      item.attachments = [provider]
+      let result = try await Task.detached {
+        try ShareIntake.importItems([item], store: self.store)
+      }.value
+      XCTAssertEqual(result.text, link)
+      XCTAssertEqual(result.previews?.first?.title, "Source title")
+      XCTAssertNotNil(result.previews?.first?.thumbnail)
+      XCTAssertTrue(result.importFailures.isEmpty)
+    }
     func testCancelledIntakeNeverCreatesOrClaimsADraft() throws {
       let cancellation = ShareCancellation()
       cancellation.cancel()

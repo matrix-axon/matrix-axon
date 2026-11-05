@@ -310,7 +310,7 @@ restore_list
 mkdir -p "$work/pr"
 appstore=$(make_profile appstore.mobileprovision 'IsXcodeManaged=True')
 out=$(run_real RUNNER_TEMP="$work/pr" GITHUB_ENV="$work/penv" IOS_APPSTORE_PROFILE="$appstore" PROVISIONING_PROFILES_DIRS="$profiles" -- \
-  profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --bundle-id org.example.app --install --export-path SOME_PATH)
+  profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --bundle-id org.example.app --install --export-path SOME_PATH --export-uuid SOME_UUID)
 contains "$out" "rc=0" && contains "$out" "(app-store)" && contains "$out" "installed as 11111111-2222-3333-4444-555555555555.mobileprovision" || fail "profile: a good App Store profile is accepted and installed" "$out"
 contains "$out" "warning:" && fail "profile: an Xcode-managed App Store profile gets no warning" "$out"
 
@@ -318,6 +318,13 @@ for d in pd1 pd2; do
   [ -f "$work/$d/11111111-2222-3333-4444-555555555555.mobileprovision" ] || fail "profile: it is installed in every folder Xcode might read ($d), named by UUID"
 done
 grep -q '^SOME_PATH=.*IOS_APPSTORE_PROFILE\.mobileprovision$' "$work/penv" || fail "profile: the decoded path is exported when asked" "$(cat "$work/penv" 2>/dev/null)"
+grep -q '^SOME_UUID=11111111-2222-3333-4444-555555555555$' "$work/penv" || fail "profile: validated UUID is exported for explicit signing" "$(cat "$work/penv" 2>/dev/null)"
+
+manual_store=$(make_profile manual-store.mobileprovision 'IsXcodeManaged=False')
+out=$(run_real RUNNER_TEMP="$work/manual" IOS_APPSTORE_PROFILE="$manual_store" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --manual-signing)
+contains "$out" "rc=0" || fail "manual signing: accepts the manually managed profile" "$out"
+out=$(run_real RUNNER_TEMP="$work/manual" IOS_APPSTORE_PROFILE="$appstore" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --manual-signing)
+contains "$out" "rc=1" && contains "$out" "manually managed" && contains "$out" "Replace IOS_APPSTORE_PROFILE" || fail "manual signing: rejects a managed profile before export" "$out"
 
 adhoc=$(make_profile adhoc.mobileprovision 'ProvisionedDevices=["A","B"]')
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$adhoc" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store)

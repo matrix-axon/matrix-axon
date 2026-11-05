@@ -213,19 +213,23 @@ jobs:
         run: |
           set -euo pipefail
           bundle_id=$(python3 -c 'import json; print(json.load(open("clients/web/src-tauri/tauri.conf.json"))["identifier"])')
-          scripts/ci/store-credentials.sh keychain --require "Apple Distribution"
+          scripts/ci/store-credentials.sh keychain --require "Apple Distribution" --require "Apple Development"
           scripts/ci/store-credentials.sh profile IOS_APPSTORE_PROFILE \
             --ext mobileprovision --expect app-store --bundle-id "$bundle_id" \
-            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install
+            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install --manual-signing \
+            --export-uuid AXON_IOS_APP_EXPORT_PROFILE
           # Required: the archive step looks for a development profile, and a run
-          # without one failed there. It must be the Xcode-managed one.
+          # without one failed there. Both targets use explicit manual selection.
           scripts/ci/store-credentials.sh profile IOS_DEVELOPMENT_PROFILE \
             --ext mobileprovision --expect development --bundle-id "$bundle_id" \
-            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install
+            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install --manual-signing \
+            --export-uuid AXON_IOS_APP_DEVELOPMENT_PROFILE
           scripts/ci/store-credentials.sh profile IOS_SHARE_APPSTORE_PROFILE \
-            --ext mobileprovision --expect app-store --bundle-id "$bundle_id.Share" --install
+            --ext mobileprovision --expect app-store --bundle-id "$bundle_id.Share" --install --manual-signing \
+            --export-uuid AXON_IOS_SHARE_EXPORT_PROFILE
           scripts/ci/store-credentials.sh profile IOS_SHARE_DEVELOPMENT_PROFILE \
-            --ext mobileprovision --expect development --bundle-id "$bundle_id.Share" --install
+            --ext mobileprovision --expect development --bundle-id "$bundle_id.Share" --install --manual-signing \
+            --export-uuid AXON_IOS_SHARE_DEVELOPMENT_PROFILE
           if [ "$NEED_ASC" = "yes" ]; then
             scripts/ci/store-credentials.sh asc-key
           fi

@@ -281,10 +281,72 @@ describe('durable incoming-share recovery', () => {
     expect(f.store.notice.value).toBe('Cleared 1 pending share.')
     expect(f.store.error.value).toContain('2 shares could not be cleared')
     expect(f.store.error.value).toContain('sign in or refresh your session')
-    expect(f.store.error.value).toContain(
-      'Other saved shares are temporarily busy',
-    )
+    expect(f.store.error.value).toContain('Saved shares are temporarily busy')
     expect(f.post).not.toHaveBeenCalled()
+  })
+
+  it('retains every mixed clear failure reason even when refresh clears its previous error', async () => {
+    const f = inboxFixture()
+    const original = f.port.call
+    f.port.call = vi.fn(async (action, args) => {
+      if (action === 'discard') {
+        const code = {
+          'share-0': 'busy',
+          'share-1': 'sending',
+          'share-2': 'authentication',
+        }[args?.id as string]
+        throw { code }
+      }
+      return (await original(action, args)) as never
+    })
+    await f.store.refresh()
+    f.store.unavailable.value = true
+    f.store.error.value = 'Older inbox read failure'
+    await f.store.discardAll()
+    expect(f.store.error.value).toContain('3 shares could not be cleared')
+    expect(f.store.error.value).toContain('Saved shares are temporarily busy')
+    expect(f.store.error.value).toContain('A share is still sending')
+    expect(f.store.error.value).toContain('sign in or refresh your session')
+    expect(f.store.error.value).not.toContain('null')
+    expect(f.store.error.value).not.toContain('Older inbox read failure')
+    expect(f.store.notice.value).toBe('Cleared 0 pending shares.')
+  })
+
+  it('cancels only the current device request and allows a fresh request after close', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    const original = f.port.call
+    let complete!: () => void
+    const cancelled: string[] = []
+    f.port.call = async (action, args) => {
+      if (action === 'device_preview' && complete === undefined) {
+        await new Promise<void>((resolve) => {
+          complete = resolve
+        })
+        throw { code: 'cancelled' }
+      }
+      if (action === 'cancel_preview') {
+        cancelled.push(args?.requestId as string)
+        complete()
+        return {} as never
+      }
+      return original(action, args)
+    }
+    const first = f.store.generate('https://example.org')
+    await vi.waitFor(() => expect(complete).toBeDefined())
+    const closing = f.store.close()
+    await f.store.generate('https://example.org') // Rejected while busy; cannot reset cancellation.
+    await closing
+    await first
+    expect(cancelled).toHaveLength(1)
+    await f.store.open('share')
+    await f.store.generate('https://example.org')
+    expect(f.store.selected.value?.previews?.[0]?.title).toBe('Device preview')
+    expect(f.store.error.value).toBeNull()
+    expect(
+      f.calls.filter((call) => call.action === 'device_preview')[0]?.args
+        ?.requestId,
+    ).not.toBe(cancelled[0])
   })
 
   it('clears seven idle composers without waiting for their leases or adopting their owners', async () => {

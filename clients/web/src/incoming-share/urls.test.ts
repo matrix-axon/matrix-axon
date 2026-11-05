@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { nativePreviewLinks } from './urls'
+import cases from './fixtures/device-preview-urls.json'
 
 describe('portable native preview URLs', () => {
+  it.each(cases)(
+    'matches native static eligibility for $url',
+    ({ url, eligible }) => {
+      expect(nativePreviewLinks(`Keep this link ${url}`).includes(url)).toBe(
+        eligible,
+      )
+    },
+  )
   it.each([
     'http://example.org/article',
     'https://example.org/é',

@@ -26,6 +26,7 @@ import {
 import { BUILD_INFO } from '../build-info'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { SettingsPage } from './SettingsPage'
+import { createIncomingShareStore } from '../incoming-share/store'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!ops:hs'
@@ -67,6 +68,22 @@ afterEach(() => {
 afterAll(() => server.close())
 
 describe('SettingsPage', () => {
+  it('keeps a native recovery entry in settings when the inbox is empty', () => {
+    const services = testServices()
+    services.incomingShares = createIncomingShareStore(
+      { subscribe: () => () => {}, call: async () => [] as never },
+      services.api,
+      services.timelines,
+    )
+    const { getByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(
+      getByRole('link', { name: 'Pending shares' }).getAttribute('href'),
+    ).toBe('/pending-shares')
+  })
   it('reflects and updates the theme setting', () => {
     const services = testServices()
     const { getByLabelText } = render(

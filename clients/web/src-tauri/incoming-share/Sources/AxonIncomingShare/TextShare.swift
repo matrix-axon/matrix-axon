@@ -101,6 +101,12 @@ public enum TextShare {
     else { return false }
     return true
   }
+  /// Static eligibility only; DNS and redirect/image addresses are checked
+  /// again by the restricted transport immediately before every connection.
+  public static func devicePreviewURL(_ raw: String) -> Bool {
+    guard previewURL(raw), let url = URL(string: raw) else { return false }
+    return (try? PreviewNetwork.validate(url)) != nil
+  }
   public static func previewURL(_ raw: String) -> Bool {
     validURL(raw) && URLComponents(string: raw)?.scheme == "https"
       && raw.rangeOfCharacter(from: portableURLCharacters.inverted) == nil

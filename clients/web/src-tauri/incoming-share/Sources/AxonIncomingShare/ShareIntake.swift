@@ -20,28 +20,38 @@
     private static func item(
       _ provider: NSItemProvider, type: String, cancellation: ShareCancellation
     ) throws -> NSSecureCoding {
-      // Foundation may vend an archived NSURL through untyped loadItem. Ask
-      // its public typed reader to decode it; never inspect that archive.
+      // The public coercing interface may supply LPLinkMetadata even when a
+      // typed NSURL reader is also available. Preserve that metadata first;
+      // asking for an NSSecureCoding object does not request URL contents.
+      let box = ResultBox<NSSecureCoding>()
+      provider.loadItem(forTypeIdentifier: type, options: nil) { value, _ in
+        if let value { box.finish(.success(value)) }
+        else { box.finish(.failure(ShareFailure.unavailable)) }
+      }
+      var supplied: NSSecureCoding?
+      do {
+        supplied = try box.wait(cancellation: cancellation)
+        if let supplied, !(supplied is Data) { return supplied }
+      } catch {
+        try cancellation.check()
+        guard provider.canLoadObject(ofClass: NSURL.self) else { throw error }
+      }
+      // Some providers return an NSURL archive as Data. Only Foundation's
+      // public typed reader may decode it; never inspect that archive ourselves.
       if provider.canLoadObject(ofClass: NSURL.self) {
         let typed = ResultBox<NSSecureCoding>()
         let progress = provider.loadObject(ofClass: NSURL.self) { value, _ in
-          if let url = value as? NSURL {
-            typed.finish(.success(url))
-          } else {
-            typed.finish(.failure(ShareFailure.invalid))
-          }
+          if let url = value as? NSURL { typed.finish(.success(url)) }
+          else { typed.finish(.failure(ShareFailure.invalid)) }
         }
-        do { return try typed.wait(cancellation: cancellation) } catch { progress.cancel() }
-      }
-      let box = ResultBox<NSSecureCoding>()
-      provider.loadItem(forTypeIdentifier: type, options: nil) { value, _ in
-        if let value {
-          box.finish(.success(value))
-        } else {
-          box.finish(.failure(ShareFailure.unavailable))
+        do { return try typed.wait(cancellation: cancellation) } catch {
+          progress.cancel()
+          try cancellation.check()
+          if supplied == nil { throw error }
         }
       }
-      return try box.wait(cancellation: cancellation)
+      guard let supplied else { throw ShareFailure.unavailable }
+      return supplied
     }
 
     static func bytes(

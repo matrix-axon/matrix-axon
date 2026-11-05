@@ -1,0 +1,110 @@
+[
+  {
+    "url": "https://example.org/article",
+    "eligible": true
+  },
+  {
+    "url": "https://EXAMPLE.org/article",
+    "eligible": true
+  },
+  {
+    "url": "https://example.org./article",
+    "eligible": true
+  },
+  {
+    "url": "https://xn--bcher-kva.de/article",
+    "eligible": false
+  },
+  {
+    "url": "https://example.org:8443/a%20b",
+    "eligible": true
+  },
+  {
+    "url": "http://example.org/a",
+    "eligible": false
+  },
+  {
+    "url": "https://u:p@example.org/a",
+    "eligible": false
+  },
+  {
+    "url": "https://example.org/é",
+    "eligible": false
+  },
+  {
+    "url": "https://localhost/a",
+    "eligible": false
+  },
+  {
+    "url": "https://router.local/a",
+    "eligible": false
+  },
+  {
+    "url": "https://router.local./a",
+    "eligible": false
+  },
+  {
+    "url": "https://service.corp/a",
+    "eligible": false
+  },
+  {
+    "url": "https://router.home/a",
+    "eligible": false
+  },
+  {
+    "url": "https://host.invalid/a",
+    "eligible": false
+  },
+  {
+    "url": "https://host.arpa/a",
+    "eligible": false
+  },
+  {
+    "url": "https://127.0.0.1/a",
+    "eligible": false
+  },
+  {
+    "url": "https://192.168.1.2/a",
+    "eligible": false
+  },
+  {
+    "url": "https://8.8.8.8/a",
+    "eligible": false
+  },
+  {
+    "url": "https://[::1]/a",
+    "eligible": false
+  },
+  {
+    "url": "https://[2606:4700:4700::1111]/a",
+    "eligible": false
+  },
+  {
+    "url": "https://-bad.example.org/a",
+    "eligible": false
+  },
+  {
+    "url": "https://bad-.example.org/a",
+    "eligible": false
+  },
+  {
+    "url": "https://example..org/a",
+    "eligible": false
+  },
+  {
+    "url": "https://example.org:0/a",
+    "eligible": false
+  },
+  {
+    "url": "https://example.org:65536/a",
+    "eligible": false
+  },
+  {
+    "url": "https://example.org/%XX",
+    "eligible": false
+  },
+  {
+    "url": "https://example.org/a|b",
+    "eligible": false
+  }
+]

@@ -34,6 +34,18 @@ test.beforeEach(async ({ page }) => {
       localStorage.setItem('fixture.incoming', JSON.stringify([record]))
   }, record)
 })
+test('settings retains the recovery route when the inbox is empty', async ({
+  page,
+}) => {
+  await page.addInitScript(() => localStorage.setItem('fixture.incoming', '[]'))
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('link', { name: 'Settings', exact: true }).click()
+  await page.getByRole('link', { name: 'Pending shares', exact: true }).click()
+  await expect(
+    page.getByRole('heading', { name: 'Pending shares', exact: true }),
+  ).toBeVisible()
+  await expect(page.getByText('No pending shares.')).toBeVisible()
+})
 test('clear all fences idle composers while preserving live sends and new arrivals', async ({
   page,
 }, testInfo) => {
