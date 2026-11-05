@@ -1,8 +1,11 @@
 # Share text and links to Axon on iOS
 
 In Safari or another text/link app, choose **Share → Axon**.
-Choose a sending Matrix account, use **Find room** to filter its destinations if needed, choose a room, review or edit the message, then explicitly choose **Send**.
+If you have multiple active Matrix accounts, choose a sending account; a sole active account is selected automatically and its picker is hidden.
+Use **Find room** to filter its destinations if needed, choose a room, review or edit the message, then explicitly choose **Send**.
 Account and room choices open separate native list screens.
+If no active Matrix accounts are available, the extension keeps your draft and asks you to open Axon → **Accounts** to add an account or sign in again, then reload.
+An account without joined rooms instead asks you to join a room; logged-out accounts are excluded from sending choices.
 The destination header includes a reload icon for refreshing accounts and rooms, with a spoken label for VoiceOver.
 Routine introductory instructions are hidden; loading, errors, and delivery outcomes remain visible when relevant.
 The composer remembers the last selected account and room on this device, including a selection made before cancelling a share.

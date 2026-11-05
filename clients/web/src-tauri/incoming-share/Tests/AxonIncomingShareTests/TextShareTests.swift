@@ -148,6 +148,63 @@ final class TextShareTests: XCTestCase {
     try store.discard(value.id, owner: value.owner)
     XCTAssertTrue(try store.list().isEmpty)
   }
+  func testAccountLookupIsBoundedAndIndependentOfJoinedRooms() throws {
+    let value = try store.claim(store.create(text: link).id)
+    var paths: [String] = []
+    let sender = sender { _, _, path, method, body, _, _, limit in
+      paths.append(path)
+      XCTAssertEqual(method, "GET")
+      XCTAssertNil(body)
+      XCTAssertEqual(limit, 2 * 1024 * 1024)
+      return try self.response(
+        200,
+        [
+          "data": [
+            ["account_id": self.account, "user_id": "@test:example.org", "state": "active"],
+            [
+              "account_id": UUID().uuidString, "user_id": "@out:example.org",
+              "state": "deactivated",
+            ],
+            ["account_id": UUID().uuidString, "user_id": "@gone:example.org", "state": "deleting"],
+          ]
+        ])
+    }
+    let accounts = try sender.accounts(value)
+    XCTAssertEqual(accounts.map(\.account_id), [account])
+    XCTAssertEqual(accounts.first?.user_id, "@test:example.org")
+    XCTAssertEqual(paths, ["/v1/accounts"])
+    XCTAssertNil(try store.list().first?.accountId)
+  }
+  func testAccountLookupDoesNotTreatInvalidOrFailedResponsesAsNoAccounts() throws {
+    let value = try store.claim(store.create(text: link).id)
+    let valid = ["account_id": account, "user_id": "@test:example.org", "state": "active"]
+    for data: [[String: String]] in [
+      [["account_id": account]],
+      [["account_id": "not-a-uuid", "user_id": "@test:example.org", "state": "active"]],
+      [["account_id": account, "user_id": "", "state": "active"]],
+      [["account_id": account, "user_id": "@test:example.org", "state": "unexpected"]],
+      [valid, valid],
+    ] {
+      let sender = sender { _, _, _, _, _, _, _, _ in
+        try self.response(200, ["data": data])
+      }
+      XCTAssertThrowsError(try sender.accounts(value)) {
+        XCTAssertEqual($0 as? ShareFailure, .invalidResponse)
+      }
+    }
+    for status in [401, 503] {
+      let sender = sender { _, _, _, _, _, _, _, _ in try self.response(status, ["data": []]) }
+      XCTAssertThrowsError(try sender.accounts(value)) {
+        if status == 401 {
+          XCTAssertEqual($0 as? ShareFailure, .authentication)
+        } else {
+          XCTAssertEqual(($0 as? ShareRequestFailure)?.status, status)
+        }
+      }
+    }
+    let empty = sender { _, _, _, _, _, _, _, _ in try self.response(200, ["data": []]) }
+    XCTAssertEqual(try empty.accounts(value), [])
+  }
   func testDispatchIntentPrecedesRequestAndSuccessRecordsEvent() throws {
     let value = try draft()
     var sends = 0

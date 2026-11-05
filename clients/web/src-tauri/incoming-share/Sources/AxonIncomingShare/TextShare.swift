@@ -157,6 +157,12 @@ public enum TextShare {
   }
 }
 
+public struct ShareAccount: Decodable, Equatable {
+  public let account_id: String
+  public let user_id: String
+  public let state: String
+}
+
 public struct ShareDestination: Decodable, Equatable {
   public let account_id: String
   public let account_user_id: String
@@ -239,19 +245,38 @@ public final class TextShareSender {
       }
       path += "?account_id=" + account
     }
-    let response = try call(manifest, path, limit: ShareLimits.roomListBytes)
+    let rooms: [ShareDestination] = try list(manifest, path, limit: ShareLimits.roomListBytes)
+    return rooms.filter { $0.room_type != "m.space" }
+  }
+  /// Accounts are independent of rooms: an active account can have no joined
+  /// rooms, and logged-out accounts must not be offered as sending identities.
+  public func accounts(_ manifest: ShareManifest) throws -> [ShareAccount] {
+    let accounts: [ShareAccount] = try list(manifest, "/v1/accounts", limit: 2 * 1024 * 1024)
+    guard Set(accounts.map(\.account_id)).count == accounts.count,
+      accounts.allSatisfy({
+        UUID(uuidString: $0.account_id) != nil && !$0.user_id.isEmpty
+          && ["active", "deactivated", "deleting"].contains($0.state)
+      })
+    else {
+      Self.log.error("share_accounts_invalid_response")
+      throw ShareFailure.invalidResponse
+    }
+    return accounts.filter { $0.state == "active" }
+  }
+  private struct ListEnvelope<Item: Decodable>: Decodable { var data: [Item] }
+  private func list<Item: Decodable>(_ manifest: ShareManifest, _ path: String, limit: Int) throws
+    -> [Item]
+  {
+    let response = try call(manifest, path, limit: limit)
     guard response.0 == 200 else {
       if response.0 == 401 { throw ShareFailure.authentication }
       throw ShareRequestFailure(status: response.0)
     }
-    struct Envelope: Decodable { var data: [ShareDestination] }
     do {
-      return try JSONDecoder().decode(Envelope.self, from: response.1).data.filter {
-        $0.room_type != "m.space"
-      }
+      return try JSONDecoder().decode(ListEnvelope<Item>.self, from: response.1).data
     } catch {
       // Never log the decoder's description: it may quote response content.
-      Self.log.error("share_rooms_invalid_response bytes=\(response.1.count)")
+      Self.log.error("share_list_invalid_response bytes=\(response.1.count)")
       throw ShareFailure.invalidResponse
     }
   }

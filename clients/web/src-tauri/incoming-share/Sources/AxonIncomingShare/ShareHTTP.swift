@@ -66,11 +66,13 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     mime: String? = nil, limit: Int = 256 * 1024
   ) throws -> (Int, Data) {
     let route =
-      path == "/v1/rooms" || path.hasPrefix("/v1/rooms?")
-      ? "rooms"
-      : path.hasSuffix("/send")
-        ? "send"
-        : path.hasSuffix("/generate") ? "generate" : "media"
+      path == "/v1/accounts"
+      ? "accounts"
+      : path == "/v1/rooms" || path.hasPrefix("/v1/rooms?")
+        ? "rooms"
+        : path.hasSuffix("/send")
+          ? "send"
+          : path.hasSuffix("/generate") ? "generate" : "media"
     guard URL(string: descriptor.server)?.scheme == "https" else {
       throw ShareFailure.httpsRequired
     }

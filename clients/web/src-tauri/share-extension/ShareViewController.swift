@@ -35,6 +35,7 @@ final class ShareComposer: ObservableObject {
   @Published var account = ""
   @Published var room = ""
   @Published var roomSearch = ""
+  @Published var accounts: [ShareAccount] = []
   @Published var rooms: [ShareDestination] = []
   @Published var record: ShareManifest?
   @Published var status = "Importing share…"
@@ -83,7 +84,6 @@ final class ShareComposer: ObservableObject {
     editSave?.cancel()
   }
 
-  var accounts: [String] { Array(Set(rooms.map(\.account_id))).sorted() }
   private var matchingRooms: [ShareDestination] {
     rooms.filter { destination in
       destination.account_id == account
@@ -97,7 +97,7 @@ final class ShareComposer: ObservableObject {
     Array(matchingRooms.prefix(100))
   }
   var accountTitle: String {
-    rooms.first(where: { $0.account_id == account })?.account_user_id ?? "Choose account"
+    accounts.first(where: { $0.account_id == account })?.user_id ?? "Choose account"
   }
   var roomTitle: String {
     rooms.first(where: { $0.account_id == account && $0.room_id == room })?.title ?? "Choose room"
@@ -152,19 +152,7 @@ final class ShareComposer: ObservableObject {
         items, store: store, cancellation: self.cancellation, staged: { self.current = $0 })
       let importedText = self.current!.text
       DispatchQueue.main.async { self.text = importedText }
-      let rooms = try self.sender!.destinations(self.current!)
-      let selected = try store.suggestedDestination(self.current!, destinations: rooms)
-      try self.persist(text: importedText, account: selected.account, room: selected.room)
-      DispatchQueue.main.async {
-        self.rooms = rooms
-        self.account = selected.account
-        self.room = selected.room
-      }
-      if rooms.isEmpty {
-        return
-          "No joined rooms are available. Open Axon to join a room; this draft is saved without sending."
-      }
-      return ""
+      return try self.loadDestinations(text: importedText)
     }
     heartbeat = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
       guard let self, !self.busy else { return }
@@ -400,20 +388,40 @@ final class ShareComposer: ObservableObject {
     let room = room
     run {
       try self.persist(text: text, account: account, room: room)
-      let rooms = try self.sender!.destinations(self.current!)
-      let selected = try self.store!.suggestedDestination(self.current!, destinations: rooms)
-      let selectedAccount = selected.account
-      let selectedRoom = selected.room
-      try self.persist(text: text, account: selectedAccount, room: selectedRoom)
-      DispatchQueue.main.async {
-        self.rooms = rooms
-        self.account = selectedAccount
-        self.room = selectedRoom
-      }
-      return rooms.isEmpty
-        ? "No joined rooms are available. This draft is saved without sending."
-        : ""
+      return try self.loadDestinations(text: text)
     }
+  }
+  // Initial loading and explicit reloads share the same selection policy.
+  // Run on queue; publish only after the complete fresh snapshot is saved.
+  private func loadDestinations(text: String) throws -> String {
+    let accounts = try sender!.accounts(current!)
+    let ids = Set(accounts.map(\.account_id))
+    let rooms =
+      try accounts.isEmpty
+      ? []
+      : sender!.destinations(current!).filter {
+        ids.contains($0.account_id)
+      }
+    let suggested = try store!.suggestedDestination(current!, destinations: rooms)
+    let selectedAccount = accounts.count == 1 ? accounts[0].account_id : suggested.account
+    let selectedRoom = suggested.account == selectedAccount ? suggested.room : ""
+    try persist(text: text, account: selectedAccount, room: selectedRoom)
+    DispatchQueue.main.async {
+      if self.account != selectedAccount { self.roomSearch = "" }
+      self.accounts = accounts
+      self.rooms = rooms
+      self.account = selectedAccount
+      self.room = selectedRoom
+    }
+    if accounts.isEmpty {
+      return
+        "No active Matrix accounts are available. Open Axon → Accounts to add an account or sign in again, then reload. Your draft is saved; nothing was sent."
+    }
+    if rooms.isEmpty {
+      return
+        "No joined rooms are available. Open Axon to join a room, then reload. Your draft is saved; nothing was sent."
+    }
+    return ""
   }
   func send() {
     guard canSend else { return }
@@ -621,10 +629,12 @@ private struct ShareComposeView: View {
           }
         }
         Section {
-          NavigationLink(destination: ShareAccountPicker(model: model)) {
-            VStack(alignment: .leading) {
-              Text("Sending account")
-              Text(model.accountTitle).foregroundColor(.secondary)
+          if model.accounts.count > 1 {
+            NavigationLink(destination: ShareAccountPicker(model: model)) {
+              VStack(alignment: .leading) {
+                Text("Sending account")
+                Text(model.accountTitle).foregroundColor(.secondary)
+              }
             }
           }
           NavigationLink(destination: ShareRoomPicker(model: model)) {
@@ -693,7 +703,7 @@ private struct ShareComposeView: View {
                 }
               }
             }
-            if model.account.isEmpty {
+            if model.accounts.count > 1 && model.account.isEmpty {
               Text("Choose a sending account to enable the homeserver option.").font(.caption)
             }
           } header: {
@@ -880,12 +890,12 @@ private struct ShareAccountPicker: View {
   @Environment(\.dismiss) private var dismiss
   var body: some View {
     List {
-      ForEach(model.accounts, id: \.self) { account in
+      ForEach(model.accounts, id: \.account_id) { account in
         ShareDestinationChoice(
-          title: model.rooms.first(where: { $0.account_id == account })?.account_user_id ?? account,
-          selected: model.account == account
+          title: account.user_id,
+          selected: model.account == account.account_id
         ) {
-          model.chooseAccount(account)
+          model.chooseAccount(account.account_id)
           dismiss()
         }
       }
@@ -905,6 +915,12 @@ private struct ShareRoomPicker: View {
             "Showing the first 100 of \(model.matchingRoomCount) matching rooms. Use Find room to narrow the choices."
           ).font(.caption)
         }
+      }
+      if model.matchingRoomCount == 0 {
+        Text(
+          model.roomSearch.isEmpty
+            ? "No joined rooms are available for this account. Open Axon to join a room, then reload."
+            : "No rooms match your search.")
       }
       ForEach(model.visibleRooms, id: \.room_id) { room in
         ShareDestinationChoice(title: room.title, selected: model.room == room.room_id) {
