@@ -200,6 +200,139 @@ async function fixtures(page: Page) {
 }
 
 for (const thread of [false, true]) {
+  test(`immediate Backspace restores a literal shortcode in the ${thread ? 'thread' : 'room'}`, async ({
+    page,
+  }) => {
+    const { sent } = await fixtures(page)
+    await signIn(page)
+    await page.goto(
+      thread
+        ? `${ROOM_URL}?thread=${encodeURIComponent('$emoji-root')}`
+        : ROOM_URL,
+    )
+    const pane = page.locator(thread ? '.thread-panel' : '.room-stream')
+    const input = pane.locator('.composer textarea')
+    const nativeMod = process.platform === 'darwin' ? 'Meta' : 'Control'
+    await input.fill('before :+1 after')
+    await input.evaluate((el) => el.setSelectionRange(10, 10))
+    await input.press(':')
+    await expect(input).toHaveValue('before 👍 after')
+    await input.press('Backspace')
+    await expect(input).toHaveValue('before \\:+1: after')
+    expect(await input.evaluate((el) => el.selectionStart)).toBe(12)
+    await input.press(`${nativeMod}+z`)
+    await expect(input).toHaveValue('before 👍 after')
+    await input.press(`${nativeMod}+Shift+z`)
+    await expect(input).toHaveValue('before \\:+1: after')
+    await pane
+      .locator('.composer')
+      .getByRole('button', { name: 'Send', exact: true })
+      .click()
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].body).toBe('before :+1: after')
+
+    // Typing or navigating ends the one-action restoration window.
+    await input.fill('go :+1')
+    await input.press(':')
+    await input.press('Space')
+    await input.press('Backspace')
+    await expect(input).toHaveValue('go 👍')
+    await input.press('Backspace')
+    await expect(input).toHaveValue('go ')
+    await input.fill('go :+1')
+    await input.press(':')
+    await input.press('ArrowLeft')
+    await input.press('ArrowRight')
+    await input.press('Backspace')
+    await expect(input).toHaveValue('go ')
+    // Undo/redo must not re-arm automatic restoration.
+    await input.fill('go :+1')
+    await input.press(':')
+    await input.press(`${nativeMod}+z`)
+    await input.press(`${nativeMod}+Shift+z`)
+    await input.press('Backspace')
+    await expect(input).toHaveValue('go ')
+  })
+
+  test(`standard emoji shortcodes render immediately with native undo in the ${thread ? 'thread' : 'room'}`, async ({
+    page,
+  }, info) => {
+    const { sent } = await fixtures(page)
+    await signIn(page)
+    await page.goto(
+      thread
+        ? `${ROOM_URL}?thread=${encodeURIComponent('$emoji-root')}`
+        : ROOM_URL,
+    )
+    const pane = page.locator(thread ? '.thread-panel' : '.room-stream')
+    const input = pane.locator('.composer textarea')
+    const nativeMod = process.platform === 'darwin' ? 'Meta' : 'Control'
+    // Complete a token in the middle of the draft, preserving its suffix.
+    await input.fill('before :+1 after')
+    await input.evaluate((el) => {
+      el.focus()
+      el.setSelectionRange(10, 10)
+    })
+    await input.press(':')
+    await expect(input).toHaveValue('before 👍 after')
+    expect(await input.evaluate((el) => el.selectionStart)).toBe(9)
+    await input.press(`${nativeMod}+z`)
+    await expect(input).toHaveValue('before :+1 after')
+    await input.press(`${nativeMod}+Shift+z`)
+    await expect(input).toHaveValue('before 👍 after')
+    await input.press('!')
+    await expect(input).toHaveValue('before 👍! after')
+
+    // Autocomplete uses the same native edit path, including Unicode aliases.
+    await input.fill('ship :+ after')
+    await input.evaluate((el) => el.setSelectionRange(7, 7))
+    await input.press('ArrowLeft')
+    await input.press('ArrowRight')
+    const choices = pane.getByRole('listbox', { name: 'Emoji matches' })
+    await expect(choices).toBeVisible()
+    await choices.getByRole('option', { name: /👍 :\+1:/ }).click()
+    await expect(input).toHaveValue('ship 👍 after')
+    await input.press(`${nativeMod}+z`)
+    await expect(input).toHaveValue('ship :+ after')
+    await input.press(`${nativeMod}+Shift+z`)
+    await expect(input).toHaveValue('ship 👍 after')
+
+    await input.fill('literal \\:smile')
+    await input.press(':')
+    await expect(input).toHaveValue('literal \\:smile:')
+    await input.fill('unknown :not_an_emoji')
+    await input.press(':')
+    await expect(input).toHaveValue('unknown :not_an_emoji:')
+    // Pasted/restored text and active IME composition are not rewritten.
+    await input.fill('paste :+1:')
+    await expect(input).toHaveValue('paste :+1:')
+    await input.fill('composing :+1')
+    await input.evaluate((el) => {
+      el.dispatchEvent(
+        new InputEvent('beforeinput', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertText',
+          data: ':',
+          isComposing: true,
+        }),
+      )
+    })
+    await expect(input).toHaveValue('composing :+1')
+    await input.fill('ship :partying')
+    await input.press(':')
+    await expect(input).toHaveValue('ship 🥳')
+    await page.screenshot({
+      path: info.outputPath('immediate-standard-emoji.png'),
+    })
+    await pane
+      .locator('.composer')
+      .getByRole('button', { name: 'Send', exact: true })
+      .click()
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].body).toBe('ship 🥳')
+  })
+
   test(`composer picker inserts Unicode and a selected custom image with native undo in the ${thread ? 'thread' : 'room'}`, async ({
     page,
   }, info) => {

@@ -65,6 +65,110 @@ function renderComposer(props: Partial<Parameters<typeof Composer>[0]> = {}) {
   return { onSubmit, onDraftChange, textarea, form, ...utils }
 }
 
+function beforeInput(textarea: HTMLTextAreaElement, init: InputEventInit = {}) {
+  const event = new InputEvent('beforeinput', {
+    bubbles: true,
+    cancelable: true,
+    inputType: 'insertText',
+    data: ':',
+    ...init,
+  })
+  fireEvent(textarea, event)
+  return event
+}
+
+describe('Composer typed emoji shortcodes', () => {
+  it('converts a typed closing colon and preserves the suffix, caret, and draft', () => {
+    const { textarea, onDraftChange, onSubmit, form } = renderComposer({
+      initialValue: 'before :+1 after',
+    })
+    textarea.setSelectionRange(10, 10)
+
+    expect(beforeInput(textarea).defaultPrevented).toBe(true)
+
+    expect(textarea.value).toBe('before 👍 after')
+    expect(textarea.selectionStart).toBe(9)
+    expect(textarea.selectionEnd).toBe(9)
+    expect(onDraftChange).toHaveBeenLastCalledWith('before 👍 after')
+    fireEvent.submit(form)
+    expect(onSubmit).toHaveBeenCalledWith('before 👍 after')
+  })
+
+  it('restores an escaped shortcode on immediate Backspace', () => {
+    const { textarea, onDraftChange } = renderComposer({
+      initialValue: 'before :+1 after',
+    })
+    textarea.setSelectionRange(10, 10)
+    beforeInput(textarea)
+
+    const deletion = beforeInput(textarea, {
+      inputType: 'deleteContentBackward',
+      data: null,
+    })
+
+    expect(deletion.defaultPrevented).toBe(true)
+    expect(textarea.value).toBe('before \\:+1: after')
+    expect(textarea.selectionStart).toBe(12)
+    expect(onDraftChange).toHaveBeenLastCalledWith('before \\:+1: after')
+    // A second Backspace uses ordinary native deletion.
+    expect(
+      beforeInput(textarea, {
+        inputType: 'deleteContentBackward',
+        data: null,
+      }).defaultPrevented,
+    ).toBe(false)
+  })
+
+  it.each(['navigation', 'typing', 'blur', 'selection', 'undo'])(
+    'ends Backspace restoration after %s',
+    (action) => {
+      const { textarea } = renderComposer({ initialValue: 'before :+1' })
+      textarea.setSelectionRange(10, 10)
+      beforeInput(textarea)
+      if (action === 'navigation') {
+        fireEvent.keyDown(textarea, { key: 'ArrowLeft' })
+        fireEvent.keyDown(textarea, { key: 'ArrowRight' })
+      } else if (action === 'typing') {
+        // Even an input that leaves the same text starts a new edit.
+        fireEvent.input(textarea)
+      } else if (action === 'blur') {
+        act(() => textarea.blur())
+      } else if (action === 'selection') {
+        textarea.setSelectionRange(7, 9)
+        fireEvent.select(textarea)
+        textarea.setSelectionRange(9, 9)
+      } else {
+        beforeInput(textarea, { inputType: 'historyUndo', data: null })
+      }
+      expect(
+        beforeInput(textarea, {
+          inputType: 'deleteContentBackward',
+          data: null,
+        }).defaultPrevented,
+      ).toBe(false)
+    },
+  )
+
+  it.each([
+    { text: 'literal \\:smile', init: {} },
+    { text: 'unknown :not_an_emoji', init: {} },
+    { text: '/react :+1', init: {} },
+    { text: 'composing :+1', init: { isComposing: true } },
+    { text: 'pasted :+1', init: { inputType: 'insertFromPaste' } },
+    { text: 'noncancelable :+1', init: { cancelable: false } },
+  ])('leaves $text to native editing', ({ text, init }) => {
+    const { textarea, onDraftChange } = renderComposer({
+      initialValue: text,
+      onCommand: vi.fn(),
+    })
+    textarea.setSelectionRange(text.length, text.length)
+
+    expect(beforeInput(textarea, init).defaultPrevented).toBe(false)
+    expect(textarea.value).toBe(text)
+    expect(onDraftChange).not.toHaveBeenCalled()
+  })
+})
+
 describe('Composer drafts (M-W6 step 5b)', () => {
   it('reports each edit via onDraftChange', () => {
     const { textarea, onDraftChange } = renderComposer()
@@ -773,7 +877,7 @@ describe('Composer slash command autocomplete', () => {
     expect(menu.textContent).toContain(':+1:')
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
-    expect(textarea.value).toBe('send :+1: ')
+    expect(textarea.value).toBe('send 👍 ')
     expect(queryByRole('listbox', { name: 'Emoji matches' })).toBeNull()
   })
 
