@@ -25,6 +25,10 @@ import com.google.firebase.messaging.RemoteMessage
 private const val CHANNEL_ID = "messages-v2"
 // A Regex is not a Kotlin const. The Android compiler rejects `const val` here.
 private val COLLAPSE_ID = Regex("^[0-9a-f]{32}$")
+// The FCM sentTime of the alert a notification shows (ADR 0129). A room-read
+// message compares its own sentTime with this, so both are FCM server times.
+private const val SENT_TIME_EXTRA = "axon_sent_time"
+private const val ROOM_READ_KIND = "room_read"
 
 @InvokeArg
 class PostLocalArgs {
@@ -259,12 +263,20 @@ class AxonFirebaseMessagingService : FirebaseMessagingService() {
         )
         // Do not call super. The SDK would draw a second alert whose extras
         // omit event_id, and the resume read would miss it.
-        postCollapsedNotification(this, title, body, tag, eventId, pending)
+        postCollapsedNotification(this, title, body, tag, eventId, pending, message.sentTime)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        // Foreground messages reach here via handleIntent's super call.
-        // The page posts the local toast. Showing this too would double it.
+        // Foreground alerts reach here via handleIntent's super call. The page
+        // posts the local toast, so an alert is not shown here; that would
+        // double it.
+        //
+        // A room-read message (ADR 0129) reaches here on both paths. It has no
+        // event_id, so the background branch of handleIntent hands it to
+        // super too, and the SDK calls this for a data-only message.
+        if (message.data["axon_kind"] == ROOM_READ_KIND) {
+            cancelReadRoom(this, message)
+        }
     }
 
     override fun onNewToken(token: String) {
@@ -280,6 +292,7 @@ private fun postCollapsedNotification(
     collapseId: String,
     eventId: String,
     contentIntent: PendingIntent,
+    sentTime: Long = 0L,
 ) {
     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     ensureChannel(manager)
@@ -291,10 +304,45 @@ private fun postCollapsedNotification(
         .setContentIntent(contentIntent)
         .build()
     notification.extras.putString("event_id", eventId)
+    // The page's local toast has no FCM time. Leaving the extra out lets any
+    // later room-read clear it.
+    if (sentTime > 0L) {
+        notification.extras.putLong(SENT_TIME_EXTRA, sentTime)
+    }
     // Tag plus id 0 matches FCM's android.notification.tag, so this
     // replaces the remote alert for the same room.
     manager.notify(collapseId, 0, notification)
 }
+
+/**
+ * Cancel the room's collapsed notification after the room was read elsewhere
+ * (ADR 0129). An alert FCM sent after this room-read message is newer than the
+ * read and stays.
+ */
+private fun cancelReadRoom(context: Context, message: RemoteMessage) {
+    val room = message.data["room_id"]?.trim().orEmpty()
+    if (room.isEmpty()) {
+        return
+    }
+    val tag = collapseTag(room, message.data["tag"])
+    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    val active = manager.activeNotifications.firstOrNull { it.id == 0 && it.tag == tag } ?: return
+    val alertSentTime = active.notification.extras?.getLong(SENT_TIME_EXTRA, 0L) ?: 0L
+    if (readClears(alertSentTime, message.sentTime)) {
+        manager.cancel(tag, 0)
+    }
+}
+
+/**
+ * Whether a room-read message sent at `readSentTime` clears a notification
+ * whose alert FCM sent at `alertSentTime`. Both are FCM server times; the
+ * phone's clock, and so the notification's postTime, is never used. Zero is a
+ * notification with no stored time (the page's toast, an older build, or an
+ * alert the SDK drew), and any read clears it. A read with no time clears only
+ * those.
+ */
+internal fun readClears(alertSentTime: Long, readSentTime: Long): Boolean =
+    alertSentTime <= 0L || alertSentTime < readSentTime
 
 private fun canPostNotifications(context: Context): Boolean {
     if (Build.VERSION.SDK_INT < 33) {
