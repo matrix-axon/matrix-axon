@@ -20,7 +20,8 @@ Retain provider order, filenames, and useful accompanying text.
 The initial destination is a joined room under an explicitly selected Matrix account; selecting threads, creating rooms, suggested conversation targets, rich HTML import, and an arbitrary-origin crawler in Axon are outside this plan.
 Show account identity even when only one account exists, to make the sender clear.
 
-The iOS text/rich-link stage advertises only text/web URLs; a thumbnail belonging to a link is preview metadata, not a separately shared photo.
+The iOS text/rich-link stage initially advertised only text/web URLs.
+The photo increment adds up to ten images while video and general-file intake remain pending; a thumbnail belonging to a link is preview metadata, not a separately shared photo.
 The media stage adds activation rules for supported attachment types only when their complete flow works.
 Reject an unsupported or over-limit selection explicitly; never silently send a subset.
 The user may remove problematic items and confirm the remaining content.

@@ -11,7 +11,8 @@ final class ActivationUITests: XCTestCase {
     source.tap()
   }
   private func receiver(in app: XCUIApplication) -> XCUIElement {
-    app.descendants(matching: .any).matching(NSPredicate(format: "label == 'AxonShareTest'")).firstMatch
+    app.descendants(matching: .any).matching(NSPredicate(format: "label == 'AxonShareTest'"))
+      .firstMatch
   }
   private func showAllActivities(_ app: XCUIApplication) {
     let more = app.descendants(matching: .any)
@@ -30,9 +31,12 @@ final class ActivationUITests: XCTestCase {
     more.tap()
     XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 5))
   }
-  func testTextAndURLsExposeTheRealComposerWithoutCredentials() {
+  func testTextURLsAndPhotosExposeTheRealComposerWithoutCredentials() {
     let app = XCUIApplication()
-    for name in ["source-text", "source-url", "source-decoration"] {
+    for name in [
+      "source-text", "source-url", "source-decoration", "source-image", "source-image-alternative",
+      "source-multiple-images",
+    ] {
       chooseSource(name, app: app)
       let target = receiver(in: app)
       if !target.exists || !target.isHittable { showAllActivities(app) }
@@ -56,9 +60,9 @@ final class ActivationUITests: XCTestCase {
     }
     app.terminate()
   }
-  func testImageRepresentationsDoNotAdvertiseMediaSupport() {
+  func testOtherFilesAndVideosDoNotAdvertiseSupport() {
     let app = XCUIApplication()
-    for name in ["source-image", "source-image-alternative"] {
+    for name in ["source-file", "source-video"] {
       chooseSource(name, app: app)
       showAllActivities(app)
       var previousLast = ""

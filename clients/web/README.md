@@ -92,6 +92,7 @@ Temporary media failures offer **Retry image** and retry after reconnect without
 Large plain source images can still use bounded server thumbnails; encrypted originals retain their stricter metadata limits.
 Cards never fetch the linked webpage or an external image URL.
 Preview authoring and opt-in generation are not yet exposed in the ordinary web composer; the iOS [native Share Extension](../../docs/ios-sharing.md) and [pending-share recovery surface](../../docs/ios-sharing-foundation.md) provide explicit preview generation, removal, and durable recovery.
+The iOS extension also accepts single/multiple photos with an optional first-photo caption, bounded HEIC previews, and per-photo delivery recovery; signed-device photo acceptance remains pending.
 Formatted messages containing spoilers omit preview cards, even after the spoiler is revealed.
 Malformed or oversized preview metadata is ignored.
 

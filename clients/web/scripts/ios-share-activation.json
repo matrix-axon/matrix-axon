@@ -2,5 +2,6 @@
   "NSExtensionActivationDictionaryVersion": 2,
   "NSExtensionActivationUsesStrictMatching": true,
   "NSExtensionActivationSupportsWebURLWithMaxCount": 1,
-  "NSExtensionActivationSupportsText": true
+  "NSExtensionActivationSupportsText": true,
+  "NSExtensionActivationSupportsImageWithMaxCount": 10
 }

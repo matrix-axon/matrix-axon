@@ -160,7 +160,7 @@ has no effect and the next regeneration overwrites them; change
 
 ## iOS
 
-The production text/link Share Extension is described in [iOS sharing](../../../docs/ios-sharing.md).
+The production text/link/photo Share Extension is described in [iOS sharing](../../../docs/ios-sharing.md).
 Incoming-share session/staging and the Pending shares recovery UI are described in [the foundation guide](../../../docs/ios-sharing-foundation.md).
 App Group and shared Keychain capabilities must be enabled for both `org.matrixaxon.axon` and `org.matrixaxon.axon.Share` in the developer portal and included in their provisioning profiles.
 Run `node scripts/configure-ios-sharing.mjs` from `clients/web` after every manual `tauri ios init`; packaging runs the same hook automatically.

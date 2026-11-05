@@ -65,7 +65,13 @@ const port: IncomingSharePort = {
       localStorage.setItem('fixture.incoming', JSON.stringify(records))
       return record as T
     }
-    if (action === 'update') {
+    if (action === 'photo_thumbnail') {
+      return {
+        bytes:
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=',
+      } as T
+    }
+    if (action === 'update' || action === 'remove_file') {
       const next = args.manifest as IncomingShare
       const index = records.findIndex((item) => item.id === next.id)
       if (
@@ -74,6 +80,8 @@ const port: IncomingSharePort = {
         records[index].owner !== next.owner
       )
         throw new Error('stale')
+      if (action === 'remove_file')
+        next.files = next.files.filter((file) => file.id !== args.file)
       records[index] = {
         ...next,
         revision: next.revision + 1,

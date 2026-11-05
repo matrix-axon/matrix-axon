@@ -11,10 +11,12 @@ function RecoveryThumbnail({
   store,
   file,
   delivered,
+  photo = false,
 }: {
   store: IncomingShareStore
   file: string
   delivered: boolean
+  photo?: boolean
 }) {
   const [url, setUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
@@ -38,9 +40,11 @@ function RecoveryThumbnail({
   }, [store, file])
   return failed ? (
     <p role="alert">
-      {delivered
-        ? 'The preview was delivered with the first item; its local image is unavailable.'
-        : 'The retained image is missing or corrupt. Replace or remove it before sending.'}
+      {photo
+        ? 'Photo preview unavailable. The retained original is checked again before upload.'
+        : delivered
+          ? 'The preview was delivered with the first item; its local image is unavailable.'
+          : 'The retained image is missing or corrupt. Replace or remove it before sending.'}
     </p>
   ) : url === null ? (
     <p>Loading retained image…</p>
@@ -48,7 +52,7 @@ function RecoveryThumbnail({
     <img
       class="pending-share-thumbnail"
       src={url}
-      alt="Retained link preview"
+      alt={photo ? 'Shared photo' : 'Retained link preview'}
       onError={() => setFailed(true)}
     />
   )
@@ -123,6 +127,17 @@ export function PendingSharesPage() {
   const previewLinks = [
     ...new Set(nativePreviewLinks(store.editorText.value)),
   ].filter((url) => /^https?:/i.test(url))
+  const importProblems: Record<string, string> = {
+    quota:
+      'A source item or the selection exceeded the staging/storage limits.',
+    too_many_photos: 'The selection exceeds the limit of 10 photos.',
+    expired: 'A source took too long to provide its content.',
+    provider_timeout: 'A source took too long to provide its content.',
+    incomplete_import:
+      'Import was interrupted before the selection was complete.',
+    unsupported_input: 'The selection contains unsupported content.',
+    unsupported_url: 'The selection contains an unsupported URL.',
+  }
   const blocked =
     record !== null &&
     shareOperations(record).some((item) =>
@@ -402,12 +417,48 @@ export function PendingSharesPage() {
               </div>
             )}
           </fieldset>
+          {record.files.some((file) => !file.thumbnail) && (
+            <fieldset disabled={busy || fixedDestination}>
+              <legend>Photos in sending order</legend>
+              {record.files
+                .filter((file) => !file.thumbnail)
+                .map((file) => (
+                  <div key={file.id}>
+                    <RecoveryThumbnail
+                      store={store}
+                      file={file.id}
+                      photo
+                      delivered={file.operation?.state === 'sent'}
+                    />
+                    <p>
+                      {file.name} · {Math.ceil(file.bytes / 1024)} KiB
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => act(store.removeFile(file.id))}
+                    >
+                      Remove photo: {file.name}
+                    </button>
+                  </div>
+                ))}
+            </fieldset>
+          )}
           {record.importFailures.length > 0 && (
-            <p role="alert">
-              Some items could not be imported. This share cannot be sent as a
-              partial selection; discard it and import the intended selection
-              again.
-            </p>
+            <div role="alert">
+              <p>
+                Some items could not be imported. This share cannot be sent as a
+                partial selection; discard it and import the intended selection
+                again.
+              </p>
+              <ul>
+                {[...new Set(record.importFailures)].map((failure) => (
+                  <li key={failure}>
+                    {importProblems[failure] ??
+                      'A source item could not be read or is not a supported image.'}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           <ul aria-label="Delivery outcomes">
             {record.files.some((file) => !file.thumbnail)

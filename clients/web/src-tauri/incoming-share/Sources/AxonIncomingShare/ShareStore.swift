@@ -152,7 +152,7 @@ public final class ShareStore {
   // Only for operations already holding the store's lock.
   func sessionLocked() throws -> ShareSession? { try readSession() }
 
-  public func create(text: String) throws -> ShareManifest {
+  public func create(text: String, importFailures: [String] = []) throws -> ShareManifest {
     try coordinated {
       guard let session = try readSession(),
         session.stagingAllowed ?? session.credentialAvailable
@@ -168,7 +168,8 @@ public final class ShareStore {
         (try usedBytes(records)) + text.utf8.count + ShareLimits.metadataReservation
           <= ShareLimits.pendingBytes
       else { throw ShareFailure.quota }
-      let manifest = ShareManifest(createdAt: now(), session: session.generation, text: text)
+      var manifest = ShareManifest(createdAt: now(), session: session.generation, text: text)
+      manifest.importFailures = importFailures
       let directory = try directory(manifest.id)
       try fm.createDirectory(at: directory, withIntermediateDirectories: false)
       try protect(directory)
@@ -446,7 +447,7 @@ public final class ShareStore {
       if current.completed {
         try validateSession(current)
       } else if Self.operations(current).contains(where: {
-        [.dispatching, .unknown].contains($0.state)
+        [.dispatching, .unknown, .sent].contains($0.state)
       }) {
         Self.releaseForRecovery(&current)
         current.revision += 1
@@ -483,9 +484,11 @@ public final class ShareStore {
   /// kept until its fenced lease expires. No full-file allocation is needed.
   public func importFile(
     _ id: String, owner: String, source: URL, name: String,
-    mime: String, thumbnail: Bool = false
+    mime: String, thumbnail: Bool = false, photo: Bool = false,
+    check: () throws -> Void = {}
   ) throws -> ShareManifest {
-    guard source.isFileURL else { throw ShareFailure.invalid }
+    try check()
+    guard source.isFileURL, !photo || !thumbnail else { throw ShareFailure.invalid }
     guard mime.utf8.count <= 128, mime.rangeOfCharacter(from: .controlCharacters) == nil else {
       throw ShareFailure.invalid
     }
@@ -535,6 +538,7 @@ public final class ShareStore {
     var hash = SHA256()
     let deadline = Date().addingTimeInterval(60)
     while true {
+      try check()
       guard Date() < deadline else { throw ShareFailure.expired }
       let count = Darwin.read(input, &buffer, buffer.count)
       guard count >= 0 else { throw ShareFailure.unavailable }
@@ -553,7 +557,10 @@ public final class ShareStore {
     }
     guard fsync(output) == 0 else { throw ShareFailure.unavailable }
     if thumbnail { try Self.validateThumbnail(Data(contentsOf: reservation), mime: mime) }
+    let actualMime = try photo ? PhotoShare.mime(reservation) : mime
+    try check()
     return try coordinated {
+      try check()
       var manifest = try load(id)
       try validateOwner(manifest, owner)
       guard thumbnail || manifest.files.filter({ !$0.thumbnail }).count < ShareLimits.files else {
@@ -566,12 +573,33 @@ public final class ShareStore {
       defer { if !committed { try? fm.removeItem(at: destination) } }
       manifest.files.append(
         ShareFile(
-          id: fileId, name: Self.displayName(name), mime: mime,
+          id: fileId, name: Self.displayName(name), mime: actualMime,
           bytes: bytes, digest: hash.finalize().map { String(format: "%02x", $0) }.joined(),
           thumbnail: thumbnail, operation: thumbnail ? nil : ShareOperation()))
       manifest.revision += 1
       try save(manifest, didPublish: { committed = true })
       return manifest
+    }
+  }
+
+  /// Removal cannot shift the first caption or change a partially delivered batch.
+  public func removeFile(_ input: ShareManifest, file: String) throws -> ShareManifest {
+    try coordinated {
+      var current = try load(input.id)
+      try validateOwner(current, input.owner ?? "")
+      guard current.revision == input.revision else { throw ShareFailure.stale }
+      guard
+        Self.operations(current).allSatisfy({ [.ready, .failed, .uploaded].contains($0.state) }),
+        let item = current.files.first(where: { $0.id == file && !$0.thumbnail })
+      else { throw ShareFailure.invalid }
+      current.files.removeAll { $0.id == file }
+      current.revision += 1
+      try save(current)
+      deleteFiles([item], share: current.id)
+      Self.log.info(
+        "share_photo_removed share_id=\(current.id, privacy: .public) item_id=\(item.id, privacy: .public)"
+      )
+      return current
     }
   }
 
