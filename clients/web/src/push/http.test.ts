@@ -38,6 +38,7 @@ describe('push registration HTTP', () => {
           id: '6b53f7f0-0000-4000-8000-0000000000aa',
           provider: 'fcm',
           disclosure: 'activity',
+          badge: false,
         },
       })
     }
@@ -45,7 +46,12 @@ describe('push registration HTTP', () => {
       fetchImpl,
       'http://axon.test/axon/',
       'access-token',
-      { provider: 'fcm', token: 'fcm-token', disclosure: 'activity' },
+      {
+        provider: 'fcm',
+        token: 'fcm-token',
+        disclosure: 'activity',
+        badge: false,
+      },
     )
     expect(result.id).toBe('6b53f7f0-0000-4000-8000-0000000000aa')
     const seen = calls[0]
@@ -59,6 +65,7 @@ describe('push registration HTTP', () => {
       provider: 'fcm',
       token: 'fcm-token',
       disclosure: 'activity',
+      badge: false,
     })
   })
 
@@ -80,6 +87,7 @@ describe('push registration HTTP', () => {
         provider: 'apns',
         token: 'device',
         disclosure: 'activity',
+        badge: true,
         environment: 'production',
       },
     ).catch((caught: unknown) => caught)

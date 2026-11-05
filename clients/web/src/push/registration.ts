@@ -29,6 +29,11 @@ export interface PutPushBody {
   provider: PushProvider
   token: string
   disclosure: PushDisclosure
+  /**
+   * Required on every PUT (ADR 0129). The server stores an omitted field as
+   * false, so a re-registration that dropped it would turn the badge off.
+   */
+  badge: boolean
   environment?: PushEnvironment
 }
 
@@ -55,6 +60,8 @@ export interface PushRegistrationDeps {
   enabled: () => boolean
   permissionGranted: () => boolean
   disclosure: () => PushDisclosure
+  /** Whether APNs sends should carry the unread total as the icon badge. */
+  badge: () => boolean
   refreshSession: () => Promise<RefreshOutcome>
   onAccessTokenRefreshed: (listener: () => void) => () => void
   accessToken: () => string | null | Promise<string | null>
@@ -216,6 +223,7 @@ export function createPushRegistration(deps: PushRegistrationDeps): {
       provider: deps.remote.provider,
       token: device.token,
       disclosure: deps.disclosure(),
+      badge: deps.badge(),
     }
     if (deps.remote.provider === 'apns' && environment !== null) {
       body.environment = environment

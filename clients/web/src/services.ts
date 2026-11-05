@@ -1811,6 +1811,9 @@ export function createServices(
       enabled: () => settings.messageNotifications.value,
       permissionGranted: () => permissionIsGranted.value,
       disclosure: () => settings.pushDisclosure.value,
+      // ADR 0129: the one badge setting also decides whether APNs sends
+      // carry the unread total while the app is suspended.
+      badge: () => settings.appBadgeEnabled.value,
       refreshSession: () => auth.refreshNow(),
       onAccessTokenRefreshed: (listener) =>
         auth.onAccessTokenRefreshed(listener),
@@ -1852,9 +1855,10 @@ export function createServices(
     effect(() => {
       const signedIn = auth.signedIn.value
       const enabled = settings.messageNotifications.value
-      // Read so a disclosure change re-runs this effect. The registration
-      // reads the current value itself when it PUTs.
+      // Read so a disclosure or badge change re-runs this effect. The
+      // registration reads the current values itself when it PUTs.
       void settings.pushDisclosure.value
+      void settings.appBadgeEnabled.value
       const known = permissionKnown.value
       // A grant or a revocation has to re-run reconcile. `permissionKnown`
       // stays true after the first read, so the granted bit is its own signal.

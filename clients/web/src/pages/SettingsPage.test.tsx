@@ -948,6 +948,8 @@ describe('the app icon badge', () => {
     expect(
       await findByText(/does not turn on message notifications/),
     ).toBeTruthy()
+    // No remote push here, so no server-kept badge to explain.
+    expect(queryByText(/While Axon is suspended/)).toBeNull()
     fireEvent.click(
       await findByRole('button', {
         name: 'Allow notifications to enable the badge',
@@ -962,6 +964,35 @@ describe('the app icon badge', () => {
         }),
       ).toBeNull(),
     )
+  })
+
+  it('tells an APNs shell that the suspended badge needs message notifications', async () => {
+    const { findByText } = render(
+      <ServicesContext.Provider
+        value={testServices({
+          platform: {
+            browserCanAdoptApp: false,
+            iconBadgeSupport: 'permission',
+            notificationPermission: () => Promise.resolve('granted'),
+            remotePush: {
+              provider: 'apns',
+              deviceToken: () =>
+                Promise.resolve({ token: 'device', environment: 'sandbox' }),
+              deliveredEventIds: () => Promise.resolve([]),
+              onWake: () => () => {},
+              postCollapsed: () => Promise.resolve(),
+            },
+          },
+        })}
+      >
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(
+      await findByText(
+        'While Axon is suspended, the server keeps this count current only when message notifications are on.',
+      ),
+    ).toBeTruthy()
   })
 
   it('points a denied iOS shell at Settings', async () => {
