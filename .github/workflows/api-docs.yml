@@ -141,10 +141,35 @@ jobs:
           if [ -n "$tag" ]; then
             echo "Pulling demo recordings from release $tag (manual override)"
           else
-            tag="$(gh release list --repo "${{ github.repository }}" \
-              --exclude-drafts --limit 1 --json tagName -q '.[0].tagName')"
-            [ -n "$tag" ] || { echo "::error::no releases found on ${{ github.repository }} to pull demo recordings from"; exit 1; }
-            echo "Pulling demo recordings from $tag (most recently published release)"
+            # Walk releases newest-first and take the first one that already has
+            # every recording attached, so a release published before its videos
+            # are uploaded falls back to the previous recordings instead of
+            # failing the whole build. (An explicit demo_release_tag above is
+            # deliberately strict: asking for a release and silently getting a
+            # different one would be worse than failing.)
+            required="tui-demo.mp4 web-demo-desktop.mp4 web-demo-mobile.mp4"
+            newest=""
+            for candidate in $(gh release list --repo "${{ github.repository }}" \
+                --exclude-drafts --limit 30 --json tagName -q '.[].tagName'); do
+              [ -n "$newest" ] || newest="$candidate"
+              assets="$(gh release view "$candidate" --repo "${{ github.repository }}" \
+                --json assets -q '.assets[].name')"
+              missing=""
+              for f in $required; do
+                echo "$assets" | grep -qx "$f" || missing="$missing $f"
+              done
+              if [ -z "$missing" ]; then
+                tag="$candidate"
+                break
+              fi
+              echo "::notice::release $candidate lacks:$missing — trying the next most recent release"
+            done
+            [ -n "$newest" ] || { echo "::error::no releases found on ${{ github.repository }} to pull demo recordings from"; exit 1; }
+            [ -n "$tag" ] || { echo "::error::none of the 30 most recent releases has all of: $required"; exit 1; }
+            if [ "$tag" != "$newest" ]; then
+              echo "::warning::newest release $newest has no demo recordings yet; using $tag instead"
+            fi
+            echo "Pulling demo recordings from $tag (most recent release with all recordings)"
           fi
           gh release download "$tag" \
             --repo "${{ github.repository }}" \
