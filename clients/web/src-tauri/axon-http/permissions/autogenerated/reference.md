@@ -1,6 +1,6 @@
 ## Default Permission
 
-Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, and read the connection counters. Any `http` or `https` URL is reachable, the same reach `http:default` grants today (ADR 0127 § 8).
+Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, and read the connection counters. Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).
 
 #### This default permission set includes the following:
 

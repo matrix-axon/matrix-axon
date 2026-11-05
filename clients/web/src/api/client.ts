@@ -295,7 +295,7 @@ async function fetchWithinDeadline(
     throw error
   }
   trace?.sent()
-  const pending = fetch(request).catch(asTransportFailure)
+  const pending = fetch(request)
   let response: Response
   try {
     response = await bounded(pending)
@@ -319,7 +319,7 @@ async function fetchWithinDeadline(
   const reader = response.body.getReader()
   let body: Uint8Array<ArrayBuffer>
   try {
-    body = await bounded(readAll(reader).catch(asTransportFailure))
+    body = await bounded(readAll(reader))
   } catch (error) {
     // Settles the pending read as done, so `readAll` returns into a race that
     // is already decided rather than leaving anything unhandled.
@@ -328,48 +328,6 @@ async function fetchWithinDeadline(
   }
   trace?.end('ok')
   return rebuilt(response, body)
-}
-
-/** The plugin's wording for an abort, in either spelling it uses. */
-const CANCELLED = /cancell?ed/i
-
-/**
- * Rethrow a transport's rejection as the `TypeError` the fetch contract
- * promises for one.
- *
- * The shell's own transport keeps that contract (`platform/shell-http.ts`),
- * so this is for the legacy one behind Settings → Debug, and goes when it does
- * (ADR 0127 § 5). `tauri-plugin-http` does not keep it. Its Rust side serialises a
- * failed request to a bare string (`reqwest`'s "error sending request for url
- * (…)"), and the plugin rejects with that string as it stands. Nothing
- * downstream recognised it, so `requestFailureMessage` fell through to the
- * raw text, and an iPhone on a poor link showed a banner quoting a full
- * request URL in place of "Could not reach Axon".
- *
- * Anything carrying a `name` is left alone: that is an `Error` or a
- * `DOMException` (not an `Error` under jsdom, see `causeField`), and
- * the classification below already reads it. The original text is kept as
- * the message, which is what `failureKind` reads for the readout.
- */
-function asTransportFailure(error: unknown): never {
-  if (causeField(error, 'name') !== null) {
-    throw error
-  }
-  // The plugin's Rust side answers an abort with a string too ("Request
-  // canceled"). That is an abort and must stay one: as a `TypeError` it would
-  // tell the reader the network was down when a deadline had fired. The race
-  // in `fetchWithinDeadline` normally settles first, since it hears the
-  // signal synchronously and this arrives over IPC, but nothing here should
-  // depend on that ordering.
-  if (typeof error === 'string' && CANCELLED.test(error)) {
-    // A named `Error`, not a `DOMException`: under jsdom that is not an
-    // `Error` (see `causeField`), and `withinDeadline` would rewrap it and
-    // lose the name this exists to carry.
-    throw Object.assign(new Error(error), { name: 'AbortError' })
-  }
-  throw new TypeError(typeof error === 'string' ? error : 'request failed', {
-    cause: error,
-  })
 }
 
 /**
@@ -381,19 +339,8 @@ function asTransportFailure(error: unknown): never {
  *
  * The shell's own transport says why on the error's `cause`: `dns`,
  * `refused`, `connect_timeout`, `tls`, `reset`, `body`, `cancelled`, `scope`
- * or `other` (ADR 0127 § 4). That is used as it stands.
- *
- * Otherwise the words are the legacy plugin's own categories where the shell
- * produced the error, since those are the only distinction it lets through:
- *
- * - `send` — never got a response: DNS, connect, TLS, or a connection lost
- *   before the headers.
- * - `body` — headers arrived and the body did not finish.
- * - `cancelled` — the transport's own word for an abort. Only recorded when
- *   neither of this client's signals had fired, since `outcomeOf` calls those
- *   `timeout` or `aborted` and neither is a failure. What is left is a cancel
- *   the transport decided on, which is rare and worth telling apart.
- * - `fetch` — a browser's `TypeError`, which says no more than that.
+ * or `other` (ADR 0127 § 4). That is used as it stands. Otherwise a
+ * `TypeError` is a browser's `fetch` failure, which says no more than that.
  *
  * The return type is the allow-list (`FailureKind` in `perf.ts`), so the
  * compiler and not this comment is what keeps a message out of the readout.
@@ -402,16 +349,6 @@ export function failureKind(error: unknown): FailureKind {
   const transport = transportFailureOf(error)
   if (transport !== null) {
     return transport.kind
-  }
-  const message = causeField(error, 'message') ?? ''
-  if (message.startsWith('error sending request')) {
-    return 'send'
-  }
-  if (/body/i.test(message) && message.startsWith('error ')) {
-    return 'body'
-  }
-  if (CANCELLED.test(message)) {
-    return 'cancelled'
   }
   return causeField(error, 'name') === 'TypeError' ? 'fetch' : 'other'
 }
@@ -424,7 +361,7 @@ export function failureKind(error: unknown): FailureKind {
  * response. Nothing reads them today, but a caller that one day checked
  * `redirected` to spot a proxy, or `type` to diagnose CORS, would silently
  * read defaults. So they are copied across as own properties, the way
- * `tauri-plugin-http` already sets `url` on the responses it builds.
+ * `platform/shell-http.ts` sets `url` on the responses it builds.
  */
 function rebuilt(response: Response, body: Uint8Array<ArrayBuffer>): Response {
   const copy = new Response(body, {

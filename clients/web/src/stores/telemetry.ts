@@ -92,8 +92,8 @@ export interface TelemetrySession {
  * The packaged app and the home-screen web app share an icon, and a capture
  * pasted from the wrong one was diagnosed as the other (2026-09-25). They
  * behave differently in exactly the ways this readout measures. The shell
- * sends `/v1` through `tauri-plugin-http`, so Resource Timing never sees those
- * requests and every `:req` field is empty; the browser sends them through
+ * sends `/v1` through its own transport (ADR 0127), so Resource Timing never
+ * sees those requests and every `:req` field is empty; the browser sends them through
  * WebKit's own stack, which is where its abort quirks live. `build` settles
  * "was the fix even deployed?" without a second round trip.
  */

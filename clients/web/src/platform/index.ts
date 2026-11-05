@@ -401,24 +401,6 @@ export interface Platform {
    * app are a later cut.
    */
   remotePush: RemotePush | null
-
-  /**
-   * The shell's own HTTP transport (ADR 0127), or `null` in a browser, which
-   * has only its `fetch`.
-   */
-  shellTransport: ShellTransport | null
-}
-
-/**
- * The packaged app's handle on which transport `fetch` uses.
- *
- * Settings → Debug → "Legacy shell transport" routes requests back through
- * `tauri-plugin-http` for one release, for A/B comparison on a device and as
- * an escape hatch (ADR 0127 § 5). Read on every request, so a change applies
- * to the next one without a restart.
- */
-export interface ShellTransport {
-  setLegacy(on: boolean): void
 }
 
 /**
@@ -652,7 +634,6 @@ export function browserPlatform(): Platform {
     iconBadgeSupport: 'web',
     setIconBadge: null,
     remotePush: null,
-    shellTransport: null,
   }
 }
 

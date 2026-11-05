@@ -25,12 +25,12 @@ generates their attribution for us. They are recorded here deliberately.
   <https://webkit.org/licensing-webkit/>.
 
 ## OVERVIEW
-- MIT License (used by 449 crates)
+- MIT License (used by 435 crates)
 - Unicode License v3 (used by 19 crates)
 - ISC License (used by 18 crates)
 - Apache License 2.0 (used by 11 crates)
-- BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (used by 6 crates)
 - Mozilla Public License 2.0 (used by 5 crates)
+- BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (used by 4 crates)
 - Boost Software License 1.0 (used by 2 crates)
 - Community Data License Agreement Permissive 2.0 (used by 2 crates)
 - zlib License (used by 2 crates)
@@ -1273,70 +1273,6 @@ limitations under the License.
 ================================================================================
 ## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 ### USED BY:
-  - encoding_rs 0.8.35
-================================================================================
-// Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
-//
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are met:
-//
-// 1. Redistributions of source code must retain the above copyright notice, this
-//    list of conditions and the following disclaimer.
-//
-// 2. Redistributions in binary form must reproduce the above copyright notice,
-//    this list of conditions and the following disclaimer in the documentation
-//    and/or other materials provided with the distribution.
-//
-// 3. Neither the name of the copyright holder nor the names of its
-//    contributors may be used to endorse or promote products derived from
-//    this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;
-// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-/// The PUA code points special-cased in the GB18030 encoder.
-pub(crate) static GB18030_2022_OVERRIDE_PUA: [u16; 18] &#x3D; [
-    0xE78D, 0xE78E, 0xE78F, 0xE790, 0xE791, 0xE792, 0xE793, 0xE794, 0xE795, 0xE796, 0xE81E, 0xE826,
-    0xE82B, 0xE82C, 0xE832, 0xE843, 0xE854, 0xE864,
-];
-
-/// The bytes corresponding to the PUA code points special-cased in the GB18030 encoder.
-pub(crate) static GB18030_2022_OVERRIDE_BYTES: [[u8; 2]; 18] &#x3D; [
-    [0xA6, 0xD9],
-    [0xA6, 0xDA],
-    [0xA6, 0xDB],
-    [0xA6, 0xDC],
-    [0xA6, 0xDD],
-    [0xA6, 0xDE],
-    [0xA6, 0xDF],
-    [0xA6, 0xEC],
-    [0xA6, 0xED],
-    [0xA6, 0xF3],
-    [0xFE, 0x59],
-    [0xFE, 0x61],
-    [0xFE, 0x66],
-    [0xFE, 0x67],
-    [0xFE, 0x6D],
-    [0xFE, 0x7E],
-    [0xFE, 0x90],
-    [0xFE, 0xA0],
-];
-
-
------------------------
-
-
-================================================================================
-## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
-### USED BY:
   - alloc-no-stdlib 3.0.0
   - brotli 9.0.0
 ================================================================================
@@ -1412,42 +1348,6 @@ Redistribution and use in source and binary forms, with or without modification,
 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
-### USED BY:
-  - encoding_rs 0.8.35
-================================================================================
-Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 -----------------------
@@ -2682,7 +2582,6 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - data-url 0.3.2
   - idna 1.1.0
   - percent-encoding 2.3.2
   - url 2.5.8
@@ -5157,70 +5056,6 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - document-features 0.2.12
-================================================================================
-Copyright (c) 2020 Olivier Goffart &lt;ogoffart@sixtyfps.io&gt;
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the &quot;Software&quot;), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
-  - litrs 1.0.0
-================================================================================
-Copyright (c) 2020 Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the &quot;Software&quot;), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
   - cpufeatures 0.2.17
 ================================================================================
 Copyright (c) 2020-2025 The RustCrypto Project Developers
@@ -5931,7 +5766,6 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - encoding_rs 0.8.35
   - utf8_iter 1.0.4
 ================================================================================
 Copyright Mozilla Foundation
@@ -6027,73 +5861,11 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - publicsuffix 2.3.0
-================================================================================
-MIT License
-
-Copyright (c) 2016 Rushmore Mushambi
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the &quot;Software&quot;), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
   - field-offset 0.3.6
 ================================================================================
 MIT License
 
 Copyright (c) 2016-2021 Diggory Blake, and other contributors.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the &quot;Software&quot;), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
-  - cookie_store 0.22.1
-================================================================================
-MIT License
-
-Copyright (c) 2017 
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the &quot;Software&quot;), to deal
@@ -6771,38 +6543,6 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - psl-types 2.0.11
-================================================================================
-MIT License
-
-Copyright (c) 2021 Rushmore Mushambi
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the &quot;Software&quot;), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
-  - urlpattern 0.3.0
   - urlpattern 0.6.0
 ================================================================================
 MIT License
@@ -7109,18 +6849,12 @@ SOFTWARE.
   - tauri-plugin-deep-link 2.4.10
   - tauri-plugin-dialog 2.7.3
   - tauri-plugin-fs 2.5.2
-  - tauri-plugin-http 2.5.9
   - tauri-plugin-notification 2.5.1
   - tauri-plugin-opener 2.5.5
   - tauri-plugin-single-instance 2.4.4
   - tauri-plugin-websocket 2.4.3
   - tauri-plugin 2.7.1
   - tauri-winrt-notification 0.8.1
-  - unic-char-property 0.9.0
-  - unic-char-range 0.9.0
-  - unic-common 0.9.0
-  - unic-ucd-ident 0.9.0
-  - unic-ucd-version 0.9.0
   - webview2-com-macros 0.8.1
   - webview2-com-sys 0.39.1
   - webview2-com 0.39.1

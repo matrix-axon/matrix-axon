@@ -608,56 +608,6 @@ describe('request telemetry', () => {
   })
 
   /**
-   * `tauri-plugin-http` rejects with a bare string: `reqwest`'s message, URL
-   * and all. Unrecognised, it reached the banner verbatim on an iPhone.
-   */
-  it('rewords a shell transport failure and reports it without the url', async () => {
-    const failing: typeof globalThis.fetch = (input) =>
-      Promise.reject(
-        `error sending request for url (${(input as Request).url})`,
-      )
-    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
-      fetch: failing,
-    })
-
-    await expect(api.GET('/v1/accounts')).rejects.toThrow(
-      REQUEST_UNREACHABLE_MESSAGE,
-    )
-
-    const failed = marks.filter((mark) => mark.name === 'api:failed')
-    expect(failed).toHaveLength(1)
-    expect(failed[0].detail).toMatchObject({
-      route: 'accounts',
-      kind: 'send',
-      stage: 'headers',
-    })
-    expect(JSON.stringify(failed[0].detail)).not.toContain(BASE_URL)
-  })
-
-  it('reports a body the shell failed to finish as a body failure', async () => {
-    const truncating: typeof globalThis.fetch = async () =>
-      new Response(
-        new ReadableStream<Uint8Array>({
-          pull(controller) {
-            controller.error('error decoding response body')
-          },
-        }),
-        { status: 200 },
-      )
-    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
-      fetch: truncating,
-    })
-
-    await expect(api.GET('/v1/accounts')).rejects.toThrow(
-      REQUEST_UNREACHABLE_MESSAGE,
-    )
-
-    expect(
-      marks.find((mark) => mark.name === 'api:failed')?.detail,
-    ).toMatchObject({ kind: 'body', stage: 'body' })
-  })
-
-  /**
    * The shell's own transport says why on the error's cause (ADR 0127 § 4):
    * that word, and its closed-set detail, are what the readout records.
    */
@@ -717,25 +667,6 @@ describe('request telemetry', () => {
       stage: 'body',
       ver: 'h2',
     })
-  })
-
-  /**
-   * The plugin's Rust side answers an abort with a string as well. It must
-   * not be dressed as a dead network.
-   */
-  it("keeps the shell's cancel an abort, not an unreachable server", async () => {
-    const cancelling: typeof globalThis.fetch = () =>
-      Promise.reject('Request canceled')
-    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
-      fetch: cancelling,
-    })
-
-    await expect(api.GET('/v1/accounts')).rejects.toThrow(
-      REQUEST_TIMEOUT_MESSAGE,
-    )
-    expect(
-      marks.find((mark) => mark.name === 'api:failed')?.detail,
-    ).toMatchObject({ kind: 'cancelled' })
   })
 
   /**

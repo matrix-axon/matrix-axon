@@ -5,9 +5,9 @@
 //! **Transport.** The page loads from a custom scheme, so every `/v1` call is
 //! cross-origin, and the server serves no CORS headers (ADR 0046's M-W1.5 was
 //! designed and never built; ADR 0052 § 5 chose a same-origin front door
-//! instead). `tauri-plugin-http` and `tauri-plugin-websocket` move those calls
-//! into this process, where CORS does not apply and a plain-http LAN server is
-//! reachable — see ADR 0102 § 2.
+//! instead). The in-repo `axon-http` plugin (ADR 0127) and
+//! `tauri-plugin-websocket` move those calls into this process, where CORS does
+//! not apply and a plain-http LAN server is reachable — see ADR 0102 § 2.
 //!
 //! **Serving the bundle**, so an unknown path can fall back to the app instead
 //! of 404ing. See `route`.
@@ -69,16 +69,13 @@ pub fn run() {
     let builder = builder
         .manage(DroppedPaths::default())
         .invoke_handler(tauri::generate_handler![read_dropped_file, set_icon_badge])
-        // Transport. All three are granted by capability files under
+        // Transport. Both are granted by capability files under
         // `capabilities/`, not here — what the page may reach is
         // security-relevant and belongs somewhere reviewable.
         //
         // `axon-http` is the shell's own pooled HTTP client (ADR 0127), which
-        // every `/v1` and media request uses. `tauri-plugin-http` stays for
-        // one release behind Settings → Debug → "Legacy shell transport", and
-        // goes with that toggle.
+        // every `/v1` and media request uses.
         .plugin(tauri_plugin_axon_http::init())
-        .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_websocket::init())
         // Saving an attachment: a save dialog and a real write, because
         // `<a download>` does nothing from a custom scheme.

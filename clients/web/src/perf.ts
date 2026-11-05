@@ -221,18 +221,13 @@ export function setTelemetrySink(fn: TelemetrySinkFn | null): void {
   sink = fn
 }
 
-/**
- * The shell transport's counters (`Stats` in `src-tauri/axon-http`), plus
- * whether the legacy transport is in use, so a reading can say which
- * transport its numbers describe.
- */
+/** The shell transport's counters (`Stats` in `src-tauri/axon-http`). */
 export interface TransportStatsReading {
   connectionsOpened: number
   requestsSent: number
   retries: { nack: number; fastReset: number; requeue: number }
   resets: number
   liveEntries: number
-  legacy: boolean
 }
 
 /** Why a `transport:stats` line was written. */
@@ -270,7 +265,6 @@ export function perfMarkTransportStats(why: TransportStatsReason): void {
     .then((stats) => {
       perfMark('transport:stats', {
         why,
-        legacy: stats.legacy,
         conn: count(stats.connectionsOpened),
         sent: count(stats.requestsSent),
         nack: count(stats.retries.nack),
@@ -635,7 +629,7 @@ interface RoomOpen {
    * has no entry for a request until it *finishes*, so a request stalled
    * mid-body is invisible on the `waiting` line, which is exactly when it
    * matters. And it has none at all in the packaged app, whose requests leave
-   * through `tauri-plugin-http` rather than the webview. Bounded by
+   * through the shell's own transport rather than the webview. Bounded by
    * `ROOM_OPEN_REQUESTS_MAX`.
    */
   requests: RequestRecord[]
@@ -1141,11 +1135,10 @@ export type RequestOutcome = 'ok' | 'timeout' | 'aborted' | 'failed'
  * that names an account and a room. As a plain `string` only a comment stood
  * in the way of that.
  *
- * The shell's transport names its own categories (ADR 0127 § 4). `send` is
- * the legacy shell transport's only word for a failure before headers, and
- * `fetch` a browser's, which says no more than that.
+ * The shell's transport names its own categories (ADR 0127 § 4). `fetch` is
+ * a browser's, which says no more than that.
  */
-export type FailureKind = 'send' | 'fetch' | TransportFailureKind
+export type FailureKind = 'fetch' | TransportFailureKind
 
 /**
  * Where a request was when it ended, or where it is now if it has not.
@@ -1196,8 +1189,8 @@ export interface RequestTrace {
  * Driven by the API client rather than read from Resource Timing, for two
  * reasons. A request that is still in flight has no resource entry, so the
  * `waiting` line could never show the request it was waiting *on*. And the
- * packaged app's requests go through `tauri-plugin-http`, so the webview
- * records no entry for them at all.
+ * packaged app's requests go through the shell's own transport, so the
+ * webview records no entry for them at all.
  *
  * Records are not marks. A room list's preview burst would push the mark ring
  * (`RECENT_MARKS_MAX`) past the marks `summariseTransition` scans for, so only
@@ -1277,11 +1270,9 @@ export function perfTraceRequest(url: string): RequestTrace | null {
  * `/v1` requests begun and not yet settled, counted only while marks are on.
  *
  * A failure's `inflight` is the reading that separates a bad link from a
- * crowd. The packaged app opens a connection per request (`tauri-plugin-http`
- * builds a new `reqwest` client for each, so nothing is pooled or
- * multiplexed), and a room with a few hundred threads asks for every thread
- * root at once (`stores/threads.ts`). One request failing alone on a phone is
- * the network; one failing among 300 is the client.
+ * crowd. A room with a few hundred threads asks for every thread root at
+ * once (`stores/threads.ts`). One request failing alone on a phone is the
+ * network; one failing among 300 is the client.
  */
 let openRequests = 0
 

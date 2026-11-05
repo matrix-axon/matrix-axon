@@ -1,6 +1,6 @@
 # ADR 0127 — One shared HTTP client in the native shell
 
-**Status:** Proposed; tracked in [issue 663](https://github.com/matrix-axon/matrix-axon/issues/663).
+**Status:** Accepted and implemented; tracked in [issue 663](https://github.com/matrix-axon/matrix-axon/issues/663), implemented in [PR 896](https://github.com/matrix-axon/matrix-axon/pull/896) and [PR 918](https://github.com/matrix-axon/matrix-axon/pull/918), with the legacy transport's removal in [issue 956](https://github.com/matrix-axon/matrix-axon/issues/956).
 Amends [ADR 0102](0102-tauri-packaging-and-store-distribution.md) § 2, which routes `/v1` traffic through `tauri-plugin-http`.
 That ADR's authority analysis and its "target design" stand unchanged.
 
@@ -175,6 +175,7 @@ So `api/client.ts`'s abort handling is unchanged, and an abort is never logged a
 - **A developer toggle**, Settings → Debug → "Legacy shell transport", routes requests back through `tauri-plugin-http` for one release.
   It is there for A/B comparison on a device and as an escape hatch.
   It is off by default.
+  It shipped in v0.1.21 and v0.1.22 and was removed with the plugin in delivery step 3 ([issue 956](https://github.com/matrix-axon/matrix-axon/issues/956)).
 
 ### 6. A fresh client after resume
 
@@ -249,16 +250,17 @@ Error statuses (5xx, 429, 503) are application policy, and belong with ADR 0122'
 
 ### 8. Authority is unchanged
 
-The new commands accept any `http` or `https` URL on any host and port: the same reach the plugin's `http(s)://*:*` scope grants today.
+The new commands accept any `http` or `https` URL on any host and port: the same reach `tauri-plugin-http`'s `http(s)://*:*` scope granted.
 The bearer token stays in JavaScript.
 This is a transport change, not the narrower design ADR 0102 § 2 records (paths instead of URLs, and a credential the shell holds).
 
 It is that design's prerequisite, though.
 Once the transport is an in-repo command, narrowing it means changing the command's arguments, not replacing its plumbing.
 That step stays sequenced with the keychain work ([issue 481](https://github.com/matrix-axon/matrix-axon/issues/481)), as ADR 0102 says, and is tracked in [issue 893](https://github.com/matrix-axon/matrix-axon/issues/893).
-Until it lands, the any-URL reach exists through two paths during the toggle release: the old plugin and the new commands.
+Until it lands, any `http` or `https` URL is reachable, through one path: the new commands.
 
-`tauri-plugin-http` and its capability entry are removed in the release after this ships, when the developer toggle goes.
+During the toggle release (v0.1.21 and v0.1.22) there were two, the old plugin and the new commands.
+`tauri-plugin-http` and its `http:default` capability entry were removed with the developer toggle in delivery step 3 ([PR 957](https://github.com/matrix-axon/matrix-axon/pull/957), [issue 956](https://github.com/matrix-axon/matrix-axon/issues/956)).
 The WebSocket stays on `tauri-plugin-websocket`: it is one long-lived connection, so it was never part of the problem.
 
 ## What this does not decide
@@ -322,7 +324,9 @@ It helps, but every remaining request still pays a handshake, and the app would 
 2. The plugin, its JavaScript binding, the `Platform.fetch` swap behind the developer toggle, the new failure kinds, `version` on traces and `transport:stats`.
    All of it is in the web silo (`clients/web`, including `src-tauri`).
    It may land as two PRs: the Rust plugin with its tests, then the client wiring.
+   Done: [PR 896](https://github.com/matrix-axon/matrix-axon/pull/896) (the plugin) and [PR 918](https://github.com/matrix-axon/matrix-axon/pull/918) (the wiring), shipped in v0.1.21.
 3. After one release with field readings: remove `tauri-plugin-http`, its capability entry and the toggle.
+   Done: [PR 957](https://github.com/matrix-axon/matrix-axon/pull/957), with the readings recorded on [issue 956](https://github.com/matrix-axon/matrix-axon/issues/956).
 
 ## Verification
 
@@ -353,8 +357,8 @@ It helps, but every remaining request still pays a handshake, and the app would 
   Background the app for five minutes, then bring it back.
   The first request succeeds at normal latency, and one new connection is counted.
 - **Proxy.**
-  With a proxy configured in macOS or Windows system settings, the new transport and the legacy toggle both go through it.
-  On iOS and Android, neither does.
+  With a proxy configured in macOS or Windows system settings, the new transport goes through it, as the legacy one did.
+  On iOS and Android, neither did.
 - **Upload.**
   Send a file near 100 MiB on iOS and on the Android emulator, and watch memory stay near one copy of the file.
   Android's raw-payload IPC path differs from iOS's and has to be measured, not assumed.

@@ -367,10 +367,10 @@
           "markdownDescription": "Denies the stats command without any pre-configured scope."
         },
         {
-          "description": "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, and read the connection counters. Any `http` or `https` URL is reachable, the same reach `http:default` grants today (ADR 0127 § 8).\n#### This default permission set includes:\n\n- `allow-send`\n- `allow-read-body`\n- `allow-cancel`\n- `allow-drop-body`\n- `allow-reset`\n- `allow-stats`",
+          "description": "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, and read the connection counters. Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).\n#### This default permission set includes:\n\n- `allow-send`\n- `allow-read-body`\n- `allow-cancel`\n- `allow-drop-body`\n- `allow-reset`\n- `allow-stats`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, and read the connection counters. Any `http` or `https` URL is reachable, the same reach `http:default` grants today (ADR 0127 § 8).\n#### This default permission set includes:\n\n- `allow-send`\n- `allow-read-body`\n- `allow-cancel`\n- `allow-drop-body`\n- `allow-reset`\n- `allow-stats`"
+          "markdownDescription": "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, and read the connection counters. Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).\n#### This default permission set includes:\n\n- `allow-send`\n- `allow-read-body`\n- `allow-cancel`\n- `allow-drop-body`\n- `allow-reset`\n- `allow-stats`"
         }
       ]
     }

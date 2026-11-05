@@ -1378,24 +1378,3 @@ describe('OAuth client identity from the platform', () => {
     )
   })
 })
-
-describe('the legacy shell transport choice (ADR 0127 § 5)', () => {
-  it('reaches the shell before any request, and follows the setting', () => {
-    const storage = memoryStorage()
-    storage.setItem(
-      'axon.settings',
-      JSON.stringify({ version: 1, legacyShellTransport: true }),
-    )
-    const chosen: boolean[] = []
-    const services = createServices(storage, memoryStorage(), {
-      ...browserPlatform(),
-      defaultApiBaseUrl: 'https://axon.example.com',
-      shellTransport: { setLegacy: (on) => chosen.push(on) },
-    })
-
-    // The stored choice, applied while the graph is built.
-    expect(chosen).toEqual([true])
-    services.settings.legacyShellTransport.value = false
-    expect(chosen).toEqual([true, false])
-  })
-})

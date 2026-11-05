@@ -216,8 +216,9 @@ describe('shellFetch response', () => {
     expect(response.url).toBe('https://media.example/after-redirect')
     expect(response.headers.get('x-b')).toBe('2')
     expect(transportVersion(response)).toBe('h2')
-    // The workaround in `media-service.ts` exists because the legacy plugin's
-    // `blob()` came back untyped. This one does not.
+    // Headers are set at construction, so `blob()` is typed. `media-service.ts`
+    // relies on it: untyped, WebKit's long-press Copy put the `blob:` URL on
+    // the iOS clipboard instead of the picture.
     const blob = await response.clone().blob()
     expect(blob.type).toBe('image/png')
     expect(await response.text()).toBe('abc')
