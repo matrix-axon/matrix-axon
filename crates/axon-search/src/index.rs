@@ -263,11 +263,14 @@ impl SearchIndex {
                 Ok(query) => query,
                 // Users type prose, not query syntax: `they're`, `10:30`, `(x` and
                 // `a AND` fail to parse (`10:30` as a nonexistent field), so retry
-                // them as plain words. Any other error means the query parsed but is
-                // unusable (`-coming` excludes everything), and stays a BadQuery.
-                Err(QueryParserError::SyntaxError(_) | QueryParserError::FieldDoesNotExist(_)) => {
-                    self.literal_query(text)?
-                }
+                // them as plain words, as does a value that does not fit its typed
+                // field (`origin_ts:noon`). Any other error means the query parsed
+                // but is unusable (`-coming` excludes everything), and stays a BadQuery.
+                Err(
+                    QueryParserError::SyntaxError(_)
+                    | QueryParserError::FieldDoesNotExist(_)
+                    | QueryParserError::ExpectedInt(_),
+                ) => self.literal_query(text)?,
                 Err(e) => return Err(SearchError::BadQuery(e.to_string())),
             }
         };
@@ -1105,6 +1108,25 @@ mod tests {
         // `see:` is a nonexistent field, so this takes the fallback; the 41-byte
         // segment is dropped from the query as it was from the index.
         let found = index.search(&params(&format!("see:{long}:end"))).unwrap();
+        assert_eq!(found.total, 1);
+    }
+
+    #[test]
+    fn typed_field_value_that_does_not_parse_falls_back() {
+        let (index, _dir) = open_tmp();
+        let account = Uuid::new_v4();
+        index.index_for_test(&[ev(
+            account,
+            "$a",
+            "!r",
+            "@u:x",
+            1,
+            "the origin_ts noon thing",
+        )]);
+        index.reload().unwrap();
+        // `origin_ts` is the i64 field, so `noon` fails with ExpectedInt rather than
+        // a syntax error; it is still prose.
+        let found = index.search(&params("origin_ts:noon")).unwrap();
         assert_eq!(found.total, 1);
     }
 
