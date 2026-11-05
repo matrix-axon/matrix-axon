@@ -276,7 +276,7 @@ scene now depends on:
   Enter is not the send affordance a touch-only user has — the Send button is.
 
 The web custom emoji picker is covered by `clients/web/e2e/custom-emoji-picker.spec.ts`, including personal and room packs, image previews, sends, withdrawals, and mobile safe-area and keyboard viewport containment in both room and thread pickers.
-Composer insertion is covered by `clients/web/e2e/composer-emoji.spec.ts`: immediate standard shortcode conversion, standard and custom selection, duplicate pack names, native undo/redo, room/thread sends, room draft reload, pack removal, and touch access through the sticker picker.
+Composer insertion is covered by `clients/web/e2e/composer-emoji.spec.ts`: immediate standard shortcode conversion and Backspace restoration to literal text, standard and custom selection, duplicate pack names, native undo/redo, room/thread sends, room draft reload, pack removal, and touch access through the sticker picker.
 No recorded demo scene covers the composer emoji picker yet.
 A recorded demo scene for pack selection remains outstanding; the existing `react` scene continues to demonstrate Unicode reactions.
 

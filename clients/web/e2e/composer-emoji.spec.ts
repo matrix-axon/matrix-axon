@@ -200,6 +200,60 @@ async function fixtures(page: Page) {
 }
 
 for (const thread of [false, true]) {
+  test(`immediate Backspace restores a literal shortcode in the ${thread ? 'thread' : 'room'}`, async ({
+    page,
+  }) => {
+    const { sent } = await fixtures(page)
+    await signIn(page)
+    await page.goto(
+      thread
+        ? `${ROOM_URL}?thread=${encodeURIComponent('$emoji-root')}`
+        : ROOM_URL,
+    )
+    const pane = page.locator(thread ? '.thread-panel' : '.room-stream')
+    const input = pane.locator('.composer textarea')
+    const nativeMod = process.platform === 'darwin' ? 'Meta' : 'Control'
+    await input.fill('before :+1 after')
+    await input.evaluate((el) => el.setSelectionRange(10, 10))
+    await input.press(':')
+    await expect(input).toHaveValue('before 👍 after')
+    await input.press('Backspace')
+    await expect(input).toHaveValue('before \\:+1: after')
+    expect(await input.evaluate((el) => el.selectionStart)).toBe(12)
+    await input.press(`${nativeMod}+z`)
+    await expect(input).toHaveValue('before 👍 after')
+    await input.press(`${nativeMod}+Shift+z`)
+    await expect(input).toHaveValue('before \\:+1: after')
+    await pane
+      .locator('.composer')
+      .getByRole('button', { name: 'Send', exact: true })
+      .click()
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].body).toBe('before :+1: after')
+
+    // Typing or navigating ends the one-action restoration window.
+    await input.fill('go :+1')
+    await input.press(':')
+    await input.press('Space')
+    await input.press('Backspace')
+    await expect(input).toHaveValue('go 👍')
+    await input.press('Backspace')
+    await expect(input).toHaveValue('go ')
+    await input.fill('go :+1')
+    await input.press(':')
+    await input.press('ArrowLeft')
+    await input.press('ArrowRight')
+    await input.press('Backspace')
+    await expect(input).toHaveValue('go ')
+    // Undo/redo must not re-arm automatic restoration.
+    await input.fill('go :+1')
+    await input.press(':')
+    await input.press(`${nativeMod}+z`)
+    await input.press(`${nativeMod}+Shift+z`)
+    await input.press('Backspace')
+    await expect(input).toHaveValue('go ')
+  })
+
   test(`standard emoji shortcodes render immediately with native undo in the ${thread ? 'thread' : 'room'}`, async ({
     page,
   }, info) => {

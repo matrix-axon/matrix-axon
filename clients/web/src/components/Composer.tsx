@@ -267,6 +267,12 @@ export function Composer({
   const [draft, setDraft] = useState(initialValue)
   const inline = useRef(parseInlineEmoji(initialValue, initialInlineEmoji))
   const pendingInline = useRef<InlineEmojiReference[] | null>(null)
+  const convertedEmoji = useRef<{
+    text: string
+    start: number
+    end: number
+    shortcode: string
+  } | null>(null)
   const beforeInput = useRef<{
     text: string
     start: number
@@ -364,6 +370,7 @@ export function Composer({
     const refs = parseInlineEmoji(initialValue, JSON.parse(initialEmojiKey))
     inline.current = refs
     pendingInline.current = null
+    convertedEmoji.current = null
     beforeInput.current = null
     emojiHistory.current = initialEmojiHistory(initialValue, refs)
     synced.current = initialValue
@@ -597,6 +604,7 @@ export function Composer({
     synced.current = initialValue
     syncedEmoji.current = initialEmojiKey
     if (clean) {
+      convertedEmoji.current = null
       inline.current = parseInlineEmoji(
         initialValue,
         JSON.parse(initialEmojiKey),
@@ -689,6 +697,7 @@ export function Composer({
     historyDirection?: number,
     edit?: { start: number; end: number },
   ) => {
+    convertedEmoji.current = null
     const history = emojiHistory.current
     let refs: InlineEmojiReference[] | undefined
     if (historyDirection) {
@@ -917,6 +926,7 @@ export function Composer({
   }
 
   const submit = () => {
+    convertedEmoji.current = null
     if (stickerLookup.current !== null) {
       setStickerProblem(
         'Still checking sticker packs. Wait before sending another message.',
@@ -1354,11 +1364,30 @@ export function Composer({
             enterkeyhint={singlePane ? 'enter' : 'send'}
             onBeforeInput={(event) => {
               const el = event.currentTarget
+              const converted = convertedEmoji.current
+              convertedEmoji.current = null
               beforeInput.current = {
                 text: el.value,
                 start: el.selectionStart,
                 end: el.selectionEnd,
                 type: event.inputType,
+              }
+              if (
+                event.cancelable &&
+                !event.isComposing &&
+                event.inputType === 'deleteContentBackward' &&
+                converted &&
+                el.value === converted.text &&
+                el.selectionStart === converted.end &&
+                el.selectionEnd === converted.end &&
+                insertEmojiText(
+                  converted.start,
+                  converted.end,
+                  `\\:${converted.shortcode}:`,
+                )
+              ) {
+                event.preventDefault()
+                return
               }
               // Replace the token in the same native edit as the closing
               // colon, retaining undo and avoiding edits during IME or paste.
@@ -1379,8 +1408,15 @@ export function Composer({
                   query &&
                   unicode !== null &&
                   insertEmojiText(query.start, query.end, unicode)
-                )
+                ) {
+                  convertedEmoji.current = {
+                    text: el.value,
+                    start: query.start,
+                    end: query.start + unicode.length,
+                    shortcode: query.query,
+                  }
                   event.preventDefault()
+                }
               }
             }}
             onInput={(event) => {
@@ -1417,6 +1453,7 @@ export function Composer({
             }}
             onClick={(event) => setCaret(event.currentTarget.selectionStart)}
             onPointerDown={(event) => {
+              convertedEmoji.current = null
               if (event.pointerType === 'touch') {
                 event.currentTarget.dataset.touchFocus = ''
               } else {
@@ -1425,11 +1462,23 @@ export function Composer({
             }}
             onFocus={onFocus}
             onBlur={(event) => {
+              convertedEmoji.current = null
               delete event.currentTarget.dataset.touchFocus
             }}
             onKeyUp={(event) => setCaret(event.currentTarget.selectionStart)}
-            onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+            onSelect={(event) => {
+              const el = event.currentTarget
+              const converted = convertedEmoji.current
+              if (
+                converted &&
+                (el.selectionStart !== converted.end ||
+                  el.selectionEnd !== converted.end)
+              )
+                convertedEmoji.current = null
+              setCaret(el.selectionStart)
+            }}
             onPaste={(event) => {
+              convertedEmoji.current = null
               // A pasted screenshot arrives as a file on the clipboard. Claim
               // the event *only* when one is actually there — an ordinary text
               // paste must still land in the field.
@@ -1468,6 +1517,12 @@ export function Composer({
               })
             }}
             onKeyDown={(event) => {
+              if (
+                event.key !== 'Backspace' ||
+                hasModifier(event) ||
+                event.isComposing
+              )
+                convertedEmoji.current = null
               if (
                 event.key === ';' &&
                 isPrimaryModifier(event) &&

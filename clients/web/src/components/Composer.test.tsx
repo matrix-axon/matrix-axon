@@ -94,6 +94,61 @@ describe('Composer typed emoji shortcodes', () => {
     expect(onSubmit).toHaveBeenCalledWith('before 👍 after')
   })
 
+  it('restores an escaped shortcode on immediate Backspace', () => {
+    const { textarea, onDraftChange } = renderComposer({
+      initialValue: 'before :+1 after',
+    })
+    textarea.setSelectionRange(10, 10)
+    beforeInput(textarea)
+
+    const deletion = beforeInput(textarea, {
+      inputType: 'deleteContentBackward',
+      data: null,
+    })
+
+    expect(deletion.defaultPrevented).toBe(true)
+    expect(textarea.value).toBe('before \\:+1: after')
+    expect(textarea.selectionStart).toBe(12)
+    expect(onDraftChange).toHaveBeenLastCalledWith('before \\:+1: after')
+    // A second Backspace uses ordinary native deletion.
+    expect(
+      beforeInput(textarea, {
+        inputType: 'deleteContentBackward',
+        data: null,
+      }).defaultPrevented,
+    ).toBe(false)
+  })
+
+  it.each(['navigation', 'typing', 'blur', 'selection', 'undo'])(
+    'ends Backspace restoration after %s',
+    (action) => {
+      const { textarea } = renderComposer({ initialValue: 'before :+1' })
+      textarea.setSelectionRange(10, 10)
+      beforeInput(textarea)
+      if (action === 'navigation') {
+        fireEvent.keyDown(textarea, { key: 'ArrowLeft' })
+        fireEvent.keyDown(textarea, { key: 'ArrowRight' })
+      } else if (action === 'typing') {
+        // Even an input that leaves the same text starts a new edit.
+        fireEvent.input(textarea)
+      } else if (action === 'blur') {
+        act(() => textarea.blur())
+      } else if (action === 'selection') {
+        textarea.setSelectionRange(7, 9)
+        fireEvent.select(textarea)
+        textarea.setSelectionRange(9, 9)
+      } else {
+        beforeInput(textarea, { inputType: 'historyUndo', data: null })
+      }
+      expect(
+        beforeInput(textarea, {
+          inputType: 'deleteContentBackward',
+          data: null,
+        }).defaultPrevented,
+      ).toBe(false)
+    },
+  )
+
   it.each([
     { text: 'literal \\:smile', init: {} },
     { text: 'unknown :not_an_emoji', init: {} },
