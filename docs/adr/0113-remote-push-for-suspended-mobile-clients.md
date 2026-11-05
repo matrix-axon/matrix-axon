@@ -278,13 +278,14 @@ The data payload always carries routing fields, as strings:
 The alert text for `activity` does not include them.
 Apple and Google can still read them.
 A tap opens that room, including the thread, without a round trip.
-The payload carries no badge count.
+The payload carries no badge count, unless the registration opts in under ADR 0129 (below).
 The icon badge stays the local total from #607.
 
 > **Amended by [ADR 0129](0129-badge-and-read-clearing-for-suspended-phones.md).**
 > An APNs registration with `badge` set carries the instance unread total as `aps.badge`.
 > For those registrations only, a fall in a room's `notification_count` also queues a badge-only APNs push.
 > A fall to zero queues an Android message that cancels the room's notification, whatever `badge` says.
+> That message replaces an alert for the room that is still waiting, so the alert is not sent.
 
 APNs sends a visible alert.
 `apns-push-type` is `alert` and `apns-priority` is 10.

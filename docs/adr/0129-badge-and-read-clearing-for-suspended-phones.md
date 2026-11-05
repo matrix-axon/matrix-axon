@@ -30,7 +30,8 @@ Removing delivered notifications on desktop, and from iOS Notification Center, i
 
 The server keeps a suspended phone's unread state current with two new sends.
 No send runs app code on iOS.
-ADR 0113's case list is unchanged: an alert is sent in exactly the cases it was before.
+ADR 0113's case list is unchanged: an alert is queued in exactly the cases it was before.
+One alert that was queued may now go unsent: on an Android device, a room-read message replaces a waiting alert for the same room (see Router and scheduling).
 The only change to the alert itself is the `aps.badge` field described under iOS below.
 
 ### The total
@@ -44,6 +45,8 @@ The total is read when a send starts, not when the router decides.
 A burst of reads that coalesces into one send carries the newest total.
 A failed or slow read (the two-second bound the liveness check uses) skips the badge, and the failure is logged.
 For an alert, only the badge field is skipped and the alert still goes out.
+The devices that share one alert share one successful read.
+A failed read is not shared: the next device tries again.
 
 One registration covers every Matrix account on the instance (ADR 0113), so one total covers the device.
 
@@ -62,6 +65,13 @@ When it is true and the provider is APNs:
   No app code runs, so this still needs no background mode.
 - An observation that falls and also sends an alert (ADR 0113's "fell, still above zero, notifying message" case) does not queue a second, badge-only push.
   The alert already carries the total.
+- If a badge-enabled device's alert cannot go out with its total, the outcome depends on why:
+  - An alert too large for the payload limit, even with the generic text, is sent as a badge-only push instead, so the total still lands.
+  - A newer alert for the same room that replaces a waiting one carries a newer total.
+  - A registration the liveness check rejects is deleted, so its badge no longer matters.
+  - A failed or slow total read sends the alert without `aps.badge`, and no badge-only push follows: it would need the same read.
+    The icon then stays one step behind until the next push, or until the app runs and repaints.
+    v1 accepts this.
 - A zero total is sent as `0`, which clears the icon.
 
 The badge-only push goes out on every fall, not only when the total reaches zero.
@@ -116,8 +126,12 @@ There is no `collapse_key`.
 FCM stores at most four collapse keys per device, and one per room would drop clears for most rooms.
 
 A late clear must not cancel a newer alert for the same room.
-The client cancels only a notification posted before the message's FCM `sentTime` (`RemoteMessage.getSentTime()`).
-An alert that arrived after the clear was sent survives it.
+When the client posts an alert, it stores that alert's FCM `sentTime` (`RemoteMessage.getSentTime()`) in the notification's extras.
+A room-read message cancels the notification only when the stored time is earlier than the room-read's own `sentTime`.
+Both times come from FCM's servers, so the phone's clock is never compared, and an alert sent after the clear survives it.
+The notification's `postTime` is not used: it is the phone's clock.
+A notification with no stored time, posted by an older build or by the running app, is cancelled.
+The running app is in the foreground or recently was, so a normal-priority clear is not held for Doze, and the app repaints from the room list anyway.
 
 A partial read (the count falls but stays above zero) sends no room-read message.
 The room still has unread messages, and its one collapsed notification is still accurate.
@@ -137,6 +151,8 @@ The router task still does not await Postgres: the total is read inside the spaw
   A newer alert or room-read message replaces one that is still waiting, so a waiting alert for a room that has since been read is dropped instead of sent.
 - A badge-only push has one key per registration.
   At most one runs and at most one waits, so a burst of reads (marking every room read) produces at most two badge-only pushes per device.
+  A fall that arrives while a badge-only push is running always fills the waiting slot, even if the running push has already read its total.
+  The waiting push reads the total again when it starts, so the last push a burst produces carries the newest total.
 - A room-read message is account-scoped like an alert, so removing the account or dropping the room drops it while it waits.
   A badge-only push is not tied to an account.
 - The first observation of a room after startup seeds the room and is not a fall, as in ADR 0113.
@@ -151,6 +167,7 @@ The next push or the next foreground repaint corrects the badge.
 `PUT /v1/push/registrations` gains an optional boolean `badge`.
 An omitted `badge` is stored as false, so a client built before this change keeps ADR 0113's payloads, and a device opts in explicitly.
 The upsert writes it like `disclosure`: a repeat `PUT` that omits it sets it back to false.
+So every client `PUT` must send `badge`, including a re-registration after a token refresh; otherwise the device silently stops getting badges.
 The response echoes `badge`.
 
 The field is accepted for both providers.
@@ -176,9 +193,10 @@ The total is an aggregate count and is not secret.
   It adds the migration, the `badge` field, the total query, the two payloads, and the router's fall handling.
 - The client change waits for the server change, as ADR 0113 required for its own client half.
   It is `clients/web/`, including `src-tauri/`:
-  - `PUT` sends `badge` from `appBadgeEnabled`, and changing that setting re-registers.
-  - The Android service handles `axon_kind: room_read`.
-    It cancels the room's tag when the notification predates `sentTime`, on the background path and on the foreground path.
+  - Every `PUT` sends `badge` from `appBadgeEnabled`, including token-refresh re-registrations, and changing that setting re-registers.
+    A test pins that no registration path omits the field.
+  - The Android service stores each alert's FCM `sentTime` in the notification's extras and handles `axon_kind: room_read`.
+    It cancels the room's tag when the stored time is earlier than the room-read's `sentTime`, on the background path and on the foreground path.
 - `docs/client-parity.md` gains a row when the client half ships.
 - iOS Notification Center still keeps a banner for a room that has been read.
   Withdrawing it needs app code on a suspended phone, which this ADR does not add.
