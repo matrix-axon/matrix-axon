@@ -28,8 +28,14 @@ set -euo pipefail
 
 status=0
 for file in "$@"; do
-	# `|| true`: grep exits 1 for "no match", which is the passing case.
-	hits=$(grep -n -E '\{\{|\{%' -- "$file" || true)
+	# grep exits 1 for "no match", which is the passing case, and 2 for an error
+	# such as a missing or unreadable file, which must not pass unscanned.
+	rc=0
+	hits=$(grep -n -E '\{\{|\{%' -- "$file") || rc=$?
+	if [ "$rc" -gt 1 ]; then
+		echo "check-liquid: cannot scan $file" >&2
+		exit "$rc"
+	fi
 	if [ -n "$hits" ]; then
 		status=1
 		while IFS= read -r line; do
