@@ -87,7 +87,7 @@ brew install --cask matrix-axon/tap/axon
 ```
 
 On first launch the app asks for your Axon server's address: `http://<host>:8080` for the Docker stack, or your Tailscale or TLS hostname.
-Then sign in with a token — `docker compose exec axon-server axon-server token issue --label desktop` — or through SSO, if your server has registered the desktop client (see [SSO sign-in](../clients/web/README.md#sso-sign-in) for the `[[oauth.clients]]` entry it needs; the Docker stack does not create one for you).
+Then sign in with a token — `docker compose exec axon-server axon-server token issue --label desktop` — or through SSO, if your server has registered the desktop client (see [SSO sign-in](https://github.com/matrix-axon/matrix-axon/blob/main/clients/web/README.md#sso-sign-in) for the `[[oauth.clients]]` entry it needs; the Docker stack does not create one for you).
 The one-time `/bootstrap/<code>` URL signs in the browser client, not the app, and minting a token consumes it — so do the browser sign-in first if you want both.
 Each release also carries `THIRDPARTY-axon-desktop.txt`, the full license disclosure for everything the app bundles.
 
