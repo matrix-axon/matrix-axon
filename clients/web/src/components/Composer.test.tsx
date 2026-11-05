@@ -65,6 +65,55 @@ function renderComposer(props: Partial<Parameters<typeof Composer>[0]> = {}) {
   return { onSubmit, onDraftChange, textarea, form, ...utils }
 }
 
+function beforeInput(textarea: HTMLTextAreaElement, init: InputEventInit = {}) {
+  const event = new InputEvent('beforeinput', {
+    bubbles: true,
+    cancelable: true,
+    inputType: 'insertText',
+    data: ':',
+    ...init,
+  })
+  fireEvent(textarea, event)
+  return event
+}
+
+describe('Composer typed emoji shortcodes', () => {
+  it('converts a typed closing colon and preserves the suffix, caret, and draft', () => {
+    const { textarea, onDraftChange, onSubmit, form } = renderComposer({
+      initialValue: 'before :+1 after',
+    })
+    textarea.setSelectionRange(10, 10)
+
+    expect(beforeInput(textarea).defaultPrevented).toBe(true)
+
+    expect(textarea.value).toBe('before 👍 after')
+    expect(textarea.selectionStart).toBe(9)
+    expect(textarea.selectionEnd).toBe(9)
+    expect(onDraftChange).toHaveBeenLastCalledWith('before 👍 after')
+    fireEvent.submit(form)
+    expect(onSubmit).toHaveBeenCalledWith('before 👍 after')
+  })
+
+  it.each([
+    { text: 'literal \\:smile', init: {} },
+    { text: 'unknown :not_an_emoji', init: {} },
+    { text: '/react :+1', init: {} },
+    { text: 'composing :+1', init: { isComposing: true } },
+    { text: 'pasted :+1', init: { inputType: 'insertFromPaste' } },
+    { text: 'noncancelable :+1', init: { cancelable: false } },
+  ])('leaves $text to native editing', ({ text, init }) => {
+    const { textarea, onDraftChange } = renderComposer({
+      initialValue: text,
+      onCommand: vi.fn(),
+    })
+    textarea.setSelectionRange(text.length, text.length)
+
+    expect(beforeInput(textarea, init).defaultPrevented).toBe(false)
+    expect(textarea.value).toBe(text)
+    expect(onDraftChange).not.toHaveBeenCalled()
+  })
+})
+
 describe('Composer drafts (M-W6 step 5b)', () => {
   it('reports each edit via onDraftChange', () => {
     const { textarea, onDraftChange } = renderComposer()
