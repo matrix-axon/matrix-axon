@@ -50,9 +50,9 @@ tauri-plugin-fs = "2"
 # Pinned to 2.5.x rather than "2". The Tauri CLI requires the Rust crate and
 # `@tauri-apps/plugin-notification` to agree on major.minor, and a newer
 # release can be too young for pnpm's minimumReleaseAge supply-chain guard to
-# install. Pinning down here keeps both sides on the aged release. 2.5 requires Rust 1.90
-# (see `rust-version` above) and fixes the Windows permission check that 2.4
-# short-circuited to denied.
+# install. Pinning down here keeps both sides on the aged release. 2.5
+# requires Rust 1.90 (see `rust-version` above) and fixes the Windows
+# permission check that 2.4 short-circuited to denied.
 tauri-plugin-notification = "~2.5"
 # In-repo: Sign in with Apple and Keychain token storage on iOS (ADR 0054).
 tauri-plugin-native-auth = { path = "native-auth" }
