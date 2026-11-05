@@ -9674,7 +9674,7 @@
           "push"
         ],
         "summary": "Register a push token",
-        "description": "Register or re-home a device token.\n\nUpsert on `(provider, token)`. The same session updates disclosure,\nenvironment, and the access token that last wrote the row. A different\nsession becomes the owner and keeps the same id. The response does not\ninclude the token.",
+        "description": "Register or re-home a device token.\n\nUpsert on `(provider, token)`. The same session updates disclosure,\nenvironment, badge, and the access token that last wrote the row. A different\nsession becomes the owner and keeps the same id. The response does not\ninclude the token.",
         "operationId": "put_registration",
         "requestBody": {
           "content": {
@@ -11084,9 +11084,14 @@
             "required": [
               "id",
               "provider",
-              "disclosure"
+              "disclosure",
+              "badge"
             ],
             "properties": {
+              "badge": {
+                "type": "boolean",
+                "description": "Whether APNs sends carry the instance unread total as the icon badge\n(ADR 0129). Stored for FCM too; only APNs reads it."
+              },
               "disclosure": {
                 "type": "string",
                 "description": "What a later send may put in the banner: `activity`,\n`sender_and_room`, or `preview`."
@@ -15495,9 +15500,14 @@
         "required": [
           "id",
           "provider",
-          "disclosure"
+          "disclosure",
+          "badge"
         ],
         "properties": {
+          "badge": {
+            "type": "boolean",
+            "description": "Whether APNs sends carry the instance unread total as the icon badge\n(ADR 0129). Stored for FCM too; only APNs reads it."
+          },
           "disclosure": {
             "type": "string",
             "description": "What a later send may put in the banner: `activity`,\n`sender_and_room`, or `preview`."
@@ -15608,6 +15618,10 @@
           "disclosure"
         ],
         "properties": {
+          "badge": {
+            "type": "boolean",
+            "description": "Send the instance unread total as the app icon badge (ADR 0129).\nAPNs only; FCM stores it and ignores it. Omitted is `false`, and every\n`PUT` writes it, so a repeat that omits it turns the badge off."
+          },
           "disclosure": {
             "type": "string",
             "description": "`activity`, `sender_and_room`, or `preview`. Required, so an omitted\nfield cannot land on `preview`."

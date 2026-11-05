@@ -40,6 +40,8 @@ pub struct PushRegistration {
     pub provider: String,
     pub disclosure: String,
     pub environment: Option<String>,
+    /// Whether APNs sends carry the unread total as `aps.badge` (ADR 0129).
+    pub badge: bool,
 }
 
 /// What `PUT /v1/push/registrations` writes. `token` is the device token.
@@ -51,6 +53,7 @@ pub struct NewPushRegistration<'a> {
     pub token: &'a str,
     pub environment: Option<&'a str>,
     pub disclosure: &'a str,
+    pub badge: bool,
 }
 
 impl std::fmt::Debug for NewPushRegistration<'_> {
@@ -62,6 +65,7 @@ impl std::fmt::Debug for NewPushRegistration<'_> {
             .field("token", &"[REDACTED]")
             .field("environment", &self.environment)
             .field("disclosure", &self.disclosure)
+            .field("badge", &self.badge)
             .finish()
     }
 }
@@ -104,18 +108,19 @@ impl Store {
                      ) AS refresh_live \
              ), written AS ( \
                  INSERT INTO push_registrations \
-                     (session_id, token_id, provider, token, environment, disclosure) \
-                 SELECT $1, $2, $3, $4, $5, $6 FROM gate \
+                     (session_id, token_id, provider, token, environment, disclosure, badge) \
+                 SELECT $1, $2, $3, $4, $5, $6, $7 FROM gate \
                   WHERE token_live AND (non_expiring OR refresh_live) \
                  ON CONFLICT (provider, token) DO UPDATE \
                      SET session_id = EXCLUDED.session_id, \
                          token_id = EXCLUDED.token_id, \
                          environment = EXCLUDED.environment, \
-                         disclosure = EXCLUDED.disclosure \
-                 RETURNING id, provider, disclosure, environment \
+                         disclosure = EXCLUDED.disclosure, \
+                         badge = EXCLUDED.badge \
+                 RETURNING id, provider, disclosure, environment, badge \
              ) \
              SELECT written.id, written.provider, written.disclosure, written.environment, \
-                    gate.token_live \
+                    written.badge, gate.token_live \
                FROM gate \
                LEFT JOIN written ON true"
         );
@@ -126,6 +131,7 @@ impl Store {
             .bind(registration.token)
             .bind(registration.environment)
             .bind(registration.disclosure)
+            .bind(registration.badge)
             .fetch_one(&mut *tx)
             .await?;
         let id: Option<Uuid> = row.try_get("id")?;
@@ -137,6 +143,7 @@ impl Store {
                 provider: row.try_get("provider")?,
                 disclosure: row.try_get("disclosure")?,
                 environment: row.try_get("environment")?,
+                badge: row.try_get("badge")?,
             }));
         }
         tx.rollback().await?;
@@ -224,6 +231,8 @@ pub struct PushTarget {
     pub token: String,
     pub environment: Option<String>,
     pub disclosure: String,
+    /// ADR 0129: APNs sends carry `aps.badge`, and a fall queues a badge-only push.
+    pub badge: bool,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -235,6 +244,7 @@ impl std::fmt::Debug for PushTarget {
             .field("token", &"[REDACTED]")
             .field("environment", &self.environment)
             .field("disclosure", &self.disclosure)
+            .field("badge", &self.badge)
             .field("updated_at", &self.updated_at)
             .finish()
     }
@@ -262,7 +272,7 @@ impl Store {
     /// and still has to send. Callers must not log these rows.
     pub async fn list_push_targets(&self) -> Result<Vec<PushTarget>, StoreError> {
         let rows = sqlx_core::query::query(
-            "SELECT id, provider, token, environment, disclosure, updated_at \
+            "SELECT id, provider, token, environment, disclosure, badge, updated_at \
              FROM push_registrations",
         )
         .fetch_all(&self.pool)
@@ -276,7 +286,7 @@ impl Store {
     /// caller sends and does not delete.
     pub async fn push_send_check(&self, id: Uuid) -> Result<Option<PushSendCheck>, StoreError> {
         let sql = format!(
-            "SELECT id, provider, token, environment, disclosure, updated_at, \
+            "SELECT id, provider, token, environment, disclosure, badge, updated_at, \
                     ( \
                         EXISTS ( \
                             SELECT 1 FROM tokens \
@@ -326,6 +336,7 @@ fn push_target(row: &sqlx_postgres::PgRow) -> Result<PushTarget, StoreError> {
         token: row.try_get("token")?,
         environment: row.try_get("environment")?,
         disclosure: row.try_get("disclosure")?,
+        badge: row.try_get("badge")?,
         updated_at: row.try_get("updated_at")?,
     })
 }

@@ -2149,7 +2149,7 @@ export interface paths {
          * @description Register or re-home a device token.
          *
          *     Upsert on `(provider, token)`. The same session updates disclosure,
-         *     environment, and the access token that last wrote the row. A different
+         *     environment, badge, and the access token that last wrote the row. A different
          *     session becomes the owner and keeps the same id. The response does not
          *     include the token.
          */
@@ -2869,6 +2869,11 @@ export interface components {
              *     The device token is not in the response.
              */
             data: {
+                /**
+                 * @description Whether APNs sends carry the instance unread total as the icon badge
+                 *     (ADR 0129). Stored for FCM too; only APNs reads it.
+                 */
+                badge: boolean;
                 /**
                  * @description What a later send may put in the banner: `activity`,
                  *     `sender_and_room`, or `preview`.
@@ -5023,6 +5028,11 @@ export interface components {
          */
         PushRegistrationDto: {
             /**
+             * @description Whether APNs sends carry the instance unread total as the icon badge
+             *     (ADR 0129). Stored for FCM too; only APNs reads it.
+             */
+            badge: boolean;
+            /**
              * @description What a later send may put in the banner: `activity`,
              *     `sender_and_room`, or `preview`.
              */
@@ -5088,6 +5098,12 @@ export interface components {
         };
         /** @description Body of `PUT /v1/push/registrations`. */
         PutPushRegistrationRequest: {
+            /**
+             * @description Send the instance unread total as the app icon badge (ADR 0129).
+             *     APNs only; FCM stores it and ignores it. Omitted is `false`, and every
+             *     `PUT` writes it, so a repeat that omits it turns the badge off.
+             */
+            badge?: boolean;
             /**
              * @description `activity`, `sender_and_room`, or `preview`. Required, so an omitted
              *     field cannot land on `preview`.

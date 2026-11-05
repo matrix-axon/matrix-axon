@@ -1949,6 +1949,9 @@ pub struct PushRegistrationDto {
     pub disclosure: String,
     /// `sandbox` or `production` for APNs. Null for FCM.
     pub environment: Option<String>,
+    /// Whether APNs sends carry the instance unread total as the icon badge
+    /// (ADR 0129). Stored for FCM too; only APNs reads it.
+    pub badge: bool,
 }
 
 /// Body of `PUT /v1/push/registrations`.
@@ -1966,6 +1969,11 @@ pub struct PutPushRegistrationRequest {
     /// `sandbox` or `production` for APNs. Omit for FCM.
     #[serde(default)]
     pub environment: Option<String>,
+    /// Send the instance unread total as the app icon badge (ADR 0129).
+    /// APNs only; FCM stores it and ignores it. Omitted is `false`, and every
+    /// `PUT` writes it, so a repeat that omits it turns the badge off.
+    #[serde(default)]
+    pub badge: bool,
 }
 
 /// An upstream sign-in identity bound to this instance's owner

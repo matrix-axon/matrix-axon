@@ -31,6 +31,12 @@ pub(crate) struct Decision {
     pub state: RoomState,
     pub send: Option<PushMessage>,
     pub unknown_ids: Vec<String>,
+    /// The new `notification_count` when it fell on a seeded room (ADR 0129).
+    ///
+    /// Set whether or not this observation also sends, and whatever the
+    /// highlight count did. A seed is never a fall: the first count after
+    /// startup has nothing trustworthy to compare with.
+    pub notification_fell_to: Option<u64>,
 }
 
 /// Apply one observation.
@@ -61,6 +67,7 @@ pub(crate) fn decide(
                 state: kept,
                 send: None,
                 unknown_ids,
+                notification_fell_to: None,
             };
         };
         let mut seeded = RoomState::unseeded(after);
@@ -72,6 +79,7 @@ pub(crate) fn decide(
             state: seeded,
             send: None,
             unknown_ids,
+            notification_fell_to: None,
         };
     }
 
@@ -81,6 +89,7 @@ pub(crate) fn decide(
     let mut send = None;
     let rose = after.0 > state.pair.0 || after.1 > state.pair.1;
     let fell = !rose && (after.0 < state.pair.0 || after.1 < state.pair.1);
+    let notification_fell_to = (after.0 < state.pair.0).then_some(after.0);
 
     if rose && notifying.is_some() {
         send = notifying;
@@ -118,6 +127,7 @@ pub(crate) fn decide(
         },
         send,
         unknown_ids,
+        notification_fell_to,
     }
 }
 
@@ -307,6 +317,48 @@ mod tests {
         assert!(seeded.state.seeded);
         assert_eq!(seeded.state.pair, (3, 0));
         assert_eq!(seeded.state.slot.unwrap().event_id, "m");
+    }
+
+    #[test]
+    fn a_seeded_fall_reports_the_new_notification_count() {
+        let partial = decide(&seeded((4, 1)), Some((3, 1)), &[]);
+        assert_eq!(partial.notification_fell_to, Some(3));
+
+        let caught_up = decide(&seeded((4, 1)), Some((0, 0)), &[]);
+        assert_eq!(caught_up.notification_fell_to, Some(0));
+
+        // An alert in the same observation does not hide the fall. The router
+        // decides that the alert's own badge makes a badge-only push redundant.
+        let with_alert = decide(
+            &seeded((4, 1)),
+            Some((3, 0)),
+            &[message("m", PushClass::Notify)],
+        );
+        assert!(with_alert.send.is_some());
+        assert_eq!(with_alert.notification_fell_to, Some(3));
+    }
+
+    #[test]
+    fn a_highlight_fall_alone_or_a_seed_is_not_a_notification_fall() {
+        let highlight_only = decide(&seeded((3, 2)), Some((3, 0)), &[]);
+        assert_eq!(highlight_only.notification_fell_to, None);
+
+        let rise = decide(&seeded((3, 0)), Some((4, 0)), &[]);
+        assert_eq!(rise.notification_fell_to, None);
+
+        let unknown_count = decide(&seeded((3, 0)), None, &[]);
+        assert_eq!(unknown_count.notification_fell_to, None);
+
+        // An unseeded placeholder pair is above the first real count, which
+        // must still not read as a fall.
+        let seed = decide(&RoomState::unseeded((9, 9)), Some((0, 0)), &[]);
+        assert_eq!(seed.notification_fell_to, None);
+        let unseeded_message = decide(
+            &RoomState::unseeded((9, 9)),
+            None,
+            &[message("m", PushClass::Notify)],
+        );
+        assert_eq!(unseeded_message.notification_fell_to, None);
     }
 
     #[test]

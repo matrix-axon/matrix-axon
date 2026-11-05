@@ -53,6 +53,10 @@ The packaged iOS, iPadOS, and Android app registers when message notifications a
 `GET /v1/status` reports `push.apns` and `push.fcm`, true when this process loaded that provider's key.
 Registration succeeds when the key is not configured.
 Waking a device is a separate step from storing the registration.
+Reading a room on any device also reaches suspended phones (ADR 0129).
+An iPhone or iPad whose registration has `badge` set gets the instance unread total on every alert, and a badge-only push when a count falls.
+An Android device gets a silent message that withdraws the room's notification once that room is fully read.
+These sends use the same keys, and need no extra configuration.
 Set `[push.apns]` with `team_id`, `key_id`, `bundle_id`, and exactly one of `private_key` or `private_key_path`.
 Set `[push.fcm]` with `project_id`, `client_email`, `package_name`, and exactly one of those key sources.
 A provider whose every field is empty stays off.
