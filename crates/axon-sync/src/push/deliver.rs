@@ -274,6 +274,11 @@ impl LiveTransport {
                 event_id = %message.event_id,
                 "push payload exceeded 4096 bytes; wake dropped"
             );
+            // The alert suppressed this observation's badge-only push, so
+            // the total it would have carried goes out on its own (ADR 0129).
+            if let Some(total) = badge {
+                self.send_badge(&target, total).await;
+            }
             return;
         };
         let subject = Subject::Room {
@@ -332,13 +337,18 @@ impl LiveTransport {
         let Some(total) = read_badge_total(&self.store).await else {
             return;
         };
+        self.send_badge(&target, total).await;
+    }
+
+    /// Send `{"aps":{"badge":N}}` to an APNs registration.
+    async fn send_badge(&self, target: &PushTarget, total: u64) {
         let headers = ApnsHeaders {
             priority: "5",
             collapse: None,
         };
         let verdict = self
             .send_configured_apns(
-                &target,
+                target,
                 Subject::Badge { total },
                 headers,
                 payload::apns_badge_body(total),
@@ -813,7 +823,7 @@ pub(crate) struct SharedBanner {
     room_id: String,
     sender: String,
     once: tokio::sync::OnceCell<(Option<String>, String)>,
-    badge: tokio::sync::OnceCell<Option<u64>>,
+    badge: tokio::sync::OnceCell<u64>,
 }
 
 impl SharedBanner {
@@ -835,11 +845,25 @@ impl SharedBanner {
     }
 
     /// The unread total for this alert's `aps.badge`. Read by the first
-    /// badge-enabled device to need it. A failed read leaves the badge off the
-    /// alert, which still sends.
+    /// badge-enabled device to need it. A failed read leaves the badge off
+    /// that device's alert, which still sends, and is not kept: the next
+    /// device reads again.
     async fn badge_total(&self, store: &Store) -> Option<u64> {
-        *self.badge.get_or_init(|| read_badge_total(store)).await
+        keep_success(&self.badge, || read_badge_total(store)).await
     }
+}
+
+/// `cell`'s value, or `read`'s if the cell is empty. Only a `Some` is kept,
+/// so a failed read is retried by the next caller.
+async fn keep_success<F, Fut>(cell: &tokio::sync::OnceCell<u64>, read: F) -> Option<u64>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<u64>>,
+{
+    cell.get_or_try_init(|| async { read().await.ok_or(()) })
+        .await
+        .ok()
+        .copied()
 }
 
 /// `true` when APNs rejected the provider JWT itself. The cached token must
@@ -1056,5 +1080,23 @@ mod tests {
             apns_verdict(status, &response_body, updated()),
             ProviderVerdict::Keep
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_badge_total_is_retried_and_a_read_one_is_kept() {
+        let cell = tokio::sync::OnceCell::new();
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let read = |result: Option<u64>| {
+            let reads = &reads;
+            move || async move {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                result
+            }
+        };
+
+        assert_eq!(keep_success(&cell, read(None)).await, None);
+        assert_eq!(keep_success(&cell, read(Some(3))).await, Some(3));
+        assert_eq!(keep_success(&cell, read(Some(9))).await, Some(3));
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

@@ -645,7 +645,8 @@ fn apply_observation(
 /// push for each badge-enabled APNs device, and a fall to zero queues a
 /// room-read message for each FCM device (ADR 0129). An alert in the same
 /// observation already carries the total, so it suppresses the badge-only
-/// push. ADR 0113 never sends an alert on a fall to zero, so the room-read
+/// push; `deliver` sends that push itself if the alert is too large to send.
+/// ADR 0113 never sends an alert on a fall to zero, so the room-read
 /// message cannot be suppressed by one.
 fn jobs_for(
     observation: &Observation,
