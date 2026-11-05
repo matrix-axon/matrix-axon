@@ -3,6 +3,27 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.23 - 2026-11-05
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(web): replace standard emoji shortcodes while composing by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/952
+* feat(server): badge and room-read pushes when an unread count falls (ADR 0129) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/963
+#### Bug Fixes
+* fix(search): fall back to plain words when a query is not valid syntax by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/965
+#### Documentation
+* ci(docs): fail the Pages build when a site link does not resolve by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/954
+* docs(adr): ADR 0129, clear badges and read notifications on suspended phones by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/961
+#### Dependencies
+* refactor(web): remove tauri-plugin-http and the legacy shell transport toggle (ADR 0127 step 3) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/957
+#### Build and CI
+* ci(docs): fail the push gate on Liquid syntax in markdown by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/955
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.22...v0.1.23
+
 ## v0.1.22 - 2026-11-03
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
