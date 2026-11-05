@@ -236,8 +236,16 @@ impl Store {
     /// `epoch` and the account is still an active member. An absence
     /// confirmation also requires that no tuple of its type exists, so state
     /// sync delivered during the request wins; it serializes with that
-    /// tuple's insert on an advisory lock, so the two cannot both commit. Takes a share lock on the
-    /// summary row for the commit only; nothing is held across the request.
+    /// tuple's insert on an advisory lock, so the two cannot both commit.
+    /// Nothing is held across the request.
+    ///
+    /// Lock order: a share lock on the summary row, then (for a confirmation)
+    /// the absence advisory lock, then the cache row. The only other holder of the advisory lock
+    /// is the `room_state` insert trigger, which then deletes the cache row;
+    /// no transaction that inserts `room_state` also writes `room_summaries`
+    /// (`refresh_room_summary_display` and the epoch advance are statements
+    /// of their own), and summary writers take the summary row first. With
+    /// every path taking these locks in this order, no cycle can form.
     pub async fn record_room_detail(
         &self,
         account_id: Uuid,

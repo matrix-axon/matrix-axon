@@ -33,6 +33,11 @@ fn replies_map_to_the_documented_outcomes() {
             "unsupported"
         );
         assert_eq!(label(kind, status(405, None)), "unsupported");
+        assert_eq!(
+            label(kind, status(404, None)),
+            "unsupported",
+            "a bare 404 is a missing endpoint, from the server or a proxy"
+        );
         assert_eq!(label(kind, Reply::TooLarge), "too_large");
         assert_eq!(
             label(kind, Reply::Ok(b"not json".to_vec())),
@@ -152,9 +157,15 @@ fn alias_lists_are_validated_and_bounded() {
     );
 }
 
+fn changes() -> RoomDetailsChanges {
+    let (live_tx, _) = tokio::sync::broadcast::channel(8);
+    RoomDetailsChanges::new(Uuid::new_v4(), live_tx)
+}
+
 #[test]
 fn the_queue_coalesces_and_drops_its_oldest_job_when_full() {
-    let queue = Queue::default();
+    let changes = changes();
+    let queue = Queue::new(changes.clone());
     let room = |i: usize| OwnedRoomId::try_from(format!("!r{i}:localhost")).unwrap();
     assert_eq!(queue.push(room(0), RoomDetailJob::Absence), None);
     assert_eq!(queue.push(room(0), RoomDetailJob::Absence), None);
@@ -165,12 +176,32 @@ fn the_queue_coalesces_and_drops_its_oldest_job_when_full() {
         assert_eq!(queue.push(room(i), RoomDetailJob::Absence), None);
     }
     assert_eq!(queue.depth(), QUEUE_CAPACITY);
+    // A panel shows the oldest job queued.
+    assert_eq!(
+        queue.observe("!r0:localhost", RoomDetailJob::Absence),
+        JobActivity::Queued
+    );
     assert_eq!(
         queue.push(room(99), RoomDetailJob::Absence),
         Some((room(0), RoomDetailJob::Absence)),
         "the oldest job makes way for the newest"
     );
     assert_eq!(queue.depth(), QUEUE_CAPACITY);
+    assert_eq!(
+        changes.take_pending().remove("!r0:localhost"),
+        Some(std::collections::BTreeSet::from([
+            RoomDetailSource::Metadata
+        ])),
+        "a dropped job a read saw is announced, so its panel re-reads"
+    );
+    assert_eq!(
+        queue.push(room(98), RoomDetailJob::Absence),
+        Some((room(0), RoomDetailJob::LocalAliases))
+    );
+    assert!(
+        changes.take_pending().is_empty(),
+        "an unseen drop needs no frame"
+    );
     assert_eq!(
         queue.observe("!r0:localhost", RoomDetailJob::Absence),
         JobActivity::Idle
@@ -326,7 +357,7 @@ fn the_registry_ignores_stopped_accounts_and_keeps_a_newer_run() {
         registry.activity(account, "!r:localhost", RoomDetailJob::Absence),
         JobActivity::Idle
     );
-    let first = registry.register(account);
+    let first = registry.register(account, changes());
     registry.request(account, "!r:localhost", RoomDetailJob::Absence);
     registry.request(account, "not a room id", RoomDetailJob::Absence);
     assert_eq!(first.queue().depth(), 1);
@@ -335,7 +366,7 @@ fn the_registry_ignores_stopped_accounts_and_keeps_a_newer_run() {
         JobActivity::Queued
     );
     // A restart starts with nothing queued.
-    let second = registry.register(account);
+    let second = registry.register(account, changes());
     drop(first);
     assert_eq!(
         registry.activity(account, "!r:localhost", RoomDetailJob::Absence),
@@ -520,6 +551,9 @@ struct Script {
     replies: Mutex<HashMap<String, Reply>>,
     during_request: Mutex<Option<Hook>>,
     hang: AtomicBool,
+    /// How long the first request waits for its gate permit.
+    admission_delay: Mutex<Option<Duration>>,
+    admitted: Mutex<Vec<Instant>>,
 }
 
 #[async_trait]
@@ -530,7 +564,12 @@ impl Upstream for Arc<Script> {
         _read_body: bool,
         admitted: &(dyn Fn() + Sync),
     ) -> Reply {
+        let delay = self.admission_delay.lock().unwrap().take();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         admitted();
+        self.admitted.lock().unwrap().push(Instant::now());
         let path = segments.join("/");
         self.calls.lock().unwrap().push(path.clone());
         if self.hang.load(Ordering::SeqCst) {
@@ -635,7 +674,7 @@ async fn fixture() -> Fixture {
         store.clone(),
         account_id,
         changes.clone(),
-        Arc::new(Queue::default()),
+        Arc::new(Queue::new(changes.clone())),
     );
     Fixture {
         store,
@@ -694,13 +733,13 @@ async fn an_absence_job_confirms_due_types_in_order_and_announces_once() {
     f.run(RoomDetailJob::Absence, false).await;
     let expected: Vec<String> = ABSENCE_ORDER
         .iter()
-        .filter(|t| **t != "m.room.create")
+        .take_while(|t| **t != "m.room.canonical_alias")
         .map(|t| absence_path(t))
         .collect();
     assert_eq!(
         f.script.take_calls(),
         expected,
-        "encryption first; a type with a tuple never"
+        "encryption first, through the failed power-levels check"
     );
     assert_eq!(
         f.frames(),
@@ -727,8 +766,22 @@ async fn an_absence_job_confirms_due_types_in_order_and_announces_once() {
         row("m.room.power_levels").failure.as_deref(),
         Some("server_error")
     );
+    assert!(
+        rows.iter()
+            .all(|r| r.state_type != "m.room.canonical_alias"),
+        "the failure ended the job"
+    );
 
-    // Nothing is due now, so a second job asks nothing and announces nothing.
+    // The next job asks only what is still due: not the failed type, which
+    // backs off, and never a type with a tuple.
+    f.run(RoomDetailJob::Absence, false).await;
+    assert_eq!(
+        f.script.take_calls(),
+        [absence_path("m.room.canonical_alias")]
+    );
+    assert_eq!(f.frames(), [RoomDetailSource::Metadata]);
+
+    // Nothing is due now, so a job asks nothing and announces nothing.
     f.run(RoomDetailJob::Absence, false).await;
     assert!(f.script.take_calls().is_empty());
     assert!(f.frames().is_empty());
@@ -887,4 +940,48 @@ async fn a_hung_peer_holds_only_its_own_account() {
     assert_eq!(healthy.script.take_calls().len(), 7);
     assert!(!stuck.is_finished());
     stuck.abort();
+}
+
+/// A homeserver that is timing out, rate limiting, or failing gets one
+/// request per job, not one per missing type.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_failed_request_ends_an_absence_job() {
+    let mut f = fixture().await;
+    f.script.reply(
+        absence_path("m.room.encryption"),
+        Reply::Failed(NoAnswer::Timeout),
+    );
+    f.run(RoomDetailJob::Absence, false).await;
+    assert_eq!(f.script.take_calls(), [absence_path("m.room.encryption")]);
+    let due = f
+        .store
+        .due_absence_types(f.account_id, ROOM, &ABSENCE_ORDER)
+        .await
+        .unwrap();
+    assert_eq!(
+        due.len(),
+        6,
+        "every other missing type is still due: {due:?}"
+    );
+    assert!(!due.iter().any(|t| t == "m.room.encryption"));
+}
+
+/// The interval counts from when a request was sent, so a long wait for a
+/// gate permit is not credited to the next request.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn requests_are_paced_from_their_admission() {
+    let mut f = fixture().await;
+    *f.script.admission_delay.lock().unwrap() = Some(JOB_INTERVAL * 2);
+    f.run(RoomDetailJob::Absence, false).await;
+    let admitted = f.script.admitted.lock().unwrap().clone();
+    assert_eq!(admitted.len(), 7);
+    for pair in admitted.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= JOB_INTERVAL,
+            "{:?} between requests",
+            pair[1] - pair[0]
+        );
+    }
 }

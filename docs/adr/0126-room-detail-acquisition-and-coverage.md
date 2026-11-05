@@ -99,7 +99,7 @@ The table is bounded by the account's room count times ten kinds; it needs no se
 `GET /v1/accounts/{account_id}/rooms/{room_id}/homeserver_details` returns the cached `local_aliases` and `directory_visibility` rows immediately and never waits for the homeserver.
 Each detail separates the last conclusive answer from the state of attempts to refresh it, as ADR 0111 requires, so a failed refresh leaves usable stale data visible.
 
-- **Value status:** `unknown` (never answered), `available`, `partial` (some aliases failed validation and were withheld), `too_large`, `forbidden` (403), `not_found` (404 `M_NOT_FOUND`), or `unsupported` (404/405 `M_UNRECOGNIZED`).
+- **Value status:** `unknown` (never answered), `available`, `partial` (some aliases failed validation and were withheld), `too_large`, `forbidden` (403), `not_found` (404 `M_NOT_FOUND`), or `unsupported` (404/405 `M_UNRECOGNIZED`; amended: also a 404 with no `errcode`, the shape a server or proxy without the endpoint returns, and any 405).
 - **Value timing:** `fetched_at` and `expires_at`, both server clock; a past `expires_at` means stale.
 - **Refresh:** `idle`, `queued`, or `running`, with the last failure's category (`timeout`, `server_error`, `rate_limited`, `transport`, `unauthorized`, or `invalid_response` for any other status or a body of the wrong shape) and `next_attempt_at`.
   A job waiting for a gate permit is `queued`; the gate's own state is in `GET /v1/status` (ADR 0122 decision 6), and waiting is never a failure.
@@ -120,7 +120,9 @@ The API reaches it through a consumer-owned port in `axon-api` with an `axon-ser
 - **Queue:** a bounded per-account queue keyed by (room, kind), which coalesces duplicates; the kinds are `local_aliases`, `directory_visibility`, and `absence`, so a panel needs at most three entries.
   When it is full, the oldest queued job is dropped to admit the new one, because the newest request is the panel a user is looking at now.
   A dropped job leaves its row unchanged and no backoff, so the next read of that room requests it again; nothing can be starved while it is still being read.
+  Amended: a dropped job that a read reported as queued publishes its frame, so that panel re-reads.
 - **Concurrency:** one request at a time per account, with a minimum interval between jobs, so one account's large room list cannot crowd out another account's work.
+  Amended: the interval counts from when the previous request was sent, after its gate wait, and an absence job stops at its first failed request; the remaining types stay due for the next read.
 - **Gate:** every request takes a `HomeserverGate` permit as background work; waiting for a permit is not part of the request's timeout and is never recorded as a failure.
   Gate timeouts hold their slot (ADR 0122 decision 4), which is what keeps a slow peer from accumulating abandoned work.
 - **Request:** sent with reqwest and the account's current access token rather than the SDK's `send`, because the SDK buffers and parses the whole body.
@@ -128,6 +130,7 @@ The API reaches it through a consumer-owned port in `axon-api` with an `axon-ser
   A 401 is recorded as `unauthorized` and retried on backoff; token refresh stays with the account's sync.
 - **Validation:** aliases that do not parse as room aliases are withheld and reported as `partial`; a list longer than the entry limit is `too_large`.
 - **Freshness guard:** `room_summaries` gains a `membership_epoch` that its leave and rejoin transitions advance.
+  Amended: any change to the account's own `m.room.member` event also advances it, because sync can deliver a kick and rejoin as one new join with no leave; every new epoch deletes the room's rows.
   It takes each new value from a sequence rather than incrementing a per-row counter, because a purge rebuild deletes and re-inserts summary rows, and a counter restarting at its default could hand a rejoined room the epoch an in-flight job recorded.
   A job records the epoch when it starts, and its completion commits only if the account still exists and the epoch is unchanged.
   A leave during the request therefore rejects the result even if a rejoin follows before it completes, so neither confirmations nor details survive into a new membership.

@@ -11,7 +11,10 @@ ALTER TABLE room_summaries
     ALTER COLUMN membership_epoch SET DEFAULT nextval('room_membership_epoch_seq');
 
 -- Leave and rejoin transitions start a new epoch, which rejects any result
--- whose job started before them, even after a rejoin.
+-- whose job started before them, even after a rejoin. The store also starts
+-- one whenever the account's own m.room.member event changes, which covers a
+-- leave and rejoin that sync delivers as a single new join with no leave
+-- between them (`Store::upsert_room_state_with_redaction_and_purge`).
 CREATE FUNCTION advance_room_membership_epoch() RETURNS TRIGGER AS $$
 BEGIN
     NEW.membership_epoch := nextval('room_membership_epoch_seq');
@@ -27,7 +30,8 @@ CREATE TRIGGER room_summaries_advance_membership_epoch
 -- One row per account, room, and kind: the homeserver-local aliases, the
 -- directory publication, and one absence confirmation per metadata state
 -- type. Never merged into room_state. The summary foreign key deletes rows on
--- account removal and room purge; the trigger below deletes them on leave.
+-- account removal and room purge; the trigger below deletes them whenever a
+-- new membership epoch starts.
 --
 -- Times are Unix milliseconds from the PostgreSQL clock. `value_status`,
 -- `value`, `fetched_at`, and `expires_at` are the last conclusive answer;
@@ -67,8 +71,10 @@ CREATE TABLE room_detail_acquisitions (
     CHECK ((failure IS NULL) = (failures = 0))
 );
 
--- A local leave removes every cached detail and confirmation, so a removal
--- is never served from cache and a rejoin starts empty.
+-- A new membership epoch removes every cached detail and confirmation, so a
+-- removal is never served from cache and a rejoin starts empty. A leave
+-- starts one; so does a rejoin, which finds nothing left to delete unless
+-- sync never delivered the leave.
 CREATE FUNCTION delete_left_room_detail_acquisitions() RETURNS TRIGGER AS $$
 BEGIN
     DELETE FROM room_detail_acquisitions
@@ -79,7 +85,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER room_summaries_delete_left_acquisitions
     AFTER UPDATE ON room_summaries
     FOR EACH ROW
-    WHEN (NEW.hidden_left AND NOT OLD.hidden_left)
+    WHEN (NEW.membership_epoch IS DISTINCT FROM OLD.membership_epoch)
     EXECUTE FUNCTION delete_left_room_detail_acquisitions();
 
 -- Serializes a tuple's insert with an absence confirmation of the same type.

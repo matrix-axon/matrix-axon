@@ -277,7 +277,7 @@ Each detail keeps the last conclusive answer separate from the state of attempts
 | `too_large`   | More than 256 aliases, or a body over 64 KiB; withheld, not cut | 15 minutes |
 | `forbidden`   | `403`; a lost permission replaces a cached list                 | 1 hour     |
 | `not_found`   | `404 M_NOT_FOUND`                                               | 1 hour     |
-| `unsupported` | `404`/`405 M_UNRECOGNIZED`, or `405`                            | 24 hours   |
+| `unsupported` | `404 M_UNRECOGNIZED`, a `404` with no `errcode`, or any `405`   | 24 hours   |
 
 `fetched_at` and `expires_at` are Unix ms from the PostgreSQL clock; an `expires_at` in the past means stale.
 `refresh` is the refresh object `/metadata`'s `absence_check` also uses:
@@ -297,7 +297,8 @@ The API reaches it through a consumer-owned port; it never waits for it.
 
 - **Queue:** at most 32 jobs per account, keyed by room and kind (`local_aliases`, `directory_visibility`, `absence`), so a duplicate request coalesces, including with the running job.
   When the queue is full the oldest job is dropped: the newest request is the panel a user is looking at now, and the next read of the dropped room asks again.
-- **Pacing:** one request at a time per account, at least 250 ms apart, so one account's large room list cannot crowd out another account's work, and a room with every type absent fills in about 2.5 seconds.
+  A dropped job that a read reported as `queued` publishes its `room_details.changed` frame, so that panel re-reads rather than showing `queued` until it is reopened.
+- **Pacing:** one request at a time per account, at least 250 ms apart counted from when each request was sent, so one account's large room list cannot crowd out another account's work, and a room with every type absent fills in about 2.5 seconds.
 - **Gate:** each request takes a `HomeserverGate` permit as background work (ADR 0122).
   Waiting for the permit is not part of the request's 10-second timeout, and a timed-out request keeps its gate slot, which is what stops a slow homeserver from accumulating abandoned work.
 - **Request:** sent with reqwest and the account's current access token rather than the SDK's `send`, without redirects.
@@ -306,13 +307,14 @@ The API reaches it through a consumer-owned port; it never waits for it.
   A `401` is a failure to back off from: token refresh stays with the account's sync.
 - **Backoff:** one minute after the first consecutive failure, doubling to 30 minutes, and never sooner than a `Retry-After` header (delta-seconds or an HTTP date) or `retry_after_ms`, capped at 24 hours.
   A job that could not read or record the cache stores no backoff, so the worker holds it back in memory for one minute instead.
-- **Fencing:** `room_summaries.membership_epoch` takes a fresh value from a sequence on every leave and rejoin.
+  An absence job stops at its first failed request: the failed type backs off, and the remaining types stay due for the next read, so a homeserver that is rate limiting or timing out gets one request per job, not one per missing type.
+- **Fencing:** `room_summaries.membership_epoch` takes a fresh value from a sequence on every leave and rejoin, and whenever the account's own `m.room.member` event changes, which covers a kick and rejoin that sync delivers as one new join with no leave.
   A job records the epoch before its request and commits only if the account is still active and joined in that same epoch, under a share lock on the summary row for the commit alone.
   A leave during a request therefore rejects its result even if a rejoin follows before it completes.
   An absence confirmation also commits only while no tuple of its type exists.
   A sequence rather than a counter matters because a purge rebuild deletes and re-inserts summary rows; a restarted counter could hand a rejoined room the epoch an in-flight job recorded.
 - **Restart:** values, expirations, and backoff persist in `room_detail_acquisitions`; queue membership does not.
-- **Cleanup:** rows are deleted on leave (the `hidden_left` transition), on purge and on account removal (through the `room_summaries` foreign key), and, for a confirmation, when a tuple of its type arrives.
+- **Cleanup:** rows are deleted whenever a new membership epoch starts (so on leave, and on a rejoin whose leave sync never delivered), on purge and on account removal (through the `room_summaries` foreign key), and, for a confirmation, when a tuple of its type arrives.
   The table is bounded by the account's joined rooms times ten kinds.
 
 Set `RUST_LOG=axon_sync::acquisition=debug` to log each request with `account_id`, `room_id`, `kind`, `state_type`, `outcome`, `elapsed_ms`, and queue depth.

@@ -368,11 +368,25 @@ impl Store {
         } else {
             query.fetch_one(&self.pool).await?.1
         };
-        if summary_display_state(s.event_type, s.state_key)
-            || (s.event_type == "m.room.member" && local_user_id == Some(s.state_key))
-        {
+        let own_membership = s.event_type == "m.room.member" && local_user_id == Some(s.state_key);
+        if summary_display_state(s.event_type, s.state_key) || own_membership {
             self.refresh_room_summary_display(s.account_id, s.room_id)
                 .await?;
+        }
+        if own_membership && changed {
+            // Any new own member event starts a new membership epoch (ADR
+            // 0126), which fences in-flight acquisition and clears its cache.
+            // A leave also flips `hidden_left`, but a kick and rejoin that
+            // sync delivers as one new join event does not.
+            sqlx_core::query::query(
+                "UPDATE room_summaries \
+                 SET membership_epoch = nextval('room_membership_epoch_seq') \
+                 WHERE account_id = $1 AND room_id = $2",
+            )
+            .bind(s.account_id)
+            .bind(s.room_id)
+            .execute(&self.pool)
+            .await?;
         }
         Ok(changed)
     }

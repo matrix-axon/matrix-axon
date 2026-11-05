@@ -2043,11 +2043,14 @@ async fn run_account(
     // If its HTTP client cannot initialize, the account runs without it and
     // reads leave every detail unknown.
     let acquisition_cancel = cancel.child_token();
+    // Teardown below cancels and joins the worker; the guard also stops it
+    // if this run unwinds or returns early.
+    let _acquisition_guard = acquisition_cancel.clone().drop_guard();
     let acquisition = match crate::acquisition::Homeserver::new(client.clone(), Arc::clone(&gate)) {
         Ok(homeserver) => {
             let registration = manager
                 .room_detail_acquisitions()
-                .register(account.account_id);
+                .register(account.account_id, room_details.clone());
             let handle = tokio::spawn(
                 crate::acquisition::Worker::new(
                     homeserver,

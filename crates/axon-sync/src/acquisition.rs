@@ -115,9 +115,28 @@ const COOLDOWN_CAPACITY: usize = 2 * QUEUE_CAPACITY;
 pub(crate) struct Queue {
     state: Mutex<QueueState>,
     wake: Notify,
+    /// Where a dropped job that a read saw is announced.
+    changes: Option<RoomDetailsChanges>,
+}
+
+/// The frame source a client re-reads for `job`.
+fn frame_source(job: RoomDetailJob) -> RoomDetailSource {
+    match job {
+        RoomDetailJob::Absence => RoomDetailSource::Metadata,
+        RoomDetailJob::LocalAliases | RoomDetailJob::DirectoryVisibility => {
+            RoomDetailSource::HomeserverDetails
+        }
+    }
 }
 
 impl Queue {
+    pub(crate) fn new(changes: RoomDetailsChanges) -> Self {
+        Self {
+            changes: Some(changes),
+            ..Self::default()
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, QueueState> {
         // Plain data, never held across an await or a panic-prone call.
         self.state
@@ -128,7 +147,9 @@ impl Queue {
     /// Queue `job` unless it is already queued or running. When the queue is
     /// full the oldest job is dropped: the newest request is the panel a user
     /// is looking at now, and a dropped job is requested again by the next
-    /// read of its room. Returns the dropped job, if any.
+    /// read of its room. A dropped job that a read saw is announced, so its
+    /// panel re-reads instead of showing `queued` until it is reopened.
+    /// Returns the dropped job, if any.
     fn push(
         &self,
         room_id: OwnedRoomId,
@@ -149,8 +170,7 @@ impl Queue {
         }
         let dropped = (state.queued.len() >= QUEUE_CAPACITY)
             .then(|| state.queued.pop_front())
-            .flatten()
-            .map(|e| (e.room_id, e.job));
+            .flatten();
         state.queued.push_back(Entry {
             room_id,
             job,
@@ -158,7 +178,11 @@ impl Queue {
         });
         drop(state);
         self.wake.notify_one();
-        dropped
+        let dropped = dropped?;
+        if let Some(changes) = self.changes.as_ref().filter(|_| dropped.observed) {
+            changes.mark(dropped.room_id.as_str(), frame_source(dropped.job));
+        }
+        Some((dropped.room_id, dropped.job))
     }
 
     /// Where `job` stands, recording that a read saw it.
@@ -278,8 +302,8 @@ impl RoomDetailAcquisitions {
 
     /// Give `account_id` a fresh queue for one account run. Dropping the
     /// registration removes it, unless a later run has replaced it.
-    pub(crate) fn register(&self, account_id: Uuid) -> Registration {
-        let queue = Arc::new(Queue::default());
+    pub(crate) fn register(&self, account_id: Uuid, changes: RoomDetailsChanges) -> Registration {
+        let queue = Arc::new(Queue::new(changes));
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -551,8 +575,15 @@ pub(crate) fn interpret(kind: DetailKind, reply: Reply) -> DetailOutcome {
                 answer("absent", None, ABSENCE_TTL)
             }
             (404, Some("M_NOT_FOUND")) => answer("not_found", None, CONCLUSIVE_DENIAL_TTL),
-            (404 | 405, Some("M_UNRECOGNIZED")) | (405, _) if kind != DetailKind::Absence => {
-                answer("unsupported", None, UNSUPPORTED_TTL)
+            // The endpoint is missing: the server, or a proxy in front of it,
+            // does not serve it. That settles a details read; it says nothing
+            // about whether a state tuple exists.
+            (404, None | Some("M_UNRECOGNIZED")) | (405, _) => {
+                if kind == DetailKind::Absence {
+                    invalid()
+                } else {
+                    answer("unsupported", None, UNSUPPORTED_TTL)
+                }
             }
             (429, _) => failure("rate_limited", retry_after_ms),
             (500..=599, _) => failure("server_error", retry_after_ms),
@@ -662,13 +693,7 @@ impl<U: Upstream> Worker<U> {
         // job is held back, so its re-read sees `idle` rather than queueing
         // another request.
         if ran.changed || observed {
-            let source = match job {
-                RoomDetailJob::Absence => RoomDetailSource::Metadata,
-                RoomDetailJob::LocalAliases | RoomDetailJob::DirectoryVisibility => {
-                    RoomDetailSource::HomeserverDetails
-                }
-            };
-            self.room_details.mark(room_id.as_str(), source);
+            self.room_details.mark(room_id.as_str(), frame_source(job));
         }
     }
 
@@ -717,7 +742,11 @@ impl<U: Upstream> Worker<U> {
                         return ran;
                     }
                 }
-                ran.record(self.request(room_id, epoch, kind, "", &segments).await);
+                ran.record(
+                    self.request(room_id, epoch, kind, "", &segments)
+                        .await
+                        .write,
+                );
                 ran
             }
             RoomDetailJob::Absence => {
@@ -735,10 +764,18 @@ impl<U: Upstream> Worker<U> {
                 };
                 for state_type in &types {
                     let segments = ["rooms", room_id.as_str(), "state", state_type.as_str(), ""];
-                    let write = self
+                    let Requested { write, failed } = self
                         .request(room_id, epoch, DetailKind::Absence, state_type, &segments)
                         .await;
                     ran.record(write);
+                    // A failed request ends the job: the failed type backs off,
+                    // and the rest stay due for the next read. Asking on would
+                    // send up to seven more requests to a homeserver that is
+                    // rate limiting, failing, or timing out, and hold this
+                    // account's worker for each.
+                    if failed || write.is_none() {
+                        break;
+                    }
                     // State that arrived during the request fences only its
                     // own type; a membership change fences the rest. A failed
                     // membership read is not a membership change.
@@ -757,8 +794,7 @@ impl<U: Upstream> Worker<U> {
         }
     }
 
-    /// Send one paced request and record its outcome; `None` when the outcome
-    /// could not be recorded.
+    /// Send one paced request and record its outcome.
     async fn request(
         &mut self,
         room_id: &RoomId,
@@ -766,13 +802,13 @@ impl<U: Upstream> Worker<U> {
         kind: DetailKind,
         state_type: &str,
         segments: &[&str],
-    ) -> Option<DetailWrite> {
+    ) -> Requested {
         if let Some(last) = self.last_request {
             tokio::time::sleep_until(last + JOB_INTERVAL).await;
         }
-        self.last_request = Some(Instant::now());
-        // The job reads as running only from admission, and the request's
-        // elapsed time excludes the wait for a gate permit.
+        // The job reads as running only from admission, the request's
+        // elapsed time excludes the wait for a gate permit, and the next
+        // request's interval counts from when this one was sent.
         let admitted_at = Mutex::new(None);
         let queue = Arc::clone(&self.queue);
         let reply = self
@@ -785,11 +821,14 @@ impl<U: Upstream> Worker<U> {
             })
             .await;
         self.queue.sending(false);
-        let elapsed_ms = admitted_at
+        let admitted_at = admitted_at
             .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .map_or(0, |at| at.elapsed().as_millis() as u64);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A request the gate never admitted was not sent; pace from now.
+        self.last_request = Some(admitted_at.unwrap_or_else(Instant::now));
+        let elapsed_ms = admitted_at.map_or(0, |at| at.elapsed().as_millis() as u64);
         let outcome = interpret(kind, reply);
+        let failed = matches!(outcome, DetailOutcome::Failure { .. });
         let account_id = self.account_id;
         let label = outcome_label(&outcome);
         let queue_depth = self.queue.depth();
@@ -812,16 +851,31 @@ impl<U: Upstream> Worker<U> {
             Ok(write) => write,
             Err(error) => {
                 tracing::warn!(target: "axon_sync::acquisition", %account_id, %room_id, kind = kind_name, state_type, outcome = label, reason = error.diagnostic_reason(), "room detail acquisition could not record its result");
-                return None;
+                return Requested {
+                    write: None,
+                    failed,
+                };
             }
         };
         tracing::debug!(target: "axon_sync::acquisition", %account_id, %room_id, kind = kind_name, state_type, outcome = label, elapsed_ms, queue_depth, write = ?write, "room detail acquisition finished");
         // A failure that leaves the row unchanged repeats the last one.
-        if matches!(outcome, DetailOutcome::Failure { .. }) && write == DetailWrite::Unchanged {
+        if failed && write == DetailWrite::Unchanged {
             tracing::warn!(target: "axon_sync::acquisition", %account_id, %room_id, kind = kind_name, state_type, outcome = label, elapsed_ms, "room detail acquisition keeps failing; backing off");
         }
-        Some(write)
+        Requested {
+            write: Some(write),
+            failed,
+        }
     }
+}
+
+/// What one request did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Requested {
+    /// The cache write; `None` when the outcome could not be recorded.
+    write: Option<DetailWrite>,
+    /// The homeserver gave no conclusive answer.
+    failed: bool,
 }
 
 /// What one job did.

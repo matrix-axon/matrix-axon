@@ -250,27 +250,38 @@ fn detail_parts(
     }
 }
 
+/// A status that promises a value, with the value decoded from the row. A
+/// value that does not decode (a corrupt cache row) reads as `unknown`,
+/// never as a value-bearing status with no value.
+fn with_value<T>(
+    status: HomeserverDetailStatus,
+    has_value: bool,
+    decode: impl FnOnce() -> Option<T>,
+) -> (HomeserverDetailStatus, Option<T>) {
+    if !has_value {
+        return (status, None);
+    }
+    match decode() {
+        Some(value) => (status, Some(value)),
+        None => (HomeserverDetailStatus::Unknown, None),
+    }
+}
+
 pub(crate) fn local_aliases(
     row: Option<&DetailRow>,
     activity: JobActivity,
 ) -> LocalAliasesDetailDto {
     let (status, fetched_at, expires_at, refresh) = detail_parts(row, activity);
-    let aliases = matches!(
+    let (status, aliases) = with_value(
         status,
-        HomeserverDetailStatus::Available | HomeserverDetailStatus::Partial
-    )
-    .then(|| row.and_then(|row| Vec::<String>::deserialize(row.value.as_ref()?).ok()))
-    .flatten();
+        matches!(
+            status,
+            HomeserverDetailStatus::Available | HomeserverDetailStatus::Partial
+        ),
+        || Vec::<String>::deserialize(row?.value.as_ref()?).ok(),
+    );
     LocalAliasesDetailDto {
-        status: if aliases.is_none()
-            && matches!(
-                status,
-                HomeserverDetailStatus::Available | HomeserverDetailStatus::Partial
-            ) {
-            HomeserverDetailStatus::Unknown
-        } else {
-            status
-        },
+        status,
         aliases,
         fetched_at,
         expires_at,
@@ -283,19 +294,17 @@ pub(crate) fn directory_visibility(
     activity: JobActivity,
 ) -> DirectoryVisibilityDetailDto {
     let (status, fetched_at, expires_at, refresh) = detail_parts(row, activity);
-    let visibility = (status == HomeserverDetailStatus::Available)
-        .then(|| match row?.value.as_ref()?.get("visibility")?.as_str()? {
+    let (status, visibility) = with_value(
+        status,
+        status == HomeserverDetailStatus::Available,
+        || match row?.value.as_ref()?.get("visibility")?.as_str()? {
             "public" => Some(DirectoryVisibility::Public),
             "private" => Some(DirectoryVisibility::Private),
             _ => None,
-        })
-        .flatten();
-    DirectoryVisibilityDetailDto {
-        status: if visibility.is_none() && status == HomeserverDetailStatus::Available {
-            HomeserverDetailStatus::Unknown
-        } else {
-            status
         },
+    );
+    DirectoryVisibilityDetailDto {
+        status,
         visibility,
         fetched_at,
         expires_at,

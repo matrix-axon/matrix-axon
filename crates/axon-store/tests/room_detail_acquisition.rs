@@ -548,3 +548,70 @@ async fn a_confirmation_cannot_commit_beside_a_concurrent_tuple() {
 
     common::cleanup_account(store.pool(), account_id).await;
 }
+
+/// A kick and rejoin that sync delivers as one new join event, with no leave
+/// between, still starts a new epoch: an in-flight result from before it is
+/// fenced and the rejoined room starts empty. A replay of the same event does
+/// not.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_rejoin_without_a_delivered_leave_starts_a_new_epoch() {
+    let store = common::migrated_store().await;
+    let (account_id, user) = account(&store).await;
+    common::insert_message(&store, account_id, ROOM, 1, "fixture").await;
+    membership(&store, account_id, &user, "join").await;
+    let before = store.joined_epoch(account_id, ROOM).await.unwrap().unwrap();
+    let directory = answer("available", Some(json!({ "visibility": "public" })));
+    let record = |epoch: i64| {
+        let (store, directory) = (store.clone(), directory.clone());
+        async move {
+            store
+                .record_room_detail(
+                    account_id,
+                    ROOM,
+                    epoch,
+                    DetailKind::DirectoryVisibility,
+                    "",
+                    &directory,
+                )
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(record(before).await, DetailWrite::Changed);
+
+    let rejoin = RoomStateUpsert {
+        account_id,
+        room_id: ROOM,
+        event_type: "m.room.member",
+        state_key: &user,
+        event_id: "$rejoin",
+        sender: &user,
+        origin_ts: chrono::Utc::now().timestamp_millis(),
+        content: Some(json!({ "membership": "join" })),
+    };
+    store
+        .upsert_room_state_for_local_user(&rejoin, Some(&user))
+        .await
+        .unwrap();
+    let rejoined = store.joined_epoch(account_id, ROOM).await.unwrap().unwrap();
+    assert_ne!(rejoined, before);
+    let snapshot = store
+        .room_detail_snapshot(account_id, ROOM, &[DetailKind::DirectoryVisibility])
+        .await
+        .unwrap();
+    assert!(snapshot.rows.is_empty(), "the rejoined room starts empty");
+    assert_eq!(record(before).await, DetailWrite::Fenced);
+
+    assert_eq!(record(rejoined).await, DetailWrite::Changed);
+    store
+        .upsert_room_state_for_local_user(&rejoin, Some(&user))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.joined_epoch(account_id, ROOM).await.unwrap(),
+        Some(rejoined),
+        "a replayed member event changes nothing"
+    );
+    assert_eq!(record(rejoined).await, DetailWrite::Unchanged);
+}
