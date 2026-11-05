@@ -118,7 +118,11 @@ changelog)
 	tmp=$(mktemp)
 	trap 'rm -f "$tmp"' EXIT
 	# The notes' own headings sit one level below the release heading.
-	section=$(strip_marker <"$notes" | sed -E 's/^(#+) /\1# /')
+	# Jekyll runs Liquid over CHANGELOG.md when it builds the Pages site, and a PR
+	# title can contain braces ("escape {{}} in docs" did, #924). Write them as
+	# HTML entities, which render identically here and on the site; see
+	# scripts/check-liquid.sh, which fails the push gate on a literal `{{`.
+	section=$(strip_marker <"$notes" | sed -E -e 's/^(#+) /\1# /' -e 's/\{\{/\&#123;\&#123;/g' -e 's/\{%/\&#123;%/g')
 	# ENVIRON, not awk -v, which would interpret backslashes in the notes.
 	HEAD="## $tag - $date" SECTION="$section" awk '
 		!done && /^## / { print ENVIRON["HEAD"]; print ""; print ENVIRON["SECTION"]; print ""; done = 1 }

@@ -54,7 +54,7 @@ The Windows jobs therefore run in the `release-signing` GitHub environment, whos
 
 The environment's deployment policy admits `v*` tags only, and that is the access control: a branch, a pull request or a stray tag cannot obtain a signing token.
 Both workflows also support `alpha-*` and `beta-*` tags and manual dispatch from a branch, and an environment the ref may not use rejects the job before any step runs.
-So the environment is named only for a `v*` tag (`environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release-signing' || '' }}`), and the `enabled` input of `.github/actions/windows-signing` is set from the same test.
+So the environment is named only for a `v*` tag (the job's `environment:` is an expression that gives `release-signing` when `github.ref` starts with `refs/tags/v` and an empty string otherwise), and the `enabled` input of `.github/actions/windows-signing` is set from the same test.
 The second part matters because the `ARTIFACT_SIGNING_*` variables are repository-level, so an unguarded run on a branch would see them, attempt a login and fail on a subject Entra has no credential for.
 Every other ref builds exactly as it did before signing existed.
 

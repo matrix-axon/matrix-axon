@@ -95,8 +95,8 @@ CASES: list[tuple[str, set[str]]] = [
     # cannot change a compilation unit. They do reach prettier, which is the
     # point of these two rows: the rust filter must not claim them and the
     # markdown filter must.
-    ("crates/axon-store/README.md", {"prettier"}),
-    ("clients/tui/README.md", {"prettier"}),
+    ("crates/axon-store/README.md", {"markdown-no-liquid", "prettier"}),
+    ("clients/tui/README.md", {"markdown-no-liquid", "prettier"}),
     ("smoke/local-stack/corpus/media/avatar.png", set()),
     # Migrations are BOTH an immutability-checked input and a rust build input:
     # migrations.rs embeds the directory with `include_dir!`, so a .sql edit
@@ -180,21 +180,23 @@ CASES: list[tuple[str, set[str]]] = [
     # rust build input even though it holds only aliases today.
     (".cargo/config.toml", {"rustfmt", "rust-clippy", "cargo-test"}),
     # ADRs are numbered-checked but deliberately not prettier-formatted.
-    ("docs/adr/0092-unified-pre-push-gate.md", {"adr-numbers"}),
-    ("docs/client-parity.md", {"prettier"}),
-    ("docs/mvp/prd.md", {"prettier"}),
-    # Generated wholesale by scripts/generate-thirdparty.sh; not ours to format.
-    ("THIRDPARTY.md", set()),
-    ("clients/web/src-tauri/THIRDPARTY.md", set()),
+    ("docs/adr/0092-unified-pre-push-gate.md", {"adr-numbers", "markdown-no-liquid"}),
+    ("docs/client-parity.md", {"markdown-no-liquid", "prettier"}),
+    ("docs/mvp/prd.md", {"markdown-no-liquid", "prettier"}),
+    # Generated wholesale by scripts/generate-thirdparty.sh; not ours to format,
+    # but still scanned for Liquid syntax like every markdown file.
+    ("THIRDPARTY.md", {"markdown-no-liquid"}),
+    ("clients/web/src-tauri/THIRDPARTY.md", {"markdown-no-liquid"}),
     # Also generated, and shipped inside the desktop installers via
     # `bundle.resources` -- desktop-build.yml regenerates and diffs it, so no
     # local hook needs to.
     ("build/THIRDPARTY-desktop", set()),
-    ("LICENSE.md", set()),
+    ("LICENSE.md", {"markdown-no-liquid"}),
     # Prepended verbatim by scripts/release-notes.sh from GitHub's generated
     # notes, which prettier would rewrite; checking it failed every rebase
-    # across a release on a file the branch never touched.
-    ("CHANGELOG.md", set()),
+    # across a release on a file the branch never touched. It is still scanned
+    # for Liquid syntax: release-notes.sh escapes braces, and this proves it.
+    ("CHANGELOG.md", {"markdown-no-liquid"}),
     ("scripts/check-hook-filters.py", {"hook-filters"}),
     # The notification escaping: the module, its test, and every caller that
     # interpolates through it. Deliberately narrow -- it must not claim the
@@ -220,13 +222,13 @@ CASES: list[tuple[str, set[str]]] = [
     ),
     # Watched so a `SKIP=<id>` example edited into any of them is checked
     # (see SKIP_EXAMPLE and PROSE_NAMING_HOOKS below).
-    ("AGENTS.md", {"hook-filters", "prettier"}),
-    ("CONTRIBUTING.md", {"hook-filters", "prettier"}),
+    ("AGENTS.md", {"hook-filters", "markdown-no-liquid", "prettier"}),
+    ("CONTRIBUTING.md", {"hook-filters", "markdown-no-liquid", "prettier"}),
     ("scripts/setup-hooks.sh", {"hook-filters"}),
     # Nothing local claims a workflow file; actionlint does, and it is out of
     # scope here (see the module docstring).
     (".github/workflows/smoke.yml", set()),
-    ("README.md", {"prettier"}),
+    ("README.md", {"markdown-no-liquid", "prettier"}),
 ]
 
 # Hooks that intentionally have no `files` filter, i.e. run on every push.
