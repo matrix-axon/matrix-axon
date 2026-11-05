@@ -1,6 +1,6 @@
 # ADR 0127 — One shared HTTP client in the native shell
 
-**Status:** Proposed; tracked in [issue 663](https://github.com/matrix-axon/matrix-axon/issues/663), implemented in [PR 896](https://github.com/matrix-axon/matrix-axon/pull/896) and [PR 918](https://github.com/matrix-axon/matrix-axon/pull/918), with the legacy transport's removal in [issue 956](https://github.com/matrix-axon/matrix-axon/issues/956).
+**Status:** Accepted and implemented; tracked in [issue 663](https://github.com/matrix-axon/matrix-axon/issues/663), implemented in [PR 896](https://github.com/matrix-axon/matrix-axon/pull/896) and [PR 918](https://github.com/matrix-axon/matrix-axon/pull/918), with the legacy transport's removal in [issue 956](https://github.com/matrix-axon/matrix-axon/issues/956).
 Amends [ADR 0102](0102-tauri-packaging-and-store-distribution.md) § 2, which routes `/v1` traffic through `tauri-plugin-http`.
 That ADR's authority analysis and its "target design" stand unchanged.
 
