@@ -11,7 +11,23 @@ working, rendered page:
 * the target is a raw ``.md`` file: Jekyll copied it verbatim instead of
   rendering it, so the reader gets markdown source (or a download) instead of a
   page. This is the failure that ``jekyll-relative-links`` leaves silent;
-* the link carries a ``#fragment`` and the target page has no such id.
+* the path climbs above the site root (``../../LICENSE`` from ``docs/``): the
+  checkout may have such a file, but Pages serves a 404;
+* the link carries a ``#fragment`` and the target page has no such id;
+* the page sets ``<base href>``, which changes how every relative link on it
+  resolves and which this check does not model, so it is reported instead of
+  being silently mis-resolved.
+
+Links are taken from ``<a href>``, ``<img src>``, ``<source src>``,
+``<video src>``, ``<link href>`` (stylesheets, canonical URLs) and
+``<script src>``. External links, including the hard-coded github.com URLs the
+docs use for files Jekyll does not render, are not fetched: this check is
+offline and deterministic, and a network lookup would make CI flaky.
+
+Fragments are checked against the ``id``/``name`` attributes in the HTML Jekyll
+wrote. ``#top`` (and an empty fragment) always work in browsers and are accepted.
+An id that only client-side JavaScript adds, such as the heading anchors from
+anchor.js, is invisible here, so a link to one would be reported as missing.
 
 Only pages reachable from the homepage are crawled, on purpose: Jekyll renders
 every markdown file in the repository, but only the ones a reader can reach need
@@ -35,7 +51,14 @@ from html.parser import HTMLParser
 from urllib.parse import unquote, urldefrag, urlparse
 
 # (tag, attribute) pairs that name something the reader navigates to or loads.
-LINK_ATTRS = {("a", "href"), ("img", "src"), ("source", "src"), ("video", "src")}
+LINK_ATTRS = {
+    ("a", "href"),
+    ("img", "src"),
+    ("source", "src"),
+    ("video", "src"),
+    ("link", "href"),
+    ("script", "src"),
+}
 
 
 class PageParser(HTMLParser):
@@ -50,7 +73,7 @@ class PageParser(HTMLParser):
         for key in ("id", "name"):
             if attrs.get(key):
                 self.ids.add(attrs[key])
-        if tag == "base" and attrs.get("href"):
+        if tag == "base" and attrs.get("href") is not None:
             self.base = attrs["href"]
         for (t, attr) in LINK_ATTRS:
             if tag == t and attrs.get(attr):
@@ -98,6 +121,8 @@ def main():
         """Return (file, problem) for a site-root-relative path."""
         rel = posixpath.normpath(rel) if rel else ""
         rel = "" if rel == "." else rel
+        if rel == ".." or rel.startswith("../"):
+            return None, "climbs above the site root (404 on Pages)"
         full = posixpath.join(site, rel)
         if os.path.isdir(full):
             index = posixpath.join(full, "index.html")
@@ -122,6 +147,8 @@ def main():
         seen.add(page)
         info = parse(posixpath.join(site, page))
         parsed_pages[page] = info
+        if info.base is not None:
+            problems.append((page, f'<base href="{info.base}">', "sets <base href>, which this check does not model"))
         for _tag, url in info.links:
             rel = to_site_path(url, page)
             if rel is None:
@@ -134,7 +161,7 @@ def main():
             if target.endswith((".html", ".htm")):
                 if target not in parsed_pages and target not in seen:
                     queue.append(target)
-                if frag:
+                if frag and frag.lower() != "top":
                     tinfo = parsed_pages.get(target) or parse(posixpath.join(site, target))
                     parsed_pages[target] = tinfo
                     if unquote(frag) not in tinfo.ids:
