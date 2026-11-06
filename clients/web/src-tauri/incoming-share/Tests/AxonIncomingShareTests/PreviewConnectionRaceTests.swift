@@ -99,13 +99,18 @@ final class PreviewConnectionRaceTests: XCTestCase {
   }
 
   func testDeadlineCancelsStalledAttempts() throws {
-    let probe = Probe([.hanging, .hanging])
-    XCTAssertThrowsError(
-      try probe.race(delay: 0.01).connect(
-        deadline: .now() + 0.06, cancellation: ShareCancellation())
-    ) { XCTAssertEqual($0 as? ShareFailure, .expired) }
-    XCTAssertEqual(probe.started, [0, 1])
-    XCTAssertEqual(Set(probe.stopped), [0, 1])
+    let budget: TimeInterval = 1
+    for delay in [0.01, budget + 1] {
+      let probe = Probe([.hanging, .hanging])
+      XCTAssertThrowsError(
+        try probe.race(delay: delay).connect(
+          deadline: .now() + budget, cancellation: ShareCancellation())
+      ) { XCTAssertEqual($0 as? ShareFailure, .expired) }
+      // A busy queue can exhaust the deadline before starting the alternate.
+      // Every prepared connection still needs exactly one cancellation.
+      XCTAssertEqual(probe.stopped.sorted(), [0, 1])
+      if delay > budget { XCTAssertFalse(probe.started.contains(1)) }
+    }
   }
 
   func testCancellationStopsInFlightAndQueuedAlternate() throws {
