@@ -122,6 +122,7 @@ Missing or corrupt retained bytes require an explicit image removal or preview r
 ## Building and checking
 
 The committed sources are `clients/web/src-tauri/share-extension` and the common `incoming-share` Swift package.
+The native-auth plugin also watches the shared package's manifest, dependency lock, and source directory so incremental main-app builds cannot retain stale preview code; SwiftPM build products are excluded from those watches.
 After every manual `tauri ios init`, run `node scripts/configure-ios-sharing.mjs` from `clients/web`.
 `scripts/package-ios.sh` runs the same hook after clean regeneration and always embeds the production `axon_share.appex`.
 The separate `AXON_SHARE_PROBE=1` development probe remains optional and excluded from distribution exports.
