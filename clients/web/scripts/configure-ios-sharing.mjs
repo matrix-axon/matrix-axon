@@ -21,6 +21,21 @@ const entitlements = JSON.parse(
     { encoding: 'utf8' },
   ),
 )
+// The extension's own entitlements: one committed file, so the generated project and the
+// store workflow's profile check cannot drift apart.
+const shareEntitlements = JSON.parse(
+  execFileSync(
+    'plutil',
+    [
+      '-convert',
+      'json',
+      '-o',
+      '-',
+      fileURLToPath(new URL('Entitlements.share.ios.plist', tauri)),
+    ],
+    { encoding: 'utf8' },
+  ),
+)
 if (process.env.AXON_APS_ENVIRONMENT)
   entitlements['aps-environment'] = process.env.AXON_APS_ENVIRONMENT
 const projectPath = new URL('project.yml', apple)
@@ -64,6 +79,29 @@ delete project.targets.axon_share
     ...project.packages,
     AxonIncomingShare: { path: '../../incoming-share' },
   }
+  // `tauri ios build` archives with CODE_SIGNING_ALLOWED=NO and
+  // CODE_SIGN_ENTITLEMENTS="" on the xcodebuild command line, which override every
+  // target's own settings. It then signs the app binary itself, entitlements and all,
+  // and nothing signs the extension. Export reads an archived item's entitlements
+  // from its signature, so an unsigned extension is re-signed with only its
+  // identifier and team: no App Group, no shared Keychain, and the extension cannot
+  // reach the app's data. Give it the signature the app gets, carrying its entitlements.
+  // Ad hoc, because export replaces it with the real one. $(AppIdentifierPrefix) is
+  // left as written, and export expands it against the profile, as it does for the app.
+  // Measured (Xcode 26.6, 2026-11-06): the archived extension carries the literal text, the
+  // exported .ipa carries `<team id>.org.matrixaxon.axon.sharing`. That is Xcode's
+  // behaviour, not documented, so check-ios-sharing.py still verifies the .ipa.
+  const carryEntitlements = (entitlementsPath) => [
+    {
+      name: 'Carry entitlements into an unsigned archive',
+      basedOnDependencyAnalysis: false,
+      script: [
+        'if [ "${CODE_SIGNING_ALLOWED}" = "NO" ]; then',
+        `  /usr/bin/codesign --force --sign - --timestamp=none --entitlements "\${SRCROOT}/${entitlementsPath}" "\${CODESIGNING_FOLDER_PATH}"`,
+        'fi',
+      ].join('\n'),
+    },
+  ]
   const extension = {
     type: 'app-extension',
     platform: 'iOS',
@@ -103,16 +141,10 @@ delete project.targets.axon_share
         },
       },
     },
+    postBuildScripts: carryEntitlements('Share/Share.entitlements'),
     entitlements: {
       path: 'Share/Share.entitlements',
-      properties: {
-        'com.apple.security.application-groups': [
-          'group.org.matrixaxon.axon.sharing',
-        ],
-        'keychain-access-groups': [
-          '$(AppIdentifierPrefix)org.matrixaxon.axon.sharing',
-        ],
-      },
+      properties: shareEntitlements,
     },
   }
   project.targets.axon_share = extension
@@ -127,6 +159,9 @@ delete project.targets.axon_share
     probe.info.properties.NSExtension.NSExtensionPrincipalClass =
       '$(PRODUCT_MODULE_NAME).ShareProbeViewController'
     probe.entitlements.path = 'ShareProbe/ShareProbe.entitlements'
+    probe.postBuildScripts = carryEntitlements(
+      'ShareProbe/ShareProbe.entitlements',
+    )
     project.targets.axon_share_probe = probe
     app.dependencies.push({ target: 'axon_share_probe', embed: true })
   }
