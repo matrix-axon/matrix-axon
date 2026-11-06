@@ -160,6 +160,30 @@ final class ShareComposer: ObservableObject {
     default: return "A source item could not be read or is not a supported image."
     }
   }
+  var commonPhotoSize: SharePhotoSize? {
+    let photos = record?.files.filter { !$0.thumbnail } ?? []
+    let sizes = Set(photos.map { $0.photoSize ?? .original })
+    return sizes.count == 1 ? sizes.first : nil
+  }
+  var photoUploadBytes: Int {
+    record?.files.filter { !$0.thumbnail }.reduce(0) { $0 + $1.uploadBytes } ?? 0
+  }
+  static func byteCount(_ bytes: Int) -> String {
+    ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+  }
+  func setPhotoSize(_ size: SharePhotoSize, file: String? = nil) {
+    guard editable else { return }
+    editSave?.cancel()
+    let text = text
+    let account = account
+    let room = room
+    run {
+      try self.persist(text: text, account: account, room: room)
+      self.current = try self.store!.setPhotoSize(
+        self.current!, size: size, file: file, cancellation: self.cancellation)
+      return "Photo size updated. Review the estimated upload size before sending."
+    }
+  }
   func start(_ items: [NSExtensionItem]) {
     guard !closing else { return }
     run {
@@ -247,11 +271,14 @@ final class ShareComposer: ObservableObject {
         // A thumbnail upload may have saved a newer revision, or a peer may
         // have discarded the draft. Never leave stale Send authority enabled.
         let fenced = self.refreshAfterFailure()
-        if self.current.map({ [$0.operation] + $0.files.compactMap(\.operation) })?.contains(
-          where: { [.dispatching, .unknown].contains($0.state) }) == true
-        {
+        let outcomes = self.current.map { [$0.operation] + $0.files.compactMap(\.operation) } ?? []
+        let confirmed = outcomes.filter { $0.state == .sent }.count
+        if outcomes.contains(where: { [.dispatching, .unknown].contains($0.state) }) {
           message =
             "Delivery outcome unknown. A dispatched message may have been delivered. Check the destination before any explicit resend in Axon."
+        } else if !fenced && confirmed > 0 && self.current?.completed == false {
+          message =
+            "Confirmed photos: \(confirmed). Sending stopped. Review the remaining items in Axon → Pending shares; confirmed photos will not be resent."
         } else {
           message = Self.explain(
             fenced ? ShareFailure.stale : error, draftSaved: self.current != nil)
@@ -316,6 +343,10 @@ final class ShareComposer: ObservableObject {
     }
   }
   private static func explain(_ error: Error, draftSaved: Bool = true) -> String {
+    if (error as? ShareFailure) == .photoResizeUnsupported {
+      return
+        "This format cannot be reduced here. Keep Original for animated or unsupported images; no photo sizes were changed."
+    }
     if let failure = error as? DevicePreviewFailure {
       return failure.explanation
         + " Your original link remains sendable. You can explicitly choose Use homeserver instead."
@@ -679,7 +710,7 @@ private enum SharePreviewInformation: String, Identifiable {
   }
 }
 
-private struct ShareComposeView: View {
+struct ShareComposeView: View {
   @ObservedObject var model: ShareComposer
   @Environment(\.sizeCategory) private var sizeCategory
   @State private var previewInformation: SharePreviewInformation?
@@ -793,6 +824,26 @@ private struct ShareComposeView: View {
         }
         if let photos = model.record?.files.filter({ !$0.thumbnail }), !photos.isEmpty {
           Section(header: Text("Photos (\(photos.count))")) {
+            if photos.count > 1 {
+              Picker(
+                "Size for all photos",
+                selection: Binding<SharePhotoSize?>(
+                  get: { model.commonPhotoSize },
+                  set: { if let size = $0 { model.setPhotoSize(size) } }
+                )
+              ) {
+                if model.commonPhotoSize == nil { Text("Mixed").tag(nil as SharePhotoSize?) }
+                ForEach(SharePhotoSize.allCases, id: \.self) { size in
+                  Text(size.label).tag(Optional(size))
+                }
+              }.pickerStyle(.menu).disabled(!model.editable)
+                .accessibilityIdentifier("share-photo-size-all")
+            }
+            Text("Estimated photos upload: \(ShareComposer.byteCount(model.photoUploadBytes))")
+              .accessibilityIdentifier("share-photo-upload-total")
+            Text(
+              "Reduced sizes limit the longest edge without upscaling. JPEG/HEIC/HEIF becomes JPEG; PNG stays PNG. Originals remain available in this draft."
+            ).font(.caption)
             ForEach(photos, id: \.id) { photo in
               VStack(alignment: .leading, spacing: 8) {
                 if let image = model.images[photo.id] {
@@ -802,8 +853,23 @@ private struct ShareComposeView: View {
                   Text("Photo preview unavailable").font(.caption)
                 }
                 Text(photo.name)
-                Text("\(photo.bytes / 1024) KiB · \(photo.operation?.state.rawValue ?? "ready")")
-                  .font(.caption)
+                Text(
+                  "Original: \(ShareComposer.byteCount(photo.bytes)) · Upload: ~\(ShareComposer.byteCount(photo.uploadBytes))"
+                )
+                .font(.caption)
+                Picker(
+                  "Photo size",
+                  selection: Binding(
+                    get: { photo.photoSize ?? .original },
+                    set: { model.setPhotoSize($0, file: photo.id) }
+                  )
+                ) {
+                  ForEach(SharePhotoSize.allCases, id: \.self) { size in
+                    Text(size.label).tag(size)
+                  }
+                }.pickerStyle(.menu).disabled(!model.editable)
+                  .accessibilityIdentifier("share-photo-size-item-" + photo.id)
+                Text(photo.operation?.state.rawValue ?? "ready").font(.caption)
                 Button("Remove photo") { model.removePhoto(photo.id) }
                   .buttonStyle(.borderless).disabled(!model.editable)
               }

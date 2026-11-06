@@ -3,7 +3,7 @@ import Foundation
 public enum ShareFailure: String, Error, Codable {
   case unavailable, invalid, quota, stale, busy, missingFile, expired, authentication, invalidation,
     httpsRequired, cancelled, previewUnavailable, invalidResponse, pendingLimit, previewBusy,
-    transferBusy, sending, publicIPv4Required
+    transferBusy, sending, publicIPv4Required, photoResizeUnsupported
 }
 
 public enum ShareLimits {
@@ -15,6 +15,7 @@ public enum ShareLimits {
   // Escaping a 64 KiB text import can expand its JSON representation sixfold.
   public static let manifestBytes = 1024 * 1024
   public static let metadataReservation = 2 * manifestBytes
+  public static let resizedPhotoBytes = 20 * 1024 * 1024
   public static let thumbnailBytes = 2 * 1024 * 1024
   // Room lists include topics and other fields the native picker does not use.
   public static let roomListBytes = 8 * 1024 * 1024
@@ -36,6 +37,20 @@ public struct ShareOperation: Codable, Equatable {
   public init(id: String = UUID().uuidString) { self.id = id }
 }
 
+public enum SharePhotoSize: String, Codable, CaseIterable, Hashable {
+  case original, large, medium, small
+  public var pixels: Int? {
+    switch self {
+    case .original: return nil
+    case .large: return 2048
+    case .medium: return 1280
+    case .small: return 640
+    }
+  }
+  public var title: String { rawValue.capitalized }
+  public var label: String { pixels.map { "\(title) (\($0) px)" } ?? title }
+}
+
 public struct ShareFile: Codable, Equatable {
   public var id: String
   public var name: String
@@ -44,6 +59,10 @@ public struct ShareFile: Codable, Equatable {
   public var digest: String
   public var thumbnail: Bool
   public var operation: ShareOperation?
+  // Originals stay immutable. Recovery regenerates this chosen representation.
+  public var photoSize: SharePhotoSize?
+  public var photoBytes: Int?
+  public var uploadBytes: Int { photoBytes ?? bytes }
 }
 
 public struct SharePreview: Codable, Equatable {
@@ -94,6 +113,7 @@ public struct ShareManifest: Codable, Equatable {
     self.text = text
   }
   public var bytes: Int { files.reduce(text.utf8.count) { $0 + $1.bytes } }
+  public var uploadBytes: Int { files.reduce(text.utf8.count) { $0 + $1.uploadBytes } }
   public var completed: Bool {
     let operations = files.compactMap(\.operation)
     return operations.isEmpty

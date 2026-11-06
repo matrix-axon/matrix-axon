@@ -23,13 +23,15 @@ export interface ShareFile {
   digest: string
   thumbnail: boolean
   operation?: ShareOperation
+  photoSize?: 'original' | 'large' | 'medium' | 'small'
+  photoBytes?: number
 }
 export interface SharePreview extends PreviewInput {
   provenance: 'source' | 'generated'
   thumbnail?: string
 }
 export interface IncomingShare {
-  version: 1
+  version: 1 | 2
   id: string
   createdAt: number
   session: string
@@ -85,7 +87,7 @@ export function isIncomingShare(value: unknown): value is IncomingShare {
     )
   }
   return (
-    record.version === 1 &&
+    [1, 2].includes(record.version ?? 0) &&
     typeof record.id === 'string' &&
     typeof record.session === 'string' &&
     typeof record.text === 'string' &&
@@ -110,6 +112,18 @@ export function isIncomingShare(value: unknown): value is IncomingShare {
         file.bytes >= 0 &&
         file.bytes <= 100 * 1024 * 1024 &&
         typeof file.thumbnail === 'boolean' &&
+        (record.version === 2 ||
+          (file.photoSize === undefined && file.photoBytes === undefined)) &&
+        (file.photoSize === undefined ||
+          ['original', 'large', 'medium', 'small'].includes(file.photoSize)) &&
+        (file.photoBytes === undefined ||
+          (Number.isSafeInteger(file.photoBytes) &&
+            file.photoBytes >= 0 &&
+            file.photoBytes <= 100 * 1024 * 1024)) &&
+        (file.photoSize === undefined) === (file.photoBytes === undefined) &&
+        (file.photoSize === undefined || file.mime.startsWith('image/')) &&
+        (!file.thumbnail ||
+          (file.photoSize === undefined && file.photoBytes === undefined)) &&
         (file.thumbnail || operation(file.operation)),
     ) &&
     (record.previews === undefined ||

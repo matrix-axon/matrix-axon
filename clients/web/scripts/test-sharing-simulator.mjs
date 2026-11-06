@@ -100,8 +100,14 @@ const project = {
     ShareSource: {
       type: 'application',
       platform: 'iOS',
-      sources: [join(source, '../share-extension-tests/Source.swift')],
-      dependencies: [{ target: 'ShareExtension', embed: true }],
+      sources: [
+        join(source, '../share-extension-tests/Source.swift'),
+        join(source, '../share-extension/ShareViewController.swift'),
+      ],
+      dependencies: [
+        { target: 'ShareExtension', embed: true },
+        { package: 'AxonIncomingShare' },
+      ],
       settings: {
         base: {
           PRODUCT_BUNDLE_IDENTIFIER: hostId,

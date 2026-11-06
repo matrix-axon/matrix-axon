@@ -1,6 +1,9 @@
 import LinkPresentation
+import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+
+@testable import AxonIncomingShare
 
 /// Simulator-only sender; no Keychain, App Group, server, or account access.
 @main
@@ -56,6 +59,8 @@ private final class SourceController: UIViewController {
       ("source-image-alternative", #selector(imageAlternative)),
       ("source-multiple-images", #selector(multipleImages)),
       ("source-file", #selector(file)), ("source-video", #selector(video)),
+      ("source-photo-size", #selector(photoSize)),
+      ("source-photo-size-single", #selector(singlePhotoSize)),
     ] {
       let button = UIButton(type: .system)
       button.setTitle(name, for: .normal)
@@ -92,6 +97,40 @@ private final class SourceController: UIViewController {
   @objc private func imageOnly() {
     show(UIActivityViewController(activityItems: [Self.image()], applicationActivities: nil))
   }
+  @objc private func photoSize() { showPhotoComposer(count: 2) }
+  @objc private func singlePhotoSize() { showPhotoComposer(count: 1) }
+  private func showPhotoComposer(count: Int) {
+    do {
+      let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+      let store = try ShareStore(root: root)
+      let session = ShareSession(
+        installation: "fixture", server: "https://photo-size-fixture.invalid",
+        credentialAvailable: true, expiresAt: nil)
+      try store.publish(session, credential: {})
+      let config = URLSessionConfiguration.ephemeral
+      config.protocolClasses = [PhotoSizeFixtureProtocol.self]
+      let model = ShareComposer(
+        transport: ShareHTTP(configuration: config),
+        prepare: {
+          .init(store: store, credential: { (session, "synthetic-token") })
+        },
+        close: { [weak self] in
+          self?.dismiss(animated: true)
+          try? FileManager.default.removeItem(at: root)
+        })
+      let image = UIGraphicsImageRenderer(size: CGSize(width: 2400, height: 1600)).image {
+        context in
+        UIColor.systemBlue.setFill()
+        context.fill(CGRect(x: 0, y: 0, width: 2400, height: 1600))
+      }
+      let item = NSExtensionItem()
+      item.attachments = (0..<count).map { _ in NSItemProvider(object: image) }
+      let host = UIHostingController(rootView: ShareComposeView(model: model))
+      host.isModalInPresentation = true
+      present(host, animated: true)
+      model.start([item])
+    } catch { assertionFailure("Could not prepare isolated photo fixture") }
+  }
   @objc private func multipleImages() {
     show(
       UIActivityViewController(
@@ -124,4 +163,23 @@ private final class SourceController: UIViewController {
       UIActivityViewController(
         activityItemsConfiguration: UIActivityItemsConfiguration(itemProviders: [provider])))
   }
+}
+
+/// No shared credentials, real server, or outbound requests in the photo UI fixture.
+private final class PhotoSizeFixtureProtocol: URLProtocol {
+  override class func canInit(with request: URLRequest) -> Bool {
+    request.url?.host == "photo-size-fixture.invalid"
+  }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    client?.urlProtocol(
+      self,
+      didReceive: HTTPURLResponse(
+        url: request.url!, statusCode: 200,
+        httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!,
+      cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: Data("{\"data\":[]}".utf8))
+    client?.urlProtocolDidFinishLoading(self)
+  }
+  override func stopLoading() {}
 }

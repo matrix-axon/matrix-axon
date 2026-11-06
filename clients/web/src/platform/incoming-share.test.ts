@@ -19,3 +19,27 @@ it.each([null, {}, { version: 1, text: 'incomplete' }])(
     )
   },
 )
+
+it('preserves photo sizing in a native recovery manifest and rejects malformed choices', async () => {
+  const sized = structuredClone(manifest)
+  sized.version = 2
+  Object.assign(sized.files[2], {
+    mime: 'image/heic',
+    photoSize: 'small',
+    photoBytes: 512,
+  })
+  vi.mocked(invoke).mockResolvedValue({ value: sized })
+  await expect(nativeIncomingShare().call('claim')).resolves.toEqual(sized)
+  for (const fields of [
+    { photoSize: 'huge' },
+    { photoSize: 'small', photoBytes: -1 },
+    { photoSize: 'small', photoBytes: undefined },
+  ]) {
+    const invalid = structuredClone(sized)
+    Object.assign(invalid.files[2], fields)
+    vi.mocked(invoke).mockResolvedValue({ value: invalid })
+    await expect(nativeIncomingShare().call('claim')).rejects.toThrow(
+      'Incoming share: invalid',
+    )
+  }
+})

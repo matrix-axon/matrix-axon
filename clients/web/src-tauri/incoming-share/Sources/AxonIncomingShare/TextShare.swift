@@ -394,8 +394,9 @@ public final class TextShareSender {
       next = try save(operation, in: next, file: attachment.id)
       checkpoint(next)
       do {
-        let uploaded = try store.withVerifiedFile(next.id, file: attachment.id, owner: next.owner!)
-        { url, file in
+        let uploaded = try store.withUploadFile(
+          next.id, file: attachment.id, owner: next.owner!, cancellation: cancellation
+        ) { url, file in
           let name = file.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
           return try self.object(
             self.call(

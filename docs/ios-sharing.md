@@ -19,14 +19,27 @@ Text, web URLs, and up to ten photos are supported.
 Video and general-file intake remain outstanding work in stage 7 of [the sharing plan](mobile-incoming-sharing.md).
 Photos appear in provider order with bounded display thumbnails, filenames, and saved delivery states.
 Before sending, edit the first photo's optional caption or remove individual photos.
+Each photo has a native **Photo size** menu: **Original**, **Large (2048 px)**, **Medium (1280 px)**, or **Small (640 px)**.
+Reduced sizes cap the longest edge without upscaling; Original is the default.
+For multiple photos, **Size for all photos** applies one choice to the batch; change an individual photo afterward to override it, and the batch menu shows **Mixed**.
+Each photo shows its original size and estimated upload size, with an estimated total above the selection.
+Size preparation completes before Send becomes available, and a failed or cancelled batch change does not leave partially changed choices.
 The first photo carries that caption and any included link cards; subsequent photos send without repeating them.
 Preview thumbnails belonging to links never become separate photo messages.
-After any photo has been sent or its delivery becomes uncertain, the destination, caption, cards, and selection are fixed.
+After any photo has been sent or its delivery becomes uncertain, the destination, caption, cards, selection, and photo sizes are fixed.
 Use Pending shares to explicitly prepare failed items for retry or consent to resending an uncertain item.
 Confirmed photos are skipped when continuing a batch.
+Saved size choices are also used when sending from Pending shares; recovery shows the selected preset and estimated upload size.
+Sized drafts use manifest version 2, so an older app refuses the draft rather than silently sending full-size images.
+Resume such a draft in an app version that supports the size picker.
 Cancellation after partial delivery retains the remaining originals and confirmed event IDs for recovery.
-Original photo bytes, including HEIC, are retained without conversion; recipient support for the original format varies.
-Axon derives only display thumbnails (at most 480 pixels on either edge) and never loads a full photo batch into memory.
+Original photo bytes, including HEIC, remain available in the saved draft, so changing back to Original does not re-download or reconstruct them.
+Original sends retain the supplied format; recipient support varies.
+Reduced JPEG/HEIC/HEIF photos are encoded as JPEG, while reduced PNG photos remain PNG with transparency preserved.
+Animated and other unsupported formats must use Original.
+Axon decodes bounded representations and processes one photo at a time, without loading a full photo batch into memory.
+Display thumbnails remain separate from the selected upload representation.
+Reducing limits the upload; retained originals continue to count toward pending-storage quotas.
 ImageIO checks the copied bytes' format, dimensions, and a bounded thumbnail decode rather than trusting provider MIME declarations or filename extensions.
 Sources above 200 million pixels or 65,535 pixels on either edge are refused before decoding.
 A photo may be up to 100 MiB, and all staged content in one share, including text and link thumbnails, must fit within 100 MiB.
@@ -348,7 +361,9 @@ Use manual interaction on the signed iPhone and iPad; keep XCTest UI automation 
 
 1. From Photos, share one JPEG/PNG, one HEIC, and an ordered multiple-photo selection with Axon cold, warm, and suspended.
    Review thumbnails and destination, remove a photo, edit the first caption, and explicitly send only to Axon Testing.
-   Verify recipient byte format, order, and first-caption/card semantics, including an encrypted room.
+   Set a reduced size for one photo and for an entire batch, override one photo, then restore Original.
+   Verify estimated sizes, sent pixel dimensions, HEIC-to-JPEG handling, PNG transparency, order, and first-caption/card semantics, including an encrypted room.
+   Keep a sized draft and send it from Pending shares, confirming the size choice survives recovery.
 2. Share a cloud-backed photo, a photo above the preview-thumbnail ceiling, and a selection exceeding ten photos or 100 MiB.
    Exercise low storage, unreadable content, cancellation during import, and termination during import; no incomplete selection may send.
 3. Interrupt after the first confirmed photo, during a later upload, and after message acceptance but before its response.
@@ -370,3 +385,16 @@ Desktop WebKit and iPhone WebKit recovery checks remain unverified on this host;
 The signed debugging export passed the artifact checker for shared capabilities, profiles, default ATS, matching app/extension versions, production extension embedding, and photo activation.
 The final debugging build was installed on the paired iPhone and iPad, both running iOS 27.0.1; installation alone does not establish Photos.app delivery acceptance.
 This records automated verification and packaging, not signed Photos.app send acceptance; the manual checklist above remains outstanding.
+
+### Photo size picker — November 5
+
+The size-picker revision passed 124 macOS native tests and 161 shared iOS Simulator tests, with one opt-in network test skipped in each suite.
+All 14 composer lifecycle tests passed, including an isolated regression that fails without the partial-delivery status fix.
+Two native menu UI tests exercised the real composer with isolated storage: batch sizing, an individual override and Mixed state, restoring Original, and the single-photo menu.
+Native upload tests verified saved choices after reclaim, actual JPEG dimensions and filenames from HEIC sources, unchanged original bytes, no upscaling, PNG transparency, atomic batch failure, cancellation, and interrupted temporary-file cleanup.
+The native package compiled for arm64 iOS 15 with extension-safe APIs.
+Web lint, the production build, OpenAPI/preview-contract checks, 2,982 unit tests (two skipped), and all 22 Chromium/Firefox recovery browser checks passed.
+The broader Chromium suite also passed 257 tests with 19 skips.
+The signed debugging export passed the artifact checker and was installed on both paired iOS 27.0.1 devices.
+The exported extension binary was checked for the size controls and the latest partial-delivery status message.
+The WebKit launch limitation and signed Photos.app acceptance checklist above still apply.

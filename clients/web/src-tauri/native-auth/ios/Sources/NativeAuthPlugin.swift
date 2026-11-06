@@ -253,7 +253,7 @@ class NativeAuthPlugin: Plugin {
           let manifest = try store.owned(id, owner: owner, account: account)
           guard manifest.session == descriptor.generation else { throw ShareFailure.stale }
           if args.action == "upload" {
-            let (status, body) = try store.withVerifiedFile(id, file: args.file ?? "", owner: owner) { url, file in
+            let (status, body) = try store.withUploadFile(id, file: args.file ?? "", owner: owner) { url, file in
               let kind = file.thumbnail || file.mime.hasPrefix("image/") ? "image" : "file"
               let filename = file.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "attachment"
               return try self.shareHTTP.request(descriptor: descriptor, token: token,
