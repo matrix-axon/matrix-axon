@@ -225,7 +225,11 @@ jobs:
   linux:
     name: Build for Linux
     needs: checks
-    runs-on: ubuntu-latest
+    # Pinned to the oldest supported runner, not `ubuntu-latest`: the binary
+    # requires the glibc of the machine that built it. 22.04 (glibc 2.35) keeps
+    # the .deb and AppImage runnable on Debian 12 (2.36) and Ubuntu 22.04+, the
+    # same floor as package.yml. Do not bump without checking Debian stable.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     if: >-
       ${{ github.event_name != 'pull_request'
