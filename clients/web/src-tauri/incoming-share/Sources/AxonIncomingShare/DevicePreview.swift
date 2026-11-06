@@ -6,7 +6,7 @@
   import os
 
   public enum DevicePreviewFailure: String, Error {
-    case unavailable, timeout, noMetadata, unsupportedURL
+    case unavailable, timeout, noMetadata, unsupportedURL, publicIPv4Required
 
     public var explanation: String {
       switch self {
@@ -14,13 +14,15 @@
       case .timeout: return "The on-device preview lookup timed out."
       case .noMetadata: return "The device found no usable preview metadata for this link."
       case .unsupportedURL: return "This address is not supported for on-device previews."
+      case .publicIPv4Required:
+        return "On-device previews require a public IPv4 destination. IPv6-only sites are not supported."
       }
     }
   }
 
   /// One explicit lookup on the composer's serial worker. It has no credential
-  /// or homeserver transport dependency. Apple owns the metadata network work;
-  /// this adapter bounds its lifetime and all bytes retained in our draft.
+  /// or homeserver transport dependency. Acquisition uses the restricted preview
+  /// transport; this adapter bounds all metadata and bytes retained in our draft.
   public final class DevicePreview {
     private static let log = Logger(subsystem: "org.matrixaxon.axon", category: "device-preview")
     public typealias Lookup = (URL, ShareCancellation) throws -> LPLinkMetadata
@@ -90,6 +92,9 @@
         try cancellation.check()
         if let failure = error as? DevicePreviewFailure { throw failure }
         if (error as? ShareFailure) == .expired { throw DevicePreviewFailure.timeout }
+        if (error as? ShareFailure) == .publicIPv4Required {
+          throw DevicePreviewFailure.publicIPv4Required
+        }
         throw DevicePreviewFailure.unavailable
       }
       try cancellation.check()

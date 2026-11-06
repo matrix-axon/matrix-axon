@@ -136,7 +136,7 @@
       XCTAssertEqual(result.manifest.previews?.first?.title, "Device title")
     }
     func testFailureDoesNotChangeDraftOrInvokeAnotherService() async throws {
-      for failure in [DevicePreviewFailure.timeout, .unavailable, .noMetadata] {
+      for failure in [DevicePreviewFailure.timeout, .unavailable, .noMetadata, .publicIPv4Required] {
         let input = try draft()
         var requests = 0
         let generator = DevicePreview(store: store) { _, _ in
@@ -151,6 +151,21 @@
         XCTAssertEqual(try store.refreshOwned(input.id, owner: input.owner!), input)
         XCTAssertNil(TextShare.validation(input))
       }
+    }
+    func testMissingPublicIPv4ExplainsTheRestrictionAndKeepsTheDraft() async throws {
+      let input = try draft()
+      let generator = DevicePreview(store: store) { _, _ in
+        throw ShareFailure.publicIPv4Required
+      }
+      do {
+        _ = try await Task.detached { try generator.include(input, url: self.link) }.value
+        XCTFail("An IPv6-only origin cannot start preview acquisition")
+      } catch {
+        XCTAssertEqual(error as? DevicePreviewFailure, .publicIPv4Required)
+        XCTAssertTrue(DevicePreviewFailure.publicIPv4Required.explanation.contains("IPv6-only"))
+      }
+      XCTAssertEqual(try store.refreshOwned(input.id, owner: input.owner!), input)
+      XCTAssertNil(TextShare.validation(input))
     }
     func testMissingAndOversizedImagesPreserveTextCard() async throws {
       for image in [

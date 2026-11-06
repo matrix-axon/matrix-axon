@@ -84,10 +84,17 @@ Authenticated Axon requests require HTTPS and retain default App Transport Secur
 Room-list responses have an 8 MiB ceiling; thumbnail responses retain their separate 2 MiB ceiling.
 An oversized response is reported with its limit and observed byte count, separately from connectivity errors.
 Device preview acquisition admits one lookup per process with a shared 25-second page/image deadline and cancellable DNS waits of at most four seconds.
-IPv6 and IPv4 are queried together under that DNS budget, retaining at most one validated address per family.
-The preferred IPv6 TLS connection starts first; an available IPv4 alternate starts after 250 milliseconds, or immediately if the first connection fails.
+Every origin, redirect, and selected-image host must supply a validated public IPv4 A record.
+Origin AAAA records are never connection targets: an apparently global IPv6 address can encode a private IPv4 service under an unknown operator NAT64 prefix.
+A parallel, optional lookup of the fixed `ipv4only.arpa.` name discovers a canonical RFC 7050 NAT64 prefix under the same DNS budget.
+Axon supports the RFC 6052 prefix lengths of 32, 40, 48, 56, 64, and 96 bits, but accepts only global-unicast or well-known NAT64 prefixes; local-use prefixes are unsupported.
+Only Axon's own synthesis of the vetted public A address can authorize an IPv6 connection.
+When that translation is available, its TLS connection starts first; the public IPv4 alternate starts after 250 milliseconds, or immediately if the first connection fails.
 The first TLS-ready connection wins and cancels its competitor; only the winner sends an HTTP request, avoiding duplicate page or image requests.
-Single-family and NAT64 networks remain supported, and DNS, connection racing, redirects, page reads, and image reads never reset the original deadline.
+IPv4 and supported NAT64 access networks can reach sites with public A records; IPv6-only origin sites cannot generate on-device previews.
+Their links remain sendable, and the separate homeserver action remains an explicit alternative.
+An absent, invalid, or timed-out discovery answer cannot authorize raw IPv6 or discard a usable public IPv4 target.
+DNS, connection racing, redirects, page reads, and image reads never reset the original deadline.
 Every page, redirect, and selected-image request requires HTTPS and resolves to a validated global-unicast address; private, loopback, link-local, multicast, reserved, and documentation ranges are rejected.
 The TLS socket connects to that numeric address while certificate and hostname validation still use the original DNS name, preventing a second unchecked DNS resolution.
 There are at most six requests in each redirect chain, and no cookies, credentials, referrers, proxy fetches, JavaScript, frames, stylesheets, or arbitrary subresources are used.
@@ -120,10 +127,12 @@ The separate `AXON_SHARE_PROBE=1` development probe remains optional and exclude
 Both the app ID `org.matrixaxon.axon` and extension ID `org.matrixaxon.axon.Share` need App Group `group.org.matrixaxon.axon.sharing` and matching shared Keychain access in their provisioning profiles.
 Their marketing/build versions must match.
 When automatic signing cannot select installed profiles, set `AXON_IOS_APP_DEVELOPMENT_PROFILE` and `AXON_IOS_SHARE_DEVELOPMENT_PROFILE` to manually managed profile names or UUIDs before running the generation hook or packaging script.
-These explicitly select each bundle's development identity used during archiving; the export method selects the final distribution identity/profile.
+For `debugging`, the archive and export both use `Apple Development` and those development profiles.
+For `app-store-connect` and `release-testing`, the archive and export both use `Apple Distribution` and the selected export profiles, matching the production push entitlement before export begins.
 Explicit signing also generates Tauri's `ExportOptions.plist` with profiles for both bundles, because its automatic export does not select API-created profiles reliably.
 Debug exports use those development profiles; App Store exports default to `iOS Team Store Provisioning Profile: <bundle ID>` names.
-Override custom names with `AXON_IOS_APP_EXPORT_PROFILE` and `AXON_IOS_SHARE_EXPORT_PROFILE`; manual hook invocations can select the export method with `AXON_IOS_EXPORT_METHOD`.
+Override custom distribution profiles with `AXON_IOS_APP_EXPORT_PROFILE` and `AXON_IOS_SHARE_EXPORT_PROFILE`; debugging always uses the development profiles even when distribution overrides are present.
+Manual hook invocations can select the export method with `AXON_IOS_EXPORT_METHOD`.
 Manual exports require manually managed profiles for both bundles; Xcode rejects a managed containing-app profile in a manual export.
 The Apple Store workflow selects both targets' archive and export profiles explicitly by validated UUID.
 Its four iOS profile secrets must contain manually managed profiles with the required shared capabilities; the credential check rejects Xcode-managed profiles before building.

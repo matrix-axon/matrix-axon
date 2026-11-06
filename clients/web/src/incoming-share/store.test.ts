@@ -475,6 +475,22 @@ describe('durable incoming-share recovery', () => {
     expect(f.post).not.toHaveBeenCalled()
     expect(f.store.selected.value?.text).toBe('https://example.org')
   })
+  it('explains a missing public IPv4 destination without changing the draft or using the homeserver', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    const input = structuredClone(f.store.selected.value)
+    const original = f.port.call
+    f.port.call = async (action, args) => {
+      if (action === 'device_preview')
+        throw { code: 'devicePreview_publicIPv4Required' }
+      return original(action, args)
+    }
+    await f.store.generate('https://example.org')
+    expect(f.store.error.value).toContain('IPv6-only sites are not supported')
+    expect(f.store.error.value).toContain('link remains sendable')
+    expect(f.store.selected.value).toEqual(input)
+    expect(f.post).not.toHaveBeenCalled()
+  })
   it('submits a URL to the homeserver only through its separate action', async () => {
     const f = fixture()
     await f.store.open('share')

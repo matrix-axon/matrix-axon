@@ -128,6 +128,8 @@ export function createIncomingShareStore(
         'The on-device preview lookup timed out. The link remains sendable; you can explicitly choose Use homeserver instead.',
       devicePreview_noMetadata:
         'The device found no usable preview metadata. The original link remains sendable.',
+      devicePreview_publicIPv4Required:
+        'On-device previews require a public IPv4 destination. IPv6-only sites are not supported. The link remains sendable; you can explicitly choose Use homeserver instead.',
       invalid:
         'The share contains invalid or over-limit data. Review and edit it before sending.',
       busy: 'Another share operation is active. Close other Share → Axon composers, wait up to five minutes, then retry.',

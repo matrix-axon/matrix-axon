@@ -25,9 +25,11 @@ enum PreviewNetwork {
   struct Address: Equatable {
     let text: String
     let bytes: [UInt8]
-    private init(text: String, bytes: [UInt8]) {
+    private let sourceIPv4: [UInt8]?
+    private init(text: String, bytes: [UInt8], sourceIPv4: [UInt8]? = nil) {
       self.text = text
       self.bytes = bytes
+      self.sourceIPv4 = sourceIPv4
     }
     static func parse(_ text: String) -> Address? {
       var v4 = in_addr()
@@ -39,6 +41,24 @@ enum PreviewNetwork {
         return Address(text: text, bytes: withUnsafeBytes(of: &v6) { Array($0) })
       }
       return nil
+    }
+    static func translated(_ ipv4: Address, using prefix: NAT64Prefix) -> Address? {
+      guard ipv4.bytes.count == 4, ipv4.isPublic,
+        let bytes = prefix.embedding(ipv4.bytes)
+      else { return nil }
+      var address = in6_addr()
+      withUnsafeMutableBytes(of: &address) { $0.copyBytes(from: bytes) }
+      var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+      guard inet_ntop(AF_INET6, &address, &buffer, socklen_t(buffer.count)) != nil else { return nil }
+      let candidate = Address(text: String(cString: buffer), bytes: bytes, sourceIPv4: ipv4.bytes)
+      return candidate.isPublic ? candidate : nil
+    }
+    var approvedForConnection: Bool {
+      if bytes.count == 4 { return isPublic }
+      // A global IPv6 bit pattern may be an unknown operator NAT64 mapping to
+      // a private IPv4 service. Only locally synthesized public-A targets pass.
+      guard let sourceIPv4 else { return false }
+      return Address(text: "", bytes: sourceIPv4).isPublic && isPublic
     }
     var isPublic: Bool {
       let b = bytes
@@ -119,7 +139,7 @@ enum PreviewNetwork {
         )
         throw error
       }
-      guard (1...2).contains(addresses.count), addresses.allSatisfy(\.isPublic) else {
+      guard (1...2).contains(addresses.count), addresses.allSatisfy(\.approvedForConnection) else {
         throw ShareFailure.previewUnavailable
       }
       try cancellation.check()
@@ -151,19 +171,26 @@ enum PreviewNetwork {
   private final class DNSResult {
     let result = ShareIntakeResult<Address?>()
     let family: DNSServiceProtocol
+    let host: String
+    let discovery: Bool
     var reference: DNSServiceRef?
-    init(_ family: DNSServiceProtocol) { self.family = family }
+    init(_ family: DNSServiceProtocol, host: String, discovery: Bool = false) {
+      self.family = family
+      self.host = host
+      self.discovery = discovery
+    }
   }
   // One worker per active lookup; deallocation is serialized with callbacks.
   static func resolve(_ host: String, timeout: TimeInterval, cancellation: ShareCancellation) throws
     -> [Address]
   {
     let queue = DispatchQueue(label: "org.matrixaxon.axon.preview-dns")
-    // Query both families together, with at most one pinned address per family.
-    // One absent/broken DNS family must not discard an available other family.
+    // Never query an origin's AAAA records. A separate fixed discovery query
+    // can synthesize NAT64 connectivity only from its validated public A record.
+    // Both cancellable queries share the original bounded DNS budget.
     let queries = [
-      DNSResult(DNSServiceProtocol(kDNSServiceProtocol_IPv6)),
-      DNSResult(DNSServiceProtocol(kDNSServiceProtocol_IPv4)),
+      DNSResult(DNSServiceProtocol(kDNSServiceProtocol_IPv4), host: host),
+      DNSResult(DNSServiceProtocol(kDNSServiceProtocol_IPv6), host: "ipv4only.arpa.", discovery: true),
     ]
     let deadline = DispatchTime.now() + timeout
     queue.async {
@@ -178,7 +205,7 @@ enum PreviewNetwork {
         }
         let status = DNSServiceGetAddrInfo(
           &state.reference, 0, 0,
-          state.family, host,
+          state.family, state.host,
           { _, flags, _, error, _, address, _, context in
             guard let context else { return }
             let state = Unmanaged<DNSResult>.fromOpaque(context).takeUnretainedValue()
@@ -196,7 +223,8 @@ enum PreviewNetwork {
                 address, socklen_t(address.pointee.sa_len), &buffer, socklen_t(buffer.count), nil,
                 0,
                 NI_NUMERICHOST) == 0,
-              let parsed = Address.parse(String(cString: buffer)), parsed.isPublic
+              let parsed = Address.parse(String(cString: buffer)),
+              (state.discovery ? parsed.bytes.count == 16 : parsed.bytes.count == 4 && parsed.isPublic)
             else {
               state.result.finish(.failure(ShareFailure.previewUnavailable))
               return
@@ -231,23 +259,25 @@ enum PreviewNetwork {
     cancellation: ShareCancellation
   ) throws -> [Address] {
     guard queries.count == 2 else { throw ShareFailure.previewUnavailable }
-    var addresses: [Address] = []
-    var expired = false
-    for query in queries {
-      do {
-        if let address = try query.wait(until: deadline, cancellation: cancellation) {
-          guard address.isPublic else { throw ShareFailure.previewUnavailable }
-          addresses.append(address)
-        }
-      } catch ShareFailure.cancelled {
-        throw ShareFailure.cancelled
-      } catch ShareFailure.previewUnavailable {
-        throw ShareFailure.previewUnavailable
-      } catch { expired = expired || (error as? ShareFailure) == .expired }
+    try cancellation.check()
+    guard let ipv4 = try queries[0].wait(until: deadline, cancellation: cancellation) else {
+      throw ShareFailure.publicIPv4Required
     }
-    guard !addresses.isEmpty else {
-      throw expired ? ShareFailure.expired : ShareFailure.unavailable
+    guard ipv4.bytes.count == 4, ipv4.isPublic else { throw ShareFailure.previewUnavailable }
+    var addresses = [ipv4]
+    do {
+      if let probe = try queries[1].wait(until: deadline, cancellation: cancellation),
+        let prefix = NAT64Prefix.discover(probe),
+        let translated = Address.translated(ipv4, using: prefix)
+      {
+        addresses.insert(translated, at: 0)
+      }
+    } catch ShareFailure.cancelled {
+      throw ShareFailure.cancelled
+    } catch {
+      // Optional discovery cannot invalidate a usable public IPv4 target.
     }
+    try cancellation.check()
     log.info(
       "device_preview_dns_complete ipv6=\(addresses.contains { $0.bytes.count == 16 }) ipv4=\(addresses.contains { $0.bytes.count == 4 })"
     )
@@ -261,7 +291,7 @@ enum PreviewNetwork {
     try cancellation.check()
     _ = try remaining(deadline)
     guard try validate(url) == host, (1...2).contains(addresses.count),
-      addresses.allSatisfy(\.isPublic),
+      addresses.allSatisfy(\.approvedForConnection),
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
     else { throw ShareFailure.previewUnavailable }
     let queue = DispatchQueue(label: "org.matrixaxon.axon.preview-http")
