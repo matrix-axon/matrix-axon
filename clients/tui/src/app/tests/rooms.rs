@@ -284,6 +284,7 @@ async fn leave_outcome_prunes_departed_caches_after_post_leave_refresh() {
             user_id: None,
             reason: None,
             server_names: Vec::new(),
+            join_source: String::new(),
         },
         result: Ok(()),
     })
@@ -1153,6 +1154,7 @@ mod pending_membership {
             user_id: None,
             reason: None,
             server_names: Vec::new(),
+            join_source: String::new(),
         }
     }
 
@@ -1499,6 +1501,7 @@ mod join {
             user_id: None,
             reason: None,
             server_names: Vec::new(),
+            join_source: typed.to_owned(),
         }
     }
 
@@ -1765,12 +1768,15 @@ mod join {
         .await;
 
         let status = app.status.text(false);
-        assert_eq!(
-            status,
-            "the homeserver hasn't answered for #slow:example.com"
+        assert!(
+            status.starts_with(
+                "the join result is unknown for #slow:example.com; room refresh failed:"
+            ),
+            "{status}"
         );
-        assert!(!status.contains("failed"), "{status}");
         assert!(!status.contains("joined"), "{status}");
+        assert!(!status.contains("hasn't answered"), "{status}");
+        assert_eq!(app.input.buffer, "/join #slow:example.com");
         assert!(app.pending_memberships.is_empty());
         assert!(
             app.pending_join_open.is_some(),
@@ -2359,5 +2365,204 @@ mod join {
             "{status}"
         );
         assert!(app.join_timeline_claim.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_join_restores_the_original_link() {
+        let link = "https://matrix.to/#/!abc:a.org?via=b.org";
+        let mut app = app_with_rooms(Vec::new());
+        let mut action = join_action(Uuid::nil(), "!abc:a.org", "!abc:a.org");
+        action.join_source = link.to_owned();
+        action.server_names = vec!["b.org".to_owned()];
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action,
+            result: Err(failure("HTTP 502 Bad Gateway: M_UNKNOWN", false)),
+        })
+        .await;
+
+        assert_eq!(app.input.buffer, format!("/join {link}"));
+    }
+
+    #[tokio::test]
+    async fn a_504_with_a_failed_refresh_says_the_result_is_unknown() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_for(vec!["not-json".to_owned()]).await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "#ops:example.com"),
+            result: Err(failure(
+                "HTTP 504 Gateway Timeout: join timed out after 30s",
+                true,
+            )),
+        })
+        .await;
+
+        let status = app.status.text(false);
+        assert!(
+            status.starts_with(
+                "the join result is unknown for #ops:example.com; room refresh failed:"
+            ),
+            "{status}"
+        );
+        assert!(!status.contains("joined"), "{status}");
+        assert!(!status.contains("hasn't answered"), "{status}");
+        assert_eq!(app.input.buffer, "/join #ops:example.com");
+        assert!(app.pending_join_open.is_some());
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!other:example.com")
+        );
+        assert!(app.pending_memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_join_watch_ends_when_no_covering_list_arrives() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_for(vec![rooms_response_body(std::slice::from_ref(&other))]).await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "!ops:example.com"),
+            result: Ok(()),
+        })
+        .await;
+        let deadline = app.pending_join_open.as_ref().expect("watch").deadline;
+        app.poll_pending_join_open(deadline).await;
+
+        assert!(app.pending_join_open.is_none());
+        assert!(!app.rooms_fetch_inflight);
+        assert_eq!(
+            app.status.text(false),
+            "joined #ops:example.com; it isn't in the room list yet"
+        );
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!other:example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ready_join_still_opens_after_the_watch_cap() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let ops = room("!ops:example.com", Some("#ops:example.com"), Some("Ops"));
+        let mut app = app_for(vec![
+            rooms_response_body(std::slice::from_ref(&other)),
+            empty_timeline_response_body(),
+            empty_members_response_body(),
+        ])
+        .await;
+        app.rooms.rooms = vec![other.clone()];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(ops.account_id, "#ops:example.com", &ops.room_id),
+            result: Ok(()),
+        })
+        .await;
+        let since = app.pending_join_open.as_ref().expect("watch").since;
+        app.pending_join_open.as_mut().expect("watch").deadline =
+            Instant::now() - Duration::from_secs(1);
+        app.apply_room_refresh(snapshot(vec![other, ops], since + Duration::from_millis(1)));
+        app.poll_pending_join_open(Instant::now()).await;
+
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!ops:example.com")
+        );
+        assert_eq!(app.status.text(false), "joined Ops");
+        assert!(app.pending_join_open.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_watch_that_expires_during_an_edit_keeps_its_status() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_for(vec![rooms_response_body(std::slice::from_ref(&other))]).await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+        editing(&mut app);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "!ops:example.com"),
+            result: Ok(()),
+        })
+        .await;
+        let deadline = app.pending_join_open.as_ref().expect("watch").deadline;
+        app.poll_pending_join_open(deadline).await;
+
+        assert!(matches!(app.mode, Mode::Editing { .. }));
+        assert_eq!(app.status.text(false), "editing message - Esc to cancel");
+        assert!(app.pending_join_open.is_none());
+        assert!(app.deferred_join_failure.is_some());
+
+        app.mode = Mode::Compose;
+        app.poll_pending_join_open(Instant::now()).await;
+
+        assert_eq!(
+            app.status.text(false),
+            "joined #ops:example.com; it isn't in the room list yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_busy_room_action_leaves_the_join_watch() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_for(vec![rooms_response_body(std::slice::from_ref(&other))]).await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "!ops:example.com"),
+            result: Ok(()),
+        })
+        .await;
+        app.room_action_busy = true;
+
+        app.handle_command(crate::command::parse("/invite @bob:example.com"))
+            .await;
+
+        assert!(app.pending_join_open.is_some());
+        assert_eq!(
+            app.status.text(false),
+            "a room action is already in progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_back_leave_leaves_the_join_watch() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_for(vec![rooms_response_body(std::slice::from_ref(&other))]).await;
+        app.rooms.rooms = vec![other.clone()];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: PendingRoomAction {
+                kind: RoomActionKind::Leave,
+                key: RoomKey::from(&other),
+                room_title: other.title().to_owned(),
+                user_id: None,
+                reason: None,
+                server_names: Vec::new(),
+                join_source: String::new(),
+            },
+            result: Err(failure(
+                "HTTP 504 Gateway Timeout: leave timed out after 30s",
+                true,
+            )),
+        })
+        .await;
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "!ops:example.com"),
+            result: Ok(()),
+        })
+        .await;
+
+        app.handle_command(crate::command::parse("/leave")).await;
+
+        assert!(app.pending_join_open.is_some());
+        assert!(app.status.text(false).contains("hasn't finished leaving"));
     }
 }

@@ -95,6 +95,8 @@ pub struct JoinTarget {
     /// Federation `via` hints. Empty for an alias; a bare room id contributes
     /// its own server name when the link did not name any.
     pub server_names: Vec<String>,
+    /// The argument the user typed, so a failed join can retry the same link.
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,12 +599,15 @@ pub(crate) fn parse_join_target(arg: &str) -> Result<JoinTarget, String> {
     if arg.split_whitespace().nth(1).is_some() {
         return Err("/join takes one room id, alias, or Matrix link".to_owned());
     }
-    if is_matrix_link(arg) {
-        return join_target_from_link(arg);
-    }
-    let id = ruma::RoomOrAliasId::parse(arg)
-        .map_err(|_| format!("/join: \"{arg}\" is not a room id, alias, or Matrix link"))?;
-    Ok(join_target_from_id(&id, &[]))
+    let mut target = if is_matrix_link(arg) {
+        join_target_from_link(arg)?
+    } else {
+        let id = ruma::RoomOrAliasId::parse(arg)
+            .map_err(|_| format!("/join: \"{arg}\" is not a room id, alias, or Matrix link"))?;
+        join_target_from_id(&id, &[])
+    };
+    target.source = arg.to_owned();
+    Ok(target)
 }
 
 fn is_matrix_link(arg: &str) -> bool {
@@ -638,6 +643,8 @@ fn matrix_id_join_target(
             let alias: &ruma::RoomAliasId = alias;
             alias.into()
         }
+        // An event link joins its room. `/join` has no event target, so the
+        // event id is not sent. The original link is what a retry restores.
         MatrixId::Event(room, _) => room,
         MatrixId::User(_) => return None,
         _ => return None,
@@ -645,6 +652,10 @@ fn matrix_id_join_target(
     Some(join_target_from_id(room, via))
 }
 
+/// `via` from a link replaces every other hint.
+/// A bare room id contributes its own server name, which is the only hint
+/// that id carries. That misses a room whose own server has left it.
+/// An alias sends no hint. Its server is part of the alias.
 fn join_target_from_id(id: &ruma::RoomOrAliasId, via: &[ruma::OwnedServerName]) -> JoinTarget {
     let server_names = if !via.is_empty() {
         via.iter().map(ToString::to_string).collect()
@@ -658,6 +669,7 @@ fn join_target_from_id(id: &ruma::RoomOrAliasId, via: &[ruma::OwnedServerName]) 
     JoinTarget {
         room_id_or_alias: id.to_string(),
         server_names,
+        source: String::new(),
     }
 }
 
@@ -1302,6 +1314,7 @@ mod tests {
             Command::Join(JoinTarget {
                 room_id_or_alias: "#room:example.com".to_owned(),
                 server_names: Vec::new(),
+                source: "#room:example.com".to_owned(),
             })
         );
         assert_eq!(
@@ -1309,6 +1322,7 @@ mod tests {
             Command::Join(JoinTarget {
                 room_id_or_alias: "!room:example.com".to_owned(),
                 server_names: vec!["example.com".to_owned()],
+                source: "!room:example.com".to_owned(),
             })
         );
         assert_eq!(
@@ -1319,6 +1333,7 @@ mod tests {
                     "example.com".to_owned(),
                     "backup.example.com".to_owned(),
                 ],
+                source: "https://matrix.to/#/%23room%3Aexample.com?via=example.com&via=backup.example.com".to_owned(),
             })
         );
         assert_eq!(
@@ -1326,6 +1341,7 @@ mod tests {
             Command::Join(JoinTarget {
                 room_id_or_alias: "!room:example.com".to_owned(),
                 server_names: vec!["example.com".to_owned()],
+                source: "matrix:roomid/room:example.com?via=example.com".to_owned(),
             })
         );
         assert_eq!(
@@ -1333,6 +1349,7 @@ mod tests {
             Command::Join(JoinTarget {
                 room_id_or_alias: "!room:example.com".to_owned(),
                 server_names: vec!["example.com".to_owned()],
+                source: "https://matrix.to/#/!room:example.com/$evt:example.com".to_owned(),
             })
         );
         assert!(

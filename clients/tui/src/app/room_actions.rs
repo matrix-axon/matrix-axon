@@ -36,6 +36,17 @@ const PENDING_MEMBERSHIP_FINAL_GRACE: Duration = Duration::from_secs(30);
 pub(crate) const JOIN_OPEN_READ_DELAYS: [Duration; 2] =
     [Duration::from_secs(2), Duration::from_secs(3)];
 
+/// How long a join watch may run after it is armed.
+///
+/// The delayed reads are a few seconds apart. A room-list read may take the
+/// client's read timeout, and one read can already be in flight when the
+/// watch asks for the next, so the cap is those delays plus two read
+/// timeouts. Past it, a list that never covers the joined account stops
+/// holding the entry line.
+fn join_watch_limit() -> Duration {
+    JOIN_OPEN_READ_DELAYS.iter().copied().sum::<Duration>() + Duration::from_secs(60)
+}
+
 /// A leave or forget axon timed out on, which the homeserver may still finish.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingMembership {
@@ -74,6 +85,9 @@ pub(crate) struct PendingJoinOpen {
     pub(crate) since: Instant,
     pub(crate) reads_remaining: u8,
     pub(crate) next_read_at: Instant,
+    /// When the watch gives up if no covering list has shown the room.
+    /// A room that is already listed ignores this and still opens.
+    pub(crate) deadline: Instant,
     /// When the latest delayed read was requested. A snapshot from before
     /// that request cannot end the watch.
     pub(crate) last_read_started: Option<Instant>,
@@ -134,6 +148,9 @@ pub(crate) struct PendingRoomAction {
     pub(crate) reason: Option<String>,
     /// Federation `via` hints for [`RoomActionKind::Join`]. Empty otherwise.
     pub(crate) server_names: Vec<String>,
+    /// The `/join` argument the user typed. Empty for every other action.
+    /// A retry uses this, not the parsed id, so a link keeps its `via` hints.
+    pub(crate) join_source: String,
 }
 
 #[derive(Debug)]
@@ -241,6 +258,7 @@ impl App {
             user_id: None,
             reason: None,
             server_names: target.server_names,
+            join_source: target.source,
         });
     }
 
@@ -324,10 +342,6 @@ impl App {
     }
 
     fn request_or_perform_room_action(&mut self, action: PendingRoomAction) {
-        // A new room action means the user has moved on. A late list must
-        // not pull them into the room they joined a moment ago.
-        self.pending_join_open = None;
-        self.deferred_join_failure = None;
         let held_back = |kind: RoomActionKind| {
             self.pending_memberships
                 .get(&(action.key.clone(), kind))
@@ -350,6 +364,11 @@ impl App {
             self.status = Status::from("a room action is already in progress".to_owned());
             return;
         }
+        // The action will run, or wait for confirmation. A late list must
+        // not pull the user into the room they joined a moment ago. An
+        // action that is held back or already in progress leaves the watch.
+        self.pending_join_open = None;
+        self.deferred_join_failure = None;
         if action.kind.needs_confirmation() {
             self.clear_input_buffer();
             self.status = Status::from(confirmation_status(&action));
@@ -514,10 +533,12 @@ impl App {
     }
 
     /// A join's `200` selects the room id Axon resolved.
-    /// A `504` selects only when this refresh already lists the typed target,
-    /// and otherwise says the homeserver has not answered.
+    /// A `504` selects only when this refresh already lists the typed target.
+    /// Otherwise it says the homeserver has not answered, or that the result
+    /// is unknown when the room list itself could not be read.
     /// A room missing from that refresh is watched for a few seconds
-    /// ([`JOIN_OPEN_READ_DELAYS`]). Neither path records a pending membership.
+    /// ([`JOIN_OPEN_READ_DELAYS`]), and the watch ends on its own if no
+    /// covering list arrives. Neither path records a pending membership.
     /// An open prompt keeps its room and its entry line until it ends.
     async fn finish_join(&mut self, outcome: RoomActionOutcome) {
         let account_id = outcome.action.key.account_id;
@@ -530,7 +551,8 @@ impl App {
                     .await;
             }
             Err(failure) if failure.timed_out => {
-                let listed = if self.refresh_room_list().await.is_none() {
+                let refresh_error = self.refresh_room_list().await;
+                let listed = if refresh_error.is_none() {
                     self.find_joined_room(account_id, &typed)
                 } else {
                     None
@@ -540,13 +562,21 @@ impl App {
                         .await;
                 } else {
                     self.arm_pending_join_open(account_id, &typed);
-                    self.show_join_status(format!("the homeserver hasn't answered for {typed}"));
-                    self.restore_join_line_if_composer_is_empty(&typed);
+                    // A failed read is not "the homeserver has not answered":
+                    // the join may have landed and the list is what we lack.
+                    let status = match refresh_error {
+                        Some(err) => {
+                            format!("the join result is unknown for {typed}; room refresh failed: {err}")
+                        }
+                        None => format!("the homeserver hasn't answered for {typed}"),
+                    };
+                    self.show_join_status(status);
+                    self.restore_join_line_if_composer_is_empty(&outcome.action);
                 }
             }
             Err(err) => {
                 self.show_join_status(format!("/join failed for {typed}: {err}"));
-                self.restore_join_line_if_composer_is_empty(&typed);
+                self.restore_join_line_if_composer_is_empty(&outcome.action);
             }
         }
     }
@@ -603,11 +633,17 @@ impl App {
         self.status = Status::from(status);
     }
 
-    /// Put `/join <target>` back so Enter retries it.
+    /// Put `/join <argument>` back so Enter retries it.
+    /// The argument is what the user typed, so a link keeps its `via` hints.
     /// Text typed during the flight stays. A prompt's buffer stays too.
-    fn restore_join_line_if_composer_is_empty(&mut self, typed: &str) {
+    fn restore_join_line_if_composer_is_empty(&mut self, action: &PendingRoomAction) {
         if self.mode == Mode::Compose && self.input.buffer.is_empty() {
-            self.input.buffer = format!("/join {typed}");
+            let argument = if action.join_source.is_empty() {
+                action.room_title.as_str()
+            } else {
+                action.join_source.as_str()
+            };
+            self.input.buffer = format!("/join {argument}");
             self.move_cursor_to_end();
         }
     }
@@ -625,6 +661,7 @@ impl App {
             since: now,
             reads_remaining: JOIN_OPEN_READ_DELAYS.len() as u8,
             next_read_at: now + JOIN_OPEN_READ_DELAYS[0],
+            deadline: now + join_watch_limit(),
             last_read_started: None,
             ready: false,
             held_status: None,
@@ -666,6 +703,19 @@ impl App {
             self.pending_join_open = None;
             if let Some(index) = self.find_joined_room(pending.account_id, &pending.target) {
                 self.open_joined_room(index).await;
+            }
+            return;
+        }
+        // A list that never covers this account must not hold the entry line
+        // open. A room already marked ready opened above and ignores this.
+        if now >= pending.deadline {
+            let held = self
+                .pending_join_open
+                .as_mut()
+                .and_then(|pending| pending.held_status.take());
+            self.pending_join_open = None;
+            if self.deferred_join_failure.is_none() {
+                self.deferred_join_failure = held;
             }
             return;
         }
@@ -935,6 +985,7 @@ fn action_for_room(
             .filter(|reason| !reason.is_empty())
             .map(str::to_owned),
         server_names: Vec::new(),
+        join_source: String::new(),
     }
 }
 
