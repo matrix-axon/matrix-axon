@@ -120,23 +120,26 @@ jobs:
         # hand: re-uploading an asset changes no path in the `paths:` filter
         # above, so nothing triggers on its own.
         #
-        # Defaults to the most recently *published* release, not GitHub's
-        # notion of "latest": every release here is deliberately marked a
-        # pre-release (ADR 0086, so a video-only or demo release never wears
-        # the "Latest" badge on a version that isn't), and the `/releases/
-        # latest` API — which `gh release download`/`gh release view` use
-        # with no tag argument — excludes pre-releases and 404s when every
-        # release is one. `gh release list`'s default sort does not exclude
-        # them, so it is what resolves "latest" here. A manual run can name a
-        # specific release instead via the `demo_release_tag`
+        # Defaults to the most recently *published* release that has all three
+        # recordings attached, so a release cut before its videos are uploaded
+        # falls back to the previous recordings instead of failing the build.
+        # "Most recent" is by `gh release list`, not GitHub's notion of
+        # "latest": every release here is deliberately marked a pre-release
+        # (ADR 0086, so a video-only or demo release never wears the "Latest"
+        # badge on a version that isn't), and the `/releases/latest` API —
+        # which `gh release download`/`gh release view` use with no tag
+        # argument — excludes pre-releases and 404s when every release is one.
+        # `gh release list`'s default sort does not exclude them. A manual run
+        # can name a specific release instead via the `demo_release_tag`
         # workflow_dispatch input — e.g. to pull last month's recording back
         # onto the site, or preview one attached to a release that isn't the
-        # newest.
+        # newest. That override is strict: it never falls back.
         env:
           GH_TOKEN: ${{ github.token }}
           DEMO_RELEASE_TAG: ${{ inputs.demo_release_tag }}
         run: |
           mkdir -p _site/demo
+          required="tui-demo.mp4 web-demo-desktop.mp4 web-demo-mobile.mp4"
           tag="$DEMO_RELEASE_TAG"
           if [ -n "$tag" ]; then
             echo "Pulling demo recordings from release $tag (manual override)"
@@ -147,16 +150,21 @@ jobs:
             # failing the whole build. (An explicit demo_release_tag above is
             # deliberately strict: asking for a release and silently getting a
             # different one would be worse than failing.)
-            required="tui-demo.mp4 web-demo-desktop.mp4 web-demo-mobile.mp4"
             newest=""
-            for candidate in $(gh release list --repo "${{ github.repository }}" \
-                --exclude-drafts --limit 30 --json tagName -q '.[].tagName'); do
+            # Fetched into a variable first so a failure here surfaces its own
+            # error rather than being read as "no releases found".
+            releases="$(gh release list --repo "${{ github.repository }}" \
+              --exclude-drafts --limit 30 --json tagName -q '.[].tagName')"
+            for candidate in $releases; do
               [ -n "$newest" ] || newest="$candidate"
-              assets="$(gh release view "$candidate" --repo "${{ github.repository }}" \
-                --json assets -q '.assets[].name')"
+              if ! assets="$(gh release view "$candidate" --repo "${{ github.repository }}" \
+                  --json assets -q '.assets[].name')"; then
+                echo "::notice::could not read assets of release $candidate — trying the next most recent release"
+                continue
+              fi
               missing=""
               for f in $required; do
-                echo "$assets" | grep -qx "$f" || missing="$missing $f"
+                grep -qx "$f" <<<"$assets" || missing="$missing $f"
               done
               if [ -z "$missing" ]; then
                 tag="$candidate"
@@ -171,9 +179,13 @@ jobs:
             fi
             echo "Pulling demo recordings from $tag (most recent release with all recordings)"
           fi
+          # Only the three recordings the demo page uses, not every .mp4 a
+          # release happens to carry.
+          patterns=()
+          for f in $required; do patterns+=(--pattern "$f"); done
           gh release download "$tag" \
             --repo "${{ github.repository }}" \
-            --pattern '*.mp4' \
+            "${patterns[@]}" \
             --dir _site/demo
 
       - name: Check every link reachable from the homepage works
