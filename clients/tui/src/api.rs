@@ -548,6 +548,31 @@ impl AxonClient {
             .await
     }
 
+    /// Join a room by id or alias (`POST …/rooms/join`, ADR 0068).
+    ///
+    /// Returns the room id Axon resolved. `server_names` are federation
+    /// hints and are omitted when empty.
+    pub async fn join_room(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        server_names: &[String],
+    ) -> Result<String, ApiError> {
+        let mut body = serde_json::json!({ "room_id_or_alias": room_id_or_alias });
+        if !server_names.is_empty() {
+            body["server_names"] = serde_json::json!(server_names);
+        }
+        let request = self
+            .http
+            .post(format!(
+                "{}/v1/accounts/{account_id}/rooms/join",
+                self.base_url
+            ))
+            .json(&body);
+        let joined: RoomEntryResultDto = self.send(message_mutation(request)).await?;
+        Ok(joined.room_id)
+    }
+
     pub async fn forget_room(&self, account_id: Uuid, room_id: &str) -> Result<(), ApiError> {
         self.room_membership_no_body(account_id, room_id, "forget")
             .await
@@ -2359,6 +2384,11 @@ impl EventDto {
             })
             .flatten()
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RoomEntryResultDto {
+    room_id: String,
 }
 
 #[derive(Debug, Deserialize)]

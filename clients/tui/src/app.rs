@@ -1975,6 +1975,7 @@ impl App {
             Command::Kick(input) => self.start_kick_user(input),
             Command::Ban(input) => self.start_ban_user(input),
             Command::Unban(input) => self.start_unban_user(input),
+            Command::Join(target) => self.start_join_room(target),
             Command::Verify(device_id) => self.start_verification(device_id),
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
@@ -2037,9 +2038,7 @@ impl App {
             Command::JumpToTop => {
                 self.jump_to_top().await;
             }
-            Command::Invalid(message)
-            | Command::ApiUnsupported(message)
-            | Command::Unknown(message) => {
+            Command::Invalid(message) | Command::Unknown(message) => {
                 self.status = Status::Info(message);
             }
             Command::Empty => {}

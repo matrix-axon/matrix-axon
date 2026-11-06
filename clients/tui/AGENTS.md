@@ -54,6 +54,8 @@
   Overflow recovery coalesces reads until a snapshot requested after the latest dropped frame can cover it; failed reads allow the next overflow frame to retry.
   Reconnect and `/refresh` recover other missed updates.
 - Room switching should remain forgiving within the active account filter: visible-list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
+- `/join <room id, alias, or matrix.to / matrix: link>` joins that room for the account filter, or for the only active account.
+  A `504` does not retry and does not decide the outcome; the room list is what shows a join that landed.
 
 ## Spaces (ADR 0103)
 

@@ -283,6 +283,7 @@ async fn leave_outcome_prunes_departed_caches_after_post_leave_refresh() {
             room_title: departed.title().to_owned(),
             user_id: None,
             reason: None,
+            server_names: Vec::new(),
         },
         result: Ok(()),
     })
@@ -1151,6 +1152,7 @@ mod pending_membership {
             room_title: slow.title().to_owned(),
             user_id: None,
             reason: None,
+            server_names: Vec::new(),
         }
     }
 
@@ -1473,5 +1475,329 @@ mod pending_membership {
 
         assert!(app.pending_memberships.is_empty());
         assert_eq!(app.status.text(false), "forgot Slow");
+    }
+}
+
+mod join {
+    //! `/join` picks an account, then a `200` or a listed `504` opens the room.
+    //! An unanswered `504` does not become a pending membership.
+
+    use super::*;
+    use crate::app::room_actions::{RoomActionFailure, RoomActionKind};
+
+    fn join_action(account_id: Uuid, typed: &str, room_id: &str) -> PendingRoomAction {
+        PendingRoomAction {
+            kind: RoomActionKind::Join,
+            key: RoomKey {
+                account_id,
+                room_id: room_id.to_owned(),
+            },
+            room_title: typed.to_owned(),
+            user_id: None,
+            reason: None,
+            server_names: Vec::new(),
+        }
+    }
+
+    fn failure(message: &str, timed_out: bool) -> RoomActionFailure {
+        RoomActionFailure {
+            message: message.to_owned(),
+            timed_out,
+        }
+    }
+
+    fn join_response(room_id: &str) -> String {
+        serde_json::json!({ "data": { "room_id": room_id } }).to_string()
+    }
+
+    async fn app_for(responses: Vec<String>) -> App {
+        let base_url = spawn_api_stub(responses).await;
+        let mut app = App::new(
+            AxonClient::new(base_url, None),
+            None,
+            TuiConfig::test_default(),
+            Picker::halfblocks(),
+        );
+        app.show_input_help = false;
+        app.status = Status::Info(String::new());
+        app
+    }
+
+    async fn app_joining(
+        responses: Vec<String>,
+    ) -> (App, tokio::sync::mpsc::UnboundedReceiver<RoomActionOutcome>) {
+        let mut app = app_for(responses).await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.set_room_action_sender(tx);
+        (app, rx)
+    }
+
+    #[tokio::test]
+    async fn join_with_all_and_two_accounts_asks_for_an_account() {
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![
+            account_with_id(
+                Uuid::from_u128(1),
+                "@alice:example.com",
+                AccountState::Active,
+            ),
+            account_with_id(Uuid::from_u128(2), "@bob:example.com", AccountState::Active),
+        ]);
+
+        app.handle_command(crate::command::parse("/join #room:example.com"))
+            .await;
+
+        assert_eq!(
+            app.status.text(false),
+            "choose an account with /account before using /join"
+        );
+        assert!(!app.room_action_busy);
+        assert!(matches!(app.accounts.selected, AccountSelection::All));
+    }
+
+    #[tokio::test]
+    async fn join_without_an_account_asks_for_login() {
+        let mut app = app_with_rooms(Vec::new());
+
+        app.handle_command(crate::command::parse("/join #room:example.com"))
+            .await;
+
+        assert_eq!(app.status.text(false), "log in before using /join");
+        assert!(!app.room_action_busy);
+    }
+
+    #[tokio::test]
+    async fn join_with_one_account_uses_that_account() {
+        let account_id = Uuid::from_u128(4);
+        let (mut app, mut rx) = app_joining(vec![join_response("!resolved:example.com")]).await;
+        app.set_accounts(vec![account_with_id(
+            account_id,
+            "@alice:example.com",
+            AccountState::Active,
+        )]);
+
+        app.handle_command(crate::command::parse("/join !room:example.com"))
+            .await;
+
+        let outcome = rx.recv().await.expect("join outcome");
+        assert_eq!(outcome.action.key.account_id, account_id);
+        assert_eq!(outcome.action.key.room_id, "!resolved:example.com");
+        assert_eq!(outcome.action.server_names, vec!["example.com".to_owned()]);
+        assert!(outcome.result.is_ok());
+        assert!(app.room_action_busy);
+        assert_eq!(app.status.text(false), "joining !room:example.com...");
+    }
+
+    #[tokio::test]
+    async fn join_with_the_account_filter_uses_that_account() {
+        let alice = Uuid::from_u128(1);
+        let bob = Uuid::from_u128(2);
+        let (mut app, mut rx) = app_joining(vec![join_response("!resolved:example.com")]).await;
+        app.set_accounts(vec![
+            account_with_id(alice, "@alice:example.com", AccountState::Active),
+            account_with_id(bob, "@bob:example.com", AccountState::Active),
+        ]);
+        app.accounts.selected = AccountSelection::Account(1);
+
+        app.handle_command(crate::command::parse("/join #room:example.com"))
+            .await;
+
+        let outcome = rx.recv().await.expect("join outcome");
+        assert_eq!(outcome.action.key.account_id, bob);
+        assert!(outcome.action.server_names.is_empty());
+        assert_eq!(outcome.action.key.room_id, "!resolved:example.com");
+        assert!(outcome.result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn join_with_only_a_launch_filter_uses_that_account() {
+        let account_id = Uuid::from_u128(9);
+        let (mut app, mut rx) = app_joining(vec![join_response("!resolved:example.com")]).await;
+        app.account_filter = Some(account_id);
+
+        app.handle_command(crate::command::parse("/join #room:example.com"))
+            .await;
+
+        let outcome = rx.recv().await.expect("join outcome");
+        assert_eq!(outcome.action.key.account_id, account_id);
+        assert!(outcome.result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn join_success_refreshes_and_selects_when_the_room_is_listed() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let ops = room("!ops:example.com", Some("#ops:example.com"), Some("Ops"));
+        let mut app = app_for(vec![
+            rooms_response_body(&[other.clone(), ops.clone()]),
+            empty_timeline_response_body(),
+            empty_members_response_body(),
+        ])
+        .await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(ops.account_id, "#ops:example.com", &ops.room_id),
+            result: Ok(()),
+        })
+        .await;
+
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!ops:example.com")
+        );
+        assert_eq!(app.status.text(false), "joined Ops");
+        assert!(app.pending_memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn join_success_keeps_the_selection_when_the_room_is_not_listed() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_for(vec![rooms_response_body(std::slice::from_ref(&other))]).await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "!ops:example.com"),
+            result: Ok(()),
+        })
+        .await;
+
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!other:example.com")
+        );
+        assert_eq!(
+            app.status.text(false),
+            "joined #ops:example.com; it isn't in the room list yet"
+        );
+        assert!(app.pending_memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_504_from_join_does_not_decide_or_enter_pending_membership() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_for(vec![rooms_response_body(std::slice::from_ref(&other))]).await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "#ops:example.com"),
+            result: Err(failure(
+                "HTTP 504 Gateway Timeout: join timed out after 30s",
+                true,
+            )),
+        })
+        .await;
+
+        let status = app.status.text(false);
+        assert_eq!(
+            status,
+            "the homeserver hasn't answered for #ops:example.com"
+        );
+        assert!(!status.contains("failed"), "{status}");
+        assert!(!status.contains("joined"), "{status}");
+        assert!(app.pending_memberships.is_empty());
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!other:example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_504_from_join_selects_when_the_room_list_contains_the_alias() {
+        let ops = room("!ops:example.com", Some("#ops:example.com"), Some("Ops"));
+        let mut app = app_for(vec![
+            rooms_response_body(std::slice::from_ref(&ops)),
+            empty_timeline_response_body(),
+            empty_members_response_body(),
+        ])
+        .await;
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(ops.account_id, "#ops:example.com", "#ops:example.com"),
+            result: Err(failure(
+                "HTTP 504 Gateway Timeout: join timed out after 30s",
+                true,
+            )),
+        })
+        .await;
+
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!ops:example.com")
+        );
+        assert_eq!(app.status.text(false), "joined Ops");
+        assert!(app.pending_memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_504_with_a_failed_refresh_ignores_the_room_already_on_screen() {
+        let listed = room("!slow:example.com", Some("#slow:example.com"), Some("Slow"));
+        let mut app = app_for(vec!["not-json".to_owned()]).await;
+        app.rooms.rooms = vec![listed.clone()];
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(listed.account_id, "#slow:example.com", "#slow:example.com"),
+            result: Err(failure(
+                "HTTP 504 Gateway Timeout: join timed out after 30s",
+                true,
+            )),
+        })
+        .await;
+
+        let status = app.status.text(false);
+        assert_eq!(
+            status,
+            "the homeserver hasn't answered for #slow:example.com"
+        );
+        assert!(!status.contains("failed"), "{status}");
+        assert!(!status.contains("joined"), "{status}");
+        assert!(app.pending_memberships.is_empty());
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!slow:example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_502_from_join_reports_failure() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_with_rooms(vec![other]);
+        app.rooms.selected = Some(0);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "#ops:example.com"),
+            result: Err(failure("HTTP 502 Bad Gateway: M_UNKNOWN", false)),
+        })
+        .await;
+
+        assert_eq!(
+            app.status.text(false),
+            "/join failed for #ops:example.com: HTTP 502 Bad Gateway: M_UNKNOWN"
+        );
+        assert!(app.pending_memberships.is_empty());
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!other:example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_timeout_from_join_reports_failure() {
+        let mut app = app_with_rooms(Vec::new());
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "#ops:example.com"),
+            result: Err(failure("request timed out", false)),
+        })
+        .await;
+
+        assert_eq!(
+            app.status.text(false),
+            "/join failed for #ops:example.com: request timed out"
+        );
+        assert!(app.pending_memberships.is_empty());
     }
 }

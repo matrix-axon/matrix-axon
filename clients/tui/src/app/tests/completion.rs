@@ -505,7 +505,7 @@ fn tab_completion_fills_refresh_command() {
 }
 
 #[test]
-fn tab_completion_fills_known_api_unsupported_command() {
+fn tab_completion_fills_join_command() {
     let mut app = app_with_rooms(Vec::new());
     app.input.buffer = "/jo".to_owned();
 

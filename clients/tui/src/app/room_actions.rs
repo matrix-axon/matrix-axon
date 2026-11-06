@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::api::RoomDto;
-use crate::command::UserReasonCommand;
+use crate::command::{JoinTarget, UserReasonCommand};
 
 use super::{App, Mode, RoomKey, RoomTargetResolution, Status};
 
@@ -81,6 +81,7 @@ pub(crate) enum RoomActionKind {
     Kick,
     Ban,
     Unban,
+    Join,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +91,8 @@ pub(crate) struct PendingRoomAction {
     pub(crate) room_title: String,
     pub(crate) user_id: Option<String>,
     pub(crate) reason: Option<String>,
+    /// Federation `via` hints for [`RoomActionKind::Join`]. Empty otherwise.
+    pub(crate) server_names: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -107,6 +110,7 @@ impl RoomActionKind {
             Self::Kick => "kicking",
             Self::Ban => "banning",
             Self::Unban => "unbanning",
+            Self::Join => "joining",
         }
     }
 
@@ -118,6 +122,7 @@ impl RoomActionKind {
             Self::Kick => "kicked",
             Self::Ban => "banned",
             Self::Unban => "unbanned",
+            Self::Join => "joined",
         }
     }
 
@@ -129,13 +134,17 @@ impl RoomActionKind {
             Self::Kick => "kick",
             Self::Ban => "ban",
             Self::Unban => "unban",
+            Self::Join => "join",
         }
     }
 
     fn needs_confirmation(self) -> bool {
-        !matches!(self, Self::Invite)
+        !matches!(self, Self::Invite | Self::Join)
     }
 
+    /// Leave and forget drop the room from the list.
+    /// A join does not, and a `504` on join stays unresolved instead of
+    /// becoming a pending membership (ADR 0121 is leave and forget only).
     fn removes_room_from_list(self) -> bool {
         matches!(self, Self::Leave | Self::Forget)
     }
@@ -171,6 +180,43 @@ impl App {
         };
         let action = action_for_room(&room, RoomActionKind::Forget, None, None);
         self.request_or_perform_room_action(action);
+    }
+
+    pub(crate) fn start_join_room(&mut self, target: JoinTarget) {
+        let account_id = match self.join_account_id() {
+            Ok(account_id) => account_id,
+            Err(message) => {
+                self.status = Status::from(message.to_owned());
+                return;
+            }
+        };
+        self.request_or_perform_room_action(PendingRoomAction {
+            kind: RoomActionKind::Join,
+            key: RoomKey {
+                account_id,
+                room_id: target.room_id_or_alias.clone(),
+            },
+            room_title: target.room_id_or_alias,
+            user_id: None,
+            reason: None,
+            server_names: target.server_names,
+        });
+    }
+
+    /// The account `/join` acts for.
+    ///
+    /// The account-panel filter wins. Otherwise the only active account, or
+    /// the launch filter when the account list has not arrived. Several
+    /// accounts and an empty list are both a prompt, never a guess.
+    fn join_account_id(&self) -> Result<Uuid, &'static str> {
+        if let Some(account_id) = self.active_account_filter() {
+            return Ok(account_id);
+        }
+        match self.accounts.accounts.as_slice() {
+            [only] => Ok(only.account_id),
+            [] => self.account_filter.ok_or("log in before using /join"),
+            _ => Err("choose an account with /account before using /join"),
+        }
     }
 
     pub(crate) fn start_invite_user(&mut self, user_id: &str) {
@@ -269,18 +315,18 @@ impl App {
             self.stop_typing_for_room(&action.key);
         }
         let client = self.client.clone();
-        let task_action = action.clone();
+        let mut task_action = action.clone();
         tokio::spawn(async move {
             let account_id = task_action.key.account_id;
-            let room_id = task_action.key.room_id.as_str();
+            let room_id = task_action.key.room_id.clone();
             let result = match task_action.kind {
-                RoomActionKind::Leave => client.leave_room(account_id, room_id).await,
-                RoomActionKind::Forget => client.forget_room(account_id, room_id).await,
+                RoomActionKind::Leave => client.leave_room(account_id, &room_id).await,
+                RoomActionKind::Forget => client.forget_room(account_id, &room_id).await,
                 RoomActionKind::Invite => {
                     client
                         .invite_user(
                             account_id,
-                            room_id,
+                            &room_id,
                             task_action.user_id.as_deref().unwrap_or_default(),
                         )
                         .await
@@ -289,7 +335,7 @@ impl App {
                     client
                         .kick_user(
                             account_id,
-                            room_id,
+                            &room_id,
                             task_action.user_id.as_deref().unwrap_or_default(),
                             task_action.reason.as_deref(),
                         )
@@ -299,7 +345,7 @@ impl App {
                     client
                         .ban_user(
                             account_id,
-                            room_id,
+                            &room_id,
                             task_action.user_id.as_deref().unwrap_or_default(),
                             task_action.reason.as_deref(),
                         )
@@ -309,12 +355,18 @@ impl App {
                     client
                         .unban_user(
                             account_id,
-                            room_id,
+                            &room_id,
                             task_action.user_id.as_deref().unwrap_or_default(),
                             task_action.reason.as_deref(),
                         )
                         .await
                 }
+                RoomActionKind::Join => client
+                    .join_room(account_id, &room_id, &task_action.server_names)
+                    .await
+                    .map(|resolved| {
+                        task_action.key.room_id = resolved;
+                    }),
             }
             .map_err(|err| RoomActionFailure {
                 timed_out: err.is_gateway_timeout(),
@@ -329,6 +381,10 @@ impl App {
 
     pub(crate) async fn handle_room_action_outcome(&mut self, outcome: RoomActionOutcome) {
         self.room_action_busy = false;
+        if outcome.action.kind == RoomActionKind::Join {
+            self.finish_join(outcome).await;
+            return;
+        }
         match outcome.result {
             Ok(()) => {
                 if outcome.action.kind.removes_room_from_list() {
@@ -338,13 +394,7 @@ impl App {
                 }
                 let departed_selected =
                     self.selected_room().map(RoomKey::from) == Some(outcome.action.key.clone());
-                let refresh_warning = match self.client.list_rooms(self.account_filter).await {
-                    Ok(rooms) => {
-                        self.apply_room_refresh(rooms);
-                        None
-                    }
-                    Err(err) => Some(err.to_string()),
-                };
+                let refresh_warning = self.refresh_room_list().await;
                 if outcome.action.kind.removes_room_from_list() && departed_selected {
                     self.sync_draft_on_room_change();
                     if self.selected_room().is_some() {
@@ -385,6 +435,87 @@ impl App {
                 ));
             }
         }
+    }
+
+    async fn refresh_room_list(&mut self) -> Option<String> {
+        match self.client.list_rooms(self.account_filter).await {
+            Ok(rooms) => {
+                self.apply_room_refresh(rooms);
+                None
+            }
+            Err(err) => Some(err.to_string()),
+        }
+    }
+
+    /// A join's `200` selects the room id Axon resolved.
+    /// A `504` selects only when this refresh already lists the typed target,
+    /// and otherwise says the homeserver has not answered.
+    /// Neither path records a pending membership.
+    async fn finish_join(&mut self, outcome: RoomActionOutcome) {
+        let account_id = outcome.action.key.account_id;
+        let typed = outcome.action.room_title.clone();
+        let resolved = outcome.action.key.room_id.clone();
+        match outcome.result {
+            Ok(()) => {
+                let refresh_error = self.refresh_room_list().await;
+                self.settle_listed_join(account_id, &resolved, &typed, refresh_error)
+                    .await;
+            }
+            Err(failure) if failure.timed_out => {
+                let listed = if self.refresh_room_list().await.is_none() {
+                    self.find_joined_room(account_id, &typed)
+                } else {
+                    None
+                };
+                if let Some(index) = listed {
+                    self.open_joined_room(index).await;
+                } else {
+                    self.status =
+                        Status::from(format!("the homeserver hasn't answered for {typed}"));
+                }
+            }
+            Err(err) => {
+                self.status = Status::from(format!("/join failed for {typed}: {err}"));
+            }
+        }
+    }
+
+    async fn settle_listed_join(
+        &mut self,
+        account_id: Uuid,
+        room_id: &str,
+        typed: &str,
+        refresh_error: Option<String>,
+    ) {
+        let listed = if refresh_error.is_none() {
+            self.find_joined_room(account_id, room_id)
+        } else {
+            None
+        };
+        if let Some(index) = listed {
+            self.open_joined_room(index).await;
+            return;
+        }
+        let mut status = format!("joined {typed}; it isn't in the room list yet");
+        if let Some(err) = refresh_error {
+            status.push_str(&format!("; room refresh failed: {err}"));
+        }
+        self.status = Status::from(status);
+    }
+
+    async fn open_joined_room(&mut self, index: usize) {
+        self.select_room_index(index).await;
+        let title = self.rooms.rooms[index].title().to_owned();
+        self.status = Status::from(format!("joined {title}"));
+    }
+
+    /// A room this account has in the list under `target`, which is a room id
+    /// or a canonical alias.
+    fn find_joined_room(&self, account_id: Uuid, target: &str) -> Option<usize> {
+        self.rooms.rooms.iter().position(|room| {
+            room.account_id == account_id
+                && (room.room_id == target || room.canonical_alias.as_deref() == Some(target))
+        })
     }
 }
 
@@ -515,6 +646,7 @@ fn action_for_room(
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .map(str::to_owned),
+        server_names: Vec::new(),
     }
 }
 
@@ -537,7 +669,7 @@ fn confirmation_status(action: &PendingRoomAction) -> String {
             action.user_id.as_deref().unwrap_or("user"),
             action.room_title
         ),
-        RoomActionKind::Invite => progress_status(action),
+        RoomActionKind::Invite | RoomActionKind::Join => progress_status(action),
     }
 }
 
