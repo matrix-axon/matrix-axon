@@ -45,6 +45,7 @@ function harness(options?: {
   let enabled = true
   let permissionGranted = true
   let disclosure: PutPushBody['disclosure'] = 'activity'
+  let badge = true
   let refreshOutcome: RefreshOutcome = 'refreshed'
   let refreshCount = 0
   let putFailures = 0
@@ -72,6 +73,7 @@ function harness(options?: {
     enabled: () => enabled,
     permissionGranted: () => permissionGranted,
     disclosure: () => disclosure,
+    badge: () => badge,
     refreshSession: () => {
       refreshCount += 1
       if (refreshOutcome === 'refreshed') {
@@ -142,6 +144,9 @@ function harness(options?: {
     setDisclosure: (value: PutPushBody['disclosure']) => {
       disclosure = value
     },
+    setBadge: (value: boolean) => {
+      badge = value
+    },
     failPuts: (count: number) => {
       putFailures = count
     },
@@ -186,6 +191,7 @@ describe('createPushRegistration', () => {
           provider: 'apns',
           token: 'device-token',
           disclosure: 'activity',
+          badge: true,
           environment: 'sandbox',
         },
       },
@@ -209,6 +215,7 @@ describe('createPushRegistration', () => {
           provider: 'apns',
           token: 'device-token',
           disclosure: 'activity',
+          badge: true,
           environment: 'sandbox',
         },
       },
@@ -359,6 +366,49 @@ describe('createPushRegistration', () => {
     expect(push.puts[1]?.body.disclosure).toBe('preview')
     expect(push.puts[1]?.body.environment).toBe('sandbox')
   })
+
+  it('re-PUTs a badge change without refreshing first', async () => {
+    const push = harness()
+    await push.registration.reconcile()
+    push.setBadge(false)
+    await push.registration.reconcile()
+    expect(push.refreshCount()).toBe(0)
+    expect(push.puts.map((put) => put.body.badge)).toEqual([true, false])
+    push.setBadge(true)
+    await push.registration.reconcile()
+    expect(push.puts.map((put) => put.body.badge)).toEqual([true, false, true])
+  })
+
+  // ADR 0129: the server stores an omitted `badge` as false, so any PUT that
+  // dropped it would silently turn the badge off. Walk every path that PUTs.
+  it.each([
+    ['apns', 'sandbox'],
+    ['fcm', null],
+  ] as const)(
+    'sends the current badge on every %s registration path',
+    async (provider, environment) => {
+      const push = harness({ provider, environment })
+      push.setBadge(false)
+      // First launch, with the server asking for one refresh first.
+      push.failPuts(1)
+      await push.registration.reconcile()
+      // A token refresh this module did not request.
+      push.emitRefresh()
+      await drain()
+      // A disclosure change.
+      push.setDisclosure('preview')
+      await push.registration.reconcile()
+      // Notifications off, then on again.
+      push.setEnabled(false)
+      await push.registration.reconcile()
+      push.setEnabled(true)
+      await push.registration.reconcile()
+      expect(push.puts).toHaveLength(5)
+      for (const put of push.puts) {
+        expect(put.body).toHaveProperty('badge', false)
+      }
+    },
+  )
 
   it('re-PUTs after a refresh it did not request, without calling refresh again', async () => {
     const push = harness()
