@@ -73,6 +73,53 @@ final class ComposerLifecycleTests: XCTestCase {
     XCTAssertNil(saved.owner)
   }
 
+  func testPhotoSizeChoiceAppliesToAllAndSupportsIndividualOverrides() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 1800, height: 1200)).image { context in
+      UIColor.systemBlue.setFill()
+      context.fill(CGRect(x: 0, y: 0, width: 1800, height: 1200))
+    }
+    let item = NSExtensionItem()
+    item.attachments = [NSItemProvider(object: image), NSItemProvider(object: image)]
+    let model = fixture.composer()
+    load(model) { model.start([item]) }
+    XCTAssertEqual(model.commonPhotoSize, .original)
+    let first = try XCTUnwrap(model.record?.files.first?.id)
+    model.text = "Caption survives resizing"
+    load(model) { model.setPhotoSize(.small) }
+    XCTAssertEqual(model.commonPhotoSize, .small)
+    XCTAssertEqual(model.record?.text, "Caption survives resizing")
+    XCTAssertTrue(
+      try XCTUnwrap(model.record?.files).allSatisfy {
+        $0.photoSize == .small && $0.photoBytes != nil
+      })
+    load(model) { model.setPhotoSize(.medium, file: first) }
+    XCTAssertNil(model.commonPhotoSize)
+    XCTAssertEqual(model.record?.files[0].photoSize, .medium)
+    XCTAssertEqual(model.record?.files[1].photoSize, .small)
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
+    let recovered = try XCTUnwrap(fixture.store.list().first)
+    XCTAssertEqual(recovered.files.map(\.photoSize), [.medium, .small])
+  }
+
+  func testPreparationFailureAfterPartialDeliveryKeepsTheConfirmedOutcomeVisible() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer()
+    load(model) { model.start([fixture.photos()]) }
+    var saved = try XCTUnwrap(model.record)
+    saved.files[0].operation!.state = .dispatching
+    saved = try fixture.store.update(saved)
+    saved.files[0].operation!.state = .sent
+    saved.files[0].operation!.eventId = "$confirmed"
+    _ = try fixture.store.update(saved)
+    load(model) { model.run { throw ShareFailure.quota } }
+    XCTAssertTrue(model.status.contains("Confirmed photos: 1"), model.status)
+    XCTAssertFalse(model.status.contains("Nothing was sent"), model.status)
+    model.cancel()
+    wait(for: [fixture.closed], timeout: 3)
+  }
+
   func testFailedFinishKeepsHeartbeatAndAllowsRetry() throws {
     let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
     let model = fixture.composer(heartbeatInterval: 0.05)
@@ -328,6 +375,15 @@ private final class ComposerFixture {
   var item: NSExtensionItem {
     let item = NSExtensionItem()
     item.attachments = [NSItemProvider(object: URL(string: "https://example.org/")! as NSURL)]
+    return item
+  }
+  func photos() -> NSExtensionItem {
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 24)).image { context in
+      UIColor.systemBlue.setFill()
+      context.fill(CGRect(x: 0, y: 0, width: 32, height: 24))
+    }
+    let item = NSExtensionItem()
+    item.attachments = [NSItemProvider(object: image), NSItemProvider(object: image)]
     return item
   }
   func account(_ id: String) -> [String: Any] {

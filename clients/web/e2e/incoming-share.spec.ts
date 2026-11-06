@@ -448,6 +448,7 @@ for (const partial of [false, true]) {
           JSON.stringify([
             {
               ...record,
+              version: 2,
               text: 'Photo caption',
               previews: [],
               operation: { id: 'batch', state: 'ready' },
@@ -456,6 +457,8 @@ for (const partial of [false, true]) {
                 name,
                 mime: index === 0 ? 'image/heic' : 'image/png',
                 bytes: 3 * 1024 * 1024,
+                photoSize: 'small',
+                photoBytes: 512,
                 digest: 'fixture',
                 thumbnail: false,
                 operation: {
@@ -479,6 +482,7 @@ for (const partial of [false, true]) {
       2,
     )
     await expect(photos.getByRole('img').first()).toBeVisible()
+    await expect(photos).toContainText('small · ~1 KiB upload')
     expect(await photos.getByRole('button').allTextContents()).toEqual([
       'Remove photo: first.heic',
       'Remove photo: second.png',

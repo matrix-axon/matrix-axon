@@ -66,10 +66,14 @@ const port: IncomingSharePort = {
       return record as T
     }
     if (action === 'photo_thumbnail') {
-      return {
-        bytes:
-          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=',
-      } as T
+      // Native returns a bounded JPEG. Generate an independently encoded,
+      // valid fixture instead of relying on a CRC-invalid sample PNG.
+      const canvas = document.createElement('canvas')
+      canvas.width = canvas.height = 16
+      const context = canvas.getContext('2d')!
+      context.fillStyle = '#0088ff'
+      context.fillRect(0, 0, 16, 16)
+      return { bytes: canvas.toDataURL('image/jpeg').split(',')[1] } as T
     }
     if (action === 'update' || action === 'remove_file') {
       const next = args.manifest as IncomingShare

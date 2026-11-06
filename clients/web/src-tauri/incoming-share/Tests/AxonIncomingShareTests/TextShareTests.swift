@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import XCTest
 
 @testable import AxonIncomingShare
@@ -612,6 +613,36 @@ final class TextShareTests: XCTestCase {
     let recovered = try XCTUnwrap(try store.list().first)
     XCTAssertNil(recovered.owner)
     XCTAssertEqual(recovered.files.compactMap { $0.operation?.state }, [.sent, .ready, .ready])
+  }
+
+  func testNativeSenderUploadsReducedBytesWithMatchingMimeAndFilename() throws {
+    let source = root.appendingPathComponent("photo.heic")
+    try PhotoFixture.write(source, type: .heic, width: 2400, height: 1600)
+    var value = try draft()
+    value = try store.importFile(
+      value.id, owner: value.owner!, source: source,
+      name: "photo.heic", mime: "image/heic", photo: true)
+    value = try store.setPhotoSize(value, size: .small)
+    var uploaded = false
+    let sender = sender { _, _, path, _, _, file, mime, _ in
+      if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+      if let file {
+        XCTAssertEqual(mime, "image/jpeg")
+        XCTAssertTrue(path.contains("filename=photo%2Ejpg"))
+        let image = try XCTUnwrap(CGImageSourceCreateWithURL(file as CFURL, nil))
+        let properties = try XCTUnwrap(
+          CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [CFString: Any])
+        XCTAssertEqual(properties[kCGImagePropertyPixelWidth] as? Int, 640)
+        uploaded = true
+        return try self.response(200, ["data": ["upload_id": UUID().uuidString]])
+      }
+      return try self.response(200, ["data": ["event_id": "$reduced"]])
+    }
+    let result = try sender.send(value)
+    XCTAssertTrue(uploaded)
+    XCTAssertTrue(result.completed)
+    XCTAssertEqual(result.files[0].mime, "image/heic")
+    XCTAssertEqual(result.files[0].photoSize, .small)
   }
 
 }

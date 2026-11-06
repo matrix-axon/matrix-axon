@@ -431,7 +431,16 @@ export function PendingSharesPage() {
                       delivered={file.operation?.state === 'sent'}
                     />
                     <p>
-                      {file.name} · {Math.ceil(file.bytes / 1024)} KiB
+                      {file.name} · {Math.ceil(file.bytes / 1024)} KiB original
+                      {file.photoSize !== undefined &&
+                        file.photoSize !== 'original' && (
+                          <>
+                            {' '}
+                            · {file.photoSize} · ~
+                            {Math.ceil((file.photoBytes ?? file.bytes) / 1024)}{' '}
+                            KiB upload
+                          </>
+                        )}
                     </p>
                     <button
                       type="button"
