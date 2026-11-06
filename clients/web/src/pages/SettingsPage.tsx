@@ -1210,12 +1210,16 @@ function AppIconBadgeFields() {
           the app.
         </p>
       )}
-      {appPlatform.remotePush?.provider === 'apns' && (
-        <p class="muted">
-          While Axon is suspended, the server keeps this count current only when
-          message notifications are on.
-        </p>
-      )}
+      {/* The device registers for push only while message notifications are
+          on, so only then can the server repaint the badge (ADR 0129). */}
+      {appPlatform.remotePush?.provider === 'apns' &&
+        settings.appBadgeEnabled.value &&
+        !settings.messageNotifications.value && (
+          <p class="muted">
+            Message notifications are off, so this count does not update while
+            Axon is suspended.
+          </p>
+        )}
       {support === 'permission' && notificationPermission === 'default' && (
         <>
           <button type="button" onClick={requestShellBadgePermission}>

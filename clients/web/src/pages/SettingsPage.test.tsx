@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -949,7 +950,7 @@ describe('the app icon badge', () => {
       await findByText(/does not turn on message notifications/),
     ).toBeTruthy()
     // No remote push here, so no server-kept badge to explain.
-    expect(queryByText(/While Axon is suspended/)).toBeNull()
+    expect(queryByText(/does not update while Axon is suspended/)).toBeNull()
     fireEvent.click(
       await findByRole('button', {
         name: 'Allow notifications to enable the badge',
@@ -966,33 +967,44 @@ describe('the app icon badge', () => {
     )
   })
 
-  it('tells an APNs shell that the suspended badge needs message notifications', async () => {
-    const { findByText } = render(
-      <ServicesContext.Provider
-        value={testServices({
-          platform: {
-            browserCanAdoptApp: false,
-            iconBadgeSupport: 'permission',
-            notificationPermission: () => Promise.resolve('granted'),
-            remotePush: {
-              provider: 'apns',
-              deviceToken: () =>
-                Promise.resolve({ token: 'device', environment: 'sandbox' }),
-              deliveredEventIds: () => Promise.resolve([]),
-              onWake: () => () => {},
-              postCollapsed: () => Promise.resolve(),
-            },
-          },
-        })}
-      >
+  it('tells an APNs shell the suspended badge needs message notifications, only while that is the gap', async () => {
+    const services = testServices({
+      platform: {
+        browserCanAdoptApp: false,
+        iconBadgeSupport: 'permission',
+        notificationPermission: () => Promise.resolve('granted'),
+        remotePush: {
+          provider: 'apns',
+          deviceToken: () =>
+            Promise.resolve({ token: 'device', environment: 'sandbox' }),
+          deliveredEventIds: () => Promise.resolve([]),
+          onWake: () => () => {},
+          postCollapsed: () => Promise.resolve(),
+        },
+      },
+    })
+    const note =
+      'Message notifications are off, so this count does not update while Axon is suspended.'
+    const { findByText, queryByText } = render(
+      <ServicesContext.Provider value={services}>
         <SettingsPage />
       </ServicesContext.Provider>,
     )
-    expect(
-      await findByText(
-        'While Axon is suspended, the server keeps this count current only when message notifications are on.',
-      ),
-    ).toBeTruthy()
+    // The defaults: badge on, message notifications off.
+    expect(services.settings.appBadgeEnabled.value).toBe(true)
+    expect(services.settings.messageNotifications.value).toBe(false)
+    expect(await findByText(note)).toBeTruthy()
+
+    act(() => {
+      services.settings.messageNotifications.value = true
+    })
+    await waitFor(() => expect(queryByText(note)).toBeNull())
+
+    act(() => {
+      services.settings.messageNotifications.value = false
+      services.settings.appBadgeEnabled.value = false
+    })
+    await waitFor(() => expect(queryByText(note)).toBeNull())
   })
 
   it('points a denied iOS shell at Settings', async () => {

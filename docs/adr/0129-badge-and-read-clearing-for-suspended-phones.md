@@ -1,6 +1,6 @@
 # ADR 0129 — Badge and read clearing for suspended phones
 
-**Status:** Proposed; tracked in [issue 958](https://github.com/matrix-axon/matrix-axon/issues/958).
+**Status:** Accepted; tracked in [issue 958](https://github.com/matrix-axon/matrix-axon/issues/958).
 Amends [ADR 0113](0113-remote-push-for-suspended-mobile-clients.md).
 
 ## Context
@@ -132,6 +132,10 @@ Both times come from FCM's servers, so the phone's clock is never compared, and 
 The notification's `postTime` is not used: it is the phone's clock.
 A notification with no stored time, posted by an older build or by the running app, is cancelled.
 The running app is in the foreground or recently was, so a normal-priority clear is not held for Doze, and the app repaints from the room list anyway.
+An alert the FCM SDK drew itself has no stored time either.
+The service leaves an alert to the SDK only when it cannot post one itself, for example when the message has no `event_id` or no launch intent resolves, so this is rare.
+A late clear can then cancel a newer SDK-drawn alert for that room.
+v1 accepts this.
 
 A partial read (the count falls but stays above zero) sends no room-read message.
 The room still has unread messages, and its one collapsed notification is still accurate.
