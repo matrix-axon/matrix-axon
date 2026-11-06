@@ -130,7 +130,7 @@ The API reaches it through a consumer-owned port in `axon-api` with an `axon-ser
   A 401 is recorded as `unauthorized` and retried on backoff; token refresh stays with the account's sync.
 - **Validation:** aliases that do not parse as room aliases are withheld and reported as `partial`; a list longer than the entry limit is `too_large`.
 - **Freshness guard:** `room_summaries` gains a `membership_epoch` that its leave and rejoin transitions advance.
-  Amended: any change to the account's own `m.room.member` event also advances it, because sync can deliver a kick and rejoin as one new join with no leave; every new epoch deletes the room's rows.
+  Amended: any change to the account's own `m.room.member` event also advances it, in the same transaction as the event, because sync can deliver a kick and rejoin as one new join with no leave; every new epoch deletes the room's rows.
   It takes each new value from a sequence rather than incrementing a per-row counter, because a purge rebuild deletes and re-inserts summary rows, and a counter restarting at its default could hand a rejoined room the epoch an in-flight job recorded.
   A job records the epoch when it starts, and its completion commits only if the account still exists and the epoch is unchanged.
   A leave during the request therefore rejects the result even if a rejoin follows before it completes, so neither confirmations nor details survive into a new membership.

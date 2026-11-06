@@ -615,3 +615,93 @@ async fn a_rejoin_without_a_delivered_leave_starts_a_new_epoch() {
     );
     assert_eq!(record(rejoined).await, DetailWrite::Unchanged);
 }
+
+/// The epoch advance commits with the member event that starts it: while the
+/// advance waits for the summary row, the event is not visible either, so no
+/// result can commit for the old epoch beside the new event.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_member_event_commits_with_its_epoch_advance() {
+    let store = common::migrated_store().await;
+    let (account_id, user) = account(&store).await;
+    common::insert_message(&store, account_id, ROOM, 1, "fixture").await;
+    membership(&store, account_id, &user, "join").await;
+    let before = store.joined_epoch(account_id, ROOM).await.unwrap().unwrap();
+
+    // Hold the summary row so the advance has to wait for it. NO KEY UPDATE
+    // leaves foreign-key checks against the row free.
+    let pool = common::raw_pool().await;
+    let mut summary = pool.begin().await.unwrap();
+    let (holder,): (i32,) = sqlx_core::query_as::query_as(
+        "SELECT pg_backend_pid() FROM room_summaries \
+         WHERE account_id = $1 AND room_id = $2 FOR NO KEY UPDATE",
+    )
+    .bind(account_id)
+    .bind(ROOM)
+    .fetch_one(&mut *summary)
+    .await
+    .unwrap();
+    let rejoin = tokio::spawn({
+        let (store, user) = (store.clone(), user.clone());
+        async move {
+            store
+                .upsert_room_state_for_local_user(
+                    &RoomStateUpsert {
+                        account_id,
+                        room_id: ROOM,
+                        event_type: "m.room.member",
+                        state_key: &user,
+                        event_id: "$rejoin",
+                        sender: &user,
+                        origin_ts: chrono::Utc::now().timestamp_millis(),
+                        content: Some(json!({ "membership": "join" })),
+                    },
+                    Some(&user),
+                )
+                .await
+                .unwrap()
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (blocked,): (bool,) = sqlx_core::query_as::query_as(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY (pg_blocking_pids(pid)))",
+        )
+        .bind(holder)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if blocked {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the member write never waited for the summary row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let visible = store
+        .room_state(account_id, ROOM, "m.room.member", &user)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        visible.event_id, "$rejoin",
+        "the event is not visible before its epoch advance"
+    );
+
+    summary.commit().await.unwrap();
+    rejoin.await.unwrap();
+    assert_ne!(
+        store.joined_epoch(account_id, ROOM).await.unwrap(),
+        Some(before)
+    );
+    let visible = store
+        .room_state(account_id, ROOM, "m.room.member", &user)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(visible.event_id, "$rejoin");
+
+    common::cleanup_account(store.pool(), account_id).await;
+}

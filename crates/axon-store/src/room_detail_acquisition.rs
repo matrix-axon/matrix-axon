@@ -240,12 +240,16 @@ impl Store {
     /// Nothing is held across the request.
     ///
     /// Lock order: a share lock on the summary row, then (for a confirmation)
-    /// the absence advisory lock, then the cache row. The only other holder of the advisory lock
-    /// is the `room_state` insert trigger, which then deletes the cache row;
-    /// no transaction that inserts `room_state` also writes `room_summaries`
-    /// (`refresh_room_summary_display` and the epoch advance are statements
-    /// of their own), and summary writers take the summary row first. With
-    /// every path taking these locks in this order, no cycle can form.
+    /// the absence advisory lock, then the cache row. The only other holder of
+    /// the advisory lock is the `room_state` insert trigger for the eight
+    /// metadata types, which then deletes the cache row; no transaction that
+    /// inserts one of those tuples also writes `room_summaries`. The
+    /// transactions that write both a `room_state` row and the summary row
+    /// (an own member event with its epoch advance, and
+    /// `reconcile_redacted_room_state`) take the `room_state` row first and
+    /// never the advisory lock, and this function never locks `room_state`.
+    /// Summary writers take the summary row before any cache row. With every
+    /// path taking these locks in this order, no cycle can form.
     pub async fn record_room_detail(
         &self,
         account_id: Uuid,

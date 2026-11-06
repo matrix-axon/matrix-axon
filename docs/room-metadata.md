@@ -308,7 +308,7 @@ The API reaches it through a consumer-owned port; it never waits for it.
 - **Backoff:** one minute after the first consecutive failure, doubling to 30 minutes, and never sooner than a `Retry-After` header (delta-seconds or an HTTP date) or `retry_after_ms`, capped at 24 hours.
   A job that could not read or record the cache stores no backoff, so the worker holds it back in memory for one minute instead.
   An absence job stops at its first failed request: the failed type backs off, and the remaining types stay due for the next read, so a homeserver that is rate limiting or timing out gets one request per job, not one per missing type.
-- **Fencing:** `room_summaries.membership_epoch` takes a fresh value from a sequence on every leave and rejoin, and whenever the account's own `m.room.member` event changes, which covers a kick and rejoin that sync delivers as one new join with no leave.
+- **Fencing:** `room_summaries.membership_epoch` takes a fresh value from a sequence on every leave and rejoin, and whenever the account's own `m.room.member` event changes, which covers a kick and rejoin that sync delivers as one new join with no leave. That advance commits in the same transaction as the event.
   A job records the epoch before its request and commits only if the account is still active and joined in that same epoch, under a share lock on the summary row for the commit alone.
   A leave during a request therefore rejects its result even if a rejoin follows before it completes.
   An absence confirmation also commits only while no tuple of its type exists.
