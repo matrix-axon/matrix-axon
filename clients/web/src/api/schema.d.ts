@@ -983,6 +983,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/homeserver_details": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get room homeserver details
+         * @description Read the room details only the account's homeserver knows, from Axon's
+         *     account-scoped cache: the aliases the homeserver maintains for the room,
+         *     which are distinct from the advertised aliases in `GET …/metadata`, and
+         *     whether its directory publishes the room.
+         *     Returns immediately and never waits for the homeserver. When a detail is
+         *     unknown or expired and no backoff is in force, the read schedules a
+         *     refresh in the background; `refresh` reports it, and a failed refresh
+         *     leaves the last answer visible with its `expires_at` in the past.
+         *     Only rooms the account has joined are acquired; any other room, including
+         *     unknown room IDs, reads as `unknown` and makes no request.
+         *     Re-read on reopen, on reconnect, and on a `room_details.changed` WebSocket
+         *     frame whose `sources` include `homeserver_details`, which follows every
+         *     change and the end of any refresh a read saw queued or running.
+         */
+        get: operations["room_homeserver_details"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/info": {
         parameters: {
             query?: never;
@@ -1101,12 +1133,17 @@ export interface paths {
         /**
          * Get room metadata
          * @description Read typed room metadata from account-scoped cached state.
-         *     No upstream requests or membership aggregation occur on this route.
+         *     No upstream request is made on this route, and it never waits for one.
          *     Missing snapshots remain unknown, including for unjoined/unknown rooms.
+         *     For a joined room, a snapshot with no tuple also reports whether the
+         *     account's homeserver has confirmed the room has no such state
+         *     (`absence_confirmed_at`) and the state of confirming it (`absence_check`);
+         *     a read schedules the confirmation in the background when it is due.
          *     Content is limited to 128 KiB per state tuple before transfer and decoding.
          *     Re-read on reopen, on reconnect, and on a `room_details.changed` WebSocket
          *     frame whose `sources` include `metadata`, which follows every change to a
-         *     stored snapshot; open panels need no polling.
+         *     stored snapshot or confirmation and the end of any confirmation a read saw
+         *     queued or running; open panels need no polling.
          *     Event `origin_ts` is provenance, not a sync-freshness timestamp.
          */
         get: operations["room_metadata"];
@@ -2964,6 +3001,14 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_RoomHomeserverDetailsDto: {
+            /** @description Room details only the account's homeserver knows, from Axon's cache. */
+            data: {
+                directory_visibility: components["schemas"]["DirectoryVisibilityDetailDto"];
+                local_aliases: components["schemas"]["LocalAliasesDetailDto"];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_RoomInfoDto: {
             /**
              * @description Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small
@@ -3741,6 +3786,16 @@ export interface components {
          *     succeeded or when Axon last checked upstream availability.
          */
         CachedRoomMetadata_RoomAliasesMetadata: {
+            absence_check?: null | components["schemas"]["DetailRefreshDto"];
+            /**
+             * Format: int64
+             * @description Unix ms when the account's homeserver last confirmed that the room has
+             *     no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+             *     ever set while `status` is `unknown`; `null` when Axon has no such
+             *     confirmation. A client may then apply a Matrix default only where the
+             *     specification defines what the absent state means.
+             */
+            absence_confirmed_at?: number | null;
             content?: null | {
                 alias?: string | null;
                 alt_aliases?: string[] | null;
@@ -3772,6 +3827,16 @@ export interface components {
          *     succeeded or when Axon last checked upstream availability.
          */
         CachedRoomMetadata_RoomCreationMetadata: {
+            absence_check?: null | components["schemas"]["DetailRefreshDto"];
+            /**
+             * Format: int64
+             * @description Unix ms when the account's homeserver last confirmed that the room has
+             *     no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+             *     ever set while `status` is `unknown`; `null` when Axon has no such
+             *     confirmation. A client may then apply a Matrix default only where the
+             *     specification defines what the absent state means.
+             */
+            absence_confirmed_at?: number | null;
             content?: null | {
                 additional_creators?: string[] | null;
                 creator?: string | null;
@@ -3809,6 +3874,16 @@ export interface components {
          *     succeeded or when Axon last checked upstream availability.
          */
         CachedRoomMetadata_RoomEncryptionMetadata: {
+            absence_check?: null | components["schemas"]["DetailRefreshDto"];
+            /**
+             * Format: int64
+             * @description Unix ms when the account's homeserver last confirmed that the room has
+             *     no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+             *     ever set while `status` is `unknown`; `null` when Axon has no such
+             *     confirmation. A client may then apply a Matrix default only where the
+             *     specification defines what the absent state means.
+             */
+            absence_confirmed_at?: number | null;
             content?: null | {
                 algorithm?: string | null;
                 /** Format: int64 */
@@ -3843,6 +3918,16 @@ export interface components {
          *     succeeded or when Axon last checked upstream availability.
          */
         CachedRoomMetadata_RoomGuestAccessMetadata: {
+            absence_check?: null | components["schemas"]["DetailRefreshDto"];
+            /**
+             * Format: int64
+             * @description Unix ms when the account's homeserver last confirmed that the room has
+             *     no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+             *     ever set while `status` is `unknown`; `null` when Axon has no such
+             *     confirmation. A client may then apply a Matrix default only where the
+             *     specification defines what the absent state means.
+             */
+            absence_confirmed_at?: number | null;
             content?: null | {
                 guest_access?: string | null;
             };
@@ -3873,6 +3958,16 @@ export interface components {
          *     succeeded or when Axon last checked upstream availability.
          */
         CachedRoomMetadata_RoomHistoryVisibilityMetadata: {
+            absence_check?: null | components["schemas"]["DetailRefreshDto"];
+            /**
+             * Format: int64
+             * @description Unix ms when the account's homeserver last confirmed that the room has
+             *     no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+             *     ever set while `status` is `unknown`; `null` when Axon has no such
+             *     confirmation. A client may then apply a Matrix default only where the
+             *     specification defines what the absent state means.
+             */
+            absence_confirmed_at?: number | null;
             content?: null | {
                 history_visibility?: string | null;
             };
@@ -3903,6 +3998,16 @@ export interface components {
          *     succeeded or when Axon last checked upstream availability.
          */
         CachedRoomMetadata_RoomJoinRulesMetadata: {
+            absence_check?: null | components["schemas"]["DetailRefreshDto"];
+            /**
+             * Format: int64
+             * @description Unix ms when the account's homeserver last confirmed that the room has
+             *     no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+             *     ever set while `status` is `unknown`; `null` when Axon has no such
+             *     confirmation. A client may then apply a Matrix default only where the
+             *     specification defines what the absent state means.
+             */
+            absence_confirmed_at?: number | null;
             content?: null | {
                 /** @description Restriction conditions, preserving namespaced/unknown condition types. */
                 allow?: components["schemas"]["RoomJoinConditionMetadata"][] | null;
@@ -3935,6 +4040,16 @@ export interface components {
          *     succeeded or when Axon last checked upstream availability.
          */
         CachedRoomMetadata_RoomPowerLevelsMetadata: {
+            absence_check?: null | components["schemas"]["DetailRefreshDto"];
+            /**
+             * Format: int64
+             * @description Unix ms when the account's homeserver last confirmed that the room has
+             *     no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+             *     ever set while `status` is `unknown`; `null` when Axon has no such
+             *     confirmation. A client may then apply a Matrix default only where the
+             *     specification defines what the absent state means.
+             */
+            absence_confirmed_at?: number | null;
             content?: null | {
                 /** Format: int64 */
                 ban?: number | null;
@@ -3985,6 +4100,16 @@ export interface components {
          *     succeeded or when Axon last checked upstream availability.
          */
         CachedRoomMetadata_RoomServerAclMetadata: {
+            absence_check?: null | components["schemas"]["DetailRefreshDto"];
+            /**
+             * Format: int64
+             * @description Unix ms when the account's homeserver last confirmed that the room has
+             *     no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+             *     ever set while `status` is `unknown`; `null` when Axon has no such
+             *     confirmation. A client may then apply a Matrix default only where the
+             *     specification defines what the absent state means.
+             */
+            absence_confirmed_at?: number | null;
             content?: null | {
                 allow?: string[] | null;
                 allow_ip_literals?: boolean | null;
@@ -4106,6 +4231,19 @@ export interface components {
             url: string;
         };
         /**
+         * @description The state of attempts to refresh a cached value, separate from the value
+         *     itself, so a failed refresh leaves usable stale data visible.
+         */
+        DetailRefreshDto: {
+            failure?: null | components["schemas"]["RefreshFailure"];
+            /**
+             * Format: int64
+             * @description Unix ms before which no refresh is attempted, when one is set.
+             */
+            next_attempt_at?: number | null;
+            state: components["schemas"]["RefreshState"];
+        };
+        /**
          * @description One Matrix device of a user, as reported by `GET …/devices` — the picker a
          *     client shows before starting SAS verification (M16, ADR 0060).
          */
@@ -4172,6 +4310,30 @@ export interface components {
             updated_at: string;
             /** @description The opaque value the winning device wrote. Axon never interprets it. */
             value: unknown;
+        };
+        /**
+         * @description Whether the account's homeserver publishes the room in its directory.
+         * @enum {string}
+         */
+        DirectoryVisibility: "public" | "private";
+        /**
+         * @description The room's publication in the account's homeserver directory (`GET
+         *     /directory/list/room/{roomId}`).
+         */
+        DirectoryVisibilityDetailDto: {
+            /**
+             * Format: int64
+             * @description Unix ms when that answer goes stale; a past value means stale.
+             */
+            expires_at?: number | null;
+            /**
+             * Format: int64
+             * @description Unix ms of the last conclusive answer, from the server clock.
+             */
+            fetched_at?: number | null;
+            refresh: components["schemas"]["DetailRefreshDto"];
+            status: components["schemas"]["HomeserverDetailStatus"];
+            visibility?: null | components["schemas"]["DirectoryVisibility"];
         };
         /**
          * @description Request body for editing a message (`PUT …/events/{event_id}`). Replaces the
@@ -4423,6 +4585,11 @@ export interface components {
          */
         HomeserverBreakerDto: "closed" | "open" | "probing";
         /**
+         * @description What Axon last learned about a homeserver detail.
+         * @enum {string}
+         */
+        HomeserverDetailStatus: "unknown" | "available" | "partial" | "too_large" | "forbidden" | "not_found" | "unsupported";
+        /**
          * @description One homeserver's load gate (ADR 0122): how many of axon's background
          *     requests (backfill, upstream room probes, key-backup downloads, DM
          *     auto-joins) it admits at once, and whether its circuit breaker has stopped
@@ -4592,6 +4759,27 @@ export interface components {
             matched_url: string;
             site_name?: string | null;
             title?: string | null;
+        };
+        /**
+         * @description The aliases the account's homeserver maintains for the room (`GET
+         *     /rooms/{roomId}/aliases`). Distinct from the advertised aliases in
+         *     `m.room.canonical_alias`, which `GET …/metadata` serves.
+         */
+        LocalAliasesDetailDto: {
+            /** @description `null` unless status is `available` or `partial`. */
+            aliases?: string[] | null;
+            /**
+             * Format: int64
+             * @description Unix ms when that answer goes stale; a past value means stale.
+             */
+            expires_at?: number | null;
+            /**
+             * Format: int64
+             * @description Unix ms of the last conclusive answer, from the server clock.
+             */
+            fetched_at?: number | null;
+            refresh: components["schemas"]["DetailRefreshDto"];
+            status: components["schemas"]["HomeserverDetailStatus"];
         };
         /**
          * @description Request body for runtime login (`POST /v1/accounts/login`). Adds or
@@ -5235,6 +5423,17 @@ export interface components {
             timed_out: boolean;
         };
         /**
+         * @description Why the last refresh attempt failed. Allowlisted; never upstream text.
+         * @enum {string}
+         */
+        RefreshFailure: "timeout" | "server_error" | "rate_limited" | "transport" | "unauthorized" | "invalid_response";
+        /**
+         * @description Whether a refresh is waiting for, or using, the account's worker. In
+         *     memory only: after a restart every refresh is `idle`.
+         * @enum {string}
+         */
+        RefreshState: "idle" | "queued" | "running";
+        /**
          * @description A room in the cross-account list (`GET /v1/rooms`). Identity is
          *     `(account_id, room_id)` — a room joined by two accounts appears twice.
          */
@@ -5322,6 +5521,11 @@ export interface components {
          */
         RoomEntryResultDto: {
             room_id: string;
+        };
+        /** @description Room details only the account's homeserver knows, from Axon's cache. */
+        RoomHomeserverDetailsDto: {
+            directory_visibility: components["schemas"]["DirectoryVisibilityDetailDto"];
+            local_aliases: components["schemas"]["LocalAliasesDetailDto"];
         };
         /**
          * @description Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small
@@ -9116,6 +9320,49 @@ export interface operations {
             };
             /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    room_homeserver_details: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cached homeserver details with freshness and refresh state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomHomeserverDetailsDto"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal database failure */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

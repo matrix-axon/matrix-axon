@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
+use crate::bounded_body::{read_bounded_body, BoundedBodyError};
 use crate::error::SyncError;
 
 const MAX_STATIC_REGISTRATIONS: usize = 64;
@@ -384,43 +385,6 @@ fn validate_metadata_urls(
             .map_err(|err| SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}")))?;
     }
     Ok(())
-}
-
-/// Why a bounded read stopped short.
-pub(crate) enum BoundedBodyError {
-    TooLarge,
-    Transport(reqwest::Error),
-}
-
-/// Read a response body, refusing one larger than `max_bytes` before it is
-/// buffered or parsed. The one bounded reader for every Matrix OAuth response.
-pub(crate) async fn read_bounded_body(
-    mut response: reqwest::Response,
-    max_bytes: usize,
-) -> Result<Vec<u8>, BoundedBodyError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(BoundedBodyError::TooLarge);
-    }
-    let mut body = Vec::with_capacity(
-        response
-            .content_length()
-            .unwrap_or_default()
-            .min(max_bytes as u64) as usize,
-    );
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(BoundedBodyError::Transport)?
-    {
-        if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(BoundedBodyError::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 async fn bounded_body(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, SyncError> {

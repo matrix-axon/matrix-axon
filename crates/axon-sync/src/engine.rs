@@ -434,6 +434,12 @@ impl SyncEngine {
         self.manager.homeserver_gates()
     }
 
+    /// Each running account's room-detail acquisition queue (ADR 0126), for
+    /// the API's room detail reads. Cheap to clone (an `Arc` internally).
+    pub fn room_detail_acquisitions(&self) -> crate::acquisition::RoomDetailAcquisitions {
+        self.manager.room_detail_acquisitions()
+    }
+
     /// Per-account sync-service state, for the API status surface
     /// (`GET /v1/status`). Cheap to clone (an `Arc` internally).
     pub fn sync_health(&self) -> SyncHealth {
@@ -2032,6 +2038,37 @@ async fn run_account(
         room_details.clone(),
     ));
 
+    // Room-detail acquisition (ADR 0126): one paced worker per account run,
+    // behind the homeserver gate. Reads reach it through the registration.
+    // If its HTTP client cannot initialize, the account runs without it and
+    // reads leave every detail unknown.
+    let acquisition_cancel = cancel.child_token();
+    // Teardown below cancels and joins the worker; the guard also stops it
+    // if this run unwinds or returns early.
+    let _acquisition_guard = acquisition_cancel.clone().drop_guard();
+    let acquisition = match crate::acquisition::Homeserver::new(client.clone(), Arc::clone(&gate)) {
+        Ok(homeserver) => {
+            let registration = manager
+                .room_detail_acquisitions()
+                .register(account.account_id, room_details.clone());
+            let handle = tokio::spawn(
+                crate::acquisition::Worker::new(
+                    homeserver,
+                    store.clone(),
+                    account.account_id,
+                    room_details.clone(),
+                    registration.queue(),
+                )
+                .run(acquisition_cancel.clone()),
+            );
+            Some((registration, handle))
+        }
+        Err(error) => {
+            tracing::warn!(target: "axon_sync::acquisition", account_id = %account.account_id, error = %error, "room detail acquisition disabled for this run: its HTTP client did not initialize");
+            None
+        }
+    };
+
     // Subscribe before `start`, so the first response is not missed on the
     // capacity-32 broadcast. This run owns the task: a child token and a join
     // below, the same as the other watchers. The engine tracker must not hold
@@ -2354,6 +2391,14 @@ async fn run_account(
     member_counts_cancel.cancel();
     if let Err(err) = member_counts_handle.await {
         tracing::warn!(account_id = %account.account_id, error = %err, "member count worker did not shut down cleanly");
+    }
+
+    acquisition_cancel.cancel();
+    if let Some((registration, handle)) = acquisition {
+        if let Err(err) = handle.await {
+            tracing::warn!(account_id = %account.account_id, error = %err, "room detail acquisition worker did not shut down cleanly");
+        }
+        drop(registration);
     }
 
     state_redaction_cancel.cancel();

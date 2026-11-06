@@ -184,6 +184,11 @@ pub struct AppState {
     /// adapter over the sync engine's `HomeserverGates` via
     /// [`with_homeserver_status`](Self::with_homeserver_status).
     pub homeserver_status: Arc<dyn HomeserverStatusProvider>,
+    /// Room-detail acquisition port (ADR 0126) for `GET …/metadata` and `GET
+    /// …/homeserver_details`. Defaults to acquiring nothing; the binary
+    /// injects an adapter over the sync engine's acquisition workers via
+    /// [`with_room_detail_acquisition`](Self::with_room_detail_acquisition).
+    pub room_details: Arc<dyn crate::room_details::RoomDetailAcquirer>,
     /// Account sync-readiness port (ADR 0030, issue #241) for
     /// `AccountDto.sync_state` and the `account.sync_state` WS frame. Defaults
     /// to a no-op provider reporting `"connecting"` for every account; the
@@ -418,6 +423,7 @@ impl AppState {
             build_info: BuildInfo::default(),
             sync_status: Arc::new(NoSyncStatus),
             homeserver_status: Arc::new(NoHomeserverStatus),
+            room_details: Arc::new(crate::room_details::NoRoomDetailAcquisition),
             sync_state: Arc::new(NoSyncState),
             backup_state: Arc::new(NoBackupState),
             oauth: None,
@@ -474,6 +480,17 @@ impl AppState {
     /// `HomeserverGates`; tests that don't care keep the default (empty) one.
     pub fn with_homeserver_status(mut self, provider: Arc<dyn HomeserverStatusProvider>) -> Self {
         self.homeserver_status = provider;
+        self
+    }
+
+    /// Inject the room-detail acquisition port (ADR 0126). The binary calls
+    /// this with an adapter over the sync engine's acquisition workers; tests
+    /// that don't care keep the default, which acquires nothing.
+    pub fn with_room_detail_acquisition(
+        mut self,
+        acquirer: Arc<dyn crate::room_details::RoomDetailAcquirer>,
+    ) -> Self {
+        self.room_details = acquirer;
         self
     }
 
@@ -1047,6 +1064,12 @@ impl FromRef<AppState> for Arc<PushMaterial> {
 impl FromRef<AppState> for Arc<Notify> {
     fn from_ref(state: &AppState) -> Arc<Notify> {
         Arc::clone(&state.push_changed)
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn crate::room_details::RoomDetailAcquirer> {
+    fn from_ref(state: &AppState) -> Self {
+        state.room_details.clone()
     }
 }
 

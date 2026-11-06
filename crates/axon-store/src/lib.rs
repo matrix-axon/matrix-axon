@@ -27,6 +27,7 @@ mod oauth_identities;
 mod oauth_native;
 mod oauth_refresh_tokens;
 mod push;
+mod room_detail_acquisition;
 mod rooms;
 mod search;
 mod spaces;
@@ -65,6 +66,9 @@ pub use oauth_native::{
 pub use oauth_refresh_tokens::{RedeemRefreshTokenError, RotatedRefreshToken};
 pub use push::{
     NewPushRegistration, PushRegistration, PushRegistrationOutcome, PushSendCheck, PushTarget,
+};
+pub use room_detail_acquisition::{
+    DetailKind, DetailOutcome, DetailRow, DetailSnapshot, DetailWrite,
 };
 pub use rooms::{RoomSummary, RoomTag};
 pub use search::{

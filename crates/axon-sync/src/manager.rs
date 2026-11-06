@@ -85,6 +85,8 @@ pub struct ClientManager {
     dead_rooms: DeadRooms,
     /// One load gate per homeserver, shared by every account using it (ADR 0122).
     gates: HomeserverGates,
+    /// Each running account's room-detail acquisition queue (ADR 0126).
+    acquisitions: crate::acquisition::RoomDetailAcquisitions,
 }
 
 impl ClientManager {
@@ -99,6 +101,7 @@ impl ClientManager {
             pending_adoption_cleanup: Arc::new(Mutex::new(HashSet::new())),
             dead_rooms: Arc::new(Mutex::new(HashMap::new())),
             gates: HomeserverGates::default(),
+            acquisitions: Default::default(),
         }
     }
 
@@ -110,6 +113,11 @@ impl ClientManager {
     /// Every homeserver's load gate, for `GET /v1/status`.
     pub(crate) fn homeserver_gates(&self) -> HomeserverGates {
         self.gates.clone()
+    }
+
+    /// Each running account's room-detail acquisition queue (ADR 0126).
+    pub(crate) fn room_detail_acquisitions(&self) -> crate::acquisition::RoomDetailAcquisitions {
+        self.acquisitions.clone()
     }
 
     async fn finish_adoption_cleanup(&self, account_id: Uuid) {

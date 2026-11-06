@@ -18,8 +18,10 @@
 //! `SyncConfig`, and a cancellation token; it supervises a task per account and
 //! restarts failed syncs with exponential backoff.
 
+mod acquisition;
 mod backfill;
 mod backup;
+mod bounded_body;
 mod client;
 mod devices;
 mod discovery;
@@ -54,6 +56,7 @@ mod sync_health;
 mod trust;
 mod verification;
 
+pub use acquisition::RoomDetailAcquisitions;
 pub use backfill::BackfillHealth;
 pub use backup::{BackupAction, BackupHealth, BackupSnapshot, BackupStateView, RecoveryStateView};
 pub use devices::{DeviceInfo, DeviceList, DeviceListEngine, DeviceListError};

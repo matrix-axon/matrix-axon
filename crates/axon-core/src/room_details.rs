@@ -33,6 +33,44 @@ pub enum RoomDetailSource {
     /// `GET …/info`'s `member_counts`: the persisted pair changed or was
     /// cleared.
     MemberCounts,
+    /// `GET …/homeserver_details`: a detail's value, freshness, or refresh
+    /// state changed.
+    HomeserverDetails,
+}
+
+/// The order an absence job confirms a room's missing metadata types (ADR
+/// 0126 decision 2): encryption first, because a false "unencrypted" is the
+/// costliest mistake.
+pub const ABSENCE_ORDER: [&str; 8] = [
+    "m.room.encryption",
+    "m.room.server_acl",
+    "m.room.join_rules",
+    "m.room.history_visibility",
+    "m.room.guest_access",
+    "m.room.power_levels",
+    "m.room.canonical_alias",
+    "m.room.create",
+];
+
+/// A job a read asks an account's acquisition worker for (ADR 0126 decision
+/// 4). The queue holds at most one of each per room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoomDetailJob {
+    /// The homeserver-local aliases.
+    LocalAliases,
+    /// The room's directory publication.
+    DirectoryVisibility,
+    /// Confirm every due metadata type that has no tuple.
+    Absence,
+}
+
+/// Where a job stands in its account's worker. In memory only: a restart
+/// leaves every job idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobActivity {
+    Idle,
+    Queued,
+    Running,
 }
 
 #[cfg(test)]
@@ -47,5 +85,15 @@ mod tests {
         }
         assert!(!is_metadata_state("m.room.name", ""));
         assert!(!is_metadata_state("m.room.member", ""));
+    }
+
+    #[test]
+    fn absence_order_covers_every_metadata_type_once() {
+        let mut order = ABSENCE_ORDER.to_vec();
+        assert_eq!(order[0], "m.room.encryption");
+        order.sort_unstable();
+        let mut types = METADATA_STATE_TYPES.to_vec();
+        types.sort_unstable();
+        assert_eq!(order, types);
     }
 }

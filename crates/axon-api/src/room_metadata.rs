@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 
 use axon_store::RoomMetadataStateRow;
+
+use crate::room_details::DetailRefreshDto;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
@@ -13,7 +15,7 @@ use uuid::Uuid;
 
 /// Availability of a particular cached state tuple. An unknown tuple is not
 /// evidence that a setting is unset, encryption is disabled, or access is public.
-#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RoomMetadataStatus {
     /// Axon has no cached row. It may not have requested/hydrated this type.
@@ -56,6 +58,39 @@ pub struct CachedRoomMetadata<T: ToSchema> {
     /// `null` unless status is `available` or `partial`.
     #[schema(schema_with = nullable_metadata_content::<T>)]
     pub content: Option<T>,
+    /// Unix ms when the account's homeserver last confirmed that the room has
+    /// no such state (`404 M_NOT_FOUND` from the room-state endpoint). Only
+    /// ever set while `status` is `unknown`; `null` when Axon has no such
+    /// confirmation. A client may then apply a Matrix default only where the
+    /// specification defines what the absent state means.
+    pub absence_confirmed_at: Option<i64>,
+    /// The state of confirming absence: `null` when the type has a tuple, or
+    /// has never been attempted and no attempt is queued. `queued` or
+    /// `running` means a confirmation is coming; `idle` with a `failure` or a
+    /// future `next_attempt_at` means it failed or was denied.
+    pub absence_check: Option<DetailRefreshDto>,
+}
+
+/// The absence fields every snapshot carries, whatever its content type.
+pub(crate) trait AbsenceFields {
+    /// Whether the snapshot has no tuple, so absence can apply.
+    fn has_no_tuple(&self) -> bool;
+    fn set_absence(&mut self, confirmed_at: Option<i64>, check: Option<DetailRefreshDto>);
+}
+
+impl<T: ToSchema> AbsenceFields for CachedRoomMetadata<T> {
+    fn has_no_tuple(&self) -> bool {
+        self.status == RoomMetadataStatus::Unknown
+    }
+
+    fn set_absence(&mut self, confirmed_at: Option<i64>, check: Option<DetailRefreshDto>) {
+        // A confirmation is never shown beside a tuple, which describes the
+        // type. The store already keeps the two from committing together.
+        if self.has_no_tuple() {
+            self.absence_confirmed_at = confirmed_at;
+            self.absence_check = check;
+        }
+    }
 }
 
 // utoipa's generic inline schema does not preserve Option<T>'s nullability.
@@ -79,6 +114,8 @@ impl<T: ToSchema> Default for CachedRoomMetadata<T> {
             redaction_event_id: None,
             content: None,
             invalid_fields: Vec::new(),
+            absence_confirmed_at: None,
+            absence_check: None,
         }
     }
 }
@@ -94,6 +131,8 @@ impl<T: MetadataContent> CachedRoomMetadata<T> {
             redaction_event_id: row.state.redaction_event_id,
             content: None,
             invalid_fields: Vec::new(),
+            absence_confirmed_at: None,
+            absence_check: None,
         };
         if row.oversized {
             snapshot.status = RoomMetadataStatus::TooLarge;
@@ -481,6 +520,11 @@ macro_rules! room_metadata {
                     }
                 }
                 metadata
+            }
+
+            /// Each snapshot's absence fields, by state type.
+            pub(crate) fn absence_targets(&mut self) -> [(&'static str, &mut dyn AbsenceFields); Self::EVENT_TYPES.len()] {
+                [$(($event_type, &mut self.$field as &mut dyn AbsenceFields),)+]
             }
         }
     };

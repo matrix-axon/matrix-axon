@@ -31,6 +31,7 @@ mod oauth;
 mod openapi;
 mod preview_generation;
 mod response;
+mod room_details;
 mod room_metadata;
 mod routes;
 mod search;
@@ -88,6 +89,7 @@ pub use oauth::{
 pub use openapi::ApiDoc;
 pub use preview_generation::PreviewGenerator;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
+pub use room_details::RoomDetailAcquirer;
 pub use search::{
     SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SearchSort,
 };
@@ -340,6 +342,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/metadata",
             get(routes::room_metadata::room_metadata),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/homeserver_details",
+            get(routes::room_metadata::room_homeserver_details),
         )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/upgrade",

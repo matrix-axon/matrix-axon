@@ -2,7 +2,8 @@
 //! [`SyncHealth`] to `axon-api`'s status ports (M10), so `GET /v1/status`
 //! reports the engine's disk-space health and each account's sync-service
 //! state, and binds [`HomeserverGates`] to the homeserver load-gate port (ADR
-//! 0122). Also binds [`BackupHealth`] to `AccountDto.backup` (ADR 0098).
+//! 0122). Also binds [`BackupHealth`] to `AccountDto.backup` (ADR 0098), and
+//! [`RoomDetailAcquisitions`] to the room-detail acquisition port (ADR 0126).
 //! This binary is the one place that knows both crates; `axon-api` and
 //! `axon-sync` never depend on each other.
 
@@ -10,11 +11,12 @@ use async_trait::async_trait;
 use axon_api::{
     AccountSyncSnapshot, BackfillStatusProvider, BackfillStatusSnapshot, BackupSnapshotDto,
     BackupStateDto, BackupStateProvider, HomeserverBreakerSnapshot, HomeserverGateSnapshot,
-    HomeserverStatusProvider, RecoveryStateDto, SyncStateProvider, SyncStatusProvider,
+    HomeserverStatusProvider, RecoveryStateDto, RoomDetailAcquirer, SyncStateProvider,
+    SyncStatusProvider,
 };
 use axon_sync::{
     BackfillHealth, BackupHealth, BackupSnapshot, BackupStateView, BreakerSnapshot,
-    HomeserverGates, RecoveryStateView, SyncHealth,
+    HomeserverGates, RecoveryStateView, RoomDetailAcquisitions, SyncHealth,
 };
 use uuid::Uuid;
 
@@ -81,6 +83,26 @@ impl HomeserverStatusProvider for HomeserverStatusAdapter {
                 },
             })
             .collect()
+    }
+}
+
+/// Wraps the sync engine's [`RoomDetailAcquisitions`] so they satisfy the API's
+/// [`RoomDetailAcquirer`] port (ADR 0126). The orphan rule requires a local
+/// newtype.
+pub struct RoomDetailAcquisitionAdapter(pub RoomDetailAcquisitions);
+
+impl RoomDetailAcquirer for RoomDetailAcquisitionAdapter {
+    fn request(&self, account_id: Uuid, room_id: &str, job: axon_core::RoomDetailJob) {
+        self.0.request(account_id, room_id, job);
+    }
+
+    fn activity(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        job: axon_core::RoomDetailJob,
+    ) -> axon_core::JobActivity {
+        self.0.activity(account_id, room_id, job)
     }
 }
 
