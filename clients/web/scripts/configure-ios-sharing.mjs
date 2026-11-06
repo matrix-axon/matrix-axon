@@ -21,6 +21,21 @@ const entitlements = JSON.parse(
     { encoding: 'utf8' },
   ),
 )
+// The extension's own entitlements: one committed file, so the generated project and the
+// store workflow's profile check cannot drift apart.
+const shareEntitlements = JSON.parse(
+  execFileSync(
+    'plutil',
+    [
+      '-convert',
+      'json',
+      '-o',
+      '-',
+      fileURLToPath(new URL('Entitlements.share.ios.plist', tauri)),
+    ],
+    { encoding: 'utf8' },
+  ),
+)
 if (process.env.AXON_APS_ENVIRONMENT)
   entitlements['aps-environment'] = process.env.AXON_APS_ENVIRONMENT
 const projectPath = new URL('project.yml', apple)
@@ -126,14 +141,7 @@ delete project.targets.axon_share
     postBuildScripts: carryEntitlements('Share/Share.entitlements'),
     entitlements: {
       path: 'Share/Share.entitlements',
-      properties: {
-        'com.apple.security.application-groups': [
-          'group.org.matrixaxon.axon.sharing',
-        ],
-        'keychain-access-groups': [
-          '$(AppIdentifierPrefix)org.matrixaxon.axon.sharing',
-        ],
-      },
+      properties: shareEntitlements,
     },
   }
   project.targets.axon_share = extension

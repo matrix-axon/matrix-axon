@@ -144,6 +144,7 @@ Its four effective iOS profile inputs must contain manually managed profiles wit
 Optional `IOS_MANUAL_APPSTORE_PROFILE` and `IOS_MANUAL_DEVELOPMENT_PROFILE` repository secrets take precedence over the containing-app profile secrets, allowing older automatic-signing branches to keep using their existing Xcode-managed profiles.
 The Share Extension always uses `IOS_SHARE_APPSTORE_PROFILE` and `IOS_SHARE_DEVELOPMENT_PROFILE`.
 The Apple Store workflow also requires `IOS_SHARE_DEVELOPMENT_PROFILE` and `IOS_SHARE_APPSTORE_PROFILE` repository secrets for that extension ID; the credential check fails early when either is absent.
+It also checks each Share profile against `clients/web/src-tauri/Entitlements.share.ios.plist`, the file the generator writes the extension's entitlements from, so a profile made before the App Group or shared Keychain was enabled fails there and not after the archive.
 The exported-artifact checker verifies signatures, capabilities against embedded profiles, versions, default ATS, and text/web-URL-only activation rules.
 Activation uses Apple's version 2 dictionary with strict text and single-web-URL matching.
 The policy in `clients/web/scripts/ios-share-activation.json` is shared by generation, artifact checks, and simulator share-sheet tests.

@@ -226,10 +226,12 @@ jobs:
             --entitlements clients/web/src-tauri/Entitlements.ios.plist --install --manual-signing \
             --export-uuid AXON_IOS_APP_DEVELOPMENT_PROFILE
           scripts/ci/store-credentials.sh profile IOS_SHARE_APPSTORE_PROFILE \
-            --ext mobileprovision --expect app-store --bundle-id "$bundle_id.Share" --install --manual-signing \
+            --ext mobileprovision --expect app-store --bundle-id "$bundle_id.Share" \
+            --entitlements clients/web/src-tauri/Entitlements.share.ios.plist --install --manual-signing \
             --export-uuid AXON_IOS_SHARE_EXPORT_PROFILE
           scripts/ci/store-credentials.sh profile IOS_SHARE_DEVELOPMENT_PROFILE \
-            --ext mobileprovision --expect development --bundle-id "$bundle_id.Share" --install --manual-signing \
+            --ext mobileprovision --expect development --bundle-id "$bundle_id.Share" \
+            --entitlements clients/web/src-tauri/Entitlements.share.ios.plist --install --manual-signing \
             --export-uuid AXON_IOS_SHARE_DEVELOPMENT_PROFILE
           if [ "$NEED_ASC" = "yes" ]; then
             scripts/ci/store-credentials.sh asc-key

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The Share Extension's entitlements (docs/ios-sharing.md). configure-ios-sharing.mjs
+    writes them into the generated project, and the store workflow checks each Share
+    profile against this file before building, so a profile made before the App Group
+    or the shared Keychain was enabled fails in the credential step and not after the
+    archive. Deliberately not Entitlements.ios.plist: the app asks for Sign in with
+    Apple and push, which the extension's profile must not have.
+  -->
+  <key>com.apple.security.application-groups</key>
+  <array><string>group.org.matrixaxon.axon.sharing</string></array>
+  <key>keychain-access-groups</key>
+  <array><string>$(AppIdentifierPrefix)org.matrixaxon.axon.sharing</string></array>
+</dict>
+</plist>
