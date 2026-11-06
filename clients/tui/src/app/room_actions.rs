@@ -29,6 +29,13 @@ pub(crate) const PENDING_MEMBERSHIP_CHECK_DELAYS: [Duration; 4] = [
 /// listed is reported as possibly failed.
 const PENDING_MEMBERSHIP_FINAL_GRACE: Duration = Duration::from_secs(30);
 
+/// Extra room-list reads after a join whose room was not listed yet.
+/// The immediate read already happened. Two more, a few seconds apart,
+/// cover a quiet room that never emits a live frame. The live bus has no
+/// membership event, so nothing else is guaranteed to ask for the list.
+pub(crate) const JOIN_OPEN_READ_DELAYS: [Duration; 2] =
+    [Duration::from_secs(2), Duration::from_secs(3)];
+
 /// A leave or forget axon timed out on, which the homeserver may still finish.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingMembership {
@@ -48,6 +55,30 @@ pub(crate) struct PendingMembership {
     /// Whether a room-list read that could speak for this room has listed it
     /// since the `504`. Only then can the window's end say it is still listed.
     pub(crate) seen_listed: bool,
+}
+
+/// A join the room list has not shown yet.
+///
+/// The next snapshot that started after `since` and lists `target` opens
+/// the room. `target` is the resolved room id after HTTP 200, or the typed
+/// id or alias after a 504. A snapshot that started earlier cannot speak
+/// for the join, and a failed read is not a success signal.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingJoinOpen {
+    pub(crate) account_id: Uuid,
+    pub(crate) target: String,
+    /// Selected room when the watch was armed.
+    pub(crate) anchor: Option<RoomKey>,
+    /// `App::room_choice` when the watch was armed.
+    pub(crate) room_choice: u64,
+    pub(crate) since: Instant,
+    pub(crate) reads_remaining: u8,
+    pub(crate) next_read_at: Instant,
+    /// When the latest delayed read was requested. A snapshot from before
+    /// that request cannot end the watch.
+    pub(crate) last_read_started: Option<Instant>,
+    /// A covering snapshot listed the room. The tick opens it.
+    pub(crate) ready: bool,
 }
 
 /// What a room-list read covered, for judging pending leaves by it.
@@ -266,6 +297,9 @@ impl App {
     }
 
     fn request_or_perform_room_action(&mut self, action: PendingRoomAction) {
+        // A new room action means the user has moved on. A late list must
+        // not pull them into the room they joined a moment ago.
+        self.pending_join_open = None;
         let held_back = |kind: RoomActionKind| {
             self.pending_memberships
                 .get(&(action.key.clone(), kind))
@@ -303,6 +337,9 @@ impl App {
     }
 
     pub(crate) fn perform_room_action(&mut self, action: PendingRoomAction) {
+        // Accepting a confirmation calls this directly. Drop a join watch
+        // so that room does not open under the action just confirmed.
+        self.pending_join_open = None;
         self.clear_input_buffer();
         self.mode = Mode::Compose;
         let Some(tx) = self.room_action_tx.clone() else {
@@ -450,7 +487,8 @@ impl App {
     /// A join's `200` selects the room id Axon resolved.
     /// A `504` selects only when this refresh already lists the typed target,
     /// and otherwise says the homeserver has not answered.
-    /// Neither path records a pending membership.
+    /// A room missing from that refresh is watched for a few seconds
+    /// ([`JOIN_OPEN_READ_DELAYS`]). Neither path records a pending membership.
     async fn finish_join(&mut self, outcome: RoomActionOutcome) {
         let account_id = outcome.action.key.account_id;
         let typed = outcome.action.room_title.clone();
@@ -472,6 +510,7 @@ impl App {
                 } else {
                     self.status =
                         Status::from(format!("the homeserver hasn't answered for {typed}"));
+                    self.arm_pending_join_open(account_id, &typed);
                 }
             }
             Err(err) => {
@@ -501,6 +540,117 @@ impl App {
             status.push_str(&format!("; room refresh failed: {err}"));
         }
         self.status = Status::from(status);
+        self.arm_pending_join_open(account_id, room_id);
+    }
+
+    /// Remember a room the join did not find in the list just read.
+    /// `target` is the resolved room id after a `200`, or the typed id or
+    /// alias after a `504`.
+    fn arm_pending_join_open(&mut self, account_id: Uuid, target: &str) {
+        let now = Instant::now();
+        self.pending_join_open = Some(PendingJoinOpen {
+            account_id,
+            target: target.to_owned(),
+            anchor: self.selected_room().map(RoomKey::from),
+            room_choice: self.room_choice,
+            since: now,
+            reads_remaining: JOIN_OPEN_READ_DELAYS.len() as u8,
+            next_read_at: now + JOIN_OPEN_READ_DELAYS[0],
+            last_read_started: None,
+            ready: false,
+        });
+    }
+
+    /// Open a joined room once a later list contains it, and ask for that
+    /// list while the short watch is running. Called from the main-loop tick.
+    pub(crate) async fn poll_pending_join_open(&mut self, now: Instant) {
+        let Some(pending) = self.pending_join_open.clone() else {
+            return;
+        };
+        if self.join_watch_superseded(&pending) {
+            self.pending_join_open = None;
+            return;
+        }
+        if pending.ready {
+            if self.is_mid_command() {
+                return;
+            }
+            self.pending_join_open = None;
+            if let Some(index) = self.find_joined_room(pending.account_id, &pending.target) {
+                self.open_joined_room(index).await;
+            }
+            return;
+        }
+        if pending.reads_remaining == 0 || now < pending.next_read_at {
+            return;
+        }
+        let mut pending = pending;
+        pending.reads_remaining -= 1;
+        pending.last_read_started = Some(now);
+        if pending.reads_remaining > 0 {
+            let delay_index = JOIN_OPEN_READ_DELAYS.len() - usize::from(pending.reads_remaining);
+            pending.next_read_at = now + JOIN_OPEN_READ_DELAYS[delay_index];
+        }
+        self.pending_join_open = Some(pending);
+        self.request_rooms_refresh();
+    }
+
+    /// The user picked a room, or the selected room is no longer the one
+    /// they were in when the join finished.
+    fn join_watch_superseded(&self, pending: &PendingJoinOpen) -> bool {
+        if pending.room_choice != self.room_choice {
+            return true;
+        }
+        let Some(anchor) = &pending.anchor else {
+            return false;
+        };
+        self.selected_room()
+            .is_none_or(|room| RoomKey::from(room) != *anchor)
+    }
+
+    /// A room-list snapshot just landed. A covering read that started after
+    /// the join and lists the target becomes ready to open. Once the delayed
+    /// reads are spent, a covering read that still omits it ends the watch.
+    pub(super) fn note_pending_join_open(&mut self, read: RoomListRead) {
+        let Some(pending) = &self.pending_join_open else {
+            return;
+        };
+        if read.started < pending.since {
+            return;
+        }
+        if read
+            .account_filter
+            .is_some_and(|account_id| account_id != pending.account_id)
+        {
+            return;
+        }
+        let account_id = pending.account_id;
+        let target = pending.target.clone();
+        let exhausted = pending.reads_remaining == 0
+            && pending
+                .last_read_started
+                .is_some_and(|started| read.started >= started);
+        if self.find_joined_room(account_id, &target).is_some() {
+            if let Some(pending) = &mut self.pending_join_open {
+                pending.ready = true;
+            }
+            return;
+        }
+        if exhausted {
+            self.pending_join_open = None;
+        }
+    }
+
+    /// A room-list read failed. That is not evidence the join landed. End
+    /// the watch only when its own delayed reads are already spent and no
+    /// follow-up read is queued.
+    pub(super) fn retire_pending_join_open_after_failed_read(&mut self) {
+        let exhausted = self.pending_join_open.as_ref().is_some_and(|pending| {
+            pending.reads_remaining == 0 && pending.last_read_started.is_some()
+        });
+        if exhausted && !self.rooms_fetch_again {
+            self.pending_join_open = None;
+        }
     }
 
     async fn open_joined_room(&mut self, index: usize) {

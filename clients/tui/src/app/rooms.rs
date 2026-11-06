@@ -163,9 +163,12 @@ impl App {
                     .filter(|index| *index < self.rooms.rooms.len())
             });
         self.seed_own_senders_from_rooms();
+        // A join watch owns the status line until it opens the room or gives
+        // up. "refreshed N rooms" would hide "isn't in the room list yet".
+        let hold_join_status = self.pending_join_open.is_some();
         if self.rooms.rooms.is_empty() {
             self.rooms.selected = None;
-            if !self.is_mid_command() {
+            if !self.is_mid_command() && !hold_join_status {
                 self.status = Status::from("no rooms returned by Axon".to_owned());
             }
         } else if self.rooms.selected.is_none_or(|selected| {
@@ -175,10 +178,10 @@ impl App {
         }) {
             let visible = self.visible_room_indices();
             self.rooms.selected = visible.first().copied();
-            if !self.is_mid_command() {
+            if !self.is_mid_command() && !hold_join_status {
                 self.status = Status::from(format!("loaded {} rooms", self.rooms.rooms.len()));
             }
-        } else if !self.is_mid_command() {
+        } else if !self.is_mid_command() && !hold_join_status {
             self.status = Status::from(format!("refreshed {} rooms", self.rooms.rooms.len()));
         }
         if self.bootstrap == super::BootstrapStage::Rooms {
@@ -189,6 +192,7 @@ impl App {
         }
         self.maybe_start_pin_migration();
         self.settle_pending_leaves(read);
+        self.note_pending_join_open(read);
         self.recover_title_overflow();
     }
 
@@ -933,6 +937,12 @@ impl App {
             }
         };
         self.select_room_index(index).await;
+    }
+
+    /// The user chose a room. A join still waiting on the room list must not
+    /// override that choice when the list catches up.
+    pub(crate) fn note_user_room_choice(&mut self) {
+        self.room_choice = self.room_choice.wrapping_add(1);
     }
 
     pub(crate) async fn select_room_index(&mut self, index: usize) {

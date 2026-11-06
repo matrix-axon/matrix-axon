@@ -820,6 +820,12 @@ pub(crate) struct App {
     /// [`room_actions::PENDING_MEMBERSHIP_CHECK_DELAYS`].
     pub(crate) pending_memberships:
         HashMap<(RoomKey, room_actions::RoomActionKind), room_actions::PendingMembership>,
+    /// A join whose room was not in the list yet. The next covering list
+    /// opens it. See [`room_actions::JOIN_OPEN_READ_DELAYS`].
+    pub(crate) pending_join_open: Option<room_actions::PendingJoinOpen>,
+    /// Bumped when the user chooses a room, so a late join does not steal
+    /// that choice.
+    pub(crate) room_choice: u64,
     /// Sender for results of in-flight M19 room actions spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
     pub(crate) room_action_tx: Option<mpsc::UnboundedSender<RoomActionOutcome>>,
@@ -1227,6 +1233,8 @@ impl App {
             media_send_busy: false,
             room_action_busy: false,
             pending_memberships: HashMap::new(),
+            pending_join_open: None,
+            room_choice: 0,
             room_action_tx: None,
             tag_write_tx: None,
             tag_write_busy: false,

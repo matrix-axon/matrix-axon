@@ -506,12 +506,18 @@ impl App {
         } else if key.code == KeyCode::Home {
             let visible = self.visible_room_indices();
             if let Some(&first) = visible.first() {
+                if self.rooms.selected != Some(first) {
+                    self.note_user_room_choice();
+                }
                 self.rooms.selected = Some(first);
                 self.load_selected_timeline().await;
             }
         } else if key.code == KeyCode::End {
             let visible = self.visible_room_indices();
             if let Some(&last) = visible.last() {
+                if self.rooms.selected != Some(last) {
+                    self.note_user_room_choice();
+                }
                 self.rooms.selected = Some(last);
                 self.load_selected_timeline().await;
             }

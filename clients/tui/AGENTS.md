@@ -56,6 +56,8 @@
 - Room switching should remain forgiving within the active account filter: visible-list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
 - `/join <room id, alias, or matrix.to / matrix: link>` joins that room for the account filter, or for the only active account.
   A `504` does not retry and does not decide the outcome; the room list is what shows a join that landed.
+  When the list right after the join does not contain the room, two further reads a few seconds apart open it once a list does.
+  Choosing another room or starting another room action cancels that watch.
 
 ## Spaces (ADR 0103)
 

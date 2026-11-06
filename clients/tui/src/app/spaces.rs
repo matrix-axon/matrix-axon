@@ -871,6 +871,13 @@ impl App {
 
     /// Share selection cleanup with historical jumps without starting a competing timeline read.
     pub(crate) fn prepare_room_selection(&mut self, index: usize) {
+        let next = RoomKey::from(&self.rooms.rooms[index]);
+        if self
+            .selected_room()
+            .is_none_or(|room| RoomKey::from(room) != next)
+        {
+            self.note_user_room_choice();
+        }
         self.cancel_space_launch();
         self.spaces.navigation = None;
         if let Some(pending) = self.spaces.timeline.take() {
