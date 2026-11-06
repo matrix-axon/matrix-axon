@@ -184,7 +184,11 @@
         log.info(
           "share_item public_title=\(input.attributedTitle != nil) public_text=\(input.attributedContentText != nil)"
         )
-        if let content = input.attributedContentText?.string { text.append(content) }
+        if let content = input.attributedContentText {
+          // Check the attributed length before .string materializes its value.
+          guard content.length <= ShareLimits.textBytes else { throw ShareFailure.quota }
+          text.append(try boundedString(content.string as NSString))
+        }
         for provider in input.attachments ?? [] {
           try cancellation.check()
           guard Date() < deadline else {

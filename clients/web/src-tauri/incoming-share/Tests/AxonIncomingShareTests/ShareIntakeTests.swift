@@ -9,6 +9,25 @@
   @testable import AxonIncomingShare
 
   final class ShareIntakeTests: XCTestCase {
+    private final class OversizedAttributedText: NSAttributedString {
+      private(set) var readString = false
+      override init() { super.init() }
+      required init?(coder: NSCoder) { return nil }
+      override var length: Int { ShareLimits.textBytes + 1 }
+      override var string: String { readString = true; return "oversized" }
+      override func attributes(at location: Int, effectiveRange range: NSRangePointer?)
+        -> [NSAttributedString.Key: Any] {
+        range?.pointee = NSRange(location: 0, length: length)
+        return [:]
+      }
+    }
+    private final class OversizedItem: NSExtensionItem {
+      let content = OversizedAttributedText()
+      override var attributedContentText: NSAttributedString? {
+        get { content }
+        set { }
+      }
+    }
     private final class MetadataAndURLProvider: NSItemProvider {
       let metadata: LPLinkMetadata
       init(metadata: LPLinkMetadata) {
@@ -51,6 +70,29 @@
           expiresAt: nil), credential: {})
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
+    func testOversizedAttributedTextIsRejectedBeforeReadingItsString() throws {
+      let item = OversizedItem()
+      XCTAssertThrowsError(try ShareIntake.importItems([item], store: store)) {
+        XCTAssertEqual($0 as? ShareFailure, .quota)
+      }
+      XCTAssertFalse(item.content.readString)
+      XCTAssertTrue(try store.list().isEmpty)
+    }
+    func testAttributedTextChecksUTF8BudgetAndPreservesBoundaryValue() throws {
+      for text in [String(repeating: "x", count: ShareLimits.textBytes + 1),
+                   String(repeating: "é", count: ShareLimits.textBytes / 2 + 1)] {
+        let item = NSExtensionItem()
+        item.attributedContentText = NSAttributedString(string: text)
+        XCTAssertThrowsError(try ShareIntake.importItems([item], store: store)) {
+          XCTAssertEqual($0 as? ShareFailure, .quota)
+        }
+        XCTAssertTrue(try store.list().isEmpty)
+      }
+      let text = String(repeating: "é", count: ShareLimits.textBytes / 2)
+      let item = NSExtensionItem()
+      item.attributedContentText = NSAttributedString(string: text)
+      XCTAssertEqual(try ShareIntake.importItems([item], store: store).text, text)
+    }
     func testSuppliedPublicMetadataWinsOverAnAvailableURLReader() async throws {
       let metadata = LPLinkMetadata()
       metadata.originalURL = URL(string: link)
