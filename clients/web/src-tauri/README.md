@@ -160,11 +160,14 @@ has no effect and the next regeneration overwrites them; change
 
 ## iOS
 
+The production text/link Share Extension is described in [iOS sharing](../../../docs/ios-sharing.md).
 Incoming-share session/staging and the Pending shares recovery UI are described in [the foundation guide](../../../docs/ios-sharing-foundation.md).
-App Group and shared Keychain capabilities must be enabled in the developer portal and included in provisioning profiles.
+App Group and shared Keychain capabilities must be enabled for both `org.matrixaxon.axon` and `org.matrixaxon.axon.Share` in the developer portal and included in their provisioning profiles.
 Run `node scripts/configure-ios-sharing.mjs` from `clients/web` after every manual `tauri ios init`; packaging runs the same hook automatically.
 `AXON_SHARE_PROBE=1` adds the development-only signed access probe; normal distribution builds omit it.
-Native incoming sharing requires an HTTPS Axon server and retains drafts configured for HTTP.
+Native incoming-share sending and homeserver preview lookup require an HTTPS Axon server and retain drafts configured for HTTP.
+Explicit on-device preview lookup is independent of that transport and uses a restricted HTTPS reader before the separately confirmed homeserver option.
+Its shared Swift package pins SwiftSoup 2.14.3 for inert metadata parsing and requires a Swift 6-capable Xcode toolchain; the package remains deployable to iOS 15.
 `pnpm test:sharing:simulator` runs the shared Swift recovery tests under iOS using a separate unsigned test runner; it requires Xcode, an installed iOS runtime, and `xcodegen`.
 
 Needs macOS with Xcode. Everything below is `clients/web` unless it says
@@ -546,16 +549,20 @@ Developer ID certificate and notarization login for the `.dmg`, a different
 certificate type from a store build's, and a store upload authenticates with an API
 key rather than an Apple ID.
 
-| Secret                              | What it is                                                                                             |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `APPLE_STORE_CERTIFICATES`          | Base64 of one `.p12` holding the store signing identities (certificate **and** private key)            |
-| `APPLE_STORE_CERTIFICATES_PASSWORD` | The password that `.p12` was exported with                                                             |
-| `IOS_APPSTORE_PROFILE`              | Base64 of the iOS **App Store** provisioning profile for the bundle ID                                 |
-| `IOS_DEVELOPMENT_PROFILE`           | Base64 of the **Xcode-managed** iOS development profile (`iOS Team Provisioning Profile: <bundle id>`) |
-| `MAC_APPSTORE_PROFILE`              | Base64 of the **Mac App Store** provisioning profile (`.provisionprofile`)                             |
-| `ASC_KEY_ID`                        | The 10-character key ID of an App Store Connect API key                                                |
-| `ASC_ISSUER_ID`                     | The issuer ID, a UUID, shown above the keys list                                                       |
-| `ASC_PRIVATE_KEY`                   | The full contents of that key's `AuthKey_<ID>.p8` file                                                 |
+| Secret                              | What it is                                                                                        |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `APPLE_STORE_CERTIFICATES`          | Base64 of one `.p12` holding the store signing identities (certificate **and** private key)       |
+| `APPLE_STORE_CERTIFICATES_PASSWORD` | The password that `.p12` was exported with                                                        |
+| `IOS_APPSTORE_PROFILE`              | Base64 containing-app App Store profile; used when its manual override is absent                  |
+| `IOS_DEVELOPMENT_PROFILE`           | Base64 containing-app development profile; used when its manual override is absent                |
+| `IOS_MANUAL_APPSTORE_PROFILE`       | Optional base64 manual App Store profile override for the containing app                          |
+| `IOS_MANUAL_DEVELOPMENT_PROFILE`    | Optional base64 manual development profile override for the containing app                        |
+| `IOS_SHARE_APPSTORE_PROFILE`        | Base64 of its manually managed App Store profile, with shared App Group and Keychain capabilities |
+| `IOS_SHARE_DEVELOPMENT_PROFILE`     | Base64 of its manually managed development profile, with the same shared capabilities             |
+| `MAC_APPSTORE_PROFILE`              | Base64 of the **Mac App Store** provisioning profile (`.provisionprofile`)                        |
+| `ASC_KEY_ID`                        | The 10-character key ID of an App Store Connect API key                                           |
+| `ASC_ISSUER_ID`                     | The issuer ID, a UUID, shown above the keys list                                                  |
+| `ASC_PRIVATE_KEY`                   | The full contents of that key's `AuthKey_<ID>.p8` file                                            |
 
 `ASC_*` are needed only for a run that uploads or uses `auto`. There is also one
 optional **variable** (not a secret): `MAS_APP_IDENTITY`, below.
@@ -572,15 +579,14 @@ base64 -i store.p12 | gh secret set APPLE_STORE_CERTIFICATES
 gh secret set APPLE_STORE_CERTIFICATES_PASSWORD       # paste the password at the prompt
 rm store.p12
 
-# 2. The profiles. Xcode installs the iOS profiles itself, so this finds them and
-#    shows each one's kind and platform, so the right file goes into the right
-#    secret. The Mac App Store profile is different: it is a file you downloaded
-#    from the developer portal (the one you pass to package-macos-mas.sh
-#    --profile) and was never installed anywhere, so name the folder you saved it
-#    in. Without that, no macOS profile is listed, and it says so.
+# 2. Download manually managed profiles for both iOS bundle IDs from the
+#    developer portal. Name their download folder when listing them, along with
+#    the Mac App Store profile used by package-macos-mas.sh --profile.
 scripts/ci/store-credentials.sh list-profiles --bundle-id org.matrixaxon.axon ~/Downloads
 base64 -i '<the app-store iOS .mobileprovision>' | gh secret set IOS_APPSTORE_PROFILE
-base64 -i '<the Xcode-managed development iOS .mobileprovision>' | gh secret set IOS_DEVELOPMENT_PROFILE
+base64 -i '<the manually managed development iOS .mobileprovision>' | gh secret set IOS_DEVELOPMENT_PROFILE
+base64 -i '<the manually managed Share app-store .mobileprovision>' | gh secret set IOS_SHARE_APPSTORE_PROFILE
+base64 -i '<the manually managed Share development .mobileprovision>' | gh secret set IOS_SHARE_DEVELOPMENT_PROFILE
 base64 -i '<the app-store OSX .provisionprofile>' | gh secret set MAC_APPSTORE_PROFILE
 
 # 3. The App Store Connect key.
@@ -594,8 +600,7 @@ What goes in each:
 - **The `.p12`** needs `Apple Distribution` (the iOS export, and the Mac app if it
   is signed with that), `3rd Party Mac Developer Installer` or `Mac Installer
 Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
-  Mac profile lists that certificate, and `Apple Development` (the iOS archive,
-  see below). The workflow checks the ones it must have before it builds. Export
+  Mac profile lists that certificate, and `Apple Development` (iOS debugging archives and exports). The workflow checks the ones it must have before it builds. Export
   identities, not bare certificates: without the private key there is nothing to
   sign with. `security export` takes everything in the keychain, including the
   `Developer ID Application` identity, which these builds do not use; to leave it
@@ -615,32 +620,17 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
   second time, one by one, which restores the missing identity, so the `.p12` needs
   no special treatment.
 
-- **The profiles** are checked when they are installed, and each of these fails the
-  job there, naming the secret: a development or Ad Hoc profile in
-  `IOS_APPSTORE_PROFILE` (the two swapped, which otherwise fails inside `xcodebuild`
-  as `No profiles for … were found`), a profile for another app or one that has
-  expired, a profile that lacks a capability in `Entitlements.ios.plist`, and
-  **any iOS profile that is not Xcode-managed**, in either secret. `list-profiles`
-  finds the iOS profiles because Xcode installs them, and marks each
-  `Xcode-managed` or `manual`. Both secrets must hold the Xcode-managed ones. The
-  Xcode project signs automatically, and as far as we can tell automatic signing
-  does not pick up a profile made by hand in the developer portal. That is an
-  inference, from two failures: a manual `Matrix-axon` profile in
-  `IOS_DEVELOPMENT_PROFILE`, which failed with
-
-  ```
-  Xcode couldn't find any iOS App Development provisioning profiles matching '<bundle id>'
-  ```
-
-  and a manual `Axon Sharing App Store` profile in `IOS_APPSTORE_PROFILE`, which
-  failed at export with `No profiles for … were found`. The development one
-  differed from the one that works on the Mac this was developed on only in not
-  being Xcode-managed (both list the same certificate and carry the same
-  entitlements). This used to be a warning for the development profile; it is an
-  error now, because the build cannot pass with one. The Mac App Store profile is a
-  file downloaded from the developer portal and never installed, so it is found
-  only when you name the folder, or the file, it is in; when no macOS profile turns
-  up it says so.
+- **The profiles** are checked before building: kind, bundle ID, expiry, and required capabilities must match.
+  The iOS workflow uses explicit manual signing for the containing app and Share Extension.
+  All four effective iOS profile inputs must hold manually managed profiles; Xcode-managed profiles are rejected before archive/export.
+  Optional `IOS_MANUAL_APPSTORE_PROFILE` and `IOS_MANUAL_DEVELOPMENT_PROFILE` secrets override the containing-app inputs.
+  Use these during migration when `IOS_APPSTORE_PROFILE` and `IOS_DEVELOPMENT_PROFILE` must remain Xcode-managed for older branches using automatic signing; the existing secrets remain the fallback when no override is set.
+  The helper exports each validated UUID to `AXON_IOS_APP_DEVELOPMENT_PROFILE`, `AXON_IOS_SHARE_DEVELOPMENT_PROFILE`, `AXON_IOS_APP_EXPORT_PROFILE`, or `AXON_IOS_SHARE_EXPORT_PROFILE` so the generation hook selects exactly the supplied profiles.
+  Debugging archives and exports use the development profiles with `Apple Development`; App Store and release-testing archives and exports use the export profiles with `Apple Distribution`.
+  Matching the archive identity to the export method is required because the production push entitlement is already present during archiving.
+  `list-profiles` marks downloaded profiles as `manual` or `Xcode-managed`; name their download folder when listing.
+  Local callers using automatic signing can omit `--manual-signing` when invoking the helper; that mode continues to require Xcode-managed iOS profiles.
+  The Mac App Store profile is a downloaded `.provisionprofile`; name its folder or file if it was never installed.
 
 - **The API key** needs the App Manager role or above (App Store Connect > Users
   and Access > Integrations > Team Keys). A key made for CI, rather than the one on
@@ -667,68 +657,28 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
 
 ### When a capability change invalidates the iOS profiles
 
-Enabling a capability on the App ID (Push Notifications, Sign in with Apple, App
-Groups) invalidates every provisioning profile made before it. The stored secrets
-are frozen copies, so the store build fails until they are replaced, although it
-worked the day before. Two profiles are involved, and both secrets must be
-replaced from **Xcode's own copies**, not from the portal:
+Enabling a capability on an App ID invalidates profiles made before that change.
+Stored CI secrets are frozen copies, so replace the affected profiles for both the containing app and Share Extension.
+Both IDs require the shared App Group and Keychain capabilities; the containing app also requires its existing Apple sign-in and push capabilities.
 
-| Secret                    | Profile name Xcode gives it                        | Kind        |
-| ------------------------- | -------------------------------------------------- | ----------- |
-| `IOS_APPSTORE_PROFILE`    | `iOS Team Store Provisioning Profile: <bundle id>` | app-store   |
-| `IOS_DEVELOPMENT_PROFILE` | `iOS Team Provisioning Profile: <bundle id>`       | development |
-
-1. **Regenerate them on a Mac that can reach the account.** Build once with
-   `scripts/package-ios.sh --export-method app-store-connect` (Xcode makes the
-   Store profile when it exports; the development one when it archives). Needs an
-   Apple ID in Xcode → Settings → Accounts, or the `APPLE_API_KEY`,
-   `APPLE_API_ISSUER` and `APPLE_API_KEY_PATH` variables.
-2. **Check what you are about to upload.** `list-profiles` must show both as
-   `Xcode-managed` and of the right kind. It prints each profile's path, and
-   `<file>` below is that path. Xcode keeps them in
-   `~/Library/Developer/Xcode/UserData/Provisioning Profiles` (and an older copy in
-   `~/Library/MobileDevice/Provisioning Profiles`):
+1. Generate manually managed development and App Store profiles for `org.matrixaxon.axon` and `org.matrixaxon.axon.Share` in Apple Developer.
+   Select the corresponding Apple Development or Apple Distribution certificates included in `APPLE_STORE_CERTIFICATES`.
+2. Download and inspect all four profiles:
 
    ```sh
-   scripts/ci/store-credentials.sh list-profiles --bundle-id org.matrixaxon.axon
-   security cms -D -i '<file>' | plutil -extract Entitlements.aps-environment raw -
+   scripts/ci/store-credentials.sh list-profiles ~/Downloads
+   security cms -D -i '<file>' | plutil -extract Entitlements raw -
    ```
 
-   The second command prints `production` for the Store profile and `development`
-   for the development one. Both should list the distribution certificate your
-   `APPLE_STORE_CERTIFICATES` secret holds; an Xcode-managed profile lists all of
-   them, which is why it is the safe choice.
+   Check bundle ID, kind, expiry, shared capabilities, and `manual` management.
+   For the containing app, `aps-environment` must be `production` in the Store profile and `development` in the development profile.
 
-3. **Replace the secrets** with
-   `base64 -i '<file>' | gh secret set IOS_APPSTORE_PROFILE` (and the same for
-   `IOS_DEVELOPMENT_PROFILE`), then rerun the workflow.
+3. Replace each corresponding secret with `base64 -i '<file>' | gh secret set <SECRET_NAME>`, using `IOS_DEVELOPMENT_PROFILE`, `IOS_APPSTORE_PROFILE`, `IOS_SHARE_DEVELOPMENT_PROFILE`, and `IOS_SHARE_APPSTORE_PROFILE`.
+   Rerun the workflow after all affected profiles are replaced.
 
-The signs of this, on a runner, in the order you will see them: "Install the
-signing credentials" refuses a profile that is missing a capability the app asks
-for (it compares the profile with `Entitlements.ios.plist`) or that is not
-Xcode-managed, and says which secret. Failing that, `xcodebuild` prints "doesn't
-include the ... capability" or "No profiles for ... were found", and
-`package-ios.sh` follows the log with what to do. Xcode's first line, "No
-Accounts", is only its follow-up to those; it is the cause on its own only when no
-Apple ID is signed in to Xcode and no `APPLE_API_*` key is set.
-`gh secret list` shows when each secret was last set: after a capability change
-both should be newer than the change. Two mistakes seen in practice: setting only
-one of the two secrets, and putting a hand-made portal profile (`Axon Sharing App
-Store`) in `IOS_APPSTORE_PROFILE`.
-
-If the capability is an App Group, the group must also be registered under
-Identifiers > App Groups and assigned to the App ID (Configure). A group that is
-"not available" when you try to create it is already registered, in your team
-(assign it) or in another (choose another identifier).
-
-Do not make the Store profile by hand in the portal. The name above is Xcode's, it
-is longer than the portal allows (it cuts off after `org.matrixaxo`), and the
-build exports with automatic signing, which looks the profile up under that name.
-A hand-made `matrix-axon-1` profile, and then one named like the development
-profile, both failed `exportArchive` with `No Accounts` and
-`No profiles for 'org.matrixaxon.axon' were found`, after the archive had passed.
-Two profiles with the same name fail the same way. That the lookup is by name is an
-inference from the working and failing runs, not something Apple documents.
+The credential step names a missing capability or incompatible management mode before building.
+`gh secret list` shows when each profile secret was last updated.
+If an App Group is unavailable when creating it, check whether it is already registered to your team and assign it to both IDs.
 
 The portal's certificate list shows several certificates with one name and only
 an expiry date. Tell them apart by serial: `security find-certificate -c "Apple

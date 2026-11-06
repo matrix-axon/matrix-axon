@@ -27,6 +27,8 @@ class NativeAuthPlugin: Plugin {
   private let shareQueue = DispatchQueue(label: "org.matrixaxon.axon.incoming-share")
   private let shareTransfers = DispatchQueue(label: "org.matrixaxon.axon.share-transfers", attributes: .concurrent)
   private let shareTransferSlots = DispatchSemaphore(value: 2)
+  private let sharePreviews = DispatchQueue(label: "org.matrixaxon.axon.share-previews")
+  private let previewRequests = SharePreviewRequests()
   private let sharingSetup = NSLock()
   private var shareStore: ShareStore?
   private var sharedSession: SharedSession?
@@ -142,14 +144,34 @@ class NativeAuthPlugin: Plugin {
 
   @objc public func share(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(ShareArgs.self)
-    let transfer = ["upload", "retain", "cleanup"].contains(args.action)
-    if transfer && shareTransferSlots.wait(timeout: .now()) != .success {
-      invoke.reject("Incoming share: busy", code: "busy")
+    if args.action == "cancel_preview" {
+      guard let id = args.requestId, UUID(uuidString: id) != nil else { throw ShareFailure.invalid }
+      previewRequests.cancel(id)
+      invoke.resolve(["value": [:]])
       return
     }
-    let queue = transfer ? shareTransfers : shareQueue
+    if ["invalidate", "clear_account"].contains(args.action) || (args.action == "publish" && args.replace == true) {
+      previewRequests.cancel()
+    }
+    let isPreview = args.action == "device_preview"
+    let requestId = args.requestId ?? UUID().uuidString
+    let previewCancellation: ShareCancellation?
+    do { previewCancellation = isPreview ? try previewRequests.begin(requestId) : nil }
+    catch {
+      invoke.reject("Incoming share: preview busy", code: (error as? ShareFailure)?.rawValue ?? "invalid")
+      return
+    }
+    let transfer = ["upload", "retain", "cleanup"].contains(args.action)
+    if transfer && shareTransferSlots.wait(timeout: .now()) != .success {
+      invoke.reject("Incoming share: transfers busy", code: "transferBusy")
+      return
+    }
+    let queue = isPreview ? sharePreviews : transfer ? shareTransfers : shareQueue
     queue.async {
-      defer { if transfer { self.shareTransferSlots.signal() } }
+      defer {
+        if transfer { self.shareTransferSlots.signal() }
+        if isPreview { self.previewRequests.finish(requestId) }
+      }
       do {
         if args.action == "invalidate" {
           try SharedSession.invalidate(fence: {
@@ -178,6 +200,11 @@ class NativeAuthPlugin: Plugin {
         case "list": result = try self.shareObject(store.list())
         case "clear_account": break // prepareSharing reconciled the durable intent.
         case "claim": result = try self.shareObject(store.claim(args.id ?? ""))
+        case "device_preview":
+          guard let id = args.id, let owner = args.owner, let url = args.url else { throw ShareFailure.invalid }
+          let manifest = try store.owned(id, owner: owner, account: args.accountId)
+          let outcome = try DevicePreview(store: store, cancellation: previewCancellation!).include(manifest, url: url, refresh: args.refresh ?? false)
+          result = try self.shareObject(outcome.manifest)
         case "update":
           guard let manifest = args.manifest else { throw ShareFailure.invalid }
           result = try self.shareObject(store.update(manifest, release: args.release ?? false))
@@ -250,7 +277,9 @@ class NativeAuthPlugin: Plugin {
         }
         invoke.resolve(["value": result])
       } catch {
-        let code = (error as? ShareFailure)?.rawValue ?? (error is DecodingError ? "invalid" : "unavailable")
+        let code = (error as? ShareFailure)?.rawValue
+          ?? (error as? DevicePreviewFailure).map { "devicePreview_" + $0.rawValue }
+          ?? (error is DecodingError ? "invalid" : "unavailable")
         invoke.reject("Incoming share: \(code)", code: code)
       }
     }
@@ -296,6 +325,9 @@ private struct ShareArgs: Decodable {
   let offset: Int?
   let count: Int?
   let text: String?
+  let url: String?
+  let refresh: Bool?
+  let requestId: String?
   let accountId: String?
   let uploadId: String?
   let uploadIds: [String]?

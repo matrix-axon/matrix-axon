@@ -64,12 +64,16 @@ export function connectIncomingShareSession(
           expiresAt,
           replace: false,
         })
-        if (current === generation) await store.refresh()
+        if (current === generation) {
+          store.sessionError.value = null
+          await store.refresh()
+        }
       })
     void tail.catch(() => {
-      if (current === generation)
-        store.error.value =
+      if (current === generation) {
+        store.sessionError.value =
           'Sharing credentials are unavailable. Open Axon and refresh your session before resuming.'
+      }
     })
   }
   const stop = effect(publish)

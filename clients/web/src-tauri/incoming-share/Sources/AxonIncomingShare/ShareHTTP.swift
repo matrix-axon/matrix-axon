@@ -1,12 +1,31 @@
 import Foundation
+import os
+
+/// Fixed numeric diagnostics only; upstream descriptions may contain secrets.
+public struct ShareRequestFailure: Error {
+  public let status: Int?
+  public let networkCode: Int?
+  public init(status: Int? = nil, networkCode: Int? = nil) {
+    self.status = status
+    self.networkCode = networkCode
+  }
+}
+
+public struct ShareResponseLimitFailure: Error {
+  public let limit: Int
+  public let observedBytes: Int64
+}
 
 /// Small extension-safe HTTP adapter. One ephemeral session per process reuses
 /// connections; no cookies, cross-origin redirects, or unbounded response data.
 public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
+  private static let log = Logger(subsystem: "org.matrixaxon.axon", category: "share-http")
   private final class Pending {
     var data = Data()
     var response: HTTPURLResponse?
     var error: Error?
+    var limitExceeded = false
+    var observedBytes: Int64 = 0
     let limit: Int
     let done = DispatchSemaphore(value: 0)
     init(limit: Int) { self.limit = limit }
@@ -14,10 +33,17 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
   private let lock = NSLock()
   private let slots = DispatchSemaphore(value: 2)
   private var requests: [Int: Pending] = [:]
+  private var closed = false
   private var session: URLSession!
   public override init() {
     super.init()
-    let configuration = URLSessionConfiguration.ephemeral
+    configure(.ephemeral)
+  }
+  init(configuration: URLSessionConfiguration) {
+    super.init()
+    configure(configuration)
+  }
+  private func configure(_ configuration: URLSessionConfiguration) {
     configuration.httpCookieStorage = nil
     configuration.urlCache = nil
     configuration.httpMaximumConnectionsPerHost = 2
@@ -26,11 +52,27 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
   }
 
+  public func close() {
+    lock.lock()
+    guard !closed else { lock.unlock(); return }
+    closed = true
+    lock.unlock()
+    session.invalidateAndCancel()
+  }
+
   public func request(
     descriptor: ShareSession, token: String, path: String,
     method: String = "GET", body: Data? = nil, file: URL? = nil,
     mime: String? = nil, limit: Int = 256 * 1024
   ) throws -> (Int, Data) {
+    let route =
+      path == "/v1/accounts"
+      ? "accounts"
+      : path == "/v1/rooms" || path.hasPrefix("/v1/rooms?")
+        ? "rooms"
+        : path.hasSuffix("/send")
+          ? "send"
+          : path.hasSuffix("/generate") ? "generate" : "media"
     guard URL(string: descriptor.server)?.scheme == "https" else {
       throw ShareFailure.httpsRequired
     }
@@ -43,7 +85,7 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     guard path.hasPrefix("/v1/"), !path.contains(".."),
       let url = URL(
         string: descriptor.server.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + path),
-      ["http", "https"].contains(url.scheme), (1...ShareLimits.thumbnailBytes).contains(limit)
+      ["http", "https"].contains(url.scheme), (1...ShareLimits.responseBytes).contains(limit)
     else { throw ShareFailure.invalid }
     var request = URLRequest(url: url)
     request.httpMethod = method
@@ -54,13 +96,16 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     if let mime, !mime.isEmpty { request.setValue(mime, forHTTPHeaderField: "Content-Type") }
     request.httpBody = body
     let pending = Pending(limit: limit)
+    // Closing and task creation/resume share one lock. Invalidation can race
+    // a caller that already passed its ownership/cancellation checks.
+    lock.lock()
+    guard !closed else { lock.unlock(); throw ShareFailure.cancelled }
     let task: URLSessionTask =
       file.map { session.uploadTask(with: request, fromFile: $0) }
       ?? session.dataTask(with: request)
-    lock.lock()
     requests[task.taskIdentifier] = pending
-    lock.unlock()
     task.resume()
+    lock.unlock()
     guard pending.done.wait(timeout: .now() + deadline + 5) == .success else {
       task.cancel()
       lock.lock()
@@ -68,9 +113,19 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
       lock.unlock()
       throw ShareFailure.expired
     }
-    guard pending.error == nil, let response = pending.response else {
-      throw ShareFailure.unavailable
+    if pending.limitExceeded {
+      throw ShareResponseLimitFailure(limit: limit, observedBytes: pending.observedBytes)
     }
+    guard pending.error == nil, let response = pending.response else {
+      let code = (pending.error as? URLError)?.code.rawValue ?? 0
+      Self.log.error(
+        "share_http_failed route=\(route, privacy: .public) url_error=\(code) bytes=\(pending.data.count)"
+      )
+      throw ShareRequestFailure(networkCode: code)
+    }
+    Self.log.info(
+      "share_http_response route=\(route, privacy: .public) status=\(response.statusCode) bytes=\(pending.data.count)"
+    )
     return (response.statusCode, pending.data)
   }
 
@@ -86,9 +141,13 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
   ) {
     lock.lock()
     defer { lock.unlock() }
-    guard let pending = requests[dataTask.taskIdentifier],
-      response.expectedContentLength <= pending.limit
-    else {
+    guard let pending = requests[dataTask.taskIdentifier] else {
+      completionHandler(.cancel)
+      return
+    }
+    if response.expectedContentLength > pending.limit {
+      pending.limitExceeded = true
+      pending.observedBytes = response.expectedContentLength
       completionHandler(.cancel)
       return
     }
@@ -101,6 +160,8 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     defer { lock.unlock() }
     guard let pending = requests[dataTask.taskIdentifier] else { return }
     if pending.data.count + data.count > pending.limit {
+      pending.limitExceeded = true
+      pending.observedBytes = Int64(pending.data.count) + Int64(data.count)
       dataTask.cancel()
       return
     }

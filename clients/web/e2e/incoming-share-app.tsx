@@ -13,6 +13,7 @@ const read = (): IncomingShare[] =>
   JSON.parse(
     localStorage.getItem('fixture.incoming') ?? '[]',
   ) as IncomingShare[]
+const previews = new Map<string, () => void>()
 const port: IncomingSharePort = {
   subscribe(listener) {
     window.addEventListener('focus', listener)
@@ -20,13 +21,45 @@ const port: IncomingSharePort = {
   },
   async call<T>(action: string, args = {}): Promise<T> {
     const records = read()
-    if (action === 'list') return records as T
+    if (action === 'cancel_preview') {
+      previews.get(args.requestId as string)?.()
+      return {} as T
+    }
+    if (action === 'list') {
+      if (localStorage.getItem('fixture.inboxUnavailable') === 'true')
+        throw { code: 'unavailable' }
+      return records as T
+    }
     if (action === 'check_transport') {
       if (localStorage.getItem('fixture.httpSharing') === 'true')
         throw { code: 'httpsRequired' }
       return {} as T
     }
     const record = records.find((item) => item.id === args.id)
+    if (action === 'device_preview' && record !== undefined) {
+      if (localStorage.getItem('fixture.waitForPreview') === 'true') {
+        const id = args.requestId as string
+        try {
+          await new Promise<void>((_, reject) =>
+            previews.set(id, () => reject({ code: 'cancelled' })),
+          )
+        } finally {
+          previews.delete(id)
+        }
+      }
+      if (localStorage.getItem('fixture.devicePreviewFailure') === 'true')
+        throw { code: 'devicePreview_timeout' }
+      record.previews = [
+        {
+          matched_url: args.url as string,
+          title: 'Generated on device',
+          provenance: 'generated',
+        },
+      ]
+      record.revision += 1
+      localStorage.setItem('fixture.incoming', JSON.stringify(records))
+      return record as T
+    }
     if (action === 'claim' && record !== undefined) {
       record.owner = crypto.randomUUID()
       localStorage.setItem('fixture.incoming', JSON.stringify(records))
@@ -50,6 +83,14 @@ const port: IncomingSharePort = {
       return records[index] as T
     }
     if (action === 'ack' || action === 'discard') {
+      if (args.owner !== undefined && record?.owner !== args.owner)
+        throw { code: 'stale' }
+      if (
+        action === 'discard' &&
+        record?.owner &&
+        record.operation.state === 'dispatching'
+      )
+        throw { code: 'sending' }
       localStorage.setItem(
         'fixture.incoming',
         JSON.stringify(records.filter((item) => item.id !== args.id)),

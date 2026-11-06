@@ -140,19 +140,19 @@ PY
 
 # --- check-secrets -----------------------------------------------------------
 
-all_ios="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x IOS_DEVELOPMENT_PROFILE=x"
+all_ios="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x IOS_DEVELOPMENT_PROFILE=x IOS_SHARE_DEVELOPMENT_PROFILE=x IOS_SHARE_APPSTORE_PROFILE=x"
 all_macos="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set MAC_APPSTORE_PROFILE=x"
 all_asc="ASC_KEY_ID=x ASC_ISSUER_ID=x ASC_PRIVATE_KEY=x"
 # shellcheck disable=SC2086
 out=$(run $all_ios -- check-secrets ios)
 contains "$out" "rc=0" && contains "$out" "all required secrets for the ios build are set" || fail "ios: everything set passes" "$out"
 
-for missing in APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID; do
+for missing in APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE IOS_SHARE_DEVELOPMENT_PROFILE IOS_SHARE_APPSTORE_PROFILE APPLE_TEAM_ID; do
   set_vars=$(printf '%s' "$all_ios" | tr ' ' '\n' | grep -v "^$missing=" | tr '\n' ' ')
   # shellcheck disable=SC2086
   out=$(run $set_vars -- check-secrets ios)
   contains "$out" "rc=1" && contains "$out" "$missing" || fail "ios: $missing missing is an error naming it" "$out"
-  for other in APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID; do
+  for other in APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE IOS_SHARE_DEVELOPMENT_PROFILE IOS_SHARE_APPSTORE_PROFILE APPLE_TEAM_ID; do
     [ "$other" = "$missing" ] && continue
     contains "$out" "secrets for the ios build: $other" && fail "ios: only the missing secret is named" "$out"
   done
@@ -310,7 +310,7 @@ restore_list
 mkdir -p "$work/pr"
 appstore=$(make_profile appstore.mobileprovision 'IsXcodeManaged=True')
 out=$(run_real RUNNER_TEMP="$work/pr" GITHUB_ENV="$work/penv" IOS_APPSTORE_PROFILE="$appstore" PROVISIONING_PROFILES_DIRS="$profiles" -- \
-  profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --bundle-id org.example.app --install --export-path SOME_PATH)
+  profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --bundle-id org.example.app --install --export-path SOME_PATH --export-uuid SOME_UUID)
 contains "$out" "rc=0" && contains "$out" "(app-store)" && contains "$out" "installed as 11111111-2222-3333-4444-555555555555.mobileprovision" || fail "profile: a good App Store profile is accepted and installed" "$out"
 contains "$out" "warning:" && fail "profile: an Xcode-managed App Store profile gets no warning" "$out"
 
@@ -318,6 +318,13 @@ for d in pd1 pd2; do
   [ -f "$work/$d/11111111-2222-3333-4444-555555555555.mobileprovision" ] || fail "profile: it is installed in every folder Xcode might read ($d), named by UUID"
 done
 grep -q '^SOME_PATH=.*IOS_APPSTORE_PROFILE\.mobileprovision$' "$work/penv" || fail "profile: the decoded path is exported when asked" "$(cat "$work/penv" 2>/dev/null)"
+grep -q '^SOME_UUID=11111111-2222-3333-4444-555555555555$' "$work/penv" || fail "profile: validated UUID is exported for explicit signing" "$(cat "$work/penv" 2>/dev/null)"
+
+manual_store=$(make_profile manual-store.mobileprovision 'IsXcodeManaged=False')
+out=$(run_real RUNNER_TEMP="$work/manual" IOS_APPSTORE_PROFILE="$manual_store" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --manual-signing)
+contains "$out" "rc=0" || fail "manual signing: accepts the manually managed profile" "$out"
+out=$(run_real RUNNER_TEMP="$work/manual" IOS_APPSTORE_PROFILE="$appstore" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --manual-signing)
+contains "$out" "rc=1" && contains "$out" "manually managed" && contains "$out" "Replace IOS_APPSTORE_PROFILE" || fail "manual signing: rejects a managed profile before export" "$out"
 
 adhoc=$(make_profile adhoc.mobileprovision 'ProvisionedDevices=["A","B"]')
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$adhoc" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store)

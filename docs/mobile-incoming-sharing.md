@@ -78,10 +78,15 @@ When a sender's payload is ambiguous, retain the file as an attachment for revie
 The Android picker/composer and main-app recovery UI use the shared card model and renderer.
 
 For URL-only shares, offer an explicit **Include preview** action or a previously enabled generation preference.
-Both operating systems use the same authenticated Axon helper, which delegates acquisition to the selected account's configured homeserver `preview_url` capability.
 Source-provided metadata is reused first, avoiding an unnecessary lookup.
-Explain that generating missing metadata discloses the URL to the homeserver; receiving a share or rendering an event never triggers a lookup by itself.
-Apple's `LPMetadataProvider` can fetch metadata, but v1 does not add a separate automatic iOS acquisition policy alongside the common service.
+On iOS, **Include preview** uses a restricted device HTTPS reader with validated, pinned public destinations for the page, redirects, and selected image, including when resuming a draft in Pending shares.
+It extracts inert HTML metadata without JavaScript, cookies, or automatic Apple-provider fallback.
+Explain that this contacts the website and potentially its image hosts, and does not imply access to Safari's or another app's authenticated session.
+The authenticated Axon/homeserver helper remains available as a separate **Use homeserver instead** action with its own confirmation that the URL may enter homeserver logs, even for encrypted destinations.
+Device failure never automatically selects that fallback.
+Android's documented [Sharesheet content-preview API](https://developer.android.com/develop/ui/compose/sharing/send#add-rich-content-to-text-previews) consumes sender-provided titles and thumbnails; fetching URL metadata remains an app responsibility.
+Android has no implemented native acquisition adapter yet; its implementation should follow the same source-first and restricted-device-fetch policy, with a separately confirmed homeserver option.
+Receiving a share or rendering an event never triggers a lookup by itself.
 If homeserver previews are disabled, generation times out, or no useful metadata is returned, preserve the URL and offer plain-link sending; do not promise every webpage can produce a card.
 
 The settled [server send contract](bundled-link-previews.md) carries typed, bounded optional `url_previews` on text and media-caption sends.

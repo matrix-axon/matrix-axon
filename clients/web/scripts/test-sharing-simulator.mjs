@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // Run the real shared-module XCTest suite under iOS, without installing or
@@ -10,7 +10,13 @@ const source = fileURLToPath(
   new URL('../src-tauri/incoming-share/', import.meta.url),
 )
 const output = mkdtempSync(join(tmpdir(), 'axon-sharing-simulator-'))
-const run = (command, args, timeout = 300_000) =>
+// Unique identities also prevent an installed XCTest runner from reusing an
+// older test bundle when its version has not changed between local runs.
+const hostId = `org.matrixaxon.sharingtest.x${basename(output).replaceAll('-', '').toLowerCase()}`
+const activation = JSON.parse(
+  readFileSync(new URL('ios-share-activation.json', import.meta.url), 'utf8'),
+)
+const run = (command, args, timeout = 600_000) =>
   execFileSync(command, args, { stdio: 'inherit', timeout })
 const sdk = execFileSync(
   'xcrun',
@@ -53,13 +59,96 @@ console.log(
 if (device.state !== 'Booted')
   run('xcrun', ['simctl', 'boot', device.udid], 30_000)
 // A fresh CI simulator migrates OS data on first boot; allow the same bounded
-// five-minute budget as the test build instead of timing out mid-migration.
+// ten-minute budget as each test build instead of timing out mid-migration.
 run('xcrun', ['simctl', 'bootstatus', device.udid, '-b'])
 const project = {
   name: 'SharingFoundationTests',
   options: { deploymentTarget: { iOS: '15.0' } },
   packages: { AxonIncomingShare: { path: source } },
   targets: {
+    ShareExtension: {
+      type: 'app-extension',
+      platform: 'iOS',
+      sources: [join(source, '../share-extension')],
+      dependencies: [{ package: 'AxonIncomingShare' }],
+      settings: {
+        base: {
+          PRODUCT_BUNDLE_IDENTIFIER: `${hostId}.Share`,
+          GENERATE_INFOPLIST_FILE: 'YES',
+          CODE_SIGNING_ALLOWED: 'NO',
+          APPLICATION_EXTENSION_API_ONLY: 'YES',
+          SWIFT_VERSION: '5.0',
+          CURRENT_PROJECT_VERSION: '1',
+          MARKETING_VERSION: '1.0',
+        },
+      },
+      info: {
+        path: 'ShareExtension.plist',
+        properties: {
+          CFBundleDisplayName: 'AxonShareTest',
+          CFBundleVersion: '1',
+          CFBundleShortVersionString: '1.0',
+          NSExtension: {
+            NSExtensionPointIdentifier: 'com.apple.share-services',
+            NSExtensionPrincipalClass:
+              '$(PRODUCT_MODULE_NAME).ShareViewController',
+            NSExtensionAttributes: { NSExtensionActivationRule: activation },
+          },
+        },
+      },
+    },
+    ShareSource: {
+      type: 'application',
+      platform: 'iOS',
+      sources: [join(source, '../share-extension-tests/Source.swift')],
+      dependencies: [{ target: 'ShareExtension', embed: true }],
+      settings: {
+        base: {
+          PRODUCT_BUNDLE_IDENTIFIER: hostId,
+          INFOPLIST_KEY_CFBundleDisplayName: 'AxonShareTest',
+          INFOPLIST_KEY_UILaunchScreen_Generation: 'YES',
+          GENERATE_INFOPLIST_FILE: 'YES',
+          CODE_SIGNING_ALLOWED: 'NO',
+          SWIFT_VERSION: '5.0',
+          CURRENT_PROJECT_VERSION: '1',
+          MARKETING_VERSION: '1.0',
+        },
+      },
+    },
+    ActivationTests: {
+      type: 'bundle.ui-testing',
+      platform: 'iOS',
+      sources: [
+        join(source, '../share-extension-tests/ActivationUITests.swift'),
+      ],
+      dependencies: [{ target: 'ShareSource' }],
+      settings: {
+        base: {
+          PRODUCT_BUNDLE_IDENTIFIER: `${hostId}.Tests`,
+          TEST_TARGET_NAME: 'ShareSource',
+          GENERATE_INFOPLIST_FILE: 'YES',
+          CODE_SIGNING_ALLOWED: 'NO',
+          SWIFT_VERSION: '5.0',
+        },
+      },
+    },
+    ComposerTests: {
+      type: 'bundle.unit-test',
+      platform: 'iOS',
+      sources: [
+        join(source, '../share-extension/ShareViewController.swift'),
+        join(source, '../share-extension-tests/ComposerLifecycleTests.swift'),
+      ],
+      dependencies: [{ package: 'AxonIncomingShare' }],
+      settings: {
+        base: {
+          PRODUCT_BUNDLE_IDENTIFIER: 'org.matrixaxon.composer.tests',
+          GENERATE_INFOPLIST_FILE: 'YES',
+          CODE_SIGNING_ALLOWED: 'NO',
+          SWIFT_VERSION: '5.0',
+        },
+      },
+    },
     FoundationTests: {
       type: 'bundle.unit-test',
       platform: 'iOS',
@@ -77,8 +166,18 @@ const project = {
   },
   schemes: {
     FoundationTests: {
-      build: { targets: { FoundationTests: 'test' } },
-      test: { targets: ['FoundationTests'] },
+      build: {
+        targets: {
+          FoundationTests: 'test',
+          ComposerTests: 'test',
+          ShareExtension: 'all',
+        },
+      },
+      test: { targets: ['FoundationTests', 'ComposerTests'] },
+    },
+    ActivationTests: {
+      build: { targets: { ShareSource: 'all', ActivationTests: 'all' } },
+      test: { targets: ['ActivationTests'] },
     },
   },
 }
@@ -101,3 +200,27 @@ run('xcodebuild', [
   join(output, 'results.xcresult'),
   'CODE_SIGNING_ALLOWED=NO',
 ])
+try {
+  run('xcodebuild', [
+    'test',
+    '-project',
+    join(output, 'SharingFoundationTests.xcodeproj'),
+    '-scheme',
+    'ActivationTests',
+    '-destination',
+    `platform=iOS Simulator,id=${device.udid}`,
+    '-derivedDataPath',
+    join(output, 'DerivedData'),
+    '-resultBundlePath',
+    join(output, 'activation.xcresult'),
+    'CODE_SIGNING_ALLOWED=NO',
+  ])
+} finally {
+  for (const identifier of [hostId, `${hostId}.Tests.xctrunner`]) {
+    try {
+      run('xcrun', ['simctl', 'uninstall', device.udid, identifier], 30_000)
+    } catch {
+      /* Only these disposable test identities are eligible for cleanup. */
+    }
+  }
+}

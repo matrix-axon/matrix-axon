@@ -16,6 +16,256 @@ final class ShareStoreTests: XCTestCase {
         credentialAvailable: true, expiresAt: nil), credential: {})
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
+  func testCancelAcknowledgesSentButRetainsUnknownOutcomes() throws {
+    var sent = try store.claim(store.create(text: "Sent").id)
+    sent.operation.state = .dispatching
+    sent = try store.update(sent)
+    sent.operation.state = .sent
+    sent.operation.eventId = "$confirmed"
+    sent = try store.update(sent)
+    try store.cancelComposer(sent)
+    XCTAssertTrue(try store.list().isEmpty)
+    var unknown = try store.claim(store.create(text: "Unknown").id)
+    unknown.operation.state = .dispatching
+    unknown = try store.update(unknown)
+    unknown.operation.state = .unknown
+    unknown = try store.update(unknown)
+    try store.cancelComposer(unknown)
+    let retained = try XCTUnwrap(store.list().first)
+    XCTAssertEqual(retained.operation.state, .unknown)
+    XCTAssertNil(retained.owner)
+  }
+
+  func testExplicitDiscardWorksWithoutSessionButCannotAcknowledgeOrResume() throws {
+    var draft = try store.claim(store.create(text: "orphaned draft").id)
+    draft.operation.state = .dispatching
+    draft = try store.update(draft)
+    draft.operation.state = .unknown
+    draft = try store.update(draft, release: true)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("session.json"))
+    let reopened = try ShareStore(root: root, now: { self.time })
+    XCTAssertEqual(try reopened.list().first?.operation.state, .unknown)
+    XCTAssertThrowsError(try reopened.claim(draft.id))
+    XCTAssertThrowsError(try reopened.discard(draft.id, completed: true))
+    try reopened.discard(draft.id)
+    XCTAssertTrue(try reopened.list().isEmpty)
+  }
+
+  func testOrphanedSuccessRequiresExplicitDiscardInsteadOfAcknowledgment() throws {
+    var draft = try store.claim(store.create(text: "confirmed share").id)
+    draft.operation.state = .dispatching
+    draft = try store.update(draft)
+    draft.operation.state = .sent
+    draft.operation.eventId = "$confirmed"
+    draft = try store.update(draft, release: true)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("session.json"))
+    XCTAssertThrowsError(try store.discard(draft.id, completed: true)) { error in
+      XCTAssertEqual(error as? ShareFailure, .stale)
+    }
+    XCTAssertEqual(try store.list().first?.operation.eventId, "$confirmed")
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+  }
+
+  func testOrphanedIdleDraftCanBeExplicitlyDiscardedWithoutWaitingForLease() throws {
+    let draft = try store.claim(store.create(text: "active draft").id)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("session.json"))
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+    XCTAssertThrowsError(try store.update(draft))
+  }
+
+  func testExplicitDiscardFencesAnIdleComposerWithoutWaitingForLease() throws {
+    let draft = try store.claim(store.create(text: "idle composer").id)
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+    XCTAssertThrowsError(try store.update(draft))
+  }
+
+  func testExplicitDiscardFencesAnUploadingComposerBeforeDispatch() throws {
+    var draft = try store.claim(store.create(text: "uploading composer").id)
+    draft.operation.state = .uploading
+    draft = try store.update(draft)
+    XCTAssertGreaterThan(try XCTUnwrap(draft.leaseUntil), time)
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+    draft.operation.state = .dispatching
+    XCTAssertThrowsError(try store.update(draft))
+    XCTAssertThrowsError(try store.refreshOwned(draft.id, owner: draft.owner!))
+  }
+
+  func testCancelUsesFreshDispatchStateInsteadOfDeletingAnUncertainOutcome() throws {
+    let idle = try store.claim(store.create(text: "cancel during send").id)
+    var dispatching = idle
+    dispatching.operation.state = .dispatching
+    _ = try store.update(dispatching)
+    try store.cancelComposer(idle)
+    let retained = try XCTUnwrap(store.list().first)
+    XCTAssertEqual(retained.operation.state, .unknown)
+    XCTAssertNil(retained.owner)
+  }
+
+  func testExplicitDiscardKeepsAnActiveDispatch() throws {
+    var draft = try store.claim(store.create(text: "sending").id)
+    draft.operation.state = .dispatching
+    draft = try store.update(draft)
+    XCTAssertThrowsError(try store.discard(draft.id))
+    XCTAssertEqual(try store.refreshOwned(draft.id, owner: draft.owner!), draft)
+    draft.operation.state = .sent
+    draft.operation.eventId = "$confirmed"
+    _ = try store.update(draft)
+    try store.discard(draft.id)
+    XCTAssertTrue(try store.list().isEmpty)
+  }
+
+  private func destination(_ account: String, _ room: String) -> ShareDestination {
+    ShareDestination(
+      account_id: account, account_user_id: "@fixture:example.org", room_id: room,
+      name: "Fixture room", canonical_alias: nil, display_name: nil, room_type: nil)
+  }
+
+  func testLastDestinationSurvivesNewStoreAndDiscardWithoutSending() throws {
+    let account = UUID().uuidString
+    let rooms = [destination(account, "!chosen:example.org")]
+    var draft = try store.claim(store.create(text: "First").id)
+    draft.accountId = account
+    draft.roomId = rooms[0].room_id
+    draft = try store.update(draft)
+    try store.discard(draft.id, owner: draft.owner)
+    let reopened = try ShareStore(root: root, now: { self.time })
+    let next = try reopened.create(text: "Second")
+    XCTAssertNil(next.accountId)
+    XCTAssertNil(next.roomId)
+    let selected = try reopened.suggestedDestination(next, destinations: rooms)
+    XCTAssertEqual(selected.account, account)
+    XCTAssertEqual(selected.room, rooms[0].room_id)
+    XCTAssertEqual(try reopened.list().first?.operation.state, .ready)
+  }
+
+  func testLastDestinationRequiresFreshAccountAndRoomMembership() throws {
+    let account = UUID().uuidString
+    var draft = try store.claim(store.create(text: "First").id)
+    draft.accountId = account
+    draft.roomId = "!gone:example.org"
+    draft = try store.update(draft)
+    let next = try store.create(text: "Second")
+    let other = UUID().uuidString
+    let removedAccount = try store.suggestedDestination(
+      next, destinations: [destination(other, draft.roomId!)])
+    XCTAssertEqual(removedAccount.account, "")
+    XCTAssertEqual(removedAccount.room, "")
+    let removedRoom = try store.suggestedDestination(
+      next, destinations: [destination(account, "!other:example.org")])
+    XCTAssertEqual(removedRoom.account, account)
+    XCTAssertEqual(removedRoom.room, "")
+  }
+
+  func testChangingAccountRemembersOnlyNewAccountAndPreservesDraftSelection() throws {
+    let first = UUID().uuidString
+    let second = UUID().uuidString
+    var draft = try store.claim(store.create(text: "First").id)
+    draft.accountId = first
+    draft.roomId = "!first:example.org"
+    draft = try store.update(draft)
+    let original = draft
+    draft.accountId = second
+    draft.roomId = nil
+    draft = try store.update(draft)
+    let rooms = [destination(first, original.roomId!), destination(second, "!second:example.org")]
+    let next = try store.create(text: "Second")
+    let selected = try store.suggestedDestination(next, destinations: rooms)
+    XCTAssertEqual(selected.account, second)
+    XCTAssertEqual(selected.room, "")
+    let existing = try store.suggestedDestination(original, destinations: rooms)
+    XCTAssertEqual(existing.account, first)
+    XCTAssertEqual(existing.room, original.roomId)
+    draft.text = "An autosave does not change the remembered destination"
+    _ = try store.update(draft)
+    XCTAssertEqual(try store.suggestedDestination(next, destinations: rooms).account, second)
+  }
+
+  func testLastDestinationRefreshCleanupAndSessionReplacement() throws {
+    let account = UUID().uuidString
+    let rooms = [destination(account, "!room:example.org")]
+    var draft = try store.claim(store.create(text: "First").id)
+    draft.accountId = account
+    draft.roomId = rooms[0].room_id
+    draft = try store.update(draft)
+    var session = try XCTUnwrap(store.session())
+    session.revision = UUID().uuidString
+    try store.publish(session, credential: {})
+    XCTAssertEqual(
+      try store.suggestedDestination(draft, destinations: rooms).room, rooms[0].room_id)
+    try store.clearAccount(UUID().uuidString)
+    XCTAssertTrue(
+      FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("last-destination.json").path))
+    try store.clearAccount(account)
+    let next = try store.create(text: "Second")
+    XCTAssertEqual(try store.suggestedDestination(next, destinations: rooms).account, "")
+    var chosen = try store.claim(next.id)
+    chosen.accountId = account
+    chosen.roomId = rooms[0].room_id
+    _ = try store.update(chosen)
+    session.server = "https://other.example"
+    try store.publish(session, credential: {})
+    XCTAssertEqual(
+      try store.suggestedDestination(store.create(text: "Other server"), destinations: rooms)
+        .account, "")
+    chosen = try store.refreshOwned(chosen.id, owner: chosen.owner!)
+    chosen.roomId = "!new:example.org"
+    _ = try store.update(chosen)
+    try store.invalidateSession()
+    XCTAssertFalse(
+      FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("last-destination.json").path))
+    session.generation = UUID().uuidString
+    try store.publish(session, credential: {})
+    XCTAssertEqual(
+      try store.suggestedDestination(store.create(text: "Signed in again"), destinations: rooms)
+        .account, "")
+  }
+
+  func testCorruptOrUnwritablePreferenceDoesNotBlockDrafts() throws {
+    let account = UUID().uuidString
+    let rooms = [destination(account, "!room:example.org")]
+    let path = root.appendingPathComponent("last-destination.json")
+    try Data("broken preference".utf8).write(to: path)
+    var draft = try store.claim(store.create(text: "First").id)
+    XCTAssertEqual(try store.suggestedDestination(draft, destinations: rooms).account, "")
+    try FileManager.default.removeItem(at: path)
+    try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false)
+    draft.accountId = account
+    draft.roomId = rooms[0].room_id
+    let saved = try store.update(draft)
+    XCTAssertGreaterThan(saved.revision, draft.revision)
+    XCTAssertEqual(try store.refreshOwned(saved.id, owner: saved.owner!), saved)
+    // A rejected stale writer must never replace the remembered selection.
+    try FileManager.default.removeItem(at: path)
+    var changed = saved
+    changed.roomId = "!new:example.org"
+    _ = try store.update(changed)
+    XCTAssertThrowsError(try store.update(draft))
+    XCTAssertEqual(
+      try store.suggestedDestination(
+        store.create(text: "Second"), destinations: [destination(account, changed.roomId!)]
+      ).room,
+      changed.roomId)
+  }
+
+  func testRevisionRefreshPreservesOriginalOwnerFence() throws {
+    var first = try store.claim(store.create(text: "Draft").id)
+    let originalOwner = first.owner!
+    first.accountId = UUID().uuidString
+    first.text = "Saved newer revision"
+    let updated = try store.update(first)
+    XCTAssertEqual(try store.refreshOwned(first.id, owner: originalOwner), updated)
+    time += ShareLimits.lease + 1
+    let other = try store.claim(first.id)
+    XCTAssertNotEqual(other.owner, originalOwner)
+    XCTAssertThrowsError(try store.refreshOwned(first.id, owner: originalOwner))
+    XCTAssertEqual(try store.refreshOwned(first.id, owner: other.owner!), other)
+  }
 
   func testFailedImportPublicationRemovesMovedFileAndAllowsRetry() throws {
     let fm = FileManager.default
@@ -293,7 +543,14 @@ final class ShareStoreTests: XCTestCase {
 
   func testQuotaExpiryCannotBeExtendedByOwnership() throws {
     for _ in 0..<ShareLimits.pendingCount { _ = try store.create(text: "draft") }
-    XCTAssertThrowsError(try store.create(text: "one too many"))
+    let original = try store.list()
+    XCTAssertThrowsError(try store.create(text: "one too many")) {
+      XCTAssertEqual($0 as? ShareFailure, .pendingLimit)
+    }
+    XCTAssertEqual(try store.list(), original)
+    try store.discard(XCTUnwrap(original.last).id)
+    _ = try store.create(text: "room after explicit discard")
+    XCTAssertEqual(try store.list().count, ShareLimits.pendingCount)
     let item = try store.claim(XCTUnwrap(store.list().first).id)
     time += ShareLimits.retention - 1
     var renewed = try store.claim(item.id)

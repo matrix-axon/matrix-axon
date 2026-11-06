@@ -1,10 +1,11 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import yaml from 'js-yaml'
 
 // Run after EVERY tauri ios init. Generated Xcode files are never the source
-// of truth. The optional probe is omitted from distribution builds by default.
+// of truth. The production share destination is always embedded; the optional
+// probe is omitted from distribution builds by default.
 const tauri = new URL('../src-tauri/', import.meta.url)
 const apple = new URL('gen/apple/', tauri)
 const entitlements = JSON.parse(
@@ -45,27 +46,33 @@ app.settings.base = {
   ...app.settings.base,
   CODE_SIGN_ENTITLEMENTS: 'axon_iOS/axon_iOS.entitlements',
 }
+for (const key of [
+  'CODE_SIGN_STYLE',
+  'CODE_SIGN_IDENTITY',
+  'PROVISIONING_PROFILE_SPECIFIER',
+])
+  delete app.settings.base[key]
 // Idempotence also removes the development-only probe if the next build does
 // not opt in. It must never leak into an exported distribution IPA.
 app.dependencies = app.dependencies.filter(
-  (entry) => entry.target !== 'axon_share_probe',
+  (entry) => !['axon_share_probe', 'axon_share'].includes(entry.target),
 )
 delete project.targets.axon_share_probe
-if (project.packages) delete project.packages.AxonIncomingShare
-if (process.env.AXON_SHARE_PROBE === '1') {
+delete project.targets.axon_share
+{
   project.packages = {
     ...project.packages,
     AxonIncomingShare: { path: '../../incoming-share' },
   }
-  project.targets.axon_share_probe = {
+  const extension = {
     type: 'app-extension',
     platform: 'iOS',
     deploymentTarget: '15.0',
-    sources: ['../../share-probe'],
+    sources: ['../../share-extension'],
     dependencies: [{ package: 'AxonIncomingShare' }],
     settings: {
       base: {
-        PRODUCT_BUNDLE_IDENTIFIER: 'org.matrixaxon.axon.ShareProbe',
+        PRODUCT_BUNDLE_IDENTIFIER: 'org.matrixaxon.axon.Share',
         DEVELOPMENT_TEAM: project.settingGroups.app.base.DEVELOPMENT_TEAM,
         APPLICATION_EXTENSION_API_ONLY: 'YES',
         SKIP_INSTALL: 'YES',
@@ -73,9 +80,9 @@ if (process.env.AXON_SHARE_PROBE === '1') {
       },
     },
     info: {
-      path: 'ShareProbe/Info.plist',
+      path: 'Share/Info.plist',
       properties: {
-        CFBundleDisplayName: 'Axon sharing probe',
+        CFBundleDisplayName: 'Axon',
         CFBundleShortVersionString:
           app.info.properties.CFBundleShortVersionString,
         CFBundleVersion: app.info.properties.CFBundleVersion,
@@ -84,18 +91,20 @@ if (process.env.AXON_SHARE_PROBE === '1') {
         NSExtension: {
           NSExtensionPointIdentifier: 'com.apple.share-services',
           NSExtensionPrincipalClass:
-            '$(PRODUCT_MODULE_NAME).ShareProbeViewController',
+            '$(PRODUCT_MODULE_NAME).ShareViewController',
           NSExtensionAttributes: {
-            NSExtensionActivationRule: {
-              NSExtensionActivationSupportsWebURLWithMaxCount: 1,
-              NSExtensionActivationSupportsText: true,
-            },
+            NSExtensionActivationRule: JSON.parse(
+              readFileSync(
+                new URL('ios-share-activation.json', import.meta.url),
+                'utf8',
+              ),
+            ),
           },
         },
       },
     },
     entitlements: {
-      path: 'ShareProbe/ShareProbe.entitlements',
+      path: 'Share/Share.entitlements',
       properties: {
         'com.apple.security.application-groups': [
           'group.org.matrixaxon.axon.sharing',
@@ -106,8 +115,118 @@ if (process.env.AXON_SHARE_PROBE === '1') {
       },
     },
   }
-  app.dependencies.push({ target: 'axon_share_probe', embed: true })
+  project.targets.axon_share = extension
+  app.dependencies.push({ target: 'axon_share', embed: true })
+  if (process.env.AXON_SHARE_PROBE === '1') {
+    const probe = structuredClone(extension)
+    probe.sources = ['../../share-probe']
+    probe.settings.base.PRODUCT_BUNDLE_IDENTIFIER =
+      'org.matrixaxon.axon.ShareProbe'
+    probe.info.path = 'ShareProbe/Info.plist'
+    probe.info.properties.CFBundleDisplayName = 'Axon sharing probe'
+    probe.info.properties.NSExtension.NSExtensionPrincipalClass =
+      '$(PRODUCT_MODULE_NAME).ShareProbeViewController'
+    probe.entitlements.path = 'ShareProbe/ShareProbe.entitlements'
+    project.targets.axon_share_probe = probe
+    app.dependencies.push({ target: 'axon_share_probe', embed: true })
+  }
 }
+// Xcode automatic signing ignores some API-created profiles even when the
+// installed profile grants every required entitlement. Allow explicit archive
+// selection without changing the optional probe's signing identity.
+const shareDevelopmentProfile = process.env.AXON_IOS_SHARE_DEVELOPMENT_PROFILE
+const exportPath = new URL('ExportOptions.plist', apple)
+const exportOptions = existsSync(exportPath)
+  ? JSON.parse(
+      execFileSync(
+        'plutil',
+        ['-convert', 'json', '-o', '-', fileURLToPath(exportPath)],
+        { encoding: 'utf8' },
+      ),
+    )
+  : {}
+const exportMethod =
+  process.env.AXON_IOS_EXPORT_METHOD ?? exportOptions.method ?? 'debugging'
+exportOptions.method = exportMethod
+if (shareDevelopmentProfile) {
+  const appDevelopmentProfile = process.env.AXON_IOS_APP_DEVELOPMENT_PROFILE
+  if (!appDevelopmentProfile)
+    throw new Error(
+      'Explicit signing also requires AXON_IOS_APP_DEVELOPMENT_PROFILE',
+    )
+  if (
+    shareDevelopmentProfile.length > 256 ||
+    Array.from(shareDevelopmentProfile).some(
+      (character) =>
+        character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    )
+  )
+    throw new Error(
+      'AXON_IOS_SHARE_DEVELOPMENT_PROFILE must be a profile name or UUID',
+    )
+  const development = exportMethod === 'debugging'
+  const store = exportMethod === 'app-store-connect'
+  const prefix = development
+    ? 'iOS Team Provisioning Profile: '
+    : store
+      ? 'iOS Team Store Provisioning Profile: '
+      : null
+  const appProfile = development
+    ? appDevelopmentProfile
+    : (process.env.AXON_IOS_APP_EXPORT_PROFILE ??
+      (prefix && prefix + 'org.matrixaxon.axon'))
+  const shareProfile = development
+    ? shareDevelopmentProfile
+    : (process.env.AXON_IOS_SHARE_EXPORT_PROFILE ??
+      (prefix && prefix + 'org.matrixaxon.axon.Share'))
+  if (!appProfile || !shareProfile)
+    throw new Error(
+      'Explicit export profiles are required for this export method',
+    )
+  // The archive can be signed before export (notably CI without APPLE_API_*).
+  // Its profile must therefore match the same development/production
+  // entitlements as the exported IPA. Export cannot repair an archive failure.
+  const identity = development ? 'Apple Development' : 'Apple Distribution'
+  for (const [target, profile] of [
+    [app, appProfile],
+    [project.targets.axon_share, shareProfile],
+  ]) {
+    Object.assign(target.settings.base, {
+      CODE_SIGN_STYLE: 'Manual',
+      CODE_SIGN_IDENTITY: identity,
+      PROVISIONING_PROFILE_SPECIFIER: profile,
+    })
+  }
+  Object.assign(exportOptions, {
+    signingStyle: 'manual',
+    signingCertificate: identity,
+    teamID: project.settingGroups.app.base.DEVELOPMENT_TEAM,
+    provisioningProfiles: {
+      'org.matrixaxon.axon': appProfile,
+      'org.matrixaxon.axon.Share': shareProfile,
+      ...(project.targets.axon_share_probe
+        ? {
+            'org.matrixaxon.axon.ShareProbe':
+              process.env.AXON_IOS_SHARE_PROBE_EXPORT_PROFILE ??
+              'iOS Team Provisioning Profile: org.matrixaxon.axon.ShareProbe',
+          }
+        : {}),
+    },
+  })
+} else {
+  for (const key of [
+    'signingStyle',
+    'signingCertificate',
+    'teamID',
+    'provisioningProfiles',
+  ])
+    delete exportOptions[key]
+}
+execFileSync(
+  'plutil',
+  ['-convert', 'xml1', '-o', fileURLToPath(exportPath), '-'],
+  { input: JSON.stringify(exportOptions) },
+)
 writeFileSync(projectPath, yaml.dump(project, { lineWidth: -1, noRefs: true }))
 execFileSync('xcodegen', ['generate'], {
   cwd: fileURLToPath(apple),

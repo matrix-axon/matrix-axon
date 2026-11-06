@@ -96,8 +96,10 @@ jobs:
         env:
           APPLE_STORE_CERTIFICATES: ${{ secrets.APPLE_STORE_CERTIFICATES }}
           APPLE_STORE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_STORE_CERTIFICATES_PASSWORD }}
-          IOS_APPSTORE_PROFILE: ${{ secrets.IOS_APPSTORE_PROFILE }}
-          IOS_DEVELOPMENT_PROFILE: ${{ secrets.IOS_DEVELOPMENT_PROFILE }}
+          IOS_APPSTORE_PROFILE: ${{ secrets.IOS_MANUAL_APPSTORE_PROFILE || secrets.IOS_APPSTORE_PROFILE }}
+          IOS_DEVELOPMENT_PROFILE: ${{ secrets.IOS_MANUAL_DEVELOPMENT_PROFILE || secrets.IOS_DEVELOPMENT_PROFILE }}
+          IOS_SHARE_APPSTORE_PROFILE: ${{ secrets.IOS_SHARE_APPSTORE_PROFILE }}
+          IOS_SHARE_DEVELOPMENT_PROFILE: ${{ secrets.IOS_SHARE_DEVELOPMENT_PROFILE }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -201,23 +203,34 @@ jobs:
         env:
           APPLE_STORE_CERTIFICATES: ${{ secrets.APPLE_STORE_CERTIFICATES }}
           APPLE_STORE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_STORE_CERTIFICATES_PASSWORD }}
-          IOS_APPSTORE_PROFILE: ${{ secrets.IOS_APPSTORE_PROFILE }}
-          IOS_DEVELOPMENT_PROFILE: ${{ secrets.IOS_DEVELOPMENT_PROFILE }}
+          IOS_APPSTORE_PROFILE: ${{ secrets.IOS_MANUAL_APPSTORE_PROFILE || secrets.IOS_APPSTORE_PROFILE }}
+          IOS_DEVELOPMENT_PROFILE: ${{ secrets.IOS_MANUAL_DEVELOPMENT_PROFILE || secrets.IOS_DEVELOPMENT_PROFILE }}
+          IOS_SHARE_APPSTORE_PROFILE: ${{ secrets.IOS_SHARE_APPSTORE_PROFILE }}
+          IOS_SHARE_DEVELOPMENT_PROFILE: ${{ secrets.IOS_SHARE_DEVELOPMENT_PROFILE }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         shell: bash
         run: |
           set -euo pipefail
           bundle_id=$(python3 -c 'import json; print(json.load(open("clients/web/src-tauri/tauri.conf.json"))["identifier"])')
-          scripts/ci/store-credentials.sh keychain --require "Apple Distribution"
+          scripts/ci/store-credentials.sh keychain --require "Apple Distribution" --require "Apple Development"
           scripts/ci/store-credentials.sh profile IOS_APPSTORE_PROFILE \
             --ext mobileprovision --expect app-store --bundle-id "$bundle_id" \
-            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install
-          # Required: the archive step looks for a development profile, and a run
-          # without one failed there. It must be the Xcode-managed one.
+            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install --manual-signing \
+            --export-uuid AXON_IOS_APP_EXPORT_PROFILE
+          # Validate the development profiles alongside the Store profiles for
+          # debug export support. Store archives select the distribution UUIDs;
+          # both targets use explicit manual selection for archive and export.
           scripts/ci/store-credentials.sh profile IOS_DEVELOPMENT_PROFILE \
             --ext mobileprovision --expect development --bundle-id "$bundle_id" \
-            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install
+            --entitlements clients/web/src-tauri/Entitlements.ios.plist --install --manual-signing \
+            --export-uuid AXON_IOS_APP_DEVELOPMENT_PROFILE
+          scripts/ci/store-credentials.sh profile IOS_SHARE_APPSTORE_PROFILE \
+            --ext mobileprovision --expect app-store --bundle-id "$bundle_id.Share" --install --manual-signing \
+            --export-uuid AXON_IOS_SHARE_EXPORT_PROFILE
+          scripts/ci/store-credentials.sh profile IOS_SHARE_DEVELOPMENT_PROFILE \
+            --ext mobileprovision --expect development --bundle-id "$bundle_id.Share" --install --manual-signing \
+            --export-uuid AXON_IOS_SHARE_DEVELOPMENT_PROFILE
           if [ "$NEED_ASC" = "yes" ]; then
             scripts/ci/store-credentials.sh asc-key
           fi

@@ -1,21 +1,34 @@
 # iOS incoming-share foundation
 
 The iOS app has a durable pending-share inbox at **Pending shares** (`/pending-shares`).
-Incoming share-sheet ingestion and the native picker/composer remain subsequent stages of [ADR 0125](adr/0125-ios-first-incoming-sharing.md).
-Distribution builds do not register an unfinished share target.
+Its toolbar button appears when saved shares exist and carries a count badge.
+An unreadable inbox keeps the button visible with a warning badge so you can open it and retry; a successfully loaded empty inbox without a credential warning hides the button.
+A credential-publication failure also keeps a distinct sign-in warning entry available until publication succeeds; reading the inbox does not clear that credential failure.
+The native text/link destination and its picker/composer are described in [iOS sharing](ios-sharing.md).
+The foundation below supplies its shared session, protected staging, and recovery lifecycle.
 
 ## Recovering a draft
 
 Open Pending shares and choose **Review share**.
 Confirm the sending Matrix account and joined room, edit the text or first attachment caption, and review previews and saved delivery outcomes.
+Native destination changes also update the session-bound preference used to preselect the next Share Extension destination; each existing draft keeps its own account and room.
 An ordinary room draft stays separate.
 Typing is saved after 250 milliseconds of idle time, with a one-second maximum batching window; leaving the editor, hiding the page, and Send flush pending text.
 A sudden process termination can lose text still inside that short batching window.
 After ownership expires, resume or Refresh reclaims an available share and preserves unsaved editor text without sending it.
 **Keep draft** retains the incoming share; it does not send or acknowledge delivery.
 Unfinished records expire after 24 hours, and **Discard share** explicitly removes local content.
+**Clear all** asks you to confirm bulk deletion of the shares listed when the confirmation opened.
+It removes saved drafts and delivery outcomes from this device; it does not remove messages already delivered to rooms.
+Explicit clearing fences idle composers immediately; shares with live dispatches and shares arriving after that confirmation opened are kept.
+If a share cannot be removed, the others are still cleared and the remaining shares stay available for review.
 
-**Include preview** asks the selected account's homeserver to look up the URL and therefore discloses that URL to the homeserver.
+Compatible supplied metadata is reused first.
+**Include preview** uses restricted device HTTPS fetching, independently of account selection.
+The page, redirects, and selected image use validated public endpoints with hostname-verified TLS; no website scripts or browser cookies are used.
+The website and its image hosts may receive that request; Safari or publisher-app credentials are not imported.
+**Use homeserver instead** is a separate, confirmed option that discloses the URL to the selected account's homeserver, which may log it even for encrypted rooms.
+Device lookup failure does not automatically select that option.
 Neither opening recovery nor rendering a card fetches the linked page.
 Generated and source thumbnails are retained locally, independently of server upload expiry.
 Sending re-uploads retained thumbnails without regenerating the webpage.
@@ -73,7 +86,8 @@ Snapshot creation does not duplicate file data extents; normal completion remove
 The bridge only returns bounded chunks for thumbnail presentation.
 Discard makes a bounded best-effort cleanup attempt for known unclaimed server uploads; server staging expiry remains the fallback.
 Native sharing requires an HTTPS Axon server, validates certificates, refuses redirects, and retains the default iOS App Transport Security protections.
-A configured HTTP server can still be used through the main app's existing transport, but incoming-share generation and sending preserve the draft and explain that HTTPS is required.
+A configured HTTP server can still be used through the main app's existing transport, but incoming-share homeserver generation and sending preserve the draft and explain that HTTPS is required.
+Device preview acquisition is independent of that transport and retains its own platform networking protections.
 Diagnostics include share IDs, states, sizes, and fixed error categories; they exclude content, filenames, source URLs, and credentials.
 
 ## Contributor checks
@@ -98,7 +112,8 @@ The macOS workflow compiles the common module with iOS extension API restriction
 The simulator command requires Xcode, an installed iOS runtime, and `xcodegen` (`brew install xcodegen`).
 It prefers an iPhone simulator matching the selected Xcode simulator SDK, reusing a booted match when available.
 If no matching runtime is installed, it uses another available iPhone; `AXON_SHARING_SIMULATOR=<UDID>` selects one explicitly.
-The command prints the SDK and selected runtime before booting, and bounds first-boot data migration to five minutes.
+The command prints the SDK and selected runtime before booting, and bounds first-boot data migration and each build/test invocation to ten minutes each.
+The native CI job allows thirty minutes overall for cold boot, both Simulator test suites, and the extension-safe compile.
 It builds a temporary unsigned test runner, leaves Axon's installed app/session alone, and prints the retained `.xcresult` path.
 
 | Layer                    | What it establishes                                                                                                                                     | Remaining limitation                                                                    |

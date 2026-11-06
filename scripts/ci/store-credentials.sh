@@ -8,17 +8,17 @@
 #   store-credentials.sh keychain [--require <identity-name[|alternative]>]...
 #   store-credentials.sh profile <ENV_VAR> --ext <mobileprovision|provisionprofile>
 #                                [--expect <app-store|development>] [--bundle-id <id>]
-#                                [--install] [--export-path <VAR>]
-#                                [--entitlements <plist>]
+#                                [--install] [--export-path <VAR>] [--export-uuid <VAR>]
+#                                [--entitlements <plist>] [--manual-signing]
 #   store-credentials.sh asc-key
 #   store-credentials.sh cleanup
 #   store-credentials.sh list-profiles [--bundle-id <id>] [<file-or-directory>...]
 #   store-credentials.sh explain <build-log>
 #
 # `profile` is strict about iOS profiles: any `.mobileprovision` that is not Xcode-managed
-# is an error, with or without `--expect`, because the build cannot succeed with one. A
-# caller that needs to accept an Ad Hoc or portal-made profile (none does today) would
-# have to bypass that check, not just omit `--expect`.
+# is an error for automatic signing, with or without `--expect`.
+# `--manual-signing` instead requires a manually managed profile for deterministic
+# containing-app and Share Extension selection at archive and export.
 #
 # `explain` reads the log of a failed iOS build and says what the signing errors in it
 # mean and what to do. `profile --entitlements` fails early when a profile lacks a
@@ -44,7 +44,7 @@ set -euo pipefail
 # one. A run on a clean runner without it failed with "Xcode couldn't find any iOS
 # App Development provisioning profiles matching <bundle id>", after the keychain,
 # the profiles and the API key had all installed without complaint.
-ios_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID"
+ios_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE IOS_SHARE_APPSTORE_PROFILE IOS_SHARE_DEVELOPMENT_PROFILE APPLE_TEAM_ID"
 macos_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD MAC_APPSTORE_PROFILE"
 asc_required="ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY"
 
@@ -359,7 +359,7 @@ EOF
 # --- profile -----------------------------------------------------------------
 
 cmd_profile() {
-  local var=${1:-} ext="" expect="" bundle_id="" install=0 export_as="" entitlements=""
+  local var=${1:-} ext="" expect="" bundle_id="" install=0 export_as="" export_uuid="" entitlements="" manual=0
   [ -n "$var" ] || die "profile needs the name of the environment variable holding the base64"
   shift
   while [ $# -gt 0 ]; do
@@ -368,7 +368,9 @@ cmd_profile() {
       --expect) expect=${2:?--expect needs a value}; shift ;;
       --bundle-id) bundle_id=${2:?--bundle-id needs a value}; shift ;;
       --install) install=1 ;;
+      --manual-signing) manual=1 ;;
       --export-path) export_as=${2:?--export-path needs a variable name}; shift ;;
+      --export-uuid) export_uuid=${2:?--export-uuid needs a variable name}; shift ;;
       --entitlements) entitlements=${2:?--entitlements needs a plist path}; shift ;;
       *) die "profile: unknown option $1" ;;
     esac
@@ -410,29 +412,21 @@ cmd_profile() {
   fi
   echo "$var: \"$name\" ($kind), app id $appid, expires $expires"
 
-  # The generated Xcode project signs automatically, and automatic signing looks a
-  # profile up by Xcode's own name for it, "iOS Team Provisioning Profile: <bundle id>"
-  # (development) or "iOS Team Store Provisioning Profile: <bundle id>" (app-store). A
-  # profile made by hand in the developer portal fails even when it lists the same
-  # certificate and entitlements, and only at export or archive, as "No profiles for ...
-  # were found" under a misleading "No Accounts". Seen twice: a hand-made development
-  # profile ("Xcode couldn't find any iOS App Development provisioning profiles") and a
-  # hand-made App Store one in IOS_APPSTORE_PROFILE. Fatal, since the build cannot succeed.
-  # Which profile names Xcode accepts is inferred from those failures, not documented.
-  #
-  # After the swap check, so a profile of the wrong kind is told that first, and the name
-  # to look for comes from what this secret should hold, not from what the file is.
   if [ -n "$expect" ] && [ "$kind" != "$expect" ]; then
     die "$var is a $kind profile, but this secret should hold an $expect one. Check the two profile secrets are not swapped."
   fi
-  if [ "$ext" = "mobileprovision" ] \
-      && [ "$(plutil -extract IsXcodeManaged raw -o - "$plist" 2>/dev/null || echo false)" != "true" ]; then
-    local want="an Xcode-managed profile"
-    case ${expect:-$kind} in
-      app-store) want="\"iOS Team Store Provisioning Profile: ${bundle_id:-<bundle id>}\"" ;;
-      development) want="\"iOS Team Provisioning Profile: ${bundle_id:-<bundle id>}\"" ;;
-    esac
-    die "$var holds \"$name\", a $kind profile that is not Xcode-managed. The Xcode project signs automatically and looks the profile up by Xcode's own name ($want), so a profile made by hand in the developer portal fails the build with \"No profiles for ... were found\". Use the Xcode-managed one: \`store-credentials.sh list-profiles\` marks it. Steps: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
+  if [ "$ext" = "mobileprovision" ]; then
+    local managed want="an Xcode-managed profile"
+    managed=$(plutil -extract IsXcodeManaged raw -o - "$plist" 2>/dev/null || echo false)
+    if [ "$manual" -eq 1 ]; then
+      [ "$managed" != "true" ] || die "$var holds an Xcode-managed profile, but this build selects profiles explicitly for manual signing. Replace $var with a manually managed $kind profile covering this bundle and its capabilities. See clients/web/src-tauri/README.md."
+    elif [ "$managed" != "true" ]; then
+      case ${expect:-$kind} in
+        app-store) want="\"iOS Team Store Provisioning Profile: ${bundle_id:-<bundle id>}\"" ;;
+        development) want="\"iOS Team Provisioning Profile: ${bundle_id:-<bundle id>}\"" ;;
+      esac
+      die "$var holds \"$name\", a $kind profile that is not Xcode-managed. The Xcode project signs automatically and looks the profile up by Xcode's own name ($want), so a profile made by hand in the developer portal fails the build with \"No profiles for ... were found\". Use the Xcode-managed one: \`store-credentials.sh list-profiles\` marks it. Steps: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
+    fi
   fi
 
   if [ -n "$expires" ]; then
@@ -488,7 +482,7 @@ for key, value in want.items():
 PY
     ) || die "profile: could not compare $var with $entitlements"
     if [ -n "$missing" ]; then
-      die "$var (\"$name\") does not have what the app asks for in $entitlements: $(printf '%s' "$missing" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). It was made before that capability was enabled on the App ID. Enable it in the developer portal if it is not yet, then regenerate the Xcode-managed profile and replace the secret: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
+      die "$var (\"$name\") does not have what the app asks for in $entitlements: $(printf '%s' "$missing" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). It was made before that capability was enabled on the App ID. Enable it in the developer portal if it is not yet, then regenerate a profile matching the build signing mode and replace the secret: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
     fi
   fi
 
@@ -507,6 +501,9 @@ EOF
   fi
   if [ -n "$export_as" ]; then
     export_env "$export_as" "$file"
+  fi
+  if [ -n "$export_uuid" ]; then
+    export_env "$export_uuid" "$uuid"
   fi
 }
 
@@ -665,9 +662,9 @@ cmd_explain() {
       echo "  so it does not carry it. Enabling a capability invalidates every profile made earlier."
       echo "  1. In the developer portal, check the App ID has the capability (and, for an App"
       echo "     Group, that the group is assigned to it)."
-      echo "  2. Regenerate the Xcode-managed profiles on a Mac signed in to the account"
-      echo "     (scripts/package-ios.sh does it), then replace BOTH secrets,"
-      echo "     IOS_APPSTORE_PROFILE and IOS_DEVELOPMENT_PROFILE, from those files."
+      echo "  2. Regenerate manually managed profiles for CI (Xcode-managed for local automatic"
+      echo "     signing), then replace the app and Share extension secrets: IOS_APPSTORE_PROFILE,"
+      echo "     IOS_DEVELOPMENT_PROFILE, IOS_SHARE_APPSTORE_PROFILE and IOS_SHARE_DEVELOPMENT_PROFILE."
       echo "     \`scripts/ci/store-credentials.sh list-profiles\` finds them."
       echo "  Steps: $runbook"
     fi
@@ -676,8 +673,8 @@ cmd_explain() {
       echo "$cert" | sed 's/^/    /'
       echo
       echo "  The profile does not list the distribution certificate in APPLE_STORE_CERTIFICATES. An"
-      echo "  Xcode-managed profile lists every certificate on the account, so regenerate it and"
-      echo "  replace the secret (or check the certificate secret is the current one)."
+      echo "  profile used in CI must include the certificate exported in that secret. Regenerate it"
+      echo "  with the matching certificate, or replace the certificate secret with the current one."
       echo "  Steps: $runbook"
     fi
     if [ -n "$mismatch" ]; then
@@ -693,19 +690,19 @@ cmd_explain() {
       echo
       echo "$nodev" | sed 's/^/    /'
       echo
-      echo "  The archive step needs the Xcode-managed development profile, \"iOS Team Provisioning"
-      echo "  Profile: <bundle id>\", in IOS_DEVELOPMENT_PROFILE. A profile made by hand in the portal"
-      echo "  is not found, and neither is a missing or empty secret. Steps: $runbook"
+      echo "  The archive step needs development profiles in IOS_DEVELOPMENT_PROFILE and"
+      echo "  IOS_SHARE_DEVELOPMENT_PROFILE, with UUIDs selected by the generation hook."
+      echo "  CI requires manually managed profiles; local automatic signing requires Xcode-managed"
+      echo "  ones. Check the signing mode, installed profiles and exported UUID variables. Steps: $runbook"
     fi
     if [ -n "$notfound" ]; then
       echo
       echo "$notfound" | sed 's/^/    /'
       echo
-      echo "  Xcode looks the profile up by its own name (\"iOS Team Store Provisioning Profile: <bundle id>\""
-      echo "  to export, \"iOS Team Provisioning Profile: <bundle id>\" to archive). A profile made by"
-      echo "  hand in the portal, or one that is missing, is not found."
-      echo "  On CI, the \"Install the signing credentials\" step prints the name of each profile it"
-      echo "  installed: it should be those two names. If it is not, replace the secret."
+      echo "  Check that the selected UUID belongs to an installed profile of the right kind and bundle."
+      echo "  CI explicitly selects manually managed profiles; local automatic signing may not select"
+      echo "  profiles made by hand in the portal. The \"Install the signing credentials\" step prints"
+      echo "  the installed profiles. Check the four AXON_IOS_*_PROFILE variables and secrets."
       echo "  Steps: $runbook"
     fi
     if [ -n "$accounts" ]; then
@@ -716,9 +713,9 @@ cmd_explain() {
         echo "  The errors above are the cause."
       elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
         echo "  Nothing else is listed. The workflow gives Xcode no account, only the profiles that"
-        echo "  \"Install the signing credentials\" installed: check the names that step printed are"
-        echo "  \"iOS Team Store Provisioning Profile: <bundle id>\" and \"iOS Team Provisioning"
-        echo "  Profile: <bundle id>\", and that both secrets are newer than the last capability change."
+        echo "  \"Install the signing credentials\" installed: check the selected UUIDs, bundle IDs,"
+        echo "  manual signing mode, and that all four profile secrets are newer than the last"
+        echo "  capability change."
       else
         echo "  Nothing else is listed: then this Mac has no Apple ID in Xcode > Settings > Accounts"
         echo "  and no APPLE_API_KEY, APPLE_API_ISSUER and APPLE_API_KEY_PATH (an App Store Connect"
@@ -730,8 +727,8 @@ cmd_explain() {
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "### iOS signing failed"
-      [ -n "$caps" ] && printf 'The profile lacks a capability the app asks for:\n\n```\n%s\n```\n\nRegenerate both Xcode-managed profiles and replace `IOS_APPSTORE_PROFILE` and `IOS_DEVELOPMENT_PROFILE`. See %s.\n\n' "$caps" "$runbook"
-      [ -n "$notfound" ] && printf 'Xcode did not find a profile by its managed name:\n\n```\n%s\n```\n\nA hand-made or missing profile is not found. See %s.\n\n' "$notfound" "$runbook"
+      [ -n "$caps" ] && printf 'The profile lacks a capability the app asks for:\n\n```\n%s\n```\n\nRegenerate the app and Share extension profiles for the selected signing mode and replace the four iOS profile secrets. See %s.\n\n' "$caps" "$runbook"
+      [ -n "$notfound" ] && printf 'Xcode did not find the selected profile:\n\n```\n%s\n```\n\nCheck the installed profile UUIDs and signing mode. See %s.\n\n' "$notfound" "$runbook"
       true
     } >>"$GITHUB_STEP_SUMMARY"
   fi

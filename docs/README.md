@@ -13,6 +13,7 @@ This page indexes everything else.
 | [Technical reference](technical-reference.md)                                          | Architecture, database encoding and deadlines, environment variables and config  |
 | [axon-tui](../clients/tui/README.md)                                                   | The terminal client: commands, shortcuts, configuration                          |
 | [axon-web](https://github.com/matrix-axon/matrix-axon/blob/main/clients/web/README.md) | The web client                                                                   |
+| [iOS sharing](ios-sharing.md)                                                          | Native text/link destination, previews, build setup, and device acceptance       |
 | [iOS sharing foundation](ios-sharing-foundation.md)                                    | Pending-share recovery, session/storage boundaries, and signed verification      |
 | [Desktop app](../clients/web/src-tauri/README.md)                                      | The Tauri shell for macOS, Windows and Linux                                     |
 | [Room metadata API](room-metadata.md)                                                  | Cached room-state details exposed to clients                                     |
