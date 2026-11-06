@@ -79,6 +79,16 @@ pub(crate) struct PendingJoinOpen {
     pub(crate) last_read_started: Option<Instant>,
     /// A covering snapshot listed the room. The tick opens it.
     pub(crate) ready: bool,
+    /// Entry line to show once a prompt that was open at arm time ends.
+    /// `None` when that line is already on screen.
+    pub(crate) held_status: Option<String>,
+}
+
+/// A join that selected its room, so a later timeline failure can say both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JoinTimelineClaim {
+    pub(crate) key: RoomKey,
+    pub(crate) title: String,
 }
 
 /// What a room-list read covered, for judging pending leaves by it.
@@ -237,16 +247,33 @@ impl App {
     /// The account `/join` acts for.
     ///
     /// The account-panel filter wins. Otherwise the only active account, or
-    /// the launch filter when the account list has not arrived. Several
-    /// accounts and an empty list are both a prompt, never a guess.
+    /// the launch filter while the account list has not arrived. Several
+    /// accounts and an empty list are both a prompt, never a guess. A launch
+    /// filter whose account is already known inactive is that empty list.
     fn join_account_id(&self) -> Result<Uuid, &'static str> {
         if let Some(account_id) = self.active_account_filter() {
             return Ok(account_id);
         }
         match self.accounts.accounts.as_slice() {
             [only] => Ok(only.account_id),
-            [] => self.account_filter.ok_or("log in before using /join"),
+            [] => self.launch_filter_before_accounts_arrive(),
             _ => Err("choose an account with /account before using /join"),
+        }
+    }
+
+    /// `--account-id` stands in only until `GET /v1/accounts` arrives.
+    ///
+    /// An empty visible list with that id already in `inactive_ids`, or any
+    /// arrived list that left no active row, is "log in", not a join.
+    fn launch_filter_before_accounts_arrive(&self) -> Result<Uuid, &'static str> {
+        match self.account_filter {
+            Some(account_id)
+                if self.accounts.client_visible.is_empty()
+                    && !self.accounts.inactive_ids.contains(&account_id) =>
+            {
+                Ok(account_id)
+            }
+            _ => Err("log in before using /join"),
         }
     }
 
@@ -300,6 +327,7 @@ impl App {
         // A new room action means the user has moved on. A late list must
         // not pull them into the room they joined a moment ago.
         self.pending_join_open = None;
+        self.deferred_join_failure = None;
         let held_back = |kind: RoomActionKind| {
             self.pending_memberships
                 .get(&(action.key.clone(), kind))
@@ -340,6 +368,7 @@ impl App {
         // Accepting a confirmation calls this directly. Drop a join watch
         // so that room does not open under the action just confirmed.
         self.pending_join_open = None;
+        self.deferred_join_failure = None;
         self.clear_input_buffer();
         self.mode = Mode::Compose;
         let Some(tx) = self.room_action_tx.clone() else {
@@ -489,6 +518,7 @@ impl App {
     /// and otherwise says the homeserver has not answered.
     /// A room missing from that refresh is watched for a few seconds
     /// ([`JOIN_OPEN_READ_DELAYS`]). Neither path records a pending membership.
+    /// An open prompt keeps its room and its entry line until it ends.
     async fn finish_join(&mut self, outcome: RoomActionOutcome) {
         let account_id = outcome.action.key.account_id;
         let typed = outcome.action.room_title.clone();
@@ -506,15 +536,17 @@ impl App {
                     None
                 };
                 if let Some(index) = listed {
-                    self.open_joined_room(index).await;
+                    self.open_or_defer_joined_room(index, account_id, &typed)
+                        .await;
                 } else {
-                    self.status =
-                        Status::from(format!("the homeserver hasn't answered for {typed}"));
                     self.arm_pending_join_open(account_id, &typed);
+                    self.show_join_status(format!("the homeserver hasn't answered for {typed}"));
+                    self.restore_join_line_if_composer_is_empty(&typed);
                 }
             }
             Err(err) => {
-                self.status = Status::from(format!("/join failed for {typed}: {err}"));
+                self.show_join_status(format!("/join failed for {typed}: {err}"));
+                self.restore_join_line_if_composer_is_empty(&typed);
             }
         }
     }
@@ -532,15 +564,52 @@ impl App {
             None
         };
         if let Some(index) = listed {
-            self.open_joined_room(index).await;
+            self.open_or_defer_joined_room(index, account_id, room_id)
+                .await;
             return;
         }
         let mut status = format!("joined {typed}; it isn't in the room list yet");
         if let Some(err) = refresh_error {
             status.push_str(&format!("; room refresh failed: {err}"));
         }
-        self.status = Status::from(status);
         self.arm_pending_join_open(account_id, room_id);
+        self.show_join_status(status);
+    }
+
+    /// Select the room, unless a prompt still owns the entry line.
+    /// The tick opens it once that prompt ends, if the user has not moved on.
+    async fn open_or_defer_joined_room(&mut self, index: usize, account_id: Uuid, target: &str) {
+        if self.prompt_owns_entry_line() {
+            self.arm_pending_join_open(account_id, target);
+            if let Some(pending) = &mut self.pending_join_open {
+                pending.ready = true;
+            }
+            return;
+        }
+        self.open_joined_room(index).await;
+    }
+
+    /// Write `status` now, or hold it while a prompt owns the entry line.
+    /// A held watch line lives on the watch. A failure has no watch.
+    fn show_join_status(&mut self, status: String) {
+        if self.prompt_owns_entry_line() {
+            if let Some(pending) = &mut self.pending_join_open {
+                pending.held_status = Some(status);
+            } else {
+                self.deferred_join_failure = Some(status);
+            }
+            return;
+        }
+        self.status = Status::from(status);
+    }
+
+    /// Put `/join <target>` back so Enter retries it.
+    /// Text typed during the flight stays. A prompt's buffer stays too.
+    fn restore_join_line_if_composer_is_empty(&mut self, typed: &str) {
+        if self.mode == Mode::Compose && self.input.buffer.is_empty() {
+            self.input.buffer = format!("/join {typed}");
+            self.move_cursor_to_end();
+        }
     }
 
     /// Remember a room the join did not find in the list just read.
@@ -558,19 +627,38 @@ impl App {
             next_read_at: now + JOIN_OPEN_READ_DELAYS[0],
             last_read_started: None,
             ready: false,
+            held_status: None,
         });
     }
 
     /// Open a joined room once a later list contains it, and ask for that
     /// list while the short watch is running. Called from the main-loop tick.
+    /// Also releases a join status that was held for a prompt.
     pub(crate) async fn poll_pending_join_open(&mut self, now: Instant) {
+        let superseded = self
+            .pending_join_open
+            .as_ref()
+            .is_some_and(|pending| self.join_watch_superseded(pending));
+        if superseded {
+            self.pending_join_open = None;
+        }
+        if !self.is_mid_command() {
+            if let Some(status) = self.deferred_join_failure.take() {
+                self.status = Status::from(status);
+            }
+            if !superseded {
+                if let Some(status) = self
+                    .pending_join_open
+                    .as_mut()
+                    .and_then(|pending| pending.held_status.take())
+                {
+                    self.status = Status::from(status);
+                }
+            }
+        }
         let Some(pending) = self.pending_join_open.clone() else {
             return;
         };
-        if self.join_watch_superseded(&pending) {
-            self.pending_join_open = None;
-            return;
-        }
         if pending.ready {
             if self.is_mid_command() {
                 return;
@@ -654,9 +742,51 @@ impl App {
     }
 
     async fn open_joined_room(&mut self, index: usize) {
-        self.select_room_index(index).await;
         let title = self.rooms.rooms[index].title().to_owned();
-        self.status = Status::from(format!("joined {title}"));
+        let key = RoomKey::from(&self.rooms.rooms[index]);
+        self.join_timeline_claim = Some(JoinTimelineClaim {
+            key: key.clone(),
+            title: title.clone(),
+        });
+        self.select_room_index(index).await;
+        let failure = timeline_failure_detail(&self.status).map(str::to_owned);
+        self.status = Status::from(match failure {
+            Some(err) => format!("joined {title}; timeline load failed: {err}"),
+            None => format!("joined {title}"),
+        });
+        // The flat list already awaited its timeline. The space tree's read
+        // is still in flight, and its outcome attaches a failure to this claim.
+        if !self.sidebar_timeline_in_flight_for(&key) {
+            self.join_timeline_claim = None;
+        }
+    }
+
+    /// Drop the claim for `key` when that room's timeline will not use it.
+    pub(super) fn drop_join_timeline_claim(&mut self, key: &RoomKey) {
+        if self
+            .join_timeline_claim
+            .as_ref()
+            .is_some_and(|claim| claim.key == *key)
+        {
+            self.join_timeline_claim = None;
+        }
+    }
+
+    /// The timeline failure for the room a join just opened, or the plain
+    /// failure when this read is not that room.
+    pub(super) fn consume_join_timeline_failure(&mut self, err: &str) -> String {
+        let Some(claim) = self.join_timeline_claim.take() else {
+            return format!("timeline load failed: {err}");
+        };
+        if self
+            .selected_room()
+            .is_some_and(|room| RoomKey::from(room) == claim.key)
+        {
+            format!("joined {}; timeline load failed: {err}", claim.title)
+        } else {
+            self.join_timeline_claim = Some(claim);
+            format!("timeline load failed: {err}")
+        }
     }
 
     /// A room this account has in the list under `target`, which is a room id
@@ -667,6 +797,14 @@ impl App {
                 && (room.room_id == target || room.canonical_alias.as_deref() == Some(target))
         })
     }
+}
+
+/// The detail `load_selected_timeline` stored, when that was a failure.
+fn timeline_failure_detail(status: &Status) -> Option<&str> {
+    let Status::Info(message) = status else {
+        return None;
+    };
+    message.strip_prefix("timeline load failed: ")
 }
 
 impl App {

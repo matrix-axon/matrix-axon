@@ -1675,6 +1675,10 @@ mod join {
             app.status.text(false),
             "joined #ops:example.com; it isn't in the room list yet"
         );
+        assert!(
+            app.input.buffer.is_empty(),
+            "a join that succeeded does not put the command back"
+        );
         assert!(app.pending_memberships.is_empty());
         let watch = app.pending_join_open.as_ref().expect("join watch");
         assert_eq!(watch.target, "!ops:example.com");
@@ -1705,6 +1709,7 @@ mod join {
         );
         assert!(!status.contains("failed"), "{status}");
         assert!(!status.contains("joined"), "{status}");
+        assert_eq!(app.input.buffer, "/join #ops:example.com");
         assert!(app.pending_memberships.is_empty());
         let watch = app.pending_join_open.as_ref().expect("join watch");
         assert_eq!(watch.target, "#ops:example.com");
@@ -1793,6 +1798,7 @@ mod join {
             app.status.text(false),
             "/join failed for #ops:example.com: HTTP 502 Bad Gateway: M_UNKNOWN"
         );
+        assert_eq!(app.input.buffer, "/join #ops:example.com");
         assert!(app.pending_memberships.is_empty());
         assert!(app.pending_join_open.is_none());
         assert_eq!(
@@ -1815,6 +1821,7 @@ mod join {
             app.status.text(false),
             "/join failed for #ops:example.com: request timed out"
         );
+        assert_eq!(app.input.buffer, "/join #ops:example.com");
         assert!(app.pending_memberships.is_empty());
         assert!(app.pending_join_open.is_none());
     }
@@ -2104,5 +2111,253 @@ mod join {
         assert!(!status.contains("failed"), "{status}");
         assert!(app.pending_join_open.is_none());
         assert!(app.pending_memberships.is_empty());
+    }
+
+    #[tokio::test]
+    async fn join_with_a_known_inactive_launch_filter_asks_for_login() {
+        let account_id = Uuid::from_u128(9);
+        let (mut app, mut rx) = app_joining(Vec::new()).await;
+        app.account_filter = Some(account_id);
+        app.set_accounts(vec![account_with_id(
+            account_id,
+            "@alice:example.com",
+            AccountState::Deactivated,
+        )]);
+
+        app.handle_command(crate::command::parse("/join #room:example.com"))
+            .await;
+
+        assert_eq!(app.status.text(false), "log in before using /join");
+        assert!(!app.room_action_busy);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_join_keeps_text_typed_while_it_was_in_flight() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "still typing".to_owned();
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "#ops:example.com"),
+            result: Err(failure("HTTP 502 Bad Gateway: M_UNKNOWN", false)),
+        })
+        .await;
+
+        assert_eq!(app.input.buffer, "still typing");
+        assert_eq!(
+            app.status.text(false),
+            "/join failed for #ops:example.com: HTTP 502 Bad Gateway: M_UNKNOWN"
+        );
+    }
+
+    fn editing(app: &mut App) {
+        app.mode = Mode::Editing {
+            event_id: "$evt".to_owned(),
+        };
+        app.status = Status::EventAction {
+            debug: "editing $evt - Esc to cancel".to_owned(),
+            redacted: "editing message - Esc to cancel",
+        };
+        app.input.buffer = "new body".to_owned();
+    }
+
+    #[tokio::test]
+    async fn a_join_during_an_edit_waits_to_open_the_room() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let ops = room("!ops:example.com", Some("#ops:example.com"), Some("Ops"));
+        let mut app = app_for(vec![
+            rooms_response_body(&[other.clone(), ops.clone()]),
+            empty_timeline_response_body(),
+            empty_members_response_body(),
+        ])
+        .await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+        editing(&mut app);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(ops.account_id, "#ops:example.com", &ops.room_id),
+            result: Ok(()),
+        })
+        .await;
+
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!other:example.com")
+        );
+        assert!(matches!(app.mode, Mode::Editing { .. }));
+        assert_eq!(app.input.buffer, "new body");
+        assert_eq!(app.status.text(false), "editing message - Esc to cancel");
+        assert!(app.pending_join_open.as_ref().expect("held join").ready);
+
+        app.mode = Mode::Compose;
+        app.input.buffer.clear();
+        app.poll_pending_join_open(Instant::now()).await;
+
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!ops:example.com")
+        );
+        assert_eq!(app.status.text(false), "joined Ops");
+        assert!(app.pending_join_open.is_none());
+    }
+
+    #[tokio::test]
+    async fn choosing_a_room_during_an_edit_cancels_the_held_join() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let ops = room("!ops:example.com", Some("#ops:example.com"), Some("Ops"));
+        let mut app = app_for(vec![rooms_response_body(&[other.clone(), ops.clone()])]).await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+        editing(&mut app);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(ops.account_id, "#ops:example.com", &ops.room_id),
+            result: Ok(()),
+        })
+        .await;
+        app.note_user_room_choice();
+        app.mode = Mode::Compose;
+        app.poll_pending_join_open(Instant::now()).await;
+
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!other:example.com")
+        );
+        assert!(app.pending_join_open.is_none());
+        assert_eq!(app.status.text(false), "editing message - Esc to cancel");
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_join_during_an_edit_holds_its_status() {
+        let other = room("!other:example.com", None, Some("Other"));
+        let mut app = app_for(vec![rooms_response_body(std::slice::from_ref(&other))]).await;
+        app.rooms.rooms = vec![other];
+        app.rooms.selected = Some(0);
+        editing(&mut app);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "!ops:example.com"),
+            result: Ok(()),
+        })
+        .await;
+
+        assert_eq!(app.status.text(false), "editing message - Esc to cancel");
+        assert_eq!(app.input.buffer, "new body");
+        assert_eq!(
+            app.pending_join_open
+                .as_ref()
+                .expect("watch")
+                .held_status
+                .as_deref(),
+            Some("joined #ops:example.com; it isn't in the room list yet")
+        );
+
+        app.mode = Mode::Compose;
+        app.poll_pending_join_open(Instant::now()).await;
+
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!other:example.com")
+        );
+        assert_eq!(
+            app.status.text(false),
+            "joined #ops:example.com; it isn't in the room list yet"
+        );
+        assert!(app
+            .pending_join_open
+            .as_ref()
+            .expect("watch")
+            .held_status
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_join_during_an_edit_holds_the_failure() {
+        let mut app = app_with_rooms(Vec::new());
+        editing(&mut app);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(Uuid::nil(), "#ops:example.com", "#ops:example.com"),
+            result: Err(failure("HTTP 502 Bad Gateway: M_UNKNOWN", false)),
+        })
+        .await;
+
+        assert_eq!(app.status.text(false), "editing message - Esc to cancel");
+        assert_eq!(app.input.buffer, "new body");
+        assert!(app.pending_join_open.is_none());
+
+        app.mode = Mode::Compose;
+        app.poll_pending_join_open(Instant::now()).await;
+
+        assert_eq!(
+            app.status.text(false),
+            "/join failed for #ops:example.com: HTTP 502 Bad Gateway: M_UNKNOWN"
+        );
+        assert_eq!(app.input.buffer, "new body");
+        assert!(app.deferred_join_failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_joined_room_keeps_a_flat_timeline_failure() {
+        let ops = room("!ops:example.com", Some("#ops:example.com"), Some("Ops"));
+        let mut app = app_for(vec![
+            rooms_response_body(std::slice::from_ref(&ops)),
+            "not-json".to_owned(),
+        ])
+        .await;
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(ops.account_id, "#ops:example.com", &ops.room_id),
+            result: Ok(()),
+        })
+        .await;
+
+        let status = app.status.text(false);
+        assert!(
+            status.starts_with("joined Ops; timeline load failed: invalid API JSON:"),
+            "{status}"
+        );
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!ops:example.com")
+        );
+        assert!(app.join_timeline_claim.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_joined_room_keeps_a_space_timeline_failure() {
+        let mut space = room("!space:example.com", None, Some("Space"));
+        space.room_type = Some("m.space".to_owned());
+        let ops = room("!ops:example.com", Some("#ops:example.com"), Some("Ops"));
+        let mut app = app_for(vec![
+            rooms_response_body(&[space, ops.clone()]),
+            "not-json".to_owned(),
+            "not-json".to_owned(),
+        ])
+        .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.spaces.tx = Some(tx);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: join_action(ops.account_id, "#ops:example.com", &ops.room_id),
+            result: Ok(()),
+        })
+        .await;
+
+        assert_eq!(app.status.text(false), "joined Ops");
+        assert!(app.space_tree_enabled());
+        let outcome = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeline outcome wait")
+            .expect("timeline outcome");
+        app.apply_space_outcome(outcome);
+
+        let status = app.status.text(false);
+        assert!(
+            status.starts_with("joined Ops; timeline load failed: invalid API JSON:"),
+            "{status}"
+        );
+        assert!(app.join_timeline_claim.is_none());
     }
 }

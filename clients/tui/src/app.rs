@@ -823,6 +823,10 @@ pub(crate) struct App {
     /// A join whose room was not in the list yet. The next covering list
     /// opens it. See [`room_actions::JOIN_OPEN_READ_DELAYS`].
     pub(crate) pending_join_open: Option<room_actions::PendingJoinOpen>,
+    /// A failed join's entry line, held while a prompt owns that line.
+    pub(crate) deferred_join_failure: Option<String>,
+    /// The room a join just opened, so a timeline failure can keep both facts.
+    pub(crate) join_timeline_claim: Option<room_actions::JoinTimelineClaim>,
     /// Bumped when the user chooses a room, so a late join does not steal
     /// that choice.
     pub(crate) room_choice: u64,
@@ -1234,6 +1238,8 @@ impl App {
             room_action_busy: false,
             pending_memberships: HashMap::new(),
             pending_join_open: None,
+            deferred_join_failure: None,
+            join_timeline_claim: None,
             room_choice: 0,
             room_action_tx: None,
             tag_write_tx: None,
@@ -1519,23 +1525,32 @@ impl App {
             || self.media_send_busy
             || self.room_action_busy
             || self.tag_write_busy
-            || matches!(
-                self.mode,
-                Mode::LoginUsername
-                    | Mode::LoginPassword { .. }
-                    | Mode::RecoveryKey { .. }
-                    | Mode::ConfirmLogout { .. }
-                    | Mode::ConfirmDelete { .. }
-                    | Mode::ConfirmRoomAction { .. }
-                    | Mode::Editing { .. }
-                    | Mode::Reacting { .. }
-                    | Mode::Unreacting { .. }
-                    | Mode::Search(..)
-                    | Mode::DateJump
-                    | Mode::SearchForm
-                    | Mode::SearchResults
-                    | Mode::Verification
-            )
+            || self.prompt_owns_entry_line()
+    }
+
+    /// A login, edit, search, or confirm prompt owns the entry line.
+    ///
+    /// A join that finishes during one of these must not select a room or
+    /// replace the prompt. Busy flags are not prompts: the join's own busy
+    /// flag is cleared before its outcome is applied.
+    pub(crate) fn prompt_owns_entry_line(&self) -> bool {
+        matches!(
+            self.mode,
+            Mode::LoginUsername
+                | Mode::LoginPassword { .. }
+                | Mode::RecoveryKey { .. }
+                | Mode::ConfirmLogout { .. }
+                | Mode::ConfirmDelete { .. }
+                | Mode::ConfirmRoomAction { .. }
+                | Mode::Editing { .. }
+                | Mode::Reacting { .. }
+                | Mode::Unreacting { .. }
+                | Mode::Search(..)
+                | Mode::DateJump
+                | Mode::SearchForm
+                | Mode::SearchResults
+                | Mode::Verification
+        )
     }
 
     pub(crate) fn dismiss_input_help(&mut self) {

@@ -58,6 +58,9 @@
   A `504` does not retry and does not decide the outcome; the room list is what shows a join that landed.
   When the list right after the join does not contain the room, two further reads a few seconds apart open it once a list does.
   Choosing another room or starting another room action cancels that watch.
+  A join that finishes during a prompt does not change the selected room or the entry line until that prompt ends.
+  A failed join, or a `504` the list does not show, puts `/join` back when the composer is still empty.
+  A timeline read that fails stays on the entry line next to the joined room.
 
 ## Spaces (ADR 0103)
 

@@ -499,6 +499,13 @@ impl App {
             .or(self.rooms.selected)
     }
 
+    pub(super) fn sidebar_timeline_in_flight_for(&self, key: &RoomKey) -> bool {
+        self.spaces
+            .timeline
+            .as_ref()
+            .is_some_and(|pending| pending.key == *key)
+    }
+
     pub(crate) fn activate_sidebar_room(&mut self, index: usize) {
         let defer_until_markers = matches!(
             self.bootstrap,
@@ -1227,10 +1234,12 @@ impl App {
                     .timeline
                     .take()
                     .expect("checked pending timeline");
-                if self.selected_room().map(RoomKey::from) != Some(RoomKey::from(&outcome.room))
+                let outcome_key = RoomKey::from(&outcome.room);
+                if self.selected_room().map(RoomKey::from) != Some(outcome_key.clone())
                     || self.last_jump_ts.is_some()
                     || self.thread_panel.is_some()
                 {
+                    self.drop_join_timeline_claim(&outcome_key);
                     return;
                 }
                 if pending.overflow {
@@ -1263,8 +1272,9 @@ impl App {
                         }
                     }
                     Err(err) => {
+                        let message = self.consume_join_timeline_failure(&err.to_string());
                         if !self.is_mid_command() {
-                            self.status = Status::from(format!("timeline load failed: {err}"));
+                            self.status = Status::from(message);
                         }
                     }
                 }

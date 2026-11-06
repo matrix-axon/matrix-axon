@@ -438,6 +438,8 @@ impl App {
         self.clear_room_unread(&key);
         self.thread_panel = None;
         self.spawn_relations_refresh(room);
+        // This page arrived, so a join no longer needs to attach a failure to it.
+        self.drop_join_timeline_claim(&key);
         if !self.is_mid_command() {
             self.status = Status::Info(if has_more {
                 format!(
