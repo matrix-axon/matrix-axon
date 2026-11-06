@@ -87,14 +87,17 @@ delete project.targets.axon_share
   // identifier and team: no App Group, no shared Keychain, and the extension cannot
   // reach the app's data. Give it the signature the app gets, carrying its entitlements.
   // Ad hoc, because export replaces it with the real one. $(AppIdentifierPrefix) is
-  // left as written: export expands it against the profile, as it does for the app.
+  // left as written, and export expands it against the profile, as it does for the app.
+  // Measured (Xcode 26.6, 2026-11-06): the archived extension carries the literal text, the
+  // exported .ipa carries `<team id>.org.matrixaxon.axon.sharing`. That is Xcode's
+  // behaviour, not documented, so check-ios-sharing.py still verifies the .ipa.
   const carryEntitlements = (entitlementsPath) => [
     {
       name: 'Carry entitlements into an unsigned archive',
       basedOnDependencyAnalysis: false,
       script: [
         'if [ "${CODE_SIGNING_ALLOWED}" = "NO" ]; then',
-        `  /usr/bin/codesign --force --sign - --entitlements "\${SRCROOT}/${entitlementsPath}" "\${CODESIGNING_FOLDER_PATH}"`,
+        `  /usr/bin/codesign --force --sign - --timestamp=none --entitlements "\${SRCROOT}/${entitlementsPath}" "\${CODESIGNING_FOLDER_PATH}"`,
         'fi',
       ].join('\n'),
     },

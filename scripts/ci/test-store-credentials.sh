@@ -397,7 +397,7 @@ contains "$out" "rc=0" || fail "profile --entitlements: a profile that carries e
 nogroup=$(make_profile nogroup.mobileprovision 'IsXcodeManaged=True' \
   'Entitlements.com.apple.developer.applesignin=["Default"]' 'Entitlements.aps-environment="production"')
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$nogroup" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --entitlements "$work/app.entitlements")
-contains "$out" "rc=1" && contains "$out" "com.apple.security.application-groups" && contains "$out" "does not have what the app asks for" && contains "$out" "README.md" || fail "profile --entitlements: a profile with no App Groups is refused, naming the capability and the runbook" "$out"
+contains "$out" "rc=1" && contains "$out" "com.apple.security.application-groups" && contains "$out" "does not have what the target asks for" && contains "$out" "README.md" || fail "profile --entitlements: a profile with no App Groups is refused, naming the capability and the runbook" "$out"
 
 wronggroup=$(make_profile wronggroup.mobileprovision 'IsXcodeManaged=True' \
   'Entitlements.com.apple.security.application-groups=["group.org.example.other"]' \

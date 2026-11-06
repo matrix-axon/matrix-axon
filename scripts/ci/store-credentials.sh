@@ -482,7 +482,7 @@ for key, value in want.items():
 PY
     ) || die "profile: could not compare $var with $entitlements"
     if [ -n "$missing" ]; then
-      die "$var (\"$name\") does not have what the app asks for in $entitlements: $(printf '%s' "$missing" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). It was made before that capability was enabled on the App ID. Enable it in the developer portal if it is not yet, then regenerate a profile matching the build signing mode and replace the secret: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
+      die "$var (\"$name\") does not have what the target asks for in $entitlements: $(printf '%s' "$missing" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). It was made before that capability was enabled on the App ID. Enable it in the developer portal if it is not yet, then regenerate a profile matching the build signing mode and replace the secret: \"When a capability change invalidates the iOS profiles\" in clients/web/src-tauri/README.md."
     fi
   fi
 
