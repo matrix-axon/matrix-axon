@@ -54,6 +54,17 @@
   Overflow recovery coalesces reads until a snapshot requested after the latest dropped frame can cover it; failed reads allow the next overflow frame to retry.
   Reconnect and `/refresh` recover other missed updates.
 - Room switching should remain forgiving within the active account filter: visible-list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
+- `/join <room id, alias, or matrix.to / matrix: link>` joins that room for the account filter, or for the only active account.
+  A `504` does not retry and does not decide the outcome; the room list is what shows a join that landed.
+  When the list right after the join does not contain the room, two further reads a few seconds apart open it once a list does.
+  Choosing another room or starting another room action cancels that watch.
+  An action that is held back, or one that is already in progress, does not.
+  The watch also ends if no covering list arrives before its cap, so a later refresh can use the entry line.
+  A join that finishes during a prompt does not change the selected room or the entry line until that prompt ends.
+  A failed join, or a `504` the list does not show, puts `/join` back when the composer is still empty.
+  That restored argument is what the user typed, so a link keeps its `via` hints.
+  A `504` whose room list cannot be read says the result is unknown and still watches.
+  A timeline read that fails stays on the entry line next to the joined room.
 
 ## Spaces (ADR 0103)
 

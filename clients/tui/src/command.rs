@@ -79,10 +79,24 @@ pub enum Command {
     Ban(UserReasonCommand),
     /// /unban <user> [reason] — unban a user from the selected room.
     Unban(UserReasonCommand),
+    /// /join <room> — join a room by id, alias, or Matrix link.
+    Join(JoinTarget),
     Invalid(String),
-    ApiUnsupported(String),
     Unknown(String),
     Empty,
+}
+
+/// A room `/join` will ask Axon to enter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinTarget {
+    /// Room id (`!room:server`) or alias (`#alias:server`) sent as
+    /// `room_id_or_alias`.
+    pub room_id_or_alias: String,
+    /// Federation `via` hints. Empty for an alias; a bare room id contributes
+    /// its own server name when the link did not name any.
+    pub server_names: Vec<String>,
+    /// The argument the user typed, so a failed join can retry the same link.
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +109,6 @@ pub struct UserReasonCommand {
 pub(crate) struct SlashCommand {
     pub(crate) name: &'static str,
     pub(crate) takes_argument: bool,
-    api_supported: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -110,15 +123,6 @@ impl SlashCommand {
         Self {
             name,
             takes_argument,
-            api_supported: true,
-        }
-    }
-
-    const fn api_unsupported(name: &'static str, takes_argument: bool) -> Self {
-        Self {
-            name,
-            takes_argument,
-            api_supported: false,
         }
     }
 }
@@ -170,7 +174,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/kick", true),
     SlashCommand::supported("/ban", true),
     SlashCommand::supported("/unban", true),
-    SlashCommand::api_unsupported("/join", true),
+    SlashCommand::supported("/join", true),
 ];
 
 /// Group boundaries for the help popup: `(start_index, section_title)`.
@@ -367,7 +371,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/join <room>",
         insert_text: "/join ",
-        description: "pending TUI-M19-2",
+        description: "join a room by id, alias, or matrix.to / matrix: link",
     },
     // ── Verification ─────────────────────────────────────────────────────────
     HelpCommand {
@@ -571,19 +575,101 @@ pub fn parse(input: &str) -> Command {
         "unban" => {
             parse_user_reason_command(arg, "/unban").map_or_else(Command::Invalid, Command::Unban)
         }
-        other => {
-            let command_name = format!("/{other}");
-            if SLASH_COMMANDS
-                .iter()
-                .any(|command| command.name == command_name && !command.api_supported)
-            {
-                Command::ApiUnsupported(format!(
-                    "{command_name} is not supported by the current Axon API"
-                ))
-            } else {
-                Command::Unknown(format!("unknown command: {command_name}"))
-            }
+        "join" => parse_join_command(arg),
+        other => Command::Unknown(format!("unknown command: /{other}")),
+    }
+}
+
+/// `/join` accepts one room id, one alias, or one `matrix.to` / `matrix:` link.
+///
+/// ADR 0069 maps those links through `ruma`. An empty argument is an error,
+/// not a request to join every room.
+fn parse_join_command(arg: &str) -> Command {
+    match parse_join_target(arg) {
+        Ok(target) => Command::Join(target),
+        Err(message) => Command::Invalid(message),
+    }
+}
+
+pub(crate) fn parse_join_target(arg: &str) -> Result<JoinTarget, String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err("/join requires a room id, alias, or Matrix link".to_owned());
+    }
+    if arg.split_whitespace().nth(1).is_some() {
+        return Err("/join takes one room id, alias, or Matrix link".to_owned());
+    }
+    let mut target = if is_matrix_link(arg) {
+        join_target_from_link(arg)?
+    } else {
+        let id = ruma::RoomOrAliasId::parse(arg)
+            .map_err(|_| format!("/join: \"{arg}\" is not a room id, alias, or Matrix link"))?;
+        join_target_from_id(&id, &[])
+    };
+    target.source = arg.to_owned();
+    Ok(target)
+}
+
+fn is_matrix_link(arg: &str) -> bool {
+    let lower = arg.to_ascii_lowercase();
+    lower.starts_with("https://matrix.to/")
+        || lower.starts_with("http://matrix.to/")
+        || lower.starts_with("matrix:")
+}
+
+fn join_target_from_link(arg: &str) -> Result<JoinTarget, String> {
+    let not_a_room = "/join: that Matrix link is not a room";
+    if let Ok(uri) = ruma::MatrixToUri::parse(arg) {
+        return matrix_id_join_target(uri.id(), uri.via()).ok_or_else(|| not_a_room.to_owned());
+    }
+    if let Ok(uri) = ruma::MatrixUri::parse(arg) {
+        return matrix_id_join_target(uri.id(), uri.via()).ok_or_else(|| not_a_room.to_owned());
+    }
+    Err(not_a_room.to_owned())
+}
+
+fn matrix_id_join_target(
+    id: &ruma::matrix_uri::MatrixId,
+    via: &[ruma::OwnedServerName],
+) -> Option<JoinTarget> {
+    use ruma::matrix_uri::MatrixId;
+
+    let room: &ruma::RoomOrAliasId = match id {
+        MatrixId::Room(room_id) => {
+            let room_id: &ruma::RoomId = room_id;
+            room_id.into()
         }
+        MatrixId::RoomAlias(alias) => {
+            let alias: &ruma::RoomAliasId = alias;
+            alias.into()
+        }
+        // An event link joins its room. `/join` has no event target, so the
+        // event id is not sent. The original link is what a retry restores.
+        MatrixId::Event(room, _) => room,
+        MatrixId::User(_) => return None,
+        _ => return None,
+    };
+    Some(join_target_from_id(room, via))
+}
+
+/// `via` from a link replaces every other hint.
+/// A bare room id contributes its own server name, which is the only hint
+/// that id carries. That misses a room whose own server has left it.
+/// An alias sends no hint. Its server is part of the alias.
+fn join_target_from_id(id: &ruma::RoomOrAliasId, via: &[ruma::OwnedServerName]) -> JoinTarget {
+    let server_names = if !via.is_empty() {
+        via.iter().map(ToString::to_string).collect()
+    } else if id.is_room_id() {
+        id.server_name()
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    JoinTarget {
+        room_id_or_alias: id.to_string(),
+        server_names,
+        source: String::new(),
     }
 }
 
@@ -1222,11 +1308,69 @@ mod tests {
     }
 
     #[test]
-    fn reports_known_api_unsupported_commands() {
+    fn parses_join_targets() {
         assert_eq!(
-            parse("/join #room:localhost"),
-            Command::ApiUnsupported("/join is not supported by the current Axon API".to_owned())
+            parse("/join #room:example.com"),
+            Command::Join(JoinTarget {
+                room_id_or_alias: "#room:example.com".to_owned(),
+                server_names: Vec::new(),
+                source: "#room:example.com".to_owned(),
+            })
         );
+        assert_eq!(
+            parse("/join !room:example.com"),
+            Command::Join(JoinTarget {
+                room_id_or_alias: "!room:example.com".to_owned(),
+                server_names: vec!["example.com".to_owned()],
+                source: "!room:example.com".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse("/join https://matrix.to/#/%23room%3Aexample.com?via=example.com&via=backup.example.com"),
+            Command::Join(JoinTarget {
+                room_id_or_alias: "#room:example.com".to_owned(),
+                server_names: vec![
+                    "example.com".to_owned(),
+                    "backup.example.com".to_owned(),
+                ],
+                source: "https://matrix.to/#/%23room%3Aexample.com?via=example.com&via=backup.example.com".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse("/join matrix:roomid/room:example.com?via=example.com"),
+            Command::Join(JoinTarget {
+                room_id_or_alias: "!room:example.com".to_owned(),
+                server_names: vec!["example.com".to_owned()],
+                source: "matrix:roomid/room:example.com?via=example.com".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse("/join https://matrix.to/#/!room:example.com/$evt:example.com"),
+            Command::Join(JoinTarget {
+                room_id_or_alias: "!room:example.com".to_owned(),
+                server_names: vec!["example.com".to_owned()],
+                source: "https://matrix.to/#/!room:example.com/$evt:example.com".to_owned(),
+            })
+        );
+        assert!(
+            matches!(parse("/join"), Command::Invalid(message) if message.contains("requires"))
+        );
+        assert!(matches!(
+            parse("/join #room:example.com extra"),
+            Command::Invalid(_)
+        ));
+        assert!(matches!(
+            parse("/join @alice:example.com"),
+            Command::Invalid(_)
+        ));
+        assert!(matches!(
+            parse("/join https://matrix.to/#/@alice:example.com"),
+            Command::Invalid(message) if message.contains("not a room")
+        ));
+        assert!(matches!(
+            parse("/join matrix:u/alice:example.com"),
+            Command::Invalid(message) if message.contains("not a room")
+        ));
     }
 
     #[test]

@@ -186,19 +186,16 @@ async fn whereami_requires_selected_room() {
 }
 
 #[tokio::test]
-async fn unsupported_and_unknown_commands_report_distinct_statuses() {
+async fn invalid_and_unknown_commands_report_their_own_statuses() {
     let mut app = app_with_rooms(Vec::new());
 
-    app.handle_command(Command::ApiUnsupported(
-        "/join is not supported by the current Axon API".to_owned(),
-    ))
-    .await;
+    app.handle_command(crate::command::parse("/join")).await;
     assert_eq!(
         app.status.text(false),
-        "/join is not supported by the current Axon API"
+        "/join requires a room id, alias, or Matrix link"
     );
 
-    app.handle_command(Command::Unknown("unknown command: /frobnicate".to_owned()))
+    app.handle_command(crate::command::parse("/frobnicate"))
         .await;
     assert_eq!(app.status.text(false), "unknown command: /frobnicate");
 }

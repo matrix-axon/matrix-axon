@@ -244,9 +244,13 @@ impl App {
                     Err(err) => {
                         // Permit the next overflow frame to retry after failure.
                         self.title_update_overflow = None;
-                        if !self.is_mid_command() {
+                        // A join watch owns the status line. A failed read is
+                        // not evidence the room joined, and a 504's status
+                        // must not grow the word "failed".
+                        if !self.is_mid_command() && self.pending_join_open.is_none() {
                             self.status = Status::from(format!("room refresh failed: {err}"));
                         }
+                        self.retire_pending_join_open_after_failed_read();
                     }
                 }
                 self.rooms_fetch_inflight = false;

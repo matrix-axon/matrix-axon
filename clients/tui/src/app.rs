@@ -820,6 +820,16 @@ pub(crate) struct App {
     /// [`room_actions::PENDING_MEMBERSHIP_CHECK_DELAYS`].
     pub(crate) pending_memberships:
         HashMap<(RoomKey, room_actions::RoomActionKind), room_actions::PendingMembership>,
+    /// A join whose room was not in the list yet. The next covering list
+    /// opens it. See [`room_actions::JOIN_OPEN_READ_DELAYS`].
+    pub(crate) pending_join_open: Option<room_actions::PendingJoinOpen>,
+    /// A failed join's entry line, held while a prompt owns that line.
+    pub(crate) deferred_join_failure: Option<String>,
+    /// The room a join just opened, so a timeline failure can keep both facts.
+    pub(crate) join_timeline_claim: Option<room_actions::JoinTimelineClaim>,
+    /// Bumped when the user chooses a room, so a late join does not steal
+    /// that choice.
+    pub(crate) room_choice: u64,
     /// Sender for results of in-flight M19 room actions spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
     pub(crate) room_action_tx: Option<mpsc::UnboundedSender<RoomActionOutcome>>,
@@ -1227,6 +1237,10 @@ impl App {
             media_send_busy: false,
             room_action_busy: false,
             pending_memberships: HashMap::new(),
+            pending_join_open: None,
+            deferred_join_failure: None,
+            join_timeline_claim: None,
+            room_choice: 0,
             room_action_tx: None,
             tag_write_tx: None,
             tag_write_busy: false,
@@ -1511,23 +1525,32 @@ impl App {
             || self.media_send_busy
             || self.room_action_busy
             || self.tag_write_busy
-            || matches!(
-                self.mode,
-                Mode::LoginUsername
-                    | Mode::LoginPassword { .. }
-                    | Mode::RecoveryKey { .. }
-                    | Mode::ConfirmLogout { .. }
-                    | Mode::ConfirmDelete { .. }
-                    | Mode::ConfirmRoomAction { .. }
-                    | Mode::Editing { .. }
-                    | Mode::Reacting { .. }
-                    | Mode::Unreacting { .. }
-                    | Mode::Search(..)
-                    | Mode::DateJump
-                    | Mode::SearchForm
-                    | Mode::SearchResults
-                    | Mode::Verification
-            )
+            || self.prompt_owns_entry_line()
+    }
+
+    /// A login, edit, search, or confirm prompt owns the entry line.
+    ///
+    /// A join that finishes during one of these must not select a room or
+    /// replace the prompt. Busy flags are not prompts: the join's own busy
+    /// flag is cleared before its outcome is applied.
+    pub(crate) fn prompt_owns_entry_line(&self) -> bool {
+        matches!(
+            self.mode,
+            Mode::LoginUsername
+                | Mode::LoginPassword { .. }
+                | Mode::RecoveryKey { .. }
+                | Mode::ConfirmLogout { .. }
+                | Mode::ConfirmDelete { .. }
+                | Mode::ConfirmRoomAction { .. }
+                | Mode::Editing { .. }
+                | Mode::Reacting { .. }
+                | Mode::Unreacting { .. }
+                | Mode::Search(..)
+                | Mode::DateJump
+                | Mode::SearchForm
+                | Mode::SearchResults
+                | Mode::Verification
+        )
     }
 
     pub(crate) fn dismiss_input_help(&mut self) {
@@ -1975,6 +1998,7 @@ impl App {
             Command::Kick(input) => self.start_kick_user(input),
             Command::Ban(input) => self.start_ban_user(input),
             Command::Unban(input) => self.start_unban_user(input),
+            Command::Join(target) => self.start_join_room(target),
             Command::Verify(device_id) => self.start_verification(device_id),
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
@@ -2037,9 +2061,7 @@ impl App {
             Command::JumpToTop => {
                 self.jump_to_top().await;
             }
-            Command::Invalid(message)
-            | Command::ApiUnsupported(message)
-            | Command::Unknown(message) => {
+            Command::Invalid(message) | Command::Unknown(message) => {
                 self.status = Status::Info(message);
             }
             Command::Empty => {}

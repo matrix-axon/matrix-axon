@@ -536,6 +536,9 @@ async fn run_app(
                 // Re-read the room list for a leave axon timed out on, until
                 // the room drops off it (ADR 0121 decision 5, #743).
                 app.poll_pending_memberships(now);
+                // A join whose room was not listed yet opens when a later
+                // list contains it. The extra reads are a few seconds apart.
+                app.poll_pending_join_open(now).await;
                 // Pull in list titles for rooms scrolling or filtering has just
                 // brought on screen. Bounded and idempotent — already-titled
                 // rooms are skipped (#189).

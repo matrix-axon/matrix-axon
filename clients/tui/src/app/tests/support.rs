@@ -225,6 +225,7 @@ pub(super) fn rooms_response_body(rooms: &[RoomDto]) -> String {
                 "avatar_url": room.avatar_url,
                 "canonical_alias": room.canonical_alias,
                 "display_name": room.display_name,
+                "room_type": room.room_type,
                 "last_activity_ts": room.last_activity_ts,
                 "last_event_id": room.last_event_id,
             })
