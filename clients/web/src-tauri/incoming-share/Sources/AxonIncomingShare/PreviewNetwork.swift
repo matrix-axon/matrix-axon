@@ -203,8 +203,10 @@ enum PreviewNetwork {
           state.result.finish(.failure(ShareFailure.expired))
           return
         }
+        // Surface authoritative negative answers instead of waiting out the
+        // budget: no origin A is a policy failure, and no DNS64 is optional.
         let status = DNSServiceGetAddrInfo(
-          &state.reference, 0, 0,
+          &state.reference, DNSServiceFlags(kDNSServiceFlagsReturnIntermediates), 0,
           state.family, state.host,
           { _, flags, _, error, _, address, _, context in
             guard let context else { return }

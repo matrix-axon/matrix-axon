@@ -94,6 +94,7 @@ The first TLS-ready connection wins and cancels its competitor; only the winner 
 IPv4 and supported NAT64 access networks can reach sites with public A records; IPv6-only origin sites cannot generate on-device previews.
 Their links remain sendable, and the separate homeserver action remains an explicit alternative.
 An absent, invalid, or timed-out discovery answer cannot authorize raw IPv6 or discard a usable public IPv4 target.
+DNS requests enable authoritative negative answers, so a missing A record reports the public-IPv4 requirement and a negative discovery answer does not consume the full timeout.
 DNS, connection racing, redirects, page reads, and image reads never reset the original deadline.
 Every page, redirect, and selected-image request requires HTTPS and resolves to a validated global-unicast address; private, loopback, link-local, multicast, reserved, and documentation ranges are rejected.
 The TLS socket connects to that numeric address while certificate and hostname validation still use the original DNS name, preventing a second unchecked DNS resolution.

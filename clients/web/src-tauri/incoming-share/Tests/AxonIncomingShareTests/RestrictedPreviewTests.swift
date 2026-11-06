@@ -185,6 +185,14 @@ final class RestrictedPreviewTests: XCTestCase {
           throw ShareFailure.invalid
         }))
   }
+  func testLiveIPv6OnlyOriginReportsPublicIPv4Requirement() throws {
+    guard ProcessInfo.processInfo.environment["AXON_PREVIEW_LIVE"] == "1" else {
+      throw XCTSkip("Manual public-network negative-DNS probe")
+    }
+    XCTAssertThrowsError(try RestrictedPreview.fetch(
+      URL(string: "https://ipv6.google.com/")!, cancellation: ShareCancellation())
+    ) { XCTAssertEqual($0 as? ShareFailure, .publicIPv4Required) }
+  }
   func testLivePublicHTTPSMetadata() throws {
     guard ProcessInfo.processInfo.environment["AXON_PREVIEW_LIVE"] == "1" else {
       throw XCTSkip("Manual public-network probe")
