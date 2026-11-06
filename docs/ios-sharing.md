@@ -137,7 +137,9 @@ Override custom distribution profiles with `AXON_IOS_APP_EXPORT_PROFILE` and `AX
 Manual hook invocations can select the export method with `AXON_IOS_EXPORT_METHOD`.
 Manual exports require manually managed profiles for both bundles; Xcode rejects a managed containing-app profile in a manual export.
 The Apple Store workflow selects both targets' archive and export profiles explicitly by validated UUID.
-Its four iOS profile secrets must contain manually managed profiles with the required shared capabilities; the credential check rejects Xcode-managed profiles before building.
+Its four effective iOS profile inputs must contain manually managed profiles with the required shared capabilities; the credential check rejects Xcode-managed profiles before building.
+Optional `IOS_MANUAL_APPSTORE_PROFILE` and `IOS_MANUAL_DEVELOPMENT_PROFILE` repository secrets take precedence over the containing-app profile secrets, allowing older automatic-signing branches to keep using their existing Xcode-managed profiles.
+The Share Extension always uses `IOS_SHARE_APPSTORE_PROFILE` and `IOS_SHARE_DEVELOPMENT_PROFILE`.
 The Apple Store workflow also requires `IOS_SHARE_DEVELOPMENT_PROFILE` and `IOS_SHARE_APPSTORE_PROFILE` repository secrets for that extension ID; the credential check fails early when either is absent.
 The exported-artifact checker verifies signatures, capabilities against embedded profiles, versions, default ATS, and text/web-URL-only activation rules.
 Activation uses Apple's version 2 dictionary with strict text and single-web-URL matching.

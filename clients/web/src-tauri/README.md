@@ -553,8 +553,10 @@ key rather than an Apple ID.
 | ----------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `APPLE_STORE_CERTIFICATES`          | Base64 of one `.p12` holding the store signing identities (certificate **and** private key)       |
 | `APPLE_STORE_CERTIFICATES_PASSWORD` | The password that `.p12` was exported with                                                        |
-| `IOS_APPSTORE_PROFILE`              | Base64 of the manually managed iOS **App Store** profile for the bundle ID                        |
-| `IOS_DEVELOPMENT_PROFILE`           | Base64 of the manually managed iOS development profile for the bundle ID                          |
+| `IOS_APPSTORE_PROFILE`              | Base64 containing-app App Store profile; used when its manual override is absent                  |
+| `IOS_DEVELOPMENT_PROFILE`           | Base64 containing-app development profile; used when its manual override is absent                |
+| `IOS_MANUAL_APPSTORE_PROFILE`       | Optional base64 manual App Store profile override for the containing app                          |
+| `IOS_MANUAL_DEVELOPMENT_PROFILE`    | Optional base64 manual development profile override for the containing app                        |
 | `IOS_SHARE_APPSTORE_PROFILE`        | Base64 of its manually managed App Store profile, with shared App Group and Keychain capabilities |
 | `IOS_SHARE_DEVELOPMENT_PROFILE`     | Base64 of its manually managed development profile, with the same shared capabilities             |
 | `MAC_APPSTORE_PROFILE`              | Base64 of the **Mac App Store** provisioning profile (`.provisionprofile`)                        |
@@ -620,7 +622,9 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
 
 - **The profiles** are checked before building: kind, bundle ID, expiry, and required capabilities must match.
   The iOS workflow uses explicit manual signing for the containing app and Share Extension.
-  All four iOS profile secrets must hold manually managed profiles; Xcode-managed profiles are rejected before archive/export.
+  All four effective iOS profile inputs must hold manually managed profiles; Xcode-managed profiles are rejected before archive/export.
+  Optional `IOS_MANUAL_APPSTORE_PROFILE` and `IOS_MANUAL_DEVELOPMENT_PROFILE` secrets override the containing-app inputs.
+  Use these during migration when `IOS_APPSTORE_PROFILE` and `IOS_DEVELOPMENT_PROFILE` must remain Xcode-managed for older branches using automatic signing; the existing secrets remain the fallback when no override is set.
   The helper exports each validated UUID to `AXON_IOS_APP_DEVELOPMENT_PROFILE`, `AXON_IOS_SHARE_DEVELOPMENT_PROFILE`, `AXON_IOS_APP_EXPORT_PROFILE`, or `AXON_IOS_SHARE_EXPORT_PROFILE` so the generation hook selects exactly the supplied profiles.
   Debugging archives and exports use the development profiles with `Apple Development`; App Store and release-testing archives and exports use the export profiles with `Apple Distribution`.
   Matching the archive identity to the export method is required because the production push entitlement is already present during archiving.
