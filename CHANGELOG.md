@@ -3,6 +3,24 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.24 - 2026-11-06
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* bump vodozemac to moot RUSTSEC-2026-0445 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/979
+#### Features
+* feat(server): acquire homeserver room details and confirm known absence (ADR 0126 step 2) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/953
+* feat(tui): join a room with /join by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/978
+* feat(web): badge preference on push registration and Android read-room clearing (ADR 0129) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/973
+* feat(ios): add text and rich-link Share Extension by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/962
+#### Build and CI
+* api-docs: fall back to most recent release with demo videos by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/972
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.23...v0.1.24
+
 ## v0.1.23 - 2026-11-05
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
