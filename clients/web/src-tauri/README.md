@@ -598,8 +598,7 @@ What goes in each:
 - **The `.p12`** needs `Apple Distribution` (the iOS export, and the Mac app if it
   is signed with that), `3rd Party Mac Developer Installer` or `Mac Installer
 Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
-  Mac profile lists that certificate, and `Apple Development` (the iOS archive,
-  see below). The workflow checks the ones it must have before it builds. Export
+  Mac profile lists that certificate, and `Apple Development` (iOS debugging archives and exports). The workflow checks the ones it must have before it builds. Export
   identities, not bare certificates: without the private key there is nothing to
   sign with. `security export` takes everything in the keychain, including the
   `Developer ID Application` identity, which these builds do not use; to leave it
@@ -623,6 +622,8 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
   The iOS workflow uses explicit manual signing for the containing app and Share Extension.
   All four iOS profile secrets must hold manually managed profiles; Xcode-managed profiles are rejected before archive/export.
   The helper exports each validated UUID to `AXON_IOS_APP_DEVELOPMENT_PROFILE`, `AXON_IOS_SHARE_DEVELOPMENT_PROFILE`, `AXON_IOS_APP_EXPORT_PROFILE`, or `AXON_IOS_SHARE_EXPORT_PROFILE` so the generation hook selects exactly the supplied profiles.
+  Debugging archives and exports use the development profiles with `Apple Development`; App Store and release-testing archives and exports use the export profiles with `Apple Distribution`.
+  Matching the archive identity to the export method is required because the production push entitlement is already present during archiving.
   `list-profiles` marks downloaded profiles as `manual` or `Xcode-managed`; name their download folder when listing.
   Local callers using automatic signing can omit `--manual-signing` when invoking the helper; that mode continues to require Xcode-managed iOS profiles.
   The Mac App Store profile is a downloaded `.provisionprofile`; name its folder or file if it was never installed.

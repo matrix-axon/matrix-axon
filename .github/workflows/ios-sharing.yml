@@ -8,6 +8,7 @@ on:
       - clients/web/src-tauri/share-extension-tests/**
       - clients/web/scripts/ios-share-activation.json
       - clients/web/scripts/configure-ios-sharing.mjs
+      - clients/web/scripts/test-ios-sharing-signing.mjs
       - clients/web/scripts/check-ios-sharing.py
       - clients/web/src-tauri/native-auth/ios/**
       - clients/web/src/incoming-share/fixtures/**
@@ -34,6 +35,13 @@ jobs:
           node-version: 24
       - name: Check OpenAPI and server validation policy drift
         run: node clients/web/scripts/share-contract.mjs
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+      - name: Install generator dependencies
+        run: pnpm --dir clients/web install --frozen-lockfile
+      - name: Check archive and export signing selection
+        run: node --test clients/web/scripts/test-ios-sharing-signing.mjs
       - name: Swift ownership, recovery, and portable server contracts
         run: swift test --package-path clients/web/src-tauri/incoming-share
       - name: Install simulator test project generator

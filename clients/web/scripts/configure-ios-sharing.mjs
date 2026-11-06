@@ -164,18 +164,6 @@ if (shareDevelopmentProfile) {
     throw new Error(
       'AXON_IOS_SHARE_DEVELOPMENT_PROFILE must be a profile name or UUID',
     )
-  Object.assign(project.targets.axon_share.settings.base, {
-    CODE_SIGN_STYLE: 'Manual',
-    CODE_SIGN_IDENTITY: 'Apple Development',
-    PROVISIONING_PROFILE_SPECIFIER: shareDevelopmentProfile,
-  })
-  // Tauri recomputes signingStyle from the containing target after reading
-  // ExportOptions.plist. Both targets must declare the same manual policy.
-  Object.assign(app.settings.base, {
-    CODE_SIGN_STYLE: 'Manual',
-    CODE_SIGN_IDENTITY: 'Apple Development',
-    PROVISIONING_PROFILE_SPECIFIER: appDevelopmentProfile,
-  })
   const development = exportMethod === 'debugging'
   const store = exportMethod === 'app-store-connect'
   const prefix = development
@@ -183,25 +171,35 @@ if (shareDevelopmentProfile) {
     : store
       ? 'iOS Team Store Provisioning Profile: '
       : null
-  const appProfile =
-    process.env.AXON_IOS_APP_EXPORT_PROFILE ??
-    (development
-      ? appDevelopmentProfile
-      : prefix && prefix + 'org.matrixaxon.axon')
-  const shareProfile =
-    process.env.AXON_IOS_SHARE_EXPORT_PROFILE ??
-    (development
-      ? shareDevelopmentProfile
-      : prefix && prefix + 'org.matrixaxon.axon.Share')
+  const appProfile = development
+    ? appDevelopmentProfile
+    : (process.env.AXON_IOS_APP_EXPORT_PROFILE ??
+      (prefix && prefix + 'org.matrixaxon.axon'))
+  const shareProfile = development
+    ? shareDevelopmentProfile
+    : (process.env.AXON_IOS_SHARE_EXPORT_PROFILE ??
+      (prefix && prefix + 'org.matrixaxon.axon.Share'))
   if (!appProfile || !shareProfile)
     throw new Error(
       'Explicit export profiles are required for this export method',
     )
+  // The archive can be signed before export (notably CI without APPLE_API_*).
+  // Its profile must therefore match the same development/production
+  // entitlements as the exported IPA. Export cannot repair an archive failure.
+  const identity = development ? 'Apple Development' : 'Apple Distribution'
+  for (const [target, profile] of [
+    [app, appProfile],
+    [project.targets.axon_share, shareProfile],
+  ]) {
+    Object.assign(target.settings.base, {
+      CODE_SIGN_STYLE: 'Manual',
+      CODE_SIGN_IDENTITY: identity,
+      PROVISIONING_PROFILE_SPECIFIER: profile,
+    })
+  }
   Object.assign(exportOptions, {
     signingStyle: 'manual',
-    signingCertificate: development
-      ? 'Apple Development'
-      : 'Apple Distribution',
+    signingCertificate: identity,
     teamID: project.settingGroups.app.base.DEVELOPMENT_TEAM,
     provisioningProfiles: {
       'org.matrixaxon.axon': appProfile,
