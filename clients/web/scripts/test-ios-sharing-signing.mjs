@@ -42,10 +42,11 @@ test(
           'ios-share-activation.json',
         ])
           copyFileSync(join(source, 'scripts', name), join(scripts, name))
-        copyFileSync(
-          join(source, 'src-tauri/Entitlements.ios.plist'),
-          join(tauri, 'Entitlements.ios.plist'),
-        )
+        for (const name of [
+          'Entitlements.ios.plist',
+          'Entitlements.share.ios.plist',
+        ])
+          copyFileSync(join(source, 'src-tauri', name), join(tauri, name))
         copyFileSync(join(source, 'package.json'), join(web, 'package.json'))
         writeFileSync(
           join(apple, 'project.yml'),
