@@ -32,9 +32,13 @@ runs:
     # down at 11 MB/s while the .debs from azure.archive.ubuntu.com crawled at
     # tens of kB/s, and every one of the three attempts crawled the same way.
     # So attempt 1 uses the runner's default mirror list and later attempts
-    # point apt at archive.ubuntu.com, which does not share the slow path. The
-    # switch is skipped when the runner's sources file is not the deb822 file
-    # this expects, leaving the old behaviour.
+    # point apt at archive.ubuntu.com, which is not known to share the slow path.
+    # That is a hypothesis, not a measurement: check the log of the next failed
+    # run to see whether the switch helped. The switch is skipped, with a
+    # warning, when the runner's sources file is not the deb822 file this
+    # expects, leaving the old behaviour. It rewrites that file in place, so the
+    # action assumes an ephemeral runner; on a self-hosted runner the change
+    # would persist into later jobs.
     #
     # Every failure is retried, not only a stall: a mirror that is mid-sync fails
     # fast and may well be fine a few seconds later, and a deterministic failure
@@ -62,6 +66,8 @@ runs:
           if [ "$attempt" -gt 1 ] && [ -f "$sources" ] && grep -q 'mirror+file:/etc/apt/apt-mirrors.txt' "$sources"; then
             echo "::notice title=Playwright system packages::attempt $attempt uses archive.ubuntu.com instead of the runner's default mirror"
             sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu/|' "$sources"
+          elif [ "$attempt" -gt 1 ] && ! grep -q 'archive.ubuntu.com/ubuntu/' "$sources" 2>/dev/null; then
+            echo "::warning title=Playwright system packages::attempt $attempt could not switch mirrors: $sources is missing or no longer uses the apt-mirrors.txt mirror list"
           fi
           timeout -k 10 240 pnpm exec playwright install-deps "$BROWSER" || status=$?
           if [ "$status" -eq 0 ]; then
