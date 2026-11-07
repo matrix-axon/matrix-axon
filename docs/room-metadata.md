@@ -214,15 +214,15 @@ Warnings carry `source = "sdk_display_name"`; set `RUST_LOG=warn,axon_sync::disp
 ## Space children
 
 `GET /v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy` pages through a space's children ([ADR 0128](adr/0128-paged-space-hierarchy-and-unjoined-room-discovery.md) decision 1).
-It reads only local synced state and never contacts the homeserver.
+It reads only local data and never waits for the homeserver.
 
 | Query    | Meaning                                                                                       |
 | -------- | --------------------------------------------------------------------------------------------- |
 | `limit`  | Page size; default 100, maximum 500, out-of-range values clamped                              |
 | `cursor` | The previous page's `next_cursor`; bound to the account and space it was issued for, else 400 |
-| `enrich` | Accepted and ignored until unjoined-room discovery lands (issue 622)                          |
+| `enrich` | `true` asks Axon to discover unjoined children's summaries in the background (see below)      |
 
-The response is `{ room_id, children, next_cursor, total_children }`.
+The response is `{ room_id, children, next_cursor, total_children, discovery }`.
 `next_cursor` is `null` only on the last page, so a space of any size reads to the end, and `total_children` counts every current link in the same snapshot as the page.
 A child counts only when its `m.space.child` content has a non-empty `via` list of server names, as the Matrix spec requires; this is also how a removed link (empty content) drops out.
 Child ids longer than the spec's 255-byte room-id limit are left out.
@@ -232,9 +232,94 @@ An `order` that is not a string of at most 50 printable ASCII characters counts 
 Each page starts strictly after the last row of the previous one, so links added or removed between pages never duplicate or skip another link.
 A link whose `order` or `origin_ts` changes between pages moves in the sort and can appear twice or not at all in one walk; clients de-duplicate by room id.
 
-Each child carries the `space/children` fields (`room_id`, `via`, `order`, `suggested`, and the child's cached `name`, `avatar_url`, and `room_type`), plus `parent_room_id` (always the requested space for now) and `joined`, whether the account's own membership in the child is `join`.
-Unjoined children usually have no cached state, so their display fields are `null` until discovery (ADR 0128 delivery steps 3 and 4) adds a separate `discovered` summary.
-Set `RUST_LOG=axon_api::routes::rooms=debug` to log each page's account, space, limit, returned rows, and total.
+Each child carries the `space/children` fields (`room_id`, `via`, `order`, `suggested`, and the child's cached `name`, `avatar_url`, and `room_type`), plus `parent_room_id` (always the requested space for now), `joined`, whether the account's own membership in the child is `join`, and `discovered` (below).
+Set `RUST_LOG=axon_api::routes::rooms=debug` to log each page's account, space, limit, returned rows, total, and whether it scheduled a crawl.
+
+### Unjoined-room discovery
+
+Unjoined children usually have no synced state, so their synced fields are `null`.
+Discovery fills a separate summary for them from the account's homeserver ([ADR 0128](adr/0128-paged-space-hierarchy-and-unjoined-room-discovery.md) decisions 2-4).
+Each child's `discovered` is that summary, or `null` when Axon has none; it is always `null` for a joined child, whose synced state is authoritative.
+
+```json
+{
+  "status": "available",
+  "source": "hierarchy",
+  "observed_at": 1762500000000,
+  "expires_at": 1762521600000,
+  "withheld": [],
+  "name": "General",
+  "topic": "Say hello",
+  "avatar_url": "mxc://example.org/abc",
+  "canonical_alias": "#general:example.org",
+  "num_joined_members": 42,
+  "join_rule": "public",
+  "room_type": null,
+  "world_readable": false,
+  "guest_can_join": false,
+  "encryption": null,
+  "room_version": "11"
+}
+```
+
+Show a child's synced fields when it is joined, its `discovered` fields when it is not and `discovered.status` is `available`, and otherwise the synced fields, then its room id.
+Axon never merges the two, so a client can always tell discovered data from synced state (ADR 0111).
+
+| `status`       | Meaning                                                                                                          |
+| -------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `available`    | The summary fields are the homeserver's latest answer                                                            |
+| `not_returned` | A complete crawl of a linking space no longer returned the room; the account has probably lost access. No fields |
+| `forbidden`    | The homeserver refused a summary of the room (room summaries, ADR 0128 step 4). No fields                        |
+| `not_found`    | The homeserver does not know the room (room summaries, ADR 0128 step 4). No fields                               |
+
+A summary field is `null` when the latest answer did not carry it, or when it failed validation, in which case `withheld` names it: a name over 1 KiB, a topic over 8 KiB, an alias that does not parse or an avatar that is not an `mxc://` URI, a member count that is not a non-negative integer, or any value of the wrong type.
+A field a newer answer drops is removed, not kept from an older one.
+`encryption: null` means unknown, never unencrypted: homeservers before Matrix v1.15 do not report it.
+`observed_at` and `expires_at` are Unix ms from the PostgreSQL clock; a hierarchy summary is fresh for six hours.
+One row per account and room is shared by every space that links the room, so the latest conclusive answer wins.
+
+**When Axon asks.**
+A read with `enrich=true` schedules a crawl of the space only when the account has joined the space, the space links at least one child the account has not joined, and its crawl is due: there is none, the last one ended (`complete` or `truncated`) more than six hours ago, or an unfinished one (`in_progress`, or `failed` past its `next_attempt_at`) has no page queued or running.
+Every other read is pure, including room-list grouping and any read of a space the account has not joined, so polling cannot drive upstream traffic.
+Spaces are never crawled in the background.
+
+**The crawl.**
+A crawl is a run of `GET /_matrix/client/v1/rooms/{space}/hierarchy` pages with `max_depth=1` and `suggested_only=false`, one per job on the account's acquisition worker (see [Acquisition](#acquisition)).
+After each page commits, the next page queues behind whatever is already waiting, so a panel opened during a long crawl is served between pages.
+A returned room is cached only when the space links it with a current `m.space.child` and the account has not joined it; any other room in the response is dropped, so local state alone decides membership, order, and `suggested`.
+The space's own entry, `children_state`, and the response's `membership` are ignored.
+A local link the homeserver did not return stays listed with its synced fields.
+
+`discovery` reports the space's crawl on every read, with or without `enrich`, so it is the source of truth after a reconnect:
+
+| Field             | Meaning                                                                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `state`           | `idle`, `queued`, or `running`, the worker's activity for the crawl; in memory only, so `idle` after a restart                                            |
+| `outcome`         | `null` before the first crawl; `in_progress`, `complete`, `truncated`, or `failed`                                                                        |
+| `pages`           | Pages the current crawl has committed                                                                                                                     |
+| `page_limit`      | Rooms asked for per page: 50, halved for the rest of a crawl after a page over 2 MiB                                                                      |
+| `rooms_cached`    | Children the current crawl has returned so far                                                                                                            |
+| `started_at`      | When the current crawl started from its first page                                                                                                        |
+| `completed_at`    | When it ended `complete` or `truncated`                                                                                                                   |
+| `expires_at`      | Until when an ended crawl, a denial, or `unsupported` stands                                                                                              |
+| `support`         | `unknown`, `supported`, or `unsupported` (`404 M_UNRECOGNIZED`, a bare `404`, or `405`; retried after 24 hours)                                           |
+| `failure`         | The last failure, or why a `truncated` crawl stopped: an ADR 0126 category, `forbidden`, `not_found`, `too_large`, `pagination_loop`, or `cursor_expired` |
+| `next_attempt_at` | When a failed crawl may resume                                                                                                                            |
+
+- **Complete:** a page with no `next_batch` ends the crawl `complete`.
+  In the same transaction, every linked child the crawl did not return, whose summary is older than the crawl, becomes `not_returned`, and every discovery row that no joined space links any more is deleted.
+  If the crawl skipped an entry with no valid room id, it marks nothing `not_returned`, because the skipped entry may have been one of them.
+- **Truncated:** after 40 pages (2,000 children), when a `next_batch` repeats a token already used (`pagination_loop`), or when a single room's page is still over 2 MiB at a page limit of one (`too_large`).
+  A truncated crawl marks nothing `not_returned`, and like a complete one it stands for six hours.
+- **Failed:** a transient failure keeps the committed pages and the cursor and takes ADR 0126's backoff; the next `enrich` read after `next_attempt_at` resumes from the cursor.
+  `400 M_INVALID_PARAM` on a resumed page means Synapse's 5-minute pagination session expired: the crawl restarts from the first page once, and a second time fails with `cursor_expired`.
+  `403` and `404 M_NOT_FOUND` are `forbidden` and `not_found`, retried after an hour; cached summaries stay until a later complete crawl or a leave removes them.
+
+**Transitions.**
+Joining a discovered room deletes its row with the member event, and leaving a joined room deletes any row a racing commit left.
+Leaving a space deletes its crawl and every discovery row no other joined space links, and starts a new membership epoch, which discards any page in flight; each page commits under a share lock on the space's summary row, so a leave waits for a commit and then removes what it wrote.
+A purge, a summary rebuild, and account removal delete them too.
+Values, cursors, page limits, expirations, and backoff persist in `room_discovery`, `space_discovery`, and `space_discovery_children`.
 
 The older `GET …/space/children` is unchanged: a bare array capped at 1,000 children, with no way to tell a truncated response from a complete one.
 Because it is unchanged, it still returns the link's raw `order` string, so the two routes can report a different `order` for the same link when MSC1772 treats that `order` as invalid.
@@ -295,14 +380,14 @@ A change made elsewhere to a room's aliases or publication is not seen until the
 Absence confirmation and homeserver details share one acquisition worker per account run, canceled and joined with the run like the member-count worker ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 4).
 The API reaches it through a consumer-owned port; it never waits for it.
 
-- **Queue:** at most 32 jobs per account, keyed by room and kind (`local_aliases`, `directory_visibility`, `absence`), so a duplicate request coalesces, including with the running job.
+- **Queue:** at most 32 jobs per account, keyed by room and kind (`local_aliases`, `directory_visibility`, `absence`, `hierarchy`), so a duplicate request coalesces, including with the running job.
   When the queue is full the oldest job is dropped: the newest request is the panel a user is looking at now, and the next read of the dropped room asks again.
   A dropped job that a read reported as `queued` publishes its `room_details.changed` frame, so that panel re-reads rather than showing `queued` until it is reopened.
 - **Pacing:** one request at a time per account, at least 250 ms apart counted from when each request was sent, so one account's large room list cannot crowd out another account's work, and a room with every type absent fills in about 2.5 seconds.
 - **Gate:** each request takes a `HomeserverGate` permit as background work (ADR 0122).
-  Waiting for the permit is not part of the request's 10-second timeout, and a timed-out request keeps its gate slot, which is what stops a slow homeserver from accumulating abandoned work.
+  Waiting for the permit is not part of the request's 10-second timeout (30 seconds for a hierarchy page, which can wait on federation for several remote children), and a timed-out request keeps its gate slot, which is what stops a slow homeserver from accumulating abandoned work.
 - **Request:** sent with reqwest and the account's current access token rather than the SDK's `send`, without redirects.
-  A successful body is read through the same bounded reader as Matrix OAuth responses and refused past 64 KiB before parsing; a successful absence check is discarded unread.
+  A successful body is read through the same bounded reader as Matrix OAuth responses and refused past 64 KiB (2 MiB for a hierarchy page) before parsing; a successful absence check is discarded unread.
   An error body of any request is read under a 4 KiB cap, for its `errcode` and `retry_after_ms` only.
   A `401` is a failure to back off from: token refresh stays with the account's sync.
 - **Backoff:** one minute after the first consecutive failure, doubling to 30 minutes, and never sooner than a `Retry-After` header (delta-seconds or an HTTP date) or `retry_after_ms`, capped at 24 hours.
@@ -318,8 +403,9 @@ The API reaches it through a consumer-owned port; it never waits for it.
   The table is bounded by the account's joined rooms times ten kinds.
 
 Set `RUST_LOG=axon_sync::acquisition=debug` to log each request with `account_id`, `room_id`, `kind`, `state_type`, `outcome`, `elapsed_ms`, and queue depth.
-Repeated failures and `200` absence checks (a sync coverage gap) log at warn.
-No log line contains alias values, state content, response bodies, or tokens; outcomes and failure categories are allowlisted.
+A hierarchy page also logs its page number, page limit, returned, cached, `unlinked`, joined, and `unidentified` counts, the names of withheld fields, `not_returned` and orphan counts, and restarts.
+Repeated failures, `200` absence checks (a sync coverage gap), and crawls that stop at `pagination_loop` or `too_large` log at warn; a page asked again at a smaller limit logs at info.
+No log line contains alias values, names, topics, state content, response bodies, pagination tokens, or access tokens; outcomes and failure categories are allowlisted.
 
 ## Change notification
 
@@ -341,9 +427,12 @@ A `room_details.changed` WebSocket frame tells a client which of a room's reads 
 | `metadata`           | `GET …/metadata`           | A tuple of one of the eight types is inserted, replaced, or changes its content or redaction evidence; or an absence job recorded or removed a confirmation or changed a failure |
 | `member_counts`      | `GET …/info`               | The member-count worker stores a different pair or clears one                                                                                                                    |
 | `homeserver_details` | `GET …/homeserver_details` | A detail's value, freshness, or failure changed                                                                                                                                  |
+| `space_hierarchy`    | `GET …/space/hierarchy`    | The frame's room is a space whose crawl committed a page that changed a cached child summary, or ended (`complete`, `truncated`, a failure, or `unsupported`)                    |
 
 An acquisition job also publishes its source when it ends if a read reported it as `queued` or `running`, so a panel showing a refresh in progress learns it finished even when nothing changed.
-A job dropped from a full queue publishes nothing; the panel's next read asks again.
+A job dropped from a full queue publishes its source only if a read had seen it; the panel's next read asks again.
+A crawl's later pages carry the first page's observation, so a client showing a crawl hears when a later page is dropped too, and its next `enrich` read resumes the crawl from its cursor.
+A page that only re-observes identical summaries publishes nothing until the crawl ends.
 `sources` is never empty and lists sources in the order above; clients must ignore values they do not know.
 The frame is a signal, not a payload: a client never applies a diff from it.
 The store reports whether each write changed the stored row, so identical rewrites, redeliveries after a restart, and writes the freshness guard refuses publish nothing.
@@ -381,7 +470,7 @@ The API deliberately does not hide these gaps with default values or perform a r
 Instead the homeserver confirms absence in the background (see [Known absence](#known-absence)), and a `200` from that check is logged as a coverage gap.
 
 Authoritative member counts are cached separately as described above; the lazily loaded member list is not an authoritative count.
-Unjoined-room discovery and summary enrichment are [issue 622](https://github.com/matrix-axon/matrix-axon/issues/622); its paged local read is in place (see [Space children](#space-children)).
+Unjoined-room discovery is [issue 622](https://github.com/matrix-axon/matrix-axon/issues/622): the paged read and hierarchy crawls are in place (see [Unjoined-room discovery](#unjoined-room-discovery)); single-room summaries for a selected room (ADR 0128 step 4) remain.
 The discovery cache, progressive updates, and acquisition budgets follow ADR 0111 and are not implemented by the cached state endpoint.
 Web and TUI consumption are [issue 623](https://github.com/matrix-axon/matrix-axon/issues/623) and [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
 
@@ -406,6 +495,7 @@ cargo test -p axon-api --lib room_details_changed
 cargo test -p axon-api --lib room_details
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test room_detail_acquisition -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib acquisition -- --include-ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test space_discovery -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_details -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_state_read_endpoints -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http space_hierarchy_endpoint -- --ignored
@@ -445,6 +535,10 @@ Do not point these tests at an operator database or use production credentials.
 8. Read `/homeserver_details`, add a local alias and publish the room in the directory through Matrix, wait out the 15-minute expiration (or expire the rows in the disposable database), and read again: after a frame naming `homeserver_details`, the new alias and `public` appear.
    Remove both and repeat.
 9. Leave the room while a request is held at a slow homeserver: no row may survive, and the rejoined room must start with no confirmation or details.
+10. Join a space of about 300 children, some unjoined and some private, and read its `space/hierarchy` with `enrich=true`.
+    It lists every child at once; `discovery.state` turns `queued`, then `running`, and each `room_details.changed` naming `space_hierarchy` brings more `discovered` names until `outcome` is `complete` after seven pages.
+    Make one discovered room private to the account (or ban the account from it), expire the crawl in the disposable database, and read with `enrich=true` again: that child's `discovered.status` turns `not_returned`.
+    Leave the space: its crawl and every discovered row it alone linked are gone.
 
 The fixture homeserver may reject creation-event redactions; verify that a rejected request leaves Axon's evidence unchanged rather than treating the attempt as an applied redaction.
 These small-room checks validate reconciliation and recovery, not throughput for hundreds of rooms.

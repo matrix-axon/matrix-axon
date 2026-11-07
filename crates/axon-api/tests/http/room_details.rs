@@ -346,3 +346,273 @@ async fn homeserver_details_read_from_cache_and_refresh_when_due() {
     );
     assert_eq!(body["data"]["local_aliases"]["refresh"]["state"], "queued");
 }
+
+// ---------------------------------------------------------------------------
+// `GET …/space/hierarchy` discovery (ADR 0128 step 3)
+// ---------------------------------------------------------------------------
+
+impl Joined {
+    async fn state(&self, room_id: &str, event_type: &str, state_key: &str, content: Value) {
+        let user: (String,) =
+            sqlx_core::query_as::query_as("SELECT user_id FROM accounts WHERE account_id = $1")
+                .bind(self.account_id)
+                .fetch_one(self.store.pool())
+                .await
+                .unwrap();
+        self.store
+            .upsert_room_state_for_local_user(
+                &RoomStateUpsert {
+                    account_id: self.account_id,
+                    room_id,
+                    event_type,
+                    state_key,
+                    event_id: &format!("${}", Uuid::new_v4()),
+                    sender: &user.0,
+                    origin_ts: 1,
+                    content: Some(content),
+                },
+                Some(&user.0),
+            )
+            .await
+            .unwrap();
+    }
+
+    fn hierarchy(&self, space_id: &str, enrich: bool) -> String {
+        format!(
+            "/v1/accounts/{}/rooms/{space_id}/space/hierarchy?enrich={enrich}",
+            self.account_id
+        )
+    }
+
+    async fn sql(&self, sql: &str) {
+        sqlx_core::query::query(sql)
+            .bind(self.account_id)
+            .bind(&self.room_id)
+            .execute(self.store.pool())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn only_an_enrich_read_of_a_joined_space_schedules_a_crawl() {
+    let f = joined_room().await;
+    f.state(
+        &f.room_id,
+        "m.space.child",
+        "!child:localhost",
+        json!({"via": ["localhost"]}),
+    )
+    .await;
+
+    let (status, body) = get(&f.app, &f.hierarchy(&f.room_id, false)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(f.acquirer.take().is_empty(), "a plain read is pure");
+    assert_eq!(
+        body["data"]["discovery"],
+        json!({
+            "state": "idle", "outcome": null, "pages": 0, "page_limit": null,
+            "rooms_cached": 0, "started_at": null, "completed_at": null,
+            "expires_at": null, "support": "unknown", "failure": null,
+            "next_attempt_at": null,
+        })
+    );
+    assert_eq!(body["data"]["children"][0]["discovered"], Value::Null);
+
+    let (_, body) = get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert_eq!(f.acquirer.take(), [RoomDetailJob::Hierarchy]);
+    assert_eq!(body["data"]["discovery"]["state"], "queued");
+
+    // A space the account has not joined is never crawled.
+    let (status, body) = get(&f.app, &f.hierarchy("!elsewhere:localhost", true)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(f.acquirer.take().is_empty());
+    assert_eq!(body["data"]["discovery"]["state"], "idle");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_fresh_or_backed_off_crawl_schedules_nothing() {
+    let f = joined_room().await;
+    f.state(
+        &f.room_id,
+        "m.space.child",
+        "!child:localhost",
+        json!({"via": ["localhost"]}),
+    )
+    .await;
+    let now = chrono::Utc::now().timestamp_millis();
+    f.sql(&format!(
+        "INSERT INTO space_discovery (account_id, space_id, generation, outcome, pages, \
+             page_limit, rooms_cached, started_at, completed_at, expires_at, support) \
+         VALUES ($1, $2, 3, 'complete', 2, 25, 70, {now}, {now}, {}, 'supported')",
+        now + 3_600_000
+    ))
+    .await;
+    let (_, body) = get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert!(f.acquirer.take().is_empty(), "fresh until expires_at");
+    assert_eq!(
+        body["data"]["discovery"],
+        json!({
+            "state": "idle", "outcome": "complete", "pages": 2, "page_limit": 25,
+            "rooms_cached": 70, "started_at": now, "completed_at": now,
+            "expires_at": now + 3_600_000, "support": "supported", "failure": null,
+            "next_attempt_at": null,
+        })
+    );
+
+    f.sql("UPDATE space_discovery SET expires_at = 1 WHERE account_id = $1 AND space_id = $2")
+        .await;
+    get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert_eq!(f.acquirer.take(), [RoomDetailJob::Hierarchy], "expired");
+
+    f.sql(&format!(
+        "UPDATE space_discovery SET outcome = 'failed', completed_at = NULL, cursor = 't9', \
+             failure = 'rate_limited', failures = 2, next_attempt_at = {} \
+         WHERE account_id = $1 AND space_id = $2",
+        now + 60_000
+    ))
+    .await;
+    let (_, body) = get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert!(f.acquirer.take().is_empty(), "backing off");
+    assert_eq!(body["data"]["discovery"]["failure"], "rate_limited");
+    assert_eq!(body["data"]["discovery"]["next_attempt_at"], now + 60_000);
+
+    // An unfinished crawl out of backoff resumes on the next enrich read.
+    f.sql("UPDATE space_discovery SET next_attempt_at = 1 WHERE account_id = $1 AND space_id = $2")
+        .await;
+    get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert_eq!(f.acquirer.take(), [RoomDetailJob::Hierarchy]);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unjoined_children_carry_discovered_summaries_and_joined_ones_never_do() {
+    let f = joined_room().await;
+    for child in [
+        "!a:localhost",
+        "!b:localhost",
+        "!c:localhost",
+        "!d:localhost",
+    ] {
+        f.state(
+            &f.room_id,
+            "m.space.child",
+            child,
+            json!({"via": ["localhost"]}),
+        )
+        .await;
+    }
+    f.sql(
+        r#"INSERT INTO room_discovery (account_id, room_id, status, source, summary, withheld,
+               observed_at, expires_at) VALUES
+           ($1, '!a:localhost', 'available', 'hierarchy',
+            '{"name": "A", "num_joined_members": 4, "world_readable": false}', '{topic}', 10, 20),
+           ($1, '!b:localhost', 'not_returned', 'hierarchy', NULL, '{}', 11, 21),
+           ($1, '!c:localhost', 'available', 'hierarchy', '{"name": "C"}', '{}', 12, 22)"#,
+    )
+    .await;
+    // The account joins c after a crawl cached it: synced state wins, and a
+    // raced row would still be withheld.
+    f.state(
+        "!c:localhost",
+        "m.room.member",
+        &{
+            let user: (String,) =
+                sqlx_core::query_as::query_as("SELECT user_id FROM accounts WHERE account_id = $1")
+                    .bind(f.account_id)
+                    .fetch_one(f.store.pool())
+                    .await
+                    .unwrap();
+            user.0
+        },
+        json!({"membership": "join"}),
+    )
+    .await;
+    f.sql(
+        r#"INSERT INTO room_discovery (account_id, room_id, status, source, summary,
+               observed_at, expires_at)
+           VALUES ($1, '!c:localhost', 'available', 'hierarchy', '{"name": "raced"}', 13, 23)"#,
+    )
+    .await;
+
+    let (status, body) = get(&f.app, &f.hierarchy(&f.room_id, false)).await;
+    assert_eq!(status, StatusCode::OK);
+    let children = body["data"]["children"].as_array().unwrap();
+    let by_id = |id: &str| {
+        children
+            .iter()
+            .find(|c| c["room_id"] == id)
+            .unwrap_or_else(|| panic!("{id}"))
+            .clone()
+    };
+    assert_eq!(
+        by_id("!a:localhost")["discovered"],
+        json!({
+            "status": "available", "source": "hierarchy", "observed_at": 10, "expires_at": 20,
+            "withheld": ["topic"], "name": "A", "topic": null, "avatar_url": null,
+            "canonical_alias": null, "num_joined_members": 4, "join_rule": null,
+            "room_type": null, "world_readable": false, "guest_can_join": null,
+            "encryption": null, "room_version": null,
+        }),
+        "a missing encryption field reads as unknown"
+    );
+    assert_eq!(by_id("!a:localhost")["name"], Value::Null, "never merged");
+    let b = by_id("!b:localhost");
+    assert_eq!(b["discovered"]["status"], "not_returned");
+    assert_eq!(b["discovered"]["name"], Value::Null);
+    assert_eq!(by_id("!c:localhost")["joined"], true);
+    assert_eq!(by_id("!c:localhost")["discovered"], Value::Null);
+    assert_eq!(by_id("!d:localhost")["discovered"], Value::Null);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_space_whose_children_are_all_joined_is_not_crawled() {
+    let f = joined_room().await;
+    let user: (String,) =
+        sqlx_core::query_as::query_as("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(f.account_id)
+            .fetch_one(f.store.pool())
+            .await
+            .unwrap();
+    // No children at all: nothing to discover.
+    get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert!(f.acquirer.take().is_empty());
+
+    // Every linked child joined, as in a bridge's portal space.
+    for child in ["!portal-a:localhost", "!portal-b:localhost"] {
+        f.state(
+            &f.room_id,
+            "m.space.child",
+            child,
+            json!({"via": ["localhost"]}),
+        )
+        .await;
+        f.state(
+            child,
+            "m.room.member",
+            &user.0,
+            json!({"membership": "join"}),
+        )
+        .await;
+    }
+    // A removed link (empty content) does not count either.
+    f.state(&f.room_id, "m.space.child", "!removed:localhost", json!({}))
+        .await;
+    let (status, _) = get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(f.acquirer.take().is_empty(), "nothing to discover");
+
+    // One unjoined child is enough.
+    f.state(
+        &f.room_id,
+        "m.space.child",
+        "!new:localhost",
+        json!({"via": ["localhost"]}),
+    )
+    .await;
+    get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert_eq!(f.acquirer.take(), [RoomDetailJob::Hierarchy]);
+}

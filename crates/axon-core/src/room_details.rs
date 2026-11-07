@@ -36,6 +36,10 @@ pub enum RoomDetailSource {
     /// `GET …/homeserver_details`: a detail's value, freshness, or refresh
     /// state changed.
     HomeserverDetails,
+    /// `GET …/space/hierarchy` of the frame's room, a space (ADR 0128
+    /// decision 9): a committed crawl page changed a cached child summary, or
+    /// the crawl reached a conclusive state.
+    SpaceHierarchy,
 }
 
 /// The order an absence job confirms a room's missing metadata types (ADR
@@ -62,6 +66,9 @@ pub enum RoomDetailJob {
     DirectoryVisibility,
     /// Confirm every due metadata type that has no tuple.
     Absence,
+    /// One page of the space's hierarchy crawl (ADR 0128 decision 3); the
+    /// job queues the next page itself.
+    Hierarchy,
 }
 
 /// Where a job stands in its account's worker. In memory only: a restart

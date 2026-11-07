@@ -30,6 +30,7 @@ mod push;
 mod room_detail_acquisition;
 mod rooms;
 mod search;
+mod space_discovery;
 mod spaces;
 mod state;
 mod tokens;
@@ -74,6 +75,10 @@ pub use rooms::{RoomSummary, RoomTag};
 pub use search::{
     room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,
     SEARCH_OUTBOX_ROOM_PURGE_PREFIX,
+};
+pub use space_discovery::{
+    CrawlBegin, CrawlLimits, CrawlPosition, CrawlStep, CrawlWrite, DiscoveredEntry, DiscoveredRow,
+    SpaceCrawlRow, SpaceCrawlSnapshot,
 };
 pub use spaces::{
     SpaceChildRow, SpaceHierarchyCursor, SpaceHierarchyPage, SpaceHierarchyRow, SpaceParentRow,

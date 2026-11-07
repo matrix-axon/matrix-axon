@@ -14,6 +14,7 @@ use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
+use crate::space_discovery::{discovered_json, DiscoveredRow};
 use crate::{Store, StoreError};
 
 /// Hard cap on the number of rows [`Store::space_children`] and
@@ -193,6 +194,9 @@ pub struct SpaceHierarchyRow {
     pub origin_ts: i64,
     /// Whether the account's own `m.room.member` in the child is `join`.
     pub joined: bool,
+    /// The child's discovery row (ADR 0128 decision 4). Always `None` for a
+    /// joined child: synced state is authoritative for joined rooms.
+    pub discovered: Option<DiscoveredRow>,
 }
 
 impl SpaceHierarchyRow {
@@ -358,10 +362,12 @@ impl Store {
                            AND m.event_type = 'm.room.member'
                            AND m.state_key = (SELECT ac.user_id FROM accounts ac WHERE ac.account_id = $1)
                            AND m.content->>'membership' = 'join'
-                           AND m.redacted IS DISTINCT FROM true) AS joined
+                           AND m.redacted IS DISTINCT FROM true) AS joined,
+                      {discovered} AS discovered
                FROM (SELECT count(*) AS total_children FROM links) t
                LEFT JOIN page p ON true
-               ORDER BY {sort_key}"#
+               ORDER BY {sort_key}"#,
+            discovered = discovered_json("p.child_id"),
         );
         // The look-ahead row decides `has_more`, so the last page is the one
         // that comes back short, even when the space divides into full pages.
@@ -394,6 +400,14 @@ impl Store {
                 break;
             }
             let content: Option<Value> = row.try_get("content")?;
+            let joined: bool = row.try_get("joined")?;
+            // A row a commit wrote while a join raced it is never shown for
+            // the joined room; the child's later leave deletes it.
+            let discovered = if joined {
+                None
+            } else {
+                DiscoveredRow::from_json(row.try_get("discovered")?)
+            };
             page.push(SpaceHierarchyRow {
                 child: SpaceChildRow {
                     room_id,
@@ -405,7 +419,8 @@ impl Store {
                     room_type: row.try_get("room_type")?,
                 },
                 origin_ts: row.try_get("origin_ts")?,
-                joined: row.try_get("joined")?,
+                joined,
+                discovered,
             });
         }
         Ok(SpaceHierarchyPage {

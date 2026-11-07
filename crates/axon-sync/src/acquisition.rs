@@ -8,7 +8,8 @@
 //! [`JOB_INTERVAL`], and takes a [`HomeserverGate`] permit for each. Results
 //! commit only while the account is still joined in the membership epoch the
 //! job started in, and announce a `room_details.changed` frame when they
-//! changed something a client reads.
+//! changed something a client reads. Space hierarchy crawls (ADR 0128) run
+//! on the same worker, one page per job; see [`hierarchy`].
 //!
 //! Requests go out through reqwest with the account's current access token
 //! rather than the SDK's `send`, which buffers and parses the whole body; the
@@ -126,6 +127,7 @@ fn frame_source(job: RoomDetailJob) -> RoomDetailSource {
         RoomDetailJob::LocalAliases | RoomDetailJob::DirectoryVisibility => {
             RoomDetailSource::HomeserverDetails
         }
+        RoomDetailJob::Hierarchy => RoomDetailSource::SpaceHierarchy,
     }
 }
 
@@ -155,6 +157,17 @@ impl Queue {
         room_id: OwnedRoomId,
         job: RoomDetailJob,
     ) -> Option<(OwnedRoomId, RoomDetailJob)> {
+        self.push_observed(room_id, job, false)
+    }
+
+    /// [`push`](Self::push), carrying whether a read already saw the job, as
+    /// a crawl's next page does from the page before it.
+    fn push_observed(
+        &self,
+        room_id: OwnedRoomId,
+        job: RoomDetailJob,
+        observed: bool,
+    ) -> Option<(OwnedRoomId, RoomDetailJob)> {
         let mut state = self.lock();
         let room = room_id.as_str();
         let now = Instant::now();
@@ -174,7 +187,7 @@ impl Queue {
         state.queued.push_back(Entry {
             room_id,
             job,
-            observed: false,
+            observed,
         });
         drop(state);
         self.wake.notify_one();
@@ -363,7 +376,7 @@ pub(crate) enum NoAnswer {
 pub(crate) enum Reply {
     /// `200`, with the body when it was asked for.
     Ok(Vec<u8>),
-    /// `200` whose body exceeded [`MAX_RESPONSE_BYTES`].
+    /// `200` whose body exceeded the request's body limit.
     TooLarge,
     /// Any other status, with the error body's `errcode` and the longer of
     /// `Retry-After` and `retry_after_ms`.
@@ -375,13 +388,40 @@ pub(crate) enum Reply {
     Failed(NoAnswer),
 }
 
+/// One `GET` of the client-server API.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Get<'a> {
+    /// The API version segment: `v3`, or `v1` for the hierarchy.
+    pub(crate) version: &'static str,
+    /// The path after `/_matrix/client/{version}/`, one segment each.
+    pub(crate) segments: &'a [&'a str],
+    pub(crate) query: &'a [(&'a str, &'a str)],
+    /// The largest `200` body read; `None` reads none. A larger body is
+    /// [`Reply::TooLarge`].
+    pub(crate) body_limit: Option<usize>,
+    /// The request's deadline, from when it has a gate permit.
+    pub(crate) timeout: Duration,
+}
+
+impl Get<'_> {
+    /// An ADR 0126 detail request: `v3`, no query, [`REQUEST_TIMEOUT`].
+    fn detail<'a>(segments: &'a [&'a str], read_body: bool) -> Get<'a> {
+        Get {
+            version: "v3",
+            segments,
+            query: &[],
+            body_limit: read_body.then_some(MAX_RESPONSE_BYTES),
+            timeout: REQUEST_TIMEOUT,
+        }
+    }
+}
+
 /// Where requests go. The production one is [`Homeserver`]; tests script it.
 #[async_trait]
 pub(crate) trait Upstream: Send + Sync {
-    /// `GET` the client-server API path made of `segments`, reading a `200`
-    /// body only when `read_body` is set. Calls `admitted` once the request
-    /// may go out, after any wait for a gate permit.
-    async fn get(&self, segments: &[&str], read_body: bool, admitted: &(dyn Fn() + Sync)) -> Reply;
+    /// Send `request`. Calls `admitted` once the request may go out, after
+    /// any wait for a gate permit.
+    async fn get(&self, request: Get<'_>, admitted: &(dyn Fn() + Sync)) -> Reply;
 }
 
 /// The account's homeserver, behind its load gate.
@@ -414,43 +454,48 @@ fn http_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
-fn endpoint(homeserver: &Url, segments: &[&str]) -> Option<Url> {
+fn endpoint(homeserver: &Url, request: &Get<'_>) -> Option<Url> {
     let mut url = homeserver.clone();
     url.set_query(None);
     url.set_fragment(None);
     url.path_segments_mut()
         .ok()?
         .pop_if_empty()
-        .extend(["_matrix", "client", "v3"])
-        .extend(segments);
+        .extend(["_matrix", "client", request.version])
+        .extend(request.segments);
+    if !request.query.is_empty() {
+        url.query_pairs_mut().extend_pairs(request.query);
+    }
     Some(url)
 }
 
 #[async_trait]
 impl Upstream for Homeserver {
-    async fn get(&self, segments: &[&str], read_body: bool, admitted: &(dyn Fn() + Sync)) -> Reply {
+    async fn get(&self, request: Get<'_>, admitted: &(dyn Fn() + Sync)) -> Reply {
         // Waiting for a permit is not part of the request's timeout, and a
         // closed gate is never a failure: the job still reads as queued.
-        let permit = self.gate.acquire(REQUEST_TIMEOUT).await;
+        let permit = self.gate.acquire(request.timeout).await;
         admitted();
         let Some(token) = self.client.access_token() else {
             permit.finish(Outcome::Local);
             return Reply::Failed(NoAnswer::Unauthorized);
         };
-        let Some(url) = endpoint(&self.client.homeserver(), segments) else {
+        let Some(url) = endpoint(&self.client.homeserver(), &request) else {
             permit.finish(Outcome::Local);
             return Reply::Failed(NoAnswer::Transport);
         };
-        let (reply, outcome) =
-            match tokio::time::timeout(REQUEST_TIMEOUT, send(&self.http, url, &token, read_body))
-                .await
-            {
-                Ok(reply) => {
-                    let outcome = gate_outcome(&reply);
-                    (reply, outcome)
-                }
-                Err(_) => (Reply::Failed(NoAnswer::Timeout), Outcome::TimedOut),
-            };
+        let (reply, outcome) = match tokio::time::timeout(
+            request.timeout,
+            send(&self.http, url, &token, request.body_limit),
+        )
+        .await
+        {
+            Ok(reply) => {
+                let outcome = gate_outcome(&reply);
+                (reply, outcome)
+            }
+            Err(_) => (Reply::Failed(NoAnswer::Timeout), Outcome::TimedOut),
+        };
         permit.finish(outcome);
         reply
     }
@@ -468,7 +513,7 @@ fn gate_outcome(reply: &Reply) -> Outcome {
     }
 }
 
-async fn send(http: &reqwest::Client, url: Url, token: &str, read_body: bool) -> Reply {
+async fn send(http: &reqwest::Client, url: Url, token: &str, body_limit: Option<usize>) -> Reply {
     let response = match http.get(url).bearer_auth(token).send().await {
         Ok(response) => response,
         Err(error) if error.is_timeout() => return Reply::Failed(NoAnswer::Timeout),
@@ -476,10 +521,10 @@ async fn send(http: &reqwest::Client, url: Url, token: &str, read_body: bool) ->
     };
     let status = response.status().as_u16();
     if status == 200 {
-        if !read_body {
+        let Some(body_limit) = body_limit else {
             return Reply::Ok(Vec::new());
-        }
-        return match read_bounded_body(response, MAX_RESPONSE_BYTES).await {
+        };
+        return match read_bounded_body(response, body_limit).await {
             Ok(body) => Reply::Ok(body),
             Err(BoundedBodyError::TooLarge) => Reply::TooLarge,
             Err(BoundedBodyError::Transport(error)) if error.is_timeout() => {
@@ -689,10 +734,21 @@ impl<U: Upstream> Worker<U> {
     async fn step(&mut self, room_id: &RoomId, job: RoomDetailJob) {
         let ran = self.run_job(room_id, job).await;
         let observed = self.queue.finish(ran.local_failure);
+        if ran.next_page {
+            // Behind whatever is already waiting, so a panel opened during a
+            // long crawl is served between its pages (ADR 0128 decision 3).
+            // The page carries the observation: a client showing the crawl
+            // hears its end, or the eviction of a later page.
+            self.queue.push_observed(room_id.to_owned(), job, observed);
+            if ran.changed {
+                self.room_details.mark(room_id.as_str(), frame_source(job));
+            }
+            return;
+        }
         // An observer hears the job ended even after a local failure: the
         // job is held back, so its re-read sees `idle` rather than queueing
         // another request.
-        if ran.changed || observed {
+        if ran.changed || ran.conclusive || observed {
             self.room_details.mark(room_id.as_str(), frame_source(job));
         }
     }
@@ -714,6 +770,7 @@ impl<U: Upstream> Worker<U> {
             }
         };
         match job {
+            RoomDetailJob::Hierarchy => self.run_hierarchy(room_id, epoch).await,
             RoomDetailJob::LocalAliases | RoomDetailJob::DirectoryVisibility => {
                 let (kind, segments) = match job {
                     RoomDetailJob::LocalAliases => (
@@ -794,15 +851,10 @@ impl<U: Upstream> Worker<U> {
         }
     }
 
-    /// Send one paced request and record its outcome.
-    async fn request(
-        &mut self,
-        room_id: &RoomId,
-        epoch: i64,
-        kind: DetailKind,
-        state_type: &str,
-        segments: &[&str],
-    ) -> Requested {
+    /// Send one request at most every [`JOB_INTERVAL`], marking the job
+    /// running while it is in flight. Returns the reply and the request's
+    /// elapsed milliseconds from admission.
+    async fn paced(&mut self, request: Get<'_>) -> (Reply, u64) {
         if let Some(last) = self.last_request {
             tokio::time::sleep_until(last + JOB_INTERVAL).await;
         }
@@ -813,7 +865,7 @@ impl<U: Upstream> Worker<U> {
         let queue = Arc::clone(&self.queue);
         let reply = self
             .upstream
-            .get(segments, kind != DetailKind::Absence, &|| {
+            .get(request, &|| {
                 *admitted_at
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
@@ -827,6 +879,21 @@ impl<U: Upstream> Worker<U> {
         // A request the gate never admitted was not sent; pace from now.
         self.last_request = Some(admitted_at.unwrap_or_else(Instant::now));
         let elapsed_ms = admitted_at.map_or(0, |at| at.elapsed().as_millis() as u64);
+        (reply, elapsed_ms)
+    }
+
+    /// Send one paced request and record its outcome.
+    async fn request(
+        &mut self,
+        room_id: &RoomId,
+        epoch: i64,
+        kind: DetailKind,
+        state_type: &str,
+        segments: &[&str],
+    ) -> Requested {
+        let (reply, elapsed_ms) = self
+            .paced(Get::detail(segments, kind != DetailKind::Absence))
+            .await;
         let outcome = interpret(kind, reply);
         let failed = matches!(outcome, DetailOutcome::Failure { .. });
         let account_id = self.account_id;
@@ -883,6 +950,11 @@ struct Requested {
 struct Ran {
     /// Something a client reads changed.
     changed: bool,
+    /// A crawl reached a conclusive state, which a client hears even when no
+    /// summary changed (ADR 0128 decision 9).
+    conclusive: bool,
+    /// A crawl has another page due: queue it behind what is waiting.
+    next_page: bool,
     /// The cache could not be read or a result could not be recorded, so no
     /// backoff was stored; the queue holds the job back instead.
     local_failure: bool,
@@ -897,6 +969,8 @@ impl Ran {
         }
     }
 }
+
+mod hierarchy;
 
 #[cfg(test)]
 mod tests;

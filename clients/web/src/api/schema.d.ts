@@ -1371,6 +1371,18 @@ export interface paths {
          *     page, and `total_children` counts every current link, so nothing is
          *     dropped silently. An unknown `account_id`/`room_id`, or a room with no
          *     children, is an empty page (200), not a 404.
+         *
+         *     Each unjoined child also carries `discovered`: what the account's
+         *     homeserver said about it when Axon last crawled the space's hierarchy, or
+         *     `null` (ADR 0128). Show the child's synced fields when it is joined, its
+         *     `discovered` fields when it is not and `discovered.status` is
+         *     `available`, and otherwise the synced fields, then the room id. With
+         *     `enrich=true`, a read of a joined space that links at least one unjoined
+         *     child schedules a crawl in the background when none is fresh (a crawl
+         *     stays fresh for six hours) and no backoff is in force; `discovery` reports it, page by page. Re-read on a
+         *     `room_details.changed` WebSocket frame for the space whose `sources`
+         *     include `space_hierarchy`: one follows each page that changed a summary
+         *     and the end of every crawl.
          */
         get: operations["space_hierarchy"];
         put?: never;
@@ -3110,6 +3122,11 @@ export interface components {
                  */
                 children: components["schemas"]["SpaceHierarchyChildDto"][];
                 /**
+                 * @description The space's discovery crawl, returned whether or not the read asked
+                 *     for `enrich`, so it is the source of truth after a reconnect.
+                 */
+                discovery: components["schemas"]["SpaceDiscoveryDto"];
+                /**
                  * @description Pass as `cursor` to read the next page; `null` only on the last page.
                  *     Nothing is dropped silently: a space of any size pages to the end.
                  */
@@ -4142,6 +4159,21 @@ export interface components {
             /** @description Opaque state from an unexpired, pending server-side flow. */
             state: string;
         };
+        /**
+         * @description Why a crawl failed or stopped early. Allowlisted; never upstream text.
+         * @enum {string}
+         */
+        CrawlFailure: "timeout" | "server_error" | "rate_limited" | "transport" | "unauthorized" | "invalid_response" | "forbidden" | "not_found" | "too_large" | "pagination_loop" | "cursor_expired";
+        /**
+         * @description How a space's last crawl ended, or that it is still going.
+         * @enum {string}
+         */
+        CrawlOutcome: "in_progress" | "complete" | "truncated" | "failed";
+        /**
+         * @description Whether the account's homeserver serves the hierarchy endpoint.
+         * @enum {string}
+         */
+        CrawlSupport: "unknown" | "supported" | "unsupported";
         /** @description Request body for creating a DM (`POST …/rooms/dm`; ADR 0068 M19c). */
         CreateDmRequest: {
             /** @description The other participant's Matrix id (`@user:server`). */
@@ -4335,6 +4367,60 @@ export interface components {
             status: components["schemas"]["HomeserverDetailStatus"];
             visibility?: null | components["schemas"]["DirectoryVisibility"];
         };
+        /**
+         * @description A summary of an unjoined room from the account's homeserver (ADR 0128
+         *     decision 4), with its provenance. Every summary field is `null` when it
+         *     was missing from the latest answer, failed validation (then named in
+         *     `withheld`), or `status` is not `available`.
+         */
+        DiscoveredRoomDto: {
+            /** @description An `mxc://` URI. */
+            avatar_url?: string | null;
+            canonical_alias?: string | null;
+            /**
+             * @description The room's encryption algorithm. `null` means unknown, never
+             *     unencrypted: homeservers before Matrix v1.15 do not report it.
+             */
+            encryption?: string | null;
+            /**
+             * Format: int64
+             * @description Unix ms when the answer goes stale; a past value means stale.
+             */
+            expires_at: number;
+            guest_can_join?: boolean | null;
+            join_rule?: string | null;
+            name?: string | null;
+            /** Format: int64 */
+            num_joined_members?: number | null;
+            /**
+             * Format: int64
+             * @description Unix ms of the answer, from the server clock.
+             */
+            observed_at: number;
+            /** @description The room's `m.room.create` `type`, such as `m.space`. */
+            room_type?: string | null;
+            room_version?: string | null;
+            source: components["schemas"]["DiscoverySource"];
+            status: components["schemas"]["DiscoveryStatus"];
+            topic?: string | null;
+            /**
+             * @description Summary fields the latest answer carried that failed validation and
+             *     were withheld: a name, topic, or alias over its length limit, an avatar
+             *     that is not an `mxc://` URI, or a value of the wrong type.
+             */
+            withheld: string[];
+            world_readable?: boolean | null;
+        };
+        /**
+         * @description Which homeserver read produced a discovery row.
+         * @enum {string}
+         */
+        DiscoverySource: "hierarchy" | "summary";
+        /**
+         * @description What the homeserver last said about a discovered room.
+         * @enum {string}
+         */
+        DiscoveryStatus: "available" | "not_returned" | "forbidden" | "not_found";
         /**
          * @description Request body for editing a message (`PUT …/events/{event_id}`). Replaces the
          *     target event's text via an `m.replace` relation.
@@ -5871,6 +5957,54 @@ export interface components {
             via: string[];
         };
         /**
+         * @description A space's discovery crawl (ADR 0128 decision 3). `state` lives in memory
+         *     only, so after a restart it is `idle`; everything else persists.
+         */
+        SpaceDiscoveryDto: {
+            /**
+             * Format: int64
+             * @description Unix ms when the crawl ended `complete` or `truncated`.
+             */
+            completed_at?: number | null;
+            /**
+             * Format: int64
+             * @description Unix ms until which an ended crawl, a denial, or `unsupported` stands;
+             *     an `enrich` read after it starts a new crawl.
+             */
+            expires_at?: number | null;
+            failure?: null | components["schemas"]["CrawlFailure"];
+            /**
+             * Format: int64
+             * @description Unix ms before which a failed crawl is not resumed.
+             */
+            next_attempt_at?: number | null;
+            outcome?: null | components["schemas"]["CrawlOutcome"];
+            /**
+             * Format: int32
+             * @description The rooms the crawl asks for per page; halved for the rest of a crawl
+             *     after a page over Axon's size limit. `null` before the first crawl.
+             */
+            page_limit?: number | null;
+            /**
+             * Format: int32
+             * @description Pages the current crawl has committed.
+             */
+            pages: number;
+            /**
+             * Format: int32
+             * @description Children the current crawl has returned so far.
+             */
+            rooms_cached: number;
+            /**
+             * Format: int64
+             * @description Unix ms when the current crawl started from its first page.
+             */
+            started_at?: number | null;
+            /** @description Whether a page is waiting for, or using, the account's worker. */
+            state: components["schemas"]["RefreshState"];
+            support: components["schemas"]["CrawlSupport"];
+        };
+        /**
          * @description One child in a page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128
          *     decision 1): every [`SpaceChildDto`] field, from local synced state, plus
          *     where the row came from and whether the account is joined to the child.
@@ -5880,6 +6014,7 @@ export interface components {
          *     here, because the spec treats it as absent.
          */
         SpaceHierarchyChildDto: components["schemas"]["SpaceChildDto"] & {
+            discovered?: null | components["schemas"]["DiscoveredRoomDto"];
             /** @description Whether the account's own membership in the child is `join`. */
             joined: boolean;
             /**
@@ -5895,6 +6030,11 @@ export interface components {
              *     `cursor`.
              */
             children: components["schemas"]["SpaceHierarchyChildDto"][];
+            /**
+             * @description The space's discovery crawl, returned whether or not the read asked
+             *     for `enrich`, so it is the source of truth after a reconnect.
+             */
+            discovery: components["schemas"]["SpaceDiscoveryDto"];
             /**
              * @description Pass as `cursor` to read the next page; `null` only on the last page.
              *     Nothing is dropped silently: a space of any size pages to the end.
@@ -10498,9 +10638,11 @@ export interface operations {
                  */
                 cursor?: string;
                 /**
-                 * @description Ask Axon to fill in unjoined children's names from the homeserver.
-                 *     Accepted and currently ignored: discovery is not implemented yet
-                 *     (ADR 0128), so this read never contacts the homeserver.
+                 * @description Ask Axon to fill in unjoined children's summaries from the
+                 *     account's homeserver (default `false`). The read still returns at
+                 *     once; it schedules a background crawl of the space only when the
+                 *     account has joined it and no fresh crawl or backoff is in force.
+                 *     Reads without it never contact the homeserver.
                  */
                 enrich?: boolean;
             };

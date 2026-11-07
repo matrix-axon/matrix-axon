@@ -336,9 +336,10 @@ async fn a_request_is_admitted_only_with_a_gate_permit() {
         let (homeserver, admitted) = (Arc::clone(&homeserver), Arc::clone(&admitted));
         async move {
             homeserver
-                .get(&["rooms", "!r:localhost", "aliases"], true, &|| {
-                    admitted.store(true, Ordering::SeqCst)
-                })
+                .get(
+                    Get::detail(&["rooms", "!r:localhost", "aliases"], true),
+                    &|| admitted.store(true, Ordering::SeqCst),
+                )
                 .await
         }
     });
@@ -424,7 +425,9 @@ async fn mock_homeserver() -> (std::net::SocketAddr, Arc<AtomicBool>) {
                     unauthorized.store(true, Ordering::SeqCst);
                 }
                 let path = uri.path().to_owned();
-                if path.ends_with("/rooms/!r:localhost/aliases") {
+                if path == "/_matrix/client/v1/rooms/!s:localhost/hierarchy" {
+                    Json(json!({"rooms": [], "query": uri.query()})).into_response()
+                } else if path.ends_with("/rooms/!r:localhost/aliases") {
                     Json(json!({"aliases": ["#a:localhost"]})).into_response()
                 } else if path.ends_with("/directory/list/room/!big:localhost") {
                     // Declared too large: refused before any of it is read.
@@ -472,7 +475,10 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
         Homeserver::new(sdk_client(address).await, HomeserverGate::for_test()).unwrap();
     assert_eq!(
         homeserver
-            .get(&["rooms", "!r:localhost", "aliases"], true, &|| {})
+            .get(
+                Get::detail(&["rooms", "!r:localhost", "aliases"], true),
+                &|| {}
+            )
             .await,
         Reply::Ok(serde_json::to_vec(&json!({"aliases": ["#a:localhost"]})).unwrap())
     );
@@ -483,7 +489,10 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
     for room in ["!big:localhost", "!stream:localhost"] {
         assert_eq!(
             homeserver
-                .get(&["directory", "list", "room", room], true, &|| {})
+                .get(
+                    Get::detail(&["directory", "list", "room", room], true),
+                    &|| {}
+                )
                 .await,
             Reply::TooLarge
         );
@@ -493,8 +502,10 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
     assert_eq!(
         homeserver
             .get(
-                &["rooms", "!r:localhost", "state", "m.room.encryption", ""],
-                false,
+                Get::detail(
+                    &["rooms", "!r:localhost", "state", "m.room.encryption", ""],
+                    false
+                ),
                 &|| {}
             )
             .await,
@@ -503,8 +514,10 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
     assert_eq!(
         homeserver
             .get(
-                &["rooms", "!r:localhost", "state", "m.room.server_acl", ""],
-                false,
+                Get::detail(
+                    &["rooms", "!r:localhost", "state", "m.room.server_acl", ""],
+                    false
+                ),
                 &|| {}
             )
             .await,
@@ -514,6 +527,32 @@ async fn the_homeserver_gets_the_token_and_bodies_are_bounded() {
             retry_after_ms: Some(120_000),
         },
         "the longer of Retry-After and retry_after_ms"
+    );
+}
+
+/// A hierarchy page goes to the v1 path with its query encoded, and its body
+/// limit is the request's own.
+#[tokio::test]
+async fn a_hierarchy_page_uses_v1_and_encodes_its_query() {
+    let (address, _) = mock_homeserver().await;
+    let homeserver =
+        Homeserver::new(sdk_client(address).await, HomeserverGate::for_test()).unwrap();
+    let request = |body_limit| Get {
+        version: "v1",
+        segments: &["rooms", "!s:localhost", "hierarchy"],
+        query: &[("max_depth", "1"), ("from", "a b&c=d")],
+        body_limit: Some(body_limit),
+        timeout: REQUEST_TIMEOUT,
+    };
+    let Reply::Ok(body) = homeserver.get(request(64 * 1024), &|| {}).await else {
+        panic!("the v1 route answers");
+    };
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["query"], "max_depth=1&from=a+b%26c%3Dd");
+    assert_eq!(
+        homeserver.get(request(8), &|| {}).await,
+        Reply::TooLarge,
+        "the page's own body limit applies"
     );
 }
 
@@ -527,7 +566,7 @@ async fn a_hung_homeserver_times_out_and_holds_its_gate_slot() {
     tokio::time::pause();
     let started = Instant::now();
     assert_eq!(
-        homeserver.get(&["hang"], true, &|| {}).await,
+        homeserver.get(Get::detail(&["hang"], true), &|| {}).await,
         Reply::Failed(NoAnswer::Timeout)
     );
     // Paused time advances to the deadline, give or take a timer tick.
@@ -558,19 +597,22 @@ struct Script {
 
 #[async_trait]
 impl Upstream for Arc<Script> {
-    async fn get(
-        &self,
-        segments: &[&str],
-        _read_body: bool,
-        admitted: &(dyn Fn() + Sync),
-    ) -> Reply {
+    async fn get(&self, request: Get<'_>, admitted: &(dyn Fn() + Sync)) -> Reply {
         let delay = self.admission_delay.lock().unwrap().take();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
         admitted();
         self.admitted.lock().unwrap().push(Instant::now());
-        let path = segments.join("/");
+        let mut path = request.segments.join("/");
+        if !request.query.is_empty() {
+            let query: Vec<String> = request
+                .query
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect();
+            path = format!("{path}?{}", query.join("&"));
+        }
         self.calls.lock().unwrap().push(path.clone());
         if self.hang.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
@@ -985,3 +1027,5 @@ async fn requests_are_paced_from_their_admission() {
         );
     }
 }
+
+mod hierarchy;
