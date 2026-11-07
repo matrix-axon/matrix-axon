@@ -710,6 +710,18 @@ public final class ShareStore {
     // Older readers must refuse a choice they would otherwise silently ignore.
     next.version = max(next.version, 2)
     let deadline = Date().addingTimeInterval(60)
+    let targetIDs = Set(targets.map(\.id))
+    var uploadBytes = snapshot.captionBytes + snapshot.files.filter { !targetIDs.contains($0.id) }
+      .reduce(0) { $0 + $1.uploadBytes }
+    // Unchanged representations are already known. Every target needs at
+    // least one byte; reject an impossible budget before opening originals.
+    guard uploadBytes <= ShareLimits.batchBytes,
+      targets.count <= ShareLimits.batchBytes - uploadBytes
+    else { throw ShareFailure.quota }
+    if size == .original {
+      guard targets.reduce(uploadBytes, { $0 + $1.bytes }) <= ShareLimits.batchBytes
+      else { throw ShareFailure.quota }
+    }
     for target in targets {
       try cancellation.check()
       guard Date() < deadline else { throw ShareFailure.expired }
@@ -731,6 +743,10 @@ public final class ShareStore {
           }
         }
       }
+      // Compressed output sizes are only known after encoding. Fail as soon
+      // as the running total exceeds the cap instead of resizing later items.
+      guard bytes <= ShareLimits.batchBytes - uploadBytes else { throw ShareFailure.quota }
+      uploadBytes += bytes
       guard let index = next.files.firstIndex(where: { $0.id == target.id }) else {
         throw ShareFailure.stale
       }
@@ -1131,7 +1147,9 @@ public final class ShareStore {
       for file in try fm.contentsOfDirectory(
         at: directory(record.id), includingPropertiesForKeys: [.fileSizeKey])
       {
-        // A killed rename/publish or failed unlink can leave a complete file
+        // Published .preview caches are deliberately outside manifest.files
+        // and charged here, even after their reservation has been removed.
+        // A killed rename/publish or failed unlink can also leave a complete file
         // outside its manifest. Charge it until ownership reconciliation can
         // remove it. In-progress .part bytes are already covered by reservation.
         if !referenced.contains(file.lastPathComponent) && file.pathExtension != "part"

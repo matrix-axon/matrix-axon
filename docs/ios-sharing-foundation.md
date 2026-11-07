@@ -39,6 +39,7 @@ Send validates the destination against current rooms and preserves oversized dra
 The import ceiling is 64 KiB of UTF-8 text; it is not a send allowance.
 Preview fields use the server's UTF-16 limits, with a separate 32 KiB canonical preview budget and 40 KiB content budget including protocol aliases and media/encryption reservations.
 Storage is bounded to 20 shares/200 MiB, with ten user attachments and 100 MiB per file/batch; thumbnail bytes count toward storage without becoming separate messages.
+Published photo-preview caches also count toward the pending-storage cap after their reservations are removed.
 The total includes conservative reservations for metadata and atomic replacement: 2 MiB per record plus 16 KiB for session control files.
 Thus a nearly full inbox can reject a batch below its independent 100 MiB ceiling; existing drafts are never evicted to admit it.
 

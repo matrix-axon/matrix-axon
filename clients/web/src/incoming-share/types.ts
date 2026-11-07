@@ -59,7 +59,7 @@ export function canonicalShare(record: IncomingShare): IncomingShare {
   const first = record.files.find((file) => !file.thumbnail)?.operation
   const operation = { ...record.operation }
   if (
-    record.text &&
+    record.text.trim() &&
     first &&
     ['sent', 'dispatching', 'unknown'].includes(first.state)
   ) {

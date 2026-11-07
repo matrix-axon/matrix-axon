@@ -34,6 +34,41 @@ test.beforeEach(async ({ page }) => {
       localStorage.setItem('fixture.incoming', JSON.stringify([record]))
   }, record)
 })
+test('an empty reviewed draft disables Send until a message is entered', async ({
+  page,
+}) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem(
+      'fixture.incoming',
+      JSON.stringify([
+        {
+          ...record,
+          text: ' \n',
+          previews: [],
+          operation: { id: 'source', state: 'ready' },
+        },
+      ]),
+    )
+  }, record)
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(
+    page.getByText('Nothing to send.', { exact: true }),
+  ).toBeVisible()
+  const send = page.getByRole('button', {
+    name: 'Send reviewed share',
+    exact: true,
+  })
+  await expect(send).toBeDisabled()
+  await page
+    .getByRole('textbox', { name: 'Message', exact: true })
+    .fill('Now there is a message')
+  await expect(send).toBeEnabled()
+  await expect(page.getByText('Nothing to send.', { exact: true })).toHaveCount(
+    0,
+  )
+})
+
 test('settings retains the recovery route when the inbox is empty', async ({
   page,
 }) => {

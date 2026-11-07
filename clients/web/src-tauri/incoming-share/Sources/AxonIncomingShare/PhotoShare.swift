@@ -71,6 +71,7 @@ public enum PhotoShare {
           kCGImageSourceCreateThumbnailFromImageAlways: true,
           kCGImageSourceThumbnailMaxPixelSize: pixels,
           kCGImageSourceCreateThumbnailWithTransform: true,
+          // Cache the bounded thumbnail, never a full-resolution raster.
           kCGImageSourceShouldCacheImmediately: true,
           kCGImageSourceShouldAllowFloat: false,
         ] as CFDictionary)

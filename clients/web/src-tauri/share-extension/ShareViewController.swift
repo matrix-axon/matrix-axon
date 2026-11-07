@@ -246,8 +246,11 @@ final class ShareComposer: ObservableObject {
       try self.persist(text: text, captions: captions, names: names, account: account, room: room)
       self.current = try self.store!.setPhotoSize(
         self.current!, size: size, file: file, cancellation: self.cancellation)
-      if file == nil && size != .original && self.current!.files.contains(where: { !$0.thumbnail && $0.photoSize != size }) {
-        return "Photo sizes updated. Animated or unsupported images remain Original. Review the estimated upload size before sending."
+      if file == nil && size != .original {
+        let originals = self.current!.files.filter { !$0.thumbnail && $0.photoSize != size }.map(\.name)
+        if !originals.isEmpty {
+          return "Photo sizes updated. Kept Original: " + originals.joined(separator: ", ") + "."
+        }
       }
       return "Photo size updated. Review the estimated upload size before sending."
     }

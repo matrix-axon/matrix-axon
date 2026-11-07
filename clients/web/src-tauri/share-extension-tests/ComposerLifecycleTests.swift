@@ -240,6 +240,21 @@ final class ComposerLifecycleTests: XCTestCase {
     XCTAssertEqual(recovered.text, "Separate source")
   }
 
+  func testOverLimitPhotoSelectionStagesNothingAndClearlyBlocksSend() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer()
+    let item = fixture.photos()
+    item.attachments = Array(repeating: item.attachments![0], count: 11)
+    load(model) { model.start([item]) }
+    XCTAssertTrue(model.record?.files.isEmpty == true)
+    XCTAssertTrue(model.record?.importFailures.contains("too_many_photos") == true)
+    XCTAssertTrue(ShareComposer.importProblem("too_many_photos").contains("10 photos"))
+    model.chooseRoom("!first:example.org")
+    XCTAssertFalse(model.canSend)
+    model.cancel()
+    wait(for: [fixture.closed], timeout: 3)
+  }
+
   func testEmptyPhotoShareUsesPlainEmptyStateAndKeepsSendDisabled() throws {
     let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
     let model = fixture.composer()

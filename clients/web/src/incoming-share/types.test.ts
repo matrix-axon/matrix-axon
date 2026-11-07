@@ -44,3 +44,20 @@ it('stores every modern caption uniformly, independently of source text', () => 
   current.text = 'Independent message'
   expect(shareOperations(current)).toHaveLength(3)
 })
+
+it.each([1, 2, 3] as const)(
+  'keeps whitespace-only v%i source operations independent',
+  (version) => {
+    for (const state of ['sent', 'dispatching', 'unknown'] as const) {
+      const legacy = structuredClone(fixture) as IncomingShare
+      legacy.version = version
+      legacy.text = ' \t\n'
+      legacy.files[1].operation!.state = state
+      const operation = structuredClone(legacy.operation)
+      const current = canonicalShare(legacy)
+      expect(current.operation).toEqual(operation)
+      expect(shareOperations(current)).toHaveLength(2)
+      expect(current.files[1].operation!.state).toBe(state)
+    }
+  },
+)

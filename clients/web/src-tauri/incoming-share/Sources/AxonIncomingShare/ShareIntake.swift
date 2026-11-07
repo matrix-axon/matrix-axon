@@ -247,8 +247,11 @@
             "share_provider url=\(provider.hasItemConformingToTypeIdentifier(UTType.url.identifier)) text=\(provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)) image=\(provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)) representations=\(provider.registeredTypeIdentifiers.count)"
           )
           do {
-            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier)
-              && !provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+            // Local image providers remain photos. Non-image providers may
+            // advertise file-url as an alternative to a valid remote URL.
+            let localImage = provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+              && provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) && !localImage
             {
               let urlStart = urls.count
               do {
@@ -350,6 +353,9 @@
       manifest.importFailures = failures + ["incomplete_import"]
       manifest = try store.update(manifest)
       staged(manifest)
+      // Never silently send a subset of the user's selection. An over-limit
+      // selection stages no photos; any earlier failure also stops photo and
+      // preview loading. Retained partial drafts remain explicitly unsendable.
       for (provider, type) in photos {
         guard failures.isEmpty else { break }
         try cancellation.check()

@@ -171,6 +171,10 @@ export function PendingSharesPage() {
       ['sent', 'dispatching', 'unknown'].includes(item.state),
     )
   const complete = record !== null && shareCompleted(record)
+  const empty =
+    record !== null &&
+    store.editorText.value.trim() === '' &&
+    !record.files.some((file) => !file.thumbnail)
   const captionSent = record?.operation.state === 'sent'
   return (
     <section class="pending-shares-page">
@@ -655,6 +659,7 @@ export function PendingSharesPage() {
           {store.error.value !== null && (
             <p class="pending-share-exit-error">{store.error.value}</p>
           )}
+          {empty && !complete && <p role="status">Nothing to send.</p>}
           <div class="pending-share-actions">
             {busy && (
               <button type="button" onClick={() => store.cancel()}>
@@ -666,6 +671,7 @@ export function PendingSharesPage() {
               disabled={
                 busy ||
                 blocked ||
+                (empty && !complete) ||
                 !record.accountId ||
                 !record.roomId ||
                 record.importFailures.length > 0

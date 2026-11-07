@@ -505,3 +505,19 @@ Failed or uncertain photo outcomes remain visible for recovery.
 Removing the final photo from an otherwise empty share shows the neutral message Nothing to send.
 Send remains disabled until the share has content; size-limit advice is not shown for an empty draft.
 A separate source message is still retained and sendable when its last photo is removed.
+
+### Photo intake and review safeguards
+
+Photo intake fails closed rather than silently delivering a subset of the selected content.
+Selecting more than ten photos stages no photos; an unsupported provider or earlier import failure also stops later photo and supplied-preview loads.
+Already-retained partial content stays in a draft with a specific import-failure message and Send disabled; discard that draft and share the intended selection again.
+The native composer and Pending Shares both keep Send disabled for an otherwise empty draft, and native send validation rejects empty content before any network call.
+
+Inspection reads source metadata with full-image caching disabled and requests only a thumbnail bounded to 480 pixels per edge.
+Immediate caching applies to that thumbnail rather than a full-resolution raster; device peak memory for unusual high-resolution HEIC/panorama files remains part of manual acceptance.
+Published preview caches count toward the pending-storage cap as unreferenced regular files even after their temporary reservations are removed.
+
+Batch resizing reports the filenames left at Original, and each photo's size control plus the aggregate Mixed state reflects the actual saved choices.
+Unchanged upload estimates are checked before processing, and the running byte cap is checked after each encoded result so an over-limit batch does not resize its remaining items.
+The final manifest update remains atomic; compressed output sizes cannot be predicted exactly before encoding.
+Whitespace-only legacy source text uses the same message predicate during migration and delivery in both Swift and TypeScript.

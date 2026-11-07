@@ -38,6 +38,82 @@ final class PhotoShareTests: XCTestCase {
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+  func testPublishedPreviewStillCountsAgainstPendingQuotaAfterReservationRemoval() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source)
+    var draft = try store.claim(store.create(text: "").id)
+    draft = try store.importFile(draft.id, owner: draft.owner!, source: source, name: "photo.png", mime: "image/png", photo: true)
+    let directory = root.appendingPathComponent(draft.id)
+    let cache = directory.appendingPathComponent(draft.files[0].id + ".preview")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: cache.path))
+    XCTAssertFalse(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).contains { $0.pathExtension == "reservation" })
+    let filler = directory.appendingPathComponent("retained-orphan")
+    try Data().write(to: filler)
+    let handle = try FileHandle(forWritingTo: filler)
+    // Without the published cache there is exactly room for one more record.
+    let bytes = ShareLimits.pendingBytes - 16 * 1024 - 2 * ShareLimits.metadataReservation - draft.bytes
+    try handle.truncate(atOffset: UInt64(bytes))
+    try handle.close()
+    XCTAssertThrowsError(try store.create(text: "")) { XCTAssertEqual($0 as? ShareFailure, .quota) }
+    try FileManager.default.removeItem(at: cache)
+    XCTAssertNoThrow(try store.create(text: ""))
+  }
+
+  func testInspectionDownsamplesAHighResolutionPanorama() throws {
+    let source = root.appendingPathComponent("panorama.png")
+    try PhotoFixture.write(source, width: 60000, height: 32)
+    let original = try Data(contentsOf: source)
+    let inspected = try PhotoShare.inspect(source)
+    XCTAssertEqual(inspected.mime, "image/png")
+    let thumbnail = try XCTUnwrap(CGImageSourceCreateWithData(inspected.thumbnail as CFData, nil))
+    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(thumbnail, 0, nil))
+    XCTAssertLessThanOrEqual(image.width, 480)
+    XCTAssertLessThanOrEqual(image.height, 480)
+    XCTAssertEqual(try Data(contentsOf: source), original)
+  }
+
+  func testWhitespaceOnlyLegacyTextDoesNotAdoptAPhotoOutcome() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source)
+    var draft = try store.claim(store.create(text: "").id)
+    draft = try store.importFile(draft.id, owner: draft.owner!, source: source, name: "photo.png", mime: "image/png", photo: true)
+    for version in 1...3 {
+      for state: DeliveryState in [.sent, .dispatching, .unknown] {
+        var legacy = draft
+        legacy.version = version
+        legacy.text = " \t\n"
+        legacy.files[0].caption = nil
+        legacy.files[0].operation!.state = state
+        legacy.files[0].operation!.eventId = state == .sent ? "$photo" : nil
+        let current = legacy.canonicalized()
+        XCTAssertFalse(current.hasMessage)
+        XCTAssertEqual(current.operation, legacy.operation)
+        XCTAssertEqual(current.deliveryOperations.count, 1)
+        XCTAssertEqual(current.files[0].operation, legacy.files[0].operation)
+      }
+    }
+  }
+
+  func testSizeChangeRejectsAnImpossibleKnownBudgetBeforeOpeningTargets() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source)
+    var draft = try store.claim(store.create(text: "").id)
+    for name in ["first.png", "second.png"] {
+      draft = try store.importFile(draft.id, owner: draft.owner!, source: source, name: name, mime: "image/png", photo: true)
+    }
+    // A bounded legacy estimate can fill the budget before the selected photo
+    // is opened. Preserve the original manifest if preflight rejects it.
+    draft.files[1].photoSize = .large
+    draft.files[1].photoBytes = ShareLimits.batchBytes
+    let directory = root.appendingPathComponent(draft.id)
+    try ShareJSON.encode(draft).write(to: directory.appendingPathComponent("manifest.json"))
+    try FileManager.default.removeItem(at: directory.appendingPathComponent(draft.files[0].id))
+    XCTAssertThrowsError(try store.setPhotoSize(draft, size: .small, file: draft.files[0].id)) {
+      XCTAssertEqual($0 as? ShareFailure, .quota)
+    }
+    XCTAssertEqual(try store.list().first, draft)
+  }
+
   func testRenamePreservesPhotoIdentityAndRecoveryAndFencesDelivery() throws {
     let source = root.appendingPathComponent("source.png")
     try PhotoFixture.write(source)

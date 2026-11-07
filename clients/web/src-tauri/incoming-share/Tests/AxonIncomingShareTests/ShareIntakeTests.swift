@@ -190,6 +190,49 @@
       }
       XCTAssertTrue(try store.list().isEmpty)
     }
+    func testNonImageDualURLProvidersKeepRemoteLinksAndRejectLocalURLs() async throws {
+      for raw in [link, "file:///private/fixture.html"] {
+        let provider = NSItemProvider()
+        provider.registerItem(forTypeIdentifier: UTType.url.identifier) { complete, _, _ in
+          complete?(URL(string: raw)! as NSURL, nil)
+        }
+        provider.registerItem(forTypeIdentifier: UTType.fileURL.identifier) { complete, _, _ in
+          XCTFail("The local-file alternative must not be requested")
+          complete?(nil, NSError(domain: "fixture", code: 1))
+        }
+        let item = NSExtensionItem()
+        item.attributedContentText = NSAttributedString(string: "Keep accompanying text")
+        item.attachments = [provider]
+        let result = try await Task.detached { try ShareIntake.importItems([item], store: self.store) }.value
+        XCTAssertTrue(result.files.isEmpty)
+        XCTAssertTrue(result.text.contains("Keep accompanying text"))
+        if raw == link {
+          XCTAssertTrue(result.text.contains(link))
+          XCTAssertTrue(result.importFailures.isEmpty)
+        } else {
+          XCTAssertEqual(result.importFailures, ["unsupported_url"])
+        }
+      }
+    }
+
+    func testDualURLImageProviderStillStagesAPhotoInsteadOfItsFileURL() throws {
+      let source = root.appendingPathComponent("source.png")
+      try PhotoFixture.write(source)
+      let provider = TrackedPhoto(source: source)
+      for type in [UTType.url, .fileURL] {
+        provider.registerItem(forTypeIdentifier: type.identifier) { complete, _, _ in
+          XCTFail("Local images must use their image representation")
+          complete?(nil, NSError(domain: "fixture", code: 1))
+        }
+      }
+      let item = NSExtensionItem()
+      item.attachments = [provider]
+      let result = try ShareIntake.importItems([item], store: store)
+      XCTAssertEqual(result.files.filter { !$0.thumbnail }.count, 1)
+      XCTAssertTrue(result.importFailures.isEmpty)
+      XCTAssertEqual(provider.loads, 1)
+    }
+
     func testPublicURLAndAccompanyingTextImportOnceWithoutFetching() async throws {
       let item = NSExtensionItem()
       item.attributedContentText = NSAttributedString(string: "Useful accompanying prose " + link)

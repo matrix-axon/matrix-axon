@@ -118,7 +118,7 @@ public struct ShareManifest: Codable, Equatable {
   public func canonicalized() -> ShareManifest {
     guard version < 4 else { return self }
     var next = self
-    if let first = files.first(where: { !$0.thumbnail }), !text.isEmpty,
+    if let first = files.first(where: { !$0.thumbnail }), hasMessage,
       let delivery = first.operation, [.sent, .dispatching, .unknown].contains(delivery.state) {
       next.operation.state = delivery.state == .dispatching ? .unknown : delivery.state
       next.operation.eventId = delivery.eventId

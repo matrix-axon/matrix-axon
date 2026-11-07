@@ -506,6 +506,19 @@ final class TextShareTests: XCTestCase {
     return try store.update(value)
   }
 
+  func testRemovingLastPhotoRejectsEmptyDeliveryBeforeAnyNetworkCall() throws {
+    var value = try photos(1)
+    value = try store.removeFile(value, file: value.files[0].id)
+    var requests = 0
+    let blocked = sender { _, _, _, _, _, _, _, _ in
+      requests += 1
+      throw ShareFailure.unavailable
+    }
+    XCTAssertEqual(TextShare.validation(value), "empty_text")
+    XCTAssertThrowsError(try blocked.send(value)) { XCTAssertEqual($0 as? ShareFailure, .invalid) }
+    XCTAssertEqual(requests, 0)
+  }
+
   func testSourceMessageAndPhotosSendIndependentlyWithCardsOnlyOnTheSourceMessage() throws {
     var value = try photos()
     value.text = link
