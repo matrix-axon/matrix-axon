@@ -19,9 +19,9 @@ Text, web URLs, and up to ten photos are supported.
 Video and general-file intake remain outstanding work in stage 7 of [the sharing plan](mobile-incoming-sharing.md).
 Photos appear in provider order with bounded display thumbnails, filenames, and saved delivery states.
 Each photo has its own optional caption field inside its photo box, directly below the filename.
-An empty field shows **Caption**; tapping it opens a blank multiline editor, and **Done** dismisses the keyboard.
+An empty field shows **Caption**; tapping it opens a blank single-line editor, and **Done** dismisses the keyboard.
 Shared source text initially populates the first photo's caption; other photos start with empty captions.
-Edit each caption independently or remove individual photos before sending.
+Edit each caption independently or use the trash icon at the top right of each photo block to remove that photo before sending.
 Each photo has a native **Photo size** menu: **Original**, **Large (2048 px)**, **Medium (1280 px)**, or **Small (640 px)**.
 Reduced sizes cap the longest edge without upscaling; Original is the default.
 For multiple photos, **Size for all photos** applies one choice to the batch; change an individual photo afterward to override it, and the batch menu shows **Mixed**.
@@ -76,7 +76,10 @@ The **Link preview** section appears above the message editor and shows **Link o
 At accessibility text sizes, the action moves below the status so its full label remains readable.
 Information buttons beside **Link preview** and **Use homeserver instead** explain the corresponding network requests and privacy implications.
 Viewing this information performs no lookup; homeserver lookup still requires separate confirmation.
-**Send** stays in the navigation bar; after confirmed delivery it becomes **Done**.
+**Send** stays in the navigation bar.
+Once every item is confirmed sent, Axon acknowledges the completed draft and automatically dismisses the extension back to the source app.
+Partial failures and uncertain outcomes stay open for review.
+If completed-draft cleanup fails, **Done** retries closing without resending the confirmed messages.
 Disabled or unavailable previews leave the original plain link editable and sendable.
 Device status distinguishes unavailable metadata, a timeout, and a text card with an absent/unavailable image.
 The separate homeserver action distinguishes disabled previews, an unsupported service, a timeout, an unavailable URL, a busy service, and missing usable metadata.
@@ -109,7 +112,7 @@ If closing fails, lease renewal and editing remain available for retry; transien
 **Cancel** interrupts provider reads and HTTP requests, stops queued work and heartbeats, and discards an undispatched share without sending it.
 Cancellation reconciles the latest saved delivery state under the shared lock; an uncertain dispatch is retained without ownership for explicit recovery.
 A message already dispatched may have been delivered; its saved outcome remains in Pending shares.
-Cancel after confirmed success acknowledges and removes that completed record, as Done does; unknown delivery outcomes remain recoverable.
+If completed-draft cleanup failed, Cancel or Done acknowledges and removes the completed record; unknown delivery outcomes remain recoverable.
 Confirmed success records the Matrix event ID for the message or each delivered photo.
 An interrupted request or missing success response is **outcome unknown**, never automatically resent.
 Inspect the destination before explicitly consenting to a possible duplicate in recovery.
@@ -421,3 +424,18 @@ The signed debugging export passed its capability/profile/activation checks, and
 The same IPA was installed on the paired iPhone and iPad running iOS 27.2 through `pymobiledevice3 apps install --developer --streaming`.
 The `devicectl` install route failed because the installed developer disk image lacks the device variant; the paired installation service succeeded without mounting that image.
 The WebKit host limitation and real Photos.app send acceptance checklist remain unchanged.
+
+### Automatic completion and compact photo controls — November 7
+
+Successful text, single-photo, and multi-photo sends now acknowledge their completed drafts and dismiss automatically.
+Partial failures and unknown delivery outcomes stay open; a completed-draft cleanup failure retains Done for a cleanup-only retry without sending again.
+Photo rows now use a single-line caption field and an accessible 44-point trash control at the top right; the reduced-size explanatory paragraph was removed.
+Verification passed 171 shared iOS Simulator tests (two opt-in network checks skipped), all 18 composer lifecycle tests, and all five simulator UI tests.
+The lifecycle tests exercise successful text/single/batch completion, partial definite rejection, unknown delivery, failed completion cleanup, and cleanup retry without another send.
+The photo UI test verifies the compact field height, trash placement, independent captions, and removal behavior.
+Web lint, all 2,992 unit tests (two skipped), OpenAPI/preview-contract checks, and the production build passed.
+The signed debugging export passed its artifact checks and was installed on the paired iPhone.
+The final extension binary contains the new trash controls and completion handling, and no longer contains the reduced-size explanation.
+The iPad installation attempt found no matching connected device; `devicectl` reported it disconnected, and usbmux listed only the iPhone.
+The same signed IPA is ready for iPad installation after reconnection.
+Real Photos.app send acceptance remains a separate manual check.
