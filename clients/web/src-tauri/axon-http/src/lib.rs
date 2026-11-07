@@ -109,7 +109,9 @@ fn method(name: &str) -> Result<Method> {
 
 /// Headers `fetch` forbids a page to set, which `tauri-plugin-http` drops as
 /// well. A webview's `Request` already refuses most of them; the rest would
-/// fight hyper's own framing.
+/// fight hyper's own framing. `Accept-Encoding` is the client's to choose:
+/// reqwest adds the encodings it can decode, and `Outgoing::build` asks for
+/// `identity` on a `Range` request.
 fn is_forbidden(name: &HeaderName) -> bool {
     matches!(
         *name,

@@ -1556,3 +1556,131 @@ async fn post_and_put_resets_are_never_retried() {
         assert_eq!(stats.retries.nack, 0, "{method}");
     }
 }
+
+// ===== response compression (#990) =====
+
+/// A body large enough to arrive in several chunks, so decoding is exercised
+/// across `read_body` calls rather than on one buffer.
+fn compressible_body() -> Vec<u8> {
+    br#"{"room_id":"!abc:example.org","display_name":"A room","last_activity_ts":1794088676000},"#
+        .repeat(2000)
+}
+
+fn brotli_encode(plain: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
+    writer.write_all(plain).unwrap();
+    writer.into_inner()
+}
+
+fn gzip_encode(plain: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(plain).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// Answers with `compressible_body`, encoded as `encode` picks from the
+/// request's `Accept-Encoding` (`None` sends it as is). It echoes the
+/// `Accept-Encoding` it saw in `x-seen-accept-encoding`.
+fn encoding_handler(encode: fn(&str) -> Option<&'static str>) -> Handler {
+    handler(move |req: hyper::Request<Incoming>| async move {
+        let seen = req
+            .headers()
+            .get("accept-encoding")
+            .map(|value| value.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        let plain = compressible_body();
+        let (encoding, body) = match encode(&seen) {
+            Some("br") => (Some("br"), brotli_encode(&plain)),
+            Some("gzip") => (Some("gzip"), gzip_encode(&plain)),
+            Some(other) => panic!("no encoder for {other}"),
+            None => (None, plain),
+        };
+        let length = body.len();
+        let mut response = reply(200, TestBody::Full(Some(Bytes::from(body))));
+        let headers = response.headers_mut();
+        headers.insert("x-seen-accept-encoding", seen.parse().unwrap());
+        headers.insert("content-length", length.into());
+        if let Some(encoding) = encoding {
+            headers.insert("content-encoding", encoding.parse().unwrap());
+        }
+        response
+    })
+}
+
+fn header<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
+    head.headers
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+#[tokio::test]
+async fn responses_are_asked_for_compressed_and_decoded_from_brotli() {
+    // As the axon server answers: brotli whenever it is offered.
+    let server = Server::start(
+        true,
+        encoding_handler(|seen| seen.contains("br").then_some("br")),
+    )
+    .await;
+    let transport = transport();
+    let (head, body) = fetch(&transport, 0, get(&server.url("/v1/rooms"))).await;
+    // The page cannot set `Accept-Encoding` (it is forbidden and dropped), so
+    // this is the transport's own offer.
+    assert_eq!(header(&head, "x-seen-accept-encoding"), Some("gzip,br"));
+    assert_eq!(body, compressible_body());
+    // The page is handed decoded bytes, so it must not be told they are
+    // encoded, or be given the encoded length.
+    assert_eq!(header(&head, "content-encoding"), None);
+    assert_eq!(header(&head, "content-length"), None);
+}
+
+#[tokio::test]
+async fn a_gzip_response_is_decoded() {
+    // Gzip whatever was offered, so a transport that cannot decode it is
+    // handed the encoded bytes rather than a plain body that passes anyway.
+    let server = Server::start(false, encoding_handler(|_| Some("gzip"))).await;
+    let transport = transport();
+    let (head, body) = fetch(&transport, 0, get(&server.url("/"))).await;
+    assert_eq!(body, compressible_body());
+    assert_eq!(header(&head, "content-encoding"), None);
+}
+
+#[tokio::test]
+async fn a_range_request_asks_for_identity_and_keeps_its_length() {
+    // A server that would compress anything it is allowed to.
+    let server = Server::start(
+        false,
+        encoding_handler(|seen| match seen {
+            "identity" | "" => None,
+            _ => Some("gzip"),
+        }),
+    )
+    .await;
+    let transport = transport();
+    let mut ranged = get(&server.url("/v1/media/x"));
+    ranged
+        .headers
+        .insert(reqwest::header::RANGE, "bytes=0-".parse().unwrap());
+    let (head, body) = fetch(&transport, 0, ranged).await;
+    // A byte range indexes the stored representation, so it must not be
+    // replaced by our offer of compression.
+    assert_eq!(header(&head, "x-seen-accept-encoding"), Some("identity"));
+    assert_eq!(body, compressible_body());
+    let length = compressible_body().len().to_string();
+    assert_eq!(header(&head, "content-length"), Some(length.as_str()));
+}
+
+#[tokio::test]
+async fn a_page_supplied_accept_encoding_is_replaced_by_the_transports() {
+    let server = Server::start(false, encoding_handler(|_| None)).await;
+    let transport = transport();
+    let mut outgoing = get(&server.url("/"));
+    // Through the same conversion `send` applies to the page's headers: an
+    // encoding the transport cannot decode must not reach the server.
+    outgoing.headers =
+        crate::outgoing_headers(vec![("Accept-Encoding".into(), "zstd".into())], None).unwrap();
+    let (head, _) = fetch(&transport, 0, outgoing).await;
+    assert_eq!(header(&head, "x-seen-accept-encoding"), Some("gzip,br"));
+}
