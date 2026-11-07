@@ -386,7 +386,7 @@ Use manual interaction on the signed iPhone and iPad; keep XCTest UI automation 
 2. Share a cloud-backed photo, a photo above the preview-thumbnail ceiling, and a selection exceeding ten photos or 100 MiB.
    Exercise low storage, unreadable content, cancellation during import, and termination during import; no incomplete selection may send.
 3. Interrupt after the confirmed source message, after the first confirmed photo, during a later upload, and after message acceptance but before its response.
-   Verify saved per-item states and event IDs in Pending shares, explicit duplicate-risk consent, and no repeated confirmed source message, photo, or card.
+   Verify saved per-item states and event IDs in Pending shares, explicit retry of uncertain items without a confirmation checkbox, and no repeated confirmed source message, photo, or card.
 4. Check photo removal and recovery on iPad in split view, large Dynamic Type, VoiceOver, and with the keyboard visible.
    Verify sign-out/account removal fences pending work and discard/expiry cleans protected originals.
 
@@ -485,3 +485,7 @@ Closing during review acquisition waits for the claim and releases it too; reope
 Live dispatch retains ownership until its delivery outcome is recorded.
 Review acquisition displays Opening share, and a failed review displays its error beside the selected review button.
 Native diagnostics record generated share IDs for claim, release, and busy outcomes without recording message content or credentials.
+
+The retry control for an uncertain item is available directly, without a duplicate-delivery checkbox.
+Choosing Retry item prepares that item for the next Send reviewed share action; confirmed items continue to be skipped.
+Native bridge JSON parsing preserves fractional timestamps exactly, so saving a draft or releasing its owner does not falsely fail the immutable creation-time check.

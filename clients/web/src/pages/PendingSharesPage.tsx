@@ -74,12 +74,10 @@ export function PendingSharesPage() {
   const [reviewId, setReviewId] = useState<string | null>(null)
   const [draggedPhoto, setDraggedPhoto] = useState<string | null>(null)
   const [messageEditorId, setMessageEditorId] = useState<string | null>(null)
-  const [duplicateRisk, setDuplicateRisk] = useState(false)
   const [homeserverURL, setHomeserverURL] = useState<string | null>(null)
   const [clearIds, setClearIds] = useState<string[] | null>(null)
   const selectedId = store?.selected.value?.id
   useEffect(() => {
-    setDuplicateRisk(false)
     setHomeserverURL(null)
   }, [selectedId])
   useEffect(() => {
@@ -126,10 +124,10 @@ export function PendingSharesPage() {
       {(item.state === 'failed' || item.state === 'unknown') && (
         <button
           type="button"
-          disabled={busy || (item.state === 'unknown' && !duplicateRisk)}
-          onClick={() => act(store.retry(item.id, duplicateRisk))}
+          disabled={busy}
+          onClick={() => act(store.retry(item.id, true))}
         >
-          {item.state === 'unknown' ? 'Allow explicit resend' : 'Prepare retry'}
+          {item.state === 'unknown' ? 'Retry item' : 'Prepare retry'}
         </button>
       )}
     </li>
@@ -654,17 +652,9 @@ export function PendingSharesPage() {
                   .map((file) => operation(file.operation!, file.name))
               : operation(record.operation, 'Message')}
           </ul>
-          <label>
-            <input
-              type="checkbox"
-              checked={duplicateRisk}
-              onChange={(event) =>
-                setDuplicateRisk(event.currentTarget.checked)
-              }
-            />
-            I understand an uncertain item may already have been delivered and
-            resending can create a duplicate.
-          </label>
+          {store.error.value !== null && (
+            <p class="pending-share-exit-error">{store.error.value}</p>
+          )}
           <div class="pending-share-actions">
             {busy && (
               <button type="button" onClick={() => store.cancel()}>

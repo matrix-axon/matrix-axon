@@ -44,7 +44,7 @@ Thus a nearly full inbox can reject a batch below its independent 100 MiB ceilin
 
 Confirmed items retain their event IDs and are never resent during recovery.
 An interrupted dispatch is **outcome unknown**, because the server may have accepted it without returning a response.
-Inspect the destination before explicitly allowing a resend; the duplicate-risk checkbox never triggers a send itself.
+Choose Retry item to prepare an uncertain item for the next explicit send; no confirmation checkbox is required.
 Stopping a batch prevents subsequent dispatches after the current request finishes, and cannot recall a message already accepted upstream.
 Discarding a partial batch never deletes preview upload handles already associated with its delivered source message or a combined legacy first attachment.
 
@@ -242,7 +242,8 @@ A subsequent read of that room found exactly one timeline event containing its u
 An attempted response interception did not modify Tauri's immutable invocation function, so that successful send is not evidence of a network interruption.
 A separate synthetic record was advanced through the real native bridge to a durable dispatch checkpoint before process termination, without making a network request.
 After lease expiry, the relaunched app retained the text, reclaimed ownership, and displayed outcome unknown.
-Explicit resend remained disabled while duplicate-risk consent was unchecked.
+At that earlier validation, explicit resend remained disabled while duplicate-risk consent was unchecked.
+The current UI replaces that checkbox with a direct Retry item action.
 The synthetic uncertain record was then discarded without resending.
 This distinguishes physical crash-checkpoint recovery from an interrupted live transfer.
 Full VoiceOver use, Dynamic Type, split-view interaction, and real extension transfer interruption remain later-stage device checks.

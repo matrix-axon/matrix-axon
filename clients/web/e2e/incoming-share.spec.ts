@@ -320,9 +320,8 @@ test('recovery preserves cards and uncertain outcomes until explicit discard', a
   await expect(
     page.getByRole('button', { name: 'Send reviewed share' }),
   ).toBeDisabled()
-  await expect(
-    page.getByRole('button', { name: 'Allow explicit resend' }),
-  ).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Retry item' })).toBeEnabled()
+  await expect(page.getByRole('checkbox')).toHaveCount(0)
   await page.getByRole('button', { name: 'Keep draft', exact: true }).click()
   await page.evaluate(() => location.assign('/e2e/incoming-share.html'))
   await page.getByRole('button', { name: 'Review share', exact: true }).click()
@@ -386,9 +385,7 @@ test('typing persists in batches and refresh recovers expired ownership', async 
     localStorage.setItem('fixture.incoming', JSON.stringify(records))
     window.dispatchEvent(new Event('focus'))
   })
-  await expect(
-    page.getByText('Ownership renewed', { exact: false }),
-  ).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText('Ownership renewed')
   await expect(editor).toHaveValue(expected)
   await editor.fill('Reclaimed draft https://example.org/article')
   await page.getByRole('button', { name: 'Keep draft', exact: true }).click()
@@ -508,11 +505,11 @@ for (const partial of [false, true]) {
       for (const button of await photos.getByRole('button').all())
         await expect(button).toBeDisabled()
       const retry = page.getByRole('button', {
-        name: 'Allow explicit resend',
+        name: 'Retry item',
         exact: true,
       })
-      await expect(retry).toBeDisabled()
-      await page.getByRole('checkbox').check()
+      await expect(retry).toBeEnabled()
+      await expect(page.getByRole('checkbox')).toHaveCount(0)
       await retry.click()
       await expect(
         page.getByRole('list', { name: 'Delivery outcomes' }),
