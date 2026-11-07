@@ -10,6 +10,7 @@ private final class ComposerRoomsProtocol: URLProtocol {
     let started: XCTestExpectation
     var body: Data?
     var accounts: Data
+    var response: ((URLRequest) -> (Int, Data))?
     init(started: XCTestExpectation, body: Data?, accounts: Data) {
       self.started = started
       started.assertForOverFulfill = false
@@ -27,22 +28,120 @@ private final class ComposerRoomsProtocol: URLProtocol {
     Self.lock.lock()
     let reply = Self.replies[request.url!.host!]
     let body = request.url?.path == "/v1/accounts" ? reply?.accounts : reply?.body
+    let responder = reply?.response
     Self.lock.unlock()
     guard let reply else { return }
-    if request.url?.path == "/v1/rooms" { reply.started.fulfill() }
-    guard let body else { return }
+    let path = request.url?.path
+    if path == "/v1/rooms" { reply.started.fulfill() }
+    let status: Int
+    let payload: Data
+    if path != "/v1/rooms" && path != "/v1/accounts", let responder {
+      (status, payload) = responder(request)
+    } else {
+      guard let body else { return }
+      (status, payload) = (200, body)
+    }
     client?.urlProtocol(
       self,
       didReceive: HTTPURLResponse(
-        url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+        url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
         headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
-    client?.urlProtocol(self, didLoad: body)
+    client?.urlProtocol(self, didLoad: payload)
     client?.urlProtocolDidFinishLoading(self)
   }
   override func stopLoading() {}
 }
 
 final class ComposerLifecycleTests: XCTestCase {
+  func testConfirmedTextSinglePhotoAndBatchCloseAutomaticallyAfterCleanup() throws {
+    for count in 0...2 {
+      let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+      var sent = 0
+      fixture.respond { request in
+        if request.url!.path.hasSuffix("/media/uploads") {
+          return (200, Data("{\"data\":{\"upload_id\":\"\(UUID().uuidString)\"}}".utf8))
+        }
+        sent += 1
+        return (200, Data("{\"data\":{\"event_id\":\"$sent-\(sent)\"}}".utf8))
+      }
+      var closed = 0
+      let model = fixture.composer { closed += 1 }
+      let item = count == 0 ? fixture.item : fixture.photos()
+      if count == 1 { item.attachments = Array(item.attachments!.prefix(1)) }
+      load(model) { model.start([item]) }
+      model.chooseRoom("!first:example.org")
+      XCTAssertTrue(model.canSend)
+      model.send()
+      wait(for: [fixture.closed], timeout: 5)
+      XCTAssertEqual(sent, max(1, count))
+      XCTAssertEqual(closed, 1)
+      XCTAssertTrue(try fixture.store.list().isEmpty)
+      model.send()
+      model.cancel()
+      XCTAssertEqual(closed, 1)
+      XCTAssertEqual(sent, max(1, count))
+    }
+  }
+
+  func testPartialFailureAndUnknownDeliveryStayOpenWithConfirmedOutcomes() throws {
+    for status in [400, 500] {
+      let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+      var sent = 0
+      fixture.respond { request in
+        if request.url!.path.hasSuffix("/media/uploads") {
+          return (200, Data("{\"data\":{\"upload_id\":\"\(UUID().uuidString)\"}}".utf8))
+        }
+        sent += 1
+        if sent == 1 { return (200, Data("{\"data\":{\"event_id\":\"$confirmed\"}}".utf8)) }
+        return (status, Data("{\"error\":{\"code\":\"bad_request\"}}".utf8))
+      }
+      var closed = 0
+      let model = fixture.composer { closed += 1 }
+      load(model) { model.start([fixture.photos()]) }
+      model.chooseRoom("!first:example.org")
+      load(model) { model.send() }
+      XCTAssertEqual(closed, 0)
+      XCTAssertEqual(model.record?.files.map { $0.operation?.state }, [.sent, status == 400 ? .failed : .unknown])
+      XCTAssertEqual(model.record?.files.first?.operation?.eventId, "$confirmed")
+      XCTAssertFalse(model.canSend)
+      model.cancel()
+      wait(for: [fixture.closed], timeout: 3)
+      XCTAssertEqual(try fixture.store.list().first?.files.first?.operation?.eventId, "$confirmed")
+    }
+  }
+
+  func testCleanupFailureRetainsConfirmedSuccessAndDoneRetriesWithoutSending() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    var sent = 0
+    fixture.respond { _ in
+      sent += 1
+      return (200, Data("{\"data\":{\"event_id\":\"$confirmed\"}}".utf8))
+    }
+    var closed = 0
+    let model = fixture.composer { closed += 1 }
+    load(model) { model.start([fixture.item]) }
+    model.chooseRoom("!first:example.org")
+    let blocked = model.$record.filter { $0?.completed == true }.prefix(1).sink { _ in
+      do { try fixture.blockStorage() } catch { XCTFail("Could not inject cleanup failure: \(error)") }
+    }
+    let failed = expectation(description: "completed cleanup failure shown")
+    let status = model.$status.filter { $0.contains("completed draft could not be removed") }.prefix(1).sink { _ in failed.fulfill() }
+    model.send()
+    wait(for: [failed], timeout: 5)
+    blocked.cancel()
+    status.cancel()
+    XCTAssertEqual(closed, 0)
+    XCTAssertEqual(sent, 1)
+    XCTAssertFalse(model.canSend)
+    XCTAssertFalse(model.status.contains("Nothing was sent"))
+    try fixture.restoreStorage()
+    XCTAssertEqual(try fixture.store.list().first?.operation.state, .sent)
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
+    XCTAssertEqual(sent, 1)
+    XCTAssertTrue(try fixture.store.list().isEmpty)
+  }
+
   func testPhotoOnlyComposerAllowsEmptyCaptionRemovalAndDraftRecovery() throws {
     let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
     let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 24)).image { context in
@@ -435,6 +534,11 @@ private final class ComposerFixture {
     ComposerRoomsProtocol.lock.lock()
     ComposerRoomsProtocol.replies[host]?.accounts = accountData
     ComposerRoomsProtocol.replies[host]?.body = roomData
+    ComposerRoomsProtocol.lock.unlock()
+  }
+  func respond(_ response: @escaping (URLRequest) -> (Int, Data)) {
+    ComposerRoomsProtocol.lock.lock()
+    ComposerRoomsProtocol.replies[host]?.response = response
     ComposerRoomsProtocol.lock.unlock()
   }
   static func transport() -> ShareHTTP {

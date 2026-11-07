@@ -110,23 +110,24 @@ final class ActivationUITests: XCTestCase {
   func testPhotoCaptionsAreInlineIndependentAndFollowTheirImageOnRemoval() {
     let app = XCUIApplication()
     chooseSource("source-photo-size", app: app)
-    let fields = app.textViews.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-caption-'"))
+    let fields = app.textFields.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-caption-'"))
     XCTAssertTrue(fields.firstMatch.waitForExistence(timeout: 15))
     XCTAssertFalse(app.textViews["Message text"].exists)
     // Form materializes the visible row only: the initial AX query reported
-    // one text view for two photos. Scroll before looking up the other row.
+    // one editor for two photos. Scroll before looking up the other row.
     let firstID = fields.firstMatch.identifier
-    let first = app.textViews[firstID]
+    let first = app.textFields[firstID]
     reveal(first, app: app)
+    XCTAssertLessThanOrEqual(first.frame.height, 45)
     first.tap()
     XCTAssertEqual(first.value as? String ?? "", "")
     first.typeText("First coast")
     app.buttons["share-photo-caption-done"].tap()
-    let other = app.textViews.matching(NSPredicate(
+    let other = app.textFields.matching(NSPredicate(
       format: "identifier BEGINSWITH 'share-photo-caption-' AND identifier != %@", firstID)).firstMatch
     reveal(other, app: app)
     let secondID = other.identifier
-    let second = app.textViews[secondID]
+    let second = app.textFields[secondID]
     second.tap()
     XCTAssertEqual(second.value as? String ?? "", "")
     second.typeText("Second mountain")
@@ -135,7 +136,9 @@ final class ActivationUITests: XCTestCase {
     reveal(first, app: app, down: true)
     XCTAssertEqual(first.value as? String, "First coast")
     let remove = app.buttons["Remove photo"].firstMatch
-    reveal(remove, app: app)
+    reveal(remove, app: app, down: true)
+    XCTAssertGreaterThan(remove.frame.minX, first.frame.midX)
+    XCTAssertLessThan(remove.frame.minY, first.frame.minY)
     let screenshot = XCTAttachment(screenshot: app.screenshot())
     screenshot.name = "Captions inside photo boxes"
     screenshot.lifetime = .keepAlways
@@ -143,7 +146,7 @@ final class ActivationUITests: XCTestCase {
     remove.tap()
     let removed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: first)
     XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 10), .completed)
-    let remaining = app.textViews[secondID]
+    let remaining = app.textFields[secondID]
     reveal(remaining, app: app)
     XCTAssertEqual(remaining.value as? String, "Second mountain")
     app.buttons["Cancel"].firstMatch.tap()

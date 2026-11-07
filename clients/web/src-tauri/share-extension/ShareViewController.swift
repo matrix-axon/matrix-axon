@@ -281,14 +281,19 @@ final class ShareComposer: ObservableObject {
       }
     }
   }
-  func run(blocking: Bool = true, _ action: @escaping () throws -> String) {
+  func run(
+    blocking: Bool = true, dismissOnSuccess: Bool = false,
+    _ action: @escaping () throws -> String
+  ) {
     guard !closing else { return }
     if blocking { busy = true }
     queue.async {
       let message: String
+      var succeeded = false
       do {
         try self.cancellation.check()
         message = try action()
+        succeeded = true
       } catch {
         if (try? self.cancellation.check()) != nil {
           Self.log.error(
@@ -303,9 +308,10 @@ final class ShareComposer: ObservableObject {
         if outcomes.contains(where: { [.dispatching, .unknown].contains($0.state) }) {
           message =
             "Delivery outcome unknown. A dispatched message may have been delivered. Check the destination before any explicit resend in Axon."
-        } else if !fenced && confirmed > 0 && self.current?.completed == false {
-          message =
-            "Confirmed photos: \(confirmed). Sending stopped. Review the remaining items in Axon → Pending shares; confirmed photos will not be resent."
+        } else if !fenced && confirmed > 0 {
+          message = self.current?.completed == true
+            ? "Sent successfully. The completed draft could not be removed. Tap Done to retry closing; nothing will be resent."
+            : "Confirmed photos: \(confirmed). Sending stopped. Review the remaining items in Axon → Pending shares; confirmed photos will not be resent."
         } else {
           message = Self.explain(
             fenced ? ShareFailure.stale : error, draftSaved: self.current != nil)
@@ -368,6 +374,11 @@ final class ShareComposer: ObservableObject {
           id, caption in record?.files.first(where: { $0.id == id })?.caption != caption
         }) { self.edited() }
         if !message.isEmpty { UIAccessibility.post(notification: .announcement, argument: message) }
+        if dismissOnSuccess && succeeded && record?.completed == true {
+          // Reuse the acknowledged-completion cleanup before ending the request.
+          // Cleanup failure leaves Done available and cannot replay a send.
+          self.finish(discard: false)
+        }
       }
     }
   }
@@ -572,7 +583,7 @@ final class ShareComposer: ObservableObject {
     let captions = photoCaptions
     let account = account
     let room = room
-    run {
+    run(dismissOnSuccess: true) {
       try self.persist(text: text, captions: captions, account: account, room: room, retry: true)
       self.current = try self.sender!.send(self.current!, checkpoint: { self.current = $0 })
       let record = self.current!
@@ -764,8 +775,9 @@ private struct SharePhotoCaption: View {
   let file: String
   @FocusState private var focused: Bool
   var body: some View {
-    ZStack(alignment: .topLeading) {
-      TextEditor(text: $text).frame(minHeight: 72)
+    ZStack(alignment: .leading) {
+      TextField("", text: $text).frame(minHeight: 44)
+        .submitLabel(.done).onSubmit { focused = false }
         .focused($focused).accessibilityLabel("Caption")
         .accessibilityIdentifier("share-photo-caption-" + file)
         .toolbar {
@@ -778,7 +790,7 @@ private struct SharePhotoCaption: View {
           }
         }
       if text.isEmpty && !focused {
-        Text("Caption").foregroundColor(.secondary).padding(.leading, 5).padding(.top, 8)
+        Text("Caption").foregroundColor(.secondary)
           .allowsHitTesting(false).accessibilityHidden(true)
       }
     }
@@ -916,16 +928,23 @@ struct ShareComposeView: View {
             }
             Text("Estimated photos upload: \(ShareComposer.byteCount(model.photoUploadBytes))")
               .accessibilityIdentifier("share-photo-upload-total")
-            Text(
-              "Reduced sizes limit the longest edge without upscaling. JPEG/HEIC/HEIF becomes JPEG; PNG stays PNG. Originals remain available in this draft."
-            ).font(.caption)
             ForEach(photos, id: \.id) { photo in
               VStack(alignment: .leading, spacing: 8) {
-                if let image = model.images[photo.id] {
-                  Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 160)
-                    .accessibilityLabel("Photo: \(photo.name)")
-                } else {
-                  Text("Photo preview unavailable").font(.caption)
+                HStack(alignment: .top) {
+                  if let image = model.images[photo.id] {
+                    Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 160)
+                      .accessibilityLabel("Photo: \(photo.name)")
+                  } else {
+                    Text("Photo preview unavailable").font(.caption)
+                  }
+                  Spacer(minLength: 12)
+                  Button { model.removePhoto(photo.id) } label: {
+                    Image(systemName: "trash").frame(width: 44, height: 44).contentShape(Rectangle())
+                  }
+                  .buttonStyle(.borderless).disabled(!model.editable)
+                  .accessibilityLabel("Remove photo")
+                  .accessibilityHint(photo.name)
+                  .accessibilityIdentifier("share-photo-remove-" + photo.id)
                 }
                 Text(photo.name)
                 SharePhotoCaption(
@@ -951,8 +970,6 @@ struct ShareComposeView: View {
                 }.pickerStyle(.menu).disabled(!model.editable)
                   .accessibilityIdentifier("share-photo-size-item-" + photo.id)
                 Text(photo.operation?.state.rawValue ?? "ready").font(.caption)
-                Button("Remove photo") { model.removePhoto(photo.id) }
-                  .buttonStyle(.borderless).disabled(!model.editable)
               }
             }
           }
