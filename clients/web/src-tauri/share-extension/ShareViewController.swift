@@ -32,6 +32,7 @@ final class ShareViewController: UIViewController {
 final class ShareComposer: ObservableObject {
   private static let log = Logger(subsystem: "org.matrixaxon.axon", category: "share-extension")
   @Published var text = ""
+  @Published var photoCaptions: [String: String] = [:]
   @Published var account = ""
   @Published var room = ""
   @Published var roomSearch = ""
@@ -138,6 +139,7 @@ final class ShareComposer: ObservableObject {
   var validation: String? {
     guard var draft = record else { return "No draft" }
     draft.text = text
+    Self.applyCaptions(photoCaptions, to: &draft)
     let links = Set(TextShare.links(text))
     draft.previews = draft.previews?.filter { links.contains($0.matched_url) }
     return TextShare.validation(draft)
@@ -160,6 +162,30 @@ final class ShareComposer: ObservableObject {
     default: return "A source item could not be read or is not a supported image."
     }
   }
+  func photoCaption(_ file: String) -> String {
+    guard let record, let photo = record.files.first(where: { $0.id == file }) else { return "" }
+    if record.files.first(where: { !$0.thumbnail })?.id == file { return text }
+    return photoCaptions[file] ?? record.caption(for: photo)
+  }
+  func setPhotoCaption(_ caption: String, file: String) {
+    guard editable else { return }
+    if record?.files.first(where: { !$0.thumbnail })?.id == file {
+      text = caption
+    } else {
+      photoCaptions[file] = caption
+    }
+    edited()
+  }
+  private static func applyCaptions(_ captions: [String: String], to draft: inout ShareManifest) {
+    let first = draft.files.first(where: { !$0.thumbnail })?.id
+    for index in draft.files.indices where !draft.files[index].thumbnail && draft.files[index].id != first {
+      if let caption = captions[draft.files[index].id], caption != draft.files[index].caption {
+        draft.files[index].caption = caption
+        // Older readers must not silently send these photos without captions.
+        draft.version = 3
+      }
+    }
+  }
   var commonPhotoSize: SharePhotoSize? {
     let photos = record?.files.filter { !$0.thumbnail } ?? []
     let sizes = Set(photos.map { $0.photoSize ?? .original })
@@ -175,10 +201,11 @@ final class ShareComposer: ObservableObject {
     guard editable else { return }
     editSave?.cancel()
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, account: account, room: room)
       self.current = try self.store!.setPhotoSize(
         self.current!, size: size, file: file, cancellation: self.cancellation)
       return "Photo size updated. Review the estimated upload size before sending."
@@ -337,7 +364,9 @@ final class ShareComposer: ObservableObject {
         if blocking { self.busy = false }
         // A debounce can fire while a blocking action disables saving. Retry
         // the current editor text after it settles; never revive a fenced draft.
-        if blocking && self.editable && self.text != record?.text { self.edited() }
+        if blocking && self.editable && (self.text != record?.text || self.photoCaptions.contains {
+          id, caption in record?.files.first(where: { $0.id == id })?.caption != caption
+        }) { self.edited() }
         if !message.isEmpty { UIAccessibility.post(notification: .announcement, argument: message) }
       }
     }
@@ -432,9 +461,13 @@ final class ShareComposer: ObservableObject {
         "The server or source is unavailable or timed out. Your saved draft remains in Axon → Pending shares. Review it before retrying."
     }
   }
-  private func persist(text: String, account: String, room: String, retry: Bool = false) throws {
+  private func persist(
+    text: String, captions: [String: String]? = nil, account: String, room: String,
+    retry: Bool = false
+  ) throws {
     guard var next = current, let store else { throw ShareFailure.unavailable }
     next.text = text
+    if let captions { Self.applyCaptions(captions, to: &next) }
     next.accountId = account.isEmpty ? nil : account
     next.roomId = room.isEmpty ? nil : room
     let links = Set(TextShare.links(text))
@@ -455,11 +488,18 @@ final class ShareComposer: ObservableObject {
   func removePhoto(_ file: String) {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, account: account, room: room)
       self.current = try self.store!.removeFile(self.current!, file: file)
+      let remaining = self.current!
+      DispatchQueue.main.async {
+        self.text = remaining.text
+        let secondary = Set(remaining.files.filter { !$0.thumbnail }.dropFirst().map(\.id))
+        self.photoCaptions = self.photoCaptions.filter { secondary.contains($0.key) }
+      }
       return "Photo removed. Review the remaining selection before sending."
     }
   }
@@ -472,10 +512,11 @@ final class ShareComposer: ObservableObject {
   func save() {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run(blocking: false) {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, account: account, room: room)
       // Autosave must preserve actionable authentication/offline and delivery
       // status, including the first programmatic population of the editor.
       return ""
@@ -484,10 +525,11 @@ final class ShareComposer: ObservableObject {
   func reloadDestinations() {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, account: account, room: room)
       return try self.loadDestinations(text: text)
     }
   }
@@ -527,10 +569,11 @@ final class ShareComposer: ObservableObject {
     guard canSend else { return }
     editSave?.cancel()
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room, retry: true)
+      try self.persist(text: text, captions: captions, account: account, room: room, retry: true)
       self.current = try self.sender!.send(self.current!, checkpoint: { self.current = $0 })
       let record = self.current!
       let operations = record.files.compactMap(\.operation)
@@ -549,10 +592,11 @@ final class ShareComposer: ObservableObject {
   func generateOnDevice(_ url: String, refresh: Bool) {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, account: account, room: room)
       let outcome = try self.devicePreview!.include(self.current!, url: url, refresh: refresh)
       self.current = outcome.manifest
       if outcome.reused { return "Supplied preview retained. Review before sending." }
@@ -570,10 +614,11 @@ final class ShareComposer: ObservableObject {
   func generateUsingHomeserver(_ url: String) {
     guard editable, !account.isEmpty else { return }
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, account: account, room: room)
       var imageState = SharePreviewImageState.absent
       self.current = try self.sender!.generate(
         self.current!, url: url, imageState: { imageState = $0 })
@@ -591,10 +636,11 @@ final class ShareComposer: ObservableObject {
   func removePreview(imageOnly: Bool, url: String? = nil) {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, account: account, room: room)
       var next = self.current!
       if imageOnly {
         next.previews = next.previews?.map { p in
@@ -617,10 +663,11 @@ final class ShareComposer: ObservableObject {
   func editPreview(url: String, title: String, description: String) {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, account: account, room: room)
       var next = self.current!
       next.previews = next.previews?.map { preview in
         var p = preview
@@ -637,6 +684,7 @@ final class ShareComposer: ObservableObject {
   func finish(discard: Bool) {
     guard !busy else { return }
     let text = text
+    let captions = photoCaptions
     let account = account
     let room = room
     run {
@@ -648,7 +696,7 @@ final class ShareComposer: ObservableObject {
           if !([record.operation] + record.files.compactMap(\.operation)).contains(where: {
             [.unknown, .dispatching].contains($0.state)
           }) {
-            try self.persist(text: text, account: account, room: room)
+            try self.persist(text: text, captions: captions, account: account, room: room)
           }
           self.current = try store.update(self.current!, release: true)
         }
@@ -706,6 +754,33 @@ private enum SharePreviewInformation: String, Identifiable {
     case .homeserver:
       return
         "Generate a link preview from your account's Matrix homeserver, which may log the URL even for an encrypted room."
+    }
+  }
+}
+
+/// A focused empty editor has no placeholder text to select or delete.
+private struct SharePhotoCaption: View {
+  @Binding var text: String
+  let file: String
+  @FocusState private var focused: Bool
+  var body: some View {
+    ZStack(alignment: .topLeading) {
+      TextEditor(text: $text).frame(minHeight: 72)
+        .focused($focused).accessibilityLabel("Caption")
+        .accessibilityIdentifier("share-photo-caption-" + file)
+        .toolbar {
+          ToolbarItemGroup(placement: .keyboard) {
+            if focused {
+              Spacer()
+              Button("Done") { focused = false }
+                .accessibilityIdentifier("share-photo-caption-done")
+            }
+          }
+        }
+      if text.isEmpty && !focused {
+        Text("Caption").foregroundColor(.secondary).padding(.leading, 5).padding(.top, 8)
+          .allowsHitTesting(false).accessibilityHidden(true)
+      }
     }
   }
 }
@@ -853,6 +928,12 @@ struct ShareComposeView: View {
                   Text("Photo preview unavailable").font(.caption)
                 }
                 Text(photo.name)
+                SharePhotoCaption(
+                  text: Binding(
+                    get: { model.photoCaption(photo.id) },
+                    set: { model.setPhotoCaption($0, file: photo.id) }),
+                  file: photo.id
+                ).disabled(!model.editable)
                 Text(
                   "Original: \(ShareComposer.byteCount(photo.bytes)) · Upload: ~\(ShareComposer.byteCount(photo.uploadBytes))"
                 )
@@ -876,16 +957,16 @@ struct ShareComposeView: View {
             }
           }
         }
-        Section(
-          header: Text(
-            model.record?.files.contains(where: { !$0.thumbnail }) == true
-              ? "First photo caption" : "Message")
-        ) {
-          TextEditor(text: $model.text).frame(minHeight: 140).accessibilityLabel("Message text")
-            .disabled(!model.editable).onChange(of: model.text) { _ in model.edited() }
-          if let validation = model.validation, model.record != nil {
+        if model.record?.files.contains(where: { !$0.thumbnail }) != true {
+          Section(header: Text("Message")) {
+            TextEditor(text: $model.text).frame(minHeight: 140).accessibilityLabel("Message text")
+              .disabled(!model.editable).onChange(of: model.text) { _ in model.edited() }
+          }
+        }
+        if let validation = model.validation, model.record != nil {
+          Section {
             Text(
-              "Cannot send: \(validation). Shorten the text or remove excess cards. The editable draft is retained."
+              "Cannot send: \(validation). Shorten the text or captions, or remove excess cards. The editable draft is retained."
             ).foregroundColor(.red)
           }
         }

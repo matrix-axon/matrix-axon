@@ -121,9 +121,21 @@ final class PhotoShareTests: XCTestCase {
         draft.id, owner: draft.owner!, source: source,
         name: name, mime: "image/png", photo: true)
     }
+    draft = try store.importThumbnail(
+      draft.id, owner: draft.owner!, data: Data(contentsOf: source), mime: "image/png",
+      preview: SharePreview(matched_url: "https://example.org", title: "First photo card"))
+    draft.version = 3
+    draft.files[1].caption = "Caption for two"
+    draft = try store.update(draft)
+    draft = try store.setPhotoSize(draft, size: .small)
+    XCTAssertEqual(draft.version, 3)
     let before = draft
     draft = try store.removeFile(draft, file: draft.files[0].id)
     XCTAssertEqual(draft.files.map(\.name), ["two.png"])
+    XCTAssertEqual(draft.text, "Caption for two")
+    XCTAssertNil(draft.files[0].caption)
+    XCTAssertNil(draft.previews)
+    XCTAssertFalse(draft.files.contains(where: \.thumbnail))
     XCTAssertThrowsError(try store.update(before))
     draft.files[0].operation!.state = .dispatching
     draft = try store.update(draft)
@@ -133,6 +145,38 @@ final class PhotoShareTests: XCTestCase {
     draft = try store.update(draft)
     XCTAssertThrowsError(try store.removeFile(draft, file: draft.files[0].id))
   }
+  func testCaptionBudgetRecoveryAndContentFences() throws {
+    let source = root.appendingPathComponent("photo.png")
+    try PhotoFixture.write(source)
+    var draft = try store.claim(store.create(text: "First caption").id)
+    for _ in 0..<2 {
+      draft = try store.importFile(
+        draft.id, owner: draft.owner!, source: source, name: "photo.png", mime: "image/png", photo: true)
+    }
+    var invalid = draft
+    invalid.files[1].caption = "Ignored by old readers"
+    XCTAssertThrowsError(try store.update(invalid))
+    draft.version = 3
+    draft.files[1].caption = String(repeating: "é", count: ShareLimits.textBytes / 2)
+    XCTAssertEqual(TextShare.validation(draft), "text_too_large")
+    XCTAssertThrowsError(try store.update(draft))
+    draft.files[1].caption = "Second caption"
+    draft = try store.update(draft, release: true)
+    draft = try store.claim(draft.id)
+    XCTAssertEqual(draft.caption(for: draft.files[1]), "Second caption")
+    draft.files[0].operation!.state = .dispatching
+    draft = try store.update(draft)
+    invalid = draft
+    invalid.files[1].caption = "Must not change an uncertain batch"
+    XCTAssertThrowsError(try store.update(invalid))
+    draft.files[0].operation!.state = .sent
+    draft.files[0].operation!.eventId = "$confirmed"
+    draft = try store.update(draft)
+    invalid = draft
+    invalid.files[1].caption = "Must not change a partially delivered batch"
+    XCTAssertThrowsError(try store.update(invalid))
+  }
+
   func testSizeChoicesPreserveOriginalsAndRecoveryUploadsTheSelectedDimensions() throws {
     let source = root.appendingPathComponent("photo.heic")
     try PhotoFixture.write(source, type: .heic, width: 2400, height: 1600)

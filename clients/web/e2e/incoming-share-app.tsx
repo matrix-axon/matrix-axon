@@ -84,8 +84,17 @@ const port: IncomingSharePort = {
         records[index].owner !== next.owner
       )
         throw new Error('stale')
-      if (action === 'remove_file')
+      if (action === 'remove_file') {
+        const first =
+          next.files.find((file) => !file.thumbnail)?.id === args.file
         next.files = next.files.filter((file) => file.id !== args.file)
+        if (first) {
+          const promoted = next.files.find((file) => !file.thumbnail)
+          next.text = promoted?.caption ?? ''
+          if (promoted) delete promoted.caption
+          next.previews = undefined
+        }
+      }
       records[index] = {
         ...next,
         revision: next.revision + 1,

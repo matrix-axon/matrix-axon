@@ -25,13 +25,14 @@ export interface ShareFile {
   operation?: ShareOperation
   photoSize?: 'original' | 'large' | 'medium' | 'small'
   photoBytes?: number
+  caption?: string
 }
 export interface SharePreview extends PreviewInput {
   provenance: 'source' | 'generated'
   thumbnail?: string
 }
 export interface IncomingShare {
-  version: 1 | 2
+  version: 1 | 2 | 3
   id: string
   createdAt: number
   session: string
@@ -65,6 +66,12 @@ export function shareCompleted(record: IncomingShare): boolean {
   )
 }
 
+export function photoCaption(record: IncomingShare, file: ShareFile): string {
+  return record.files.find((candidate) => !candidate.thumbnail)?.id === file.id
+    ? record.text
+    : (file.caption ?? '')
+}
+
 /** Reject unsupported/corrupt records without acknowledging their contents. */
 export function isIncomingShare(value: unknown): value is IncomingShare {
   if (typeof value !== 'object' || value === null) return false
@@ -87,7 +94,7 @@ export function isIncomingShare(value: unknown): value is IncomingShare {
     )
   }
   return (
-    [1, 2].includes(record.version ?? 0) &&
+    [1, 2, 3].includes(record.version ?? 0) &&
     typeof record.id === 'string' &&
     typeof record.session === 'string' &&
     typeof record.text === 'string' &&
@@ -112,7 +119,7 @@ export function isIncomingShare(value: unknown): value is IncomingShare {
         file.bytes >= 0 &&
         file.bytes <= 100 * 1024 * 1024 &&
         typeof file.thumbnail === 'boolean' &&
-        (record.version === 2 ||
+        ((record.version ?? 0) >= 2 ||
           (file.photoSize === undefined && file.photoBytes === undefined)) &&
         (file.photoSize === undefined ||
           ['original', 'large', 'medium', 'small'].includes(file.photoSize)) &&
@@ -124,8 +131,21 @@ export function isIncomingShare(value: unknown): value is IncomingShare {
         (file.photoSize === undefined || file.mime.startsWith('image/')) &&
         (!file.thumbnail ||
           (file.photoSize === undefined && file.photoBytes === undefined)) &&
+        (file.caption === undefined ||
+          (record.version === 3 &&
+            !file.thumbnail &&
+            typeof file.caption === 'string' &&
+            file.caption.length <= 64 * 1024)) &&
         (file.thumbnail || operation(file.operation)),
     ) &&
+    record.files.find((file) => !file.thumbnail)?.caption === undefined &&
+    new TextEncoder().encode(record.text).length +
+      record.files.reduce(
+        (bytes, file) =>
+          bytes + new TextEncoder().encode(file.caption ?? '').length,
+        0,
+      ) <=
+      64 * 1024 &&
     (record.previews === undefined ||
       (Array.isArray(record.previews) &&
         record.previews.length <= 8 &&
