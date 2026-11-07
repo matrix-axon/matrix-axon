@@ -38,6 +38,43 @@ final class PhotoShareTests: XCTestCase {
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+  func testRenamePreservesPhotoIdentityAndRecoveryAndFencesDelivery() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source)
+    var draft = try store.claim(store.create(text: "Source message").id)
+    draft = try store.importFile(draft.id, owner: draft.owner!, source: source, name: "original.png", mime: "image/png", photo: true)
+    draft.files[0].caption = "Per-photo caption"
+    draft = try store.update(draft)
+    let original = draft
+    let file = draft.files[0]
+    let preview = try store.photoThumbnail(draft.id, file: file.id, owner: draft.owner!)
+    for invalid in ["", "  ", "../other.png", "bad\nname.png", String(repeating: "é", count: 128)] {
+      XCTAssertFalse(ShareStore.validPhotoName(invalid))
+      XCTAssertThrowsError(try store.renameFile(draft, file: file.id, name: invalid))
+    }
+    XCTAssertThrowsError(try store.renameFile(draft, file: UUID().uuidString, name: "other.png"))
+    draft = try store.renameFile(draft, file: file.id, name: "  Café coast.png  ")
+    var renamed = file
+    renamed.name = "Café coast.png"
+    XCTAssertEqual(draft.files, [renamed])
+    XCTAssertEqual(draft.text, original.text)
+    XCTAssertEqual(try store.photoThumbnail(draft.id, file: file.id, owner: draft.owner!), preview)
+    XCTAssertThrowsError(try store.renameFile(original, file: file.id, name: "stale.png"))
+    try store.withUploadFile(draft.id, file: file.id, owner: draft.owner!) { _, upload in
+      XCTAssertEqual(upload.name, "Café coast.png")
+      XCTAssertEqual(upload.digest, file.digest)
+    }
+    draft = try store.update(draft, release: true)
+    draft = try store.claim(draft.id)
+    XCTAssertEqual(draft.files, [renamed])
+    draft.files[0].operation!.state = .dispatching
+    draft = try store.update(draft)
+    XCTAssertThrowsError(try store.renameFile(draft, file: file.id, name: "late.png"))
+    draft.files[0].operation!.state = .unknown
+    draft = try store.update(draft)
+    XCTAssertThrowsError(try store.renameFile(draft, file: file.id, name: "uncertain.png"))
+  }
+
   func testReorderPreservesContentAndFencesDelivery() throws {
     let source = root.appendingPathComponent("source.png")
     try PhotoFixture.write(source)

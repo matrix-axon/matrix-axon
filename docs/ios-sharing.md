@@ -489,3 +489,14 @@ Native diagnostics record generated share IDs for claim, release, and busy outco
 The retry control for an uncertain item is available directly, without a duplicate-delivery checkbox.
 Choosing Retry item prepares that item for the next Send reviewed share action; confirmed items continue to be skipped.
 Native bridge JSON parsing preserves fractional timestamps exactly, so saving a draft or releasing its owner does not falsely fail the immutable creation-time check.
+
+Tap a photo filename in the extension to open Rename photo with the current filename prefilled.
+Save updates that photo's display name durably; Cancel keeps the existing name.
+Names may contain spaces and Unicode, are limited to 255 UTF-8 bytes, and cannot contain path separators or control characters.
+Captions, size choices, send order, original bytes, and cached previews stay associated with the photo ID.
+Confirmed or uncertain delivery prevents renaming the batch.
+
+The routine ready label is hidden from photo rows.
+Ready means waiting to upload, rather than upload complete: Send initiates upload and delivery.
+Send is disabled during the operation, while the existing progress indicator and Sending status remain visible.
+Failed or uncertain photo outcomes remain visible for recovery.

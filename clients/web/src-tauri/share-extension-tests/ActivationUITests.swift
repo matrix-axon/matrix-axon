@@ -107,6 +107,42 @@ final class ActivationUITests: XCTestCase {
     app.buttons["Cancel"].firstMatch.tap()
     app.terminate()
   }
+  func testPhotoFilenameEditorIsPrefilledAndSavesOrCancelsWithoutReadyLabels() {
+    let app = XCUIApplication()
+    chooseSource("source-photo-size-single", app: app)
+    let filename = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-filename-'" )).firstMatch
+    XCTAssertTrue(filename.waitForExistence(timeout: 15))
+    reveal(filename, app: app)
+    let identifier = filename.identifier
+    let original = filename.label.replacingOccurrences(of: "Rename photo ", with: "")
+    XCTAssertFalse(app.staticTexts["ready"].exists)
+    filename.tap()
+    let field = app.textFields["share-photo-filename-field"]
+    XCTAssertTrue(field.waitForExistence(timeout: 5))
+    XCTAssertEqual(field.value as? String, original)
+    field.tap()
+    field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count) + "Coast holiday.heic")
+    app.buttons["share-photo-filename-save"].tap()
+    let renamed = app.buttons[identifier]
+    let updated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS 'Coast holiday.heic'"), object: renamed)
+    XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 10), .completed)
+    renamed.tap()
+    XCTAssertTrue(field.waitForExistence(timeout: 5))
+    XCTAssertEqual(field.value as? String, "Coast holiday.heic")
+    field.tap()
+    field.typeText(" cancelled")
+    app.navigationBars["Rename photo"].buttons["Cancel"].tap()
+    XCTAssertTrue(renamed.waitForExistence(timeout: 5))
+    XCTAssertEqual(renamed.label, "Rename photo Coast holiday.heic")
+    renamed.tap()
+    XCTAssertTrue(field.waitForExistence(timeout: 5))
+    XCTAssertEqual(field.value as? String, "Coast holiday.heic")
+    app.navigationBars["Rename photo"].buttons["Cancel"].tap()
+    XCTAssertFalse(app.staticTexts["ready"].exists)
+    app.buttons["Cancel"].firstMatch.tap()
+    app.terminate()
+  }
+
   func testMasterCaptionAndNativeDragReordering() {
     let app = XCUIApplication()
     chooseSource("source-photo-size", app: app)
@@ -125,6 +161,9 @@ final class ActivationUITests: XCTestCase {
     reorder.tap()
     let handles = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Reorder' AND identifier != 'share-photo-reorder'"))
     XCTAssertTrue(handles.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+    // With 44-point filename controls, the first compact row began at y=742
+    // and the second was below the 874-point viewport, outside the AX snapshot.
+    if handles.count < 2 { app.swipeUp() }
     XCTAssertEqual(handles.count, 2, app.debugDescription)
     reveal(handles.element(boundBy: 1), app: app)
     let first = handles.element(boundBy: 0)

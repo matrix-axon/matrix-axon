@@ -625,6 +625,29 @@ public final class ShareStore {
     }
   }
 
+  public static func validPhotoName(_ name: String) -> Bool {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !trimmed.isEmpty && trimmed.utf8.count <= 255 && displayName(trimmed) == trimmed
+  }
+
+  /// Only the display name changes; retained paths, captions and upload identities stay fixed.
+  public func renameFile(_ input: ShareManifest, file: String, name: String) throws -> ShareManifest {
+    try coordinated {
+      var current = try load(input.id)
+      try validateOwner(current, input.owner ?? "")
+      guard current.revision == input.revision else { throw ShareFailure.stale }
+      guard Self.validPhotoName(name),
+        Self.operations(current).allSatisfy({ [.ready, .failed, .uploaded].contains($0.state) }),
+        let index = current.files.firstIndex(where: { $0.id == file && !$0.thumbnail && $0.mime.hasPrefix("image/") })
+      else { throw ShareFailure.invalid }
+      current.files[index].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+      current.revision += 1
+      try save(current)
+      Self.log.info("share_photo_renamed share_id=\(current.id, privacy: .public) item_id=\(file, privacy: .public)")
+      return current
+    }
+  }
+
   /// Reorder descriptors atomically; captions and retained bytes stay with their IDs.
   public func reorderFiles(_ input: ShareManifest, order: [String]) throws -> ShareManifest {
     try coordinated {

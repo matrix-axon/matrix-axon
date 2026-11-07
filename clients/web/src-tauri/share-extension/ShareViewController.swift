@@ -514,6 +514,15 @@ final class ShareComposer: ObservableObject {
     guard !busy, record?.owner != nil else { return }
     run { self.photoPreviewAttempts.remove(file); return "Retrying photo preview." }
   }
+  func renamePhoto(_ file: String, name: String) {
+    guard editable else { return }
+    let text = text, captions = photoCaptions, account = account, room = room
+    run {
+      try self.persist(text: text, captions: captions, account: account, room: room)
+      self.current = try self.store!.renameFile(self.current!, file: file, name: name)
+      return "Photo renamed."
+    }
+  }
   func removePhoto(_ file: String) {
     guard editable else { return }
     let text = text
@@ -595,6 +604,7 @@ final class ShareComposer: ObservableObject {
   }
   func send() {
     guard canSend else { return }
+    status = "Sending…"
     editSave?.cancel()
     let text = text
     let captions = photoCaptions
@@ -819,10 +829,53 @@ private struct SharePhotoCaption: View {
   }
 }
 
+private struct PhotoFilenameEdit: Identifiable {
+  let id: String
+  let name: String
+}
+
+private struct PhotoFilenameEditor: View {
+  let save: (String) -> Void
+  @State private var name: String
+  @FocusState private var focused: Bool
+  @Environment(\.presentationMode) private var presentation
+  init(name: String, save: @escaping (String) -> Void) {
+    self.save = save
+    _name = State(initialValue: name)
+  }
+  var body: some View {
+    NavigationView {
+      Form {
+        TextField("Filename", text: $name)
+          .textInputAutocapitalization(.never).disableAutocorrection(true)
+          .focused($focused).submitLabel(.done)
+          .accessibilityIdentifier("share-photo-filename-field")
+          .onSubmit { commit() }
+      }
+      .navigationTitle("Rename photo")
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Cancel") { presentation.wrappedValue.dismiss() }
+        }
+        ToolbarItem(placement: .confirmationAction) {
+          Button("Save") { commit() }.disabled(!ShareStore.validPhotoName(name))
+            .accessibilityIdentifier("share-photo-filename-save")
+        }
+      }
+    }.navigationViewStyle(.stack).onAppear { focused = true }
+  }
+  private func commit() {
+    guard ShareStore.validPhotoName(name) else { return }
+    save(name)
+    presentation.wrappedValue.dismiss()
+  }
+}
+
 struct ShareComposeView: View {
   @ObservedObject var model: ShareComposer
   @Environment(\.sizeCategory) private var sizeCategory
   @State private var photoEditMode: EditMode = .inactive
+  @State private var filenameEdit: PhotoFilenameEdit?
   @State private var keepMessageEditor = false
   @State private var previewInformation: SharePreviewInformation?
   @State private var previewSearch = ""
@@ -980,7 +1033,15 @@ struct ShareComposeView: View {
                   .accessibilityHint(photo.name)
                   .accessibilityIdentifier("share-photo-remove-" + photo.id)
                 }
-                Text(photo.name)
+                Button {
+                  filenameEdit = PhotoFilenameEdit(id: photo.id, name: photo.name)
+                } label: {
+                  Text(photo.name).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+                }.buttonStyle(.borderless).foregroundColor(.primary)
+                  .disabled(!model.editable || photoEditMode == .active)
+                  .accessibilityLabel("Rename photo " + photo.name)
+                  .accessibilityIdentifier("share-photo-filename-" + photo.id)
                 if photoEditMode != .active {
                   SharePhotoCaption(
                     text: Binding(
@@ -1004,7 +1065,9 @@ struct ShareComposeView: View {
                     }
                   }.pickerStyle(.menu).disabled(!model.editable)
                     .accessibilityIdentifier("share-photo-size-item-" + photo.id)
-                  Text(photo.operation?.state.rawValue ?? "ready").font(.caption)
+                  if let state = photo.operation?.state, state != .ready {
+                    Text(photoStatus(state)).font(.caption)
+                  }
                 }
               }.moveDisabled(!model.editable)
             }.onMove { model.movePhotos(from: $0, to: $1) }
@@ -1090,6 +1153,9 @@ struct ShareComposeView: View {
           title: Text(information.title), message: Text(information.message),
           dismissButton: .default(Text("OK")))
       }
+      .sheet(item: $filenameEdit) { photo in
+        PhotoFilenameEditor(name: photo.name) { model.renamePhoto(photo.id, name: $0) }
+      }
       .sheet(isPresented: $editingCard) {
         NavigationView {
           GeometryReader { geometry in
@@ -1130,6 +1196,18 @@ struct ShareComposeView: View {
         }
       }
     }.navigationViewStyle(.stack)
+  }
+
+  private func photoStatus(_ state: DeliveryState) -> String {
+    switch state {
+    case .ready: return ""
+    case .uploading: return "Uploading…"
+    case .uploaded: return "Uploaded"
+    case .dispatching: return "Sending…"
+    case .sent: return "Sent"
+    case .failed: return "Not sent"
+    case .unknown: return "Delivery not confirmed"
+    }
   }
 
   private func informationButton(_ information: SharePreviewInformation) -> some View {

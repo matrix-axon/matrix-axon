@@ -220,6 +220,52 @@ final class ComposerLifecycleTests: XCTestCase {
     XCTAssertEqual(recovered.files.map(\.photoSize), [.medium, .small])
   }
 
+  func testRenamingSavesPendingCaptionsAndSurvivesImmediateClose() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer()
+    load(model) { model.start([fixture.photos()]) }
+    let files = try XCTUnwrap(model.record?.files)
+    model.text = "Separate source"
+    model.setPhotoCaption("Keep my caption", file: files[0].id)
+    load(model) { model.renamePhoto(files[0].id, name: "Café coast.heic") }
+    XCTAssertEqual(model.record?.files[0].name, "Café coast.heic")
+    XCTAssertEqual(model.record?.files[0].id, files[0].id)
+    XCTAssertEqual(model.record?.files[1], files[1])
+    XCTAssertEqual(model.record?.files[0].caption, "Keep my caption")
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
+    let recovered = try XCTUnwrap(fixture.store.list().first)
+    XCTAssertEqual(recovered.files[0].name, "Café coast.heic")
+    XCTAssertEqual(recovered.files[0].caption, "Keep my caption")
+    XCTAssertEqual(recovered.text, "Separate source")
+  }
+
+  func testSendStaysDisabledWhilePhotoUploadIsInFlight() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let uploadStarted = expectation(description: "upload started")
+    let release = DispatchSemaphore(value: 0)
+    defer { release.signal() }
+    fixture.respond { request in
+      if request.url!.path.hasSuffix("/media/uploads") {
+        uploadStarted.fulfill()
+        _ = release.wait(timeout: .now() + 4)
+      }
+      return (400, Data("{\"error\":{\"code\":\"bad_request\"}}".utf8))
+    }
+    let model = fixture.composer()
+    load(model) { model.start([fixture.photos()]) }
+    model.chooseRoom("!first:example.org")
+    XCTAssertTrue(model.canSend)
+    model.send()
+    wait(for: [uploadStarted], timeout: 3)
+    XCTAssertTrue(model.busy)
+    XCTAssertFalse(model.canSend)
+    XCTAssertEqual(model.status, "Sending…")
+    load(model) { release.signal() }
+    model.cancel()
+    wait(for: [fixture.closed], timeout: 3)
+  }
+
   func testMasterCaptionAndReorderKeepSourceAndPerPhotoOverrides() throws {
     let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
     let model = fixture.composer()
