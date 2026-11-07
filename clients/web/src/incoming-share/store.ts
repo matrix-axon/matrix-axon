@@ -264,6 +264,7 @@ export function createIncomingShareStore(
     update: (record: IncomingShare) => IncomingShare,
     release = false,
     removeFile?: string,
+    order?: string[],
   ): Promise<void> {
     const generation = epoch
     const id = selected.peek()?.id
@@ -272,10 +273,15 @@ export function createIncomingShareStore(
       const record = selected.peek()
       if (record === null || record.id !== id) throw problem('stale')
       const next = await port.call<IncomingShare>(
-        removeFile === undefined ? 'update' : 'remove_file',
+        order !== undefined
+          ? 'reorder_files'
+          : removeFile === undefined
+            ? 'update'
+            : 'remove_file',
         {
           manifest: update(structuredClone(record)),
           release,
+          ...(order === undefined ? {} : { order }),
           ...(removeFile === undefined ? {} : { file: removeFile }),
         },
       )
@@ -308,39 +314,73 @@ export function createIncomingShareStore(
       })
     }
   }
-  async function open(id: string) {
+  let opening: Promise<void> | undefined
+  let closing: Promise<boolean> | undefined
+  const openingId = signal<string | null>(null)
+  async function performOpen(id: string) {
+    await closing?.catch(() => {})
     if (busy.peek()) return
     const generation = epoch
     busy.value = true
+    openingId.value = id
+    error.value = null
     try {
-      if (selected.peek() !== null) await close(true)
+      await releaseSelection()
       const record = await port.call<IncomingShare>('claim', { id })
-      if (generation === epoch) {
-        selected.value = record
-        error.value = null
-      }
+      if (generation === epoch) selected.value = record
     } catch (cause) {
       if (generation === epoch) describeFailure(cause)
     } finally {
-      if (generation === epoch) busy.value = false
-    }
-  }
-  async function close(fromOpen = false) {
-    const work = previewWork
-    await cancelPreview()
-    if (work !== null) await work
-    if (busy.peek() && !fromOpen) return
-    if (selected.peek() === null) return
-    const generation = epoch
-    try {
-      await flushEdits()
-      await change((record) => record, true)
-    } finally {
       if (generation === epoch) {
-        selected.value = null
-        await refresh()
+        busy.value = false
+        openingId.value = null
       }
     }
+  }
+  function open(id: string) {
+    if (opening) return opening
+    const task = performOpen(id)
+    opening = task
+    void task.finally(() => {
+      if (opening === task) opening = undefined
+    })
+    return task
+  }
+  async function releaseSelection() {
+    const generation = epoch
+    if (selected.peek() === null) return
+    await flushEdits()
+    await change((record) => record, true)
+    if (generation === epoch) selected.value = null
+  }
+  function close() {
+    if (closing) return closing
+    // Navigation may unmount the page while claim is still in flight.
+    // Release that claim too; otherwise it remains locked for five minutes.
+    const claim = opening
+    const generation = epoch
+    const task = (async () => {
+      await claim
+      const work = previewWork
+      await cancelPreview()
+      if (work !== null) await work
+      if (generation !== epoch || busy.peek()) return false
+      busy.value = true
+      try {
+        await releaseSelection()
+        await refresh()
+        return true
+      } finally {
+        if (generation === epoch) busy.value = false
+      }
+    })()
+    closing = task
+    void task
+      .finally(() => {
+        if (closing === task) closing = undefined
+      })
+      .catch(() => {})
+    return task
   }
   async function discardRecord(record: IncomingShare, generation: number) {
     if (generation !== epoch) return
@@ -833,6 +873,32 @@ export function createIncomingShareStore(
     sessionError,
     refresh,
     open,
+    openingId,
+    masterCaption: computed(() => {
+      const photos =
+        selected.value?.files.filter((file) => !file.thumbnail) ?? []
+      const captions = photos.map((file) => editorCaption(file.id))
+      return captions.every((caption) => caption === captions[0])
+        ? (captions[0] ?? '')
+        : ''
+    }),
+    async editMasterCaption(caption: string) {
+      const record = selected.peek()
+      if (!record || busy.peek()) return
+      scheduleEdit(record.id, {
+        ...drafts.peek()[record.id],
+        captions: Object.fromEntries(
+          record.files
+            .filter((file) => !file.thumbnail)
+            .map((file) => [file.id, caption]),
+        ),
+      })
+    },
+    async reorderPhotos(order: string[]) {
+      if (busy.peek()) return
+      await flushEdits()
+      await change((record) => record, false, undefined, order)
+    },
     close,
     discard,
     discardAll,

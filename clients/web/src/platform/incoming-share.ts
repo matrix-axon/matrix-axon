@@ -23,6 +23,7 @@ export function nativeIncomingShare(): IncomingSharePort {
           'claim',
           'update',
           'remove_file',
+          'reorder_files',
           'retain',
           'seed',
           'device_preview',

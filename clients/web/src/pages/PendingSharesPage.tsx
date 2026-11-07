@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { useServices } from '../services'
 import { nativePreviewLinks } from '../incoming-share/urls'
 import { LinkPreviews } from '../components/LinkPreviews'
@@ -67,7 +68,11 @@ function RecoveryThumbnail({
 }
 
 export function PendingSharesPage() {
+  const location = useLocation()
   const { incomingShares: store, accounts, rooms, auth } = useServices()
+  const [closing, setClosing] = useState(false)
+  const [reviewId, setReviewId] = useState<string | null>(null)
+  const [draggedPhoto, setDraggedPhoto] = useState<string | null>(null)
   const [messageEditorId, setMessageEditorId] = useState<string | null>(null)
   const [duplicateRisk, setDuplicateRisk] = useState(false)
   const [homeserverURL, setHomeserverURL] = useState<string | null>(null)
@@ -106,6 +111,8 @@ export function PendingSharesPage() {
     )
   const record = store.selected.value
   const busy = store.busy.value
+  const reviewError =
+    record === null && store.pending.value.some((item) => item.id === reviewId)
   const act = (action: Promise<unknown>) => {
     void action.catch(() => {})
   }
@@ -169,12 +176,41 @@ export function PendingSharesPage() {
   const captionSent = record?.operation.state === 'sent'
   return (
     <section class="pending-shares-page">
-      <h1>Pending shares</h1>
+      <div class="pending-shares-header">
+        <h1>Pending shares</h1>
+        <button
+          type="button"
+          aria-label="Close pending shares"
+          disabled={busy || closing}
+          onClick={() => {
+            setClosing(true)
+            void store
+              .close()
+              .then((closed) => {
+                if (closed) location.route('/')
+              })
+              .catch(() => {})
+              .finally(() => setClosing(false))
+          }}
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="m6 6 12 12M18 6 6 18"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+      </div>
       <p>
         Saved on this device for up to 24 hours. Saving a share does not send
         it.
       </p>
-      {store.error.value !== null && <p role="alert">{store.error.value}</p>}
+      {store.error.value !== null && !reviewError && (
+        <p role="alert">{store.error.value}</p>
+      )}
       {store.sessionError.value !== null && (
         <p role="alert">{store.sessionError.value}</p>
       )}
@@ -261,9 +297,14 @@ export function PendingSharesPage() {
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => act(store.open(item.id))}
+                  onClick={() => {
+                    setReviewId(item.id)
+                    act(store.open(item.id))
+                  }}
                 >
-                  Review share
+                  {store.openingId.value === item.id
+                    ? 'Opening share…'
+                    : 'Review share'}
                 </button>
                 <button
                   type="button"
@@ -272,6 +313,9 @@ export function PendingSharesPage() {
                 >
                   Discard share
                 </button>
+                {reviewId === item.id && store.error.value !== null && (
+                  <p role="alert">{store.error.value}</p>
+                )}
               </li>
             ))}
           </ul>
@@ -440,18 +484,79 @@ export function PendingSharesPage() {
           {record.files.some((file) => !file.thumbnail) && (
             <fieldset>
               <legend>Photos in sending order</legend>
+              {record.files.filter((file) => !file.thumbnail).length > 1 && (
+                <label>
+                  Master caption
+                  <textarea
+                    class="pending-photo-caption"
+                    rows={1}
+                    placeholder="Master caption"
+                    disabled={busy || fixedDestination}
+                    value={store.masterCaption.value}
+                    onInput={(event) =>
+                      act(store.editMasterCaption(event.currentTarget.value))
+                    }
+                    onBlur={() => act(store.flushEdits())}
+                  />
+                </label>
+              )}
               {record.files
                 .filter((file) => !file.thumbnail)
                 .map((file) => (
-                  <div key={file.id}>
+                  <div
+                    key={file.id}
+                    class="pending-photo-block"
+                    onDragStart={(event) => {
+                      setDraggedPhoto(file.id)
+                      event.dataTransfer?.setData('text/plain', file.id)
+                    }}
+                    onDragEnd={() => setDraggedPhoto(null)}
+                    onDragOver={(event) => {
+                      if (draggedPhoto && !busy && !fixedDestination)
+                        event.preventDefault()
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      if (
+                        !draggedPhoto ||
+                        busy ||
+                        fixedDestination ||
+                        draggedPhoto === file.id
+                      )
+                        return
+                      const order = record.files
+                        .filter((photo) => !photo.thumbnail)
+                        .map((photo) => photo.id)
+                      order.splice(order.indexOf(draggedPhoto), 1)
+                      order.splice(order.indexOf(file.id), 0, draggedPhoto)
+                      setDraggedPhoto(null)
+                      act(store.reorderPhotos(order))
+                    }}
+                  >
                     <RecoveryThumbnail
                       store={store}
                       file={file.id}
                       photo
                       delivered={file.operation?.state === 'sent'}
                     />
-                    <p>{file.name}</p>
+                    <p class="pending-photo-name">
+                      {file.name}
+                      {record.files.filter((photo) => !photo.thumbnail).length >
+                        1 && (
+                        <button
+                          type="button"
+                          draggable={!busy && !fixedDestination}
+                          disabled={busy || fixedDestination}
+                          class="pending-photo-handle"
+                          aria-label={`Drag ${file.name} to reorder`}
+                        >
+                          ⠿
+                        </button>
+                      )}
+                    </p>
                     <textarea
+                      class="pending-photo-caption"
+                      rows={1}
                       aria-label={`Caption for ${file.name}`}
                       placeholder="Caption"
                       disabled={busy || fixedDestination}
@@ -466,6 +571,39 @@ export function PendingSharesPage() {
                         )
                       }
                     />
+                    {record.files.filter((photo) => !photo.thumbnail).length >
+                      1 && (
+                      <div class="pending-share-actions">
+                        {[-1, 1].map((direction) => {
+                          const order = record.files
+                            .filter((photo) => !photo.thumbnail)
+                            .map((photo) => photo.id)
+                          const index = order.indexOf(file.id)
+                          const target = index + direction
+                          return (
+                            <button
+                              type="button"
+                              disabled={
+                                busy ||
+                                fixedDestination ||
+                                target < 0 ||
+                                target >= order.length
+                              }
+                              aria-label={`Move ${file.name} ${direction < 0 ? 'up' : 'down'}`}
+                              onClick={() => {
+                                ;[order[index], order[target]] = [
+                                  order[target],
+                                  order[index],
+                                ]
+                                act(store.reorderPhotos(order))
+                              }}
+                            >
+                              {direction < 0 ? '↑' : '↓'}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
                     <p>
                       {Math.ceil(file.bytes / 1024)} KiB original
                       {file.photoSize !== undefined &&

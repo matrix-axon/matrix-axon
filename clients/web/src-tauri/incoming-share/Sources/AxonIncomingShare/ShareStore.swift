@@ -295,12 +295,16 @@ public final class ShareStore {
       _ = try reconcileLocked()
       var manifest = try load(id)
       try validateSession(manifest)
-      guard manifest.owner == nil else { throw ShareFailure.busy }
+      guard manifest.owner == nil else {
+        Self.log.info("share_claim_busy share_id=\(id, privacy: .public)")
+        throw ShareFailure.busy
+      }
       manifest.owner = UUID().uuidString
       manifest.leaseUntil = min(
         now() + ShareLimits.lease, manifest.createdAt + ShareLimits.retention)
       manifest.revision += 1
       try save(manifest)
+      Self.log.info("share_claimed share_id=\(id, privacy: .public) revision=\(manifest.revision)")
       return manifest
     }
   }
@@ -355,6 +359,7 @@ public final class ShareStore {
         release ? nil : min(now() + ShareLimits.lease, next.createdAt + ShareLimits.retention)
       if release { next.owner = nil }
       try save(next)
+      if release { Self.log.info("share_released share_id=\(next.id, privacy: .public)") }
       if next.accountId != current.accountId || next.roomId != current.roomId {
         rememberDestination(next)
       }
@@ -616,6 +621,26 @@ public final class ShareStore {
       Self.log.info(
         "share_photo_removed share_id=\(current.id, privacy: .public) item_id=\(item.id, privacy: .public)"
       )
+      return current
+    }
+  }
+
+  /// Reorder descriptors atomically; captions and retained bytes stay with their IDs.
+  public func reorderFiles(_ input: ShareManifest, order: [String]) throws -> ShareManifest {
+    try coordinated {
+      var current = try load(input.id)
+      try validateOwner(current, input.owner ?? "")
+      guard current.revision == input.revision else { throw ShareFailure.stale }
+      guard Self.operations(current).allSatisfy({ [.ready, .failed, .uploaded].contains($0.state) })
+      else { throw ShareFailure.invalid }
+      let photos = current.files.filter { !$0.thumbnail }
+      guard order.count == photos.count, Set(order).count == order.count,
+        Set(order) == Set(photos.map(\.id)) else { throw ShareFailure.invalid }
+      let indexed = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, $0) })
+      current.files = order.map { indexed[$0]! } + current.files.filter { $0.thumbnail }
+      current.revision += 1
+      try save(current)
+      Self.log.info("share_photos_reordered share_id=\(current.id, privacy: .public) count=\(photos.count)")
       return current
     }
   }

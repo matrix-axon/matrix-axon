@@ -173,6 +173,27 @@ final class ShareComposer: ObservableObject {
     photoCaptions[file] = caption
     edited()
   }
+  var masterCaption: String {
+    let captions = record?.files.filter { !$0.thumbnail }.map { photoCaption($0.id) } ?? []
+    return Set(captions).count == 1 ? captions.first! : ""
+  }
+  func setMasterCaption(_ caption: String) {
+    guard editable else { return }
+    for photo in record?.files.filter({ !$0.thumbnail }) ?? [] { photoCaptions[photo.id] = caption }
+    edited()
+  }
+  func movePhotos(from offsets: IndexSet, to destination: Int) {
+    guard editable else { return }
+    var order = record?.files.filter { !$0.thumbnail }.map(\.id) ?? []
+    guard offsets.allSatisfy({ order.indices.contains($0) }), (0...order.count).contains(destination) else { return }
+    order.move(fromOffsets: offsets, toOffset: destination)
+    let text = text, captions = photoCaptions, account = account, room = room
+    run {
+      try self.persist(text: text, captions: captions, account: account, room: room)
+      self.current = try self.store!.reorderFiles(self.current!, order: order)
+      return "Photo order saved."
+    }
+  }
   private static func applyCaptions(_ captions: [String: String], to draft: inout ShareManifest) {
     for index in draft.files.indices where !draft.files[index].thumbnail {
       if let caption = captions[draft.files[index].id] { draft.files[index].caption = caption }
@@ -774,12 +795,13 @@ private enum SharePreviewInformation: String, Identifiable {
 private struct SharePhotoCaption: View {
   @Binding var text: String
   let file: String
+  var title: String = "Caption"
   @FocusState private var focused: Bool
   var body: some View {
     ZStack(alignment: .leading) {
       TextEditor(text: $text).frame(height: 44)
-        .focused($focused).accessibilityLabel("Caption")
-        .accessibilityIdentifier("share-photo-caption-" + file)
+        .focused($focused).accessibilityLabel(title)
+        .accessibilityIdentifier(file == "master" ? "share-master-caption" : "share-photo-caption-" + file)
         .toolbar {
           ToolbarItemGroup(placement: .keyboard) {
             if focused {
@@ -790,7 +812,7 @@ private struct SharePhotoCaption: View {
           }
         }
       if text.isEmpty && !focused {
-        Text("Caption").foregroundColor(.secondary).padding(.leading, 5)
+        Text(title).foregroundColor(.secondary).padding(.leading, 5)
           .allowsHitTesting(false).accessibilityHidden(true)
       }
     }
@@ -800,6 +822,7 @@ private struct SharePhotoCaption: View {
 struct ShareComposeView: View {
   @ObservedObject var model: ShareComposer
   @Environment(\.sizeCategory) private var sizeCategory
+  @State private var photoEditMode: EditMode = .inactive
   @State private var keepMessageEditor = false
   @State private var previewInformation: SharePreviewInformation?
   @State private var previewSearch = ""
@@ -913,6 +936,13 @@ struct ShareComposeView: View {
         if let photos = model.record?.files.filter({ !$0.thumbnail }), !photos.isEmpty {
           Section(header: Text("Photos (\(photos.count))")) {
             if photos.count > 1 {
+              SharePhotoCaption(
+                text: Binding(get: { model.masterCaption }, set: { model.setMasterCaption($0) }),
+                file: "master", title: "Master caption"
+              ).disabled(!model.editable)
+              Button(photoEditMode == .active ? "Done reordering" : "Reorder photos") {
+                photoEditMode = photoEditMode == .active ? .inactive : .active
+              }.disabled(!model.editable).accessibilityIdentifier("share-photo-reorder")
               Picker(
                 "Size for all photos",
                 selection: Binding<SharePhotoSize?>(
@@ -933,7 +963,7 @@ struct ShareComposeView: View {
               VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top) {
                   if let image = model.images[photo.id] {
-                    Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 160)
+                    Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: photoEditMode == .active ? 60 : 160)
                       .accessibilityLabel("Photo: \(photo.name)")
                   } else {
                     VStack {
@@ -951,31 +981,33 @@ struct ShareComposeView: View {
                   .accessibilityIdentifier("share-photo-remove-" + photo.id)
                 }
                 Text(photo.name)
-                SharePhotoCaption(
-                  text: Binding(
-                    get: { model.photoCaption(photo.id) },
-                    set: { model.setPhotoCaption($0, file: photo.id) }),
-                  file: photo.id
-                ).disabled(!model.editable)
-                Text(
-                  "Original: \(ShareComposer.byteCount(photo.bytes)) · Upload: ~\(ShareComposer.byteCount(photo.uploadBytes))"
-                )
-                .font(.caption)
-                Picker(
-                  "Photo size",
-                  selection: Binding(
-                    get: { photo.photoSize ?? .original },
-                    set: { model.setPhotoSize($0, file: photo.id) }
+                if photoEditMode != .active {
+                  SharePhotoCaption(
+                    text: Binding(
+                      get: { model.photoCaption(photo.id) },
+                      set: { model.setPhotoCaption($0, file: photo.id) }),
+                    file: photo.id
+                  ).disabled(!model.editable)
+                  Text(
+                    "Original: \(ShareComposer.byteCount(photo.bytes)) · Upload: ~\(ShareComposer.byteCount(photo.uploadBytes))"
                   )
-                ) {
-                  ForEach(SharePhotoSize.allCases, id: \.self) { size in
-                    Text(size.label).tag(size)
-                  }
-                }.pickerStyle(.menu).disabled(!model.editable)
-                  .accessibilityIdentifier("share-photo-size-item-" + photo.id)
-                Text(photo.operation?.state.rawValue ?? "ready").font(.caption)
-              }
-            }
+                  .font(.caption)
+                  Picker(
+                    "Photo size",
+                    selection: Binding(
+                      get: { photo.photoSize ?? .original },
+                      set: { model.setPhotoSize($0, file: photo.id) }
+                    )
+                  ) {
+                    ForEach(SharePhotoSize.allCases, id: \.self) { size in
+                      Text(size.label).tag(size)
+                    }
+                  }.pickerStyle(.menu).disabled(!model.editable)
+                    .accessibilityIdentifier("share-photo-size-item-" + photo.id)
+                  Text(photo.operation?.state.rawValue ?? "ready").font(.caption)
+                }
+              }.moveDisabled(!model.editable)
+            }.onMove { model.movePhotos(from: $0, to: $1) }
           }
         }
         if keepMessageEditor || !model.text.isEmpty || model.record?.files.contains(where: { !$0.thumbnail }) != true {
@@ -1044,6 +1076,10 @@ struct ShareComposeView: View {
             Button("Keep draft in Axon") { model.finish(discard: false) }.disabled(model.busy)
           }
         }
+      }
+      .environment(\.editMode, $photoEditMode)
+      .onChange(of: model.record?.files.filter { !$0.thumbnail }.count) { count in
+        if (count ?? 0) < 2 { photoEditMode = .inactive }
       }
       .navigationTitle("Share to Axon")
       .onChange(of: model.record?.id) { _ in

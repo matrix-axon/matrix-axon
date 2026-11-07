@@ -38,6 +38,36 @@ final class PhotoShareTests: XCTestCase {
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+  func testReorderPreservesContentAndFencesDelivery() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source)
+    var draft = try store.claim(store.create(text: "Source message").id)
+    for name in ["first.png", "second.png"] {
+      draft = try store.importFile(draft.id, owner: draft.owner!, source: source, name: name, mime: "image/png", photo: true)
+    }
+    draft.files[0].caption = "First 🌊"
+    draft.files[1].caption = "Second"
+    draft = try store.update(draft)
+    let original = draft
+    let reversed = Array(draft.files.map(\.id).reversed())
+    XCTAssertThrowsError(try store.reorderFiles(draft, order: [reversed[0], reversed[0]]))
+    XCTAssertThrowsError(try store.reorderFiles(draft, order: [UUID().uuidString, reversed[1]]))
+    draft = try store.reorderFiles(draft, order: reversed)
+    XCTAssertEqual(draft.files, Array(original.files.reversed()))
+    XCTAssertEqual(draft.text, original.text)
+    XCTAssertEqual(draft.previews, original.previews)
+    XCTAssertThrowsError(try store.reorderFiles(original, order: reversed))
+    draft = try store.update(draft, release: true)
+    draft = try store.claim(draft.id)
+    XCTAssertEqual(draft.files.map(\.id), reversed)
+    draft.files[0].operation!.state = .dispatching
+    draft = try store.update(draft)
+    XCTAssertThrowsError(try store.reorderFiles(draft, order: Array(reversed.reversed())))
+    draft.files[0].operation!.state = .unknown
+    draft = try store.update(draft)
+    XCTAssertThrowsError(try store.reorderFiles(draft, order: reversed))
+  }
+
   func testOriginalNamesAndCachedPreviewsDoNotReadOriginalsAgain() throws {
     let source = root.appendingPathComponent("source.png")
     try PhotoFixture.write(source, width: 1800, height: 1200)

@@ -464,3 +464,24 @@ All six native UI flows passed across the full suite and focused source-message 
 Web lint, the production build, API/preview-contract checks, all 2,998 web tests (two skipped), 24 Chromium/Firefox recovery checks, and the broader Chromium suite (257 passed, 20 skipped) passed.
 The signed debugging IPA passed its artifact checks and was installed on the paired iPhone; the iPad remained disconnected.
 The WebKit host limitation and live Photos.app acceptance checklist remain outstanding.
+
+### Batch captions, photo order, and recovery navigation
+
+When more than one photo is shared, the Master caption field appears above the photo controls in both the extension and Pending Shares.
+Typing there replaces every photo caption; clearing it clears every photo caption.
+Individual caption edits remain available and make the master field blank when the captions differ.
+The separate shared source message and link cards are unaffected.
+
+In the extension, choose Reorder photos, drag the standard reorder handles, then choose Done reordering.
+The compact rows keep more photos visible while arranging the batch.
+Pending Shares also provides a drag handle and accessible Move up/Move down buttons.
+A single manifest write saves the order, and photo captions, size selections, and retained originals remain associated with their IDs.
+Delivery follows the saved photo order after any separate source message.
+Reordering is unavailable after confirmed or uncertain delivery has fixed the content.
+
+The close icon at the top right of Pending Shares saves edits and releases the reviewed draft before returning to the room list.
+A failed save keeps the draft open.
+Closing during review acquisition waits for the claim and releases it too; reopening waits for that release instead of leaving a five-minute ownership lease behind.
+Live dispatch retains ownership until its delivery outcome is recorded.
+Review acquisition displays Opening share, and a failed review displays its error beside the selected review button.
+Native diagnostics record generated share IDs for claim, release, and busy outcomes without recording message content or credentials.

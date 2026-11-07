@@ -208,6 +208,9 @@ class NativeAuthPlugin: Plugin {
         case "update":
           guard let manifest = args.manifest else { throw ShareFailure.invalid }
           result = try self.shareObject(store.update(manifest, release: args.release ?? false))
+        case "reorder_files":
+          guard let manifest = args.manifest, let order = args.order else { throw ShareFailure.invalid }
+          result = try self.shareObject(store.reorderFiles(manifest, order: order))
         case "remove_file":
           guard let manifest = args.manifest, let file = args.file else { throw ShareFailure.invalid }
           result = try self.shareObject(store.removeFile(manifest, file: file))
@@ -327,6 +330,7 @@ private struct ShareArgs: Decodable {
   let owner: String?
   let manifest: ShareManifest?
   let release: Bool?
+  let order: [String]?
   let file: String?
   let offset: Int?
   let count: Int?

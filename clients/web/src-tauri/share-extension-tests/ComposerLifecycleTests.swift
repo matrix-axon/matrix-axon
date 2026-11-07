@@ -220,6 +220,28 @@ final class ComposerLifecycleTests: XCTestCase {
     XCTAssertEqual(recovered.files.map(\.photoSize), [.medium, .small])
   }
 
+  func testMasterCaptionAndReorderKeepSourceAndPerPhotoOverrides() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer()
+    load(model) { model.start([fixture.photos()]) }
+    let files = try XCTUnwrap(model.record?.files)
+    model.text = "Separate source"
+    model.setMasterCaption("Together 🌊")
+    XCTAssertEqual(model.masterCaption, "Together 🌊")
+    XCTAssertEqual(model.photoCaption(files[1].id), "Together 🌊")
+    model.setPhotoCaption("Individual", file: files[1].id)
+    XCTAssertEqual(model.masterCaption, "")
+    load(model) { model.movePhotos(from: IndexSet(integer: 0), to: 2) }
+    XCTAssertEqual(model.record?.files.map(\.id), [files[1].id, files[0].id])
+    XCTAssertEqual(model.record?.files.map(\.caption), ["Individual", "Together 🌊"])
+    XCTAssertEqual(model.text, "Separate source")
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
+    let recovered = try XCTUnwrap(fixture.store.list().first)
+    XCTAssertEqual(recovered.files.map(\.id), [files[1].id, files[0].id])
+    XCTAssertEqual(recovered.files.map(\.caption), ["Individual", "Together 🌊"])
+  }
+
   func testPhotoCaptionsSaveWithTheirPhotoAndSurviveRemovalAndImmediateClose() throws {
     let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
     let model = fixture.composer()

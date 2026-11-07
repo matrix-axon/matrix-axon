@@ -107,6 +107,49 @@ final class ActivationUITests: XCTestCase {
     app.buttons["Cancel"].firstMatch.tap()
     app.terminate()
   }
+  func testMasterCaptionAndNativeDragReordering() {
+    let app = XCUIApplication()
+    chooseSource("source-photo-size", app: app)
+    let master = app.textViews["share-master-caption"]
+    XCTAssertTrue(master.waitForExistence(timeout: 15))
+    reveal(master, app: app)
+    master.tap()
+    master.typeText("Together")
+    app.buttons["share-photo-caption-done"].tap()
+    let fields = app.textViews.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-caption-'"))
+    reveal(fields.firstMatch, app: app)
+    let firstID = fields.firstMatch.identifier
+    XCTAssertEqual(fields.firstMatch.value as? String, "Together")
+    let reorder = app.buttons["share-photo-reorder"]
+    reveal(reorder, app: app, down: true)
+    reorder.tap()
+    let handles = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Reorder' AND identifier != 'share-photo-reorder'"))
+    XCTAssertTrue(handles.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertEqual(handles.count, 2, app.debugDescription)
+    reveal(handles.element(boundBy: 1), app: app)
+    let first = handles.element(boundBy: 0)
+    let last = handles.element(boundBy: 1)
+    first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.5, thenDragTo: last.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)))
+    // The status row is virtualized above the viewport here. Verify the saved
+    // photo IDs after ending edit mode instead of polling an absent AX row.
+    reveal(reorder, app: app, down: true)
+    reorder.tap()
+    reveal(fields.firstMatch, app: app)
+    XCTAssertNotEqual(fields.firstMatch.identifier, firstID)
+    XCTAssertEqual(fields.firstMatch.value as? String, "Together")
+    reveal(reorder, app: app, down: true)
+    reorder.tap()
+    let remove = app.buttons["Remove photo"].firstMatch
+    reveal(remove, app: app)
+    remove.tap()
+    XCTAssertTrue(fields.firstMatch.waitForExistence(timeout: 10))
+    XCTAssertEqual(fields.count, 1)
+    XCTAssertFalse(reorder.exists)
+    XCTAssertEqual(fields.firstMatch.value as? String, "Together")
+    app.buttons["Cancel"].firstMatch.tap()
+    app.terminate()
+  }
+
   func testPhotoCaptionsAreInlineIndependentAndFollowTheirImageOnRemoval() {
     let app = XCUIApplication()
     chooseSource("source-photo-size", app: app)
