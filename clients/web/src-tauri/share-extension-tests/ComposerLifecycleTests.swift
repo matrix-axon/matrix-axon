@@ -192,14 +192,23 @@ final class ComposerLifecycleTests: XCTestCase {
 
   func testPhotoSizeChoiceAppliesToAllAndSupportsIndividualOverrides() throws {
     let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
-    let image = UIGraphicsImageRenderer(size: CGSize(width: 1800, height: 1200)).image { context in
+    // Fix the pixel count across simulator display scales; 3x would create two 19 MP images.
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = true
+    let image = UIGraphicsImageRenderer(
+      size: CGSize(width: 1800, height: 1200), format: format
+    ).image { context in
       UIColor.systemBlue.setFill()
       context.fill(CGRect(x: 0, y: 0, width: 1800, height: 1200))
     }
+    XCTAssertEqual(image.cgImage?.width, 1800)
+    XCTAssertEqual(image.cgImage?.height, 1200)
     let item = NSExtensionItem()
     item.attachments = [NSItemProvider(object: image), NSItemProvider(object: image)]
     let model = fixture.composer()
-    load(model) { model.start([item]) }
+    // Initial import includes provider encoding and staging of both photos on CI.
+    load(model, timeout: 15) { model.start([item]) }
     XCTAssertEqual(model.commonPhotoSize, .original)
     let first = try XCTUnwrap(model.record?.files.first?.id)
     model.text = "Caption survives resizing"
@@ -577,12 +586,12 @@ final class ComposerLifecycleTests: XCTestCase {
     }
   }
 
-  private func load(_ model: ShareComposer, action: () -> Void) {
+  private func load(_ model: ShareComposer, timeout: TimeInterval = 5, action: () -> Void) {
     let loaded = expectation(description: "destinations loaded")
     let subscription = model.$busy.dropFirst().filter { !$0 }.prefix(1).sink { _ in loaded.fulfill()
     }
     action()
-    wait(for: [loaded], timeout: 5)
+    wait(for: [loaded], timeout: timeout)
     subscription.cancel()
   }
 
