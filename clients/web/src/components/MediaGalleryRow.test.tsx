@@ -393,6 +393,60 @@ describe('MediaGalleryRow', () => {
     expect(container.querySelector('.gallery-cell .gallery-caption')).toBeNull()
   })
 
+  it('renders a caption shared by every image once, unnumbered', async () => {
+    serveBytes()
+    const { container } = renderRow([
+      image('$1', { filename: 'a.png', body: 'Food' }),
+      image('$2', { filename: 'b.png', body: 'Food' }),
+      image('$3', { filename: 'c.png', body: 'Food' }),
+    ])
+    await waitFor(() =>
+      expect(container.querySelector('.gallery-caption')).not.toBeNull(),
+    )
+    const captions = container.querySelectorAll('.gallery-caption')
+    expect(captions).toHaveLength(1)
+    expect(captions[0].textContent).toBe('Food')
+    expect(container.querySelector('.gallery-caption-index')).toBeNull()
+  })
+
+  it('treats captions differing only by surrounding whitespace as shared', async () => {
+    serveBytes()
+    const { container } = renderRow([
+      image('$1', { filename: 'a.png', body: 'Food' }),
+      image('$2', { filename: 'b.png', body: 'Food \n' }),
+    ])
+    await waitFor(() =>
+      expect(container.querySelector('.gallery-caption')).not.toBeNull(),
+    )
+    expect(container.querySelectorAll('.gallery-caption')).toHaveLength(1)
+    expect(container.querySelector('.gallery-caption-index')).toBeNull()
+  })
+
+  it('renders a single captioned image unnumbered', async () => {
+    serveBytes()
+    const { container } = renderRow([
+      image('$1', { filename: 'a.png', body: 'Food' }),
+    ])
+    await waitFor(() =>
+      expect(container.querySelector('.gallery-caption')).not.toBeNull(),
+    )
+    expect(container.querySelectorAll('.gallery-caption')).toHaveLength(1)
+    expect(container.querySelector('.gallery-caption-index')).toBeNull()
+  })
+
+  it('keeps per-image captions when they differ or some are missing', async () => {
+    serveBytes()
+    const { container } = renderRow([
+      image('$1', { filename: 'a.png', body: 'Food' }),
+      image('$2', { filename: 'b.png', body: 'Food' }),
+      image('$3'),
+    ])
+    await waitFor(() =>
+      expect(container.querySelector('.gallery-caption')).not.toBeNull(),
+    )
+    expect(container.querySelectorAll('.gallery-caption')).toHaveLength(2)
+  })
+
   it('renders markdown in gallery captions', async () => {
     serveBytes()
     const { container } = renderRow([
