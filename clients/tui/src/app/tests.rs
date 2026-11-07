@@ -8,6 +8,7 @@
 mod commands;
 mod completion;
 mod input;
+mod invites;
 mod lifecycle;
 mod live_events;
 mod navigation;

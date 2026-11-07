@@ -138,6 +138,17 @@ impl App {
                 account_id,
                 payload,
             } => self.apply_unread_counts(account_id, &payload),
+            LiveFrame::InviteAdded(invite) => {
+                self.note_invite_added(invite);
+                LiveFrameAction::None
+            }
+            LiveFrame::InviteRemoved {
+                account_id,
+                room_id,
+            } => {
+                self.note_invite_removed(account_id, &room_id);
+                LiveFrameAction::None
+            }
         }
     }
 

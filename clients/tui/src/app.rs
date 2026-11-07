@@ -9,8 +9,8 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::api::LiveFrame;
 use crate::api::{
-    AccountDto, AccountState, AxonClient, EmojiDto, EventDto, FlowDto, FlowStage, RoomDto,
-    SendRelation, VerificationFrameDto, VerificationFrameKind,
+    AccountDto, AccountState, AxonClient, EmojiDto, EventDto, FlowDto, FlowStage, InviteDto,
+    RoomDto, SendRelation, VerificationFrameDto, VerificationFrameKind,
 };
 use crate::command::Command;
 #[cfg(test)]
@@ -26,6 +26,7 @@ mod completion;
 mod drafts;
 mod ephemeral;
 pub(crate) mod frame;
+mod invites;
 pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
 mod layout_cache;
 mod lifecycle;
@@ -51,6 +52,7 @@ pub(crate) mod tags;
 mod timeline;
 mod typing;
 
+pub(crate) use invites::InviteActionOutcome;
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
     date_separator_line, display_body_with_sender, format_date, format_time, message_index_at_line,
@@ -135,6 +137,12 @@ pub(crate) enum Mode {
     },
     ConfirmRoomAction {
         action: PendingRoomAction,
+    },
+    /// Reject confirmation for one invite. The key is the row the user had
+    /// selected; `y` rejects that invite and does not retarget a filtered list.
+    /// Focus-cycle abandons it the same way as [`Mode::ConfirmRoomAction`].
+    ConfirmInviteReject {
+        key: RoomKey,
     },
     RoomList,
     AccountList,
@@ -599,6 +607,7 @@ pub(crate) enum PopupKind {
     Status,
     CommandResponse,
     MediaPreview,
+    Invites,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -685,6 +694,15 @@ impl From<&RoomDto> for RoomKey {
         Self {
             account_id: room.account_id,
             room_id: room.room_id.clone(),
+        }
+    }
+}
+
+impl From<&InviteDto> for RoomKey {
+    fn from(invite: &InviteDto) -> Self {
+        Self {
+            account_id: invite.account_id,
+            room_id: invite.room_id.clone(),
         }
     }
 }
@@ -833,6 +851,28 @@ pub(crate) struct App {
     /// Sender for results of in-flight M19 room actions spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
     pub(crate) room_action_tx: Option<mpsc::UnboundedSender<RoomActionOutcome>>,
+    /// Pending invites across accounts (ADR 0130). Selectable room rows stay
+    /// joined rooms; this list is the `/pending` popup.
+    pub(crate) invites: Vec<InviteDto>,
+    /// Keys a 2xx accept or reject removed, until a later list omits them.
+    pub(crate) invite_suppressed: HashSet<RoomKey>,
+    /// `invite.added` frames that arrived while a list read was in flight.
+    /// Newest first, so a refresh cannot reorder two of them by hash.
+    pub(crate) invite_live_adds: Vec<(RoomKey, InviteDto)>,
+    /// `invite.removed` keys that arrived while a list read was in flight.
+    pub(crate) invite_live_removals: HashSet<RoomKey>,
+    pub(crate) invites_fetch_inflight: bool,
+    pub(crate) invites_fetch_again: bool,
+    /// Rejects axon answered with a 504. Same schedule as a pending leave,
+    /// settled from `GET /v1/invites` rather than the room list.
+    pub(crate) pending_invite_rejects: HashMap<RoomKey, room_actions::PendingMembership>,
+    pub(crate) invite_selection: Option<RoomKey>,
+    pub(crate) invite_action_tx: Option<mpsc::UnboundedSender<InviteActionOutcome>>,
+    /// Extra invite-list reads after an accept the homeserver has not answered
+    /// yet. The immediate refresh already happened. Two more follow
+    /// [`room_actions::JOIN_OPEN_READ_DELAYS`]. This is not the `/join` watch:
+    /// that one re-reads the room list and must not grow extra invite reads.
+    pub(crate) invite_accept_followup: Option<invites::InviteAcceptFollowUp>,
     /// Sender for `m.favourite` pin/unpin/migration writes. `None` in unit tests.
     pub(crate) tag_write_tx: Option<mpsc::UnboundedSender<TagWriteOutcome>>,
     /// True while a favourite tag write is in flight.
@@ -1311,6 +1351,16 @@ impl App {
             pending_marker_put: None,
             typing: None,
             ephemeral: ephemeral::EphemeralState::default(),
+            invites: Vec::new(),
+            invite_suppressed: HashSet::new(),
+            invite_live_adds: Vec::new(),
+            invite_live_removals: HashSet::new(),
+            invites_fetch_inflight: false,
+            invites_fetch_again: false,
+            pending_invite_rejects: HashMap::new(),
+            invite_selection: None,
+            invite_action_tx: None,
+            invite_accept_followup: None,
         }
     }
 
@@ -1542,6 +1592,7 @@ impl App {
                 | Mode::ConfirmLogout { .. }
                 | Mode::ConfirmDelete { .. }
                 | Mode::ConfirmRoomAction { .. }
+                | Mode::ConfirmInviteReject { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
@@ -1992,6 +2043,7 @@ impl App {
                 self.start_thread_from_selected_message().await;
             }
             Command::UnreadThreads => self.open_unread_threads_picker(),
+            Command::Invites => self.open_invites(),
             Command::Leave => self.start_leave_room(),
             Command::Forget(target) => self.start_forget_room(target.as_deref()),
             Command::Invite(user_id) => self.start_invite_user(&user_id),
@@ -2003,10 +2055,7 @@ impl App {
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
-            Command::Refresh => {
-                self.refresh_spaces();
-                self.request_rooms_refresh();
-            }
+            Command::Refresh => self.refresh_lists(),
             Command::EditConfig => {
                 self.edit_config_requested = true;
             }

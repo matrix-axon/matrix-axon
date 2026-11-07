@@ -66,6 +66,59 @@
   A `504` whose room list cannot be read says the result is unknown and still watches.
   A timeline read that fails stays on the entry line next to the joined room.
 
+## Pending invites (ADR 0130)
+
+- Selectable room-list rows stay joined rooms.
+  Do not add an invite row to that list or to its keyboard navigation.
+- When the filtered count is above zero, the rooms title appends ` · N invites` after the title it already has, including a bootstrap or search title and the unsaved-order suffix.
+  Zero invites leaves that title unchanged.
+  One invite uses the singular.
+- `/pending` opens the inbox popup.
+  Enter accepts, the `reject_invite` shortcut rejects, and Esc closes.
+  `reject_invite` defaults to `r` with no modifiers, so Shift-R and Ctrl-R do not reject unless the user binds them.
+  A submit binding of that same key accepts, and the popup title then omits reject.
+  The title also omits reject when that key is a shortcut handled before the popup.
+  A page binding is checked after reject, so the title still names it.
+  The popup title otherwise names the configured accept, reject, and close keys.
+  Reject asks `Reject {title}? [y/N]` and stays in the inbox.
+  The inbox popup stays up under that question, and each frame puts the question back on the status line.
+  `y` sends the leave for that invite.
+  If that invite has already left the list, `y` does not send and says it is no longer pending.
+  `n` and Esc cancel and leave the composer as it was.
+  A reject that is still held, waiting on its first check, shows the pending status and does not ask.
+  The question does not mark a room action busy and does not clear a join watch.
+  Focus-cycle leaves the question the same way it leaves a room-action confirmation, and it does not reject.
+  Up and Down move the selection by the invite's account and room.
+  Page Up and Page Down, and the configured message page keys, move by eight.
+  A filter that hides the selected row moves the marker onto an invite that is still visible, and that same keystroke does not accept or reject it.
+- The list is always `GET /v1/invites` with no `account_id`.
+  The visible set then uses the room list's account filter and room filter.
+  Favorites show none.
+  Unread keeps every invite that passed the account filter.
+- A 2xx accept or reject suppresses that key until a later list omits it, so an in-flight list cannot put the row back.
+  Both also request that list.
+  The accept does not clear suppression itself.
+  `invite.added` clears the suppression.
+  `invite.removed` drops the row and does not suppress it.
+- A 404 on the list is an older server: an empty inbox and no error.
+  It does not clear suppression and does not settle a pending reject.
+- A reject `504` keeps the row and uses the leave schedule (30/90/210/450 seconds, then the same grace).
+  That hold is separate from pending membership and settles from `GET /v1/invites`.
+  The schedule advance is shared with a pending leave.
+  A repeat reject waits until the first check has run.
+  A logged-out account is not settled by a list that omits it, and its hold does not advance or request a list until the account is active again.
+- Accept uses join and then the existing room-open path.
+  A 2xx closes the popup, requests a fresh invite list, and opens the room when the refreshed room list contains it.
+  A `504` closes the popup, watches the room list when the room is not listed yet, re-reads the invite list immediately and twice more on those same delays, and does not restore `/join` into the composer.
+  `/join` does not issue those invite reads.
+  The timed-out room-list follow-up is one helper for both `/join` and an inbox accept.
+- A known-contact DM invite may still flash and then disappear (ADR 0040).
+- The startup invite read is spawned beside the room fetch.
+  Applying it does not advance bootstrap.
+  Login, logout, recover, backup enable, and delete request the list again after they refresh accounts.
+  A target-resolution read that has not changed the active set yet does not.
+  A failed list read keeps live adds and removals so the retry still merges them.
+
 ## Spaces (ADR 0103)
 
 - Keep `app/spaces.rs` as the shared sidebar projection and freshness owner: space roots, leaf rooms, and nonselectable headings/dividers.
@@ -100,6 +153,7 @@
   than adding a sixth await ahead of the loop. The one deliberate exception is
   the flat-list launch room's timeline, which is bounded and must follow read-marker
   hydration (ADR 0048/0089).
+  The pending-invite list is spawned beside the room fetch and does not advance that chain (ADR 0130).
 - **Per-room background work is demand-driven and semaphore-bounded (ADR
   0093).** Anything that costs one request per room — space membership reads
   and any future per-room fetch — must ask only for what is on screen

@@ -107,8 +107,7 @@ impl App {
         } else if self.shortcuts.unread_threads.matches(key) && !self.is_mid_command() {
             self.open_unread_threads_picker();
         } else if self.shortcuts.refresh.matches(key) && !self.is_mid_command() {
-            self.refresh_spaces();
-            self.request_rooms_refresh();
+            self.refresh_lists();
         } else {
             match self.mode.clone() {
                 Mode::Compose => self.handle_compose_key(key).await,
@@ -127,6 +126,9 @@ impl App {
                 Mode::ConfirmDelete { account } => self.handle_confirm_delete_key(key, account),
                 Mode::ConfirmRoomAction { action } => {
                     self.handle_confirm_room_action_key(key, action)
+                }
+                Mode::ConfirmInviteReject { key: room_key } => {
+                    self.handle_confirm_invite_reject_key(key, room_key)
                 }
                 Mode::RoomList => self.handle_room_list_key(key).await,
                 Mode::AccountList => self.handle_account_list_key(key).await,
@@ -233,6 +235,8 @@ impl App {
             self.handle_help_popup_key(key);
         } else if kind == PopupKind::UnreadThreads {
             self.handle_unread_threads_popup_key(key).await;
+        } else if kind == PopupKind::Invites {
+            self.handle_invites_popup_key(key);
         } else if key.code == KeyCode::Up {
             self.popup_scroll = self.popup_scroll.saturating_sub(1);
         } else if key.code == KeyCode::Down {
@@ -1033,6 +1037,7 @@ impl App {
                 | Mode::ConfirmLogout { .. }
                 | Mode::ConfirmDelete { .. }
                 | Mode::ConfirmRoomAction { .. }
+                | Mode::ConfirmInviteReject { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
@@ -1131,6 +1136,7 @@ impl App {
                 | Mode::ConfirmLogout { .. }
                 | Mode::ConfirmDelete { .. }
                 | Mode::ConfirmRoomAction { .. }
+                | Mode::ConfirmInviteReject { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
@@ -1190,6 +1196,7 @@ impl App {
                 | Mode::ConfirmLogout { .. }
                 | Mode::ConfirmDelete { .. }
                 | Mode::ConfirmRoomAction { .. }
+                | Mode::ConfirmInviteReject { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }

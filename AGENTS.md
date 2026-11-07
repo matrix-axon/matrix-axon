@@ -130,7 +130,7 @@ this table is the orientation copy.
   reject is existing `POST …/rooms/{id}/leave`.
   Known-contact DM auto-join (ADR 0040) is unchanged.
   `axon-web` consumes this (Invites row + `/invites` inbox);
-  `axon-tui` does not — it has no inbox and is the outstanding consumer, tracked in `docs/client-parity.md`.
+  `axon-tui` consumes it as a rooms-title count and a `/pending` popup (ADR 0130), and keeps invite rows out of the joined-room list (`docs/client-parity.md`).
 - **A migration that has landed on `main` is immutable — never edit it, not even a comment.** sqlx checksums each migration file's _entire contents_ into `_sqlx_migrations` and refuses to start when the bytes no longer match, so a comment-only or whitespace edit is a hard startup failure (`migration <version> was previously applied but has been modified`) on every database that already applied it — including every deployed instance, which is exactly who never re-reads the file.
   To change schema, add a new timestamped migration;
   to correct or expand a comment, say it in the new migration that supersedes it rather than editing the old one.
