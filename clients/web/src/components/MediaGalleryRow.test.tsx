@@ -409,6 +409,31 @@ describe('MediaGalleryRow', () => {
     expect(container.querySelector('.gallery-caption-index')).toBeNull()
   })
 
+  it('treats captions differing only by surrounding whitespace as shared', async () => {
+    serveBytes()
+    const { container } = renderRow([
+      image('$1', { filename: 'a.png', body: 'Food' }),
+      image('$2', { filename: 'b.png', body: 'Food \n' }),
+    ])
+    await waitFor(() =>
+      expect(container.querySelector('.gallery-caption')).not.toBeNull(),
+    )
+    expect(container.querySelectorAll('.gallery-caption')).toHaveLength(1)
+    expect(container.querySelector('.gallery-caption-index')).toBeNull()
+  })
+
+  it('renders a single captioned image unnumbered', async () => {
+    serveBytes()
+    const { container } = renderRow([
+      image('$1', { filename: 'a.png', body: 'Food' }),
+    ])
+    await waitFor(() =>
+      expect(container.querySelector('.gallery-caption')).not.toBeNull(),
+    )
+    expect(container.querySelectorAll('.gallery-caption')).toHaveLength(1)
+    expect(container.querySelector('.gallery-caption-index')).toBeNull()
+  })
+
   it('keeps per-image captions when they differ or some are missing', async () => {
     serveBytes()
     const { container } = renderRow([

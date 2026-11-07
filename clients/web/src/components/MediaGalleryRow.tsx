@@ -196,8 +196,13 @@ export function MediaGalleryRow({
    * is noise: show it once for the whole gallery, unnumbered.
    */
   const sharedCaption =
+    captioned.length > 0 &&
     captioned.length === events.length &&
-    captioned.every((entry) => entry.caption === captioned[0].caption)
+    // Trimmed, so a trailing space or newline a bridge appends does not make
+    // identical captions look different.
+    captioned.every(
+      (entry) => entry.caption.trim() === captioned[0].caption.trim(),
+    )
   const visibleCaptions = sharedCaption ? captioned.slice(0, 1) : captioned
 
   if (expanded) {
