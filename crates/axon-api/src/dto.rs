@@ -682,6 +682,13 @@ pub struct SpaceHierarchyChildDto {
     pub parent_room_id: String,
     /// Whether the account's own membership in the child is `join`.
     pub joined: bool,
+    /// What the account's homeserver said about the child when a crawl of a
+    /// linking space last reached it (ADR 0128 decision 4), or `null` when
+    /// Axon has no such answer. Always `null` for a joined child, whose
+    /// synced fields are authoritative. A child that a later complete crawl
+    /// no longer returned keeps a non-null value with status `not_returned`
+    /// and no summary fields.
+    pub discovered: Option<crate::space_discovery::DiscoveredRoomDto>,
 }
 
 impl SpaceHierarchyChildDto {
@@ -690,6 +697,10 @@ impl SpaceHierarchyChildDto {
             child: SpaceChildDto::from(row.child),
             parent_room_id: parent_room_id.to_owned(),
             joined: row.joined,
+            discovered: row
+                .discovered
+                .filter(|_| !row.joined)
+                .and_then(crate::space_discovery::DiscoveredRoomDto::from_row),
         }
     }
 }
@@ -709,6 +720,9 @@ pub struct SpaceHierarchyPage {
     /// `via`), counted in the same snapshot as the page, so a client can show
     /// "120 of 1,340".
     pub total_children: i64,
+    /// The space's discovery crawl, returned whether or not the read asked
+    /// for `enrich`, so it is the source of truth after a reconnect.
+    pub discovery: crate::space_discovery::SpaceDiscoveryDto,
 }
 
 /// One space-parent entry (`GET …/rooms/{room_id}/space/parents`, issue #404,

@@ -36,6 +36,7 @@ mod room_metadata;
 mod routes;
 mod search;
 mod sender;
+mod space_discovery;
 mod state;
 mod sync_state;
 mod sync_status;

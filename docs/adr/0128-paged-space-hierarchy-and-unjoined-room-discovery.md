@@ -270,6 +270,12 @@ Each step is one server-silo PR, with OpenAPI, the regenerated web schema, `docs
    Needs nothing else, and unblocks issue 553.
 2. **ADR 0126 step 2 (issue 621):** the acquisition worker, homeserver details, absence confirmation, and `membership_epoch`.
 3. **Hierarchy discovery:** decisions 2, 3, 4, 6, 9 (`space_hierarchy`), 10, and 11.
+   It adds `discovery` and each child's `discovered` to the paged read.
+   A conclusive denial and `unsupported` are recorded as outcome `failed` with `failure` `forbidden` or `not_found`, or with `support` `unsupported`, and no cursor, so the next attempt after `next_attempt_at` starts a new generation.
+   A `next_batch` that is not a non-empty string of at most 1 KiB is an `invalid_response`, so a stored cursor and the loop-detection list stay bounded.
+   A first join can arrive before the room has a summary row whose epoch the trigger could advance, so the member-event transaction deletes the room's discovery row itself; a summary rebuild deletes the crawl as a leave does, because the rebuilt row takes a new epoch.
+   Field names in `discovered` are the Matrix spec's (`num_joined_members`, `guest_can_join`).
+   An `enrich` read also requires the space to link at least one child the account has not joined: on the production instance a bridge's portal space linked 4,864 rooms, 4,795 of them joined, and a space with every child joined could discover nothing at a cost of up to 40 requests per `CRAWL_TTL`.
 4. **Room summaries:** decision 5 and the `discovery` source; closes issue 622.
 
 Client adoption follows as separate PRs: web (issue 623), TUI (issue 624), and the TUI's oversized-space handling (issue 553).
