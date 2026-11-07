@@ -190,6 +190,16 @@ export function MediaGalleryRow({
         entry.caption !== null && entry.caption !== '',
     )
 
+  /**
+   * When every image carries the identical caption (a sender captioning a
+   * batch once, or a bridge repeating it), numbering N copies of the same text
+   * is noise: show it once for the whole gallery, unnumbered.
+   */
+  const sharedCaption =
+    captioned.length === events.length &&
+    captioned.every((entry) => entry.caption === captioned[0].caption)
+  const visibleCaptions = sharedCaption ? captioned.slice(0, 1) : captioned
+
   if (expanded) {
     return (
       <>
@@ -359,7 +369,7 @@ export function MediaGalleryRow({
             )
           })}
         </ul>
-        {captioned.length > 0 && (
+        {visibleCaptions.length > 0 && (
           /*
            * Captions live beneath the grid rather than on the cells: a square
            * thumbnail has no room for text, and overlaying it hides the very
@@ -370,15 +380,15 @@ export function MediaGalleryRow({
            * having to break — see `groupable` in `group-media-runs`.
            */
           <ul class="gallery-captions">
-            {captioned.map(({ event, caption, position }) => (
+            {visibleCaptions.map(({ event, caption, position }) => (
               <li key={event.event_id} class="gallery-caption">
-                {captioned.length > 1 && (
+                {visibleCaptions.length > 1 && (
                   <span class="gallery-caption-index" aria-hidden="true">
                     {position}
                   </span>
                 )}
                 <span>
-                  {captioned.length > 1 ? `Image ${position}: ` : ''}
+                  {visibleCaptions.length > 1 ? `Image ${position}: ` : ''}
                   <MediaCaption
                     accountId={accountId}
                     caption={caption}
