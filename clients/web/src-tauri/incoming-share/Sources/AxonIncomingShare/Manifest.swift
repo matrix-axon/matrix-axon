@@ -62,6 +62,8 @@ public struct ShareFile: Codable, Equatable {
   // Originals stay immutable. Recovery regenerates this chosen representation.
   public var photoSize: SharePhotoSize?
   public var photoBytes: Int?
+  // The first photo uses manifest.text; later captions stay attached to file IDs.
+  public var caption: String?
   public var uploadBytes: Int { photoBytes ?? bytes }
 }
 
@@ -112,8 +114,14 @@ public struct ShareManifest: Codable, Equatable {
     self.session = session
     self.text = text
   }
-  public var bytes: Int { files.reduce(text.utf8.count) { $0 + $1.bytes } }
-  public var uploadBytes: Int { files.reduce(text.utf8.count) { $0 + $1.uploadBytes } }
+  public func caption(for file: ShareFile) -> String {
+    files.first(where: { !$0.thumbnail })?.id == file.id ? text : (file.caption ?? "")
+  }
+  public var captionBytes: Int {
+    files.reduce(text.utf8.count) { $0 + ($1.caption?.utf8.count ?? 0) }
+  }
+  public var bytes: Int { files.reduce(captionBytes) { $0 + $1.bytes } }
+  public var uploadBytes: Int { files.reduce(captionBytes) { $0 + $1.uploadBytes } }
   public var completed: Bool {
     let operations = files.compactMap(\.operation)
     return operations.isEmpty

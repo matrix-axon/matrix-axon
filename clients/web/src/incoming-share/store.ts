@@ -5,7 +5,7 @@ import type { SendProgress } from '../stores/timeline'
 import { matchUrls } from '../html/linkify'
 import { nativePreviewLinks } from './urls'
 import { previewPreflight, type PreviewInput } from './contract'
-import { shareCompleted, shareOperations } from './types'
+import { photoCaption, shareCompleted, shareOperations } from './types'
 import type {
   IncomingShare,
   IncomingSharePort,
@@ -51,13 +51,14 @@ export function createIncomingShareStore(
   let tail: Promise<void> = Promise.resolve()
   let sessionReady = () => Promise.resolve()
   let stopRequested = false
-  const drafts = signal<Record<string, string>>({})
+  type CaptionDraft = { text?: string; captions?: Record<string, string> }
+  const drafts = signal<Record<string, CaptionDraft>>({})
   const editorText = computed(() => {
     const record = selected.value
-    return record === null ? '' : (drafts.value[record.id] ?? record.text)
+    return record === null ? '' : (drafts.value[record.id]?.text ?? record.text)
   })
   let flushingEdit:
-    { id: string; text: string; promise: Promise<void> } | undefined
+    { id: string; draft: CaptionDraft; promise: Promise<void> } | undefined
   let editTimer: ReturnType<typeof setTimeout> | undefined
   let editDeadline: ReturnType<typeof setTimeout> | undefined
   const problem = (code: string) => Object.assign(new Error(code), { code })
@@ -71,29 +72,58 @@ export function createIncomingShareStore(
     clearEditTimers()
     const id = selected.peek()?.id
     if (id === undefined) return
-    const text = drafts.peek()[id]
-    if (text === undefined) return
-    if (flushingEdit?.id === id && flushingEdit.text === text)
+    const draft = drafts.peek()[id]
+    if (draft === undefined) return
+    if (flushingEdit?.id === id && flushingEdit.draft === draft)
       return flushingEdit.promise
-    const urls = new Set(matchUrls(text).map((match) => match.url))
-    const promise = change((record) => ({
-      ...record,
-      text,
-      previews: record.previews?.filter((preview) =>
-        urls.has(preview.matched_url),
-      ),
-    }))
-    flushingEdit = { id, text, promise }
+    const promise = change((record) => {
+      const text = draft.text ?? record.text
+      const urls = new Set(matchUrls(text).map((match) => match.url))
+      return {
+        ...record,
+        version: draft.captions === undefined ? record.version : 3,
+        text,
+        files: record.files.map((file) =>
+          draft.captions?.[file.id] === undefined
+            ? file
+            : { ...file, caption: draft.captions[file.id] },
+        ),
+        previews: record.previews?.filter((preview) =>
+          urls.has(preview.matched_url),
+        ),
+      }
+    })
+    flushingEdit = { id, draft, promise }
     try {
       await promise
     } finally {
       if (flushingEdit?.promise === promise) flushingEdit = undefined
     }
-    if (drafts.peek()[id] === text) {
+    if (drafts.peek()[id] === draft) {
       const next = { ...drafts.peek() }
       delete next[id]
       drafts.value = next
     }
+  }
+
+  function scheduleEdit(id: string, draft: CaptionDraft) {
+    drafts.value = { ...drafts.peek(), [id]: draft }
+    clearTimeout(editTimer)
+    const persist = () => {
+      void flushEdits().catch(() => {})
+    }
+    editTimer = setTimeout(persist, 250)
+    editDeadline ??= setTimeout(persist, 1000)
+  }
+  function editorCaption(file: string): string {
+    const record = selected.value
+    const photo = record?.files.find((item) => item.id === file)
+    if (!record || !photo) return ''
+    if (record.files.find((item) => !item.thumbnail)?.id === file)
+      return editorText.value
+    return (
+      drafts.value[record.id]?.captions?.[file] ?? photoCaption(record, photo)
+    )
   }
 
   function failureCode(cause: unknown): string | null {
@@ -638,8 +668,21 @@ export function createIncomingShareStore(
             },
           )
         : null
-      if (failure !== null) {
-        error.value = `Cannot send: ${failure}. ${budget}Shorten the text or remove excess previews. Your draft is retained.`
+      const photoFailure = attachments
+        .slice(1)
+        .filter((file) => file.operation?.state !== 'sent')
+        .map((file) =>
+          previewPreflight(
+            {
+              body: photoCaption(record!, file),
+              url_previews: [],
+            },
+            true,
+          ),
+        )
+        .find((value) => value !== null)
+      if (failure !== null || photoFailure !== undefined) {
+        error.value = `Cannot send: ${failure ?? photoFailure}. ${budget}Shorten the text or remove excess previews. Your draft is retained.`
         return
       }
       // Retained thumbnails are always re-uploaded on an explicit Send. This
@@ -721,7 +764,7 @@ export function createIncomingShareStore(
           }
           success = await timeline.sendStagedMedia(
             uploadId,
-            index === 0 ? record.text : '',
+            photoCaption(record, file),
             {
               urlPreviews: index === 0 ? previews : undefined,
               progress: progress(file.id),
@@ -761,6 +804,7 @@ export function createIncomingShareStore(
     pending,
     selected,
     editorText,
+    editorCaption,
     flushEdits,
     busy,
     error,
@@ -872,13 +916,25 @@ export function createIncomingShareStore(
     async edit(text: string) {
       const id = selected.peek()?.id
       if (id === undefined || busy.peek()) return
-      drafts.value = { ...drafts.peek(), [id]: text }
-      clearTimeout(editTimer)
-      const persist = () => {
-        void flushEdits().catch(() => {})
+      scheduleEdit(id, { ...drafts.peek()[id], text })
+    },
+    async editPhotoCaption(file: string, caption: string) {
+      const record = selected.peek()
+      if (
+        !record ||
+        busy.peek() ||
+        !record.files.some((item) => item.id === file && !item.thumbnail)
+      )
+        return
+      if (record.files.find((item) => !item.thumbnail)?.id === file) {
+        scheduleEdit(record.id, { ...drafts.peek()[record.id], text: caption })
+      } else {
+        const draft = drafts.peek()[record.id]
+        scheduleEdit(record.id, {
+          ...draft,
+          captions: { ...draft?.captions, [file]: caption },
+        })
       }
-      editTimer = setTimeout(persist, 250)
-      editDeadline ??= setTimeout(persist, 1000)
     },
     async destination(accountId: string, roomId?: string) {
       await flushEdits()

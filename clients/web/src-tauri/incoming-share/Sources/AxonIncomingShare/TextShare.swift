@@ -153,7 +153,9 @@ public enum TextShare {
   }
 
   public static func validation(_ manifest: ShareManifest) -> String? {
-    let media = manifest.files.contains { !$0.thumbnail }
+    let photos = manifest.files.filter { !$0.thumbnail }
+    let media = !photos.isEmpty
+    guard manifest.captionBytes <= ShareLimits.textBytes else { return "text_too_large" }
     guard media || !manifest.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return "empty_text"
     }
@@ -162,7 +164,15 @@ public enum TextShare {
       if (preview.description?.utf16.count ?? 0) > 1000 { return "preview_description_too_large" }
       if (preview.site_name?.utf16.count ?? 0) > 120 { return "preview_site_name_too_large" }
     }
-    return PreviewContract.check(wire(manifest, reserveImages: true, media: media), media: media)
+    if let failure = PreviewContract.check(
+      wire(manifest, reserveImages: true, media: media), media: media) { return failure }
+    for photo in photos.dropFirst() {
+      if let failure = PreviewContract.check([
+        "upload_id": "00000000-0000-4000-8000-000000000001",
+        "caption": manifest.caption(for: photo), "url_previews": [],
+      ], media: true) { return failure }
+    }
+    return nil
   }
 
   public static func definiteRejection(status: Int, code: String?) -> Bool {
@@ -420,7 +430,9 @@ public final class TextShareSender {
       next = try save(operation, in: next, file: attachment.id)
       checkpoint(next)
       var wire =
-        index == 0 ? TextShare.wire(next, media: true) : ["caption": "", "url_previews": []]
+        index == 0
+        ? TextShare.wire(next, media: true)
+        : ["caption": next.caption(for: attachment), "url_previews": []]
       wire["upload_id"] = operation.uploadId!
       guard PreviewContract.check(wire, media: true) == nil else { throw ShareFailure.invalid }
       let body = try JSONSerialization.data(

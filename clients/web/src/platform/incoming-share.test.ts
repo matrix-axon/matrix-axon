@@ -43,3 +43,26 @@ it('preserves photo sizing in a native recovery manifest and rejects malformed c
     )
   }
 })
+
+it('accepts version 3 captions and rejects captions older consumers would ignore', async () => {
+  const captions = structuredClone(manifest)
+  captions.version = 3
+  Object.assign(captions.files[2], {
+    caption: 'Second café 🌊',
+    mime: 'image/png',
+  })
+  vi.mocked(invoke).mockResolvedValue({ value: captions })
+  await expect(nativeIncomingShare().call('claim')).resolves.toEqual(captions)
+  for (const version of [1, 2, 4]) {
+    vi.mocked(invoke).mockResolvedValue({ value: { ...captions, version } })
+    await expect(nativeIncomingShare().call('claim')).rejects.toThrow(
+      'Incoming share: invalid',
+    )
+  }
+  const invalid = structuredClone(captions)
+  Object.assign(invalid.files[2], { caption: 'é'.repeat(64 * 1024) })
+  vi.mocked(invoke).mockResolvedValue({ value: invalid })
+  await expect(nativeIncomingShare().call('claim')).rejects.toThrow(
+    'Incoming share: invalid',
+  )
+})

@@ -130,7 +130,7 @@ These are server ceilings; validate bounded image decode and ownership cleanup o
 Define a versioned `IncomingShare` manifest with a share UUID, creation time, normalized server identity and opaque session generation, optional chosen account/room, editable text, and an ordered list of attachment records.
 Each attachment has a stable item UUID, safe display filename, declared/sniffed type, measured byte count, and an opaque reference to an app-owned staged file.
 The manifest also records import failures and per-item delivery state, including confirmed event IDs and server upload IDs when available.
-Use a dedicated text operation for a text-only share; with attachments, text is the first item's caption, matching current composer semantics.
+Use a dedicated text operation for a text-only share; with attachments, imported text is the first item's caption and each subsequent photo has its own editable caption.
 Never put credentials, shared text, or file paths in URLs, intent callbacks, analytics, or logs.
 Credentials remain in protected credential storage and are never serialized into the manifest.
 

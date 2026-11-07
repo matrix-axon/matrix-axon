@@ -107,6 +107,49 @@ final class ActivationUITests: XCTestCase {
     app.buttons["Cancel"].firstMatch.tap()
     app.terminate()
   }
+  func testPhotoCaptionsAreInlineIndependentAndFollowTheirImageOnRemoval() {
+    let app = XCUIApplication()
+    chooseSource("source-photo-size", app: app)
+    let fields = app.textViews.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-caption-'"))
+    XCTAssertTrue(fields.firstMatch.waitForExistence(timeout: 15))
+    XCTAssertFalse(app.textViews["Message text"].exists)
+    // Form materializes the visible row only: the initial AX query reported
+    // one text view for two photos. Scroll before looking up the other row.
+    let firstID = fields.firstMatch.identifier
+    let first = app.textViews[firstID]
+    reveal(first, app: app)
+    first.tap()
+    XCTAssertEqual(first.value as? String ?? "", "")
+    first.typeText("First coast")
+    app.buttons["share-photo-caption-done"].tap()
+    let other = app.textViews.matching(NSPredicate(
+      format: "identifier BEGINSWITH 'share-photo-caption-' AND identifier != %@", firstID)).firstMatch
+    reveal(other, app: app)
+    let secondID = other.identifier
+    let second = app.textViews[secondID]
+    second.tap()
+    XCTAssertEqual(second.value as? String ?? "", "")
+    second.typeText("Second mountain")
+    app.buttons["share-photo-caption-done"].tap()
+    XCTAssertEqual(second.value as? String, "Second mountain")
+    reveal(first, app: app, down: true)
+    XCTAssertEqual(first.value as? String, "First coast")
+    let remove = app.buttons["Remove photo"].firstMatch
+    reveal(remove, app: app)
+    let screenshot = XCTAttachment(screenshot: app.screenshot())
+    screenshot.name = "Captions inside photo boxes"
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
+    remove.tap()
+    let removed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: first)
+    XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 10), .completed)
+    let remaining = app.textViews[secondID]
+    reveal(remaining, app: app)
+    XCTAssertEqual(remaining.value as? String, "Second mountain")
+    app.buttons["Cancel"].firstMatch.tap()
+    app.terminate()
+  }
+
   func testSinglePhotoHasItsOwnSizeMenuWithoutABatchControl() {
     let app = XCUIApplication()
     chooseSource("source-photo-size-single", app: app)

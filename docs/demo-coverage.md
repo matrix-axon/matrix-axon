@@ -297,7 +297,7 @@ Viewer download errors remaining visible on the card after close have component-
 The existing `media` recording still demonstrates image galleries; a recorded audio/text/PDF/video attachment-card scene remains outstanding.
 
 The native iOS text/link/photo Share Extension adds an account/room picker with validated last-destination restore, editable message/card preview, supplied metadata followed by explicit restricted HTTPS preview acquisition, separately confirmed homeserver lookup, Send, and durable draft/unknown-outcome recovery.
-The photo increment adds ordered photo thumbnails/filenames, first-photo caption semantics, removal before sending, individual and batch size pickers with upload estimates, and per-item partial-delivery recovery.
+The photo increment adds ordered photo thumbnails/filenames, independently editable captions below each filename, removal before sending, individual and batch size pickers with upload estimates, and per-item partial-delivery recovery.
 Photo-specific native/simulator and browser recovery tests complement the signed iPhone/iPad checklist; signed photo acceptance and a native photo recording remain outstanding.
 Settings → Sharing keeps a recovery link available when the inbox is empty.
 Recovery now also has a conditional toolbar entry with a count or read-failure badge and confirmed bulk clearing that fences idle composers and preserves in-flight sends and newly arriving shares.

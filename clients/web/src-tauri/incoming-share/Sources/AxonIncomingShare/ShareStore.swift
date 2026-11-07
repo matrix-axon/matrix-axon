@@ -312,11 +312,13 @@ public final class ShareStore {
       guard proposed.session == current.session, proposed.owner != nil,
         proposed.owner == current.owner, proposed.revision == current.revision,
         (current.leaseUntil ?? 0) > now(), proposed.files.count == current.files.count,
-        proposed.createdAt == current.createdAt, proposed.version == current.version
+        proposed.createdAt == current.createdAt,
+        (proposed.version == current.version || (proposed.version == 3 && current.version < 3))
       else { throw ShareFailure.stale }
       for (before, after) in zip(current.files, proposed.files) {
         var descriptor = after
         descriptor.operation = before.operation
+        descriptor.caption = before.caption
         guard before == descriptor else { throw ShareFailure.invalid }
         if let from = before.operation, let to = after.operation {
           try validateTransition(from: from, to: to)
@@ -325,7 +327,11 @@ public final class ShareStore {
         }
       }
       guard proposed.uploadBytes <= ShareLimits.batchBytes,
-        proposed.text.utf8.count <= ShareLimits.textBytes,
+        proposed.captionBytes <= ShareLimits.textBytes,
+        proposed.files.allSatisfy({
+          $0.caption == nil || (proposed.version == 3 && !$0.thumbnail)
+        }),
+        proposed.files.first(where: { !$0.thumbnail })?.caption == nil,
         (proposed.previews?.count ?? 0) <= 8
       else { throw ShareFailure.quota }
       guard
@@ -382,7 +388,8 @@ public final class ShareStore {
       guard current.operation.state != .sent || proposed.operation == current.operation,
         proposed.text == current.text,
         proposed.accountId == current.accountId, proposed.roomId == current.roomId,
-        proposed.previews == current.previews
+        proposed.previews == current.previews,
+        proposed.files.map(\.caption) == current.files.map(\.caption)
       else { throw ShareFailure.invalid }
     }
   }
@@ -593,10 +600,22 @@ public final class ShareStore {
         Self.operations(current).allSatisfy({ [.ready, .failed, .uploaded].contains($0.state) }),
         let item = current.files.first(where: { $0.id == file && !$0.thumbnail })
       else { throw ShareFailure.invalid }
+      let first = current.files.first { !$0.thumbnail }?.id == file
       current.files.removeAll { $0.id == file }
+      var removed = [item]
+      if first {
+        // Captions follow their photo, never the vacated position in the batch.
+        current.text = current.files.first(where: { !$0.thumbnail })?.caption ?? ""
+        if let index = current.files.firstIndex(where: { !$0.thumbnail }) {
+          current.files[index].caption = nil
+        }
+        let previous = current
+        current.previews = nil
+        removed += removeUnusedThumbnails(from: previous, next: &current)
+      }
       current.revision += 1
       try save(current)
-      deleteFiles([item], share: current.id)
+      deleteFiles(removed, share: current.id)
       Self.log.info(
         "share_photo_removed share_id=\(current.id, privacy: .public) item_id=\(item.id, privacy: .public)"
       )
@@ -644,7 +663,7 @@ public final class ShareStore {
     }
     var next = snapshot
     // Older readers must refuse a choice they would otherwise silently ignore.
-    next.version = 2
+    next.version = max(next.version, 2)
     let deadline = Date().addingTimeInterval(60)
     for target in targets {
       try cancellation.check()
@@ -1056,16 +1075,18 @@ public final class ShareStore {
   private func load(_ id: String) throws -> ShareManifest {
     let value = try decode(
       ShareManifest.self, from: directory(id).appendingPathComponent("manifest.json"))
-    guard [1, 2].contains(value.version), value.id == id,
-      value.text.utf8.count <= ShareLimits.textBytes,
+    guard [1, 2, 3].contains(value.version), value.id == id,
+      value.captionBytes <= ShareLimits.textBytes,
+      value.files.first(where: { !$0.thumbnail })?.caption == nil,
       value.files.count <= ShareLimits.files + 16,
       value.files.allSatisfy({
         UUID(uuidString: $0.id) != nil && $0.bytes >= 0 && $0.bytes <= ShareLimits.batchBytes
-          && (value.version == 2 || ($0.photoSize == nil && $0.photoBytes == nil))
+          && (value.version >= 2 || ($0.photoSize == nil && $0.photoBytes == nil))
           && ($0.photoBytes.map { $0 >= 0 && $0 <= ShareLimits.batchBytes } ?? true)
           && (($0.photoSize == nil) == ($0.photoBytes == nil))
           && ($0.photoSize == nil || $0.mime.hasPrefix("image/"))
           && (!$0.thumbnail || ($0.photoSize == nil && $0.photoBytes == nil))
+          && ($0.caption == nil || (value.version == 3 && !$0.thumbnail))
       }),
       (value.previews?.count ?? 0) <= 8
     else { throw ShareFailure.invalid }

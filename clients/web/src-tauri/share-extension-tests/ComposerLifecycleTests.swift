@@ -103,6 +103,28 @@ final class ComposerLifecycleTests: XCTestCase {
     XCTAssertEqual(recovered.files.map(\.photoSize), [.medium, .small])
   }
 
+  func testPhotoCaptionsSaveWithTheirPhotoAndSurviveRemovalAndImmediateClose() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer()
+    load(model) { model.start([fixture.photos()]) }
+    let files = try XCTUnwrap(model.record?.files)
+    model.setPhotoCaption("First beach", file: files[0].id)
+    model.setPhotoCaption("Second café 🌊\nTwo lines", file: files[1].id)
+    load(model) { model.setPhotoSize(.small) }
+    XCTAssertEqual(model.record?.version, 3)
+    XCTAssertEqual(model.record?.text, "First beach")
+    XCTAssertEqual(model.record?.files[1].caption, "Second café 🌊\nTwo lines")
+    load(model) { model.removePhoto(files[0].id) }
+    XCTAssertEqual(model.photoCaption(files[1].id), "Second café 🌊\nTwo lines")
+    model.setPhotoCaption("Edited remaining caption", file: files[1].id)
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
+    let recovered = try XCTUnwrap(fixture.store.list().first)
+    XCTAssertEqual(recovered.files.map(\.id), [files[1].id])
+    XCTAssertEqual(recovered.text, "Edited remaining caption")
+    XCTAssertNil(recovered.owner)
+  }
+
   func testPreparationFailureAfterPartialDeliveryKeepsTheConfirmedOutcomeVisible() throws {
     let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
     let model = fixture.composer()

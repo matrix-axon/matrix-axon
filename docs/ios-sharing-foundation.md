@@ -10,7 +10,7 @@ The foundation below supplies its shared session, protected staging, and recover
 ## Recovering a draft
 
 Open Pending shares and choose **Review share**.
-Confirm the sending Matrix account and joined room, edit the text or first attachment caption, and review previews and saved delivery outcomes.
+Confirm the sending Matrix account and joined room, edit the text or each photo's caption, and review previews and saved delivery outcomes.
 Native destination changes also update the session-bound preference used to preselect the next Share Extension destination; each existing draft keeps its own account and room.
 An ordinary room draft stays separate.
 Typing is saved after 250 milliseconds of idle time, with a one-second maximum batching window; leaving the editor, hiding the page, and Send flush pending text.
@@ -76,11 +76,14 @@ A deferred push deletion rechecks the remaining sign-out barriers and visibly re
 
 A cross-process file lock guards descriptors, quota reservations, revisions, and ownership fences.
 Files and manifests are published atomically with filesystem synchronization.
-Photo size choices use manifest version 2; existing version 1 drafts remain readable.
+Photo size choices use manifest version 2; additional per-photo captions use version 3.
+Versions 1 and 2 remain readable.
+The first photo's caption remains canonical in `text`, and subsequent captions are stored with their file IDs; removing the first photo promotes the remaining caption without transferring the removed caption or cards.
+The combined captions count toward the 64 KiB UTF-8 staging ceiling and pending-storage quota, and each outgoing caption is validated before any photo sends.
 Both consumers regenerate the chosen representation from verified retained originals, using protected temporary files that reserve pending-storage quota.
 Choosing sizes for a batch publishes all choices in one manifest update; a crash before publication retains the previous choices.
 An interrupted rendition upload is recovered as an upload, without being mistaken for incomplete provider intake.
-Older app builds reject version 2 drafts rather than ignoring their size choices.
+Older app builds reject unsupported manifest versions rather than ignoring their size choices or captions.
 Network and provider waits run outside that lock, and all locks, leases, copies, transfers, and response bodies are bounded.
 Resume reconciliation reports incomplete imports, removes orphaned temporary data, and turns interrupted dispatches into unknown outcomes without replay.
 Heartbeats and delivery-state changes avoid global quota scans; growing content still checks authoritative cross-process totals under the lock.

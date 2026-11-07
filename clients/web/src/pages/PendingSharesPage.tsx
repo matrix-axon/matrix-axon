@@ -309,15 +309,19 @@ export function PendingSharesPage() {
                   ))}
               </select>
             </label>
-            <label>
-              Message or first attachment caption
-              <textarea
-                key={record.id}
-                value={store.editorText.value}
-                onBlur={() => act(store.flushEdits())}
-                onInput={(event) => act(store.edit(event.currentTarget.value))}
-              />
-            </label>
+            {!record.files.some((file) => !file.thumbnail) && (
+              <label>
+                Message
+                <textarea
+                  key={record.id}
+                  value={store.editorText.value}
+                  onBlur={() => act(store.flushEdits())}
+                  onInput={(event) =>
+                    act(store.edit(event.currentTarget.value))
+                  }
+                />
+              </label>
+            )}
             <LinkPreviews
               accountId={record.accountId ?? ''}
               body={store.editorText.value}
@@ -430,8 +434,23 @@ export function PendingSharesPage() {
                       photo
                       delivered={file.operation?.state === 'sent'}
                     />
+                    <p>{file.name}</p>
+                    <textarea
+                      aria-label={`Caption for ${file.name}`}
+                      placeholder="Caption"
+                      value={store.editorCaption(file.id)}
+                      onBlur={() => act(store.flushEdits())}
+                      onInput={(event) =>
+                        act(
+                          store.editPhotoCaption(
+                            file.id,
+                            event.currentTarget.value,
+                          ),
+                        )
+                      }
+                    />
                     <p>
-                      {file.name} · {Math.ceil(file.bytes / 1024)} KiB original
+                      {Math.ceil(file.bytes / 1024)} KiB original
                       {file.photoSize !== undefined &&
                         file.photoSize !== 'original' && (
                           <>

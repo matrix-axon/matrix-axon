@@ -18,19 +18,26 @@ The native extension works independently of the app's WebView; open Axon once an
 Text, web URLs, and up to ten photos are supported.
 Video and general-file intake remain outstanding work in stage 7 of [the sharing plan](mobile-incoming-sharing.md).
 Photos appear in provider order with bounded display thumbnails, filenames, and saved delivery states.
-Before sending, edit the first photo's optional caption or remove individual photos.
+Each photo has its own optional caption field inside its photo box, directly below the filename.
+An empty field shows **Caption**; tapping it opens a blank multiline editor, and **Done** dismisses the keyboard.
+Shared source text initially populates the first photo's caption; other photos start with empty captions.
+Edit each caption independently or remove individual photos before sending.
 Each photo has a native **Photo size** menu: **Original**, **Large (2048 px)**, **Medium (1280 px)**, or **Small (640 px)**.
 Reduced sizes cap the longest edge without upscaling; Original is the default.
 For multiple photos, **Size for all photos** applies one choice to the batch; change an individual photo afterward to override it, and the batch menu shows **Mixed**.
 Each photo shows its original size and estimated upload size, with an estimated total above the selection.
 Size preparation completes before Send becomes available, and a failed or cancelled batch change does not leave partially changed choices.
-The first photo carries that caption and any included link cards; subsequent photos send without repeating them.
+Each photo sends its own caption.
+Included link cards belong to the first photo; subsequent photos do not repeat those cards.
+Removing a photo removes its caption; removing the first photo also removes its cards, while the remaining captions stay with their images.
 Preview thumbnails belonging to links never become separate photo messages.
-After any photo has been sent or its delivery becomes uncertain, the destination, caption, cards, selection, and photo sizes are fixed.
+After any photo has been sent or its delivery becomes uncertain, the destination, captions, cards, selection, and photo sizes are fixed.
 Use Pending shares to explicitly prepare failed items for retry or consent to resending an uncertain item.
 Confirmed photos are skipped when continuing a batch.
 Saved size choices are also used when sending from Pending shares; recovery shows the selected preset and estimated upload size.
-Sized drafts use manifest version 2, so an older app refuses the draft rather than silently sending full-size images.
+Sized drafts use manifest version 2; drafts with additional photo captions use version 3.
+Older apps refuse unsupported draft versions rather than silently dropping captions or sending full-size images.
+All captions together share the 64 KiB UTF-8 staging ceiling; each outgoing photo is also checked against the server's event budget before sending any photo.
 Resume such a draft in an app version that supports the size picker.
 Cancellation after partial delivery retains the remaining originals and confirmed event IDs for recovery.
 Original photo bytes, including HEIC, remain available in the saved draft, so changing back to Original does not re-download or reconstruct them.
@@ -360,9 +367,10 @@ Signed-device photo acceptance has not yet been recorded for this increment.
 Use manual interaction on the signed iPhone and iPad; keep XCTest UI automation on Simulator because earlier physical XCTest automation crashed the iPad automation service.
 
 1. From Photos, share one JPEG/PNG, one HEIC, and an ordered multiple-photo selection with Axon cold, warm, and suspended.
-   Review thumbnails and destination, remove a photo, edit the first caption, and explicitly send only to Axon Testing.
+   Review thumbnails and destination, remove a photo, edit different captions below each filename, and explicitly send only to Axon Testing.
    Set a reduced size for one photo and for an entire batch, override one photo, then restore Original.
-   Verify estimated sizes, sent pixel dimensions, HEIC-to-JPEG handling, PNG transparency, order, and first-caption/card semantics, including an encrypted room.
+   Remove the first photo and verify that the remaining captions stay with their images; keep a draft and reopen it to check caption recovery.
+   Verify estimated sizes, sent pixel dimensions, HEIC-to-JPEG handling, PNG transparency, order, independent captions, and first-photo card semantics, including an encrypted room.
    Keep a sized draft and send it from Pending shares, confirming the size choice survives recovery.
 2. Share a cloud-backed photo, a photo above the preview-thumbnail ceiling, and a selection exceeding ten photos or 100 MiB.
    Exercise low storage, unreadable content, cancellation during import, and termination during import; no incomplete selection may send.
@@ -398,3 +406,18 @@ The broader Chromium suite also passed 257 tests with 19 skips.
 The signed debugging export passed the artifact checker and was installed on both paired iOS 27.0.1 devices.
 The exported extension binary was checked for the size controls and the latest partial-delivery status message.
 The WebKit launch limitation and signed Photos.app acceptance checklist above still apply.
+
+### Individual photo captions — November 6
+
+Each photo now has a multiline caption editor below its filename, within the photo row.
+The placeholder disappears on focus, and the keyboard has a Done action.
+Verification passed 131 macOS native tests and 171 shared iOS Simulator tests (two opt-in network checks skipped in each suite), plus all 15 composer lifecycle tests.
+Native and web send tests verify distinct captions, Unicode and line breaks, explicit recovery without repeating confirmed items, combined caption limits, and caption immutability after uncertain or confirmed delivery.
+Removal tests verify that deleting the first photo retains the remaining photo's own caption and removes the former first photo's cards and protected thumbnails.
+The four existing simulator UI checks passed; a focused additional UI check passed typing independent captions, dismissing the keyboard, and preserving the remaining caption after removal.
+The caption UI test scrolls before locating the second editor because the initial accessibility snapshot materialized only the visible photo row.
+Web lint, the production build, OpenAPI/preview-contract checks, 2,992 unit tests (two skipped), 22 Chromium/Firefox recovery checks, and the full Chromium suite (257 passed, 19 skipped) passed.
+The signed debugging export passed its capability/profile/activation checks, and its extension binary contains the inline caption editors and keyboard Done action.
+The same IPA was installed on the paired iPhone and iPad running iOS 27.2 through `pymobiledevice3 apps install --developer --streaming`.
+The `devicectl` install route failed because the installed developer disk image lacks the device variant; the paired installation service succeeded without mounting that image.
+The WebKit host limitation and real Photos.app send acceptance checklist remain unchanged.

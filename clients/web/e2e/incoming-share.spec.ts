@@ -195,9 +195,7 @@ test('leaving recovery cancels device acquisition and releases ownership', async
   await page
     .getByRole('button', { name: 'Include preview:', exact: false })
     .click()
-  await expect(
-    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
-  ).toBeDisabled()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toBeDisabled()
   await page.getByRole('link', { name: 'Settings', exact: true }).click()
   await expect
     .poll(() =>
@@ -210,9 +208,7 @@ test('leaving recovery cancels device acquisition and releases ownership', async
     .getByRole('link', { name: 'Pending shares, 1', exact: true })
     .click()
   await page.getByRole('button', { name: 'Review share', exact: true }).click()
-  await expect(
-    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
-  ).toBeEnabled()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toBeEnabled()
 })
 test('preview work disables the caption and preserves its saved text', async ({
   page,
@@ -242,7 +238,7 @@ test('preview work disables the caption and preserves its saved text', async ({
   await page.goto('/e2e/incoming-share.html')
   await page.getByRole('button', { name: 'Review share', exact: true }).click()
   const caption = page.getByRole('textbox', {
-    name: 'Message or first attachment caption',
+    name: 'Message',
   })
   await expect(caption).toBeEnabled()
   await page
@@ -365,7 +361,7 @@ test('typing persists in batches and refresh recovers expired ownership', async 
   )
   await page.getByRole('button', { name: 'Review share', exact: true }).click()
   const editor = page.getByRole('textbox', {
-    name: 'Message or first attachment caption',
+    name: 'Message',
   })
   const suffix = 'x'.repeat(200)
   await editor.press('End')
@@ -429,9 +425,9 @@ test('HTTP native sharing explains the restriction and retains the draft', async
   await expect(page.getByRole('alert')).toContainText(
     'requires an HTTPS server',
   )
-  await expect(
-    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
-  ).toHaveValue(record.text)
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue(
+    record.text,
+  )
   expect(sends).toEqual([])
 })
 
@@ -448,7 +444,7 @@ for (const partial of [false, true]) {
           JSON.stringify([
             {
               ...record,
-              version: 2,
+              version: 3,
               text: 'Photo caption',
               previews: [],
               operation: { id: 'batch', state: 'ready' },
@@ -459,6 +455,7 @@ for (const partial of [false, true]) {
                 bytes: 3 * 1024 * 1024,
                 photoSize: 'small',
                 photoBytes: 512,
+                ...(index === 1 ? { caption: 'Second caption' } : {}),
                 digest: 'fixture',
                 thumbnail: false,
                 operation: {
@@ -488,10 +485,16 @@ for (const partial of [false, true]) {
       'Remove photo: second.png',
     ])
     const caption = page.getByRole('textbox', {
-      name: 'Message or first attachment caption',
+      name: 'Caption for first.heic',
     })
+    const secondCaption = page.getByRole('textbox', {
+      name: 'Caption for second.png',
+    })
+    await expect(caption).toHaveValue('Photo caption')
+    await expect(secondCaption).toHaveValue('Second caption')
     if (partial) {
       await expect(caption).toBeDisabled()
+      await expect(secondCaption).toBeDisabled()
       for (const button of await photos.getByRole('button').all())
         await expect(button).toBeDisabled()
       const retry = page.getByRole('button', {
@@ -508,11 +511,12 @@ for (const partial of [false, true]) {
         page.getByRole('list', { name: 'Delivery outcomes' }),
       ).toContainText('second.png: ready')
     } else {
+      await secondCaption.fill('Edited second caption')
       await photos
         .getByRole('button', { name: 'Remove photo: first.heic', exact: true })
         .click()
       await expect(photos.getByRole('button')).toHaveCount(1)
-      await expect(caption).toHaveValue('Photo caption')
+      await expect(secondCaption).toHaveValue('Edited second caption')
       await page
         .getByRole('button', { name: 'Keep draft', exact: true })
         .click()
@@ -525,6 +529,9 @@ for (const partial of [false, true]) {
           .getByRole('group', { name: 'Photos in sending order' })
           .getByRole('button'),
       ).toHaveText('Remove photo: second.png')
+      await expect(
+        page.getByRole('textbox', { name: 'Caption for second.png' }),
+      ).toHaveValue('Edited second caption')
     }
   })
 }

@@ -43,8 +43,17 @@ function fixture(
         )
           throw new Error('stale')
         record = { ...structuredClone(next), revision: next.revision + 1 }
-        if (action === 'remove_file')
+        if (action === 'remove_file') {
+          const first =
+            record.files.find((file) => !file.thumbnail)?.id === args?.file
           record.files = record.files.filter((file) => file.id !== args?.file)
+          if (first) {
+            const promoted = record.files.find((file) => !file.thumbnail)
+            record.text = promoted?.caption ?? ''
+            if (promoted) delete promoted.caption
+            record.previews = undefined
+          }
+        }
         return structuredClone(record) as T
       }
       if (action === 'upload' && uploadFailure) throw { code: 'missingFile' }
@@ -958,13 +967,66 @@ describe('photo recovery', () => {
     expect(maximum).toBe(1)
     f.store.dispose()
   })
+  it('saves distinct captions, sends each one, and retains the photo association on removal', async () => {
+    const f = fixture()
+    f.seed({
+      files: [
+        photo,
+        { ...photo, id: 'second', operation: { id: 'op-two', state: 'ready' } },
+      ],
+    })
+    await f.store.open('share')
+    await f.store.editPhotoCaption('photo', 'First caption')
+    await f.store.editPhotoCaption('second', 'Second café 🌊\nNew line')
+    expect(f.store.editorCaption('photo')).toBe('First caption')
+    expect(f.store.editorCaption('second')).toBe('Second café 🌊\nNew line')
+    await f.store.flushEdits()
+    expect(f.record().version).toBe(3)
+    await f.store.send()
+    expect(f.post.mock.calls.map((call) => call[1].body.caption)).toEqual([
+      'First caption',
+      'Second café 🌊\nNew line',
+    ])
+    f.store.dispose()
+  })
+  it('promotes the remaining photo caption when the first photo is removed', async () => {
+    const f = fixture()
+    f.seed({ files: [photo, { ...photo, id: 'second' }] })
+    await f.store.open('share')
+    await f.store.editPhotoCaption('photo', 'First caption')
+    await f.store.editPhotoCaption('second', 'Second caption')
+    await f.store.removeFile('photo')
+    expect(f.store.editorCaption('second')).toBe('Second caption')
+    expect(f.record().text).toBe('Second caption')
+    expect(f.record().files[0].caption).toBeUndefined()
+    f.store.dispose()
+  })
+  it('validates a later caption before uploading or sending any photo', async () => {
+    const f = fixture()
+    f.seed({
+      version: 3,
+      files: [
+        photo,
+        { ...photo, id: 'second', caption: 'x'.repeat(64 * 1024) },
+      ],
+    })
+    await f.store.open('share')
+    await f.store.send()
+    expect(f.post).not.toHaveBeenCalled()
+    expect(f.calls.some(({ action }) => action === 'upload')).toBe(false)
+    expect(f.store.error.value).toContain('Cannot send')
+    f.store.dispose()
+  })
   it('flushes the caption before atomically removing a photo', async () => {
     const f = fixture()
     f.seed({ files: [photo] })
     await f.store.open('share')
     await f.store.edit('Keep this caption')
     await f.store.removeFile('photo')
-    expect(f.record().text).toBe('Keep this caption')
+    expect(
+      f.calls.find(({ action }) => action === 'remove_file')?.args?.manifest,
+    ).toMatchObject({ text: 'Keep this caption' })
+    expect(f.record().text).toBe('')
     expect(f.record().files).toEqual([])
     expect(
       f.calls.filter(({ action }) => action === 'remove_file'),

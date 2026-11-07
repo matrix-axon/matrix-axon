@@ -505,8 +505,12 @@ final class TextShareTests: XCTestCase {
     return try store.update(value)
   }
 
-  func testPhotosSendInOrderWithOnlyTheFirstCaptionAndCard() throws {
+  func testPhotosSendTheirOwnCaptionsWithOnlyTheFirstCard() throws {
     var value = try photos()
+    value.version = 3
+    value.files[1].caption = "Second photo: café 🌊\nA different caption"
+    value.files[2].caption = ""
+    value = try store.update(value)
     value = try store.importThumbnail(
       value.id, owner: value.owner!,
       data: Data(contentsOf: root.appendingPathComponent("photo.png")), mime: "image/png",
@@ -529,7 +533,7 @@ final class TextShareTests: XCTestCase {
     let result = try sender.send(value)
     XCTAssertTrue(result.completed)
     XCTAssertEqual(uploads.count, 4)
-    XCTAssertEqual(messages.map { $0["caption"] as? String }, [link, "", ""])
+    XCTAssertEqual(messages.map { $0["caption"] as? String }, [link, "Second photo: café 🌊\nA different caption", ""])
     XCTAssertEqual((messages[0]["url_previews"] as? [Any])?.count, 1)
     XCTAssertNotNil((messages[0]["url_previews"] as? [[String: Any]])?[0]["image_upload_id"])
     XCTAssertEqual((messages[1]["url_previews"] as? [Any])?.count, 0)
@@ -538,7 +542,11 @@ final class TextShareTests: XCTestCase {
   }
 
   func testPhotoResponseLossStopsTheBatchAndExplicitRecoverySkipsConfirmedCaption() throws {
-    let value = try photos()
+    var value = try photos()
+    value.version = 3
+    value.files[1].caption = "Second caption"
+    value.files[2].caption = "Third caption"
+    value = try store.update(value)
     var sends = 0
     let sender = sender { _, _, path, _, _, file, _, _ in
       if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
@@ -564,10 +572,8 @@ final class TextShareTests: XCTestCase {
     XCTAssertTrue(result.completed)
     XCTAssertEqual(result.files[0].operation?.eventId, "$first")
     XCTAssertEqual(retried.count, 2)
-    XCTAssertTrue(
-      retried.allSatisfy {
-        ($0["caption"] as? String) == "" && ($0["url_previews"] as? [Any])?.isEmpty == true
-      })
+    XCTAssertEqual(retried.map { $0["caption"] as? String }, ["Second caption", "Third caption"])
+    XCTAssertTrue(retried.allSatisfy { ($0["url_previews"] as? [Any])?.isEmpty == true })
   }
 
   func testPhotoUploadFailureIsRetryableAndRetainsEarlierConfirmation() throws {
