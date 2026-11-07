@@ -6114,7 +6114,7 @@
           "rooms"
         ],
         "summary": "Page through a space's children",
-        "description": "Page through a space's children (`m.space.child` links with a valid\n`via`) in MSC1772 order: `order` ascending by code point with absent\nlast, then the link's `origin_ts`, then child room id (ADR 0128). Each\nchild carries the same synced fields as `space/children`, plus\n`parent_room_id` and whether the account is `joined` to it.\n\nReads only local data and never waits for the homeserver. Each page starts\nstrictly after the last row of the previous one, so a link added or\nremoved between pages neither duplicates nor skips any other link; a link\nwhose `order` or `origin_ts` changes between pages (an edit or a\nreplacement `m.space.child` event) may appear twice or not at all in one\nwalk, so de-duplicate by room id. `next_cursor` is `null` only on the last\npage, and `total_children` counts every current link, so nothing is\ndropped silently. An unknown `account_id`/`room_id`, or a room with no\nchildren, is an empty page (200), not a 404.",
+        "description": "Page through a space's children (`m.space.child` links with a valid\n`via`) in MSC1772 order: `order` ascending by code point with absent\nlast, then the link's `origin_ts`, then child room id (ADR 0128). Each\nchild carries the same synced fields as `space/children`, plus\n`parent_room_id` and whether the account is `joined` to it.\n\nReads only local data and never waits for the homeserver. Each page starts\nstrictly after the last row of the previous one, so a link added or\nremoved between pages neither duplicates nor skips any other link; a link\nwhose `order` or `origin_ts` changes between pages (an edit or a\nreplacement `m.space.child` event) may appear twice or not at all in one\nwalk, so de-duplicate by room id. `next_cursor` is `null` only on the last\npage, and `total_children` counts every current link, so nothing is\ndropped silently. An unknown `account_id`/`room_id`, or a room with no\nchildren, is an empty page (200), not a 404.\n\nEach unjoined child also carries `discovered`: what the account's\nhomeserver said about it when Axon last crawled the space's hierarchy, or\n`null` (ADR 0128). Show the child's synced fields when it is joined, its\n`discovered` fields when it is not and `discovered.status` is\n`available`, and otherwise the synced fields, then the room id. With\n`enrich=true`, a read of a joined space that links at least one unjoined\nchild schedules a crawl in the background when none is fresh (a crawl\nstays fresh for six hours) and no backoff is in force; `discovery` reports it, page by page. Re-read on a\n`room_details.changed` WebSocket frame for the space whose `sources`\ninclude `space_hierarchy`: one follows each page that changed a summary\nand the end of every crawl.",
         "operationId": "space_hierarchy",
         "parameters": [
           {
@@ -6158,7 +6158,7 @@
           {
             "name": "enrich",
             "in": "query",
-            "description": "Ask Axon to fill in unjoined children's names from the homeserver.\nAccepted and currently ignored: discovery is not implemented yet\n(ADR 0128), so this read never contacts the homeserver.",
+            "description": "Ask Axon to fill in unjoined children's summaries from the\naccount's homeserver (default `false`). The read still returns at\nonce; it schedules a background crawl of the space only when the\naccount has joined it and no fresh crawl or backoff is in force.\nReads without it never contact the homeserver.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -11581,7 +11581,8 @@
             "required": [
               "room_id",
               "children",
-              "total_children"
+              "total_children",
+              "discovery"
             ],
             "properties": {
               "children": {
@@ -11590,6 +11591,10 @@
                   "$ref": "#/components/schemas/SpaceHierarchyChildDto"
                 },
                 "description": "Up to `limit` children in MSC1772 order, strictly after the request's\n`cursor`."
+              },
+              "discovery": {
+                "$ref": "#/components/schemas/SpaceDiscoveryDto",
+                "description": "The space's discovery crawl, returned whether or not the read asked\nfor `enrich`, so it is the source of truth after a reconnect."
               },
               "next_cursor": {
                 "type": [
@@ -13834,6 +13839,42 @@
           }
         }
       },
+      "CrawlFailure": {
+        "type": "string",
+        "description": "Why a crawl failed or stopped early. Allowlisted; never upstream text.",
+        "enum": [
+          "timeout",
+          "server_error",
+          "rate_limited",
+          "transport",
+          "unauthorized",
+          "invalid_response",
+          "forbidden",
+          "not_found",
+          "too_large",
+          "pagination_loop",
+          "cursor_expired"
+        ]
+      },
+      "CrawlOutcome": {
+        "type": "string",
+        "description": "How a space's last crawl ended, or that it is still going.",
+        "enum": [
+          "in_progress",
+          "complete",
+          "truncated",
+          "failed"
+        ]
+      },
+      "CrawlSupport": {
+        "type": "string",
+        "description": "Whether the account's homeserver serves the hierarchy endpoint.",
+        "enum": [
+          "unknown",
+          "supported",
+          "unsupported"
+        ]
+      },
       "CreateDmRequest": {
         "type": "object",
         "description": "Request body for creating a DM (`POST …/rooms/dm`; ADR 0068 M19c).",
@@ -14228,6 +14269,130 @@
             ]
           }
         }
+      },
+      "DiscoveredRoomDto": {
+        "type": "object",
+        "description": "A summary of an unjoined room from the account's homeserver (ADR 0128\ndecision 4), with its provenance. Every summary field is `null` when it\nwas missing from the latest answer, failed validation (then named in\n`withheld`), or `status` is not `available`.",
+        "required": [
+          "status",
+          "source",
+          "observed_at",
+          "expires_at",
+          "withheld"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An `mxc://` URI."
+          },
+          "canonical_alias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "encryption": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The room's encryption algorithm. `null` means unknown, never\nunencrypted: homeservers before Matrix v1.15 do not report it."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms when the answer goes stale; a past value means stale."
+          },
+          "guest_can_join": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "join_rule": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "num_joined_members": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "observed_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms of the answer, from the server clock."
+          },
+          "room_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The room's `m.room.create` `type`, such as `m.space`."
+          },
+          "room_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/DiscoverySource"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DiscoveryStatus"
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "withheld": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Summary fields the latest answer carried that failed validation and\nwere withheld: a name, topic, or alias over its length limit, an avatar\nthat is not an `mxc://` URI, or a value of the wrong type."
+          },
+          "world_readable": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "DiscoverySource": {
+        "type": "string",
+        "description": "Which homeserver read produced a discovery row.",
+        "enum": [
+          "hierarchy",
+          "summary"
+        ]
+      },
+      "DiscoveryStatus": {
+        "type": "string",
+        "description": "What the homeserver last said about a discovered room.",
+        "enum": [
+          "available",
+          "not_returned",
+          "forbidden",
+          "not_found"
+        ]
       },
       "EditRequest": {
         "type": "object",
@@ -16921,6 +17086,97 @@
           }
         }
       },
+      "SpaceDiscoveryDto": {
+        "type": "object",
+        "description": "A space's discovery crawl (ADR 0128 decision 3). `state` lives in memory\nonly, so after a restart it is `idle`; everything else persists.",
+        "required": [
+          "state",
+          "pages",
+          "rooms_cached",
+          "support"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the crawl ended `complete` or `truncated`."
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms until which an ended crawl, a denial, or `unsupported` stands;\nan `enrich` read after it starts a new crawl."
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CrawlFailure",
+                "description": "The last failure, or the limit a `truncated` crawl stopped at."
+              }
+            ]
+          },
+          "next_attempt_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms before which a failed crawl is not resumed."
+          },
+          "outcome": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CrawlOutcome",
+                "description": "`null` when the space has never been crawled."
+              }
+            ]
+          },
+          "page_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The rooms the crawl asks for per page; halved for the rest of a crawl\nafter a page over Axon's size limit. `null` before the first crawl."
+          },
+          "pages": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Pages the current crawl has committed."
+          },
+          "rooms_cached": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Children the current crawl has returned so far."
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms when the current crawl started from its first page."
+          },
+          "state": {
+            "$ref": "#/components/schemas/RefreshState",
+            "description": "Whether a page is waiting for, or using, the account's worker."
+          },
+          "support": {
+            "$ref": "#/components/schemas/CrawlSupport"
+          }
+        }
+      },
       "SpaceHierarchyChildDto": {
         "allOf": [
           {
@@ -16933,6 +17189,17 @@
               "joined"
             ],
             "properties": {
+              "discovered": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DiscoveredRoomDto",
+                    "description": "What the account's homeserver said about the child when a crawl of a\nlinking space last reached it (ADR 0128 decision 4), or `null` when\nAxon has no such answer. Always `null` for a joined child, whose\nsynced fields are authoritative. A child that a later complete crawl\nno longer returned keeps a non-null value with status `not_returned`\nand no summary fields."
+                  }
+                ]
+              },
               "joined": {
                 "type": "boolean",
                 "description": "Whether the account's own membership in the child is `join`."
@@ -16952,7 +17219,8 @@
         "required": [
           "room_id",
           "children",
-          "total_children"
+          "total_children",
+          "discovery"
         ],
         "properties": {
           "children": {
@@ -16961,6 +17229,10 @@
               "$ref": "#/components/schemas/SpaceHierarchyChildDto"
             },
             "description": "Up to `limit` children in MSC1772 order, strictly after the request's\n`cursor`."
+          },
+          "discovery": {
+            "$ref": "#/components/schemas/SpaceDiscoveryDto",
+            "description": "The space's discovery crawl, returned whether or not the read asked\nfor `enrich`, so it is the source of truth after a reconnect."
           },
           "next_cursor": {
             "type": [
