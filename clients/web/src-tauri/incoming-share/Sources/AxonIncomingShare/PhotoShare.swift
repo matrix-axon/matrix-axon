@@ -9,10 +9,7 @@ public enum PhotoShare {
     public let mime: String
     public let fileExtension: String
     public func filename(_ original: String) -> String {
-      let stem = URL(fileURLWithPath: original).deletingPathExtension().lastPathComponent
-      // At most 48 Unicode scalars of four bytes each, plus the known extension.
-      let bounded = String(String.UnicodeScalarView(stem.unicodeScalars.prefix(48)))
-      return (bounded.isEmpty ? "photo" : bounded) + "." + fileExtension
+      PhotoShare.filename(original, extension: fileExtension, replacing: true)
     }
   }
 
@@ -43,11 +40,28 @@ public enum PhotoShare {
     else { throw ShareFailure.invalid }
     return mime
   }
-  public static func mime(_ url: URL) throws -> String {
+  public static func mime(_ url: URL) throws -> String { try inspect(url).mime }
+  public static func inspect(_ url: URL) throws -> (mime: String, thumbnail: Data) {
     let source = try source(url)
-    let mime = try detectedMime(source)
-    _ = try image(source, pixels: 480)
-    return mime
+    return (try detectedMime(source), try encode(
+      image(source, pixels: 480), type: .jpeg, limit: ShareLimits.thumbnailBytes,
+      cancellation: ShareCancellation()))
+  }
+  public static func originalFilename(_ name: String, mime: String) -> String {
+    filename(name, extension: UTType(mimeType: mime)?.preferredFilenameExtension ?? "img", replacing: false)
+  }
+  private static func filename(_ original: String, extension suffix: String, replacing: Bool) -> String {
+    let url = URL(fileURLWithPath: original)
+    if !replacing && !url.pathExtension.isEmpty { return original }
+    let stem = replacing ? url.deletingPathExtension().lastPathComponent : original
+    var bounded = ""
+    var bytes = 0
+    for scalar in stem.unicodeScalars {
+      guard bytes + scalar.utf8.count <= 254 - suffix.utf8.count else { break }
+      bounded.unicodeScalars.append(scalar)
+      bytes += scalar.utf8.count
+    }
+    return (bounded.isEmpty ? "photo" : bounded) + "." + suffix
   }
   private static func image(_ source: CGImageSource, pixels: Int) throws -> CGImage {
     guard

@@ -439,15 +439,20 @@ for (const partial of [false, true]) {
       ({ record, partial }) => {
         if (localStorage.getItem('fixture.photoSeeded') === 'true') return
         localStorage.setItem('fixture.photoSeeded', 'true')
+        localStorage.setItem('fixture.thumbnailFailureOnce', 'true')
         localStorage.setItem(
           'fixture.incoming',
           JSON.stringify([
             {
               ...record,
-              version: 3,
-              text: 'Photo caption',
+              version: 4,
+              text: 'Independent source message',
               previews: [],
-              operation: { id: 'batch', state: 'ready' },
+              operation: {
+                id: 'batch',
+                state: partial ? 'sent' : 'ready',
+                ...(partial ? { eventId: '$source' } : {}),
+              },
               files: ['first.heic', 'second.png'].map((name, index) => ({
                 id: `photo-${index}`,
                 name,
@@ -455,7 +460,7 @@ for (const partial of [false, true]) {
                 bytes: 3 * 1024 * 1024,
                 photoSize: 'small',
                 photoBytes: 512,
-                ...(index === 1 ? { caption: 'Second caption' } : {}),
+                caption: index === 0 ? 'Photo caption' : 'Second caption',
                 digest: 'fixture',
                 thumbnail: false,
                 operation: {
@@ -475,6 +480,10 @@ for (const partial of [false, true]) {
       .getByRole('button', { name: 'Review share', exact: true })
       .click()
     const photos = page.getByRole('group', { name: 'Photos in sending order' })
+    await photos.getByRole('button', { name: 'Retry image preview' }).click()
+    await expect(
+      page.getByRole('textbox', { name: 'Shared message', exact: true }),
+    ).toHaveValue('Independent source message')
     await expect(photos.getByRole('img', { name: 'Shared photo' })).toHaveCount(
       2,
     )
@@ -511,12 +520,22 @@ for (const partial of [false, true]) {
         page.getByRole('list', { name: 'Delivery outcomes' }),
       ).toContainText('second.png: ready')
     } else {
+      const sourceMessage = page.getByRole('textbox', {
+        name: 'Shared message',
+        exact: true,
+      })
+      await sourceMessage.fill('')
+      await expect(sourceMessage).toBeVisible()
+      await sourceMessage.fill('Independent source message')
       await secondCaption.fill('Edited second caption')
       await photos
         .getByRole('button', { name: 'Remove photo: first.heic', exact: true })
         .click()
       await expect(photos.getByRole('button')).toHaveCount(1)
       await expect(secondCaption).toHaveValue('Edited second caption')
+      await expect(
+        page.getByRole('textbox', { name: 'Shared message', exact: true }),
+      ).toHaveValue('Independent source message')
       await page
         .getByRole('button', { name: 'Keep draft', exact: true })
         .click()
@@ -535,3 +554,32 @@ for (const partial of [false, true]) {
     }
   })
 }
+
+test('text-only preview overflow explains the link limit without reporting an unsupported image', async ({
+  page,
+}) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem(
+      'fixture.incoming',
+      JSON.stringify([
+        {
+          ...record,
+          version: 4,
+          operation: { ...record.operation, state: 'ready' },
+          importFailures: ['too_many_source_previews'],
+        },
+      ]),
+    )
+  }, record)
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(
+    page.getByText(
+      'The source supplied more than eight link previews. Share fewer links.',
+      { exact: true },
+    ),
+  ).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: 'Send reviewed share' }),
+  ).toBeDisabled()
+})

@@ -64,7 +64,7 @@ The server prerequisites and web image-card renderer are available for the later
 
 A rich-link share has three independent parts: acquiring metadata, delivering it inside the Matrix message, and rendering the bundled card.
 A card visible in the sending app or system share sheet does not prove the receiving app gets its metadata or thumbnail.
-Keep the original HTTP(S) URL in the message body or first attachment caption; the card is additional context and removing it never removes the link.
+Keep the original HTTP(S) URL in the shared message body; the card is additional context and removing it never removes the link.
 
 On iOS, Apple's Link Presentation framework represents rich links with `LPLinkMetadata` and displays them with `LPLinkView`.
 Import compatible source-supplied title/URL/image data when actually available through supported extension input representations.
@@ -114,7 +114,7 @@ Do not serialize an Apple-specific archive, platform URI, or local image path in
 
 Store normalized preview data and thumbnail handles in the durable incoming-share record with provenance (`source` or `generated`) and the exact matched URL.
 If the user removes/changes that URL, remove or explicitly regenerate the stale preview; editing another portion of the text must not discard a valid card.
-The first file's caption carries link previews for a mixed batch; subsequent files do not repeat them.
+The independent source message carries link previews for a mixed batch; photo captions do not repeat those cards.
 Permit preview removal before sending, and record its delivery with the parent message rather than as an independent send operation.
 The settled server limits are eight cards, 4096 UTF-16 code units per URL, 300 for title, 1000 for description and 120 for site name, aligned with the current renderer's string-length units.
 Also bound preview metadata to 32 KiB per share; count UTF-8 bytes of the canonical JSON preview array, including keys, escaping, punctuation and resolved image descriptors, but excluding thumbnail file bytes.
@@ -130,7 +130,7 @@ These are server ceilings; validate bounded image decode and ownership cleanup o
 Define a versioned `IncomingShare` manifest with a share UUID, creation time, normalized server identity and opaque session generation, optional chosen account/room, editable text, and an ordered list of attachment records.
 Each attachment has a stable item UUID, safe display filename, declared/sniffed type, measured byte count, and an opaque reference to an app-owned staged file.
 The manifest also records import failures and per-item delivery state, including confirmed event IDs and server upload IDs when available.
-Use a dedicated text operation for a text-only share; with attachments, imported text is the first item's caption and each subsequent photo has its own editable caption.
+Use a dedicated text operation for a text-only share; with photos, imported text is an independent message and every photo has its own editable caption.
 Never put credentials, shared text, or file paths in URLs, intent callbacks, analytics, or logs.
 Credentials remain in protected credential storage and are never serialized into the manifest.
 

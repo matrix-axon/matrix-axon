@@ -131,7 +131,7 @@ public enum TextShare {
   }
 
   public static func wire(
-    _ manifest: ShareManifest, reserveImages: Bool = false, media: Bool = false
+    _ manifest: ShareManifest, reserveImages: Bool = false
   ) -> [String: Any] {
     let previews: [[String: Any]] = (manifest.previews ?? []).map { preview in
       var entry: [String: Any] = ["matched_url": preview.matched_url]
@@ -143,16 +143,15 @@ public enum TextShare {
         ? "00000000-0000-4000-8000-000000000001" : preview.image_upload_id
       return entry
     }
-    if media {
-      return [
-        "upload_id": "00000000-0000-4000-8000-000000000001",
-        "caption": manifest.text, "url_previews": previews,
-      ]
-    }
     return ["body": manifest.text, "url_previews": previews]
   }
 
+  public static func photoWire(_ file: ShareFile, uploadId: String = "00000000-0000-4000-8000-000000000001") -> [String: Any] {
+    ["upload_id": uploadId, "caption": file.caption ?? "", "url_previews": []]
+  }
+
   public static func validation(_ manifest: ShareManifest) -> String? {
+    let manifest = manifest.canonicalized()
     let photos = manifest.files.filter { !$0.thumbnail }
     let media = !photos.isEmpty
     guard manifest.captionBytes <= ShareLimits.textBytes else { return "text_too_large" }
@@ -164,13 +163,11 @@ public enum TextShare {
       if (preview.description?.utf16.count ?? 0) > 1000 { return "preview_description_too_large" }
       if (preview.site_name?.utf16.count ?? 0) > 120 { return "preview_site_name_too_large" }
     }
-    if let failure = PreviewContract.check(
-      wire(manifest, reserveImages: true, media: media), media: media) { return failure }
-    for photo in photos.dropFirst() {
-      if let failure = PreviewContract.check([
-        "upload_id": "00000000-0000-4000-8000-000000000001",
-        "caption": manifest.caption(for: photo), "url_previews": [],
-      ], media: true) { return failure }
+    if manifest.hasMessage {
+      if let failure = PreviewContract.check(wire(manifest, reserveImages: true), media: false) { return failure }
+    }
+    for photo in photos {
+      if let failure = PreviewContract.check(photoWire(photo), media: true) { return failure }
     }
     return nil
   }
@@ -371,7 +368,7 @@ public final class TextShareSender {
     -> ShareManifest
   {
     let attachments = input.files.filter { !$0.thumbnail }
-    guard input.operation.state == .ready, input.importFailures.isEmpty,
+    guard !input.completed, (!input.hasMessage || [.ready, .sent].contains(input.operation.state)), input.importFailures.isEmpty,
       let room = input.roomId, TextShare.validation(input) == nil,
       attachments.allSatisfy({
         $0.mime.hasPrefix("image/")
@@ -385,16 +382,16 @@ public final class TextShareSender {
       })
     else { throw ShareFailure.stale }
     var next = input
-    if attachments.first?.operation?.state != .sent {
+    if next.hasMessage && next.operation.state != .sent {
       next = try uploadPreviews(next, path: path, checkpoint: checkpoint)
-    }
-    if attachments.isEmpty {
       let body = try JSONSerialization.data(
         withJSONObject: TextShare.wire(next), options: [.sortedKeys, .withoutEscapingSlashes])
-      return try dispatch(
-        next, path: path, room: room, body: body, file: nil, checkpoint: checkpoint)
+      next = try dispatch(next, path: path, room: room, body: body, file: nil, checkpoint: checkpoint)
+      checkpoint(next)
+      if next.operation.state != .sent { return next }
     }
-    for (index, attachment) in attachments.enumerated() {
+    if attachments.isEmpty { return next }
+    for attachment in attachments {
       try cancellation.check()
       if attachment.operation?.state == .sent { continue }
       var operation = next.files.first { $0.id == attachment.id }!.operation!
@@ -429,11 +426,7 @@ public final class TextShareSender {
       }
       next = try save(operation, in: next, file: attachment.id)
       checkpoint(next)
-      var wire =
-        index == 0
-        ? TextShare.wire(next, media: true)
-        : ["caption": next.caption(for: attachment), "url_previews": []]
-      wire["upload_id"] = operation.uploadId!
+      let wire = TextShare.photoWire(attachment, uploadId: operation.uploadId!)
       guard PreviewContract.check(wire, media: true) == nil else { throw ShareFailure.invalid }
       let body = try JSONSerialization.data(
         withJSONObject: wire, options: [.sortedKeys, .withoutEscapingSlashes])

@@ -9,6 +9,42 @@
   @testable import AxonIncomingShare
 
   final class ShareIntakeTests: XCTestCase {
+    private final class TrackedPhoto: NSItemProvider {
+      var loads = 0
+      init(source: URL?) {
+        super.init()
+        suggestedName = "IMG_1234"
+        registerFileRepresentation(forTypeIdentifier: UTType.png.identifier, fileOptions: [], visibility: .all) { [weak self] complete in
+          self?.loads += 1
+          complete(source, false, source == nil ? NSError(domain: "fixture", code: 1) : nil)
+          return Progress(totalUnitCount: 1)
+        }
+      }
+    }
+    func testPhotoFailureStopsRemainingProvidersAndOverLimitSelectionCopiesNothing() throws {
+      let source = root.appendingPathComponent("source.png")
+      try PhotoFixture.write(source)
+      let failed = TrackedPhoto(source: nil)
+      let untouched = TrackedPhoto(source: source)
+      let item = NSExtensionItem()
+      item.attachments = [failed, untouched]
+      let draft = try ShareIntake.importItems([item], store: store)
+      XCTAssertFalse(draft.importFailures.isEmpty)
+      XCTAssertEqual(failed.loads, 1)
+      XCTAssertEqual(untouched.loads, 0)
+      XCTAssertTrue(draft.files.isEmpty)
+      let over = NSExtensionItem()
+      over.attachments = (0..<11).map { _ in untouched }
+      let overDraft = try ShareIntake.importItems([over], store: store)
+      XCTAssertTrue(overDraft.importFailures.contains("too_many_photos"))
+      XCTAssertEqual(untouched.loads, 0)
+      let single = NSExtensionItem()
+      single.attachments = [untouched]
+      let imported = try ShareIntake.importItems([single], store: store)
+      XCTAssertEqual(imported.files.first?.name, "IMG_1234.png")
+      XCTAssertEqual(untouched.loads, 1)
+    }
+
     private final class OversizedAttributedText: NSAttributedString {
       private(set) var readString = false
       override init() { super.init() }

@@ -46,7 +46,7 @@ Confirmed items retain their event IDs and are never resent during recovery.
 An interrupted dispatch is **outcome unknown**, because the server may have accepted it without returning a response.
 Inspect the destination before explicitly allowing a resend; the duplicate-risk checkbox never triggers a send itself.
 Stopping a batch prevents subsequent dispatches after the current request finishes, and cannot recall a message already accepted upstream.
-Discarding a partial batch never deletes preview upload handles already associated with its delivered caption or first attachment.
+Discarding a partial batch never deletes preview upload handles already associated with its delivered source message or a combined legacy first attachment.
 
 ## Session and storage boundaries
 
@@ -76,10 +76,14 @@ A deferred push deletion rechecks the remaining sign-out barriers and visibly re
 
 A cross-process file lock guards descriptors, quota reservations, revisions, and ownership fences.
 Files and manifests are published atomically with filesystem synchronization.
-Photo size choices use manifest version 2; additional per-photo captions use version 3.
-Versions 1 and 2 remain readable.
-The first photo's caption remains canonical in `text`, and subsequent captions are stored with their file IDs; removing the first photo promotes the remaining caption without transferring the removed caption or cards.
-The combined captions count toward the 64 KiB UTF-8 staging ceiling and pending-storage quota, and each outgoing caption is validated before any photo sends.
+Manifest version 4 separates the source message and its delivery operation from uniform per-file captions.
+Versions 1–3 are upgraded at the read boundary; legacy confirmed or uncertain combined message/photo outcomes also fence the source message against automatic replay.
+Removing a photo does not alter the source message, cards, or other captions.
+The combined source/caption text counts toward the 64 KiB UTF-8 ceiling and pending-storage quota; every outgoing message is validated before any send.
+Bounded protected JPEG previews are prepared during intake and tied to the immutable original digest.
+Their cache files count toward pending quota and survive claim/reconciliation; interrupted preview generation is not an incomplete provider import.
+Cached preview reads verify only the bounded derivative, while uploads still verify the full original snapshot.
+Read-only preview requests use the serial local-work queue rather than consuming network-transfer slots; failed presentation offers an explicit retry.
 Both consumers regenerate the chosen representation from verified retained originals, using protected temporary files that reserve pending-storage quota.
 Choosing sizes for a batch publishes all choices in one manifest update; a crash before publication retains the previous choices.
 An interrupted rendition upload is recovered as an upload, without being mistaken for incomplete provider intake.

@@ -5,7 +5,12 @@ import type { SendProgress } from '../stores/timeline'
 import { matchUrls } from '../html/linkify'
 import { nativePreviewLinks } from './urls'
 import { previewPreflight, type PreviewInput } from './contract'
-import { photoCaption, shareCompleted, shareOperations } from './types'
+import {
+  canonicalShare,
+  photoCaption,
+  shareCompleted,
+  shareOperations,
+} from './types'
 import type {
   IncomingShare,
   IncomingSharePort,
@@ -16,11 +21,30 @@ import type {
 export type IncomingShareStore = ReturnType<typeof createIncomingShareStore>
 
 export function createIncomingShareStore(
-  port: IncomingSharePort,
+  incomingPort: IncomingSharePort,
   api: ApiClient,
   timelines: TimelineStoreCache,
   accessToken?: () => Promise<string | null>,
 ) {
+  const normalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(normalize)
+    if (
+      value &&
+      typeof value === 'object' &&
+      'version' in value &&
+      'files' in value &&
+      'text' in value
+    )
+      return canonicalShare(value as IncomingShare)
+    return value
+  }
+  const port: IncomingSharePort = {
+    subscribe: (listener) => incomingPort.subscribe(listener),
+    call: async <T>(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => normalize(await incomingPort.call(action, args)) as T,
+  }
   const pending = signal<IncomingShare[]>([])
   const selected = signal<IncomingShare | null>(null)
   const busy = signal(false)
@@ -81,7 +105,7 @@ export function createIncomingShareStore(
       const urls = new Set(matchUrls(text).map((match) => match.url))
       return {
         ...record,
-        version: draft.captions === undefined ? record.version : 3,
+        version: 4,
         text,
         files: record.files.map((file) =>
           draft.captions?.[file.id] === undefined
@@ -119,8 +143,6 @@ export function createIncomingShareStore(
     const record = selected.value
     const photo = record?.files.find((item) => item.id === file)
     if (!record || !photo) return ''
-    if (record.files.find((item) => !item.thumbnail)?.id === file)
-      return editorText.value
     return (
       drafts.value[record.id]?.captions?.[file] ?? photoCaption(record, photo)
     )
@@ -420,7 +442,7 @@ export function createIncomingShareStore(
     )
       return
     const previewUploads =
-      operations[0]?.state === 'sent'
+      record.operation.state === 'sent'
         ? []
         : (record.previews?.flatMap((preview) =>
             preview.image_upload_id == null ? [] : [preview.image_upload_id],
@@ -625,10 +647,9 @@ export function createIncomingShareStore(
       )
         throw problem('room')
       const attachments = record.files.filter((file) => !file.thumbnail)
-      const captionPending =
-        attachments.length === 0
-          ? record.operation.state !== 'sent'
-          : attachments[0].operation?.state !== 'sent'
+      const messagePending =
+        (record.text.trim() !== '' || attachments.length === 0) &&
+        record.operation.state !== 'sent'
       const operations = shareOperations(record)
       if (
         operations.some((operation) =>
@@ -659,17 +680,16 @@ export function createIncomingShareStore(
         }),
       )
       let budget = ''
-      const failure = captionPending
+      const failure = messagePending
         ? previewPreflight(
             { body: record.text, url_previews: wire ?? [] },
-            attachments.length > 0,
+            false,
             (field, measured, limit) => {
               budget = `${field}: ${measured} / ${limit}. `
             },
           )
         : null
       const photoFailure = attachments
-        .slice(1)
         .filter((file) => file.operation?.state !== 'sent')
         .map((file) =>
           previewPreflight(
@@ -687,7 +707,7 @@ export function createIncomingShareStore(
       }
       // Retained thumbnails are always re-uploaded on an explicit Send. This
       // avoids relying on a server handle's independent TTL and never refetches a page.
-      for (const preview of captionPending ? (record.previews ?? []) : []) {
+      for (const preview of messagePending ? (record.previews ?? []) : []) {
         if (stopRequested) return
         if (preview.thumbnail !== undefined) {
           const uploadId = await upload(preview.thumbnail)
@@ -718,15 +738,15 @@ export function createIncomingShareStore(
       )
       const timeline = timelines.acquire(record.accountId!, record.roomId!)
       let success = true
-      if (attachments.length === 0) {
-        if (record.operation.state !== 'sent')
-          success = await timeline.send(record.text, {
-            formattedBody: null,
-            urlPreviews: previews,
-            progress: progress(),
-          })
-      } else {
-        for (const [index, file] of attachments.entries()) {
+      if (messagePending) {
+        success = await timeline.send(record.text, {
+          formattedBody: null,
+          urlPreviews: previews,
+          progress: progress(),
+        })
+      }
+      if (success) {
+        for (const file of attachments) {
           if (stopRequested) {
             success = false
             break
@@ -766,7 +786,7 @@ export function createIncomingShareStore(
             uploadId,
             photoCaption(record, file),
             {
-              urlPreviews: index === 0 ? previews : undefined,
+              urlPreviews: undefined,
               progress: progress(file.id),
             },
           )
@@ -926,15 +946,11 @@ export function createIncomingShareStore(
         !record.files.some((item) => item.id === file && !item.thumbnail)
       )
         return
-      if (record.files.find((item) => !item.thumbnail)?.id === file) {
-        scheduleEdit(record.id, { ...drafts.peek()[record.id], text: caption })
-      } else {
-        const draft = drafts.peek()[record.id]
-        scheduleEdit(record.id, {
-          ...draft,
-          captions: { ...draft?.captions, [file]: caption },
-        })
-      }
+      const draft = drafts.peek()[record.id]
+      scheduleEdit(record.id, {
+        ...draft,
+        captions: { ...draft?.captions, [file]: caption },
+      })
     },
     async destination(accountId: string, roomId?: string) {
       await flushEdits()

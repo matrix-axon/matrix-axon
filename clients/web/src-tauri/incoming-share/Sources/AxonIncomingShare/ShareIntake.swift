@@ -351,6 +351,7 @@
       manifest = try store.update(manifest)
       staged(manifest)
       for (provider, type) in photos {
+        guard failures.isEmpty else { break }
         try cancellation.check()
         do {
           manifest = try photo(
@@ -370,6 +371,7 @@
       manifest.importFailures.append("incomplete_import")
       manifest = try store.update(manifest)
       for link in metadata {
+        guard failures.isEmpty else { break }
         try cancellation.check()
         guard let raw = TextShare.matchedLink(link.url, in: normalized) else { continue }
         if (manifest.previews?.count ?? 0) >= 8
@@ -377,7 +379,7 @@
         {
           manifest.importFailures.append("too_many_source_previews")
           manifest = try store.update(manifest)
-          continue
+          break
         }
         let title = TextShare.previewField(link.title, limit: 300)
         guard title != nil || link.imageProvider != nil else { continue }

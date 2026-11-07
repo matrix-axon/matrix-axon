@@ -61,6 +61,7 @@ private final class SourceController: UIViewController {
       ("source-file", #selector(file)), ("source-video", #selector(video)),
       ("source-photo-size", #selector(photoSize)),
       ("source-photo-size-single", #selector(singlePhotoSize)),
+      ("source-photo-message", #selector(photoMessage)),
     ] {
       let button = UIButton(type: .system)
       button.setTitle(name, for: .normal)
@@ -97,9 +98,10 @@ private final class SourceController: UIViewController {
   @objc private func imageOnly() {
     show(UIActivityViewController(activityItems: [Self.image()], applicationActivities: nil))
   }
+  @objc private func photoMessage() { showPhotoComposer(count: 2, message: "Source message https://example.org") }
   @objc private func photoSize() { showPhotoComposer(count: 2) }
   @objc private func singlePhotoSize() { showPhotoComposer(count: 1) }
-  private func showPhotoComposer(count: Int) {
+  private func showPhotoComposer(count: Int, message: String = "") {
     do {
       let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
       let store = try ShareStore(root: root)
@@ -124,6 +126,7 @@ private final class SourceController: UIViewController {
         context.fill(CGRect(x: 0, y: 0, width: 2400, height: 1600))
       }
       let item = NSExtensionItem()
+      if !message.isEmpty { item.attributedContentText = NSAttributedString(string: message) }
       item.attachments = (0..<count).map { _ in NSItemProvider(object: image) }
       let host = UIHostingController(rootView: ShareComposeView(model: model))
       host.isModalInPresentation = true

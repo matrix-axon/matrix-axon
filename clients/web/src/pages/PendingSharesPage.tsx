@@ -20,7 +20,10 @@ function RecoveryThumbnail({
 }) {
   const [url, setUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
+    setFailed(false)
+    setUrl(null)
     let active = true
     let objectUrl: string | null = null
     void store.thumbnail(file).then(
@@ -37,15 +40,20 @@ function RecoveryThumbnail({
       active = false
       if (objectUrl !== null) URL.revokeObjectURL(objectUrl)
     }
-  }, [store, file])
+  }, [store, file, attempt])
   return failed ? (
-    <p role="alert">
-      {photo
-        ? 'Photo preview unavailable. The retained original is checked again before upload.'
-        : delivered
-          ? 'The preview was delivered with the first item; its local image is unavailable.'
-          : 'The retained image is missing or corrupt. Replace or remove it before sending.'}
-    </p>
+    <div role="alert">
+      <p>
+        {photo
+          ? 'Photo preview unavailable. The retained original is checked again before upload.'
+          : delivered
+            ? 'The preview was delivered with the shared message; its local image is unavailable.'
+            : 'The retained image is missing or corrupt. Replace or remove it before sending.'}
+      </p>
+      <button type="button" onClick={() => setAttempt((value) => value + 1)}>
+        Retry image preview
+      </button>
+    </div>
   ) : url === null ? (
     <p>Loading retained image…</p>
   ) : (
@@ -60,6 +68,7 @@ function RecoveryThumbnail({
 
 export function PendingSharesPage() {
   const { incomingShares: store, accounts, rooms, auth } = useServices()
+  const [messageEditorId, setMessageEditorId] = useState<string | null>(null)
   const [duplicateRisk, setDuplicateRisk] = useState(false)
   const [homeserverURL, setHomeserverURL] = useState<string | null>(null)
   const [clearIds, setClearIds] = useState<string[] | null>(null)
@@ -137,6 +146,14 @@ export function PendingSharesPage() {
       'Import was interrupted before the selection was complete.',
     unsupported_input: 'The selection contains unsupported content.',
     unsupported_url: 'The selection contains an unsupported URL.',
+    too_many_source_previews:
+      'The source supplied more than eight link previews. Share fewer links.',
+    invalid: 'A source item is invalid or could not be decoded.',
+    unreadable_manifest:
+      'Saved draft metadata could not be read. Check the destination before discarding it.',
+    missingFile: 'A source file is missing or no longer readable.',
+    provider_unavailable: 'The source app could not provide an item.',
+    unavailable: 'The source app could not provide an item.',
   }
   const blocked =
     record !== null &&
@@ -148,14 +165,8 @@ export function PendingSharesPage() {
     shareOperations(record).some((item) =>
       ['sent', 'dispatching', 'unknown'].includes(item.state),
     )
-  const deliveredOperations =
-    record?.files.flatMap((file) =>
-      file.operation === undefined ? [] : [file.operation],
-    ) ?? []
   const complete = record !== null && shareCompleted(record)
-  const captionSent =
-    record !== null &&
-    (deliveredOperations[0] ?? record.operation).state === 'sent'
+  const captionSent = record?.operation.state === 'sent'
   return (
     <section class="pending-shares-page">
       <h1>Pending shares</h1>
@@ -309,11 +320,16 @@ export function PendingSharesPage() {
                   ))}
               </select>
             </label>
-            {!record.files.some((file) => !file.thumbnail) && (
+            {(messageEditorId === record.id ||
+              store.editorText.value !== '' ||
+              !record.files.some((file) => !file.thumbnail)) && (
               <label>
-                Message
+                {record.files.some((file) => !file.thumbnail)
+                  ? 'Shared message'
+                  : 'Message'}
                 <textarea
                   key={record.id}
+                  onFocus={() => setMessageEditorId(record.id)}
                   value={store.editorText.value}
                   onBlur={() => act(store.flushEdits())}
                   onInput={(event) =>
@@ -422,7 +438,7 @@ export function PendingSharesPage() {
             )}
           </fieldset>
           {record.files.some((file) => !file.thumbnail) && (
-            <fieldset disabled={busy || fixedDestination}>
+            <fieldset>
               <legend>Photos in sending order</legend>
               {record.files
                 .filter((file) => !file.thumbnail)
@@ -438,6 +454,7 @@ export function PendingSharesPage() {
                     <textarea
                       aria-label={`Caption for ${file.name}`}
                       placeholder="Caption"
+                      disabled={busy || fixedDestination}
                       value={store.editorCaption(file.id)}
                       onBlur={() => act(store.flushEdits())}
                       onInput={(event) =>
@@ -463,6 +480,7 @@ export function PendingSharesPage() {
                     </p>
                     <button
                       type="button"
+                      disabled={busy || fixedDestination}
                       onClick={() => act(store.removeFile(file.id))}
                     >
                       Remove photo: {file.name}
@@ -482,13 +500,16 @@ export function PendingSharesPage() {
                 {[...new Set(record.importFailures)].map((failure) => (
                   <li key={failure}>
                     {importProblems[failure] ??
-                      'A source item could not be read or is not a supported image.'}
+                      'A source item could not be imported. Share the intended selection again.'}
                   </li>
                 ))}
               </ul>
             </div>
           )}
           <ul aria-label="Delivery outcomes">
+            {record.text.trim() !== '' &&
+              record.files.some((file) => !file.thumbnail) &&
+              operation(record.operation, 'Shared message')}
             {record.files.some((file) => !file.thumbnail)
               ? record.files
                   .filter((file) => !file.thumbnail)

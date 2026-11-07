@@ -19,8 +19,9 @@ Text, web URLs, and up to ten photos are supported.
 Video and general-file intake remain outstanding work in stage 7 of [the sharing plan](mobile-incoming-sharing.md).
 Photos appear in provider order with bounded display thumbnails, filenames, and saved delivery states.
 Each photo has its own optional caption field inside its photo box, directly below the filename.
-An empty field shows **Caption**; tapping it opens a blank single-line editor, and **Done** dismisses the keyboard.
-Shared source text initially populates the first photo's caption; other photos start with empty captions.
+An empty field shows **Caption**; tapping it opens a compact editor that is one line tall, scrolls multiline content, and accepts line breaks.
+**Done** dismisses the keyboard.
+Imported source text and links stay in a separate **Shared message** editor; every photo has its own independent caption.
 Edit each caption independently or use the trash icon at the top right of each photo block to remove that photo before sending.
 Each photo has a native **Photo size** menu: **Original**, **Large (2048 px)**, **Medium (1280 px)**, or **Small (640 px)**.
 Reduced sizes cap the longest edge without upscaling; Original is the default.
@@ -28,24 +29,31 @@ For multiple photos, **Size for all photos** applies one choice to the batch; ch
 Each photo shows its original size and estimated upload size, with an estimated total above the selection.
 Size preparation completes before Send becomes available, and a failed or cancelled batch change does not leave partially changed choices.
 Each photo sends its own caption.
-Included link cards belong to the first photo; subsequent photos do not repeat those cards.
-Removing a photo removes its caption; removing the first photo also removes its cards, while the remaining captions stay with their images.
+The shared message and its link cards are sent once before the photos, with their own saved delivery outcome.
+Removing a photo removes only that photo and its caption; the shared message, its cards, and all other captions remain intact.
+Removing every photo leaves a sendable text/link share.
 Preview thumbnails belonging to links never become separate photo messages.
 After any photo has been sent or its delivery becomes uncertain, the destination, captions, cards, selection, and photo sizes are fixed.
 Use Pending shares to explicitly prepare failed items for retry or consent to resending an uncertain item.
 Confirmed photos are skipped when continuing a batch.
 Saved size choices are also used when sending from Pending shares; recovery shows the selected preset and estimated upload size.
-Sized drafts use manifest version 2; drafts with additional photo captions use version 3.
-Older apps refuse unsupported draft versions rather than silently dropping captions or sending full-size images.
-All captions together share the 64 KiB UTF-8 staging ceiling; each outgoing photo is also checked against the server's event budget before sending any photo.
-Resume such a draft in an app version that supports the size picker.
+Current drafts use manifest version 4, with a separate source message and uniform per-photo captions.
+Versions 1–3 are upgraded at the boundary; if an older first photo already carried the message, its confirmed or uncertain outcome is retained for that message, so recovery cannot silently replay it.
+Older apps refuse unsupported draft versions rather than silently dropping source text, captions, or size choices.
+The source message and all captions together share the 64 KiB UTF-8 staging ceiling; every outgoing message is checked against the event budget before any send.
 Cancellation after partial delivery retains the remaining originals and confirmed event IDs for recovery.
 Original photo bytes, including HEIC, remain available in the saved draft, so changing back to Original does not re-download or reconstruct them.
 Original sends retain the supplied format; recipient support varies.
 Reduced JPEG/HEIC/HEIF photos are encoded as JPEG, while reduced PNG photos remain PNG with transparency preserved.
-Animated and other unsupported formats must use Original.
+For a batch size change, animated and unsupported formats stay at Original while supported still photos receive the requested size.
+An individual unsupported resize explains that Original is required; other failures still leave the whole batch choice unchanged.
 Axon decodes bounded representations and processes one photo at a time, without loading a full photo batch into memory.
-Display thumbnails remain separate from the selected upload representation.
+Intake prepares a bounded protected display preview once; later presentation reads that preview without hashing or decoding the full original.
+Its cache is tied to the original descriptor digest, validated independently, and charged against pending-storage quota.
+Legacy drafts generate this cache on first presentation; missing previews have an explicit retry action, and failed native previews are not retried on each autosave.
+Original bytes are still fully verified before upload.
+Original filenames without extensions receive the extension associated with the detected MIME type.
+Intake stops requesting more photo providers after a failure or an over-limit selection.
 Reducing limits the upload; retained originals continue to count toward pending-storage quotas.
 ImageIO checks the copied bytes' format, dimensions, and a bounded thumbnail decode rather than trusting provider MIME declarations or filename extensions.
 Sources above 200 million pixels or 65,535 pixels on either edge are refused before decoding.
@@ -372,13 +380,13 @@ Use manual interaction on the signed iPhone and iPad; keep XCTest UI automation 
 1. From Photos, share one JPEG/PNG, one HEIC, and an ordered multiple-photo selection with Axon cold, warm, and suspended.
    Review thumbnails and destination, remove a photo, edit different captions below each filename, and explicitly send only to Axon Testing.
    Set a reduced size for one photo and for an entire batch, override one photo, then restore Original.
-   Remove the first photo and verify that the remaining captions stay with their images; keep a draft and reopen it to check caption recovery.
-   Verify estimated sizes, sent pixel dimensions, HEIC-to-JPEG handling, PNG transparency, order, independent captions, and first-photo card semantics, including an encrypted room.
+   Remove the first and last photos and verify that the source message/cards survive while remaining captions stay with their images; keep a draft and reopen it to check recovery.
+   Verify estimated sizes, sent pixel dimensions, HEIC-to-JPEG handling, PNG transparency, order, independent captions, and source-message card semantics, including an encrypted room.
    Keep a sized draft and send it from Pending shares, confirming the size choice survives recovery.
 2. Share a cloud-backed photo, a photo above the preview-thumbnail ceiling, and a selection exceeding ten photos or 100 MiB.
    Exercise low storage, unreadable content, cancellation during import, and termination during import; no incomplete selection may send.
-3. Interrupt after the first confirmed photo, during a later upload, and after message acceptance but before its response.
-   Verify saved per-item states and event IDs in Pending shares, explicit duplicate-risk consent, and no repeated confirmed first caption or card.
+3. Interrupt after the confirmed source message, after the first confirmed photo, during a later upload, and after message acceptance but before its response.
+   Verify saved per-item states and event IDs in Pending shares, explicit duplicate-risk consent, and no repeated confirmed source message, photo, or card.
 4. Check photo removal and recovery on iPad in split view, large Dynamic Type, VoiceOver, and with the keyboard visible.
    Verify sign-out/account removal fences pending work and discard/expiry cleans protected originals.
 
@@ -416,7 +424,7 @@ Each photo now has a multiline caption editor below its filename, within the pho
 The placeholder disappears on focus, and the keyboard has a Done action.
 Verification passed 131 macOS native tests and 171 shared iOS Simulator tests (two opt-in network checks skipped in each suite), plus all 15 composer lifecycle tests.
 Native and web send tests verify distinct captions, Unicode and line breaks, explicit recovery without repeating confirmed items, combined caption limits, and caption immutability after uncertain or confirmed delivery.
-Removal tests verify that deleting the first photo retains the remaining photo's own caption and removes the former first photo's cards and protected thumbnails.
+The earlier caption-promotion removal checks were superseded by the version 4 source-message preservation checks described below.
 The four existing simulator UI checks passed; a focused additional UI check passed typing independent captions, dismissing the keyboard, and preserving the remaining caption after removal.
 The caption UI test scrolls before locating the second editor because the initial accessibility snapshot materialized only the visible photo row.
 Web lint, the production build, OpenAPI/preview-contract checks, 2,992 unit tests (two skipped), 22 Chromium/Firefox recovery checks, and the full Chromium suite (257 passed, 19 skipped) passed.
@@ -429,7 +437,7 @@ The WebKit host limitation and real Photos.app send acceptance checklist remain 
 
 Successful text, single-photo, and multi-photo sends now acknowledge their completed drafts and dismiss automatically.
 Partial failures and unknown delivery outcomes stay open; a completed-draft cleanup failure retains Done for a cleanup-only retry without sending again.
-Photo rows now use a single-line caption field and an accessible 44-point trash control at the top right; the reduced-size explanatory paragraph was removed.
+Photo rows use a compact caption control and an accessible 44-point trash control at the top right; the reduced-size explanatory paragraph was removed.
 Verification passed 171 shared iOS Simulator tests (two opt-in network checks skipped), all 18 composer lifecycle tests, and all five simulator UI tests.
 The lifecycle tests exercise successful text/single/batch completion, partial definite rejection, unknown delivery, failed completion cleanup, and cleanup retry without another send.
 The photo UI test verifies the compact field height, trash placement, independent captions, and removal behavior.
@@ -439,3 +447,20 @@ The final extension binary contains the new trash controls and completion handli
 The iPad installation attempt found no matching connected device; `devicectl` reported it disconnected, and usbmux listed only the iPhone.
 The same signed IPA is ready for iPad installation after reconnection.
 Real Photos.app send acceptance remains a separate manual check.
+
+### Photo-share review corrections — November 7
+
+The source message and link cards are now independent of uniformly stored photo captions, as selected during review.
+Deleting the first or last photo preserves that message and its cards; a message with photos is confirmed separately before photo delivery starts.
+Version 4 migration preserves legacy confirmed and uncertain outcomes for the combined first item, so recovery cannot automatically repeat that message.
+Batch sizing leaves animated/unsupported photos at Original, originals gain MIME-derived filename extensions when needed, and intake stops after the first failure or an over-limit photo selection.
+Photo presentation uses protected, quota-accounted cached derivatives prepared during intake; legacy cache misses generate one verified derivative, and full original verification remains mandatory before upload.
+Photo-preview requests no longer compete for network-transfer slots, and readonly preview retry remains available when delivery has fixed the editable controls.
+Compact caption editors still occupy one line of height while accepting and scrolling multiline text.
+Text-only rejection messages retain their failure code and guidance, and import errors distinguish link-preview limits, unavailable providers, missing files, and invalid content.
+
+Verification passed 136 macOS native tests (two opt-in network tests skipped), the 176-test shared iOS suite (two skipped), 19 composer lifecycle tests, and focused iOS migration/continuation checks.
+All six native UI flows passed across the full suite and focused source-message checks, including multiline caption editing and source preservation after removing every photo.
+Web lint, the production build, API/preview-contract checks, all 2,998 web tests (two skipped), 24 Chromium/Firefox recovery checks, and the broader Chromium suite (257 passed, 20 skipped) passed.
+The signed debugging IPA passed its artifact checks and was installed on the paired iPhone; the iPad remained disconnected.
+The WebKit host limitation and live Photos.app acceptance checklist remain outstanding.

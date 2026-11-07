@@ -53,6 +53,24 @@ private final class ComposerRoomsProtocol: URLProtocol {
 }
 
 final class ComposerLifecycleTests: XCTestCase {
+  func testTextOnlyRejectionExplainsCodeAndUnknownOutcomeUsesSingularMessage() throws {
+    for status in [400, 500] {
+      let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+      fixture.respond { _ in (status, Data("{\"error\":{\"code\":\"bad_request\"}}".utf8)) }
+      let model = fixture.composer()
+      load(model) { model.start([fixture.item]) }
+      model.chooseRoom("!first:example.org")
+      load(model) { model.send() }
+      XCTAssertTrue(model.status.contains(status == 400 ? "Not sent: bad_request" : "Delivery outcome unknown"))
+      XCTAssertFalse(model.status.contains("another item"))
+      if status == 400 { XCTAssertTrue(model.status.contains("Edit the text")) }
+      model.cancel()
+      wait(for: [fixture.closed], timeout: 3)
+    }
+    XCTAssertTrue(ShareComposer.importProblem("too_many_source_previews").contains("link previews"))
+    XCTAssertFalse(ShareComposer.importProblem("unknown_future_category").contains("image"))
+  }
+
   func testConfirmedTextSinglePhotoAndBatchCloseAutomaticallyAfterCleanup() throws {
     for count in 0...2 {
       let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
@@ -162,12 +180,12 @@ final class ComposerLifecycleTests: XCTestCase {
     load(model) { model.removePhoto(first) }
     XCTAssertEqual(model.record?.files.count, 1)
     XCTAssertEqual(model.images.count, 1)
-    model.text = "Keep this first-photo caption"
+    model.setPhotoCaption("Keep this first-photo caption", file: model.record!.files[0].id)
     model.finish(discard: false)
     wait(for: [fixture.closed], timeout: 3)
     let saved = try XCTUnwrap(fixture.store.list().first)
     XCTAssertEqual(saved.files.count, 1)
-    XCTAssertEqual(saved.text, "Keep this first-photo caption")
+    XCTAssertEqual(saved.files[0].caption, "Keep this first-photo caption")
     XCTAssertEqual(saved.files[0].operation?.state, .ready)
     XCTAssertNil(saved.owner)
   }
@@ -210,8 +228,8 @@ final class ComposerLifecycleTests: XCTestCase {
     model.setPhotoCaption("First beach", file: files[0].id)
     model.setPhotoCaption("Second café 🌊\nTwo lines", file: files[1].id)
     load(model) { model.setPhotoSize(.small) }
-    XCTAssertEqual(model.record?.version, 3)
-    XCTAssertEqual(model.record?.text, "First beach")
+    XCTAssertEqual(model.record?.version, 4)
+    XCTAssertEqual(model.record?.files[0].caption, "First beach")
     XCTAssertEqual(model.record?.files[1].caption, "Second café 🌊\nTwo lines")
     load(model) { model.removePhoto(files[0].id) }
     XCTAssertEqual(model.photoCaption(files[1].id), "Second café 🌊\nTwo lines")
@@ -220,7 +238,7 @@ final class ComposerLifecycleTests: XCTestCase {
     wait(for: [fixture.closed], timeout: 3)
     let recovered = try XCTUnwrap(fixture.store.list().first)
     XCTAssertEqual(recovered.files.map(\.id), [files[1].id])
-    XCTAssertEqual(recovered.text, "Edited remaining caption")
+    XCTAssertEqual(recovered.files[0].caption, "Edited remaining caption")
     XCTAssertNil(recovered.owner)
   }
 
@@ -235,7 +253,7 @@ final class ComposerLifecycleTests: XCTestCase {
     saved.files[0].operation!.eventId = "$confirmed"
     _ = try fixture.store.update(saved)
     load(model) { model.run { throw ShareFailure.quota } }
-    XCTAssertTrue(model.status.contains("Confirmed photos: 1"), model.status)
+    XCTAssertTrue(model.status.contains("Confirmed items: 1"), model.status)
     XCTAssertFalse(model.status.contains("Nothing was sent"), model.status)
     model.cancel()
     wait(for: [fixture.closed], timeout: 3)

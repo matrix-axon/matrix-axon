@@ -2,6 +2,8 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
 import { nativeIncomingShare } from './incoming-share'
 import manifest from '../incoming-share/fixtures/manifest-v1.json'
+import { canonicalShare } from '../incoming-share/types'
+import type { IncomingShare } from '../incoming-share/types'
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 beforeEach(() => vi.mocked(invoke).mockReset())
 it('accepts a valid device preview manifest', async () => {
@@ -65,4 +67,12 @@ it('accepts version 3 captions and rejects captions older consumers would ignore
   await expect(nativeIncomingShare().call('claim')).rejects.toThrow(
     'Incoming share: invalid',
   )
+})
+
+it('accepts the modern source-message and uniform-caption native contract', async () => {
+  const modern = canonicalShare(structuredClone(manifest) as IncomingShare)
+  modern.files[1].caption = 'First photo caption'
+  modern.files[2].caption = 'Second photo caption'
+  vi.mocked(invoke).mockResolvedValue({ value: modern })
+  await expect(nativeIncomingShare().call('claim')).resolves.toEqual(modern)
 })

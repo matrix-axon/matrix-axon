@@ -501,13 +501,15 @@ final class TextShareTests: XCTestCase {
         value.id, owner: value.owner!, source: source,
         name: "photo-\(index).png", mime: "image/png", photo: true)
     }
-    value.previews = [SharePreview(matched_url: link, title: "Caption card")]
+    value.text = ""
+    value.previews = nil
     return try store.update(value)
   }
 
-  func testPhotosSendTheirOwnCaptionsWithOnlyTheFirstCard() throws {
+  func testSourceMessageAndPhotosSendIndependentlyWithCardsOnlyOnTheSourceMessage() throws {
     var value = try photos()
-    value.version = 3
+    value.text = link
+    value.files[0].caption = "First photo caption"
     value.files[1].caption = "Second photo: café 🌊\nA different caption"
     value.files[2].caption = ""
     value = try store.update(value)
@@ -524,26 +526,67 @@ final class TextShareTests: XCTestCase {
         uploads.append(try Data(contentsOf: file))
         return try self.response(200, ["data": ["upload_id": UUID().uuidString]])
       }
-      XCTAssertTrue(path.hasSuffix("/send-media"))
       let saved = try self.store.list()[0]
-      XCTAssertEqual(saved.files[messages.count].operation?.state, .dispatching)
+      if messages.isEmpty {
+        XCTAssertTrue(path.hasSuffix("/send"))
+        XCTAssertEqual(saved.operation.state, .dispatching)
+      } else {
+        XCTAssertTrue(path.hasSuffix("/send-media"))
+        XCTAssertEqual(saved.files[messages.count - 1].operation?.state, .dispatching)
+      }
       messages.append(try JSONSerialization.jsonObject(with: body!) as! [String: Any])
       return try self.response(200, ["data": ["event_id": "$photo-\(messages.count)"]])
     }
     let result = try sender.send(value)
     XCTAssertTrue(result.completed)
     XCTAssertEqual(uploads.count, 4)
-    XCTAssertEqual(messages.map { $0["caption"] as? String }, [link, "Second photo: café 🌊\nA different caption", ""])
+    XCTAssertEqual(messages[0]["body"] as? String, link)
+    XCTAssertEqual(messages.dropFirst().map { $0["caption"] as? String }, ["First photo caption", "Second photo: café 🌊\nA different caption", ""])
     XCTAssertEqual((messages[0]["url_previews"] as? [Any])?.count, 1)
     XCTAssertNotNil((messages[0]["url_previews"] as? [[String: Any]])?[0]["image_upload_id"])
     XCTAssertEqual((messages[1]["url_previews"] as? [Any])?.count, 0)
     XCTAssertEqual(
-      result.files.compactMap { $0.operation?.eventId }, ["$photo-1", "$photo-2", "$photo-3"])
+      result.files.compactMap { $0.operation?.eventId }, ["$photo-2", "$photo-3", "$photo-4"])
+  }
+
+  func testSourceConfirmationIsNotReplayedAndUncertainSourceBlocksPhotoContinuation() throws {
+    for state in [DeliveryState.sent, .unknown] {
+      var value = try photos(2)
+      value.text = link
+      value.files[0].caption = "First photo"
+      value.files[1].caption = "Second photo"
+      value.previews = [SharePreview(matched_url: link, title: "Already delivered source card")]
+      value.operation.state = .dispatching
+      value = try store.update(value)
+      value.operation.state = state
+      value.operation.eventId = state == .sent ? "$source" : nil
+      value = try store.update(value)
+      var requests = 0
+      var captions: [String] = []
+      let continuation = sender { _, _, path, _, body, file, _, _ in
+        requests += 1
+        if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+        if file != nil { return try self.response(200, ["data": ["upload_id": UUID().uuidString]]) }
+        XCTAssertTrue(path.hasSuffix("/send-media"))
+        let wire = try JSONSerialization.jsonObject(with: body!) as! [String: Any]
+        captions.append(wire["caption"] as! String)
+        XCTAssertEqual((wire["url_previews"] as? [Any])?.count, 0)
+        return try self.response(200, ["data": ["event_id": "$photo-\(captions.count)"]])
+      }
+      if state == .unknown {
+        XCTAssertThrowsError(try continuation.send(value))
+        XCTAssertEqual(requests, 0)
+      } else {
+        let result = try continuation.send(value)
+        XCTAssertEqual(result.operation.eventId, "$source")
+        XCTAssertTrue(result.completed)
+        XCTAssertEqual(captions, ["First photo", "Second photo"])
+      }
+    }
   }
 
   func testPhotoResponseLossStopsTheBatchAndExplicitRecoverySkipsConfirmedCaption() throws {
     var value = try photos()
-    value.version = 3
     value.files[1].caption = "Second caption"
     value.files[2].caption = "Third caption"
     value = try store.update(value)

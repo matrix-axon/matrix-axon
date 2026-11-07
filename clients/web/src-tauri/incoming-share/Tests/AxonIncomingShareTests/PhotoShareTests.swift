@@ -38,6 +38,91 @@ final class PhotoShareTests: XCTestCase {
   }
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+  func testOriginalNamesAndCachedPreviewsDoNotReadOriginalsAgain() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source, width: 1800, height: 1200)
+    var draft = try store.claim(store.create(text: "").id)
+    draft = try store.importFile(draft.id, owner: draft.owner!, source: source, name: "IMG_1234", mime: "image/*", photo: true)
+    let file = draft.files[0]
+    XCTAssertEqual(file.name, "IMG_1234.png")
+    let thumbnail = try store.photoThumbnail(draft.id, file: file.id, owner: draft.owner!)
+    let retained = root.appendingPathComponent(draft.id).appendingPathComponent(file.id)
+    try Data("corrupted original".utf8).write(to: retained)
+    XCTAssertEqual(try store.photoThumbnail(draft.id, file: file.id, owner: draft.owner!), thumbnail)
+    draft = try store.update(draft, release: true)
+    draft = try store.claim(draft.id)
+    XCTAssertEqual(try store.photoThumbnail(draft.id, file: file.id, owner: draft.owner!), thumbnail)
+    XCTAssertThrowsError(try store.withUploadFile(draft.id, file: file.id, owner: draft.owner!) { _, _ in })
+  }
+
+  func testBatchSizingLeavesAnimationOriginalAndResizesStillPhotos() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source, width: 1800, height: 1200)
+    let animation = root.appendingPathComponent("animation.gif")
+    let image = try XCTUnwrap(CGImageSourceCreateWithURL(source as CFURL, nil))
+    let frame = try XCTUnwrap(CGImageSourceCreateImageAtIndex(image, 0, nil))
+    let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(animation as CFURL, UTType.gif.identifier as CFString, 2, nil))
+    CGImageDestinationAddImage(destination, frame, nil)
+    CGImageDestinationAddImage(destination, frame, nil)
+    XCTAssertTrue(CGImageDestinationFinalize(destination))
+    var draft = try store.claim(store.create(text: "").id)
+    for (url, name) in [(source, "still"), (animation, "animated")] {
+      draft = try store.importFile(draft.id, owner: draft.owner!, source: url, name: name, mime: "image/*", photo: true)
+    }
+    draft = try store.setPhotoSize(draft, size: .small)
+    XCTAssertEqual(draft.files.map(\.photoSize), [.small, .original])
+    XCTAssertLessThan(draft.files[0].uploadBytes, draft.files[0].bytes)
+    XCTAssertEqual(draft.files[1].uploadBytes, draft.files[1].bytes)
+    XCTAssertThrowsError(try store.setPhotoSize(draft, size: .small, file: draft.files[1].id))
+    XCTAssertEqual(try store.refreshOwned(draft.id, owner: draft.owner!).files.map(\.photoSize), [.small, .original])
+  }
+
+  func testLegacyDraftUpgradePreservesIndependentSourceAndDeliveryFences() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source)
+    for version in [1, 2, 3] {
+      for state in [DeliveryState.ready, .sent, .unknown] {
+        var draft = try store.claim(store.create(text: "Shared message https://example.org").id)
+        for _ in 0..<2 {
+          draft = try store.importFile(draft.id, owner: draft.owner!, source: source, name: "photo", mime: "image/*", photo: true)
+        }
+        draft.version = version
+        draft.files[0].name = "IMG_OLD"
+        draft.files[0].caption = nil
+        draft.files[0].operation!.state = state
+        draft.files[0].operation!.eventId = state == .sent ? "$legacy" : nil
+        draft.files[1].caption = version == 3 ? "Second photo" : nil
+        try JSONEncoder().encode(draft).write(to: root.appendingPathComponent(draft.id).appendingPathComponent("manifest.json"))
+        let upgraded = try store.refreshOwned(draft.id, owner: draft.owner!)
+        XCTAssertEqual(upgraded.version, 4)
+        XCTAssertEqual(upgraded.text, draft.text)
+        XCTAssertEqual(upgraded.files.map(\.caption), ["", version == 3 ? "Second photo" : ""])
+        XCTAssertEqual(upgraded.operation.state, state)
+        XCTAssertEqual(upgraded.operation.eventId, state == .sent ? "$legacy" : nil)
+        XCTAssertEqual(upgraded.files[0].operation?.state, state)
+        if state == .ready {
+          let name = try store.withUploadFile(upgraded.id, file: upgraded.files[0].id, owner: upgraded.owner!) { _, file in file.name }
+          XCTAssertEqual(name, "IMG_OLD.png")
+        }
+      }
+    }
+  }
+
+  func testRemovingEveryPhotoRetainsSourceMessageAndCards() throws {
+    let source = root.appendingPathComponent("source.png")
+    try PhotoFixture.write(source)
+    let text = "Shared message https://example.org"
+    var draft = try store.claim(store.create(text: text).id)
+    draft = try store.importFile(draft.id, owner: draft.owner!, source: source, name: "photo", mime: "image/*", photo: true)
+    draft = try store.importThumbnail(draft.id, owner: draft.owner!, data: Data(contentsOf: source), mime: "image/png", preview: SharePreview(matched_url: "https://example.org", title: "Source card"))
+    draft = try store.removeFile(draft, file: draft.files.first(where: { !$0.thumbnail })!.id)
+    XCTAssertEqual(draft.text, text)
+    XCTAssertEqual(draft.previews?.first?.title, "Source card")
+    XCTAssertEqual(draft.files.filter { !$0.thumbnail }.count, 0)
+    XCTAssertEqual(draft.files.filter(\.thumbnail).count, 1)
+    XCTAssertNil(TextShare.validation(draft))
+  }
+
   func testOriginalExceedsPreviewCeilingAndUsesDetectedMime() throws {
     let source = root.appendingPathComponent("misleading.heic")
     try PhotoFixture.write(source)
@@ -124,18 +209,17 @@ final class PhotoShareTests: XCTestCase {
     draft = try store.importThumbnail(
       draft.id, owner: draft.owner!, data: Data(contentsOf: source), mime: "image/png",
       preview: SharePreview(matched_url: "https://example.org", title: "First photo card"))
-    draft.version = 3
     draft.files[1].caption = "Caption for two"
     draft = try store.update(draft)
     draft = try store.setPhotoSize(draft, size: .small)
-    XCTAssertEqual(draft.version, 3)
+    XCTAssertEqual(draft.version, 4)
     let before = draft
     draft = try store.removeFile(draft, file: draft.files[0].id)
-    XCTAssertEqual(draft.files.map(\.name), ["two.png"])
-    XCTAssertEqual(draft.text, "Caption for two")
-    XCTAssertNil(draft.files[0].caption)
-    XCTAssertNil(draft.previews)
-    XCTAssertFalse(draft.files.contains(where: \.thumbnail))
+    XCTAssertEqual(draft.files.filter { !$0.thumbnail }.map(\.name), ["two.png"])
+    XCTAssertEqual(draft.text, "Caption")
+    XCTAssertEqual(draft.files[0].caption, "Caption for two")
+    XCTAssertEqual(draft.previews?.count, 1)
+    XCTAssertTrue(draft.files.contains(where: \.thumbnail))
     XCTAssertThrowsError(try store.update(before))
     draft.files[0].operation!.state = .dispatching
     draft = try store.update(draft)
@@ -154,9 +238,9 @@ final class PhotoShareTests: XCTestCase {
         draft.id, owner: draft.owner!, source: source, name: "photo.png", mime: "image/png", photo: true)
     }
     var invalid = draft
+    invalid.version = 3
     invalid.files[1].caption = "Ignored by old readers"
     XCTAssertThrowsError(try store.update(invalid))
-    draft.version = 3
     draft.files[1].caption = String(repeating: "é", count: ShareLimits.textBytes / 2)
     XCTAssertEqual(TextShare.validation(draft), "text_too_large")
     XCTAssertThrowsError(try store.update(draft))
@@ -190,7 +274,7 @@ final class PhotoShareTests: XCTestCase {
     let ids = draft.files.map(\.id)
     draft = try store.setPhotoSize(draft, size: .small)
     XCTAssertEqual(draft.files.map(\.photoSize), [.small, .small])
-    XCTAssertEqual(draft.version, 2)
+    XCTAssertEqual(draft.version, 4)
     draft = try store.setPhotoSize(draft, size: .medium, file: ids[0])
     XCTAssertEqual(draft.files.map(\.photoSize), [.medium, .small])
     draft = try store.update(draft, release: true)
@@ -260,6 +344,8 @@ final class PhotoShareTests: XCTestCase {
   func testInterruptedResizeUploadDoesNotMarkProviderIntakeIncomplete() throws {
     let draft = try store.claim(store.create(text: "caption").id)
     let directory = root.appendingPathComponent(draft.id)
+    try ShareJSON.encode(1024).write(to: directory.appendingPathComponent("photo-preview-fixture.part.reservation"))
+    try Data("temporary preview".utf8).write(to: directory.appendingPathComponent("photo-preview-fixture.part"))
     try ShareJSON.encode(1024).write(
       to: directory.appendingPathComponent("photo-upload-fixture.part.reservation"))
     try Data("temporary encoding".utf8).write(
