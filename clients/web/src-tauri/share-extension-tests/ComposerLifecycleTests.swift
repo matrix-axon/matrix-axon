@@ -227,17 +227,77 @@ final class ComposerLifecycleTests: XCTestCase {
     let files = try XCTUnwrap(model.record?.files)
     model.text = "Separate source"
     model.setPhotoCaption("Keep my caption", file: files[0].id)
-    load(model) { model.renamePhoto(files[0].id, name: "Café coast.heic") }
-    XCTAssertEqual(model.record?.files[0].name, "Café coast.heic")
+    model.setPhotoName("Café coast.heic", file: files[0].id)
+    XCTAssertEqual(model.photoName(files[0].id), "Café coast.heic")
     XCTAssertEqual(model.record?.files[0].id, files[0].id)
     XCTAssertEqual(model.record?.files[1], files[1])
-    XCTAssertEqual(model.record?.files[0].caption, "Keep my caption")
+    XCTAssertEqual(model.photoCaption(files[0].id), "Keep my caption")
     model.finish(discard: false)
     wait(for: [fixture.closed], timeout: 3)
     let recovered = try XCTUnwrap(fixture.store.list().first)
     XCTAssertEqual(recovered.files[0].name, "Café coast.heic")
     XCTAssertEqual(recovered.files[0].caption, "Keep my caption")
     XCTAssertEqual(recovered.text, "Separate source")
+  }
+
+  func testEmptyPhotoShareUsesPlainEmptyStateAndKeepsSendDisabled() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer()
+    let item = fixture.photos()
+    item.attachments = Array(item.attachments!.prefix(1))
+    load(model) { model.start([item]) }
+    model.chooseRoom("!first:example.org")
+    XCTAssertTrue(model.canSend)
+    let file = try XCTUnwrap(model.record?.files.first)
+    load(model) { model.removePhoto(file.id) }
+    XCTAssertEqual(model.validationMessage, "Nothing to send.")
+    XCTAssertTrue(model.status.isEmpty)
+    XCTAssertFalse(model.canSend)
+    XCTAssertTrue(model.record?.files.isEmpty == true)
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
+  }
+
+  func testInlineFilenameIsAppliedBeforeImmediateSend() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    var uploadedNames: [String] = []
+    fixture.respond { request in
+      if request.url!.path.hasSuffix("/media/uploads") {
+        uploadedNames.append(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "filename" }!.value!)
+        return (200, Data("{\"data\":{\"upload_id\":\"\(UUID().uuidString)\"}}".utf8))
+      }
+      return (200, Data("{\"data\":{\"event_id\":\"$sent\"}}".utf8))
+    }
+    let model = fixture.composer()
+    load(model) { model.start([fixture.photos()]) }
+    model.chooseRoom("!first:example.org")
+    let files = try XCTUnwrap(model.record?.files)
+    model.setPhotoName("Coast trip.heic", file: files[0].id)
+    model.send()
+    wait(for: [fixture.closed], timeout: 5)
+    XCTAssertEqual(uploadedNames, ["Coast trip.heic", files[1].name])
+  }
+
+  func testTemporarilyEmptyFilenameRetainsLastValidNameUntilCorrected() throws {
+    let fixture = try ComposerFixture(started: XCTestExpectation(description: "rooms"))
+    let model = fixture.composer()
+    load(model) { model.start([fixture.photos()]) }
+    let file = try XCTUnwrap(model.record?.files.first)
+    model.setPhotoName("", file: file.id)
+    let saved = expectation(description: "filename autosave completed")
+    let subscription = model.$record.dropFirst().prefix(1).sink { _ in saved.fulfill() }
+    model.save()
+    wait(for: [saved], timeout: 5)
+    subscription.cancel()
+    XCTAssertEqual(model.record?.files[0].name, file.name)
+    XCTAssertEqual(model.photoName(file.id), "")
+    XCTAssertEqual(model.validationMessage, "Enter a filename for each photo.")
+    model.setPhotoName("Corrected coast.heic", file: file.id)
+    load(model) { model.setPhotoSize(.small) }
+    XCTAssertEqual(model.record?.files[0].name, "Corrected coast.heic")
+    XCTAssertNil(model.validationMessage)
+    model.finish(discard: false)
+    wait(for: [fixture.closed], timeout: 3)
   }
 
   func testSendStaysDisabledWhilePhotoUploadIsInFlight() throws {
@@ -276,16 +336,19 @@ final class ComposerLifecycleTests: XCTestCase {
     XCTAssertEqual(model.masterCaption, "Together 🌊")
     XCTAssertEqual(model.photoCaption(files[1].id), "Together 🌊")
     model.setPhotoCaption("Individual", file: files[1].id)
+    model.setPhotoName("First coast.heic", file: files[0].id)
     XCTAssertEqual(model.masterCaption, "")
     load(model) { model.movePhotos(from: IndexSet(integer: 0), to: 2) }
     XCTAssertEqual(model.record?.files.map(\.id), [files[1].id, files[0].id])
     XCTAssertEqual(model.record?.files.map(\.caption), ["Individual", "Together 🌊"])
     XCTAssertEqual(model.text, "Separate source")
+    XCTAssertEqual(model.record?.files[1].name, "First coast.heic")
     model.finish(discard: false)
     wait(for: [fixture.closed], timeout: 3)
     let recovered = try XCTUnwrap(fixture.store.list().first)
     XCTAssertEqual(recovered.files.map(\.id), [files[1].id, files[0].id])
     XCTAssertEqual(recovered.files.map(\.caption), ["Individual", "Together 🌊"])
+    XCTAssertEqual(recovered.files[1].name, "First coast.heic")
   }
 
   func testPhotoCaptionsSaveWithTheirPhotoAndSurviveRemovalAndImmediateClose() throws {

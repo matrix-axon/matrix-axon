@@ -107,38 +107,32 @@ final class ActivationUITests: XCTestCase {
     app.buttons["Cancel"].firstMatch.tap()
     app.terminate()
   }
-  func testPhotoFilenameEditorIsPrefilledAndSavesOrCancelsWithoutReadyLabels() {
+  func testPhotoFilenameEditsInlineAndLastRemovalShowsNothingToSend() {
     let app = XCUIApplication()
     chooseSource("source-photo-size-single", app: app)
-    let filename = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-filename-'" )).firstMatch
+    let filename = app.textFields.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-filename-'" )).firstMatch
     XCTAssertTrue(filename.waitForExistence(timeout: 15))
     reveal(filename, app: app)
-    let identifier = filename.identifier
-    let original = filename.label.replacingOccurrences(of: "Rename photo ", with: "")
+    let original = filename.value as? String ?? ""
+    XCTAssertFalse(original.isEmpty)
     XCTAssertFalse(app.staticTexts["ready"].exists)
     filename.tap()
-    let field = app.textFields["share-photo-filename-field"]
-    XCTAssertTrue(field.waitForExistence(timeout: 5))
-    XCTAssertEqual(field.value as? String, original)
-    field.tap()
-    field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count) + "Coast holiday.heic")
-    app.buttons["share-photo-filename-save"].tap()
-    let renamed = app.buttons[identifier]
-    let updated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS 'Coast holiday.heic'"), object: renamed)
-    XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 10), .completed)
-    renamed.tap()
-    XCTAssertTrue(field.waitForExistence(timeout: 5))
-    XCTAssertEqual(field.value as? String, "Coast holiday.heic")
-    field.tap()
-    field.typeText(" cancelled")
-    app.navigationBars["Rename photo"].buttons["Cancel"].tap()
-    XCTAssertTrue(renamed.waitForExistence(timeout: 5))
-    XCTAssertEqual(renamed.label, "Rename photo Coast holiday.heic")
-    renamed.tap()
-    XCTAssertTrue(field.waitForExistence(timeout: 5))
-    XCTAssertEqual(field.value as? String, "Coast holiday.heic")
-    app.navigationBars["Rename photo"].buttons["Cancel"].tap()
-    XCTAssertFalse(app.staticTexts["ready"].exists)
+    XCTAssertTrue(app.navigationBars["Share to Axon"].exists)
+    XCTAssertFalse(app.navigationBars["Rename photo"].exists)
+    filename.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count) + "Coast holiday.heic")
+    app.buttons["share-photo-filename-done"].tap()
+    XCTAssertTrue(app.images["Photo: Coast holiday.heic"].waitForExistence(timeout: 5))
+    XCTAssertEqual(filename.value as? String, "Coast holiday.heic")
+    XCTAssertFalse(app.buttons["share-photo-filename-save"].exists)
+    let remove = app.buttons["Remove photo"].firstMatch
+    reveal(remove, app: app, down: true)
+    remove.tap()
+    let empty = app.staticTexts["share-validation-message"]
+    XCTAssertTrue(empty.waitForExistence(timeout: 5))
+    XCTAssertEqual(empty.label, "Nothing to send.")
+    XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label == 'Nothing to send.'")).count, 1)
+    XCTAssertFalse(app.buttons["share-send"].isEnabled)
+    XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Shorten the text' OR label CONTAINS 'empty_text'")).firstMatch.exists)
     app.buttons["Cancel"].firstMatch.tap()
     app.terminate()
   }

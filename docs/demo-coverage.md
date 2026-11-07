@@ -309,7 +309,7 @@ Homeserver preview confirmation is anchored to the corresponding link's button.
 It is not covered by the browser demo driver or recorded tours.
 Native XCTest and the signed-device checklist in [iOS sharing](ios-sharing.md) cover this separate OS surface; a new native recording remains outstanding.
 
-The native photo composer also provides a master caption, drag ordering, and a filename editor prefilled by tapping each photo name.
+The native photo composer also provides a master caption, drag ordering, and filenames edited inline with their current values prefilled.
 Routine ready labels are hidden; Sending progress and failure/uncertain outcomes remain visible.
 These native views remain outside the browser-only recorded tour.
-Simulator UI checks exercise filename Save/Cancel, per-photo captions and size selection, and native drag ordering; signed-device photo acceptance remains separate.
+Simulator UI checks exercise inline filename edits, the empty state after removing the final photo, per-photo captions and size selection, and native drag ordering; signed-device photo acceptance remains separate.
