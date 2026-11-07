@@ -272,7 +272,7 @@ Axon never merges the two, so a client can always tell discovered data from sync
 | `forbidden`    | The homeserver refused a summary of the room (room summaries, ADR 0128 step 4). No fields                        |
 | `not_found`    | The homeserver does not know the room (room summaries, ADR 0128 step 4). No fields                               |
 
-A summary field is `null` when the latest answer did not carry it, or when it failed validation, in which case `withheld` names it: a name over 1 KiB, a topic over 8 KiB, an alias that does not parse or an avatar that is not an `mxc://` URI, a member count that is not a non-negative integer, or any value of the wrong type.
+A summary field is `null` when the latest answer did not carry it, or when it failed validation, in which case `withheld` names it: a name over 1 KiB, a topic over 8 KiB, an alias that does not parse or an avatar that is not an `mxc://` URI, a member count that is not a non-negative integer, a string containing U+0000 (which PostgreSQL cannot store), or any value of the wrong type.
 A field a newer answer drops is removed, not kept from an older one.
 `encryption: null` means unknown, never unencrypted: homeservers before Matrix v1.15 do not report it.
 `observed_at` and `expires_at` are Unix ms from the PostgreSQL clock; a hierarchy summary is fresh for six hours.

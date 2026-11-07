@@ -87,6 +87,11 @@ enum Field {
 
 impl Field {
     fn valid(self, value: &Value) -> bool {
+        // PostgreSQL stores no U+0000 in `text` or `jsonb`, so a string that
+        // carries one could never commit; withhold it like any invalid field.
+        if value.as_str().is_some_and(|text| text.contains('\0')) {
+            return false;
+        }
         match self {
             Field::Text(max) => value.as_str().is_some_and(|text| text.len() <= max),
             Field::Mxc => value.as_str().is_some_and(|text| {
@@ -128,7 +133,8 @@ pub(crate) fn parse_entry(entry: &Value) -> Option<DiscoveredEntry> {
 }
 
 /// A `200` hierarchy body as a page, or `None` when its shape is wrong: no
-/// `rooms` array, or a `next_batch` that is not a usable token. The
+/// `rooms` array, or a `next_batch` that is not a usable token (empty, over
+/// [`MAX_TOKEN_BYTES`], or carrying a U+0000 PostgreSQL cannot store). The
 /// requested space's own entry is skipped; `children_state` and every other
 /// unknown field are ignored.
 pub(crate) fn parse_page(body: &[u8], space_id: &str) -> Option<CrawlStep> {
@@ -136,7 +142,9 @@ pub(crate) fn parse_page(body: &[u8], space_id: &str) -> Option<CrawlStep> {
     let rooms = body.get("rooms")?.as_array()?;
     let next_batch = match body.get("next_batch") {
         None | Some(Value::Null) => None,
-        Some(Value::String(token)) if !token.is_empty() && token.len() <= MAX_TOKEN_BYTES => {
+        Some(Value::String(token))
+            if !token.is_empty() && token.len() <= MAX_TOKEN_BYTES && !token.contains('\0') =>
+        {
             Some(token.clone())
         }
         Some(_) => return None,
@@ -474,6 +482,19 @@ mod tests {
             ["join_rule"]
         );
         assert_eq!(withheld("guest_can_join", json!(1)), ["guest_can_join"]);
+        // PostgreSQL cannot store U+0000, in any string field.
+        for field in [
+            "name",
+            "topic",
+            "avatar_url",
+            "canonical_alias",
+            "join_rule",
+            "room_type",
+            "encryption",
+            "room_version",
+        ] {
+            assert_eq!(withheld(field, json!("a\u{0}b")), [field], "{field}");
+        }
     }
 
     #[test]
@@ -524,6 +545,7 @@ mod tests {
         invalid(json!({"rooms": [], "next_batch": 7}));
         invalid(json!({"rooms": [], "next_batch": ""}));
         invalid(json!({"rooms": [], "next_batch": "t".repeat(MAX_TOKEN_BYTES + 1)}));
+        invalid(json!({"rooms": [], "next_batch": "t\u{0}"}));
         assert_eq!(
             interpret(Reply::Ok(b"not json".to_vec()), SPACE, false),
             failure("invalid_response", None)

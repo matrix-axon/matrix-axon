@@ -913,3 +913,48 @@ async fn an_observed_crawl_announces_a_page_dropped_from_the_queue() {
     assert_eq!(snapshot.crawl.unwrap().outcome, "in_progress");
     assert!(snapshot.due);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_nul_in_a_field_or_token_cannot_wedge_the_crawl() {
+    let mut fx = fixture().await;
+    fx.link("!a:localhost").await;
+    fx.link("!b:localhost").await;
+    // A NUL name is withheld and the rest of the page commits.
+    fx.script.reply(
+        hierarchy_path(50, None),
+        page(
+            json!([{"room_id": "!a:localhost", "name": "bad\u{0}name", "topic": "kept"}]),
+            Some("t1"),
+        ),
+    );
+    fx.script.reply(
+        hierarchy_path(50, Some("t1")),
+        page(json!([child("!b:localhost", "B")]), Some("t\u{0}")),
+    );
+    fx.crawl().await;
+    let a = fx
+        .store
+        .room_discovery(fx.account_id, "!a:localhost")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (a.summary, a.withheld),
+        (Some(json!({"topic": "kept"})), vec!["name".to_owned()])
+    );
+
+    // A NUL token is a malformed answer: the crawl backs off on its cursor
+    // instead of failing to record the page forever.
+    fx.next_page().await;
+    let crawl = fx.snapshot().await.crawl.unwrap();
+    assert_eq!(
+        (
+            crawl.outcome.as_str(),
+            crawl.failure.as_deref(),
+            crawl.pages
+        ),
+        ("failed", Some("invalid_response"), 1)
+    );
+    assert!(crawl.next_attempt_at.is_some());
+}
