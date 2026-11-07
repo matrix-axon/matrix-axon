@@ -252,7 +252,10 @@ fn send_kind(err: &reqwest::Error) -> TransportError {
             None => TransportError::new(Kind::Tls),
         };
     }
-    // No request or read timeout is configured, so a timeout here is the
+    if is_keep_alive_timeout(&causes) {
+        return TransportError::with(Kind::Other, KEEP_ALIVE_DETAIL);
+    }
+    // No request or read timeout is configured, so any other timeout is the
     // connect timeout, or the OS giving up on the handshake (`ETIMEDOUT`).
     if err.is_timeout() {
         return if err.is_connect() {
@@ -308,9 +311,28 @@ pub(crate) fn is_reset_failure(err: &reqwest::Error) -> bool {
     classify_send(err).kind == Kind::Reset
 }
 
+/// `detail` for a connection hyper closed because a keep-alive ping went
+/// unanswered (ADR 0127's 2026-11-07 amendment). Every request on that
+/// connection fails with it at once.
+pub(crate) const KEEP_ALIVE_DETAIL: &str = "KeepAlive";
+
+/// hyper closed the connection because a keep-alive ping went unanswered.
+///
+/// hyper's error type for this is private, but it is the only client-side
+/// source of `hyper::Error::is_timeout`: hyper's other timeout, on reading
+/// request headers, is server-only. The OS's `ETIMEDOUT` arrives as an
+/// `io::Error` and does not make `is_timeout` true on a `hyper::Error`.
+/// `a_keep_alive_timeout_is_reported_as_keep_alive` pins this down.
+fn is_keep_alive_timeout(causes: &[&(dyn StdError + 'static)]) -> bool {
+    find::<hyper::Error>(causes).is_some_and(hyper::Error::is_timeout)
+}
+
 /// The category of a failure while reading a body that had started.
 pub(crate) fn classify_body(err: &reqwest::Error) -> TransportError {
     let causes = causes(err);
+    if is_keep_alive_timeout(&causes) {
+        return TransportError::with(Kind::Body, KEEP_ALIVE_DETAIL);
+    }
     match find_io(&causes) {
         Some(_) if is_decode_failure(&causes) => TransportError::with(Kind::Body, DECODE_DETAIL),
         Some(io) => TransportError::with(Kind::Body, io_kind_name(io.kind())),
