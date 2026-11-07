@@ -27,6 +27,15 @@ runs:
     # job. Cleanup has no timeout of its own (`dpkg --configure -a` can hang), so
     # the caller sets `timeout-minutes` on the step as the hard stop.
     #
+    # A retry that reaches the same mirror does not help when the mirror is the
+    # problem: in the 2026-11-05 and 2026-11-06 failures the package indexes came
+    # down at 11 MB/s while the .debs from azure.archive.ubuntu.com crawled at
+    # tens of kB/s, and every one of the three attempts crawled the same way.
+    # So attempt 1 uses the runner's default mirror list and later attempts
+    # point apt at archive.ubuntu.com, which does not share the slow path. The
+    # switch is skipped when the runner's sources file is not the deb822 file
+    # this expects, leaving the old behaviour.
+    #
     # Every failure is retried, not only a stall: a mirror that is mid-sync fails
     # fast and may well be fine a few seconds later, and a deterministic failure
     # costs seconds. The warning says which it was, by exit status (124 is
@@ -49,6 +58,11 @@ runs:
         attempts=3
         for attempt in $(seq 1 "$attempts"); do
           status=0
+          sources=/etc/apt/sources.list.d/ubuntu.sources
+          if [ "$attempt" -gt 1 ] && [ -f "$sources" ] && grep -q 'mirror+file:/etc/apt/apt-mirrors.txt' "$sources"; then
+            echo "::notice title=Playwright system packages::attempt $attempt uses archive.ubuntu.com instead of the runner's default mirror"
+            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu/|' "$sources"
+          fi
           timeout -k 10 240 pnpm exec playwright install-deps "$BROWSER" || status=$?
           if [ "$status" -eq 0 ]; then
             exit 0
