@@ -422,7 +422,8 @@ pub struct SpaceHierarchyQuery {
 /// `available`, and otherwise the synced fields, then the room id. With
 /// `enrich=true`, a read of a joined space that links at least one unjoined
 /// child schedules a crawl in the background when none is fresh (a crawl
-/// stays fresh for six hours) and no backoff is in force; `discovery` reports it, page by page. Re-read on a
+/// stays fresh for six hours), none is queued or running, and no backoff is
+/// in force. `discovery` reports the crawl page by page. Re-read on a
 /// `room_details.changed` WebSocket frame for the space whose `sources`
 /// include `space_hierarchy`: one follows each page that changed a summary
 /// and the end of every crawl.
@@ -470,24 +471,30 @@ pub async fn space_hierarchy(
         store.space_crawl_snapshot(account_id, &room_id),
     )
     .await?;
-    // Only an explicit enrich read of a joined space whose crawl is due asks
-    // the worker, so polling and room-list reads cost nothing upstream.
-    // A space whose linked children are all joined has nothing to discover;
-    // asked only when a crawl would otherwise be scheduled, so plain reads
-    // never pay for the scan.
+    let activity = || {
+        if crawl.eligible {
+            acquirer.activity(account_id, &room_id, RoomDetailJob::Hierarchy)
+        } else {
+            JobActivity::Idle
+        }
+    };
+    let mut current = activity();
+    // Only an explicit enrich read of a joined space whose crawl is due and
+    // not already queued or running asks the worker, so polling during a
+    // crawl and room-list reads cost nothing upstream. A space whose linked
+    // children are all joined has nothing to discover; asked only when a
+    // crawl would otherwise be scheduled, so plain reads never pay for the
+    // scan.
     let scheduled = enrich
         && crawl.due
+        && current == JobActivity::Idle
         && store
             .space_has_unjoined_children(account_id, &room_id)
             .await?;
     if scheduled {
         acquirer.request(account_id, &room_id, RoomDetailJob::Hierarchy);
+        current = activity();
     }
-    let activity = if crawl.eligible {
-        acquirer.activity(account_id, &room_id, RoomDetailJob::Hierarchy)
-    } else {
-        JobActivity::Idle
-    };
     let next_cursor = page
         .has_more
         .then(|| page.rows.last())
@@ -515,7 +522,7 @@ pub async fn space_hierarchy(
         children,
         next_cursor,
         total_children: page.total_children,
-        discovery: SpaceDiscoveryDto::new(&crawl, activity),
+        discovery: SpaceDiscoveryDto::new(&crawl, current),
     }))
 }
 

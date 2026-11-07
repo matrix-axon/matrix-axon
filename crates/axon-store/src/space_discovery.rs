@@ -250,9 +250,9 @@ fn crawl_from_row(row: &PgRow) -> Result<Crawl, sqlx_core::Error> {
 }
 
 /// SQL predicate, over a child id expression `child`, that the account's own
-/// membership in it is `join`: the same rule as the hierarchy read's
-/// `joined`. `$1` is the account.
-fn joined_child(child: &str) -> String {
+/// membership in it is `join`. The hierarchy read's `joined` and the crawl's
+/// joined filter both use it, so they cannot disagree. `$1` is the account.
+pub(crate) fn joined_child(child: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM room_state m \
            WHERE m.account_id = $1 AND m.room_id = {child} \
@@ -482,7 +482,10 @@ impl Store {
             }
             CrawlStep::TooLarge if crawl.page_limit > 1 => {
                 // Never raised again within this crawl, so a crawl makes at
-                // most log2(PAGE_LIMIT) + 1 size retries in all.
+                // most log2(PAGE_LIMIT) + 1 size retries in all. Re-asking a
+                // resumed page with a smaller `limit` keeps its `from`:
+                // Synapse binds a token to the room, `max_depth`, and
+                // `suggested_only` only, and reads `limit` per request.
                 write.page_limit = crawl.page_limit / 2;
                 write.outcome = "in_progress";
                 write.next_page = true;

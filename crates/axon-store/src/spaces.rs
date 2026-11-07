@@ -14,7 +14,7 @@ use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
-use crate::space_discovery::{discovered_json, DiscoveredRow};
+use crate::space_discovery::{discovered_json, joined_child, DiscoveredRow};
 use crate::{Store, StoreError};
 
 /// Hard cap on the number of rows [`Store::space_children`] and
@@ -357,17 +357,13 @@ impl Store {
                       (SELECT rs.content->>'type' FROM room_state rs
                          WHERE rs.account_id = $1 AND rs.room_id = p.child_id
                            AND rs.event_type = 'm.room.create' AND rs.state_key = '') AS room_type,
-                      EXISTS (SELECT 1 FROM room_state m
-                         WHERE m.account_id = $1 AND m.room_id = p.child_id
-                           AND m.event_type = 'm.room.member'
-                           AND m.state_key = (SELECT ac.user_id FROM accounts ac WHERE ac.account_id = $1)
-                           AND m.content->>'membership' = 'join'
-                           AND m.redacted IS DISTINCT FROM true) AS joined,
+                      {joined} AS joined,
                       {discovered} AS discovered
                FROM (SELECT count(*) AS total_children FROM links) t
                LEFT JOIN page p ON true
                ORDER BY {sort_key}"#,
             discovered = discovered_json("p.child_id"),
+            joined = joined_child("p.child_id"),
         );
         // The look-ahead row decides `has_more`, so the last page is the one
         // that comes back short, even when the space divides into full pages.

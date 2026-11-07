@@ -1379,7 +1379,8 @@ export interface paths {
          *     `available`, and otherwise the synced fields, then the room id. With
          *     `enrich=true`, a read of a joined space that links at least one unjoined
          *     child schedules a crawl in the background when none is fresh (a crawl
-         *     stays fresh for six hours) and no backoff is in force; `discovery` reports it, page by page. Re-read on a
+         *     stays fresh for six hours), none is queued or running, and no backoff is
+         *     in force. `discovery` reports the crawl page by page. Re-read on a
          *     `room_details.changed` WebSocket frame for the space whose `sources`
          *     include `space_hierarchy`: one follows each page that changed a summary
          *     and the end of every crawl.

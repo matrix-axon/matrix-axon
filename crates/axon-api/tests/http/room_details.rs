@@ -421,8 +421,11 @@ async fn only_an_enrich_read_of_a_joined_space_schedules_a_crawl() {
     assert_eq!(body["data"]["children"][0]["discovered"], Value::Null);
 
     let (_, body) = get(&f.app, &f.hierarchy(&f.room_id, true)).await;
-    assert_eq!(f.acquirer.take(), [RoomDetailJob::Hierarchy]);
     assert_eq!(body["data"]["discovery"]["state"], "queued");
+    // Polling while the crawl is queued asks the worker nothing more.
+    let (_, body) = get(&f.app, &f.hierarchy(&f.room_id, true)).await;
+    assert_eq!(body["data"]["discovery"]["state"], "queued");
+    assert_eq!(f.acquirer.take(), [RoomDetailJob::Hierarchy]);
 
     // A space the account has not joined is never crawled.
     let (status, body) = get(&f.app, &f.hierarchy("!elsewhere:localhost", true)).await;
