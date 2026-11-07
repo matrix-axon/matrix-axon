@@ -19,6 +19,9 @@ use crate::dto::{
 use crate::extract::{Path, Query};
 use crate::member_profiles::{MemberProfile, MemberProfileService};
 use crate::response::{ApiError, ApiResponse};
+use crate::room_details::RoomDetailAcquirer;
+use crate::space_discovery::SpaceDiscoveryDto;
+use axon_core::{JobActivity, RoomDetailJob};
 
 /// Default timeline page size when `limit` is omitted.
 const DEFAULT_LIMIT: i64 = 50;
@@ -386,9 +389,11 @@ pub struct SpaceHierarchyQuery {
     /// Opaque cursor from a previous page's `next_cursor`; omit for the first
     /// page. A cursor is bound to the account and space it was issued for.
     pub cursor: Option<String>,
-    /// Ask Axon to fill in unjoined children's names from the homeserver.
-    /// Accepted and currently ignored: discovery is not implemented yet
-    /// (ADR 0128), so this read never contacts the homeserver.
+    /// Ask Axon to fill in unjoined children's summaries from the
+    /// account's homeserver (default `false`). The read still returns at
+    /// once; it schedules a background crawl of the space only when the
+    /// account has joined it and no fresh crawl or backoff is in force.
+    /// Reads without it never contact the homeserver.
     pub enrich: Option<bool>,
 }
 
@@ -409,6 +414,18 @@ pub struct SpaceHierarchyQuery {
 /// page, and `total_children` counts every current link, so nothing is
 /// dropped silently. An unknown `account_id`/`room_id`, or a room with no
 /// children, is an empty page (200), not a 404.
+///
+/// Each unjoined child also carries `discovered`: what the account's
+/// homeserver said about it when Axon last crawled the space's hierarchy, or
+/// `null` (ADR 0128). Show the child's synced fields when it is joined, its
+/// `discovered` fields when it is not and `discovered.status` is
+/// `available`, and otherwise the synced fields, then the room id. With
+/// `enrich=true`, a read of a joined space that links at least one unjoined
+/// child schedules a crawl in the background when none is fresh (a crawl
+/// stays fresh for six hours) and no backoff is in force; `discovery` reports it, page by page. Re-read on a
+/// `room_details.changed` WebSocket frame for the space whose `sources`
+/// include `space_hierarchy`: one follows each page that changed a summary
+/// and the end of every crawl.
 #[utoipa::path(
     get,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy",
@@ -425,6 +442,7 @@ pub struct SpaceHierarchyQuery {
 )]
 pub async fn space_hierarchy(
     State(store): State<Store>,
+    State(acquirer): State<Arc<dyn RoomDetailAcquirer>>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Query(q): Query<SpaceHierarchyQuery>,
 ) -> Result<ApiResponse<SpaceHierarchyPage>, ApiError> {
@@ -446,9 +464,30 @@ pub async fn space_hierarchy(
         .limit
         .unwrap_or(HIERARCHY_DEFAULT_LIMIT)
         .clamp(1, axon_store::SPACE_HIERARCHY_MAX_PAGE);
-    let page = store
-        .space_hierarchy_page(account_id, &room_id, after.as_ref(), limit)
-        .await?;
+    let enrich = q.enrich.unwrap_or(false);
+    let (page, crawl) = try_join(
+        store.space_hierarchy_page(account_id, &room_id, after.as_ref(), limit),
+        store.space_crawl_snapshot(account_id, &room_id),
+    )
+    .await?;
+    // Only an explicit enrich read of a joined space whose crawl is due asks
+    // the worker, so polling and room-list reads cost nothing upstream.
+    // A space whose linked children are all joined has nothing to discover;
+    // asked only when a crawl would otherwise be scheduled, so plain reads
+    // never pay for the scan.
+    let scheduled = enrich
+        && crawl.due
+        && store
+            .space_has_unjoined_children(account_id, &room_id)
+            .await?;
+    if scheduled {
+        acquirer.request(account_id, &room_id, RoomDetailJob::Hierarchy);
+    }
+    let activity = if crawl.eligible {
+        acquirer.activity(account_id, &room_id, RoomDetailJob::Hierarchy)
+    } else {
+        JobActivity::Idle
+    };
     let next_cursor = page
         .has_more
         .then(|| page.rows.last())
@@ -459,7 +498,8 @@ pub async fn space_hierarchy(
         %room_id,
         limit,
         resumed = after.is_some(),
-        enrich = q.enrich.unwrap_or(false),
+        enrich,
+        scheduled,
         returned = page.rows.len(),
         total_children = page.total_children,
         has_more = page.has_more,
@@ -475,6 +515,7 @@ pub async fn space_hierarchy(
         children,
         next_cursor,
         total_children: page.total_children,
+        discovery: SpaceDiscoveryDto::new(&crawl, activity),
     }))
 }
 

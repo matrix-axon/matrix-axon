@@ -100,7 +100,7 @@ pub enum DetailWrite {
 
 /// The room's membership epoch while the account is active and joined.
 /// `$1` is the account, `$2` the room.
-const JOINED_EPOCH: &str = "SELECT s.membership_epoch FROM room_summaries s \
+pub(crate) const JOINED_EPOCH: &str = "SELECT s.membership_epoch FROM room_summaries s \
     JOIN accounts ac ON ac.account_id = s.account_id \
     WHERE s.account_id = $1 AND s.room_id = $2 AND NOT s.hidden_left AND ac.state = 'active' \
       AND EXISTS (SELECT 1 FROM room_state m WHERE m.account_id = s.account_id \
@@ -110,7 +110,7 @@ const JOINED_EPOCH: &str = "SELECT s.membership_epoch FROM room_summaries s \
       AND NOT EXISTS (SELECT 1 FROM room_upstream_reconcile r \
           WHERE r.account_id = s.account_id AND r.room_id = s.room_id AND r.state = 'gone')";
 
-const NOW_MS: &str = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
+pub(crate) const NOW_MS: &str = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
 
 /// The old row a write compares against.
 struct Previous {
@@ -439,7 +439,7 @@ impl Next {
 }
 
 /// `min` doubled per consecutive failure after the first, capped at `max`.
-fn backoff_ms(failures: i32, min: i64, max: i64) -> i64 {
+pub(crate) fn backoff_ms(failures: i32, min: i64, max: i64) -> i64 {
     let doublings = failures.saturating_sub(1).clamp(0, 30) as u32;
     min.saturating_mul(1_i64 << doublings).min(max)
 }

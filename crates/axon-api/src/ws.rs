@@ -276,9 +276,10 @@ const ROOM_DETAILS_CHANGED: &str = "room_details.changed";
 #[derive(Debug, Serialize)]
 struct RoomDetailsFramePayload {
     room_id: String,
-    /// `metadata` (`GET …/metadata`), `member_counts` (`GET …/info`), and
-    /// `homeserver_details` (`GET …/homeserver_details`), in that order; never
-    /// empty. Clients ignore values they do not know.
+    /// `metadata` (`GET …/metadata`), `member_counts` (`GET …/info`),
+    /// `homeserver_details` (`GET …/homeserver_details`), and
+    /// `space_hierarchy` (`GET …/space/hierarchy` of this room, a space), in
+    /// that order; never empty. Clients ignore values they do not know.
     sources: Vec<&'static str>,
 }
 
@@ -288,6 +289,7 @@ fn room_detail_source(source: RoomDetailSource) -> &'static str {
         RoomDetailSource::Metadata => "metadata",
         RoomDetailSource::MemberCounts => "member_counts",
         RoomDetailSource::HomeserverDetails => "homeserver_details",
+        RoomDetailSource::SpaceHierarchy => "space_hierarchy",
     }
 }
 
@@ -969,6 +971,7 @@ mod tests {
             account_id,
             room_id: "!r:localhost".to_owned(),
             sources: [
+                RoomDetailSource::SpaceHierarchy,
                 RoomDetailSource::HomeserverDetails,
                 RoomDetailSource::MemberCounts,
                 RoomDetailSource::Metadata,
@@ -979,7 +982,7 @@ mod tests {
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(
             v["payload"],
-            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details"]})
+            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details", "space_hierarchy"]})
         );
     }
 
