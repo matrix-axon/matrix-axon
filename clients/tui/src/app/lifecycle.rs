@@ -1,14 +1,20 @@
+use std::time::{Duration, Instant};
+
 use ruma::OwnedUserId;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::api::{
-    AccountDto, AccountState, BackupAction, EnableBackupResponse, FlowDto, VerificationFrameDto,
+    AccountDto, AccountState, BackupAction, DeviceListDto, EnableBackupResponse, FlowDto,
+    VerificationFrameDto, HTTP_REQUEST_TIMEOUT,
 };
 
 use super::{
-    AccountSelection, App, Mode, RecoveryOrigin, RoomKey, Status, VerificationDirection,
-    VerificationFlow, VerificationStage,
+    device_picker_rows, AccountSelection, App, DevicePicker, DevicePickerPhase, Mode, PopupKind,
+    RecoveryOrigin, RoomKey, Status, VerificationDirection, VerificationFlow, VerificationStage,
+    DEVICE_PICKER_CHECKING_SELF, DEVICE_PICKER_EMPTY, DEVICE_PICKER_FAILED, DEVICE_PICKER_LOADING,
+    DEVICE_PICKER_REFRESHING, DEVICE_PICKER_UNKNOWN_SELF, VERIFICATION_IN_PROGRESS,
+    VERIFICATION_NOT_RUNNING,
 };
 
 pub(super) enum LogoutResolution {
@@ -129,6 +135,20 @@ pub(crate) enum LifecycleOutcome {
         provisional: String,
         enriched: String,
     },
+    /// Result of `GET …/devices` for the SAS device picker. Applied only while
+    /// that picker is still open for the same account and generation.
+    DevicesListed {
+        account_id: Uuid,
+        generation: u64,
+        result: Result<DeviceListDto, String>,
+    },
+    /// Result of `GET /v1/accounts` while the device picker is waiting to learn
+    /// this session's Matrix device id. Applied only for that same generation.
+    DevicePickerAccounts {
+        account_id: Uuid,
+        generation: u64,
+        result: Result<Vec<AccountDto>, String>,
+    },
 }
 
 /// Failure modes of a verification resync. A 404 is treated as an implicit
@@ -136,6 +156,27 @@ pub(crate) enum LifecycleOutcome {
 pub(crate) enum VerifyResyncError {
     NotFound,
     Other(String),
+}
+
+/// Result of launching an outgoing SAS flow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[must_use]
+enum OutgoingVerification {
+    Started,
+    /// No lifecycle sender. Unit tests omit it; production installs one
+    /// before the loop. That is not a user-visible failure.
+    NotRunning,
+}
+
+/// A picker whose device or account GET should still answer.
+///
+/// Compared with `<` so `r` at the bound can replace a request that never
+/// reported back. `refreshing` covers a ready-list refresh and an account
+/// read for an unknown device id. The bound is a stand-in for "the task
+/// finished"; the HTTP client applies its own timeout inside `read_request`.
+fn device_list_load_is_in_flight(picker: &DevicePicker) -> bool {
+    let waiting = picker.refreshing || matches!(picker.phase, DevicePickerPhase::Loading);
+    waiting && picker.loading_since.elapsed() < HTTP_REQUEST_TIMEOUT + Duration::from_secs(1)
 }
 
 impl App {
@@ -440,13 +481,11 @@ impl App {
 
     /// Start an outgoing SAS flow against a pasted device id (self-verification,
     /// ADR 0028 §1) or a `@user:server` (cross-user verification, ADR 0040).
+    /// With no target, open the device picker instead of requiring a pasted id.
     /// Verification is deliberately *not* gated by `lifecycle_busy` (ADR 0028 §4).
     pub(crate) fn start_verification(&mut self, target: Option<String>) {
         let Some(target) = target.filter(|t| !t.trim().is_empty()) else {
-            self.status = Status::from(
-                "usage: /verify <device_id|@user:server> (incoming requests open automatically)"
-                    .to_owned(),
-            );
+            self.open_device_picker();
             return;
         };
         let target = target.trim().to_owned();
@@ -460,8 +499,30 @@ impl App {
                 return;
             }
         };
+        let _ = self.launch_outgoing_verification(account_id, target, is_user);
+    }
+
+    /// Start SAS for an account the caller already chose.
+    ///
+    /// The device picker passes the account it listed. A pasted `/verify`
+    /// resolves the account first, then calls this. No sender means this is
+    /// not the running TUI: leave the mode alone, and do not dial.
+    fn launch_outgoing_verification(
+        &mut self,
+        account_id: Uuid,
+        target: String,
+        is_user: bool,
+    ) -> OutgoingVerification {
+        if self
+            .verification
+            .as_ref()
+            .is_some_and(|flow| !flow.stage.is_terminal())
+        {
+            self.status = Status::Info(VERIFICATION_IN_PROGRESS.to_owned());
+            return OutgoingVerification::NotRunning;
+        }
         let Some(tx) = self.lifecycle_tx.clone() else {
-            return;
+            return OutgoingVerification::NotRunning;
         };
         let (user_id, device_id) = if is_user {
             (target.clone(), String::new())
@@ -494,6 +555,368 @@ impl App {
                 .map_err(|err| err.to_string());
             let _ = tx.send(LifecycleOutcome::VerifyStarted { account_id, result });
         });
+        OutgoingVerification::Started
+    }
+
+    /// Open the SAS device picker for the account `/verify` would target.
+    /// The list is fetched off the event loop; the popup paints immediately.
+    ///
+    /// No lifecycle sender means the GET cannot report back, so the popup
+    /// stays closed. A non-terminal flow stays where it is: Enter on a row
+    /// would otherwise replace it.
+    pub(crate) fn open_device_picker(&mut self) {
+        if self
+            .verification
+            .as_ref()
+            .is_some_and(|flow| !flow.stage.is_terminal())
+        {
+            self.status = Status::Info(VERIFICATION_IN_PROGRESS.to_owned());
+            return;
+        }
+        let account_id = match self.resolve_verification_account() {
+            Ok(id) => id,
+            Err(message) => {
+                self.status = Status::from(message);
+                return;
+            }
+        };
+        if self.lifecycle_tx.is_none() {
+            self.status = Status::Info(VERIFICATION_NOT_RUNNING.to_owned());
+            return;
+        }
+        self.device_picker = Some(DevicePicker {
+            account_id,
+            generation: self.device_picker_generation,
+            loading_since: Instant::now(),
+            refreshing: false,
+            phase: DevicePickerPhase::Loading,
+            rows: Vec::new(),
+            selection: 0,
+        });
+        self.popup_scroll = 0;
+        self.mode = Mode::Popup(PopupKind::DevicePicker);
+        if self.own_matrix_device_id(account_id).is_none() {
+            self.hide_device_picker_without_own_id();
+            return;
+        }
+        self.begin_device_load();
+    }
+
+    /// Ask for the list again. Ignored while a load is still inside the HTTP
+    /// timeout, so holding `r` does not stack one GET per key repeat. Past
+    /// that bound, `r` starts another load and a late response is stale.
+    /// A ready list, including an empty one, can still be refreshed.
+    /// The rows stay until that refresh settles.
+    pub(crate) fn retry_device_picker(&mut self) {
+        if !matches!(self.mode, Mode::Popup(PopupKind::DevicePicker)) {
+            return;
+        }
+        let Some(account_id) = self.device_picker.as_ref().and_then(|picker| {
+            if device_list_load_is_in_flight(picker) {
+                None
+            } else {
+                Some(picker.account_id)
+            }
+        }) else {
+            return;
+        };
+        if self.own_matrix_device_id(account_id).is_none() {
+            self.refresh_unknown_self();
+            return;
+        }
+        self.begin_device_load();
+    }
+
+    /// Bump the generation and fetch.
+    ///
+    /// A first load, a failed load, and an unknown device id clear the rows.
+    /// A ready list keeps its rows and selection until the response arrives.
+    fn begin_device_load(&mut self) {
+        self.device_picker_generation = self.device_picker_generation.wrapping_add(1);
+        let generation = self.device_picker_generation;
+        let keep_rows = self
+            .device_picker
+            .as_ref()
+            .is_some_and(|picker| matches!(picker.phase, DevicePickerPhase::Ready));
+        if let Some(picker) = self.device_picker.as_mut() {
+            picker.generation = generation;
+            picker.loading_since = Instant::now();
+            picker.refreshing = keep_rows;
+            if !keep_rows {
+                picker.phase = DevicePickerPhase::Loading;
+                picker.rows.clear();
+                picker.selection = 0;
+            }
+        }
+        if !keep_rows {
+            self.popup_scroll = 0;
+        }
+        self.status = Status::Info(
+            if keep_rows {
+                DEVICE_PICKER_REFRESHING
+            } else {
+                DEVICE_PICKER_LOADING
+            }
+            .to_owned(),
+        );
+        self.spawn_device_list();
+    }
+
+    /// Re-read accounts so a device id that arrived after startup can unblock
+    /// the list. Without a lifecycle sender the cache is all there is, and `r`
+    /// does not pretend a fetch started.
+    fn refresh_unknown_self(&mut self) {
+        let Some(account_id) = self.device_picker.as_ref().map(|picker| picker.account_id) else {
+            return;
+        };
+        if self.own_matrix_device_id(account_id).is_some() {
+            self.begin_device_load();
+            return;
+        }
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            self.status = Status::Info(DEVICE_PICKER_UNKNOWN_SELF.to_owned());
+            return;
+        };
+        self.device_picker_generation = self.device_picker_generation.wrapping_add(1);
+        let generation = self.device_picker_generation;
+        if let Some(picker) = self.device_picker.as_mut() {
+            picker.generation = generation;
+            picker.loading_since = Instant::now();
+            picker.refreshing = true;
+            picker.phase = DevicePickerPhase::UnknownSelf;
+            picker.rows.clear();
+            picker.selection = 0;
+        }
+        self.status = Status::Info(DEVICE_PICKER_CHECKING_SELF.to_owned());
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client.list_accounts().await.map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::DevicePickerAccounts {
+                account_id,
+                generation,
+                result,
+            });
+        });
+    }
+
+    /// Refuse the list. Without this session's id every device is a candidate,
+    /// including the one SAS cannot complete.
+    fn hide_device_picker_without_own_id(&mut self) {
+        self.device_picker_generation = self.device_picker_generation.wrapping_add(1);
+        let generation = self.device_picker_generation;
+        if let Some(picker) = self.device_picker.as_mut() {
+            picker.generation = generation;
+            picker.refreshing = false;
+            picker.phase = DevicePickerPhase::UnknownSelf;
+            picker.rows.clear();
+            picker.selection = 0;
+        }
+        self.popup_scroll = 0;
+        self.status = Status::Info(DEVICE_PICKER_UNKNOWN_SELF.to_owned());
+    }
+
+    fn own_matrix_device_id(&self, account_id: Uuid) -> Option<String> {
+        self.accounts
+            .client_visible
+            .iter()
+            .find(|account| account.account_id == account_id)
+            .and_then(|account| account.device_id.clone())
+            .filter(|id| !id.is_empty())
+    }
+
+    /// Drop picker state once its popup is gone, so a later mode (logout,
+    /// account switch, Ctrl-J, and the rest) cannot keep a list for an
+    /// account that is no longer on screen.
+    pub(crate) fn discard_device_picker_if_closed(&mut self) {
+        if self.device_picker.is_some()
+            && !matches!(self.mode, Mode::Popup(PopupKind::DevicePicker))
+        {
+            self.device_picker = None;
+        }
+    }
+
+    fn spawn_device_list(&mut self) {
+        let Some(picker) = self.device_picker.as_ref() else {
+            return;
+        };
+        let account_id = picker.account_id;
+        let generation = picker.generation;
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client
+                .list_devices(account_id)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::DevicesListed {
+                account_id,
+                generation,
+                result,
+            });
+        });
+    }
+
+    fn apply_device_list(
+        &mut self,
+        account_id: Uuid,
+        generation: u64,
+        result: Result<DeviceListDto, String>,
+    ) {
+        let mode_ok = matches!(self.mode, Mode::Popup(PopupKind::DevicePicker));
+        let picker_ok = self.device_picker.as_ref().is_some_and(|picker| {
+            picker.account_id == account_id && picker.generation == generation
+        });
+        if !mode_ok {
+            self.device_picker = None;
+            return;
+        }
+        if !picker_ok {
+            return;
+        }
+        let Some(own) = self.own_matrix_device_id(account_id) else {
+            self.hide_device_picker_without_own_id();
+            return;
+        };
+        match result {
+            Ok(list) => {
+                let rows = device_picker_rows(&list.devices, &own);
+                let empty = rows.is_empty();
+                if let Some(picker) = self.device_picker.as_mut() {
+                    picker.rows = rows;
+                    picker.selection = 0;
+                    picker.refreshing = false;
+                    picker.phase = DevicePickerPhase::Ready;
+                }
+                self.popup_scroll = 0;
+                self.status = Status::Info(if empty {
+                    DEVICE_PICKER_EMPTY.to_owned()
+                } else {
+                    "Select a device to verify".to_owned()
+                });
+            }
+            Err(error) => {
+                let keep_rows = self
+                    .device_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.refreshing);
+                if keep_rows {
+                    if let Some(picker) = self.device_picker.as_mut() {
+                        picker.refreshing = false;
+                    }
+                    self.status =
+                        Status::Info(format!("Could not refresh the device list: {error}"));
+                } else {
+                    if let Some(picker) = self.device_picker.as_mut() {
+                        picker.refreshing = false;
+                        picker.rows.clear();
+                        picker.selection = 0;
+                        picker.phase = DevicePickerPhase::Failed(error);
+                    }
+                    self.popup_scroll = 0;
+                    self.status = Status::Info(DEVICE_PICKER_FAILED.to_owned());
+                }
+            }
+        }
+    }
+
+    /// Apply an account-list read started because this session's device id was
+    /// missing. A stale generation is dropped, including its account list, so
+    /// a newer login is not overwritten by an older read.
+    fn apply_device_picker_accounts(
+        &mut self,
+        account_id: Uuid,
+        generation: u64,
+        result: Result<Vec<AccountDto>, String>,
+    ) {
+        let matches = matches!(self.mode, Mode::Popup(PopupKind::DevicePicker))
+            && self.device_picker.as_ref().is_some_and(|picker| {
+                picker.account_id == account_id && picker.generation == generation
+            });
+        if !matches {
+            return;
+        }
+        if let Some(picker) = self.device_picker.as_mut() {
+            picker.refreshing = false;
+        }
+        match result {
+            Ok(accounts) => {
+                self.set_accounts(accounts);
+                if self.own_matrix_device_id(account_id).is_some() {
+                    self.begin_device_load();
+                } else if let Some(picker) = self.device_picker.as_mut() {
+                    picker.phase = DevicePickerPhase::UnknownSelf;
+                    picker.rows.clear();
+                    picker.selection = 0;
+                    self.status = Status::Info(DEVICE_PICKER_UNKNOWN_SELF.to_owned());
+                }
+            }
+            Err(error) => {
+                self.status = Status::Info(format!("Could not refresh accounts: {error}"));
+            }
+        }
+    }
+
+    pub(crate) fn move_device_picker_selection(&mut self, delta: isize) {
+        let Some(picker) = self.device_picker.as_mut() else {
+            return;
+        };
+        let len = picker.rows.len();
+        if len == 0 {
+            picker.selection = 0;
+            return;
+        }
+        let current = picker.selection.min(len.saturating_sub(1));
+        let next = match delta.cmp(&0) {
+            std::cmp::Ordering::Less => current.saturating_sub(delta.unsigned_abs()),
+            std::cmp::Ordering::Equal => current,
+            std::cmp::Ordering::Greater => current.saturating_add(delta as usize).min(len - 1),
+        };
+        picker.selection = next;
+    }
+
+    /// Enter on a row. Loading, empty, and failed lists do not start a flow.
+    ///
+    /// The account is the one the picker listed. Re-resolving from the
+    /// current filter would verify device X against whichever account became
+    /// selected while the list was open.
+    pub(crate) fn verify_selected_device(&mut self) {
+        let Some((account_id, device_id)) = self.device_picker.as_ref().and_then(|picker| {
+            if !matches!(picker.phase, DevicePickerPhase::Ready) {
+                return None;
+            }
+            picker
+                .rows
+                .get(picker.selection)
+                .map(|row| (picker.account_id, row.device_id.clone()))
+        }) else {
+            return;
+        };
+        if self.launch_outgoing_verification(account_id, device_id, false)
+            == OutgoingVerification::Started
+        {
+            self.device_picker = None;
+            self.popup_scroll = 0;
+        }
+    }
+
+    /// Leave the picker with `/verify ` in the composer so a device id can be pasted.
+    pub(crate) fn paste_device_id_from_picker(&mut self) {
+        self.device_picker = None;
+        self.popup_scroll = 0;
+        self.mode = Mode::Compose;
+        self.reset_completion_state();
+        self.input.buffer = "/verify ".to_owned();
+        self.move_cursor_to_end();
+        self.status = Status::Info("paste a device id and press Enter".to_owned());
+    }
+
+    pub(crate) fn close_device_picker(&mut self) {
+        self.device_picker = None;
+        self.popup_scroll = 0;
+        self.mode = Mode::Compose;
+        self.status = Status::Info(String::new());
     }
 
     /// Auto-open the modal for a peer-initiated request (ADR 0028 §2). Ignores a
@@ -512,6 +935,10 @@ impl App {
         {
             return;
         }
+        // An incoming request takes the modal. The picker is not a flow, so it
+        // loses, and a list still in flight must not reopen it.
+        self.device_picker = None;
+        self.popup_scroll = 0;
         self.verification = Some(VerificationFlow {
             account_id,
             user_id,
@@ -824,6 +1251,24 @@ impl App {
                     self.pending_command_response = Some(enriched);
                 }
             }
+            return;
+        }
+        if let LifecycleOutcome::DevicesListed {
+            account_id,
+            generation,
+            result,
+        } = outcome
+        {
+            self.apply_device_list(account_id, generation, result);
+            return;
+        }
+        if let LifecycleOutcome::DevicePickerAccounts {
+            account_id,
+            generation,
+            result,
+        } = outcome
+        {
+            self.apply_device_picker_accounts(account_id, generation, result);
             return;
         }
         if let LifecycleOutcome::MediaSent { key, result } = outcome {
@@ -1188,7 +1633,10 @@ impl App {
             LifecycleOutcome::MessageSent { .. } => unreachable!(),
             LifecycleOutcome::MediaSent { .. } => unreachable!(),
             LifecycleOutcome::WhoamiDevice { .. } => unreachable!(),
+            LifecycleOutcome::DevicesListed { .. } => unreachable!(),
+            LifecycleOutcome::DevicePickerAccounts { .. } => unreachable!(),
         }
+        self.discard_device_picker_if_closed();
         self.queue_completed_command_response();
     }
 

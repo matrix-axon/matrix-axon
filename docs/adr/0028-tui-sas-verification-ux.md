@@ -49,6 +49,12 @@ client. A device-list endpoint (`GET …/devices`) plus a TUI device picker is
 tracked as **issue #84** and is out of scope here. The incoming direction is
 fully smooth today and is the one the first-run story depends on.
 
+*(Superseded for axon-tui: bare `/verify` opens a device picker on `GET …/devices` (#333).
+`/verify <device_id>` remains the paste path, and `/verify @user:server` is unchanged.
+The list stays hidden until this session's device id is known.
+Enter starts verification for the account the list was opened for, even if the account filter changes while the picker is open.
+A refresh keeps those rows until the new list arrives, and a verification already in progress is left as it is.)*
+
 ### 2. Incoming requests auto-open a modal; emoji comparison is a centered popup
 
 A `verification.requested` frame **auto-opens** the verification modal and takes

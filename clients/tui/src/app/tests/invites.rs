@@ -12,7 +12,7 @@ use crate::app::room_actions::{
 use crate::app::*;
 use crate::command::{parse, HELP_COMMAND_GROUPS};
 use crate::config::KeyBinding;
-use crossterm::event::KeyModifiers;
+use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -849,6 +849,16 @@ async fn shift_r_and_ctrl_r_do_not_reject_and_submit_bound_to_r_accepts() {
     app.handle_invites_popup_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     assert!(!app.room_action_busy);
     assert!(rx.try_recv().is_err());
+    assert_eq!(app.mode, Mode::Popup(PopupKind::Invites));
+
+    app.handle_invites_popup_key(KeyEvent::new_with_kind_and_state(
+        KeyCode::Char('r'),
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+        KeyEventState::CAPS_LOCK | KeyEventState::NUM_LOCK,
+    ));
+    assert_eq!(app.mode, Mode::ConfirmInviteReject { key: key_of(&row) });
+    app.mode = Mode::Popup(PopupKind::Invites);
 
     let (base, _request_rx) = serve_one(
         "200 OK",

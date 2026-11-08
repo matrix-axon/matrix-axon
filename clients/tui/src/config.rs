@@ -494,6 +494,8 @@ impl KeyBinding {
     }
 
     pub fn matches(&self, key: KeyEvent) -> bool {
+        // Caps Lock and Num Lock are `KeyEvent.state` when the kitty protocol
+        // reports them, not `KeyModifiers`. A binding of `r` still matches.
         self.code == key.code && self.modifiers == key.modifiers
     }
 

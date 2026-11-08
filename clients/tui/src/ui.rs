@@ -12,9 +12,10 @@ use unicode_width::UnicodeWidthChar;
 use crate::app::frame::{PaneAreas, PopupView};
 use crate::app::{
     account_localpart, date_separator_line, format_date, format_time, overlay_selection_on_page,
-    selected_line_style, AccountSelection, App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey,
-    ProtocolState, RoomFilter, RoomKey, SearchKind, Status, UnreadThreadEntry,
-    VerificationDirection, VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
+    selected_line_style, AccountSelection, App, DevicePickerPhase, ImageState, MediaKey, Mode,
+    PopupKind, ProtocolKey, ProtocolState, RoomFilter, RoomKey, SearchKind, Status,
+    UnreadThreadEntry, VerificationDirection, VerificationFlow, VerificationStage,
+    DEVICE_PICKER_EMPTY, DEVICE_PICKER_LOADING, DEVICE_PICKER_UNKNOWN_SELF, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
@@ -183,6 +184,7 @@ fn command_response_needs_popup(app: &App, input_area: Rect) -> bool {
 /// the occlusion math no longer agrees with. Feeding both halves one area is
 /// what closes that.
 pub(crate) fn prepare(app: &mut App, screen: Rect) {
+    app.discard_device_picker_if_closed();
     let areas = pane_areas(app, screen);
     app.frame.areas = areas;
     prepare_accounts(app, &areas);
@@ -617,6 +619,24 @@ fn prepare_popup(app: &mut App, screen: Rect) {
             "Shortcuts  (Esc to close)".to_owned(),
             popup_shortcuts_lines(&app.shortcuts),
         ),
+        PopupKind::DevicePicker => {
+            let width = usize::from(area.width.saturating_sub(2));
+            let lines = device_picker_lines(app, width);
+            let selected = app
+                .device_picker
+                .as_ref()
+                .map(|picker| picker.selection)
+                .unwrap_or(0);
+            if selected < app.popup_scroll {
+                app.popup_scroll = selected;
+            } else if selected >= app.popup_scroll.saturating_add(page_size) {
+                app.popup_scroll = selected.saturating_add(1).saturating_sub(page_size);
+            }
+            (
+                "Devices  (Enter verify, r retry, p paste, Esc close)".to_owned(),
+                lines,
+            )
+        }
         PopupKind::UnreadThreads => {
             let entries = app.unread_thread_entries();
             app.sync_unread_thread_selection(&entries);
@@ -2674,6 +2694,141 @@ fn popup_help_lines(app: &App) -> Vec<Line<'static>> {
 
 const UNREAD_THREAD_PREVIEW_LINES: usize = 3;
 
+/// Body of the SAS device picker. Every line fits `width` columns.
+pub(crate) fn device_picker_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let Some(picker) = app.device_picker.as_ref() else {
+        return plain_popup_lines(DEVICE_PICKER_LOADING, width, Style::default());
+    };
+    let mut lines = match &picker.phase {
+        DevicePickerPhase::Loading => {
+            plain_popup_lines(DEVICE_PICKER_LOADING, width, Style::default())
+        }
+        DevicePickerPhase::Failed(error) => {
+            let mut lines = plain_popup_lines(error, width, Style::default().fg(app.colors.status));
+            lines.push(Line::from(""));
+            lines.extend(plain_popup_lines(
+                "Press r to retry.",
+                width,
+                Style::default().fg(app.colors.input_hint),
+            ));
+            lines
+        }
+        DevicePickerPhase::UnknownSelf => {
+            plain_popup_lines(DEVICE_PICKER_UNKNOWN_SELF, width, Style::default())
+        }
+        DevicePickerPhase::Ready if picker.rows.is_empty() => {
+            plain_popup_lines(DEVICE_PICKER_EMPTY, width, Style::default())
+        }
+        DevicePickerPhase::Ready => picker
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let selected = index == picker.selection;
+                let text =
+                    fit_device_row(selected, &row.label, &row.device_id, row.is_verified, width);
+                let style = if selected {
+                    Style::default()
+                        .fg(app.colors.selected_room)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(text, style))
+            })
+            .collect(),
+    };
+    if picker.refreshing && matches!(picker.phase, DevicePickerPhase::Ready) {
+        lines.push(Line::from(""));
+        lines.extend(plain_popup_lines(
+            "Refreshing…",
+            width,
+            Style::default().fg(app.colors.input_hint),
+        ));
+    }
+    lines
+}
+
+fn plain_popup_lines(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    rich_lines_to_spans(wrap_rich_lines(plain_rich_lines(text), width, width))
+        .into_iter()
+        .map(|spans| {
+            let text = spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>();
+            Line::from(Span::styled(text, style))
+        })
+        .collect()
+}
+
+fn fit_device_row(
+    selected: bool,
+    label: &str,
+    device_id: &str,
+    verified: bool,
+    width: usize,
+) -> String {
+    let width = width.max(1);
+    let marker = if selected { '>' } else { ' ' };
+    let trust = if verified { "verified" } else { "not verified" };
+    let full = format!("{marker} {label}  {device_id}  {trust}");
+    if display_width(&full) <= width {
+        return full;
+    }
+    let tail = format!("  {device_id}  {trust}");
+    let head = format!("{marker} ");
+    let head_width = display_width(&head);
+    let tail_width = display_width(&tail);
+    if head_width + tail_width < width {
+        let label = truncate_chars(label, width - head_width - tail_width);
+        let fitted = format!("{head}{label}{tail}");
+        if display_width(&fitted) <= width {
+            return fitted;
+        }
+    }
+    let without_label = format!("{marker} {device_id}  {trust}");
+    if display_width(&without_label) <= width {
+        return without_label;
+    }
+    // The trust word is what the row is for. Truncate the device id before it,
+    // and only then give up characters from the trust word itself.
+    let trust_only = format!("{marker} {trust}");
+    let trust_tail = format!("  {trust}");
+    let prefix_width = display_width(&head);
+    let trust_tail_width = display_width(&trust_tail);
+    if prefix_width + trust_tail_width <= width {
+        let id = truncate_chars(device_id, width - prefix_width - trust_tail_width);
+        if !id.is_empty() {
+            let fitted = format!("{head}{id}{trust_tail}");
+            if display_width(&fitted) <= width {
+                return fitted;
+            }
+        }
+    }
+    if display_width(&trust_only) <= width {
+        return trust_only;
+    }
+    // A suffix of the trust word drops `>` at a few columns (`ied`), so the
+    // selected row looks unselected. Keep the marker and cut from the front
+    // with the same width helper the rest of the row uses.
+    fit_marker_and_trust(marker, trust, width)
+}
+
+fn fit_marker_and_trust(marker: char, trust: &str, width: usize) -> String {
+    let marker = marker.to_string();
+    let marker_width = display_width(&marker);
+    let gap_width = display_width(" ");
+    if marker_width + gap_width > width {
+        return take_display_width(&marker, width);
+    }
+    let mut out = marker;
+    out.push(' ');
+    out.push_str(&take_display_width(trust, width - marker_width - gap_width));
+    out
+}
+
 fn popup_unread_thread_lines(
     app: &App,
     entries: &[UnreadThreadEntry],
@@ -3281,6 +3436,12 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         Row::Kv(shortcuts.reply.label(), "reply to selected result"),
         Row::Kv(shortcuts.thread.label(), "thread from selected result"),
         Row::Blank,
+        Row::Section("Device verification:"),
+        Row::Kv(shortcuts.submit.label(), "verify the selected device"),
+        Row::Kv("r".to_owned(), "retry the device list"),
+        Row::Kv("p".to_owned(), "paste a device id instead of picking one"),
+        Row::Kv(shortcuts.clear_input.label(), "close the device list"),
+        Row::Blank,
         Row::Section("Input:"),
         Row::Kv(
             shortcuts.newline.label(),
@@ -3700,6 +3861,9 @@ mod tests {
         assert!(text.contains(&config.shortcuts.reject_invite.label()));
         assert!(text.contains("Up / Down"));
         assert!(text.contains("select previous / next message"));
+        assert!(text.contains("retry the device list"));
+        assert!(text.contains("paste a device id instead of picking one"));
+        assert!(text.contains("close the device list"));
     }
 
     #[test]
