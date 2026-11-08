@@ -1,7 +1,11 @@
-//! The space discovery cache (ADR 0128 decisions 3, 4, and 6): rows shared
-//! by spaces, and cleanup on leave, purge rebuild, and account removal.
+//! The space discovery cache (ADR 0128 decisions 3-6): rows shared by
+//! spaces, room-summary refresh state, and cleanup on leave, purge rebuild,
+//! and account removal.
 mod common;
-use axon_store::{CrawlBegin, CrawlLimits, CrawlStep, DiscoveredEntry, RoomStateUpsert, Store};
+use axon_store::{
+    CrawlBegin, CrawlLimits, CrawlStep, DiscoveredEntry, RoomStateUpsert, Store, SummaryLimits,
+    SummaryStep,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -293,5 +297,165 @@ async fn a_page_from_before_a_leave_and_rejoin_is_fenced_even_in_the_same_genera
         .unwrap();
     assert!(write.fenced, "the membership epoch fences it");
     assert_eq!(name(&store, account_id).await, None);
+    common::cleanup_account(store.pool(), account_id).await;
+}
+
+const SUMMARY_LIMITS: SummaryLimits = SummaryLimits {
+    summary_ttl_ms: 3600 * 1000,
+    min_backoff_ms: 60_000,
+    max_backoff_ms: 1_800_000,
+};
+
+async fn refresh_rows(store: &Store, account_id: Uuid) -> i64 {
+    let (count,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT count(*) FROM room_discovery_refresh WHERE account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    count
+}
+
+async fn fail_summary(store: &Store, account_id: Uuid) {
+    let write = store
+        .record_room_summary(
+            account_id,
+            CHILD,
+            SUMMARY_LIMITS,
+            &SummaryStep::Failure {
+                category: "timeout",
+                retry_after_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!write.fenced && write.changed);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn summary_refresh_rows_go_when_no_joined_space_links_the_room() {
+    let store = common::migrated_store().await;
+    let (account_id, user) = setup(&store).await;
+    fail_summary(&store, account_id).await;
+    assert_eq!(refresh_rows(&store, account_id).await, 1);
+    let leave = json!({"membership": "leave"});
+    state(
+        &store,
+        account_id,
+        &user,
+        SPACE_A,
+        "m.room.member",
+        &user,
+        leave.clone(),
+    )
+    .await;
+    assert_eq!(
+        refresh_rows(&store, account_id).await,
+        1,
+        "B still links it"
+    );
+    state(
+        &store,
+        account_id,
+        &user,
+        SPACE_B,
+        "m.room.member",
+        &user,
+        leave,
+    )
+    .await;
+    assert_eq!(refresh_rows(&store, account_id).await, 0);
+    common::cleanup_account(store.pool(), account_id).await;
+
+    // A complete crawl's orphan step drops a refresh row whose links are gone.
+    let (account_id, user) = setup(&store).await;
+    fail_summary(&store, account_id).await;
+    for space in [SPACE_A, SPACE_B] {
+        state(
+            &store,
+            account_id,
+            &user,
+            space,
+            "m.space.child",
+            CHILD,
+            json!({}),
+        )
+        .await;
+    }
+    let epoch = store
+        .joined_epoch(account_id, SPACE_A)
+        .await
+        .unwrap()
+        .unwrap();
+    let CrawlBegin::Page(position) = store
+        .begin_space_crawl(account_id, SPACE_A, epoch, LIMITS)
+        .await
+        .unwrap()
+    else {
+        panic!("a new crawl starts");
+    };
+    let write = store
+        .record_space_crawl(
+            account_id,
+            SPACE_A,
+            epoch,
+            position.generation,
+            LIMITS,
+            &CrawlStep::Page {
+                entries: Vec::new(),
+                unidentified: 0,
+                next_batch: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(write.outcome, "complete");
+    assert_eq!(refresh_rows(&store, account_id).await, 0);
+
+    // Account removal takes it too.
+    common::cleanup_account(store.pool(), account_id).await;
+    let (account_id, _) = setup(&store).await;
+    fail_summary(&store, account_id).await;
+    store.delete_account_row(account_id).await.unwrap();
+    assert_eq!(
+        refresh_rows(&store, account_id).await,
+        0,
+        "account removal cascades"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn the_fallback_crawl_is_the_first_linking_space_whose_crawl_is_due() {
+    let store = common::migrated_store().await;
+    let (account_id, _) = setup(&store).await;
+    assert_eq!(
+        store
+            .room_summary_fallback_space(account_id, CHILD)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(SPACE_A)
+    );
+    crawl(&store, account_id, SPACE_A, "A").await;
+    assert_eq!(
+        store
+            .room_summary_fallback_space(account_id, CHILD)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(SPACE_B),
+        "A's crawl is fresh"
+    );
+    crawl(&store, account_id, SPACE_B, "B").await;
+    assert_eq!(
+        store
+            .room_summary_fallback_space(account_id, CHILD)
+            .await
+            .unwrap(),
+        None
+    );
     common::cleanup_account(store.pool(), account_id).await;
 }

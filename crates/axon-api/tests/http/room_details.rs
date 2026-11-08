@@ -10,6 +10,13 @@ use axon_store::{DetailKind, DetailOutcome};
 struct RecordingAcquirer(Mutex<Vec<(Uuid, String, RoomDetailJob)>>);
 
 impl RecordingAcquirer {
+    fn take_requests(&self) -> Vec<(String, RoomDetailJob)> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+            .into_iter()
+            .map(|(_, room, job)| (room, job))
+            .collect()
+    }
+
     fn take(&self) -> Vec<RoomDetailJob> {
         std::mem::take(&mut *self.0.lock().unwrap())
             .into_iter()
@@ -618,4 +625,204 @@ async fn a_space_whose_children_are_all_joined_is_not_crawled() {
     .await;
     get(&f.app, &f.hierarchy(&f.room_id, true)).await;
     assert_eq!(f.acquirer.take(), [RoomDetailJob::Hierarchy]);
+}
+
+// ---------------------------------------------------------------------------
+// GET …/discovery (ADR 0128 step 4)
+// ---------------------------------------------------------------------------
+
+const CHILD: &str = "!summary-child:localhost";
+
+impl Joined {
+    fn discovery(&self, room_id: &str) -> String {
+        format!("/v1/accounts/{}/rooms/{room_id}/discovery", self.account_id)
+    }
+
+    async fn link_child(&self) {
+        self.state(
+            &self.room_id,
+            "m.space.child",
+            CHILD,
+            json!({"via": ["localhost"]}),
+        )
+        .await;
+    }
+
+    /// Run `sql` with `$1` the account and `$2` the child.
+    async fn child_sql(&self, sql: &str) {
+        sqlx_core::query::query(sql)
+            .bind(self.account_id)
+            .bind(CHILD)
+            .execute(self.store.pool())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_discovery_read_schedules_a_summary_only_for_a_linked_unjoined_room() {
+    let f = joined_room().await;
+    // Before any link, the child qualifies for nothing.
+    let (status, body) = get(&f.app, &f.discovery(CHILD)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(f.acquirer.take().is_empty());
+    assert_eq!(
+        body["data"],
+        json!({
+            "room_id": CHILD, "eligible": false, "discovered": null, "support": "unknown",
+            "refresh": {"state": "idle", "failure": null, "next_attempt_at": null},
+        })
+    );
+
+    f.link_child().await;
+    let (_, body) = get(&f.app, &f.discovery(CHILD)).await;
+    assert_eq!(body["data"]["eligible"], true);
+    assert_eq!(body["data"]["refresh"]["state"], "queued");
+    // Polling while it is queued asks the worker nothing more.
+    let (_, body) = get(&f.app, &f.discovery(CHILD)).await;
+    assert_eq!(body["data"]["refresh"]["state"], "queued");
+    assert_eq!(
+        f.acquirer.take_requests(),
+        [(CHILD.to_owned(), RoomDetailJob::Summary)]
+    );
+
+    // The joined space itself, an unknown room, and a malformed id ask nothing.
+    for room in [f.room_id.as_str(), "!unknown:localhost"] {
+        let (status, body) = get(&f.app, &f.discovery(room)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["eligible"], false, "{room}");
+    }
+    let (status, _) = get(&f.app, &f.discovery("%00")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(f.acquirer.take().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_cached_summary_is_served_until_it_expires_or_its_backoff_ends() {
+    let f = joined_room().await;
+    f.link_child().await;
+    let now = chrono::Utc::now().timestamp_millis();
+    f.child_sql(&format!(
+        "INSERT INTO room_discovery (account_id, room_id, status, source, summary, withheld, \
+             observed_at, expires_at) \
+         VALUES ($1, $2, 'available', 'summary', \
+             '{{\"name\": \"Child\", \"num_joined_members\": 4}}', '{{topic}}', {now}, {})",
+        now + 3_600_000
+    ))
+    .await;
+    f.child_sql(
+        "INSERT INTO room_discovery_refresh (account_id, room_id, support) \
+         VALUES ($1, $2, 'supported')",
+    )
+    .await;
+    let (_, body) = get(&f.app, &f.discovery(CHILD)).await;
+    assert!(f.acquirer.take().is_empty(), "fresh until expires_at");
+    let discovered = &body["data"]["discovered"];
+    assert_eq!(
+        (
+            &discovered["status"],
+            &discovered["source"],
+            &discovered["name"],
+            &discovered["num_joined_members"],
+            &discovered["withheld"],
+            &discovered["encryption"],
+        ),
+        (
+            &json!("available"),
+            &json!("summary"),
+            &json!("Child"),
+            &json!(4),
+            &json!(["topic"]),
+            &Value::Null
+        )
+    );
+    assert_eq!(body["data"]["support"], "supported");
+    assert_eq!(body["data"]["refresh"]["state"], "idle");
+
+    f.child_sql("UPDATE room_discovery SET expires_at = 1 WHERE account_id = $1 AND room_id = $2")
+        .await;
+    let (_, body) = get(&f.app, &f.discovery(CHILD)).await;
+    assert_eq!(f.acquirer.take(), [RoomDetailJob::Summary], "expired");
+    assert_eq!(
+        body["data"]["discovered"]["name"], "Child",
+        "a stale summary stays visible"
+    );
+
+    // A failed refresh backs off and reports why.
+    f.child_sql(&format!(
+        "UPDATE room_discovery_refresh SET failure = 'timeout', failures = 1, \
+             next_attempt_at = {} WHERE account_id = $1 AND room_id = $2",
+        now + 60_000
+    ))
+    .await;
+    let (_, body) = get(&f.app, &f.discovery(CHILD)).await;
+    assert!(f.acquirer.take().is_empty(), "backing off");
+    assert_eq!(
+        body["data"]["refresh"],
+        json!({"state": "idle", "failure": "timeout", "next_attempt_at": now + 60_000})
+    );
+
+    // Joined, the room's synced state is authoritative: no discovered data.
+    let user: (String,) =
+        sqlx_core::query_as::query_as("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(f.account_id)
+            .fetch_one(f.store.pool())
+            .await
+            .unwrap();
+    f.state(
+        CHILD,
+        "m.room.member",
+        &user.0,
+        json!({"membership": "join"}),
+    )
+    .await;
+    let (_, body) = get(&f.app, &f.discovery(CHILD)).await;
+    assert_eq!(body["data"]["eligible"], false);
+    assert_eq!(body["data"]["discovered"], Value::Null);
+    assert!(f.acquirer.take().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_unsupported_summary_endpoint_falls_back_to_a_crawl_of_a_linking_space() {
+    let f = joined_room().await;
+    f.link_child().await;
+    let now = chrono::Utc::now().timestamp_millis();
+    f.child_sql(&format!(
+        "INSERT INTO room_discovery_refresh (account_id, room_id, support, next_attempt_at) \
+         VALUES ($1, $2, 'unsupported', {})",
+        now + 86_400_000
+    ))
+    .await;
+    let (_, body) = get(&f.app, &f.discovery(CHILD)).await;
+    assert_eq!(body["data"]["support"], "unsupported");
+    assert_eq!(body["data"]["refresh"]["state"], "idle");
+    assert_eq!(body["data"]["refresh"]["next_attempt_at"], now + 86_400_000);
+    assert_eq!(
+        f.acquirer.take_requests(),
+        [(f.room_id.clone(), RoomDetailJob::Hierarchy)],
+        "a crawl of the linking space, not a summary"
+    );
+
+    // A fresh crawl of the only linking space leaves nothing to schedule.
+    f.sql(&format!(
+        "INSERT INTO space_discovery (account_id, space_id, generation, outcome, page_limit, \
+             started_at, completed_at, expires_at, support) \
+         VALUES ($1, $2, 1, 'complete', 50, {now}, {now}, {}, 'supported')",
+        now + 3_600_000
+    ))
+    .await;
+    get(&f.app, &f.discovery(CHILD)).await;
+    assert!(f.acquirer.take().is_empty());
+
+    // Once the answer expires, the endpoint is checked again.
+    f.child_sql(
+        "UPDATE room_discovery_refresh SET next_attempt_at = 1 \
+         WHERE account_id = $1 AND room_id = $2",
+    )
+    .await;
+    get(&f.app, &f.discovery(CHILD)).await;
+    assert_eq!(f.acquirer.take(), [RoomDetailJob::Summary]);
 }

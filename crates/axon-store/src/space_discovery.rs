@@ -618,7 +618,7 @@ impl Store {
         Ok(current == Some((epoch,)))
     }
 
-    async fn now(
+    pub(crate) async fn now(
         tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
     ) -> Result<i64, StoreError> {
         let (now,): (i64,) = sqlx_core::query_as::query_as(&format!("SELECT {NOW_MS}"))
@@ -953,8 +953,9 @@ impl Store {
         Ok(omitted.len())
     }
 
-    /// Delete discovery rows no joined space links any more, and this
-    /// space's returned-set rows for links that no longer exist.
+    /// Delete discovery rows and room-summary refresh rows no joined space
+    /// links any more, and this space's returned-set rows for links that no
+    /// longer exist.
     async fn delete_orphans(
         tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
         account_id: Uuid,
@@ -967,6 +968,14 @@ impl Store {
         )
         .bind(account_id)
         .fetch_all(&mut **tx)
+        .await?;
+        // A room-summary refresh row is kept or dropped with its room.
+        sqlx_core::query::query(
+            "DELETE FROM room_discovery_refresh r WHERE r.account_id = $1 \
+               AND NOT room_discovery_is_linked(r.account_id, r.room_id)",
+        )
+        .bind(account_id)
+        .execute(&mut **tx)
         .await?;
         let sql = format!(
             "DELETE FROM space_discovery_children c \

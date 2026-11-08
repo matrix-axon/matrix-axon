@@ -40,6 +40,10 @@ pub enum RoomDetailSource {
     /// decision 9): a committed crawl page changed a cached child summary, or
     /// the crawl reached a conclusive state.
     SpaceHierarchy,
+    /// `GET …/discovery` of the frame's room, an unjoined room (ADR 0128
+    /// decision 9): a room-summary job changed its discovery row, the
+    /// summary endpoint's support, or its failure.
+    Discovery,
 }
 
 /// The order an absence job confirms a room's missing metadata types (ADR
@@ -69,6 +73,9 @@ pub enum RoomDetailJob {
     /// One page of the space's hierarchy crawl (ADR 0128 decision 3); the
     /// job queues the next page itself.
     Hierarchy,
+    /// The room summary of one unjoined room a joined space links (ADR 0128
+    /// decision 5).
+    Summary,
 }
 
 /// Where a job stands in its account's worker. In memory only: a restart

@@ -9,7 +9,9 @@
 //! commit only while the account is still joined in the membership epoch the
 //! job started in, and announce a `room_details.changed` frame when they
 //! changed something a client reads. Space hierarchy crawls (ADR 0128) run
-//! on the same worker, one page per job; see [`hierarchy`].
+//! on the same worker, one page per job; see [`hierarchy`]. So do room
+//! summaries of one selected unjoined room, which fence on the spaces that
+//! link it rather than on the room's own membership; see [`summary`].
 //!
 //! Requests go out through reqwest with the account's current access token
 //! rather than the SDK's `send`, which buffers and parses the whole body; the
@@ -128,6 +130,7 @@ fn frame_source(job: RoomDetailJob) -> RoomDetailSource {
             RoomDetailSource::HomeserverDetails
         }
         RoomDetailJob::Hierarchy => RoomDetailSource::SpaceHierarchy,
+        RoomDetailJob::Summary => RoomDetailSource::Discovery,
     }
 }
 
@@ -422,6 +425,10 @@ pub(crate) trait Upstream: Send + Sync {
     /// Send `request`. Calls `admitted` once the request may go out, after
     /// any wait for a gate permit.
     async fn get(&self, request: Get<'_>, admitted: &(dyn Fn() + Sync)) -> Reply;
+
+    /// Which room-summary endpoint the homeserver advertises in `/versions`
+    /// (ADR 0128 decision 5).
+    async fn summary_endpoint(&self) -> summary::SummaryEndpoint;
 }
 
 /// The account's homeserver, behind its load gate.
@@ -498,6 +505,24 @@ impl Upstream for Homeserver {
         };
         permit.finish(outcome);
         reply
+    }
+
+    async fn summary_endpoint(&self) -> summary::SummaryEndpoint {
+        // Only the SDK's cache, which its own requests fill and its state
+        // store keeps: a fetch here would bypass the gate and the summary
+        // timeout. A stale entry is still returned (the SDK refreshes it in
+        // the background); an empty cache, as just after a first start, is
+        // `Unknown` and takes a failure's backoff.
+        match self.client.supported_versions_cached().await {
+            Ok(Some(supported)) => summary::SummaryEndpoint::advertised(
+                supported
+                    .versions
+                    .iter()
+                    .any(|version| *version >= matrix_sdk::ruma::api::MatrixVersion::V1_15),
+                supported.features.iter().map(|feature| feature.as_str()),
+            ),
+            Ok(None) | Err(_) => summary::SummaryEndpoint::Unknown,
+        }
     }
 }
 
@@ -757,6 +782,11 @@ impl<U: Upstream> Worker<U> {
     async fn run_job(&mut self, room_id: &RoomId, job: RoomDetailJob) -> Ran {
         let account_id = self.account_id;
         let mut ran = Ran::default();
+        // A summary is of a room the account has not joined; its job checks
+        // its own eligibility and fences on the linking spaces.
+        if job == RoomDetailJob::Summary {
+            return self.run_summary(room_id).await;
+        }
         let epoch = match self.store.joined_epoch(account_id, room_id.as_str()).await {
             Ok(Some(epoch)) => epoch,
             Ok(None) => {
@@ -771,6 +801,8 @@ impl<U: Upstream> Worker<U> {
         };
         match job {
             RoomDetailJob::Hierarchy => self.run_hierarchy(room_id, epoch).await,
+            // Returned above, before any membership read.
+            RoomDetailJob::Summary => ran,
             RoomDetailJob::LocalAliases | RoomDetailJob::DirectoryVisibility => {
                 let (kind, segments) = match job {
                     RoomDetailJob::LocalAliases => (
@@ -971,6 +1003,7 @@ impl Ran {
 }
 
 mod hierarchy;
+mod summary;
 
 #[cfg(test)]
 mod tests;

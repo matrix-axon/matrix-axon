@@ -26,7 +26,7 @@ fn child(id: &str, name: &str) -> Value {
     json!({"room_id": id, "name": name, "num_joined_members": 3, "children_state": []})
 }
 
-async fn state_in(
+pub(super) async fn state_in(
     store: &Store,
     account_id: Uuid,
     user: &str,

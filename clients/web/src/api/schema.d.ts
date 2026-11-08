@@ -887,6 +887,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/discovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an unjoined room's discovered summary
+         * @description Read what the account's homeserver said about one room the account has
+         *     not joined, such as a space child a user selected in Room Information
+         *     (ADR 0128). `discovered` is the cached summary, from a room-summary
+         *     request or from a crawl of a space that links the room, or `null`; it is
+         *     always `null` for a joined room, whose synced state is authoritative.
+         *
+         *     Returns at once and never waits for the homeserver. When the room is
+         *     `eligible` (the account has not joined it and a joined space links it
+         *     with a current `m.space.child`) and its summary is unknown or expired
+         *     with no backoff in force, the read schedules one
+         *     `GET /_matrix/client/v1/room_summary/{roomId}` in the background, with
+         *     `via` taken from the links; `refresh` reports it. A summary stays fresh
+         *     for an hour. Any other room, including unknown room IDs, makes no
+         *     request. When `support` is `unsupported`, the read instead schedules a
+         *     crawl of one joined space that links the room, as a `space/hierarchy`
+         *     read with `enrich=true` would. Re-read on a `room_details.changed`
+         *     WebSocket frame for this room whose `sources` include `discovery`, and,
+         *     while `support` is `unsupported`, on one for the linking space naming
+         *     `space_hierarchy`.
+         */
+        get: operations["room_discovery"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs": {
         parameters: {
             query?: never;
@@ -1373,8 +1411,8 @@ export interface paths {
          *     children, is an empty page (200), not a 404.
          *
          *     Each unjoined child also carries `discovered`: what the account's
-         *     homeserver said about it when Axon last crawled the space's hierarchy, or
-         *     `null` (ADR 0128). Show the child's synced fields when it is joined, its
+         *     homeserver last said about it, from a crawl of the space's hierarchy or a
+         *     `GET …/discovery` read of the child, or `null` (ADR 0128). Show the child's synced fields when it is joined, its
          *     `discovered` fields when it is not and `discovered.status` is
          *     `available`, and otherwise the synced fields, then the room id. With
          *     `enrich=true`, a read of a joined space that links at least one unjoined
@@ -2989,6 +3027,30 @@ export interface components {
                  *     under-lock cap.
                  */
                 timed_out: boolean;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_RoomDiscoveryDto: {
+            /**
+             * @description What Axon knows about one unjoined room from the account's homeserver, and
+             *     where its room-summary refresh stands (ADR 0128 decision 5).
+             */
+            data: {
+                discovered?: null | components["schemas"]["DiscoveredRoomDto"];
+                /**
+                 * @description Axon may ask the homeserver about this room: the account has not
+                 *     joined it, and a space the account has joined links it with a current
+                 *     `m.space.child`. Any other room is never requested.
+                 */
+                eligible: boolean;
+                /**
+                 * @description The room-summary refresh. `state` is the worker's activity while a
+                 *     summary is due, and `idle` otherwise; `next_attempt_at` is the end of
+                 *     a failure backoff, or when an `unsupported` endpoint is checked again.
+                 */
+                refresh: components["schemas"]["DetailRefreshDto"];
+                room_id: string;
+                support: components["schemas"]["SummarySupport"];
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -5521,6 +5583,27 @@ export interface components {
          */
         RefreshState: "idle" | "queued" | "running";
         /**
+         * @description What Axon knows about one unjoined room from the account's homeserver, and
+         *     where its room-summary refresh stands (ADR 0128 decision 5).
+         */
+        RoomDiscoveryDto: {
+            discovered?: null | components["schemas"]["DiscoveredRoomDto"];
+            /**
+             * @description Axon may ask the homeserver about this room: the account has not
+             *     joined it, and a space the account has joined links it with a current
+             *     `m.space.child`. Any other room is never requested.
+             */
+            eligible: boolean;
+            /**
+             * @description The room-summary refresh. `state` is the worker's activity while a
+             *     summary is due, and `idle` otherwise; `next_attempt_at` is the end of
+             *     a failure backoff, or when an `unsupported` endpoint is checked again.
+             */
+            refresh: components["schemas"]["DetailRefreshDto"];
+            room_id: string;
+            support: components["schemas"]["SummarySupport"];
+        };
+        /**
          * @description A room in the cross-account list (`GET /v1/rooms`). Identity is
          *     `(account_id, room_id)` — a room joined by two accounts appears twice.
          */
@@ -6172,6 +6255,12 @@ export interface components {
         SubmitMatrixOAuthQrRequest: {
             qr_code_data: string;
         };
+        /**
+         * @description Whether the account's homeserver serves room summaries for this room
+         *     (ADR 0128 decision 5).
+         * @enum {string}
+         */
+        SummarySupport: "unknown" | "supported" | "unsupported";
         /**
          * @description Sync-engine readiness on the wire (ADR 0030, issue #241) — the constrained
          *     enum form of the four values `axon-sync`'s `SyncHealth` derives, so the
@@ -9056,6 +9145,58 @@ export interface operations {
             };
             /** @description The homeserver did not answer in time (ADR 0121); a write may still take effect */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    room_discovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id of an unjoined room */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The room's cached summary and refresh state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomDiscoveryDto"];
+                };
+            };
+            /** @description A room id containing a control character */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal database failure */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

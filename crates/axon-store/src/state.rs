@@ -377,11 +377,14 @@ impl Store {
                 .bind(s.room_id)
                 .execute(&mut *tx)
                 .await?;
-                // The epoch trigger deletes the room's discovery row (ADR
-                // 0128 decision 6), but a first join may have no summary row
-                // to advance yet; synced state is authoritative from here.
+                // The epoch trigger deletes the room's discovery and
+                // room-summary refresh rows (ADR 0128 decision 6), but a
+                // first join may have no summary row to advance yet; synced
+                // state is authoritative from here.
                 sqlx_core::query::query(
-                    "DELETE FROM room_discovery WHERE account_id = $1 AND room_id = $2",
+                    "WITH refresh AS (DELETE FROM room_discovery_refresh \
+                         WHERE account_id = $1 AND room_id = $2) \
+                     DELETE FROM room_discovery WHERE account_id = $1 AND room_id = $2",
                 )
                 .bind(s.account_id)
                 .bind(s.room_id)
