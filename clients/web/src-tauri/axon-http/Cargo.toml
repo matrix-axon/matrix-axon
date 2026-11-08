@@ -34,7 +34,17 @@ percent-encoding = "2"
 # charset, which nothing here uses. `macos-system-configuration` is what makes
 # the system proxy apply on macOS (and Windows, through `system-proxy`), so the
 # proxy behaviour matches the plugin's by construction.
+#
+# `gzip` and `brotli` make reqwest send `Accept-Encoding: gzip,br` and decode
+# the answer. The page cannot ask for compression itself (`Accept-Encoding` is
+# a forbidden header, dropped in `lib.rs`), so without these every `/v1`
+# response arrived uncompressed: 2.5 MB for a 5,759-room `/v1/rooms` that is
+# 429 KB as brotli (#990). The server breaks the tie towards brotli. Not
+# `zstd`: it links the C `zstd-sys` into every mobile and desktop
+# cross-build, for a body no smaller than brotli's.
 reqwest = { version = "0.12", default-features = false, features = [
+  "brotli",
+  "gzip",
   "http2",
   "macos-system-configuration",
   "rustls-tls",
@@ -52,6 +62,10 @@ tower-layer = "0.3"
 tower-service = "0.3"
 
 [dev-dependencies]
+# Encoders for the compression tests' server. Both are already in the lockfile
+# through Tauri's own build, so they add nothing new to fetch.
+brotli = "9"
+flate2 = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }

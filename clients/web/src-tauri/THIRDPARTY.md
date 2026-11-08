@@ -25,7 +25,7 @@ generates their attribution for us. They are recorded here deliberately.
   <https://webkit.org/licensing-webkit/>.
 
 ## OVERVIEW
-- MIT License (used by 435 crates)
+- MIT License (used by 438 crates)
 - Unicode License v3 (used by 19 crates)
 - ISC License (used by 18 crates)
 - Apache License 2.0 (used by 11 crates)
@@ -2315,6 +2315,10 @@ DEALINGS IN THE SOFTWARE.
       - walkdir 2.5.0
   - Copyright (c) 2020 Yoshua Wuyts
       - async-broadcast 0.7.2
+  - Copyright (c) 2018 the rustasync developers
+      - async-compression 0.4.51
+      - compression-codecs 0.4.46
+      - compression-core 0.4.34
   - Copyright (c) 2015 Alice Maz
       - base64 0.21.7
       - base64 0.22.1
