@@ -87,9 +87,29 @@ class SplitStatements(unittest.TestCase):
         self.assertIn("Copyright [yyyy]", rest)
         self.assertIn("copyright license to reproduce", rest)
 
-    def test_unfilled_template_stays_in_the_text(self):
-        _, found, _ = tn.split_statements("Copyright (c) <year> <owner>.\n\nPermission.\n")
+    def test_a_stray_body_line_is_not_taken_for_a_statement(self):
+        # A line that merely starts with the word is license text, not a holder.
+        text = "MIT License\n\nPermission.\n\nCopyright Notice: keep this.\nCopyright Holder rights.\n\nAS IS.\n"
+        rest, found, inline = tn.split_statements(text)
         self.assertEqual(found, [])
+        self.assertTrue(inline)  # left in the text, and the label says to look there
+        self.assertIn("Copyright Notice: keep this.", rest)
+        self.assertIn("Copyright Holder rights.", rest)
+
+    def test_unfilled_template_stays_in_the_text(self):
+        _, found, inline = tn.split_statements("Copyright (c) <year> <owner>.\n\nPermission.\n")
+        self.assertEqual(found, [])
+        self.assertFalse(inline)  # boilerplate, not a statement the reader needs to find
+
+    def test_a_holder_only_line_is_left_in_place_and_labelled(self):
+        # utf8_iter: "Copyright Mozilla Foundation" has no year or (c).
+        rest, found, inline = tn.split_statements("Copyright Mozilla Foundation\n\nPermission.\n")
+        self.assertEqual(found, [])
+        self.assertTrue(inline)
+        self.assertIn("Copyright Mozilla Foundation", rest)
+
+    def test_a_text_with_no_copyright_wording_is_not_labelled(self):
+        self.assertEqual(tn.split_statements("Permission is hereby granted.\n")[2], False)
 
     def test_scattered_statements_are_left_in_place(self):
         # regression: atomic-waker's LICENSE-THIRD-PARTY repeats the same holders
@@ -167,19 +187,61 @@ class Merge(unittest.TestCase):
         self.assertEqual(out[0].crates[("x", "1")], [tn.INLINE])
 
     def test_nothing_is_lost(self):
-        # The script asserts this itself; this pins that the assertion is wired
-        # to the real words and not vacuously true.
+        # merge() runs check_lossless on every entry; make sure it is wired to
+        # the real text and not vacuously true.
         entry = lic("MIT", mit("Copyright (c) 2020 Alice"), ("a", "1"))
-        remainder, found, _ = tn.split_statements(entry["text"])
-        self.assertEqual(tn.words(entry["text"]), tn.words(remainder) + tn.words("\n".join(found)))
-        with self.assertRaises(AssertionError):
-            bad = dict(entry, text=entry["text"])
-            real = tn.split_statements
+        real = tn.split_statements
+        try:
             tn.split_statements = lambda t: (real(t)[0].replace("WARRANTY", ""), real(t)[1], False)
-            try:
-                tn.merge([bad])
-            finally:
-                tn.split_statements = real
+            with self.assertRaises(RuntimeError):
+                tn.merge([entry])
+        finally:
+            tn.split_statements = real
+
+
+class CheckLossless(unittest.TestCase):
+    def test_accepts_statements_spliced_in_once(self):
+        original = "Title\n\nCopyright (c) 1 A\n\nBody one. Body two.\n"
+        tn.check_lossless(original, "Title\n\nBody one. Body two.", ["Copyright (c) 1 A"], "x")
+
+    def test_accepts_a_statement_that_starts_like_the_text_after_it(self):
+        # The original and the remainder agree through "Head Copyright (c) 1",
+        # past the real splice point after "Head". A check that only tried the end
+        # of the common prefix would reject this valid merge and abort the build.
+        original = "Head Copyright (c) 1 A Copyright (c) 1 B"
+        tn.check_lossless(original, "Head Copyright (c) 1 B", ["Copyright (c) 1 A"], "x")
+
+    def test_rejects_a_dropped_word(self):
+        with self.assertRaises(RuntimeError):
+            tn.check_lossless("a b c", "a c", [], "x")
+
+    def test_rejects_words_moved_out_of_order(self):
+        # Same words, so a multiset comparison would pass this.
+        with self.assertRaises(RuntimeError):
+            tn.check_lossless("one two three four", "one three two four", [], "x")
+
+    def test_rejects_body_text_relabelled_as_a_statement(self):
+        # "Permission." moved from the body into the printed statements. The words
+        # and their order are unchanged, so only the shape of the statement can
+        # give it away.
+        with self.assertRaises(RuntimeError):
+            tn.check_lossless(
+                "Copyright (c) 1 A\nPermission. Body.",
+                "Body.",
+                ["Copyright (c) 1 A", "Permission."],
+                "x",
+            )
+
+    def test_still_raises_under_python_dash_O(self):
+        code = (
+            "import importlib.util,sys;"
+            f"s=importlib.util.spec_from_file_location('tn',{str(_path)!r});"
+            "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+            "m.check_lossless('a b c','a c',[],'x')"
+        )
+        result = subprocess.run([sys.executable, "-I", "-O", "-c", code], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RuntimeError", result.stderr)
 
 
 class Render(unittest.TestCase):

@@ -60,7 +60,10 @@ else
 fi
 
 command -v python3 > /dev/null || { echo "python3 is required to render the notices" >&2; exit 1; }
+# Every path below is relative to the repository root, so work from there
+# wherever the script was started.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/.."
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 

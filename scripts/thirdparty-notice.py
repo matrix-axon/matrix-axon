@@ -21,15 +21,23 @@ What it does
 
 The copyright statements are kept, not dropped: MIT, BSD and Apache-2.0 require
 the notice to travel with redistributions, so a crate's holder stays attributed
-to that crate. Nothing else in the text is normalized, so licenses that differ
-in any other way (the Meta/Facebook zstd BSD-3 clause 3, a different title, an
-extra paragraph) stay separate blocks. When in doubt this errs toward *not*
+to that crate.
+
+Two texts merge when, after the copyright statements are removed, they have the
+same SPDX id and the same words. Whitespace is ignored on purpose, so a
+different indentation or line wrapping still merges, and the merged block is
+printed in the layout of whichever member covers the most crates. Because the
+statements are listed apart from the text, a variant that carries its statement
+as a header and one that carries it as a footer also share one block that shows
+only one of those layouts. Nothing else is normalized: licenses that differ in
+any word (the Meta/Facebook zstd BSD-3 clause 3, a different title, an extra
+paragraph) stay separate blocks, and when in doubt this errs toward *not*
 merging.
 
-Every merged crate is checked to be lossless: its original words must equal the
-printed shared text plus its own extracted copyright statements, word for word.
-A violation aborts the run, so a bug here fails the build instead of silently
-dropping license text.
+Every license entry is checked to be lossless and in order: its original words
+must equal the printed shared text with that entry's own statements spliced back
+in at one point, word for word. A violation raises, even under `python -O`, so a
+bug here fails the build instead of silently dropping or moving license text.
 
 Usage
 -----
@@ -52,7 +60,7 @@ import argparse
 import json
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 # A copyright *statement* line. Anchored and case-sensitive on purpose:
 #   * Apache-2.0 wraps lines that begin "copyright license to reproduce" and
@@ -61,9 +69,16 @@ from collections import Counter, defaultdict
 #     NOTICE" (Unicode) are upper-case boilerplate, not statements.
 # A leading comment marker (`//`, `/*`, `*`, `#`) is allowed; ring's licenses use them.
 _COMMENT = r"(?:(?://|/\*|\*|#)\s*)?"
-_STATEMENT = re.compile(
-    rf"^\s*{_COMMENT}Copyright\s*(?:\([cC]\)|©|[0-9]|[A-Z\[`])"
-)
+# After "Copyright" it requires `(c)`, `©`, a year or a `[`. A bare capitalised
+# word is not enough: a body line like "Copyright Notice: ..." would be cut out
+# of the middle of a license and printed as that crate's attribution. The cost is
+# that a holder-only line ("Copyright Mozilla Foundation") is not extracted; that
+# text stays whole, which is the safe direction.
+_STATEMENT = re.compile(rf"^\s*{_COMMENT}Copyright\s*(?:\([cC]\)|©|[0-9]|\[)")
+# Any line that opens with the word, whether or not it is a recognised statement
+# ("Copyright Mozilla Foundation", "Copyright Notice: ..."). Used only to label a
+# crate whose text we did not extract anything from.
+_MENTION = re.compile(rf"^\s*{_COMMENT}Copyright\b")
 # The unfilled template that Apache-2.0's appendix and a few READMEs carry:
 # "Copyright [yyyy] [name of copyright owner]". It is boilerplate shared by
 # every crate, not anyone's attribution, so it stays in the shared text.
@@ -83,8 +98,9 @@ def split_statements(text: str) -> tuple[str, list[str], bool]:
     footer: statements separated by nothing but blank lines). A text that
     scatters them, like a file with one copyright line per embedded section,
     is left whole, because printing the statements apart from their sections
-    would lose which holder goes with which text. `inline` reports that case:
-    the text has statements but they were left in place.
+    would lose which holder goes with which text. `inline` reports that case,
+    and also a text with an unrecognised "Copyright ..." line: it has copyright
+    wording that was left in place.
     """
     lines = text.splitlines()
     found: list[tuple[int, int, str]] = []  # (first line, last line, statement)
@@ -101,7 +117,10 @@ def split_statements(text: str) -> tuple[str, list[str], bool]:
             i = last
         i += 1
     if not found:
-        return tidy(text), [], False
+        # Nothing extracted. If the text still opens a line with "Copyright" (a
+        # holder-only line, say), tell the reader to look in the text.
+        mentioned = any(_MENTION.match(ln) and not _PLACEHOLDER.search(ln) for ln in lines)
+        return tidy(text), [], mentioned
     taken = {n for first, last, _ in found for n in range(first, last + 1)}
     span = range(found[0][0], found[-1][1] + 1)
     if any(n not in taken and lines[n].strip() for n in span):
@@ -123,13 +142,36 @@ def key_of(text: str) -> str:
 _BARE_MARKERS = {"//", "/*", "*", "#"}
 
 
-def words(text: str) -> Counter:
-    """Word multiset, ignoring bare comment markers.
+def word_seq(text: str) -> list[str]:
+    """Words in order, ignoring bare comment markers.
 
     The markers are the one thing deliberately not carried over: a statement
-    printed as "Copyright 2015 Brian Smith." needs no leading "//".
+    printed as "Copyright 2015-2016 Brian Smith." needs no leading "//".
     """
-    return Counter(w for w in text.split() if w not in _BARE_MARKERS)
+    return [w for w in text.split() if w not in _BARE_MARKERS]
+
+
+def check_lossless(original: str, remainder: str, statements: list[str], who: str) -> None:
+    """Raise unless `original` is `remainder` with `statements` spliced in once.
+
+    Order matters: the statements may sit at only one point of the text, and
+    everything else must be untouched and in place. Each statement must also look
+    like one, so text cannot be relabelled as attribution. Deliberately not an `assert`,
+    which `python -O` strips.
+    """
+    # Only statement-shaped text may leave the body for the USED BY list.
+    if not all(_STATEMENT.match(st) for st in statements):
+        raise RuntimeError(f"{who}: a non-statement would be printed as a copyright statement")
+    orig, rest, stm = word_seq(original), word_seq(remainder), word_seq("\n".join(statements))
+    common = 0
+    while common < min(len(orig), len(rest)) and orig[common] == rest[common]:
+        common += 1
+    # The splice point is at most `common`; walk back in case the statement's
+    # first words repeat the text that follows it.
+    for k in range(common, -1, -1):
+        if orig[k : k + len(stm)] == stm and orig[:k] + orig[k + len(stm) :] == rest:
+            return
+    raise RuntimeError(f"{who}: the license text would change by merging; refusing to write the notice")
 
 
 class Block:
@@ -166,6 +208,8 @@ def merge(licenses: list[dict]) -> list[Block]:
         if len(entry["used_by"]) > block.best:
             block.best = len(entry["used_by"])
             block.text = remainder
+        who = ", ".join(f"{u['crate']['name']} {u['crate']['version']}" for u in entry["used_by"][:3])
+        check_lossless(entry["text"], remainder, statements, who)
         for used in entry["used_by"]:
             crate = (used["crate"]["name"], used["crate"]["version"])
             # A crate can ship several license files that normalize to one
@@ -174,10 +218,6 @@ def merge(licenses: list[dict]) -> list[Block]:
             have = block.crates.setdefault(crate, [])
             shown = statements or ([INLINE] if inline else [])
             have.extend(st for st in shown if st not in have)
-            # Lossless check, per crate: original words == shared words + own statements.
-            assert words(entry["text"]) == words(remainder) + words("\n".join(statements)), (
-                f"{crate[0]} {crate[1]}: license text changed by merging"
-            )
     out = list(blocks.values())
     out.sort(key=lambda b: (b.spdx, min(b.crates)))
     return out
