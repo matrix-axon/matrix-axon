@@ -34,14 +34,16 @@ on:
       - 'clients/tui/Cargo.toml'
       - 'smoke/*/Cargo.toml'
       # Everything the generator reads for the root notices: the accepted
-      # license list, the two templates, the committed outputs, and the script.
+      # license list, the notice headers, the renderer, the committed outputs, and
+      # the script.
       # Without these a change to any of them ran no gate at all.
       - 'build/about.toml'
-      - 'build/about-markdown.hbs'
-      - 'build/about-plain.hbs'
+      - 'build/notice-header-root-*.txt'
       - 'build/THIRDPARTY'
       - 'THIRDPARTY.md'
       - 'scripts/generate-thirdparty.sh'
+      - 'scripts/thirdparty-notice.py'
+      - 'scripts/thirdparty-notice-test.py'
       - '.github/workflows/thirdparty.yml'
   workflow_dispatch:
 
@@ -74,6 +76,12 @@ jobs:
         with:
           path: ~/.cargo/bin/cargo-about
           key: cargo-about-${{ runner.os }}-${{ hashFiles('scripts/generate-thirdparty.sh') }}
+
+      # The renderer merges license texts that differ only in the copyright
+      # line (#855). Its tests run first so a bug there reads as a test failure
+      # rather than as a mysterious diff in the notice below.
+      - name: Test the notice renderer
+        run: python3 -I scripts/thirdparty-notice-test.py
 
       # --root-only: the desktop shell's notices belong to `desktop-build.yml`,
       # and regenerating them here would make a root-only dependency change

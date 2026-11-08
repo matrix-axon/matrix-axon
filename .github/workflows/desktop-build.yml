@@ -45,12 +45,14 @@ on:
       - 'scripts/release-version.sh'
       - 'clients/web/pnpm-lock.yaml'
       # Everything `thirdparty` reads. Without these a change to the accepted
-      # licenses, the notice templates or the generator ran no gate until a
-      # tag was pushed — which is exactly when the release job would fail.
+      # licenses, the notice headers, the renderer or the generator ran no gate
+      # until a tag was pushed — which is exactly when the release job would fail.
       - 'build/about-desktop.toml'
-      - 'build/about-desktop-*.hbs'
+      - 'build/notice-header-desktop-*.txt'
       - 'build/THIRDPARTY-desktop'
+      - 'clients/web/src-tauri/THIRDPARTY.md'
       - 'scripts/generate-thirdparty.sh'
+      - 'scripts/thirdparty-notice.py'
   workflow_dispatch:
     inputs:
       linux:
