@@ -248,6 +248,28 @@ async fn the_unstable_path_and_an_unsupported_homeserver() {
     fx.summarize(CHILD, false).await;
     assert_eq!(fx.versions_reads(), reads, "not due: /versions is not read");
 
+    // A failed check after the 24 hours keeps `unsupported`, and with it the
+    // crawl fallback, through the backoff.
+    fx.expire_summary().await;
+    *fx.script.summary_endpoint.lock().unwrap() = Some(SummaryEndpoint::Unknown);
+    fx.summarize(CHILD, false).await;
+    assert!(fx.script.take_calls().is_empty());
+    let snapshot = fx.summary(CHILD).await;
+    assert!(snapshot.unsupported && !snapshot.due);
+    let refresh = snapshot.refresh.unwrap();
+    assert_eq!(
+        (refresh.support.as_str(), refresh.failure.as_deref()),
+        ("unsupported", Some("transport"))
+    );
+    assert_eq!(
+        fx.store
+            .room_summary_fallback_space(fx.account_id, CHILD)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(SPACE)
+    );
+
     // A missing endpoint in the answer says the same.
     fx.expire_summary().await;
     *fx.script.summary_endpoint.lock().unwrap() = None;

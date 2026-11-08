@@ -362,7 +362,7 @@ The worker reads the account's `/versions` from the SDK's cache and sends `GET /
 `via` lists at most three distinct servers from the room's current links in joined spaces, in space id order and then link order, skipping any that is not a valid server name.
 It takes a gate permit like every acquisition request, with a 10-second timeout and the 64 KiB body limit.
 A `200` must describe the requested room; its fields are validated exactly like a hierarchy entry's, and its `membership` is ignored because local membership is authoritative.
-`403` and `404 M_NOT_FOUND` replace the row with `forbidden` or `not_found` and no fields; any other failure keeps the last answer and backs off as ADR 0126 does.
+`403` and `404 M_NOT_FOUND` replace the row with `forbidden` or `not_found` and no fields; any other failure keeps the last answer and `support` and backs off as ADR 0126 does, so a room that was `unsupported` keeps its crawl fallback through the backoff.
 
 **Fallback.**
 While `support` is `unsupported`, the read schedules a crawl of the first joined space, by room id, that links the room and whose crawl is due, exactly as a `space/hierarchy` read with `enrich=true` would.

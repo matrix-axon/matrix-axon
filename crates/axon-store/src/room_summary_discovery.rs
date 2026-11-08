@@ -348,13 +348,11 @@ impl Store {
                 let failures = prior_failures.saturating_add(1);
                 let delay = backoff_ms(failures, limits.min_backoff_ms, limits.max_backoff_ms)
                     .max(retry_after_ms.unwrap_or(0));
-                // A failure keeps what was known about the endpoint.
+                // A failure keeps what was known about the endpoint: an
+                // `unsupported` room keeps its crawl fallback through the
+                // backoff, and its next attempt checks the endpoint again.
                 (
-                    if prior_support == "unsupported" {
-                        "unknown"
-                    } else {
-                        prior_support.as_str()
-                    },
+                    prior_support.as_str(),
                     Some(*category),
                     failures,
                     Some(now.saturating_add(delay)),

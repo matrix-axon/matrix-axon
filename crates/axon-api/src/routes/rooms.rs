@@ -417,8 +417,9 @@ pub struct SpaceHierarchyQuery {
 ///
 /// Each unjoined child also carries `discovered`: what the account's
 /// homeserver last said about it, from a crawl of the space's hierarchy or a
-/// `GET …/discovery` read of the child, or `null` (ADR 0128). Show the child's synced fields when it is joined, its
-/// `discovered` fields when it is not and `discovered.status` is
+/// `GET …/discovery` read of the child, or `null` (ADR 0128). Show the
+/// child's synced fields when it is joined, its `discovered` fields when it
+/// is not and `discovered.status` is
 /// `available`, and otherwise the synced fields, then the room id. With
 /// `enrich=true`, a read of a joined space that links at least one unjoined
 /// child schedules a crawl in the background when none is fresh (a crawl
