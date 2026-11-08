@@ -1581,6 +1581,10 @@ pub struct DeviceListEntryDto {
     pub device_id: String,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Locally or cross-signing trusted. Absent on an older Axon that predates
+    /// the field; the picker then shows the device as not verified.
+    #[serde(default)]
+    pub is_verified: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -3372,6 +3376,20 @@ mod tests {
             response.data.devices[0].display_name.as_deref(),
             Some("axon")
         );
+        assert!(response.data.devices[0].is_verified);
+    }
+
+    #[test]
+    fn device_list_entry_defaults_is_verified_when_absent() {
+        let body = r#"{
+            "data": {
+                "user_id": "@alice:example.com",
+                "devices": [{ "device_id": "OLD" }]
+            }
+        }"#;
+        let response: ApiResponse<DeviceListDto> = serde_json::from_str(body).unwrap();
+        assert!(!response.data.devices[0].is_verified);
+        assert_eq!(response.data.devices[0].display_name, None);
     }
 
     #[test]

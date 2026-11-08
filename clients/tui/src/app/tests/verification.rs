@@ -2,7 +2,10 @@
 //! binding a server frame to a pending outgoing request.
 
 use super::support::*;
+use crate::api::{DeviceListDto, DeviceListEntryDto};
 use crate::app::*;
+use crate::ui::device_picker_lines;
+use unicode_width::UnicodeWidthChar;
 
 fn outgoing_flow() -> VerificationFlow {
     VerificationFlow {
@@ -193,4 +196,377 @@ fn verification_apply_flow_maps_server_stage() {
     assert_eq!(flow.stage, VerificationStage::Compare);
     assert!(flow.matches(Uuid::nil(), "txn1"));
     assert!(!flow.matches(Uuid::nil(), "other"));
+}
+
+const PICKER_ACCOUNT: u128 = 7;
+
+fn signed_in_app(device_id: Option<&str>) -> App {
+    let mut app = app_with_rooms(Vec::new());
+    let mut account = account_with_id(
+        Uuid::from_u128(PICKER_ACCOUNT),
+        "@me:example.com",
+        AccountState::Active,
+    );
+    account.device_id = device_id.map(str::to_owned);
+    app.set_accounts(vec![account]);
+    app
+}
+
+fn device(id: &str, name: Option<&str>, verified: bool) -> DeviceListEntryDto {
+    DeviceListEntryDto {
+        device_id: id.to_owned(),
+        display_name: name.map(str::to_owned),
+        is_verified: verified,
+    }
+}
+
+fn device_list(devices: Vec<DeviceListEntryDto>) -> DeviceListDto {
+    DeviceListDto {
+        user_id: "@me:example.com".to_owned(),
+        devices,
+    }
+}
+
+fn sample_devices() -> Vec<DeviceListEntryDto> {
+    vec![
+        device("SELF", Some("this session"), true),
+        device("BBB", Some("phone"), false),
+        device("AAA", Some("Laptop"), true),
+        device("DDD", None, false),
+        device("CCC", Some("  "), false),
+        device("EEE", Some("Phone"), false),
+    ]
+}
+
+async fn apply_devices(app: &mut App, generation: u64, devices: Vec<DeviceListEntryDto>) {
+    app.handle_lifecycle_outcome(LifecycleOutcome::DevicesListed {
+        account_id: Uuid::from_u128(PICKER_ACCOUNT),
+        generation,
+        result: Ok(device_list(devices)),
+    })
+    .await;
+}
+
+fn picker_generation(app: &App) -> u64 {
+    app.device_picker
+        .as_ref()
+        .expect("device picker open")
+        .generation
+}
+
+fn row_ids(app: &App) -> Vec<&str> {
+    app.device_picker
+        .as_ref()
+        .expect("device picker open")
+        .rows
+        .iter()
+        .map(|row| row.device_id.as_str())
+        .collect()
+}
+
+fn line_columns(text: &str) -> usize {
+    text.chars().map(|ch| ch.width_cjk().unwrap_or(1)).sum()
+}
+
+fn line_text(line: &ratatui::text::Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[test]
+fn device_picker_rows_drop_own_device_and_sort() {
+    let rows = device_picker_rows(&sample_devices(), Some("SELF"));
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.device_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["AAA", "BBB", "EEE", "CCC", "DDD"]
+    );
+    assert_eq!(rows[0].label, "Laptop");
+    assert!(rows[0].is_verified);
+    assert_eq!(rows[1].label, "phone");
+    assert_eq!(rows[2].label, "Phone");
+    assert_eq!(rows[3].label, "Unnamed device");
+    assert_eq!(rows[4].label, "Unnamed device");
+    assert!(device_picker_rows(&sample_devices(), Some("")).len() > rows.len());
+}
+
+#[tokio::test]
+async fn bare_verify_opens_the_device_picker() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+
+    assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+    assert!(app.prompt_owns_entry_line());
+    assert_eq!(app.status.text(false), DEVICE_PICKER_LOADING);
+    let picker = app.device_picker.as_ref().expect("picker");
+    assert_eq!(picker.account_id, Uuid::from_u128(PICKER_ACCOUNT));
+    assert_eq!(picker.generation, 1);
+    assert_eq!(picker.phase, DevicePickerPhase::Loading);
+    assert!(picker.rows.is_empty());
+}
+
+#[tokio::test]
+async fn bare_verify_refuses_without_one_account() {
+    let mut app = app_with_rooms(Vec::new());
+    app.handle_command(Command::Verify(None)).await;
+    assert_eq!(app.mode, Mode::Compose);
+    assert!(app.device_picker.is_none());
+    assert!(app.status.text(false).contains("no active account"));
+
+    let mut app = app_with_rooms(Vec::new());
+    app.set_accounts(vec![
+        account_with_id(Uuid::from_u128(1), "@a:example.com", AccountState::Active),
+        account_with_id(Uuid::from_u128(2), "@b:example.com", AccountState::Active),
+    ]);
+    app.handle_command(Command::Verify(None)).await;
+    assert_eq!(app.mode, Mode::Compose);
+    assert!(app.device_picker.is_none());
+    assert!(app.status.text(false).contains("select an account"));
+}
+
+#[tokio::test]
+async fn explicit_verify_targets_skip_the_picker() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(Some("ABCDEF".to_owned())))
+        .await;
+    assert_eq!(app.mode, Mode::Verification);
+    assert!(app.device_picker.is_none());
+    let flow = app.verification.as_ref().expect("flow");
+    assert_eq!(flow.device_id, "ABCDEF");
+    assert_eq!(flow.direction, VerificationDirection::Outgoing);
+    assert_eq!(flow.stage, VerificationStage::Starting);
+
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(Some("@bob:example.org".to_owned())))
+        .await;
+    assert_eq!(app.mode, Mode::Verification);
+    assert!(app.device_picker.is_none());
+    let flow = app.verification.as_ref().expect("flow");
+    assert_eq!(flow.user_id, "@bob:example.org");
+    assert!(flow.device_id.is_empty());
+}
+
+#[tokio::test]
+async fn device_list_fills_the_open_picker_and_ignores_stale_results() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+
+    app.handle_lifecycle_outcome(LifecycleOutcome::DevicesListed {
+        account_id: Uuid::from_u128(PICKER_ACCOUNT),
+        generation: generation.wrapping_sub(1),
+        result: Ok(device_list(sample_devices())),
+    })
+    .await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+
+    app.handle_lifecycle_outcome(LifecycleOutcome::DevicesListed {
+        account_id: Uuid::nil(),
+        generation,
+        result: Ok(device_list(sample_devices())),
+    })
+    .await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+
+    apply_devices(&mut app, generation, sample_devices()).await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Ready
+    );
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+    assert_eq!(app.status.text(false), "Select a device to verify");
+
+    app.mode = Mode::Compose;
+    apply_devices(
+        &mut app,
+        generation,
+        vec![device("ZZZ", Some("late"), false)],
+    )
+    .await;
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+    app.mode = Mode::Popup(PopupKind::DevicePicker);
+
+    app.close_device_picker();
+    assert_eq!(app.mode, Mode::Compose);
+    assert!(app.device_picker.is_none());
+    apply_devices(&mut app, generation, sample_devices()).await;
+    assert!(app.device_picker.is_none());
+    assert_eq!(app.mode, Mode::Compose);
+
+    app.handle_command(Command::Verify(None)).await;
+    assert_eq!(picker_generation(&app), generation + 1);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+}
+
+#[tokio::test]
+async fn failed_device_list_stays_open_until_retry() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    app.handle_lifecycle_outcome(LifecycleOutcome::DevicesListed {
+        account_id: Uuid::from_u128(PICKER_ACCOUNT),
+        generation,
+        result: Err("HTTP 500: devices unavailable".to_owned()),
+    })
+    .await;
+    assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Failed("HTTP 500: devices unavailable".to_owned())
+    );
+    assert_eq!(app.status.text(false), "HTTP 500: devices unavailable");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+    assert_ne!(picker_generation(&app), generation);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+    let current = picker_generation(&app);
+    apply_devices(&mut app, current, sample_devices()).await;
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+}
+
+#[tokio::test]
+async fn enter_verifies_the_selected_device_and_p_returns_to_paste() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+        .await;
+    assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+
+    let generation = picker_generation(&app);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()))
+        .await;
+    assert_eq!(app.device_picker.as_ref().unwrap().selection, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+        .await;
+    assert_eq!(app.mode, Mode::Verification);
+    assert!(app.device_picker.is_none());
+    assert_eq!(app.verification.as_ref().unwrap().device_id, "BBB");
+
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()))
+        .await;
+    assert_eq!(app.mode, Mode::Compose);
+    assert!(app.device_picker.is_none());
+    assert_eq!(app.input.buffer, "/verify ");
+    assert_eq!(app.input.cursor, "/verify ".len());
+    assert!(!app.prompt_owns_entry_line());
+}
+
+#[tokio::test]
+async fn esc_closes_the_picker_and_an_incoming_request_replaces_it() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
+        .await;
+    assert_eq!(app.mode, Mode::Compose);
+    assert!(app.status.text(false).is_empty());
+    apply_devices(&mut app, generation, sample_devices()).await;
+    assert_ne!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    app.open_incoming_verification(
+        Uuid::from_u128(PICKER_ACCOUNT),
+        "flow-in".to_owned(),
+        "@me:example.com".to_owned(),
+        "OTHER".to_owned(),
+    );
+    assert_eq!(app.mode, Mode::Verification);
+    assert!(app.device_picker.is_none());
+    apply_devices(&mut app, generation, sample_devices()).await;
+    assert_eq!(app.mode, Mode::Verification);
+    assert_eq!(
+        app.verification.as_ref().unwrap().flow_id.as_deref(),
+        Some("flow-in")
+    );
+    assert!(app.device_picker.is_none());
+}
+
+#[test]
+fn device_picker_lines_mark_the_selection_and_fit_the_width() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.device_picker = Some(DevicePicker {
+        account_id: Uuid::from_u128(PICKER_ACCOUNT),
+        generation: 1,
+        phase: DevicePickerPhase::Ready,
+        selection: 1,
+        rows: vec![
+            DevicePickerRow {
+                device_id: "ABCDEFGHIJKLMNOP".to_owned(),
+                label: "電話電話電話".to_owned(),
+                is_verified: true,
+            },
+            DevicePickerRow {
+                device_id: "SHORT".to_owned(),
+                label: "phone".to_owned(),
+                is_verified: false,
+            },
+        ],
+    });
+    // 16 columns cannot hold a device id plus "verified" / "not verified".
+    // The row must still stay inside the popup, with the selection marker.
+    let narrow = 16;
+    let narrow_lines = device_picker_lines(&app, narrow);
+    assert!(narrow_lines.len() >= 2);
+    let narrow_texts: Vec<String> = narrow_lines.iter().map(line_text).collect();
+    for text in &narrow_texts {
+        assert!(
+            line_columns(text) <= narrow,
+            "{text} is {} columns",
+            line_columns(text)
+        );
+    }
+    assert!(narrow_texts[1].starts_with('>'));
+    assert!(narrow_texts[0].starts_with(' '));
+
+    // Wide enough for a truncated CJK label, the device id, and the trust word.
+    let wide = 40;
+    let wide_lines = device_picker_lines(&app, wide);
+    let wide_texts: Vec<String> = wide_lines.iter().map(line_text).collect();
+    for text in &wide_texts {
+        assert!(
+            line_columns(text) <= wide,
+            "{text} is {} columns",
+            line_columns(text)
+        );
+    }
+    assert!(wide_texts[0].contains("verified"));
+    assert!(wide_texts[0].contains("..."));
+    assert!(!wide_texts[0].contains("電話電話電話"));
+    assert!(wide_texts[1].contains("not verified"));
+    assert!(wide_texts[1].starts_with('>'));
+
+    app.device_picker.as_mut().unwrap().phase = DevicePickerPhase::Ready;
+    app.device_picker.as_mut().unwrap().rows.clear();
+    let empty = device_picker_lines(&app, narrow);
+    let empty_text = empty.iter().map(line_text).collect::<Vec<_>>().join(" ");
+    assert!(empty_text.contains("No other devices"));
+    for line in &empty {
+        assert!(line_columns(&line_text(line)) <= narrow);
+    }
 }

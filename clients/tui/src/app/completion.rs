@@ -429,8 +429,8 @@ impl App {
         let Some(target) = command_target_prefix(&self.input.buffer, "/verify") else {
             return false;
         };
-        // Only complete users (cross-user verification, ADR 0040); a device id for
-        // self-verification is pasted, not completed.
+        // Only complete users (cross-user verification, ADR 0040). Device ids are
+        // chosen in the bare `/verify` picker, or pasted as `/verify <device_id>`.
         let query = self
             .input
             .verify_command_completion

@@ -9,8 +9,8 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::api::LiveFrame;
 use crate::api::{
-    AccountDto, AccountState, AxonClient, EmojiDto, EventDto, FlowDto, FlowStage, InviteDto,
-    RoomDto, SendRelation, VerificationFrameDto, VerificationFrameKind,
+    AccountDto, AccountState, AxonClient, DeviceListEntryDto, EmojiDto, EventDto, FlowDto,
+    FlowStage, InviteDto, RoomDto, SendRelation, VerificationFrameDto, VerificationFrameKind,
 };
 use crate::command::Command;
 #[cfg(test)]
@@ -184,7 +184,7 @@ pub(crate) enum RecoveryOrigin {
 pub(crate) enum VerificationDirection {
     /// Peer-initiated: surfaced via a `verification.requested` frame.
     Incoming,
-    /// TUI-initiated via `/verify <device_id>`.
+    /// TUI-initiated via the device picker or `/verify <device_id>`.
     Outgoing,
 }
 
@@ -608,6 +608,76 @@ pub(crate) enum PopupKind {
     CommandResponse,
     MediaPreview,
     Invites,
+    /// Outgoing SAS target list (`GET …/devices`). Bare `/verify` opens it.
+    DevicePicker,
+}
+
+/// Shown when the device list has no device besides this session.
+pub(crate) const DEVICE_PICKER_EMPTY: &str =
+    "No other devices yet. If you just signed in on another client, wait a moment and retry.";
+
+pub(crate) const DEVICE_PICKER_LOADING: &str = "Loading devices…";
+
+/// One row in the SAS device picker, after this session's own device is removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DevicePickerRow {
+    pub(crate) device_id: String,
+    pub(crate) label: String,
+    pub(crate) is_verified: bool,
+}
+
+/// What the open device picker is waiting to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DevicePickerPhase {
+    Loading,
+    Ready,
+    Failed(String),
+}
+
+/// Target-selection state for bare `/verify`. One account, one generation.
+///
+/// `generation` comes from [`App`]'s monotonic counter. A list that arrives
+/// after Esc, a retry, or a newer open carries an older generation and is
+/// dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DevicePicker {
+    pub(crate) account_id: Uuid,
+    pub(crate) generation: u64,
+    pub(crate) phase: DevicePickerPhase,
+    pub(crate) rows: Vec<DevicePickerRow>,
+    pub(crate) selection: usize,
+}
+
+/// Drop this session's device, then verified-first, then label, then id.
+pub(crate) fn device_picker_rows(
+    devices: &[DeviceListEntryDto],
+    own_device_id: Option<&str>,
+) -> Vec<DevicePickerRow> {
+    let own = own_device_id.filter(|id| !id.is_empty());
+    let mut rows: Vec<DevicePickerRow> = devices
+        .iter()
+        .filter(|device| own.is_none_or(|id| device.device_id != id))
+        .map(|device| DevicePickerRow {
+            device_id: device.device_id.clone(),
+            label: device_picker_label(device.display_name.as_deref()),
+            is_verified: device.is_verified,
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        right
+            .is_verified
+            .cmp(&left.is_verified)
+            .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
+            .then_with(|| left.device_id.cmp(&right.device_id))
+    });
+    rows
+}
+
+fn device_picker_label(name: Option<&str>) -> String {
+    match name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.to_owned(),
+        None => "Unnamed device".to_owned(),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -925,6 +995,12 @@ pub(crate) struct App {
     /// The active SAS verification flow, when `Mode::Verification` is open. The
     /// modal reads and mutates this; `None` whenever the modal is closed.
     pub(crate) verification: Option<VerificationFlow>,
+    /// The open SAS device picker, when `Mode::Popup(PopupKind::DevicePicker)`
+    /// is showing. Cleared on Esc, paste, a started flow, or an incoming request.
+    pub(crate) device_picker: Option<DevicePicker>,
+    /// Monotonic id for device-list requests. Never reused, so a list from a
+    /// closed picker cannot fill the next one.
+    device_picker_generation: u64,
     /// Changes periodically for Sixel inline thumbnails, forcing ratatui's diff
     /// renderer to retransmit pixels that terminal graphics layers may drop.
     pub(crate) sixel_inline_generation: u64,
@@ -1292,6 +1368,8 @@ impl App {
             proto_cache: HashMap::new(),
             proto_cache_order: VecDeque::new(),
             verification: None,
+            device_picker: None,
+            device_picker_generation: 0,
             sixel_inline_generation: 0,
             sixel_preview_generation: 0,
             sixel_preview_refresh_after: Instant::now() + SIXEL_REFRESH_INTERVAL,
@@ -1601,6 +1679,7 @@ impl App {
                 | Mode::SearchForm
                 | Mode::SearchResults
                 | Mode::Verification
+                | Mode::Popup(PopupKind::DevicePicker)
         )
     }
 

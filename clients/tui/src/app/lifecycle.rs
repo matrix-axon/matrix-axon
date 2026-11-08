@@ -3,12 +3,14 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::api::{
-    AccountDto, AccountState, BackupAction, EnableBackupResponse, FlowDto, VerificationFrameDto,
+    AccountDto, AccountState, BackupAction, DeviceListDto, EnableBackupResponse, FlowDto,
+    VerificationFrameDto,
 };
 
 use super::{
-    AccountSelection, App, Mode, RecoveryOrigin, RoomKey, Status, VerificationDirection,
-    VerificationFlow, VerificationStage,
+    device_picker_rows, AccountSelection, App, DevicePicker, DevicePickerPhase, Mode, PopupKind,
+    RecoveryOrigin, RoomKey, Status, VerificationDirection, VerificationFlow, VerificationStage,
+    DEVICE_PICKER_EMPTY, DEVICE_PICKER_LOADING,
 };
 
 pub(super) enum LogoutResolution {
@@ -128,6 +130,13 @@ pub(crate) enum LifecycleOutcome {
     WhoamiDevice {
         provisional: String,
         enriched: String,
+    },
+    /// Result of `GET …/devices` for the SAS device picker. Applied only while
+    /// that picker is still open for the same account and generation.
+    DevicesListed {
+        account_id: Uuid,
+        generation: u64,
+        result: Result<DeviceListDto, String>,
     },
 }
 
@@ -440,13 +449,11 @@ impl App {
 
     /// Start an outgoing SAS flow against a pasted device id (self-verification,
     /// ADR 0028 §1) or a `@user:server` (cross-user verification, ADR 0040).
+    /// With no target, open the device picker instead of requiring a pasted id.
     /// Verification is deliberately *not* gated by `lifecycle_busy` (ADR 0028 §4).
     pub(crate) fn start_verification(&mut self, target: Option<String>) {
         let Some(target) = target.filter(|t| !t.trim().is_empty()) else {
-            self.status = Status::from(
-                "usage: /verify <device_id|@user:server> (incoming requests open automatically)"
-                    .to_owned(),
-            );
+            self.open_device_picker();
             return;
         };
         let target = target.trim().to_owned();
@@ -460,14 +467,15 @@ impl App {
                 return;
             }
         };
-        let Some(tx) = self.lifecycle_tx.clone() else {
-            return;
-        };
         let (user_id, device_id) = if is_user {
             (target.clone(), String::new())
         } else {
             (String::new(), target.clone())
         };
+        // Record the flow before the channel check. Unit tests build the app
+        // with no sender, and a missing sender must not dial the homeserver.
+        // The running TUI always has the channel (`main` installs it before
+        // the loop), so the request still goes out there.
         self.verification = Some(VerificationFlow {
             account_id,
             user_id,
@@ -480,6 +488,9 @@ impl App {
         });
         self.mode = Mode::Verification;
         self.status = Status::from(format!("starting verification of {target}…"));
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
         let client = self.client.clone();
         tokio::spawn(async move {
             let (user_arg, device_arg) = if is_user {
@@ -494,6 +505,179 @@ impl App {
                 .map_err(|err| err.to_string());
             let _ = tx.send(LifecycleOutcome::VerifyStarted { account_id, result });
         });
+    }
+
+    /// Open the SAS device picker for the account `/verify` would target.
+    /// The list is fetched off the event loop; the popup paints immediately.
+    pub(crate) fn open_device_picker(&mut self) {
+        let account_id = match self.resolve_verification_account() {
+            Ok(id) => id,
+            Err(message) => {
+                self.status = Status::from(message);
+                return;
+            }
+        };
+        self.device_picker_generation = self.device_picker_generation.wrapping_add(1);
+        let generation = self.device_picker_generation;
+        self.device_picker = Some(DevicePicker {
+            account_id,
+            generation,
+            phase: DevicePickerPhase::Loading,
+            rows: Vec::new(),
+            selection: 0,
+        });
+        self.popup_scroll = 0;
+        self.mode = Mode::Popup(PopupKind::DevicePicker);
+        self.status = Status::Info(DEVICE_PICKER_LOADING.to_owned());
+        self.spawn_device_list();
+    }
+
+    /// Ask for the list again. The previous request's generation no longer matches.
+    pub(crate) fn retry_device_picker(&mut self) {
+        if !matches!(self.mode, Mode::Popup(PopupKind::DevicePicker))
+            || self.device_picker.is_none()
+        {
+            return;
+        }
+        self.device_picker_generation = self.device_picker_generation.wrapping_add(1);
+        let generation = self.device_picker_generation;
+        if let Some(picker) = self.device_picker.as_mut() {
+            picker.generation = generation;
+            picker.phase = DevicePickerPhase::Loading;
+            picker.rows.clear();
+            picker.selection = 0;
+        }
+        self.popup_scroll = 0;
+        self.status = Status::Info(DEVICE_PICKER_LOADING.to_owned());
+        self.spawn_device_list();
+    }
+
+    fn spawn_device_list(&mut self) {
+        let Some(picker) = self.device_picker.as_ref() else {
+            return;
+        };
+        let account_id = picker.account_id;
+        let generation = picker.generation;
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client
+                .list_devices(account_id)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::DevicesListed {
+                account_id,
+                generation,
+                result,
+            });
+        });
+    }
+
+    fn apply_device_list(
+        &mut self,
+        account_id: Uuid,
+        generation: u64,
+        result: Result<DeviceListDto, String>,
+    ) {
+        let mode_ok = matches!(self.mode, Mode::Popup(PopupKind::DevicePicker));
+        let picker_ok = self.device_picker.as_ref().is_some_and(|picker| {
+            picker.account_id == account_id && picker.generation == generation
+        });
+        if !mode_ok || !picker_ok {
+            return;
+        }
+        let own = self
+            .accounts
+            .client_visible
+            .iter()
+            .find(|account| account.account_id == account_id)
+            .and_then(|account| account.device_id.as_deref())
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        match result {
+            Ok(list) => {
+                let rows = device_picker_rows(&list.devices, own.as_deref());
+                let empty = rows.is_empty();
+                if let Some(picker) = self.device_picker.as_mut() {
+                    picker.rows = rows;
+                    picker.selection = 0;
+                    picker.phase = DevicePickerPhase::Ready;
+                }
+                self.popup_scroll = 0;
+                self.status = Status::Info(if empty {
+                    DEVICE_PICKER_EMPTY.to_owned()
+                } else {
+                    "Select a device to verify".to_owned()
+                });
+            }
+            Err(error) => {
+                if let Some(picker) = self.device_picker.as_mut() {
+                    picker.rows.clear();
+                    picker.selection = 0;
+                    picker.phase = DevicePickerPhase::Failed(error.clone());
+                }
+                self.popup_scroll = 0;
+                self.status = Status::Info(error);
+            }
+        }
+    }
+
+    pub(crate) fn move_device_picker_selection(&mut self, delta: isize) {
+        let Some(picker) = self.device_picker.as_mut() else {
+            return;
+        };
+        let len = picker.rows.len();
+        if len == 0 {
+            picker.selection = 0;
+            return;
+        }
+        let current = picker.selection.min(len.saturating_sub(1));
+        let next = match delta.cmp(&0) {
+            std::cmp::Ordering::Less => current.saturating_sub(delta.unsigned_abs()),
+            std::cmp::Ordering::Equal => current,
+            std::cmp::Ordering::Greater => current.saturating_add(delta as usize).min(len - 1),
+        };
+        picker.selection = next;
+    }
+
+    /// Enter on a row. Loading, empty, and failed lists do not start a flow.
+    pub(crate) fn verify_selected_device(&mut self) {
+        let Some(device_id) = self.device_picker.as_ref().and_then(|picker| {
+            if !matches!(picker.phase, DevicePickerPhase::Ready) {
+                return None;
+            }
+            picker
+                .rows
+                .get(picker.selection)
+                .map(|row| row.device_id.clone())
+        }) else {
+            return;
+        };
+        self.start_verification(Some(device_id));
+        if matches!(self.mode, Mode::Verification) {
+            self.device_picker = None;
+            self.popup_scroll = 0;
+        }
+    }
+
+    /// Leave the picker with `/verify ` in the composer so a device id can be pasted.
+    pub(crate) fn paste_device_id_from_picker(&mut self) {
+        self.device_picker = None;
+        self.popup_scroll = 0;
+        self.mode = Mode::Compose;
+        self.reset_completion_state();
+        self.input.buffer = "/verify ".to_owned();
+        self.move_cursor_to_end();
+        self.status = Status::Info("paste a device id and press Enter".to_owned());
+    }
+
+    pub(crate) fn close_device_picker(&mut self) {
+        self.device_picker = None;
+        self.popup_scroll = 0;
+        self.mode = Mode::Compose;
+        self.status = Status::Info(String::new());
     }
 
     /// Auto-open the modal for a peer-initiated request (ADR 0028 §2). Ignores a
@@ -512,6 +696,10 @@ impl App {
         {
             return;
         }
+        // An incoming request takes the modal. The picker is not a flow, so it
+        // loses, and a list still in flight must not reopen it.
+        self.device_picker = None;
+        self.popup_scroll = 0;
         self.verification = Some(VerificationFlow {
             account_id,
             user_id,
@@ -824,6 +1012,15 @@ impl App {
                     self.pending_command_response = Some(enriched);
                 }
             }
+            return;
+        }
+        if let LifecycleOutcome::DevicesListed {
+            account_id,
+            generation,
+            result,
+        } = outcome
+        {
+            self.apply_device_list(account_id, generation, result);
             return;
         }
         if let LifecycleOutcome::MediaSent { key, result } = outcome {
@@ -1188,6 +1385,7 @@ impl App {
             LifecycleOutcome::MessageSent { .. } => unreachable!(),
             LifecycleOutcome::MediaSent { .. } => unreachable!(),
             LifecycleOutcome::WhoamiDevice { .. } => unreachable!(),
+            LifecycleOutcome::DevicesListed { .. } => unreachable!(),
         }
         self.queue_completed_command_response();
     }

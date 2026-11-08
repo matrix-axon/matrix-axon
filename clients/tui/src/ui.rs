@@ -12,9 +12,10 @@ use unicode_width::UnicodeWidthChar;
 use crate::app::frame::{PaneAreas, PopupView};
 use crate::app::{
     account_localpart, date_separator_line, format_date, format_time, overlay_selection_on_page,
-    selected_line_style, AccountSelection, App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey,
-    ProtocolState, RoomFilter, RoomKey, SearchKind, Status, UnreadThreadEntry,
-    VerificationDirection, VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
+    selected_line_style, AccountSelection, App, DevicePickerPhase, ImageState, MediaKey, Mode,
+    PopupKind, ProtocolKey, ProtocolState, RoomFilter, RoomKey, SearchKind, Status,
+    UnreadThreadEntry, VerificationDirection, VerificationFlow, VerificationStage,
+    DEVICE_PICKER_EMPTY, DEVICE_PICKER_LOADING, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
@@ -617,6 +618,24 @@ fn prepare_popup(app: &mut App, screen: Rect) {
             "Shortcuts  (Esc to close)".to_owned(),
             popup_shortcuts_lines(&app.shortcuts),
         ),
+        PopupKind::DevicePicker => {
+            let width = usize::from(area.width.saturating_sub(2));
+            let lines = device_picker_lines(app, width);
+            let selected = app
+                .device_picker
+                .as_ref()
+                .map(|picker| picker.selection)
+                .unwrap_or(0);
+            if selected < app.popup_scroll {
+                app.popup_scroll = selected;
+            } else if selected >= app.popup_scroll.saturating_add(page_size) {
+                app.popup_scroll = selected.saturating_add(1).saturating_sub(page_size);
+            }
+            (
+                "Devices  (Enter verify, r retry, p paste, Esc close)".to_owned(),
+                lines,
+            )
+        }
         PopupKind::UnreadThreads => {
             let entries = app.unread_thread_entries();
             app.sync_unread_thread_selection(&entries);
@@ -2673,6 +2692,160 @@ fn popup_help_lines(app: &App) -> Vec<Line<'static>> {
 }
 
 const UNREAD_THREAD_PREVIEW_LINES: usize = 3;
+
+/// Body of the SAS device picker. Every line fits `width` columns.
+pub(crate) fn device_picker_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let Some(picker) = app.device_picker.as_ref() else {
+        return plain_popup_lines(DEVICE_PICKER_LOADING, width, Style::default());
+    };
+    match &picker.phase {
+        DevicePickerPhase::Loading => {
+            plain_popup_lines(DEVICE_PICKER_LOADING, width, Style::default())
+        }
+        DevicePickerPhase::Failed(error) => {
+            let mut lines = plain_popup_lines(error, width, Style::default().fg(app.colors.status));
+            lines.push(Line::from(""));
+            lines.extend(plain_popup_lines(
+                "Press r to retry.",
+                width,
+                Style::default().fg(app.colors.input_hint),
+            ));
+            lines
+        }
+        DevicePickerPhase::Ready if picker.rows.is_empty() => {
+            plain_popup_lines(DEVICE_PICKER_EMPTY, width, Style::default())
+        }
+        DevicePickerPhase::Ready => picker
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let selected = index == picker.selection;
+                let text =
+                    fit_device_row(selected, &row.label, &row.device_id, row.is_verified, width);
+                let style = if selected {
+                    Style::default()
+                        .fg(app.colors.selected_room)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(text, style))
+            })
+            .collect(),
+    }
+}
+
+fn plain_popup_lines(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    wrap_display(text, width)
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, style)))
+        .collect()
+}
+
+fn fit_device_row(
+    selected: bool,
+    label: &str,
+    device_id: &str,
+    verified: bool,
+    width: usize,
+) -> String {
+    let width = width.max(1);
+    let marker = if selected { '>' } else { ' ' };
+    let trust = if verified { "verified" } else { "not verified" };
+    let full = format!("{marker} {label}  {device_id}  {trust}");
+    if display_width(&full) <= width {
+        return full;
+    }
+    let tail = format!("  {device_id}  {trust}");
+    let head = format!("{marker} ");
+    let head_width = display_width(&head);
+    let tail_width = display_width(&tail);
+    if head_width + tail_width < width {
+        let label = truncate_chars(label, width - head_width - tail_width);
+        let fitted = format!("{head}{label}{tail}");
+        if display_width(&fitted) <= width {
+            return fitted;
+        }
+    }
+    let without_label = format!("{marker} {device_id}  {trust}");
+    if display_width(&without_label) <= width {
+        return without_label;
+    }
+    take_display_width(&without_label, width)
+}
+
+fn wrap_display(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in text.split_whitespace() {
+        let word_width = display_width(word);
+        if current.is_empty() {
+            push_wrapped_word(
+                &mut lines,
+                &mut current,
+                &mut current_width,
+                word,
+                word_width,
+                width,
+            );
+        } else if current_width + 1 + word_width <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_width += 1 + word_width;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+            push_wrapped_word(
+                &mut lines,
+                &mut current,
+                &mut current_width,
+                word,
+                word_width,
+                width,
+            );
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn push_wrapped_word(
+    lines: &mut Vec<String>,
+    current: &mut String,
+    current_width: &mut usize,
+    word: &str,
+    word_width: usize,
+    width: usize,
+) {
+    if word_width <= width {
+        *current = word.to_owned();
+        *current_width = word_width;
+        return;
+    }
+    let mut rest = word;
+    while !rest.is_empty() {
+        let mut chunk = take_display_width(rest, width);
+        if chunk.is_empty() {
+            let ch = rest.chars().next().expect("rest is non-empty");
+            chunk = ch.to_string();
+        }
+        rest = &rest[chunk.len()..];
+        if rest.is_empty() {
+            *current = chunk;
+            *current_width = display_width(current);
+        } else {
+            lines.push(chunk);
+        }
+    }
+}
 
 fn popup_unread_thread_lines(
     app: &App,

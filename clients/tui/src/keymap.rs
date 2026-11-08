@@ -10,6 +10,15 @@ use crate::command;
 use crate::command::HELP_COMMANDS;
 use crate::search::{SearchFormField, SEARCH_HELP_TEXT};
 
+/// `r`/`p` in the device picker, including Shift, and not when Ctrl or Alt is held.
+fn device_picker_letter(key: KeyEvent, letter: char) -> bool {
+    let KeyCode::Char(ch) = key.code else {
+        return false;
+    };
+    ch.eq_ignore_ascii_case(&letter)
+        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+}
+
 /// A character to insert into the member filter.
 ///
 /// Empty and Shift are ordinary typing. Alt, and Ctrl-Alt, are how terminals
@@ -207,6 +216,10 @@ impl App {
             return;
         }
         if self.shortcuts.clear_input.matches(key) {
+            if kind == PopupKind::DevicePicker {
+                self.close_device_picker();
+                return;
+            }
             let was_search_help = kind == PopupKind::CommandResponse
                 && self.pending_command_response.as_deref() == Some(SEARCH_HELP_TEXT);
             if kind == PopupKind::RoomInfo {
@@ -237,6 +250,8 @@ impl App {
             self.handle_unread_threads_popup_key(key).await;
         } else if kind == PopupKind::Invites {
             self.handle_invites_popup_key(key);
+        } else if kind == PopupKind::DevicePicker {
+            self.handle_device_picker_popup_key(key);
         } else if key.code == KeyCode::Up {
             self.popup_scroll = self.popup_scroll.saturating_sub(1);
         } else if key.code == KeyCode::Down {
@@ -296,6 +311,24 @@ impl App {
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
         ) || self.shortcuts.message_page_up.matches(key)
             || self.shortcuts.message_page_down.matches(key)
+    }
+
+    fn handle_device_picker_popup_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Up {
+            self.move_device_picker_selection(-1);
+        } else if key.code == KeyCode::Down {
+            self.move_device_picker_selection(1);
+        } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
+            self.move_device_picker_selection(-8);
+        } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
+            self.move_device_picker_selection(8);
+        } else if self.shortcuts.submit.matches(key) {
+            self.verify_selected_device();
+        } else if device_picker_letter(key, 'r') {
+            self.retry_device_picker();
+        } else if device_picker_letter(key, 'p') {
+            self.paste_device_id_from_picker();
+        }
     }
 
     async fn handle_unread_threads_popup_key(&mut self, key: KeyEvent) {

@@ -383,10 +383,10 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     },
     // ── Verification ─────────────────────────────────────────────────────────
     HelpCommand {
-        label: "/verify <device_id|@user:server>",
+        label: "/verify [device_id|@user:server]",
         insert_text: "/verify ",
         description:
-            "start emoji SAS verification of a device or another user (incoming requests open automatically)",
+            "verify another of your devices, or another user. With no argument, pick a device from the list; incoming requests open automatically",
     },
     HelpCommand {
         label: "/bundle <event_id>",
