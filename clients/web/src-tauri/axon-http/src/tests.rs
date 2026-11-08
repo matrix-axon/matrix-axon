@@ -1609,6 +1609,32 @@ fn encoding_handler(encode: fn(&str) -> Option<&'static str>) -> Handler {
     })
 }
 
+/// The codings an `Accept-Encoding` value offers, without their q-values,
+/// so a test does not depend on the order or spacing reqwest writes them in.
+fn codings(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|coding| {
+            coding
+                .split(';')
+                .next()
+                .unwrap()
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .filter(|coding| !coding.is_empty())
+        .collect()
+}
+
+/// What the transport offered: both codings it decodes, and not `zstd`,
+/// which it does not (see `Cargo.toml`).
+fn assert_offers_gzip_and_br(head: &Head) {
+    let offered = codings(header(head, "x-seen-accept-encoding").unwrap_or_default());
+    assert!(offered.iter().any(|c| c == "gzip"), "{offered:?}");
+    assert!(offered.iter().any(|c| c == "br"), "{offered:?}");
+    assert!(!offered.iter().any(|c| c == "zstd"), "{offered:?}");
+}
+
 fn header<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
     head.headers
         .iter()
@@ -1621,14 +1647,14 @@ async fn responses_are_asked_for_compressed_and_decoded_from_brotli() {
     // As the axon server answers: brotli whenever it is offered.
     let server = Server::start(
         true,
-        encoding_handler(|seen| seen.contains("br").then_some("br")),
+        encoding_handler(|seen| codings(seen).iter().any(|c| c == "br").then_some("br")),
     )
     .await;
     let transport = transport();
     let (head, body) = fetch(&transport, 0, get(&server.url("/v1/rooms"))).await;
     // The page cannot set `Accept-Encoding` (it is forbidden and dropped), so
     // this is the transport's own offer.
-    assert_eq!(header(&head, "x-seen-accept-encoding"), Some("gzip,br"));
+    assert_offers_gzip_and_br(&head);
     assert_eq!(body, compressible_body());
     // The page is handed decoded bytes, so it must not be told they are
     // encoded, or be given the encoded length.
@@ -1682,5 +1708,119 @@ async fn a_page_supplied_accept_encoding_is_replaced_by_the_transports() {
     outgoing.headers =
         crate::outgoing_headers(vec![("Accept-Encoding".into(), "zstd".into())], None).unwrap();
     let (head, _) = fetch(&transport, 0, outgoing).await;
-    assert_eq!(header(&head, "x-seen-accept-encoding"), Some("gzip,br"));
+    assert_offers_gzip_and_br(&head);
+}
+
+/// Answers every request with `body` as is, labelled `content-encoding`.
+fn encoded_handler(encoding: &'static str, body: Vec<u8>) -> Handler {
+    let body = Bytes::from(body);
+    handler(move |_| {
+        let body = body.clone();
+        async move {
+            let length = body.len();
+            let mut response = reply(200, TestBody::Full(Some(body)));
+            let headers = response.headers_mut();
+            headers.insert("content-encoding", encoding.parse().unwrap());
+            headers.insert("content-length", length.into());
+            response
+        }
+    })
+}
+
+/// Read a body until it fails.
+async fn body_error(transport: &Transport, key: &Key) -> crate::error::TransportError {
+    loop {
+        match transport.read_body(key).await {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the body ended without an error"),
+            Err(err) => return err,
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_highly_compressed_body_is_decoded_a_chunk_per_read() {
+    // A decompression bomb: 64 MiB of zeros in a few KiB of brotli.
+    // The transport decodes only as the page reads, a bounded chunk at a
+    // time, so it never holds the expanded body. Capping what the page
+    // accumulates is the page's job, by kind of body, as it is in a browser.
+    let plain = vec![0u8; 64 << 20];
+    let bomb = {
+        use std::io::Write;
+        let mut writer = brotli::CompressorWriter::new(Vec::new(), 1 << 16, 1, 22);
+        writer.write_all(&plain).unwrap();
+        writer.into_inner()
+    };
+    drop(plain);
+    assert!(bomb.len() < 64 << 10, "{} bytes", bomb.len());
+    let server = Server::start(true, encoded_handler("br", bomb)).await;
+    let transport = transport();
+    let head = transport.send(key(0), get(&server.url("/"))).await.unwrap();
+    assert!(head.body);
+    for _ in 0..64 {
+        let chunk = transport.read_body(&key(0)).await.unwrap().unwrap();
+        assert!(chunk.len() <= 64 << 10, "{} bytes in one read", chunk.len());
+    }
+    transport.cancel(key(0));
+    assert_eq!(live(&transport), 0);
+}
+
+#[tokio::test]
+async fn a_body_that_fails_to_decode_is_named() {
+    let gzip = gzip_encode(&compressible_body());
+    let mut corrupt_gzip = gzip.clone();
+    let end = corrupt_gzip.len() - 8;
+    corrupt_gzip[20..end].iter_mut().for_each(|b| *b ^= 0x5a);
+    let truncated_gzip = gzip[..gzip.len() / 2].to_vec();
+    let mut corrupt_br = brotli_encode(&compressible_body());
+    corrupt_br[10..].iter_mut().for_each(|b| *b ^= 0x5a);
+    for (name, encoding, body) in [
+        ("corrupt gzip", "gzip", corrupt_gzip),
+        ("truncated gzip", "gzip", truncated_gzip),
+        ("corrupt brotli", "br", corrupt_br),
+    ] {
+        // The server's framing is intact: every byte it meant to send arrives.
+        let server = Server::start(true, encoded_handler(encoding, body)).await;
+        let transport = transport();
+        let head = transport.send(key(0), get(&server.url("/"))).await.unwrap();
+        assert!(head.body, "{name}");
+        let err = body_error(&transport, &key(0)).await;
+        assert_eq!(err.kind, Kind::Body, "{name}");
+        assert_eq!(
+            err.detail.as_deref(),
+            Some(crate::error::DECODE_DETAIL),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_connection_lost_mid_body_is_not_a_decode_failure() {
+    // The same truncated gzip stream, but cut short by the connection closing
+    // before the promised length: a network failure, named as one.
+    let gzip = gzip_encode(&compressible_body());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = [0u8; 4096];
+        let _ = socket.read(&mut request).await;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\n\r\n",
+            gzip.len()
+        );
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.write_all(&gzip[..gzip.len() / 2]).await;
+    });
+    let transport = transport();
+    let head = transport
+        .send(key(0), get(&format!("http://127.0.0.1:{port}/")))
+        .await
+        .unwrap();
+    assert!(head.body);
+    let err = body_error(&transport, &key(0)).await;
+    assert_eq!(err.kind, Kind::Body);
+    assert_eq!(err.detail.as_deref(), Some("UnexpectedEof"));
 }

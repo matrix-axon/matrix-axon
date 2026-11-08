@@ -312,9 +312,28 @@ pub(crate) fn is_reset_failure(err: &reqwest::Error) -> bool {
 pub(crate) fn classify_body(err: &reqwest::Error) -> TransportError {
     let causes = causes(err);
     match find_io(&causes) {
+        Some(_) if is_decode_failure(&causes) => TransportError::with(Kind::Body, DECODE_DETAIL),
         Some(io) => TransportError::with(Kind::Body, io_kind_name(io.kind())),
         None => TransportError::new(Kind::Body),
     }
+}
+
+/// `detail` for a body whose `Content-Encoding` stream was corrupt or ended
+/// early: the server's bytes arrived, but they did not decode. Without it,
+/// the decoder's `io::Error` would read as a network failure (`Other`, or
+/// `UnexpectedEof` for a truncated gzip stream).
+pub(crate) const DECODE_DETAIL: &str = "Decode";
+
+/// The decoder failed, not the connection under it.
+///
+/// reqwest maps every body error to its `Decode` kind, so `is_decode` alone
+/// says nothing. What differs is the chain. The decoder reports its own
+/// failure as an `io::Error` directly under reqwest's error. A failure of the
+/// connection underneath reaches reqwest as hyper's error, which the decoder
+/// passes up unchanged. `a_body_that_fails_to_decode_is_named` and
+/// `a_connection_lost_mid_body_is_not_a_decode_failure` pin both sides.
+fn is_decode_failure(causes: &[&(dyn StdError + 'static)]) -> bool {
+    causes.get(1).is_some_and(|cause| cause.is::<io::Error>())
 }
 
 #[cfg(test)]
