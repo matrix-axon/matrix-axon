@@ -156,6 +156,9 @@ A kept capture also carries the socket's `live:open` and `live:close`, which say
   The packaged app's transport names the cause (ADR 0127 § 4): `dns`, `refused`, `connect_timeout`, `tls`, `reset`, `body` (headers arrived, the body did not finish), `cancelled` (the transport cancelled it itself, such as on a reload), `scope` (not `http` or `https`, or a redirect that left them) or `other`.
   `detail` goes with it: an OS error name such as `ConnectionReset`, a certificate or alert name such as `UnknownIssuer`, `InvalidStatus` or `InvalidHeader` for an answer the page cannot hold (a status outside 200–599, a header value `fetch` would refuse), or `null`.
   `Decode` (under `body`) means the server's bytes arrived but did not decode: a corrupt or truncated `gzip` or `br` stream, not a network failure.
+  `kind=other detail=KeepAlive` means the connection was closed because a keep-alive ping went unanswered, so every request on it still waiting for headers fails at once (ADR 0127's 2026-11-07 amendment).
+  A body that was already being read when that happened fails as plain `kind=body detail=null` in the same millisecond, because hyper does not say why.
+  Before that amendment the same failure read `kind=other detail=TimedOut`: several of those in the same millisecond, with no connect involved, are this.
   A capture from before the packaged app's own transport (ADR 0127), or from v0.1.21–v0.1.22 with the since-removed "Legacy shell transport" toggle on, can also say `send` (never got a response).
   A browser says `fetch` (its `TypeError`, which says no more) or `other`.
   `inflight` is how many `/v1` requests were unsettled at that moment, the failed one included.

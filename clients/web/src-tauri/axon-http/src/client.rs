@@ -19,8 +19,16 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Below carrier NAT idle timers (some expire a mapping after about 30 s) and
 /// below most servers' own idle timeouts. See ADR 0127 § 1.
 pub(crate) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(25);
+/// hyper pings once nothing has been *read* for this long while a stream is
+/// open, and closes the connection if the ping is not answered within
+/// [`H2_KEEP_ALIVE_TIMEOUT`]. "Read" means a response head or body chunk this
+/// client consumed. DATA for a stream it has already cancelled is discarded
+/// inside `h2` and does not count, so a link still delivering a cancelled
+/// body looks silent to hyper. The answer to its ping then queues behind that
+/// body. The adaptive window in [`build`] bounds that queue. See ADR 0127's
+/// 2026-11-07 amendment (#991).
 const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
-const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Counters that outlive any one client, so they keep counting across a
 /// `reset` (ADR 0127 § 5).
@@ -87,6 +95,13 @@ pub(crate) struct ClientOptions {
     /// Extra trust anchors, so tests can reach an in-process HTTPS server.
     #[cfg(test)]
     pub(crate) extra_roots: Vec<reqwest::Certificate>,
+    /// The HTTP/2 keep-alive interval and timeout. The app's are the
+    /// constants above; a test shortens them to watch a ping go unanswered
+    /// without waiting 40 s.
+    pub(crate) keep_alive: (Duration, Duration),
+    /// HTTP/2 adaptive flow control, on in the app. A test turns it off to
+    /// show the failure it prevents.
+    pub(crate) adaptive_window: bool,
 }
 
 impl ClientOptions {
@@ -95,6 +110,8 @@ impl ClientOptions {
             user_agent,
             #[cfg(test)]
             extra_roots: Vec::new(),
+            keep_alive: (H2_KEEP_ALIVE_INTERVAL, H2_KEEP_ALIVE_TIMEOUT),
+            adaptive_window: true,
         }
     }
 }
@@ -107,13 +124,22 @@ pub(crate) fn build(
     counters: &Arc<Counters>,
     h2_only: bool,
 ) -> reqwest::Result<reqwest::Client> {
+    let (keep_alive_interval, keep_alive_timeout) = options.keep_alive;
     let mut builder = reqwest::Client::builder()
         .user_agent(options.user_agent.as_str())
         .connect_timeout(CONNECT_TIMEOUT)
         .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-        .http2_keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
-        .http2_keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)
+        .http2_keep_alive_interval(keep_alive_interval)
+        .http2_keep_alive_timeout(keep_alive_timeout)
         .http2_keep_alive_while_idle(false)
+        // Size the HTTP/2 receive windows from measured bandwidth (BDP),
+        // starting at the protocol's 64 KiB, instead of hyper's fixed 5 MiB
+        // per connection and 2 MiB per stream. The window bounds what can
+        // queue ahead of a keep-alive ping's answer or a new response head.
+        // hyper's estimate only ratchets up, to 16 MiB: a connection that
+        // ramped up on a fast link keeps its window after the link slows.
+        // See ADR 0127's 2026-11-07 amendment (#991).
+        .http2_adaptive_window(options.adaptive_window)
         // The transport follows redirects itself, choosing the client for
         // each hop.
         .redirect(redirect::Policy::none())

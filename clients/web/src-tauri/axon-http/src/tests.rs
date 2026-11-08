@@ -1824,3 +1824,234 @@ async fn a_connection_lost_mid_body_is_not_a_decode_failure() {
     assert_eq!(err.kind, Kind::Body);
     assert_eq!(err.detail.as_deref(), Some("UnexpectedEof"));
 }
+
+// ===== HTTP/2 keep-alive on a slow link (#991) =====
+
+/// A link that buffers everything the server sends without limit and hands
+/// it to the client at `bytes_per_sec`, as a bufferbloated cellular link does.
+/// What the server has sent but the client has not yet received waits here,
+/// in order, so a keep-alive ping's answer queues behind it exactly as it did
+/// on the device. Client-to-server traffic passes straight through.
+struct BloatedLink {
+    port: u16,
+    paused: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BloatedLink {
+    async fn start(upstream: u16, bytes_per_sec: usize) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = paused.clone();
+        tokio::spawn(async move {
+            loop {
+                // A failure here drops the connection, so the test sees a
+                // transport error rather than a panic lost in this task.
+                let Ok((client, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(server) = TcpStream::connect(("127.0.0.1", upstream)).await else {
+                    continue;
+                };
+                let (mut client_read, mut client_write) = client.into_split();
+                let (mut server_read, mut server_write) = server.into_split();
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
+                });
+                let (queue, mut queued) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16 * 1024];
+                    loop {
+                        match server_read.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => {
+                                if queue.send(buf[..n].to_vec()).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+                let pause = pause.clone();
+                tokio::spawn(async move {
+                    while let Some(chunk) = queued.recv().await {
+                        while pause.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        if client_write.write_all(&chunk).await.is_err() {
+                            return;
+                        }
+                        let secs = chunk.len() as f64 / bytes_per_sec as f64;
+                        tokio::time::sleep(Duration::from_secs_f64(secs)).await;
+                    }
+                });
+            }
+        });
+        Self { port, paused }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("https://localhost:{}{path}", self.port)
+    }
+
+    /// Stop delivering anything to the client, as a link that has died
+    /// without a reset does.
+    fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A transport whose keep-alive pings after `interval` and gives up after
+/// `timeout`, so a test can watch it in well under a second.
+fn keep_alive_transport(interval: Duration, timeout: Duration) -> Arc<Transport> {
+    keep_alive_transport_with(interval, timeout, true)
+}
+
+fn keep_alive_transport_with(
+    interval: Duration,
+    timeout: Duration,
+    adaptive_window: bool,
+) -> Arc<Transport> {
+    let mut options = ClientOptions::new("Axon/test (test)".into());
+    options.extra_roots = vec![reqwest::Certificate::from_der(CERT).unwrap()];
+    options.keep_alive = (interval, timeout);
+    options.adaptive_window = adaptive_window;
+    Arc::new(Transport::new(options).unwrap())
+}
+
+/// Bring the link's origin to its steady HTTP/2 connection, as `warm` does.
+async fn warm_link(transport: &Transport, link: &BloatedLink) {
+    for id in [1000, 1001] {
+        let (head, _) = fetch(transport, id, get(&link.url("/"))).await;
+        assert_eq!(head.version, "h2");
+    }
+}
+
+/// The device's failure: requests are cancelled at their deadline, but what
+/// the server already sent for them is still on its way. h2 discards it on
+/// arrival, so hyper sees no reads and pings, and the ping's answer queues
+/// behind the discarded bytes.
+///
+/// This cancels an 8 MiB body on a 512 KiB/s link and sends a small request
+/// on the same connection, with a 500 ms / 1.5 s keep-alive. With hyper's
+/// fixed 2 MiB stream window the backlog is four seconds of link, against a
+/// close at about two. The adaptive window keeps it to about 64 KiB, an
+/// eighth of a second. Returns the small request's outcome, and whether the
+/// connection was replaced.
+async fn small_request_after_a_cancelled_body(
+    adaptive_window: bool,
+) -> (Result<(Head, Vec<u8>), crate::error::TransportError>, bool) {
+    let server = Server::start(
+        true,
+        handler(|req: hyper::Request<Incoming>| async move {
+            if req.uri().path() == "/big" {
+                reply(200, TestBody::Full(Some(Bytes::from(vec![b'x'; 8 << 20]))))
+            } else {
+                reply(200, TestBody::text("ok"))
+            }
+        }),
+    )
+    .await;
+    let link = BloatedLink::start(server.port, 512 << 10).await;
+    let transport = keep_alive_transport_with(
+        Duration::from_millis(500),
+        Duration::from_millis(1500),
+        adaptive_window,
+    );
+    warm_link(&transport, &link).await;
+    let opened = transport.stats().connections_opened;
+
+    let head = transport
+        .send(key(1), get(&link.url("/big")))
+        .await
+        .unwrap();
+    assert!(head.body);
+    transport.cancel(key(1));
+
+    let result = promptly(async {
+        let head = transport.send(key(2), get(&link.url("/small"))).await?;
+        let body = read_all(&transport, &key(2)).await;
+        Ok((head, body))
+    })
+    .await;
+    (result, transport.stats().connections_opened != opened)
+}
+
+#[tokio::test]
+async fn a_busy_connection_survives_the_bodies_it_cancelled() {
+    let (result, replaced) = small_request_after_a_cancelled_body(true).await;
+    let (head, body) = result.expect("the connection was closed under the next request");
+    assert_eq!(head.status, 200);
+    assert_eq!(body, b"ok");
+    assert!(!replaced, "the connection was replaced");
+}
+
+#[tokio::test]
+async fn without_the_adaptive_window_the_next_request_dies_with_the_connection() {
+    // The control for the test above: it shows that setup reproduces the
+    // device's failure, so a pass there is the window's doing.
+    let (result, _) = small_request_after_a_cancelled_body(false).await;
+    let err = result.expect_err("the small request survived without the adaptive window");
+    assert_eq!(err.kind, Kind::Other);
+    assert_eq!(err.detail.as_deref(), Some(crate::error::KEEP_ALIVE_DETAIL));
+}
+
+#[tokio::test]
+async fn a_keep_alive_timeout_is_reported_as_keep_alive() {
+    let server = Server::start(true, ok_handler()).await;
+    let link = BloatedLink::start(server.port, 64 << 20).await;
+    let transport = keep_alive_transport(Duration::from_millis(200), Duration::from_millis(300));
+    warm_link(&transport, &link).await;
+    link.pause();
+    let err = promptly(transport.send(key(1), get(&link.url("/"))))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, Kind::Other);
+    assert_eq!(err.detail.as_deref(), Some(crate::error::KEEP_ALIVE_DETAIL));
+}
+
+#[tokio::test]
+async fn a_keep_alive_close_mid_body_is_a_plain_body_failure() {
+    // hyper reports the keep-alive only to a response still waiting for its
+    // head. A body read gets h2's broken pipe inside an `h2::Error`, which
+    // exposes no source, so the transport cannot name the cause. If a hyper
+    // bump starts exposing it, this fails, and the body can be labelled too.
+    let gates = Arc::new(Mutex::new(Vec::new()));
+    let kept = gates.clone();
+    let server = Server::start(
+        true,
+        handler(move |req: hyper::Request<Incoming>| {
+            let gated = req.uri().path() == "/gated";
+            let (tx, rx) = oneshot::channel::<Bytes>();
+            kept.lock().unwrap().push(tx);
+            async move {
+                if gated {
+                    reply(
+                        200,
+                        TestBody::Gated(Some(Bytes::from_static(b"first")), Some(rx)),
+                    )
+                } else {
+                    reply(200, TestBody::text("ok"))
+                }
+            }
+        }),
+    )
+    .await;
+    let link = BloatedLink::start(server.port, 64 << 20).await;
+    let transport = keep_alive_transport(Duration::from_millis(200), Duration::from_millis(300));
+    warm_link(&transport, &link).await;
+    let head = transport
+        .send(key(1), get(&link.url("/gated")))
+        .await
+        .unwrap();
+    assert!(head.body);
+    assert_eq!(
+        transport.read_body(&key(1)).await.unwrap().unwrap(),
+        b"first"
+    );
+    link.pause();
+    let err = promptly(transport.read_body(&key(1))).await.unwrap_err();
+    assert_eq!(err.kind, Kind::Body);
+    assert_eq!(err.detail, None);
+    drop(gates);
+}

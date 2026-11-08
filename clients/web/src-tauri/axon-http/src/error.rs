@@ -252,7 +252,10 @@ fn send_kind(err: &reqwest::Error) -> TransportError {
             None => TransportError::new(Kind::Tls),
         };
     }
-    // No request or read timeout is configured, so a timeout here is the
+    if is_keep_alive_timeout(&causes) {
+        return TransportError::with(Kind::Other, KEEP_ALIVE_DETAIL);
+    }
+    // No request or read timeout is configured, so any other timeout is the
     // connect timeout, or the OS giving up on the handshake (`ETIMEDOUT`).
     if err.is_timeout() {
         return if err.is_connect() {
@@ -306,6 +309,36 @@ fn is_reset(causes: &[&(dyn StdError + 'static)]) -> bool {
 /// send path retries itself for `GET` and `HEAD` (ADR 0127 § 7).
 pub(crate) fn is_reset_failure(err: &reqwest::Error) -> bool {
     classify_send(err).kind == Kind::Reset
+}
+
+/// `detail` for a connection hyper closed because a keep-alive ping went
+/// unanswered (ADR 0127's 2026-11-07 amendment). Every request on that
+/// connection still waiting for headers fails with it at once, as
+/// `kind=other`.
+///
+/// A body already being read fails as a plain `kind=body` with no detail.
+/// hyper reports the keep-alive only to the response future: once the
+/// connection is dropped, a body read gets h2's broken pipe wrapped in an
+/// `h2::Error`, which exposes no source, so nothing tells it apart from any
+/// other HTTP/2 body failure.
+/// `a_keep_alive_close_mid_body_is_a_plain_body_failure` pins that down.
+pub(crate) const KEEP_ALIVE_DETAIL: &str = "KeepAlive";
+
+/// hyper closed the connection because a keep-alive ping went unanswered.
+///
+/// hyper's error type for this is private, but it is the only client-side
+/// source of `hyper::Error::is_timeout`: hyper's other timeout, on reading
+/// request headers, is server-only. The OS's `ETIMEDOUT` arrives as an
+/// `io::Error` and does not make `is_timeout` true on a `hyper::Error`.
+/// That is hyper 1.x's behaviour, not a promise, and this check runs before
+/// the connect-timeout branch: if a hyper or reqwest bump made another error
+/// `is_timeout`, it would read as `KeepAlive`. The keep-alive tests pin the
+/// keep-alive side (`a_keep_alive_timeout_is_reported_as_keep_alive`, and
+/// `without_the_adaptive_window_the_next_request_dies_with_the_connection`).
+/// Nothing pins the other side, so re-read hyper's `is_timeout` sources on
+/// an upgrade.
+fn is_keep_alive_timeout(causes: &[&(dyn StdError + 'static)]) -> bool {
+    find::<hyper::Error>(causes).is_some_and(hyper::Error::is_timeout)
 }
 
 /// The category of a failure while reading a body that had started.
