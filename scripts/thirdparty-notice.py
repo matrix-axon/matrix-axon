@@ -234,7 +234,11 @@ def main() -> int:
     ap.add_argument("--header", required=True, help="static text printed before the OVERVIEW")
     ap.add_argument("input", nargs="?", default="-", help="cargo-about JSON (default: stdin)")
     args = ap.parse_args()
-    raw = sys.stdin.read() if args.input == "-" else open(args.input, encoding="utf-8").read()
+    if args.input == "-":
+        raw = sys.stdin.read()
+    else:
+        with open(args.input, encoding="utf-8") as fh:
+            raw = fh.read()
     with open(args.header, encoding="utf-8") as fh:
         header = fh.read()
     sys.stdout.write(render(json.loads(raw), args.format, header))

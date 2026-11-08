@@ -6,7 +6,11 @@ verifying the first version against the real cargo-about output of this repo.
 """
 
 import importlib.util
+import json
 import pathlib
+import subprocess
+import sys
+import tempfile
 import unittest
 
 _path = pathlib.Path(__file__).with_name("thirdparty-notice.py")
@@ -204,6 +208,31 @@ class Render(unittest.TestCase):
         out = tn.render(self.DATA, "plain", "Title\n\nIntro.\n")
         self.assertTrue(out.startswith("Title\n\nIntro.\n\nOVERVIEW\n"))
         self.assertIn("- MIT (used by 2 crates)", out)
+
+
+class Cli(unittest.TestCase):
+    """The command line reads the JSON from a file argument or from stdin."""
+
+    DATA = doc(lic("MIT", mit("Copyright (c) 2020 Alice"), ("a", "1.0")))
+
+    def run_cli(self, *, as_file: bool) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            header = pathlib.Path(tmp, "header.txt")
+            header.write_text("Title\n", encoding="utf-8")
+            argv = [sys.executable, "-I", str(_path), "--format", "plain", "--header", str(header)]
+            payload = json.dumps(self.DATA)
+            if as_file:
+                data = pathlib.Path(tmp, "in.json")
+                data.write_text(payload, encoding="utf-8")
+                result = subprocess.run(argv + [str(data)], capture_output=True, text=True, check=True)
+            else:
+                result = subprocess.run(argv, input=payload, capture_output=True, text=True, check=True)
+            return result.stdout
+
+    def test_file_argument_and_stdin_agree(self):
+        from_file = self.run_cli(as_file=True)
+        self.assertIn("Copyright (c) 2020 Alice", from_file)
+        self.assertEqual(from_file, self.run_cli(as_file=False))
 
 
 if __name__ == "__main__":
