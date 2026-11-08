@@ -54,7 +54,100 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for DeviceStateRow {
     }
 }
 
+/// The least a device-state delta reaches behind its cursor (ADR 0131).
+const MIN_OVERLAP_SECS: i64 = 300;
+
+/// How far a delta reaches behind its cursor: twice the ordinary pool's
+/// statement timeout, with a floor of [`MIN_OVERLAP_SECS`].
+///
+/// A write's `updated_at` is its statement's start, not its commit, so a write
+/// that started before a read and committed after it is older than that read's
+/// cursor. Every device-state write is one autocommit statement bounded by the
+/// statement timeout, so reaching back this far catches it.
+pub(crate) fn overlap_for(statement_secs: u32) -> chrono::Duration {
+    chrono::Duration::seconds((2 * i64::from(statement_secs)).max(MIN_OVERLAP_SECS))
+}
+
+/// One read of a namespace (ADR 0131): a full merged view or a delta, and the
+/// cursor to pass back next time.
+#[derive(Debug, Clone)]
+pub struct DeviceStateRead {
+    /// `true`: `rows` is the whole merged namespace, tombstones omitted.
+    /// `false`: `rows` is every key written since the cursor, each with its
+    /// current winner, tombstones included as `value: None`.
+    pub full: bool,
+    /// The rows, ordered by key.
+    pub rows: Vec<DeviceStateRow>,
+    /// The database clock taken just before this read; the next read's cursor.
+    pub as_of: DateTime<Utc>,
+}
+
 impl Store {
+    /// How far a delta reaches behind its cursor (ADR 0131).
+    pub fn device_state_overlap(&self) -> chrono::Duration {
+        self.device_state_overlap
+    }
+
+    /// Read one namespace, in full or as a delta since an earlier read's
+    /// `as_of` (ADR 0131).
+    ///
+    /// The clock is read **before** the rows, so every write this read misses
+    /// has an `updated_at` no older than `as_of − overlap` and is in the next
+    /// delta. A `since` later than the database clock did not come from this
+    /// clock, so it is answered in full rather than trusted.
+    pub async fn read_device_state(
+        &self,
+        account_id: Uuid,
+        namespace: &str,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<DeviceStateRead, StoreError> {
+        let as_of: DateTime<Utc> = sqlx_core::query_scalar::query_scalar("SELECT now()")
+            .fetch_one(&self.pool)
+            .await?;
+        match since {
+            Some(since) if since <= as_of => Ok(DeviceStateRead {
+                full: false,
+                rows: self
+                    .device_state_changes(account_id, namespace, since - self.device_state_overlap)
+                    .await?,
+                as_of,
+            }),
+            _ => Ok(DeviceStateRead {
+                full: true,
+                rows: self.merged_device_state(account_id, namespace).await?,
+                as_of,
+            }),
+        }
+    }
+
+    /// Every key of one namespace with a row written after `after`, each with
+    /// its current winner across **all** the account's rows for that key —
+    /// the same merge as [`Store::merged_device_state`] — and tombstone
+    /// winners kept, so a client holding the key learns it was deleted.
+    pub async fn device_state_changes(
+        &self,
+        account_id: Uuid,
+        namespace: &str,
+        after: DateTime<Utc>,
+    ) -> Result<Vec<DeviceStateRow>, StoreError> {
+        let rows = sqlx_core::query_as::query_as::<Postgres, DeviceStateRow>(
+            "SELECT DISTINCT ON (key) device_id, key, value, updated_at \
+               FROM device_state \
+              WHERE account_id = $1 AND namespace = $2 \
+                AND key IN ( \
+                    SELECT key FROM device_state \
+                     WHERE account_id = $1 AND namespace = $2 AND updated_at > $3 \
+                ) \
+              ORDER BY key ASC, updated_at DESC, device_id ASC",
+        )
+        .bind(account_id)
+        .bind(namespace)
+        .bind(after)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Upsert one device's batch of entries in a **single atomic statement**:
     /// either every entry commits or none does, so a failure can never leave a
     /// partially-applied merge, and one round-trip serves the whole PUT.
@@ -123,5 +216,18 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlap_is_twice_the_statement_timeout_with_a_floor() {
+        assert_eq!(overlap_for(10), chrono::Duration::minutes(5));
+        assert_eq!(overlap_for(150), chrono::Duration::minutes(5));
+        assert_eq!(overlap_for(151), chrono::Duration::seconds(302));
+        assert_eq!(overlap_for(86_400), chrono::Duration::days(2));
     }
 }

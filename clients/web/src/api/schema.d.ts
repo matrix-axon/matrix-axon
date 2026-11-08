@@ -1823,6 +1823,13 @@ export interface paths {
          *     across all the account's devices** (per key, the newest write wins; deleted
          *     keys are absent). A namespace never written is an empty map, not a `404`.
          *     The `device_id` names the calling device; the merge is account-wide.
+         *
+         *     Every response carries a `cursor`. Passing it back as `since` returns only
+         *     the keys written since that read, each with its current winner and deleted
+         *     keys as `null` (`full: false`), for the caller to merge into what it holds.
+         *     The delta may repeat keys the caller already has. A response with
+         *     `full: true` is the whole namespace, to replace what the caller holds
+         *     (ADR 0131).
          */
         get: operations["get_device_state"];
         /**
@@ -2599,13 +2606,30 @@ export interface components {
              *     last-write-wins view across *all* the account's devices: per key, the newest
              *     write wins and deleted keys are absent. This is what
              *     `GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting
-             *     client sees the state its sibling devices left.
+             *     client sees the state its sibling devices left. With `since`, it is instead
+             *     only the keys written since an earlier read (ADR 0131).
              */
             data: {
-                /** @description The merged entries, keyed by the client-chosen key (e.g. a room id). */
+                /**
+                 * @description Opaque cursor for this read. Pass it as `since` on the next read of
+                 *     this namespace for the account to get only what changed.
+                 */
+                cursor: string;
+                /**
+                 * @description The merged entries, keyed by the client-chosen key (e.g. a room id).
+                 *     When `full` is `false`, only the keys written since the `since` cursor,
+                 *     with a deleted key's `value` as `null`.
+                 */
                 entries: {
                     [key: string]: components["schemas"]["DeviceStateEntryDto"];
                 };
+                /**
+                 * @description `true`: `entries` is the whole namespace, deleted keys absent; replace
+                 *     what you hold. `false`: `entries` is a delta since the `since` cursor;
+                 *     merge it into what you hold. A read without `since` is always full, and
+                 *     one with `since` may still be.
+                 */
+                full: boolean;
                 /** @description The namespace read, e.g. `drafts`. */
                 namespace: string;
             };
@@ -4385,13 +4409,30 @@ export interface components {
          *     last-write-wins view across *all* the account's devices: per key, the newest
          *     write wins and deleted keys are absent. This is what
          *     `GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting
-         *     client sees the state its sibling devices left.
+         *     client sees the state its sibling devices left. With `since`, it is instead
+         *     only the keys written since an earlier read (ADR 0131).
          */
         DeviceStateDto: {
-            /** @description The merged entries, keyed by the client-chosen key (e.g. a room id). */
+            /**
+             * @description Opaque cursor for this read. Pass it as `since` on the next read of
+             *     this namespace for the account to get only what changed.
+             */
+            cursor: string;
+            /**
+             * @description The merged entries, keyed by the client-chosen key (e.g. a room id).
+             *     When `full` is `false`, only the keys written since the `since` cursor,
+             *     with a deleted key's `value` as `null`.
+             */
             entries: {
                 [key: string]: components["schemas"]["DeviceStateEntryDto"];
             };
+            /**
+             * @description `true`: `entries` is the whole namespace, deleted keys absent; replace
+             *     what you hold. `false`: `entries` is a delta since the `since` cursor;
+             *     merge it into what you hold. A read without `since` is always full, and
+             *     one with `since` may still be.
+             */
+            full: boolean;
             /** @description The namespace read, e.g. `drafts`. */
             namespace: string;
         };
@@ -4404,7 +4445,11 @@ export interface components {
             device_id: string;
             /** @description When the winning value was written (server clock), RFC 3339. */
             updated_at: string;
-            /** @description The opaque value the winning device wrote. Axon never interprets it. */
+            /**
+             * @description The opaque value the winning device wrote. Axon never interprets it.
+             *     `null` only in a delta (`full: false`), where it means the key was
+             *     deleted.
+             */
             value: unknown;
         };
         /**
@@ -12074,6 +12119,13 @@ export interface operations {
             query: {
                 /** @description The Axon account this state belongs to. */
                 account_id: string;
+                /**
+                 * @description The `cursor` of an earlier read of this namespace. With it, the response
+                 *     holds only the keys written since that read (`full: false`), deleted
+                 *     ones as `null`; the server may still answer in full (`full: true`).
+                 *     Opaque: pass back exactly what a response gave.
+                 */
+                since?: string;
             };
             header?: never;
             path: {
@@ -12086,7 +12138,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The merged namespace state */
+            /** @description The merged namespace state, or the changes since `since` */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12095,7 +12147,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiResponse_DeviceStateDto"];
                 };
             };
-            /** @description Missing account_id or malformed device_id */
+            /** @description Missing account_id, malformed device_id, or a malformed since cursor */
             400: {
                 headers: {
                     [name: string]: unknown;

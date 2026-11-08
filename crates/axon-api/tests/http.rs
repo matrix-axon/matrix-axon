@@ -4585,6 +4585,100 @@ async fn device_state_put_get_merge_and_tombstone() {
         .expect("cleanup");
 }
 
+/// ADR 0131: every GET carries a cursor; passing it back as `since` returns
+/// only the keys written since, with a deleted key as `null`; a malformed
+/// cursor is a 400 and one from the future is answered in full.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn device_state_since_cursor_returns_a_delta() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@devstate-since-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let app = read_app(store.clone());
+    let device = Uuid::new_v4();
+    let base = format!("/v1/devices/{device}/state/read_markers?account_id={account_id}");
+
+    // Two markers written long before any overlap reaches.
+    for key in ["!kept:localhost", "!cleared:localhost"] {
+        sqlx_core::query::query(
+            "INSERT INTO device_state (account_id, device_id, namespace, key, value, updated_at) \
+             VALUES ($1, $2, 'read_markers', $3, '{\"event_id\": \"$old\"}', now() - interval '2 hours')",
+        )
+        .bind(account_id)
+        .bind(device)
+        .bind(key)
+        .execute(&pool)
+        .await
+        .expect("backdated marker");
+    }
+
+    let (status, body) = get(&app, &base).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["full"], true);
+    assert_eq!(body["data"]["entries"].as_object().unwrap().len(), 2);
+    let cursor = body["data"]["cursor"].as_str().expect("cursor").to_owned();
+
+    let (status, _) = request(
+        &app,
+        "PUT",
+        &base,
+        Some(json!({ "entries": {
+            "!new:localhost": { "event_id": "$new" },
+            "!cleared:localhost": null,
+        }})),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = get(&app, &format!("{base}&since={cursor}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["full"], false);
+    let entries = body["data"]["entries"].as_object().expect("entries");
+    let mut keys: Vec<&String> = entries.keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["!cleared:localhost", "!new:localhost"]);
+    assert_eq!(entries["!cleared:localhost"]["value"], Value::Null);
+    assert_eq!(entries["!new:localhost"]["value"]["event_id"], "$new");
+    let next = body["data"]["cursor"].as_str().expect("next cursor");
+    assert!(
+        next.parse::<i64>().unwrap() >= cursor.parse::<i64>().unwrap(),
+        "the cursor never moves backwards"
+    );
+
+    for bad in ["nope", "-1", "1.5", ""] {
+        let (status, body) = get(&app, &format!("{base}&since={bad}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "since={bad:?}");
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+
+    let future = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_micros();
+    let (status, body) = get(&app, &format!("{base}&since={future}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["full"], true, "a future cursor reads in full");
+    let entries = body["data"]["entries"].as_object().expect("entries");
+    let mut keys: Vec<&String> = entries.keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["!kept:localhost", "!new:localhost"],
+        "no tombstones in full"
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 /// M12 device-state write caps (ADR 0048): values are opaque, so the handler
 /// bounds size, not shape — oversized values/keys/namespaces and over-long
 /// entry lists are readable 400s, and boundary-sized writes still land.

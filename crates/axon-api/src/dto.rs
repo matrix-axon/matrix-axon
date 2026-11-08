@@ -2448,19 +2448,32 @@ impl From<ThreadSummary> for ThreadSummaryDto {
 /// last-write-wins view across *all* the account's devices: per key, the newest
 /// write wins and deleted keys are absent. This is what
 /// `GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting
-/// client sees the state its sibling devices left.
+/// client sees the state its sibling devices left. With `since`, it is instead
+/// only the keys written since an earlier read (ADR 0131).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeviceStateDto {
     /// The namespace read, e.g. `drafts`.
     pub namespace: String,
     /// The merged entries, keyed by the client-chosen key (e.g. a room id).
+    /// When `full` is `false`, only the keys written since the `since` cursor,
+    /// with a deleted key's `value` as `null`.
     pub entries: BTreeMap<String, DeviceStateEntryDto>,
+    /// `true`: `entries` is the whole namespace, deleted keys absent; replace
+    /// what you hold. `false`: `entries` is a delta since the `since` cursor;
+    /// merge it into what you hold. A read without `since` is always full, and
+    /// one with `since` may still be.
+    pub full: bool,
+    /// Opaque cursor for this read. Pass it as `since` on the next read of
+    /// this namespace for the account to get only what changed.
+    pub cursor: String,
 }
 
 /// One winning entry in a merged device-state read (M12).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeviceStateEntryDto {
     /// The opaque value the winning device wrote. Axon never interprets it.
+    /// `null` only in a delta (`full: false`), where it means the key was
+    /// deleted.
     pub value: Value,
     /// The device that wrote the winning value.
     pub device_id: Uuid,
@@ -2471,8 +2484,8 @@ pub struct DeviceStateEntryDto {
 impl From<DeviceStateRow> for DeviceStateEntryDto {
     fn from(row: DeviceStateRow) -> Self {
         DeviceStateEntryDto {
-            // The merged store read drops tombstone winners, so a row here
-            // always carries a value.
+            // A full read drops tombstone winners; a delta keeps them, and
+            // they go out as `null`, which a PUT already reserves for delete.
             value: row.value.unwrap_or(Value::Null),
             device_id: row.device_id,
             updated_at: row.updated_at.to_rfc3339(),

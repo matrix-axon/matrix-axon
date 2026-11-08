@@ -8103,7 +8103,7 @@
           "device-state"
         ],
         "summary": "Get device state",
-        "description": "Read one namespace of per-device state: the last-write-wins **merged view\nacross all the account's devices** (per key, the newest write wins; deleted\nkeys are absent). A namespace never written is an empty map, not a `404`.\nThe `device_id` names the calling device; the merge is account-wide.",
+        "description": "Read one namespace of per-device state: the last-write-wins **merged view\nacross all the account's devices** (per key, the newest write wins; deleted\nkeys are absent). A namespace never written is an empty map, not a `404`.\nThe `device_id` names the calling device; the merge is account-wide.\n\nEvery response carries a `cursor`. Passing it back as `since` returns only\nthe keys written since that read, each with its current winner and deleted\nkeys as `null` (`full: false`), for the caller to merge into what it holds.\nThe delta may repeat keys the caller already has. A response with\n`full: true` is the whole namespace, to replace what the caller holds\n(ADR 0131).",
         "operationId": "get_device_state",
         "parameters": [
           {
@@ -8134,11 +8134,20 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The `cursor` of an earlier read of this namespace. With it, the response\nholds only the keys written since that read (`full: false`), deleted\nones as `null`; the server may still answer in full (`full: true`).\nOpaque: pass back exactly what a response gave.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "The merged namespace state",
+            "description": "The merged namespace state, or the changes since `since`",
             "content": {
               "application/json": {
                 "schema": {
@@ -8148,7 +8157,7 @@
             }
           },
           "400": {
-            "description": "Missing account_id or malformed device_id",
+            "description": "Missing account_id, malformed device_id, or a malformed since cursor",
             "content": {
               "application/json": {
                 "schema": {
@@ -10501,21 +10510,31 @@
         "properties": {
           "data": {
             "type": "object",
-            "description": "One namespace of per-device client state (M12, ADR 0048), as the merged\nlast-write-wins view across *all* the account's devices: per key, the newest\nwrite wins and deleted keys are absent. This is what\n`GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting\nclient sees the state its sibling devices left.",
+            "description": "One namespace of per-device client state (M12, ADR 0048), as the merged\nlast-write-wins view across *all* the account's devices: per key, the newest\nwrite wins and deleted keys are absent. This is what\n`GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting\nclient sees the state its sibling devices left. With `since`, it is instead\nonly the keys written since an earlier read (ADR 0131).",
             "required": [
               "namespace",
-              "entries"
+              "entries",
+              "full",
+              "cursor"
             ],
             "properties": {
+              "cursor": {
+                "type": "string",
+                "description": "Opaque cursor for this read. Pass it as `since` on the next read of\nthis namespace for the account to get only what changed."
+              },
               "entries": {
                 "type": "object",
-                "description": "The merged entries, keyed by the client-chosen key (e.g. a room id).",
+                "description": "The merged entries, keyed by the client-chosen key (e.g. a room id).\nWhen `full` is `false`, only the keys written since the `since` cursor,\nwith a deleted key's `value` as `null`.",
                 "additionalProperties": {
                   "$ref": "#/components/schemas/DeviceStateEntryDto"
                 },
                 "propertyNames": {
                   "type": "string"
                 }
+              },
+              "full": {
+                "type": "boolean",
+                "description": "`true`: `entries` is the whole namespace, deleted keys absent; replace\nwhat you hold. `false`: `entries` is a delta since the `since` cursor;\nmerge it into what you hold. A read without `since` is always full, and\none with `since` may still be."
               },
               "namespace": {
                 "type": "string",
@@ -14293,21 +14312,31 @@
       },
       "DeviceStateDto": {
         "type": "object",
-        "description": "One namespace of per-device client state (M12, ADR 0048), as the merged\nlast-write-wins view across *all* the account's devices: per key, the newest\nwrite wins and deleted keys are absent. This is what\n`GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting\nclient sees the state its sibling devices left.",
+        "description": "One namespace of per-device client state (M12, ADR 0048), as the merged\nlast-write-wins view across *all* the account's devices: per key, the newest\nwrite wins and deleted keys are absent. This is what\n`GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting\nclient sees the state its sibling devices left. With `since`, it is instead\nonly the keys written since an earlier read (ADR 0131).",
         "required": [
           "namespace",
-          "entries"
+          "entries",
+          "full",
+          "cursor"
         ],
         "properties": {
+          "cursor": {
+            "type": "string",
+            "description": "Opaque cursor for this read. Pass it as `since` on the next read of\nthis namespace for the account to get only what changed."
+          },
           "entries": {
             "type": "object",
-            "description": "The merged entries, keyed by the client-chosen key (e.g. a room id).",
+            "description": "The merged entries, keyed by the client-chosen key (e.g. a room id).\nWhen `full` is `false`, only the keys written since the `since` cursor,\nwith a deleted key's `value` as `null`.",
             "additionalProperties": {
               "$ref": "#/components/schemas/DeviceStateEntryDto"
             },
             "propertyNames": {
               "type": "string"
             }
+          },
+          "full": {
+            "type": "boolean",
+            "description": "`true`: `entries` is the whole namespace, deleted keys absent; replace\nwhat you hold. `false`: `entries` is a delta since the `since` cursor;\nmerge it into what you hold. A read without `since` is always full, and\none with `since` may still be."
           },
           "namespace": {
             "type": "string",
@@ -14334,7 +14363,7 @@
             "description": "When the winning value was written (server clock), RFC 3339."
           },
           "value": {
-            "description": "The opaque value the winning device wrote. Axon never interprets it."
+            "description": "The opaque value the winning device wrote. Axon never interprets it.\n`null` only in a delta (`full: false`), where it means the key was\ndeleted."
           }
         }
       },

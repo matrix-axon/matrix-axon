@@ -304,3 +304,214 @@ async fn batch_upsert_is_single_statement_with_one_timestamp() {
 
     common::cleanup_account(&pool, account_id).await;
 }
+
+/// Write one row with a chosen `updated_at`, as a write whose statement started
+/// then would carry. The `BEFORE UPDATE` trigger only fires on update, so an
+/// insert keeps the timestamp it is given.
+async fn insert_at(
+    pool: &sqlx_postgres::PgPool,
+    account_id: Uuid,
+    device_id: Uuid,
+    key: &str,
+    value: Option<serde_json::Value>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) {
+    sqlx_core::query::query(
+        "INSERT INTO device_state (account_id, device_id, namespace, key, value, updated_at) \
+         VALUES ($1, $2, 'read_markers', $3, $4, $5)",
+    )
+    .bind(account_id)
+    .bind(device_id)
+    .bind(key)
+    .bind(value)
+    .bind(updated_at)
+    .execute(pool)
+    .await
+    .expect("insert backdated row");
+}
+
+/// A delta (ADR 0131) holds exactly the keys written since the cursor, each
+/// with its current winner across devices, and a deleted key as a tombstone;
+/// keys untouched since the cursor, and other namespaces, are left out.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn delta_returns_changed_keys_with_winners_and_tombstones() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "ds-delta").await;
+    let device_a = Uuid::new_v4();
+    let device_b = Uuid::new_v4();
+    // Older than any overlap, so only what is written after the read counts.
+    let long_ago = chrono::Utc::now() - chrono::Duration::hours(2);
+    for key in ["!old:localhost", "!shared:localhost", "!gone:localhost"] {
+        insert_at(
+            &pool,
+            account_id,
+            device_a,
+            key,
+            Some(json!({ "by": "A" })),
+            long_ago,
+        )
+        .await;
+    }
+
+    let first = store
+        .read_device_state(account_id, "read_markers", None)
+        .await
+        .expect("full read");
+    assert!(first.full, "a read without a cursor is full");
+    assert_eq!(first.rows.len(), 3);
+
+    store
+        .upsert_device_state(&DeviceStateUpsert {
+            account_id,
+            device_id: device_b,
+            namespace: "read_markers",
+            entries: &[
+                ("!shared:localhost".to_owned(), Some(json!({ "by": "B" }))),
+                ("!gone:localhost".to_owned(), None),
+            ],
+        })
+        .await
+        .expect("B writes");
+    store
+        .upsert_device_state(&DeviceStateUpsert {
+            account_id,
+            device_id: device_b,
+            namespace: "drafts",
+            entries: &[("!old:localhost".to_owned(), Some(json!({ "text": "x" })))],
+        })
+        .await
+        .expect("other namespace");
+
+    let delta = store
+        .read_device_state(account_id, "read_markers", Some(first.as_of))
+        .await
+        .expect("delta read");
+    assert!(!delta.full, "a cursor from this clock gets a delta");
+    assert!(
+        delta.as_of >= first.as_of,
+        "the cursor never moves backwards"
+    );
+    let keys: Vec<&str> = delta.rows.iter().map(|r| r.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["!gone:localhost", "!shared:localhost"],
+        "only the written keys, by key"
+    );
+    assert_eq!(delta.rows[0].device_id, device_b);
+    assert!(
+        delta.rows[0].value.is_none(),
+        "a deleted key is a tombstone in a delta"
+    );
+    assert_eq!(delta.rows[1].device_id, device_b, "the newest write wins");
+    assert_eq!(delta.rows[1].value.as_ref().unwrap()["by"], "B");
+
+    // The full read still hides the tombstone.
+    let full = store
+        .read_device_state(account_id, "read_markers", None)
+        .await
+        .expect("full read again");
+    let keys: Vec<&str> = full.rows.iter().map(|r| r.key.as_str()).collect();
+    assert_eq!(keys, ["!old:localhost", "!shared:localhost"]);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A write whose statement started before a read but committed after it has
+/// an `updated_at` older than the read's cursor. The delta reaches back by the
+/// overlap to catch it, and no further (ADR 0131).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn delta_reaches_back_by_the_overlap() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "ds-overlap").await;
+    let device = Uuid::new_v4();
+    let overlap = store.device_state_overlap();
+    assert_eq!(
+        overlap,
+        chrono::Duration::minutes(5),
+        "default statement timeout → floor"
+    );
+
+    let read = store
+        .read_device_state(account_id, "read_markers", None)
+        .await
+        .expect("full read");
+    assert!(read.rows.is_empty());
+
+    // Both land after the read; one started inside the overlap, one before it.
+    let late = read.as_of - overlap + chrono::Duration::seconds(5);
+    let too_late = read.as_of - overlap - chrono::Duration::seconds(5);
+    insert_at(
+        &pool,
+        account_id,
+        device,
+        "!late:localhost",
+        Some(json!(1)),
+        late,
+    )
+    .await;
+    insert_at(
+        &pool,
+        account_id,
+        device,
+        "!ancient:localhost",
+        Some(json!(2)),
+        too_late,
+    )
+    .await;
+
+    let delta = store
+        .read_device_state(account_id, "read_markers", Some(read.as_of))
+        .await
+        .expect("delta read");
+    assert!(!delta.full);
+    let keys: Vec<&str> = delta.rows.iter().map(|r| r.key.as_str()).collect();
+    assert_eq!(keys, ["!late:localhost"], "inside the overlap only");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A cursor later than the database clock did not come from it, so the read is
+/// served in full instead of as a delta that could miss writes (ADR 0131).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cursor_from_the_future_reads_in_full() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "ds-future").await;
+    let device = Uuid::new_v4();
+    let long_ago = chrono::Utc::now() - chrono::Duration::hours(2);
+    insert_at(
+        &pool,
+        account_id,
+        device,
+        "!kept:localhost",
+        Some(json!(1)),
+        long_ago,
+    )
+    .await;
+    insert_at(
+        &pool,
+        account_id,
+        device,
+        "!deleted:localhost",
+        None,
+        long_ago,
+    )
+    .await;
+
+    let future = chrono::Utc::now() + chrono::Duration::hours(1);
+    let read = store
+        .read_device_state(account_id, "read_markers", Some(future))
+        .await
+        .expect("read");
+    assert!(read.full, "a future cursor is answered in full");
+    let keys: Vec<&str> = read.rows.iter().map(|r| r.key.as_str()).collect();
+    assert_eq!(keys, ["!kept:localhost"], "a full read omits tombstones");
+    assert!(read.as_of < future);
+
+    common::cleanup_account(&pool, account_id).await;
+}
