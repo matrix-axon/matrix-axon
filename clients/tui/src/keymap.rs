@@ -10,10 +10,13 @@ use crate::command;
 use crate::command::HELP_COMMANDS;
 use crate::search::{SearchFormField, SEARCH_HELP_TEXT};
 
-/// `r` and `p` in the device picker: the exact lowercase letter, with no modifiers.
+/// `r` and `p` in the device picker: the exact lowercase letter.
 ///
-/// `p` closes the list, so Shift and Caps Lock must not trigger it. Same rule
-/// as `reject_invite`, which is also a bare `r` unless the user rebinds it.
+/// Shift, Ctrl, Alt, Super, Hyper, and Meta do not match. An uppercase `R`
+/// does not match either, including when Caps Lock produced it. Caps Lock and
+/// Num Lock on a lowercase press are `KeyEvent.state` in crossterm 0.29, not
+/// modifier bits, so this check leaves them alone. `reject_invite` goes
+/// through `KeyBinding::matches`, which compares modifiers the same way.
 fn device_picker_letter(key: KeyEvent, letter: char) -> bool {
     matches!(key.code, KeyCode::Char(ch) if ch == letter && key.modifiers.is_empty())
 }

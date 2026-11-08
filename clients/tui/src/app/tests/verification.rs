@@ -4,9 +4,10 @@
 use std::time::{Duration, Instant};
 
 use super::support::*;
-use crate::api::{DeviceListDto, DeviceListEntryDto, HTTP_REQUEST_TIMEOUT};
+use crate::api::{AxonClient, DeviceListDto, DeviceListEntryDto, HTTP_REQUEST_TIMEOUT};
 use crate::app::*;
 use crate::ui::device_picker_lines;
+use crossterm::event::{KeyEventKind, KeyEventState};
 use unicode_width::UnicodeWidthChar;
 
 fn outgoing_flow() -> VerificationFlow {
@@ -207,6 +208,14 @@ fn enable_verification_send(app: &mut App) {
     app.set_lifecycle_sender(tx);
 }
 
+/// The picker refuses to open with no lifecycle sender, because that GET
+/// cannot report back. Point the client at a closed port so the spawned list
+/// fails immediately and its outcome is dropped with the receiver.
+fn allow_picker_fetch(app: &mut App) {
+    app.client = AxonClient::new("http://127.0.0.1:1".to_owned(), None);
+    enable_verification_send(app);
+}
+
 fn signed_in_app(device_id: Option<&str>) -> App {
     let mut app = app_with_rooms(Vec::new());
     let mut account = account_with_id(
@@ -297,11 +306,24 @@ fn device_picker_rows_drop_own_device_and_sort() {
     assert_eq!(rows[2].label, "Phone");
     assert_eq!(rows[3].label, "Unnamed device");
     assert_eq!(rows[4].label, "Unnamed device");
+
+    let dirty = device_picker_rows(
+        &[
+            device("ZZZ", Some("\n\u{1b}[31m\u{202e}phone\t"), false),
+            device("YYY", Some(" \n\u{202e}\t"), false),
+        ],
+        "SELF",
+    );
+    assert_eq!(dirty[0].label, "[31mphone");
+    assert_eq!(dirty[1].label, "Unnamed device");
+    assert!(!dirty[0].label.chars().any(char::is_control));
+    assert!(!dirty[0].label.contains('\u{202e}'));
 }
 
 #[tokio::test]
 async fn bare_verify_opens_the_device_picker() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
 
     assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
@@ -360,6 +382,7 @@ async fn explicit_verify_targets_skip_the_picker() {
 #[tokio::test]
 async fn device_list_fills_the_open_picker_and_ignores_stale_results() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
 
@@ -421,6 +444,7 @@ async fn device_list_fills_the_open_picker_and_ignores_stale_results() {
 #[tokio::test]
 async fn failed_device_list_stays_open_until_retry() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
     app.handle_lifecycle_outcome(LifecycleOutcome::DevicesListed {
@@ -456,6 +480,7 @@ async fn failed_device_list_stays_open_until_retry() {
 #[tokio::test]
 async fn enter_verifies_the_selected_device_and_p_returns_to_paste() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
         .await;
@@ -474,6 +499,7 @@ async fn enter_verifies_the_selected_device_and_p_returns_to_paste() {
     assert_eq!(app.verification.as_ref().unwrap().device_id, "BBB");
 
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()))
         .await;
@@ -487,6 +513,7 @@ async fn enter_verifies_the_selected_device_and_p_returns_to_paste() {
 #[tokio::test]
 async fn esc_closes_the_picker_and_an_incoming_request_replaces_it() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
@@ -522,6 +549,7 @@ fn device_picker_lines_mark_the_selection_and_fit_the_width() {
         account_id: Uuid::from_u128(PICKER_ACCOUNT),
         generation: 1,
         loading_since: Instant::now(),
+        refreshing: false,
         phase: DevicePickerPhase::Ready,
         selection: 1,
         rows: vec![
@@ -599,6 +627,7 @@ fn device_picker_lines_mark_the_selection_and_fit_the_width() {
 async fn device_picker_hides_the_list_until_this_session_is_known() {
     for unknown in [None, Some("")] {
         let mut app = signed_in_app(unknown);
+        allow_picker_fetch(&mut app);
         app.handle_command(Command::Verify(None)).await;
         assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
         assert_eq!(
@@ -631,6 +660,7 @@ async fn device_picker_hides_the_list_until_this_session_is_known() {
     }
 
     let mut app = signed_in_app(None);
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let before = picker_generation(&app);
     let mut account = app.accounts.client_visible[0].clone();
@@ -651,6 +681,7 @@ async fn device_picker_hides_the_list_until_this_session_is_known() {
 #[tokio::test]
 async fn retry_during_loading_does_not_start_another_list() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
@@ -667,9 +698,11 @@ async fn retry_during_loading_does_not_start_another_list() {
 #[tokio::test]
 async fn enter_without_a_sender_keeps_the_device_list() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
     apply_devices(&mut app, generation, sample_devices()).await;
+    app.lifecycle_tx = None;
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
         .await;
     assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
@@ -684,6 +717,7 @@ async fn enter_without_a_sender_keeps_the_device_list() {
 #[tokio::test]
 async fn enter_verifies_the_account_the_list_was_opened_for() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
     apply_devices(&mut app, generation, sample_devices()).await;
@@ -738,6 +772,7 @@ async fn explicit_verify_still_uses_the_current_account_filter() {
 #[tokio::test]
 async fn retry_after_the_http_timeout_starts_another_list() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
     let bound = HTTP_REQUEST_TIMEOUT + Duration::from_secs(1);
@@ -753,8 +788,9 @@ async fn retry_after_the_http_timeout_starts_another_list() {
 }
 
 #[tokio::test]
-async fn device_picker_letters_ignore_shift_and_caps() {
+async fn device_picker_letters_ignore_shift_and_honor_lock_state() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
     apply_devices(&mut app, generation, sample_devices()).await;
@@ -773,15 +809,215 @@ async fn device_picker_letters_ignore_shift_and_caps() {
         DevicePickerPhase::Ready
     );
     assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+
+    app.handle_key(KeyEvent::new_with_kind_and_state(
+        KeyCode::Char('r'),
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+        KeyEventState::CAPS_LOCK | KeyEventState::NUM_LOCK,
+    ))
+    .await;
+    assert_ne!(picker_generation(&app), generation);
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Ready
+    );
+    assert!(app.device_picker.as_ref().unwrap().refreshing);
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+
+    app.handle_key(KeyEvent::new_with_kind_and_state(
+        KeyCode::Char('p'),
+        KeyModifiers::empty(),
+        KeyEventKind::Press,
+        KeyEventState::NUM_LOCK,
+    ))
+    .await;
+    assert_eq!(app.mode, Mode::Compose);
+    assert_eq!(app.input.buffer, "/verify ");
 }
 
 #[tokio::test]
 async fn leaving_the_picker_by_message_navigation_drops_it() {
     let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
     app.handle_command(Command::Verify(None)).await;
     assert!(app.device_picker.is_some());
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
         .await;
     assert_eq!(app.mode, Mode::MessageList);
     assert!(app.device_picker.is_none());
+}
+
+#[tokio::test]
+async fn bare_verify_without_a_sender_stays_closed() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    assert_eq!(app.mode, Mode::Compose);
+    assert!(app.device_picker.is_none());
+    assert_eq!(app.status.text(false), VERIFICATION_NOT_RUNNING);
+}
+
+#[tokio::test]
+async fn verify_does_not_replace_a_verification_in_progress() {
+    let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
+    let mut flow = outgoing_flow();
+    flow.account_id = Uuid::from_u128(PICKER_ACCOUNT);
+    flow.stage = VerificationStage::Compare;
+    app.verification = Some(flow);
+    app.handle_command(Command::Verify(None)).await;
+    assert!(app.device_picker.is_none());
+    assert_eq!(app.status.text(false), VERIFICATION_IN_PROGRESS);
+    assert_eq!(
+        app.verification.as_ref().unwrap().stage,
+        VerificationStage::Compare
+    );
+
+    app.handle_command(Command::Verify(Some("ABCDEF".to_owned())))
+        .await;
+    assert_eq!(app.verification.as_ref().unwrap().device_id, "DEV");
+    assert_eq!(
+        app.verification.as_ref().unwrap().stage,
+        VerificationStage::Compare
+    );
+
+    app.verification.as_mut().unwrap().stage = VerificationStage::Done;
+    app.handle_command(Command::Verify(Some("ABCDEF".to_owned())))
+        .await;
+    assert_eq!(app.mode, Mode::Verification);
+    assert_eq!(app.verification.as_ref().unwrap().device_id, "ABCDEF");
+}
+
+#[tokio::test]
+async fn enter_does_not_replace_a_verification_in_progress() {
+    let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    app.verification = Some(outgoing_flow());
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+        .await;
+    assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+    assert!(app.device_picker.is_some());
+    assert_eq!(app.verification.as_ref().unwrap().device_id, "DEV");
+    assert_eq!(app.status.text(false), VERIFICATION_IN_PROGRESS);
+}
+
+#[tokio::test]
+async fn failed_refresh_keeps_the_ready_list() {
+    let mut app = signed_in_app(Some("SELF"));
+    allow_picker_fetch(&mut app);
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()))
+        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    let generation = picker_generation(&app);
+    let picker = app.device_picker.as_ref().unwrap();
+    assert_eq!(picker.phase, DevicePickerPhase::Ready);
+    assert!(picker.refreshing);
+    assert_eq!(picker.selection, 1);
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+    assert_eq!(app.status.text(false), DEVICE_PICKER_REFRESHING);
+    let text = device_picker_lines(&app, 40)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("Refreshing"));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    assert_eq!(picker_generation(&app), generation);
+
+    app.handle_lifecycle_outcome(LifecycleOutcome::DevicesListed {
+        account_id: Uuid::from_u128(PICKER_ACCOUNT),
+        generation,
+        result: Err("HTTP 500: devices unavailable".to_owned()),
+    })
+    .await;
+    let picker = app.device_picker.as_ref().unwrap();
+    assert_eq!(picker.phase, DevicePickerPhase::Ready);
+    assert!(!picker.refreshing);
+    assert_eq!(picker.selection, 1);
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+    assert!(app
+        .status
+        .text(false)
+        .contains("Could not refresh the device list"));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    let generation = picker_generation(&app);
+    apply_devices(
+        &mut app,
+        generation,
+        vec![device("AAA", Some("Laptop"), true)],
+    )
+    .await;
+    assert_eq!(row_ids(&app), vec!["AAA"]);
+    assert_eq!(app.device_picker.as_ref().unwrap().selection, 0);
+    assert!(!app.device_picker.as_ref().unwrap().refreshing);
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Ready
+    );
+}
+
+#[tokio::test]
+async fn unknown_self_r_rereads_the_account_list() {
+    let mut app = signed_in_app(None);
+    app.client = AxonClient::new("http://127.0.0.1:1".to_owned(), None);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.set_lifecycle_sender(tx);
+    app.handle_command(Command::Verify(None)).await;
+    let before = picker_generation(&app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    let generation = picker_generation(&app);
+    assert_ne!(generation, before);
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::UnknownSelf
+    );
+    assert!(app.device_picker.as_ref().unwrap().refreshing);
+    assert_eq!(app.status.text(false), DEVICE_PICKER_CHECKING_SELF);
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    assert_eq!(picker_generation(&app), generation);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("account refresh timed out")
+        .expect("account refresh outcome");
+    app.handle_lifecycle_outcome(outcome).await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::UnknownSelf
+    );
+    assert!(!app.device_picker.as_ref().unwrap().refreshing);
+    assert!(app
+        .status
+        .text(false)
+        .contains("Could not refresh accounts"));
+
+    let mut account = app.accounts.client_visible[0].clone();
+    account.device_id = Some("SELF".to_owned());
+    app.handle_lifecycle_outcome(LifecycleOutcome::DevicePickerAccounts {
+        account_id: Uuid::from_u128(PICKER_ACCOUNT),
+        generation: picker_generation(&app),
+        result: Ok(vec![account]),
+    })
+    .await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+    assert_eq!(
+        app.accounts.client_visible[0].device_id.as_deref(),
+        Some("SELF")
+    );
 }

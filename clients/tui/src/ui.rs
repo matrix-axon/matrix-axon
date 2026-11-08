@@ -2699,7 +2699,7 @@ pub(crate) fn device_picker_lines(app: &App, width: usize) -> Vec<Line<'static>>
     let Some(picker) = app.device_picker.as_ref() else {
         return plain_popup_lines(DEVICE_PICKER_LOADING, width, Style::default());
     };
-    match &picker.phase {
+    let mut lines = match &picker.phase {
         DevicePickerPhase::Loading => {
             plain_popup_lines(DEVICE_PICKER_LOADING, width, Style::default())
         }
@@ -2737,7 +2737,16 @@ pub(crate) fn device_picker_lines(app: &App, width: usize) -> Vec<Line<'static>>
                 Line::from(Span::styled(text, style))
             })
             .collect(),
+    };
+    if picker.refreshing && matches!(picker.phase, DevicePickerPhase::Ready) {
+        lines.push(Line::from(""));
+        lines.extend(plain_popup_lines(
+            "Refreshing…",
+            width,
+            Style::default().fg(app.colors.input_hint),
+        ));
     }
+    lines
 }
 
 fn plain_popup_lines(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {

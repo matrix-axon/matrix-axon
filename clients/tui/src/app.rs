@@ -619,11 +619,25 @@ pub(crate) const DEVICE_PICKER_EMPTY: &str =
 pub(crate) const DEVICE_PICKER_LOADING: &str = "Loading devices…";
 
 /// The account has no Matrix device id, so the list would include this session.
-pub(crate) const DEVICE_PICKER_UNKNOWN_SELF: &str = "This session's device id is not known yet, so the list stays hidden. Press r to retry, or p to paste a device id.";
+///
+/// `r` re-reads the account list. It does not fetch devices until that id exists.
+pub(crate) const DEVICE_PICKER_UNKNOWN_SELF: &str = "This session's device id is not known yet, so the list stays hidden. Press r to check again, or p to paste a device id.";
+
+/// Entry line while `r` re-reads accounts to learn this session's device id.
+pub(crate) const DEVICE_PICKER_CHECKING_SELF: &str = "Checking this session's device id…";
+
+/// Entry line while a visible device list is fetched again.
+pub(crate) const DEVICE_PICKER_REFRESHING: &str = "Refreshing devices…";
 
 /// Entry-line summary when the device list request fails. The popup shows the
 /// API error itself.
 pub(crate) const DEVICE_PICKER_FAILED: &str = "Could not list devices.";
+
+/// Bare `/verify` while a non-terminal SAS flow is already open.
+pub(crate) const VERIFICATION_IN_PROGRESS: &str = "a verification is already in progress";
+
+/// Bare `/verify` when this process has no lifecycle sender, so a list cannot load.
+pub(crate) const VERIFICATION_NOT_RUNNING: &str = "verification is not running";
 
 /// One row in the SAS device picker, after this session's own device is removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -655,6 +669,9 @@ pub(crate) struct DevicePicker {
     /// When the current load started. `r` ignores a `Loading` picker until
     /// the list request has had its HTTP timeout.
     pub(crate) loading_since: Instant,
+    /// A ready list is being fetched again, or an unknown device id is
+    /// waiting on an account-list read. Cleared when that outcome is applied.
+    pub(crate) refreshing: bool,
     pub(crate) phase: DevicePickerPhase,
     pub(crate) rows: Vec<DevicePickerRow>,
     pub(crate) selection: usize,
@@ -689,10 +706,49 @@ pub(crate) fn device_picker_rows(
 }
 
 fn device_picker_label(name: Option<&str>) -> String {
-    match name.map(str::trim).filter(|name| !name.is_empty()) {
-        Some(name) => name.to_owned(),
+    match name
+        .map(sanitize_device_label)
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => name,
         None => "Unnamed device".to_owned(),
     }
+}
+
+/// A homeserver display name is drawn as one terminal row.
+///
+/// Control characters (newlines, tabs, ESC) and bidi overrides can break
+/// that row or make the trust word look like part of the name. Whitespace
+/// controls become a space. The rest are dropped, then the name is trimmed.
+fn sanitize_device_label(name: &str) -> String {
+    name.chars()
+        .filter_map(|ch| match ch {
+            '\n' | '\r' | '\t' => Some(' '),
+            ch if ch.is_control() || is_bidi_control(ch) => None,
+            ch => Some(ch),
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// Directional marks, embeddings, overrides, and isolates.
+fn is_bidi_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'
+            | '\u{202B}'
+            | '\u{202C}'
+            | '\u{202D}'
+            | '\u{202E}'
+            | '\u{2066}'
+            | '\u{2067}'
+            | '\u{2068}'
+            | '\u{2069}'
+    )
 }
 
 #[derive(Debug, Clone, Default)]
