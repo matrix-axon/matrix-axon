@@ -19,7 +19,7 @@ use crate::search::SearchRequest;
 const LIVE_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const LIVE_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Timeout for read-only / probe requests (list calls, timeline fetches, etc.).
-const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Message-mutation timeout. These routes can block on the sync engine acquiring
 /// encryption keys; lifecycle operations such as recovery are deliberately not
 /// capped here because their documented work can legitimately exceed 60 seconds.

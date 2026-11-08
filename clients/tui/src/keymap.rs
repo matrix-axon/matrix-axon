@@ -10,13 +10,12 @@ use crate::command;
 use crate::command::HELP_COMMANDS;
 use crate::search::{SearchFormField, SEARCH_HELP_TEXT};
 
-/// `r`/`p` in the device picker, including Shift, and not when Ctrl or Alt is held.
+/// `r` and `p` in the device picker: the exact lowercase letter, with no modifiers.
+///
+/// `p` closes the list, so Shift and Caps Lock must not trigger it. Same rule
+/// as `reject_invite`, which is also a bare `r` unless the user rebinds it.
 fn device_picker_letter(key: KeyEvent, letter: char) -> bool {
-    let KeyCode::Char(ch) = key.code else {
-        return false;
-    };
-    ch.eq_ignore_ascii_case(&letter)
-        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+    matches!(key.code, KeyCode::Char(ch) if ch == letter && key.modifiers.is_empty())
 }
 
 /// A character to insert into the member filter.

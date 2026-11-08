@@ -1,10 +1,12 @@
+use std::time::{Duration, Instant};
+
 use ruma::OwnedUserId;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::api::{
     AccountDto, AccountState, BackupAction, DeviceListDto, EnableBackupResponse, FlowDto,
-    VerificationFrameDto,
+    VerificationFrameDto, HTTP_REQUEST_TIMEOUT,
 };
 
 use super::{
@@ -145,6 +147,23 @@ pub(crate) enum LifecycleOutcome {
 pub(crate) enum VerifyResyncError {
     NotFound,
     Other(String),
+}
+
+/// Result of launching an outgoing SAS flow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[must_use]
+enum OutgoingVerification {
+    Started,
+    /// No lifecycle sender. Unit tests omit it; production installs one
+    /// before the loop. That is not a user-visible failure.
+    NotRunning,
+}
+
+/// A `Loading` picker whose GET should still answer. Compared with `<` so
+/// `r` at the bound can replace a request that never reported back.
+fn device_list_load_is_in_flight(picker: &DevicePicker) -> bool {
+    matches!(picker.phase, DevicePickerPhase::Loading)
+        && picker.loading_since.elapsed() < HTTP_REQUEST_TIMEOUT + Duration::from_secs(1)
 }
 
 impl App {
@@ -467,16 +486,27 @@ impl App {
                 return;
             }
         };
+        let _ = self.launch_outgoing_verification(account_id, target, is_user);
+    }
+
+    /// Start SAS for an account the caller already chose.
+    ///
+    /// The device picker passes the account it listed. A pasted `/verify`
+    /// resolves the account first, then calls this. No sender means this is
+    /// not the running TUI: leave the mode alone, and do not dial.
+    fn launch_outgoing_verification(
+        &mut self,
+        account_id: Uuid,
+        target: String,
+        is_user: bool,
+    ) -> OutgoingVerification {
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return OutgoingVerification::NotRunning;
+        };
         let (user_id, device_id) = if is_user {
             (target.clone(), String::new())
         } else {
             (String::new(), target.clone())
-        };
-        // No sender means this is not the running TUI (unit tests omit it).
-        // Leave the mode alone rather than opening a modal that can never
-        // finish, and do not dial the homeserver.
-        let Some(tx) = self.lifecycle_tx.clone() else {
-            return;
         };
         self.verification = Some(VerificationFlow {
             account_id,
@@ -504,6 +534,7 @@ impl App {
                 .map_err(|err| err.to_string());
             let _ = tx.send(LifecycleOutcome::VerifyStarted { account_id, result });
         });
+        OutgoingVerification::Started
     }
 
     /// Open the SAS device picker for the account `/verify` would target.
@@ -519,6 +550,7 @@ impl App {
         self.device_picker = Some(DevicePicker {
             account_id,
             generation: self.device_picker_generation,
+            loading_since: Instant::now(),
             phase: DevicePickerPhase::Loading,
             rows: Vec::new(),
             selection: 0,
@@ -532,15 +564,16 @@ impl App {
         self.begin_device_load();
     }
 
-    /// Ask for the list again. Ignored while a request is already in flight,
-    /// so holding `r` does not stack one GET per key repeat. A ready list,
-    /// including an empty one, can still be refreshed.
+    /// Ask for the list again. Ignored while a load is still inside the HTTP
+    /// timeout, so holding `r` does not stack one GET per key repeat. Past
+    /// that bound, `r` starts another load and a late response is stale.
+    /// A ready list, including an empty one, can still be refreshed.
     pub(crate) fn retry_device_picker(&mut self) {
         if !matches!(self.mode, Mode::Popup(PopupKind::DevicePicker)) {
             return;
         }
         let Some(account_id) = self.device_picker.as_ref().and_then(|picker| {
-            if matches!(picker.phase, DevicePickerPhase::Loading) {
+            if device_list_load_is_in_flight(picker) {
                 None
             } else {
                 Some(picker.account_id)
@@ -561,6 +594,7 @@ impl App {
         let generation = self.device_picker_generation;
         if let Some(picker) = self.device_picker.as_mut() {
             picker.generation = generation;
+            picker.loading_since = Instant::now();
             picker.phase = DevicePickerPhase::Loading;
             picker.rows.clear();
             picker.selection = 0;
@@ -696,38 +730,28 @@ impl App {
     }
 
     /// Enter on a row. Loading, empty, and failed lists do not start a flow.
+    ///
+    /// The account is the one the picker listed. Re-resolving from the
+    /// current filter would verify device X against whichever account became
+    /// selected while the list was open.
     pub(crate) fn verify_selected_device(&mut self) {
-        let Some(device_id) = self.device_picker.as_ref().and_then(|picker| {
+        let Some((account_id, device_id)) = self.device_picker.as_ref().and_then(|picker| {
             if !matches!(picker.phase, DevicePickerPhase::Ready) {
                 return None;
             }
             picker
                 .rows
                 .get(picker.selection)
-                .map(|row| row.device_id.clone())
+                .map(|row| (picker.account_id, row.device_id.clone()))
         }) else {
             return;
         };
-        self.start_verification(Some(device_id));
-        if matches!(self.mode, Mode::Verification) {
+        if self.launch_outgoing_verification(account_id, device_id, false)
+            == OutgoingVerification::Started
+        {
             self.device_picker = None;
             self.popup_scroll = 0;
-            return;
         }
-        // The popup covers the entry line, so a refusal has to land in the
-        // body or Enter looks dead.
-        let message = self.status.text(false);
-        let message = if message.is_empty() {
-            "Could not start verification.".to_owned()
-        } else {
-            message
-        };
-        if let Some(picker) = self.device_picker.as_mut() {
-            picker.rows.clear();
-            picker.selection = 0;
-            picker.phase = DevicePickerPhase::Failed(message);
-        }
-        self.popup_scroll = 0;
     }
 
     /// Leave the picker with `/verify ` in the composer so a device id can be pasted.

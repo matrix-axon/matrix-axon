@@ -1,8 +1,10 @@
 //! Interactive-verification flow state: SAS frames, stage transitions, and
 //! binding a server frame to a pending outgoing request.
 
+use std::time::{Duration, Instant};
+
 use super::support::*;
-use crate::api::{DeviceListDto, DeviceListEntryDto};
+use crate::api::{DeviceListDto, DeviceListEntryDto, HTTP_REQUEST_TIMEOUT};
 use crate::app::*;
 use crate::ui::device_picker_lines;
 use unicode_width::UnicodeWidthChar;
@@ -519,6 +521,7 @@ fn device_picker_lines_mark_the_selection_and_fit_the_width() {
     app.device_picker = Some(DevicePicker {
         account_id: Uuid::from_u128(PICKER_ACCOUNT),
         generation: 1,
+        loading_since: Instant::now(),
         phase: DevicePickerPhase::Ready,
         selection: 1,
         rows: vec![
@@ -567,6 +570,20 @@ fn device_picker_lines_mark_the_selection_and_fit_the_width() {
     assert!(!wide_texts[0].contains("電話電話電話"));
     assert!(wide_texts[1].contains("not verified"));
     assert!(wide_texts[1].starts_with('>'));
+
+    // A few columns cannot hold the trust word. The marker stays at the head.
+    let tiny = 3;
+    let tiny_lines = device_picker_lines(&app, tiny);
+    let tiny_texts: Vec<String> = tiny_lines.iter().map(line_text).collect();
+    for text in &tiny_texts {
+        assert!(
+            line_columns(text) <= tiny,
+            "{text} is {} columns",
+            line_columns(text)
+        );
+    }
+    assert!(tiny_texts[1].starts_with('>'));
+    assert!(tiny_texts[0].starts_with(' '));
 
     app.device_picker.as_mut().unwrap().phase = DevicePickerPhase::Ready;
     app.device_picker.as_mut().unwrap().rows.clear();
@@ -648,7 +665,24 @@ async fn retry_during_loading_does_not_start_another_list() {
 }
 
 #[tokio::test]
-async fn enter_shows_a_refusal_inside_the_picker() {
+async fn enter_without_a_sender_keeps_the_device_list() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+        .await;
+    assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Ready
+    );
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+    assert_eq!(app.status.text(false), "Select a device to verify");
+}
+
+#[tokio::test]
+async fn enter_verifies_the_account_the_list_was_opened_for() {
     let mut app = signed_in_app(Some("SELF"));
     app.handle_command(Command::Verify(None)).await;
     let generation = picker_generation(&app);
@@ -665,18 +699,80 @@ async fn enter_shows_a_refusal_inside_the_picker() {
             AccountState::Active,
         ),
     ]);
-    // set_accounts keeps the previous account selected. All is the refusal.
-    app.accounts.selected = AccountSelection::All;
+    app.accounts.selected = AccountSelection::Account(1);
+    assert_eq!(app.active_account_filter(), Some(Uuid::from_u128(8)));
+    enable_verification_send(&mut app);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
         .await;
-    assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
-    match &app.device_picker.as_ref().unwrap().phase {
-        DevicePickerPhase::Failed(message) => {
-            assert!(message.contains("select an account"), "{message}");
-        }
-        other => panic!("expected a refusal in the picker, got {other:?}"),
+    assert_eq!(app.mode, Mode::Verification);
+    assert!(app.device_picker.is_none());
+    let flow = app.verification.as_ref().expect("flow");
+    assert_eq!(flow.account_id, Uuid::from_u128(PICKER_ACCOUNT));
+    assert_eq!(flow.device_id, "AAA");
+}
+
+#[tokio::test]
+async fn explicit_verify_still_uses_the_current_account_filter() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.set_accounts(vec![
+        account_with_id(
+            Uuid::from_u128(PICKER_ACCOUNT),
+            "@me:example.com",
+            AccountState::Active,
+        ),
+        account_with_id(
+            Uuid::from_u128(8),
+            "@other:example.com",
+            AccountState::Active,
+        ),
+    ]);
+    app.accounts.selected = AccountSelection::All;
+    enable_verification_send(&mut app);
+    app.handle_command(Command::Verify(Some("ABCDEF".to_owned())))
+        .await;
+    assert_ne!(app.mode, Mode::Verification);
+    assert!(app.device_picker.is_none());
+    assert!(app.status.text(false).contains("select an account"));
+}
+
+#[tokio::test]
+async fn retry_after_the_http_timeout_starts_another_list() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    let bound = HTTP_REQUEST_TIMEOUT + Duration::from_secs(1);
+    app.device_picker.as_mut().unwrap().loading_since =
+        Instant::now().checked_sub(bound).expect("bound fits");
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    assert_ne!(picker_generation(&app), generation);
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+}
+
+#[tokio::test]
+async fn device_picker_letters_ignore_shift_and_caps() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    for key in [
+        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::empty()),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::empty()),
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::SHIFT),
+    ] {
+        app.handle_key(key).await;
     }
-    assert!(app.device_picker.as_ref().unwrap().rows.is_empty());
+    assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+    assert_eq!(picker_generation(&app), generation);
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Ready
+    );
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
 }
 
 #[tokio::test]

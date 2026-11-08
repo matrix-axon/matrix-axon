@@ -652,6 +652,9 @@ pub(crate) enum DevicePickerPhase {
 pub(crate) struct DevicePicker {
     pub(crate) account_id: Uuid,
     pub(crate) generation: u64,
+    /// When the current load started. `r` ignores a `Loading` picker until
+    /// the list request has had its HTTP timeout.
+    pub(crate) loading_since: Instant,
     pub(crate) phase: DevicePickerPhase,
     pub(crate) rows: Vec<DevicePickerRow>,
     pub(crate) selection: usize,

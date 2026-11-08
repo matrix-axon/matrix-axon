@@ -2801,24 +2801,23 @@ fn fit_device_row(
     if display_width(&trust_only) <= width {
         return trust_only;
     }
-    take_display_suffix(&trust_only, width)
+    // A suffix of the trust word drops `>` at a few columns (`ied`), so the
+    // selected row looks unselected. Keep the marker and cut from the front
+    // with the same width helper the rest of the row uses.
+    fit_marker_and_trust(marker, trust, width)
 }
 
-fn take_display_suffix(value: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
+fn fit_marker_and_trust(marker: char, trust: &str, width: usize) -> String {
+    let marker = marker.to_string();
+    let marker_width = display_width(&marker);
+    let gap_width = display_width(" ");
+    if marker_width + gap_width > width {
+        return take_display_width(&marker, width);
     }
-    let mut width = 0usize;
-    let mut start = value.len();
-    for (idx, ch) in value.char_indices().rev() {
-        let ch_width = ch.width_cjk().unwrap_or(1);
-        if width + ch_width > max_width {
-            break;
-        }
-        width += ch_width;
-        start = idx;
-    }
-    value[start..].to_owned()
+    let mut out = marker;
+    out.push(' ');
+    out.push_str(&take_display_width(trust, width - marker_width - gap_width));
+    out
 }
 
 fn popup_unread_thread_lines(
