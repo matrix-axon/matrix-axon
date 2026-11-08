@@ -95,10 +95,13 @@ pub(crate) struct ClientOptions {
     /// Extra trust anchors, so tests can reach an in-process HTTPS server.
     #[cfg(test)]
     pub(crate) extra_roots: Vec<reqwest::Certificate>,
-    /// The keep-alive interval and timeout, shortened so a test can watch a
-    /// ping go unanswered without waiting 40 s.
-    #[cfg(test)]
+    /// The HTTP/2 keep-alive interval and timeout. The app's are the
+    /// constants above; a test shortens them to watch a ping go unanswered
+    /// without waiting 40 s.
     pub(crate) keep_alive: (Duration, Duration),
+    /// HTTP/2 adaptive flow control, on in the app. A test turns it off to
+    /// show the failure it prevents.
+    pub(crate) adaptive_window: bool,
 }
 
 impl ClientOptions {
@@ -107,19 +110,9 @@ impl ClientOptions {
             user_agent,
             #[cfg(test)]
             extra_roots: Vec::new(),
-            #[cfg(test)]
             keep_alive: (H2_KEEP_ALIVE_INTERVAL, H2_KEEP_ALIVE_TIMEOUT),
+            adaptive_window: true,
         }
-    }
-
-    #[cfg(test)]
-    fn keep_alive(&self) -> (Duration, Duration) {
-        self.keep_alive
-    }
-
-    #[cfg(not(test))]
-    fn keep_alive(&self) -> (Duration, Duration) {
-        (H2_KEEP_ALIVE_INTERVAL, H2_KEEP_ALIVE_TIMEOUT)
     }
 }
 
@@ -131,7 +124,7 @@ pub(crate) fn build(
     counters: &Arc<Counters>,
     h2_only: bool,
 ) -> reqwest::Result<reqwest::Client> {
-    let (keep_alive_interval, keep_alive_timeout) = options.keep_alive();
+    let (keep_alive_interval, keep_alive_timeout) = options.keep_alive;
     let mut builder = reqwest::Client::builder()
         .user_agent(options.user_agent.as_str())
         .connect_timeout(CONNECT_TIMEOUT)
@@ -146,7 +139,7 @@ pub(crate) fn build(
         // hyper's estimate only ratchets up, to 16 MiB: a connection that
         // ramped up on a fast link keeps its window after the link slows.
         // See ADR 0127's 2026-11-07 amendment (#991).
-        .http2_adaptive_window(true)
+        .http2_adaptive_window(options.adaptive_window)
         // The transport follows redirects itself, choosing the client for
         // each hop.
         .redirect(redirect::Policy::none())

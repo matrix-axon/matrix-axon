@@ -330,7 +330,13 @@ pub(crate) const KEEP_ALIVE_DETAIL: &str = "KeepAlive";
 /// source of `hyper::Error::is_timeout`: hyper's other timeout, on reading
 /// request headers, is server-only. The OS's `ETIMEDOUT` arrives as an
 /// `io::Error` and does not make `is_timeout` true on a `hyper::Error`.
-/// `a_keep_alive_timeout_is_reported_as_keep_alive` pins this down.
+/// That is hyper 1.x's behaviour, not a promise, and this check runs before
+/// the connect-timeout branch: if a hyper or reqwest bump made another error
+/// `is_timeout`, it would read as `KeepAlive`. The keep-alive tests pin the
+/// keep-alive side (`a_keep_alive_timeout_is_reported_as_keep_alive`, and
+/// `without_the_adaptive_window_the_next_request_dies_with_the_connection`).
+/// Nothing pins the other side, so re-read hyper's `is_timeout` sources on
+/// an upgrade.
 fn is_keep_alive_timeout(causes: &[&(dyn StdError + 'static)]) -> bool {
     find::<hyper::Error>(causes).is_some_and(hyper::Error::is_timeout)
 }

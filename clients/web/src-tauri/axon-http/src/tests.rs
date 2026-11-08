@@ -1845,8 +1845,14 @@ impl BloatedLink {
         let pause = paused.clone();
         tokio::spawn(async move {
             loop {
-                let (client, _) = listener.accept().await.unwrap();
-                let server = TcpStream::connect(("127.0.0.1", upstream)).await.unwrap();
+                // A failure here drops the connection, so the test sees a
+                // transport error rather than a panic lost in this task.
+                let Ok((client, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(server) = TcpStream::connect(("127.0.0.1", upstream)).await else {
+                    continue;
+                };
                 let (mut client_read, mut client_write) = client.into_split();
                 let (mut server_read, mut server_write) = server.into_split();
                 tokio::spawn(async move {
@@ -1898,9 +1904,18 @@ impl BloatedLink {
 /// A transport whose keep-alive pings after `interval` and gives up after
 /// `timeout`, so a test can watch it in well under a second.
 fn keep_alive_transport(interval: Duration, timeout: Duration) -> Arc<Transport> {
+    keep_alive_transport_with(interval, timeout, true)
+}
+
+fn keep_alive_transport_with(
+    interval: Duration,
+    timeout: Duration,
+    adaptive_window: bool,
+) -> Arc<Transport> {
     let mut options = ClientOptions::new("Axon/test (test)".into());
     options.extra_roots = vec![reqwest::Certificate::from_der(CERT).unwrap()];
     options.keep_alive = (interval, timeout);
+    options.adaptive_window = adaptive_window;
     Arc::new(Transport::new(options).unwrap())
 }
 
@@ -1912,15 +1927,20 @@ async fn warm_link(transport: &Transport, link: &BloatedLink) {
     }
 }
 
-#[tokio::test]
-async fn a_busy_connection_survives_the_bodies_it_cancelled() {
-    // The device's failure: requests are cancelled at their deadline, but what
-    // the server already sent for them is still on its way. h2 discards it on
-    // arrival, so hyper sees no reads and pings. The ping's answer queues
-    // behind the discarded bytes. With hyper's fixed 2 MiB stream window, that
-    // is two seconds of this link against a 600 ms timeout, and the next
-    // request fails with the connection. The adaptive window keeps the
-    // backlog to about 64 KiB.
+/// The device's failure: requests are cancelled at their deadline, but what
+/// the server already sent for them is still on its way. h2 discards it on
+/// arrival, so hyper sees no reads and pings, and the ping's answer queues
+/// behind the discarded bytes.
+///
+/// This cancels an 8 MiB body on a 512 KiB/s link and sends a small request
+/// on the same connection, with a 500 ms / 1.5 s keep-alive. With hyper's
+/// fixed 2 MiB stream window the backlog is four seconds of link, against a
+/// close at about two. The adaptive window keeps it to about 64 KiB, an
+/// eighth of a second. Returns the small request's outcome, and whether the
+/// connection was replaced.
+async fn small_request_after_a_cancelled_body(
+    adaptive_window: bool,
+) -> (Result<(Head, Vec<u8>), crate::error::TransportError>, bool) {
     let server = Server::start(
         true,
         handler(|req: hyper::Request<Incoming>| async move {
@@ -1932,8 +1952,12 @@ async fn a_busy_connection_survives_the_bodies_it_cancelled() {
         }),
     )
     .await;
-    let link = BloatedLink::start(server.port, 1 << 20).await;
-    let transport = keep_alive_transport(Duration::from_millis(300), Duration::from_millis(600));
+    let link = BloatedLink::start(server.port, 512 << 10).await;
+    let transport = keep_alive_transport_with(
+        Duration::from_millis(500),
+        Duration::from_millis(1500),
+        adaptive_window,
+    );
     warm_link(&transport, &link).await;
     let opened = transport.stats().connections_opened;
 
@@ -1947,17 +1971,29 @@ async fn a_busy_connection_survives_the_bodies_it_cancelled() {
     let result = promptly(async {
         let head = transport.send(key(2), get(&link.url("/small"))).await?;
         let body = read_all(&transport, &key(2)).await;
-        Ok::<_, crate::error::TransportError>((head, body))
+        Ok((head, body))
     })
     .await;
+    (result, transport.stats().connections_opened != opened)
+}
+
+#[tokio::test]
+async fn a_busy_connection_survives_the_bodies_it_cancelled() {
+    let (result, replaced) = small_request_after_a_cancelled_body(true).await;
     let (head, body) = result.expect("the connection was closed under the next request");
     assert_eq!(head.status, 200);
     assert_eq!(body, b"ok");
-    assert_eq!(
-        transport.stats().connections_opened,
-        opened,
-        "the connection was replaced"
-    );
+    assert!(!replaced, "the connection was replaced");
+}
+
+#[tokio::test]
+async fn without_the_adaptive_window_the_next_request_dies_with_the_connection() {
+    // The control for the test above: it shows that setup reproduces the
+    // device's failure, so a pass there is the window's doing.
+    let (result, _) = small_request_after_a_cancelled_body(false).await;
+    let err = result.expect_err("the small request survived without the adaptive window");
+    assert_eq!(err.kind, Kind::Other);
+    assert_eq!(err.detail.as_deref(), Some(crate::error::KEEP_ALIVE_DETAIL));
 }
 
 #[tokio::test]

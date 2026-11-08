@@ -415,6 +415,11 @@ Data still arriving after the ping does not stop the timeout.
 2. **Keep-alive timeout 20 s** (was 10 s).
    With the queue bounded, this is margin rather than the fix.
    A connection that dies under load is still closed within 40 s of its last read.
+   That is longer than the page's 20 s request deadline, as the old 30 s already was.
+   A deadline cancels the request, not the connection, so a page request sent onto a link that has died silently, such as a dropped NAT mapping, can time out too until hyper closes it.
+   That exposure grows by 10 s.
+   Going back to 10 s is not supported by evidence, because the device runs changed both settings together: a ping's answer on a lossy link, such as Network Link Conditioner's Very Bad Network profile, can need several retransmissions, and a close of a working connection is the failure this amendment fixes.
+   Resume still gets a new client (§ 6).
 3. **Report it.** A request still waiting for headers when hyper closes the connection on a keep-alive fails as `kind=other detail=KeepAlive`.
    It was `other`/`TimedOut`, indistinguishable from the OS giving up.
    hyper's error type is private, but it is the only client-side source of `hyper::Error::is_timeout`.
@@ -425,7 +430,8 @@ Data still arriving after the ping does not stop the timeout.
    On a lossy link, what makes a handshake slow is retransmission, and a shorter timeout restarts the handshake from the beginning, throwing that progress away.
    Choosing a better number needs connect durations, which nothing records yet.
 
-**Verification.** Three tests use a proxy that buffers the server's output without limit and releases it at a fixed rate: a bufferbloated link.
-At 1 MB/s with a 300 ms / 600 ms keep-alive, a request whose 8 MiB body is cancelled must not take the next request down with the connection.
-With the adaptive window turned off, it does, failing as `KeepAlive`.
+**Verification.** Four tests use a proxy that buffers the server's output without limit and releases it at a fixed rate: a bufferbloated link.
+At 512 KiB/s with a 500 ms / 1.5 s keep-alive, a request whose 8 MiB body is cancelled must not take the next request down with the connection.
+A control test turns the adaptive window off (a `ClientOptions` field the app always leaves on) and expects exactly that failure, as `KeepAlive`, so the first test is known to exercise the bug.
+The margins are wide both ways: about 1/8 s of backlog against a close at about 2 s with the window, and 4 s against 2 s without it.
 With delivery paused, a request waiting for headers fails as `KeepAlive`, not `TimedOut`, and a body already being read fails as a plain `body`.
