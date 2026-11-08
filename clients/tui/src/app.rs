@@ -618,6 +618,13 @@ pub(crate) const DEVICE_PICKER_EMPTY: &str =
 
 pub(crate) const DEVICE_PICKER_LOADING: &str = "Loading devices…";
 
+/// The account has no Matrix device id, so the list would include this session.
+pub(crate) const DEVICE_PICKER_UNKNOWN_SELF: &str = "This session's device id is not known yet, so the list stays hidden. Press r to retry, or p to paste a device id.";
+
+/// Entry-line summary when the device list request fails. The popup shows the
+/// API error itself.
+pub(crate) const DEVICE_PICKER_FAILED: &str = "Could not list devices.";
+
 /// One row in the SAS device picker, after this session's own device is removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DevicePickerRow {
@@ -632,6 +639,8 @@ pub(crate) enum DevicePickerPhase {
     Loading,
     Ready,
     Failed(String),
+    /// This session's Matrix device id is missing, so no row is safe to verify.
+    UnknownSelf,
 }
 
 /// Target-selection state for bare `/verify`. One account, one generation.
@@ -649,14 +658,17 @@ pub(crate) struct DevicePicker {
 }
 
 /// Drop this session's device, then verified-first, then label, then id.
+///
+/// `own_device_id` must be non-empty. Callers that do not know it hide the
+/// list instead of passing an empty id, which would keep every device.
 pub(crate) fn device_picker_rows(
     devices: &[DeviceListEntryDto],
-    own_device_id: Option<&str>,
+    own_device_id: &str,
 ) -> Vec<DevicePickerRow> {
-    let own = own_device_id.filter(|id| !id.is_empty());
+    debug_assert!(!own_device_id.is_empty());
     let mut rows: Vec<DevicePickerRow> = devices
         .iter()
-        .filter(|device| own.is_none_or(|id| device.device_id != id))
+        .filter(|device| device.device_id != own_device_id)
         .map(|device| DevicePickerRow {
             device_id: device.device_id.clone(),
             label: device_picker_label(device.display_name.as_deref()),
@@ -996,7 +1008,8 @@ pub(crate) struct App {
     /// modal reads and mutates this; `None` whenever the modal is closed.
     pub(crate) verification: Option<VerificationFlow>,
     /// The open SAS device picker, when `Mode::Popup(PopupKind::DevicePicker)`
-    /// is showing. Cleared on Esc, paste, a started flow, or an incoming request.
+    /// is showing. Cleared when that popup is no longer the mode, including
+    /// Esc, paste, a started flow, and an incoming request.
     pub(crate) device_picker: Option<DevicePicker>,
     /// Monotonic id for device-list requests. Never reused, so a list from a
     /// closed picker cannot fill the next one.

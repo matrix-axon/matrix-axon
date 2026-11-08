@@ -15,7 +15,7 @@ use crate::app::{
     selected_line_style, AccountSelection, App, DevicePickerPhase, ImageState, MediaKey, Mode,
     PopupKind, ProtocolKey, ProtocolState, RoomFilter, RoomKey, SearchKind, Status,
     UnreadThreadEntry, VerificationDirection, VerificationFlow, VerificationStage,
-    DEVICE_PICKER_EMPTY, DEVICE_PICKER_LOADING, IMAGE_THUMB_ROWS,
+    DEVICE_PICKER_EMPTY, DEVICE_PICKER_LOADING, DEVICE_PICKER_UNKNOWN_SELF, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
@@ -184,6 +184,7 @@ fn command_response_needs_popup(app: &App, input_area: Rect) -> bool {
 /// the occlusion math no longer agrees with. Feeding both halves one area is
 /// what closes that.
 pub(crate) fn prepare(app: &mut App, screen: Rect) {
+    app.discard_device_picker_if_closed();
     let areas = pane_areas(app, screen);
     app.frame.areas = areas;
     prepare_accounts(app, &areas);
@@ -2712,6 +2713,9 @@ pub(crate) fn device_picker_lines(app: &App, width: usize) -> Vec<Line<'static>>
             ));
             lines
         }
+        DevicePickerPhase::UnknownSelf => {
+            plain_popup_lines(DEVICE_PICKER_UNKNOWN_SELF, width, Style::default())
+        }
         DevicePickerPhase::Ready if picker.rows.is_empty() => {
             plain_popup_lines(DEVICE_PICKER_EMPTY, width, Style::default())
         }
@@ -2737,9 +2741,16 @@ pub(crate) fn device_picker_lines(app: &App, width: usize) -> Vec<Line<'static>>
 }
 
 fn plain_popup_lines(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
-    wrap_display(text, width)
+    let width = width.max(1);
+    rich_lines_to_spans(wrap_rich_lines(plain_rich_lines(text), width, width))
         .into_iter()
-        .map(|line| Line::from(Span::styled(line, style)))
+        .map(|spans| {
+            let text = spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>();
+            Line::from(Span::styled(text, style))
+        })
         .collect()
 }
 
@@ -2772,79 +2783,42 @@ fn fit_device_row(
     if display_width(&without_label) <= width {
         return without_label;
     }
-    take_display_width(&without_label, width)
+    // The trust word is what the row is for. Truncate the device id before it,
+    // and only then give up characters from the trust word itself.
+    let trust_only = format!("{marker} {trust}");
+    let trust_tail = format!("  {trust}");
+    let prefix_width = display_width(&head);
+    let trust_tail_width = display_width(&trust_tail);
+    if prefix_width + trust_tail_width <= width {
+        let id = truncate_chars(device_id, width - prefix_width - trust_tail_width);
+        if !id.is_empty() {
+            let fitted = format!("{head}{id}{trust_tail}");
+            if display_width(&fitted) <= width {
+                return fitted;
+            }
+        }
+    }
+    if display_width(&trust_only) <= width {
+        return trust_only;
+    }
+    take_display_suffix(&trust_only, width)
 }
 
-fn wrap_display(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for word in text.split_whitespace() {
-        let word_width = display_width(word);
-        if current.is_empty() {
-            push_wrapped_word(
-                &mut lines,
-                &mut current,
-                &mut current_width,
-                word,
-                word_width,
-                width,
-            );
-        } else if current_width + 1 + word_width <= width {
-            current.push(' ');
-            current.push_str(word);
-            current_width += 1 + word_width;
-        } else {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0;
-            push_wrapped_word(
-                &mut lines,
-                &mut current,
-                &mut current_width,
-                word,
-                word_width,
-                width,
-            );
+fn take_display_suffix(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut width = 0usize;
+    let mut start = value.len();
+    for (idx, ch) in value.char_indices().rev() {
+        let ch_width = ch.width_cjk().unwrap_or(1);
+        if width + ch_width > max_width {
+            break;
         }
+        width += ch_width;
+        start = idx;
     }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn push_wrapped_word(
-    lines: &mut Vec<String>,
-    current: &mut String,
-    current_width: &mut usize,
-    word: &str,
-    word_width: usize,
-    width: usize,
-) {
-    if word_width <= width {
-        *current = word.to_owned();
-        *current_width = word_width;
-        return;
-    }
-    let mut rest = word;
-    while !rest.is_empty() {
-        let mut chunk = take_display_width(rest, width);
-        if chunk.is_empty() {
-            let ch = rest.chars().next().expect("rest is non-empty");
-            chunk = ch.to_string();
-        }
-        rest = &rest[chunk.len()..];
-        if rest.is_empty() {
-            *current = chunk;
-            *current_width = display_width(current);
-        } else {
-            lines.push(chunk);
-        }
-    }
+    value[start..].to_owned()
 }
 
 fn popup_unread_thread_lines(
@@ -3454,6 +3428,12 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         Row::Kv(shortcuts.reply.label(), "reply to selected result"),
         Row::Kv(shortcuts.thread.label(), "thread from selected result"),
         Row::Blank,
+        Row::Section("Device verification:"),
+        Row::Kv(shortcuts.submit.label(), "verify the selected device"),
+        Row::Kv("r".to_owned(), "retry the device list"),
+        Row::Kv("p".to_owned(), "paste a device id instead of picking one"),
+        Row::Kv(shortcuts.clear_input.label(), "close the device list"),
+        Row::Blank,
         Row::Section("Input:"),
         Row::Kv(
             shortcuts.newline.label(),
@@ -3873,6 +3853,9 @@ mod tests {
         assert!(text.contains(&config.shortcuts.reject_invite.label()));
         assert!(text.contains("Up / Down"));
         assert!(text.contains("select previous / next message"));
+        assert!(text.contains("retry the device list"));
+        assert!(text.contains("paste a device id instead of picking one"));
+        assert!(text.contains("close the device list"));
     }
 
     #[test]

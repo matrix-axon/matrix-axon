@@ -200,6 +200,11 @@ fn verification_apply_flow_maps_server_stage() {
 
 const PICKER_ACCOUNT: u128 = 7;
 
+fn enable_verification_send(app: &mut App) {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.set_lifecycle_sender(tx);
+}
+
 fn signed_in_app(device_id: Option<&str>) -> App {
     let mut app = app_with_rooms(Vec::new());
     let mut account = account_with_id(
@@ -277,7 +282,7 @@ fn line_text(line: &ratatui::text::Line<'_>) -> String {
 
 #[test]
 fn device_picker_rows_drop_own_device_and_sort() {
-    let rows = device_picker_rows(&sample_devices(), Some("SELF"));
+    let rows = device_picker_rows(&sample_devices(), "SELF");
     assert_eq!(
         rows.iter()
             .map(|row| row.device_id.as_str())
@@ -290,7 +295,6 @@ fn device_picker_rows_drop_own_device_and_sort() {
     assert_eq!(rows[2].label, "Phone");
     assert_eq!(rows[3].label, "Unnamed device");
     assert_eq!(rows[4].label, "Unnamed device");
-    assert!(device_picker_rows(&sample_devices(), Some("")).len() > rows.len());
 }
 
 #[tokio::test]
@@ -330,6 +334,7 @@ async fn bare_verify_refuses_without_one_account() {
 #[tokio::test]
 async fn explicit_verify_targets_skip_the_picker() {
     let mut app = signed_in_app(Some("SELF"));
+    enable_verification_send(&mut app);
     app.handle_command(Command::Verify(Some("ABCDEF".to_owned())))
         .await;
     assert_eq!(app.mode, Mode::Verification);
@@ -340,6 +345,7 @@ async fn explicit_verify_targets_skip_the_picker() {
     assert_eq!(flow.stage, VerificationStage::Starting);
 
     let mut app = signed_in_app(Some("SELF"));
+    enable_verification_send(&mut app);
     app.handle_command(Command::Verify(Some("@bob:example.org".to_owned())))
         .await;
     assert_eq!(app.mode, Mode::Verification);
@@ -392,8 +398,7 @@ async fn device_list_fills_the_open_picker_and_ignores_stale_results() {
         vec![device("ZZZ", Some("late"), false)],
     )
     .await;
-    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
-    app.mode = Mode::Popup(PopupKind::DevicePicker);
+    assert!(app.device_picker.is_none());
 
     app.close_device_picker();
     assert_eq!(app.mode, Mode::Compose);
@@ -427,7 +432,7 @@ async fn failed_device_list_stays_open_until_retry() {
         app.device_picker.as_ref().unwrap().phase,
         DevicePickerPhase::Failed("HTTP 500: devices unavailable".to_owned())
     );
-    assert_eq!(app.status.text(false), "HTTP 500: devices unavailable");
+    assert_eq!(app.status.text(false), DEVICE_PICKER_FAILED);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
         .await;
@@ -459,6 +464,7 @@ async fn enter_verifies_the_selected_device_and_p_returns_to_paste() {
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()))
         .await;
     assert_eq!(app.device_picker.as_ref().unwrap().selection, 1);
+    enable_verification_send(&mut app);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
         .await;
     assert_eq!(app.mode, Mode::Verification);
@@ -528,8 +534,8 @@ fn device_picker_lines_mark_the_selection_and_fit_the_width() {
             },
         ],
     });
-    // 16 columns cannot hold a device id plus "verified" / "not verified".
-    // The row must still stay inside the popup, with the selection marker.
+    // 16 columns cannot hold a device id plus the trust word.
+    // The trust word stays; the id is what gets cut.
     let narrow = 16;
     let narrow_lines = device_picker_lines(&app, narrow);
     assert!(narrow_lines.len() >= 2);
@@ -543,6 +549,7 @@ fn device_picker_lines_mark_the_selection_and_fit_the_width() {
     }
     assert!(narrow_texts[1].starts_with('>'));
     assert!(narrow_texts[0].starts_with(' '));
+    assert!(narrow_texts.iter().all(|text| text.contains("verified")));
 
     // Wide enough for a truncated CJK label, the device id, and the trust word.
     let wide = 40;
@@ -569,4 +576,116 @@ fn device_picker_lines_mark_the_selection_and_fit_the_width() {
     for line in &empty {
         assert!(line_columns(&line_text(line)) <= narrow);
     }
+}
+
+#[tokio::test]
+async fn device_picker_hides_the_list_until_this_session_is_known() {
+    for unknown in [None, Some("")] {
+        let mut app = signed_in_app(unknown);
+        app.handle_command(Command::Verify(None)).await;
+        assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+        assert_eq!(
+            app.device_picker.as_ref().unwrap().phase,
+            DevicePickerPhase::UnknownSelf
+        );
+        assert!(app.device_picker.as_ref().unwrap().rows.is_empty());
+        assert_eq!(app.status.text(false), DEVICE_PICKER_UNKNOWN_SELF);
+        let lines = device_picker_lines(&app, 24);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("not known yet"));
+        for line in &lines {
+            assert!(line_columns(&line_text(line)) <= 24);
+        }
+
+        let generation = picker_generation(&app);
+        apply_devices(&mut app, generation, sample_devices()).await;
+        assert_eq!(
+            app.device_picker.as_ref().unwrap().phase,
+            DevicePickerPhase::UnknownSelf
+        );
+        assert!(app.device_picker.as_ref().unwrap().rows.is_empty());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+            .await;
+        assert_eq!(
+            app.device_picker.as_ref().unwrap().phase,
+            DevicePickerPhase::UnknownSelf
+        );
+    }
+
+    let mut app = signed_in_app(None);
+    app.handle_command(Command::Verify(None)).await;
+    let before = picker_generation(&app);
+    let mut account = app.accounts.client_visible[0].clone();
+    account.device_id = Some("SELF".to_owned());
+    app.set_accounts(vec![account]);
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+    assert_ne!(picker_generation(&app), before);
+    let generation = picker_generation(&app);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    assert_eq!(row_ids(&app), vec!["AAA", "BBB", "EEE", "CCC", "DDD"]);
+}
+
+#[tokio::test]
+async fn retry_during_loading_does_not_start_another_list() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()))
+        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT))
+        .await;
+    assert_eq!(picker_generation(&app), generation);
+    assert_eq!(
+        app.device_picker.as_ref().unwrap().phase,
+        DevicePickerPhase::Loading
+    );
+}
+
+#[tokio::test]
+async fn enter_shows_a_refusal_inside_the_picker() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    let generation = picker_generation(&app);
+    apply_devices(&mut app, generation, sample_devices()).await;
+    app.set_accounts(vec![
+        account_with_id(
+            Uuid::from_u128(PICKER_ACCOUNT),
+            "@me:example.com",
+            AccountState::Active,
+        ),
+        account_with_id(
+            Uuid::from_u128(8),
+            "@other:example.com",
+            AccountState::Active,
+        ),
+    ]);
+    // set_accounts keeps the previous account selected. All is the refusal.
+    app.accounts.selected = AccountSelection::All;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+        .await;
+    assert_eq!(app.mode, Mode::Popup(PopupKind::DevicePicker));
+    match &app.device_picker.as_ref().unwrap().phase {
+        DevicePickerPhase::Failed(message) => {
+            assert!(message.contains("select an account"), "{message}");
+        }
+        other => panic!("expected a refusal in the picker, got {other:?}"),
+    }
+    assert!(app.device_picker.as_ref().unwrap().rows.is_empty());
+}
+
+#[tokio::test]
+async fn leaving_the_picker_by_message_navigation_drops_it() {
+    let mut app = signed_in_app(Some("SELF"));
+    app.handle_command(Command::Verify(None)).await;
+    assert!(app.device_picker.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
+        .await;
+    assert_eq!(app.mode, Mode::MessageList);
+    assert!(app.device_picker.is_none());
 }

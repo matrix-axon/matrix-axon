@@ -166,6 +166,7 @@ impl App {
         {
             self.end_member_filter_prompt();
         }
+        self.discard_device_picker_if_closed();
         self.should_quit
     }
 
