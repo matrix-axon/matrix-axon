@@ -560,6 +560,7 @@ let versionOverride = null
 const MIME = {
   '.html': 'text/html',
   '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
   '.json': 'application/json',
