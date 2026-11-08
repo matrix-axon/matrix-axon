@@ -23,24 +23,3 @@ generates their attribution for us. They are recorded here deliberately.
 - **WKWebView / WebKit** (macOS) — supplied by the operating system as part of
   macOS. Apple's WebKit is available under LGPL-2.1 and BSD-style licenses; see
   <https://webkit.org/licensing-webkit/>.
-
-## OVERVIEW
-{{#each overview}}
-- {{name}} (used by {{count}} crate{{#if (gt count 1)}}s{{/if}})
-{{/each}}
-
-## LICENSE DETAILS
-{{#each licenses}}
-
-================================================================================
-## LICENSE: {{name}} (SPDX ID: {{id}})
-### USED BY:
-{{#each used_by}}
-  - {{crate.name}} {{crate.version}}
-{{/each}}
-================================================================================
-{{text}}
-
------------------------
-
-{{/each}}

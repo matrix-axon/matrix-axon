@@ -16,6 +16,16 @@
 # the same reason in the other direction. Running with no flag is the local
 # "regenerate everything" case.
 #
+# Two stages. cargo-about resolves the dependency graph and emits JSON;
+# `scripts/thirdparty-notice.py` renders the notices from it. The old
+# Handlebars templates are gone because cargo-about prints one block per
+# distinct license *text*, so crates whose MIT texts differ only in the
+# copyright line each got a full block (272 of them, 73% of the root notice),
+# and a template cannot merge them. The renderer prints each distinct text once
+# and keeps every crate's own copyright statement. See its docstring, and #855.
+# The static title and preamble of each notice live in
+# `build/notice-header-<workspace>-<format>.txt`.
+#
 # One pinned cargo-about, here and in CI — `.github/workflows/desktop-build.yml`
 # runs this script and keys its cache on this file, so bumping the pin here is
 # the whole procedure. The output format changes between versions (regenerating
@@ -49,12 +59,27 @@ else
   echo "Success."
 fi
 
+command -v python3 > /dev/null || { echo "python3 is required to render the notices" >&2; exit 1; }
+# Every path below is relative to the repository root, so work from there
+# wherever the script was started.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/.."
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+
+# render JSON FORMAT HEADER OUT
+render() {
+  "$here/thirdparty-notice.py" --format "$2" --header "$3" "$1" > "$4"
+}
+
 if [ "$root" = true ]; then
+  echo "Resolving the root dependency graph..."
+  cargo-about generate --format json --config ./build/about.toml > "$scratch/root.json"
   echo "Generating plaintext build/THIRDPARTY notice..."
-  cargo-about generate --config ./build/about.toml ./build/about-plain.hbs > build/THIRDPARTY
+  render "$scratch/root.json" plain build/notice-header-root-plain.txt build/THIRDPARTY
   echo "Success."
   echo "Generating markdown THIRDPARTY.md notice..."
-  cargo-about generate --config ./build/about.toml ./build/about-markdown.hbs > ./THIRDPARTY.md
+  render "$scratch/root.json" markdown build/notice-header-root-markdown.txt ./THIRDPARTY.md
   echo "Success."
 fi
 
@@ -75,16 +100,15 @@ fi
 # script cannot merge.
 if [ "$desktop" = true ]; then
   DESKTOP_MANIFEST=clients/web/src-tauri/Cargo.toml
-  echo "Generating plaintext build/THIRDPARTY-desktop notice..."
+  echo "Resolving the desktop dependency graph..."
   cargo-about generate \
+    --format json \
     --manifest-path "$DESKTOP_MANIFEST" \
-    --config ./build/about-desktop.toml \
-    ./build/about-desktop-plain.hbs > build/THIRDPARTY-desktop
+    --config ./build/about-desktop.toml > "$scratch/desktop.json"
+  echo "Generating plaintext build/THIRDPARTY-desktop notice..."
+  render "$scratch/desktop.json" plain build/notice-header-desktop-plain.txt build/THIRDPARTY-desktop
   echo "Success."
   echo "Generating markdown clients/web/src-tauri/THIRDPARTY.md notice..."
-  cargo-about generate \
-    --manifest-path "$DESKTOP_MANIFEST" \
-    --config ./build/about-desktop.toml \
-    ./build/about-desktop-markdown.hbs > clients/web/src-tauri/THIRDPARTY.md
+  render "$scratch/desktop.json" markdown build/notice-header-desktop-markdown.txt clients/web/src-tauri/THIRDPARTY.md
   echo "Success."
 fi
