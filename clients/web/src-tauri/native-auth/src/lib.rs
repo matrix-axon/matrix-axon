@@ -274,3 +274,24 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         })
         .build()
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn native_draft_timestamp_survives_json_bridge_round_trips() {
+        // This realistic fractional Unix timestamp changed by one ULP with
+        // serde_json's default parser, making ShareStore.update reject close,
+        // keep-draft, autosave and heartbeat as stale.
+        let created_at = 1_794_060_000.000_002_1_f64;
+        let original = format!(r#"{{"manifest":{{"createdAt":{created_at}}},"release":true}}"#);
+        let mut wire = original;
+        for _ in 0..4 {
+            let value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            assert_eq!(
+                value["manifest"]["createdAt"].as_f64().unwrap().to_bits(),
+                created_at.to_bits()
+            );
+            wire = serde_json::to_string(&value).unwrap();
+        }
+    }
+}

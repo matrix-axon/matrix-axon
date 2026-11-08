@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import XCTest
 
 @testable import AxonIncomingShare
@@ -491,4 +492,219 @@ final class TextShareTests: XCTestCase {
     XCTAssertTrue(dispatched)
     XCTAssertEqual(checkpoint.operation.state, .dispatching)
   }
+  private func photos(_ count: Int = 3) throws -> ShareManifest {
+    var value = try draft()
+    let source = root.appendingPathComponent("photo.png")
+    try PhotoFixture.write(source)
+    for index in 0..<count {
+      value = try store.importFile(
+        value.id, owner: value.owner!, source: source,
+        name: "photo-\(index).png", mime: "image/png", photo: true)
+    }
+    value.text = ""
+    value.previews = nil
+    return try store.update(value)
+  }
+
+  func testRemovingLastPhotoRejectsEmptyDeliveryBeforeAnyNetworkCall() throws {
+    var value = try photos(1)
+    value = try store.removeFile(value, file: value.files[0].id)
+    var requests = 0
+    let blocked = sender { _, _, _, _, _, _, _, _ in
+      requests += 1
+      throw ShareFailure.unavailable
+    }
+    XCTAssertEqual(TextShare.validation(value), "empty_text")
+    XCTAssertThrowsError(try blocked.send(value)) { XCTAssertEqual($0 as? ShareFailure, .invalid) }
+    XCTAssertEqual(requests, 0)
+  }
+
+  func testSourceMessageAndPhotosSendIndependentlyWithCardsOnlyOnTheSourceMessage() throws {
+    var value = try photos()
+    value.text = link
+    value.files[0].caption = "First photo caption"
+    value.files[1].caption = "Second photo: café 🌊\nA different caption"
+    value.files[2].caption = ""
+    value = try store.update(value)
+    value = try store.importThumbnail(
+      value.id, owner: value.owner!,
+      data: Data(contentsOf: root.appendingPathComponent("photo.png")), mime: "image/png",
+      preview: SharePreview(matched_url: link, title: "Caption card"))
+    var uploads: [Data] = []
+    var messages: [[String: Any]] = []
+    let sender = sender { _, _, path, _, body, file, mime, _ in
+      if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+      if let file {
+        XCTAssertEqual(mime, "image/png")
+        uploads.append(try Data(contentsOf: file))
+        return try self.response(200, ["data": ["upload_id": UUID().uuidString]])
+      }
+      let saved = try self.store.list()[0]
+      if messages.isEmpty {
+        XCTAssertTrue(path.hasSuffix("/send"))
+        XCTAssertEqual(saved.operation.state, .dispatching)
+      } else {
+        XCTAssertTrue(path.hasSuffix("/send-media"))
+        XCTAssertEqual(saved.files[messages.count - 1].operation?.state, .dispatching)
+      }
+      messages.append(try JSONSerialization.jsonObject(with: body!) as! [String: Any])
+      return try self.response(200, ["data": ["event_id": "$photo-\(messages.count)"]])
+    }
+    let result = try sender.send(value)
+    XCTAssertTrue(result.completed)
+    XCTAssertEqual(uploads.count, 4)
+    XCTAssertEqual(messages[0]["body"] as? String, link)
+    XCTAssertEqual(messages.dropFirst().map { $0["caption"] as? String }, ["First photo caption", "Second photo: café 🌊\nA different caption", ""])
+    XCTAssertEqual((messages[0]["url_previews"] as? [Any])?.count, 1)
+    XCTAssertNotNil((messages[0]["url_previews"] as? [[String: Any]])?[0]["image_upload_id"])
+    XCTAssertEqual((messages[1]["url_previews"] as? [Any])?.count, 0)
+    XCTAssertEqual(
+      result.files.compactMap { $0.operation?.eventId }, ["$photo-2", "$photo-3", "$photo-4"])
+  }
+
+  func testSourceConfirmationIsNotReplayedAndUncertainSourceBlocksPhotoContinuation() throws {
+    for state in [DeliveryState.sent, .unknown] {
+      var value = try photos(2)
+      value.text = link
+      value.files[0].caption = "First photo"
+      value.files[1].caption = "Second photo"
+      value.previews = [SharePreview(matched_url: link, title: "Already delivered source card")]
+      value.operation.state = .dispatching
+      value = try store.update(value)
+      value.operation.state = state
+      value.operation.eventId = state == .sent ? "$source" : nil
+      value = try store.update(value)
+      var requests = 0
+      var captions: [String] = []
+      let continuation = sender { _, _, path, _, body, file, _, _ in
+        requests += 1
+        if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+        if file != nil { return try self.response(200, ["data": ["upload_id": UUID().uuidString]]) }
+        XCTAssertTrue(path.hasSuffix("/send-media"))
+        let wire = try JSONSerialization.jsonObject(with: body!) as! [String: Any]
+        captions.append(wire["caption"] as! String)
+        XCTAssertEqual((wire["url_previews"] as? [Any])?.count, 0)
+        return try self.response(200, ["data": ["event_id": "$photo-\(captions.count)"]])
+      }
+      if state == .unknown {
+        XCTAssertThrowsError(try continuation.send(value))
+        XCTAssertEqual(requests, 0)
+      } else {
+        let result = try continuation.send(value)
+        XCTAssertEqual(result.operation.eventId, "$source")
+        XCTAssertTrue(result.completed)
+        XCTAssertEqual(captions, ["First photo", "Second photo"])
+      }
+    }
+  }
+
+  func testPhotoResponseLossStopsTheBatchAndExplicitRecoverySkipsConfirmedCaption() throws {
+    var value = try photos()
+    value.files[1].caption = "Second caption"
+    value.files[2].caption = "Third caption"
+    value = try store.update(value)
+    var sends = 0
+    let sender = sender { _, _, path, _, _, file, _, _ in
+      if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+      if file != nil { return try self.response(200, ["data": ["upload_id": UUID().uuidString]]) }
+      sends += 1
+      if sends == 2 { throw ShareFailure.expired }
+      return try self.response(200, ["data": ["event_id": "$first"]])
+    }
+    var result = try sender.send(value)
+    XCTAssertEqual(result.files.compactMap { $0.operation?.state }, [.sent, .unknown, .ready])
+    XCTAssertThrowsError(try sender.send(result))
+    XCTAssertEqual(sends, 2)
+    result.files[1].operation!.state = .ready  // Explicit duplicate-risk consent in recovery.
+    result = try store.update(result)
+    var retried: [[String: Any]] = []
+    let recovery = self.sender { _, _, path, _, body, file, _, _ in
+      if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+      if file != nil { return try self.response(200, ["data": ["upload_id": UUID().uuidString]]) }
+      retried.append(try JSONSerialization.jsonObject(with: body!) as! [String: Any])
+      return try self.response(200, ["data": ["event_id": "$remaining-\(retried.count)"]])
+    }
+    result = try recovery.send(result)
+    XCTAssertTrue(result.completed)
+    XCTAssertEqual(result.files[0].operation?.eventId, "$first")
+    XCTAssertEqual(retried.count, 2)
+    XCTAssertEqual(retried.map { $0["caption"] as? String }, ["Second caption", "Third caption"])
+    XCTAssertTrue(retried.allSatisfy { ($0["url_previews"] as? [Any])?.isEmpty == true })
+  }
+
+  func testPhotoUploadFailureIsRetryableAndRetainsEarlierConfirmation() throws {
+    let value = try photos()
+    var uploaded = 0
+    let sender = sender { _, _, path, _, _, file, _, _ in
+      if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+      if file != nil {
+        uploaded += 1
+        if uploaded == 2 { throw ShareFailure.expired }
+        return try self.response(200, ["data": ["upload_id": UUID().uuidString]])
+      }
+      return try self.response(200, ["data": ["event_id": "$first"]])
+    }
+    XCTAssertThrowsError(try sender.send(value))
+    let saved = try store.list()[0]
+    XCTAssertEqual(saved.files.compactMap { $0.operation?.state }, [.sent, .failed, .ready])
+    XCTAssertEqual(saved.files[1].operation?.failure, "upload_failed")
+    XCTAssertFalse(saved.completed)
+    try store.cancelComposer(saved)
+    let recovered = try XCTUnwrap(try store.list().first)
+    XCTAssertNil(recovered.owner)
+    XCTAssertEqual(recovered.files[0].operation?.eventId, "$first")
+  }
+
+  func testCancellationBetweenPhotoMessagesKeepsTheRemainingFilesForRecovery() throws {
+    let value = try photos()
+    let cancellation = ShareCancellation()
+    var sends = 0
+    let sender = TextShareSender(
+      store: store, credential: { (self.session, "synthetic-token") }, cancellation: cancellation
+    ) { _, _, path, _, _, file, _, _ in
+      if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+      if file != nil { return try self.response(200, ["data": ["upload_id": UUID().uuidString]]) }
+      sends += 1
+      cancellation.cancel()
+      return try self.response(200, ["data": ["event_id": "$first"]])
+    }
+    XCTAssertThrowsError(try sender.send(value))
+    let saved = try store.list()[0]
+    XCTAssertEqual(sends, 1)
+    try store.cancelComposer(saved)
+    let recovered = try XCTUnwrap(try store.list().first)
+    XCTAssertNil(recovered.owner)
+    XCTAssertEqual(recovered.files.compactMap { $0.operation?.state }, [.sent, .ready, .ready])
+  }
+
+  func testNativeSenderUploadsReducedBytesWithMatchingMimeAndFilename() throws {
+    let source = root.appendingPathComponent("photo.heic")
+    try PhotoFixture.write(source, type: .heic, width: 2400, height: 1600)
+    var value = try draft()
+    value = try store.importFile(
+      value.id, owner: value.owner!, source: source,
+      name: "photo.heic", mime: "image/heic", photo: true)
+    value = try store.setPhotoSize(value, size: .small)
+    var uploaded = false
+    let sender = sender { _, _, path, _, _, file, mime, _ in
+      if path.hasPrefix("/v1/rooms?") { return try self.destinations() }
+      if let file {
+        XCTAssertEqual(mime, "image/jpeg")
+        XCTAssertTrue(path.contains("filename=photo%2Ejpg"))
+        let image = try XCTUnwrap(CGImageSourceCreateWithURL(file as CFURL, nil))
+        let properties = try XCTUnwrap(
+          CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [CFString: Any])
+        XCTAssertEqual(properties[kCGImagePropertyPixelWidth] as? Int, 640)
+        uploaded = true
+        return try self.response(200, ["data": ["upload_id": UUID().uuidString]])
+      }
+      return try self.response(200, ["data": ["event_id": "$reduced"]])
+    }
+    let result = try sender.send(value)
+    XCTAssertTrue(uploaded)
+    XCTAssertTrue(result.completed)
+    XCTAssertEqual(result.files[0].mime, "image/heic")
+    XCTAssertEqual(result.files[0].photoSize, .small)
+  }
+
 }

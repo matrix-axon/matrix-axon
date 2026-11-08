@@ -100,8 +100,14 @@ const project = {
     ShareSource: {
       type: 'application',
       platform: 'iOS',
-      sources: [join(source, '../share-extension-tests/Source.swift')],
-      dependencies: [{ target: 'ShareExtension', embed: true }],
+      sources: [
+        join(source, '../share-extension-tests/Source.swift'),
+        join(source, '../share-extension/ShareViewController.swift'),
+      ],
+      dependencies: [
+        { target: 'ShareExtension', embed: true },
+        { package: 'AxonIncomingShare' },
+      ],
       settings: {
         base: {
           PRODUCT_BUNDLE_IDENTIFIER: hostId,
@@ -201,20 +207,26 @@ run('xcodebuild', [
   'CODE_SIGNING_ALLOWED=NO',
 ])
 try {
-  run('xcodebuild', [
-    'test',
-    '-project',
-    join(output, 'SharingFoundationTests.xcodeproj'),
-    '-scheme',
-    'ActivationTests',
-    '-destination',
-    `platform=iOS Simulator,id=${device.udid}`,
-    '-derivedDataPath',
-    join(output, 'DerivedData'),
-    '-resultBundlePath',
-    join(output, 'activation.xcresult'),
-    'CODE_SIGNING_ALLOWED=NO',
-  ])
+  // Eight UI scenarios plus their build, simulator launches, and result-bundle
+  // finalization exceeded ten minutes on CI even though every test passed.
+  run(
+    'xcodebuild',
+    [
+      'test',
+      '-project',
+      join(output, 'SharingFoundationTests.xcodeproj'),
+      '-scheme',
+      'ActivationTests',
+      '-destination',
+      `platform=iOS Simulator,id=${device.udid}`,
+      '-derivedDataPath',
+      join(output, 'DerivedData'),
+      '-resultBundlePath',
+      join(output, 'activation.xcresult'),
+      'CODE_SIGNING_ALLOWED=NO',
+    ],
+    900_000,
+  )
 } finally {
   for (const identifier of [hostId, `${hostId}.Tests.xctrunner`]) {
     try {

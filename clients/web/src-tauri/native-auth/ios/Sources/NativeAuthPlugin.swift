@@ -208,6 +208,15 @@ class NativeAuthPlugin: Plugin {
         case "update":
           guard let manifest = args.manifest else { throw ShareFailure.invalid }
           result = try self.shareObject(store.update(manifest, release: args.release ?? false))
+        case "reorder_files":
+          guard let manifest = args.manifest, let order = args.order else { throw ShareFailure.invalid }
+          result = try self.shareObject(store.reorderFiles(manifest, order: order))
+        case "remove_file":
+          guard let manifest = args.manifest, let file = args.file else { throw ShareFailure.invalid }
+          result = try self.shareObject(store.removeFile(manifest, file: file))
+        case "photo_thumbnail":
+          let data = try store.photoThumbnail(args.id ?? "", file: args.file ?? "", owner: args.owner ?? "")
+          result = ["bytes": data.base64EncodedString()]
         case "discard", "ack":
           try store.discard(args.id ?? "", owner: args.owner, completed: args.action == "ack")
         case "read":
@@ -244,7 +253,7 @@ class NativeAuthPlugin: Plugin {
           let manifest = try store.owned(id, owner: owner, account: account)
           guard manifest.session == descriptor.generation else { throw ShareFailure.stale }
           if args.action == "upload" {
-            let (status, body) = try store.withVerifiedFile(id, file: args.file ?? "", owner: owner) { url, file in
+            let (status, body) = try store.withUploadFile(id, file: args.file ?? "", owner: owner) { url, file in
               let kind = file.thumbnail || file.mime.hasPrefix("image/") ? "image" : "file"
               let filename = file.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "attachment"
               return try self.shareHTTP.request(descriptor: descriptor, token: token,
@@ -321,6 +330,7 @@ private struct ShareArgs: Decodable {
   let owner: String?
   let manifest: ShareManifest?
   let release: Bool?
+  let order: [String]?
   let file: String?
   let offset: Int?
   let count: Int?

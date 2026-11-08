@@ -61,11 +61,40 @@ const port: IncomingSharePort = {
       return record as T
     }
     if (action === 'claim' && record !== undefined) {
+      if (localStorage.getItem('fixture.claimBusy') === 'true')
+        throw { code: 'busy' }
+      if (localStorage.getItem('fixture.delayClaimOnce') === 'true') {
+        localStorage.removeItem('fixture.delayClaimOnce')
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      if (
+        localStorage.getItem('fixture.strictClaim') === 'true' &&
+        read().find((item) => item.id === args.id)?.owner
+      )
+        throw { code: 'busy' }
       record.owner = crypto.randomUUID()
       localStorage.setItem('fixture.incoming', JSON.stringify(records))
       return record as T
     }
-    if (action === 'update') {
+    if (action === 'photo_thumbnail') {
+      if (localStorage.getItem('fixture.thumbnailFailureOnce') === 'true') {
+        localStorage.removeItem('fixture.thumbnailFailureOnce')
+        throw { code: 'transferBusy' }
+      }
+      // Native returns a bounded JPEG. Generate an independently encoded,
+      // valid fixture instead of relying on a CRC-invalid sample PNG.
+      const canvas = document.createElement('canvas')
+      canvas.width = canvas.height = 16
+      const context = canvas.getContext('2d')!
+      context.fillStyle = '#0088ff'
+      context.fillRect(0, 0, 16, 16)
+      return { bytes: canvas.toDataURL('image/jpeg').split(',')[1] } as T
+    }
+    if (
+      action === 'update' ||
+      action === 'remove_file' ||
+      action === 'reorder_files'
+    ) {
       const next = args.manifest as IncomingShare
       const index = records.findIndex((item) => item.id === next.id)
       if (
@@ -74,6 +103,14 @@ const port: IncomingSharePort = {
         records[index].owner !== next.owner
       )
         throw new Error('stale')
+      if (action === 'reorder_files') {
+        const order = args.order as string[]
+        next.files = order
+          .map((id) => next.files.find((file) => file.id === id)!)
+          .concat(next.files.filter((file) => file.thumbnail))
+      }
+      if (action === 'remove_file')
+        next.files = next.files.filter((file) => file.id !== args.file)
       records[index] = {
         ...next,
         revision: next.revision + 1,

@@ -152,7 +152,7 @@ public final class ShareStore {
   // Only for operations already holding the store's lock.
   func sessionLocked() throws -> ShareSession? { try readSession() }
 
-  public func create(text: String) throws -> ShareManifest {
+  public func create(text: String, importFailures: [String] = []) throws -> ShareManifest {
     try coordinated {
       guard let session = try readSession(),
         session.stagingAllowed ?? session.credentialAvailable
@@ -168,7 +168,8 @@ public final class ShareStore {
         (try usedBytes(records)) + text.utf8.count + ShareLimits.metadataReservation
           <= ShareLimits.pendingBytes
       else { throw ShareFailure.quota }
-      let manifest = ShareManifest(createdAt: now(), session: session.generation, text: text)
+      var manifest = ShareManifest(createdAt: now(), session: session.generation, text: text)
+      manifest.importFailures = importFailures
       let directory = try directory(manifest.id)
       try fm.createDirectory(at: directory, withIntermediateDirectories: false)
       try protect(directory)
@@ -294,12 +295,16 @@ public final class ShareStore {
       _ = try reconcileLocked()
       var manifest = try load(id)
       try validateSession(manifest)
-      guard manifest.owner == nil else { throw ShareFailure.busy }
+      guard manifest.owner == nil else {
+        Self.log.info("share_claim_busy share_id=\(id, privacy: .public)")
+        throw ShareFailure.busy
+      }
       manifest.owner = UUID().uuidString
       manifest.leaseUntil = min(
         now() + ShareLimits.lease, manifest.createdAt + ShareLimits.retention)
       manifest.revision += 1
       try save(manifest)
+      Self.log.info("share_claimed share_id=\(id, privacy: .public) revision=\(manifest.revision)")
       return manifest
     }
   }
@@ -311,11 +316,13 @@ public final class ShareStore {
       guard proposed.session == current.session, proposed.owner != nil,
         proposed.owner == current.owner, proposed.revision == current.revision,
         (current.leaseUntil ?? 0) > now(), proposed.files.count == current.files.count,
-        proposed.createdAt == current.createdAt, proposed.version == 1
+        proposed.createdAt == current.createdAt,
+        proposed.version == current.version
       else { throw ShareFailure.stale }
       for (before, after) in zip(current.files, proposed.files) {
         var descriptor = after
         descriptor.operation = before.operation
+        descriptor.caption = before.caption
         guard before == descriptor else { throw ShareFailure.invalid }
         if let from = before.operation, let to = after.operation {
           try validateTransition(from: from, to: to)
@@ -323,7 +330,11 @@ public final class ShareStore {
           throw ShareFailure.invalid
         }
       }
-      guard proposed.text.utf8.count <= ShareLimits.textBytes,
+      guard proposed.uploadBytes <= ShareLimits.batchBytes,
+        proposed.captionBytes <= ShareLimits.textBytes,
+        proposed.files.allSatisfy({
+          $0.thumbnail ? $0.caption == nil : $0.caption != nil
+        }),
         (proposed.previews?.count ?? 0) <= 8
       else { throw ShareFailure.quota }
       guard
@@ -348,6 +359,7 @@ public final class ShareStore {
         release ? nil : min(now() + ShareLimits.lease, next.createdAt + ShareLimits.retention)
       if release { next.owner = nil }
       try save(next)
+      if release { Self.log.info("share_released share_id=\(next.id, privacy: .public)") }
       if next.accountId != current.accountId || next.roomId != current.roomId {
         rememberDestination(next)
       }
@@ -380,7 +392,8 @@ public final class ShareStore {
       guard current.operation.state != .sent || proposed.operation == current.operation,
         proposed.text == current.text,
         proposed.accountId == current.accountId, proposed.roomId == current.roomId,
-        proposed.previews == current.previews
+        proposed.previews == current.previews,
+        proposed.files.map(\.caption) == current.files.map(\.caption)
       else { throw ShareFailure.invalid }
     }
   }
@@ -446,7 +459,7 @@ public final class ShareStore {
       if current.completed {
         try validateSession(current)
       } else if Self.operations(current).contains(where: {
-        [.dispatching, .unknown].contains($0.state)
+        [.dispatching, .unknown, .sent].contains($0.state)
       }) {
         Self.releaseForRecovery(&current)
         current.revision += 1
@@ -460,7 +473,7 @@ public final class ShareStore {
   }
 
   private static func operations(_ manifest: ShareManifest) -> [ShareOperation] {
-    [manifest.operation] + manifest.files.compactMap(\.operation)
+    manifest.deliveryOperations
   }
 
   private static func releaseForRecovery(_ manifest: inout ShareManifest) {
@@ -483,9 +496,11 @@ public final class ShareStore {
   /// kept until its fenced lease expires. No full-file allocation is needed.
   public func importFile(
     _ id: String, owner: String, source: URL, name: String,
-    mime: String, thumbnail: Bool = false
+    mime: String, thumbnail: Bool = false, photo: Bool = false,
+    check: () throws -> Void = {}
   ) throws -> ShareManifest {
-    guard source.isFileURL else { throw ShareFailure.invalid }
+    try check()
+    guard source.isFileURL, !photo || !thumbnail else { throw ShareFailure.invalid }
     guard mime.utf8.count <= 128, mime.rangeOfCharacter(from: .controlCharacters) == nil else {
       throw ShareFailure.invalid
     }
@@ -535,6 +550,7 @@ public final class ShareStore {
     var hash = SHA256()
     let deadline = Date().addingTimeInterval(60)
     while true {
+      try check()
       guard Date() < deadline else { throw ShareFailure.expired }
       let count = Darwin.read(input, &buffer, buffer.count)
       guard count >= 0 else { throw ShareFailure.unavailable }
@@ -553,7 +569,12 @@ public final class ShareStore {
     }
     guard fsync(output) == 0 else { throw ShareFailure.unavailable }
     if thumbnail { try Self.validateThumbnail(Data(contentsOf: reservation), mime: mime) }
-    return try coordinated {
+    let inspected = try photo ? PhotoShare.inspect(reservation) : nil
+    let actualMime = inspected?.mime ?? mime
+    let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+    try check()
+    let imported = try coordinated {
+      try check()
       var manifest = try load(id)
       try validateOwner(manifest, owner)
       guard thumbnail || manifest.files.filter({ !$0.thumbnail }).count < ShareLimits.files else {
@@ -566,12 +587,84 @@ public final class ShareStore {
       defer { if !committed { try? fm.removeItem(at: destination) } }
       manifest.files.append(
         ShareFile(
-          id: fileId, name: Self.displayName(name), mime: mime,
-          bytes: bytes, digest: hash.finalize().map { String(format: "%02x", $0) }.joined(),
-          thumbnail: thumbnail, operation: thumbnail ? nil : ShareOperation()))
+          id: fileId, name: photo ? PhotoShare.originalFilename(Self.displayName(name), mime: actualMime) : Self.displayName(name), mime: actualMime,
+          bytes: bytes, digest: digest,
+          thumbnail: thumbnail, operation: thumbnail ? nil : ShareOperation(), caption: thumbnail ? nil : ""))
       manifest.revision += 1
       try save(manifest, didPublish: { committed = true })
+      try? fm.removeItem(at: reservation.appendingPathExtension("reservation"))
       return manifest
+    }
+    if let inspected {
+      do { try cachePhotoThumbnail(id, file: fileId, owner: owner, digest: digest, data: inspected.thumbnail) }
+      catch { Self.log.error("share_photo_preview_cache_failed share_id=\(id, privacy: .public) item_id=\(fileId, privacy: .public) category=\((error as? ShareFailure)?.rawValue ?? "storage", privacy: .public)") }
+    }
+    return imported
+  }
+
+  /// Removal leaves the source message and other photo captions intact; delivered batches are fixed.
+  public func removeFile(_ input: ShareManifest, file: String) throws -> ShareManifest {
+    try coordinated {
+      var current = try load(input.id)
+      try validateOwner(current, input.owner ?? "")
+      guard current.revision == input.revision else { throw ShareFailure.stale }
+      guard
+        Self.operations(current).allSatisfy({ [.ready, .failed, .uploaded].contains($0.state) }),
+        let item = current.files.first(where: { $0.id == file && !$0.thumbnail })
+      else { throw ShareFailure.invalid }
+      current.files.removeAll { $0.id == file }
+      let removed = [item]
+      current.revision += 1
+      try save(current)
+      deleteFiles(removed, share: current.id)
+      for item in removed { try? fm.removeItem(at: photoCacheURL(current.id, file: item.id)) }
+      Self.log.info(
+        "share_photo_removed share_id=\(current.id, privacy: .public) item_id=\(item.id, privacy: .public)"
+      )
+      return current
+    }
+  }
+
+  public static func validPhotoName(_ name: String) -> Bool {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !trimmed.isEmpty && trimmed.utf8.count <= 255 && displayName(trimmed) == trimmed
+  }
+
+  /// Only the display name changes; retained paths, captions and upload identities stay fixed.
+  public func renameFile(_ input: ShareManifest, file: String, name: String) throws -> ShareManifest {
+    try coordinated {
+      var current = try load(input.id)
+      try validateOwner(current, input.owner ?? "")
+      guard current.revision == input.revision else { throw ShareFailure.stale }
+      guard Self.validPhotoName(name),
+        Self.operations(current).allSatisfy({ [.ready, .failed, .uploaded].contains($0.state) }),
+        let index = current.files.firstIndex(where: { $0.id == file && !$0.thumbnail && $0.mime.hasPrefix("image/") })
+      else { throw ShareFailure.invalid }
+      current.files[index].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+      current.revision += 1
+      try save(current)
+      Self.log.info("share_photo_renamed share_id=\(current.id, privacy: .public) item_id=\(file, privacy: .public)")
+      return current
+    }
+  }
+
+  /// Reorder descriptors atomically; captions and retained bytes stay with their IDs.
+  public func reorderFiles(_ input: ShareManifest, order: [String]) throws -> ShareManifest {
+    try coordinated {
+      var current = try load(input.id)
+      try validateOwner(current, input.owner ?? "")
+      guard current.revision == input.revision else { throw ShareFailure.stale }
+      guard Self.operations(current).allSatisfy({ [.ready, .failed, .uploaded].contains($0.state) })
+      else { throw ShareFailure.invalid }
+      let photos = current.files.filter { !$0.thumbnail }
+      guard order.count == photos.count, Set(order).count == order.count,
+        Set(order) == Set(photos.map(\.id)) else { throw ShareFailure.invalid }
+      let indexed = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, $0) })
+      current.files = order.map { indexed[$0]! } + current.files.filter { $0.thumbnail }
+      current.revision += 1
+      try save(current)
+      Self.log.info("share_photos_reordered share_id=\(current.id, privacy: .public) count=\(photos.count)")
+      return current
     }
   }
 
@@ -593,6 +686,214 @@ public final class ShareStore {
       ?? ""
     let name = leaf.trimmingCharacters(in: .whitespacesAndNewlines)
     return name.isEmpty || name == "." || name == ".." ? "attachment" : name
+  }
+
+  /// One manifest rename commits an entire batch choice; originals never change.
+  public func setPhotoSize(
+    _ input: ShareManifest, size: SharePhotoSize, file: String? = nil,
+    cancellation: ShareCancellation = ShareCancellation()
+  ) throws -> ShareManifest {
+    let snapshot = try coordinated { () throws -> ShareManifest in
+      let current = try load(input.id)
+      try validateOwner(current, input.owner ?? "")
+      guard current.revision == input.revision else { throw ShareFailure.stale }
+      guard
+        Self.operations(current).allSatisfy({ [.ready, .failed, .uploaded].contains($0.state) })
+      else { throw ShareFailure.invalid }
+      return current
+    }
+    let targets = snapshot.files.filter { !$0.thumbnail && (file == nil || $0.id == file) }
+    guard !targets.isEmpty, targets.allSatisfy({ $0.mime.hasPrefix("image/") }) else {
+      throw ShareFailure.invalid
+    }
+    var next = snapshot
+    // Older readers must refuse a choice they would otherwise silently ignore.
+    next.version = max(next.version, 2)
+    let deadline = Date().addingTimeInterval(60)
+    let targetIDs = Set(targets.map(\.id))
+    var uploadBytes = snapshot.captionBytes + snapshot.files.filter { !targetIDs.contains($0.id) }
+      .reduce(0) { $0 + $1.uploadBytes }
+    // Unchanged representations are already known. Every target needs at
+    // least one byte; reject an impossible budget before opening originals.
+    guard uploadBytes <= ShareLimits.batchBytes,
+      targets.count <= ShareLimits.batchBytes - uploadBytes
+    else { throw ShareFailure.quota }
+    if size == .original {
+      guard targets.reduce(uploadBytes, { $0 + $1.bytes }) <= ShareLimits.batchBytes
+      else { throw ShareFailure.quota }
+    }
+    for target in targets {
+      try cancellation.check()
+      guard Date() < deadline else { throw ShareFailure.expired }
+      let bytes: Int
+      var chosen = size
+      if size == .original {
+        bytes = target.bytes
+      } else {
+        bytes = try withVerifiedFile(snapshot.id, file: target.id, owner: snapshot.owner!) {
+          url, original in
+          try autoreleasepool {
+            do {
+              return try PhotoShare.resized(url, size: size, cancellation: cancellation)?.data.count
+                ?? original.bytes
+            } catch ShareFailure.photoResizeUnsupported where file == nil {
+              chosen = .original
+              return original.bytes
+            }
+          }
+        }
+      }
+      // Compressed output sizes are only known after encoding. Fail as soon
+      // as the running total exceeds the cap instead of resizing later items.
+      guard bytes <= ShareLimits.batchBytes - uploadBytes else { throw ShareFailure.quota }
+      uploadBytes += bytes
+      guard let index = next.files.firstIndex(where: { $0.id == target.id }) else {
+        throw ShareFailure.stale
+      }
+      next.files[index].photoSize = chosen
+      next.files[index].photoBytes = bytes
+      // A previous upload handle describes the previous representation.
+      next.files[index].operation?.state = .ready
+      next.files[index].operation?.uploadId = nil
+      next.files[index].operation?.failure = nil
+    }
+    return try coordinated {
+      try cancellation.check()
+      guard Date() < deadline else { throw ShareFailure.expired }
+      let current = try load(snapshot.id)
+      try validateOwner(current, snapshot.owner!)
+      guard current.revision == snapshot.revision else { throw ShareFailure.stale }
+      guard
+        next.uploadBytes <= ShareLimits.batchBytes
+      else { throw ShareFailure.quota }
+      next.revision += 1
+      next.leaseUntil = min(now() + ShareLimits.lease, next.createdAt + ShareLimits.retention)
+      try save(next)
+      Self.log.info(
+        "share_photo_size_updated share_id=\(next.id, privacy: .public) count=\(targets.count) size=\(size.rawValue, privacy: .public)"
+      )
+      return next
+    }
+  }
+
+  /// Both extension and app recovery regenerate the saved representation here.
+  /// Temporary encoded bytes reserve pending quota and disappear after upload.
+  public func withUploadFile<T>(
+    _ id: String, file: String, owner: String,
+    cancellation: ShareCancellation = ShareCancellation(),
+    use: (URL, ShareFile) throws -> T
+  ) throws -> T {
+    try withVerifiedFile(id, file: file, owner: owner) { url, original in
+      try cancellation.check()
+      let output = try autoreleasepool {
+        try PhotoShare.resized(
+          url, size: original.photoSize ?? .original, cancellation: cancellation)
+      }
+      guard let output else {
+        var uploaded = original
+        uploaded.name = PhotoShare.originalFilename(original.name, mime: original.mime)
+        return try use(url, uploaded)
+      }
+      let temporary = try coordinated { () throws -> URL in
+        let current = try load(id)
+        try validateOwner(current, owner)
+        guard current.files.first(where: { $0.id == file }) == original else {
+          throw ShareFailure.stale
+        }
+        guard try usedBytes(readAll()) + output.data.count <= ShareLimits.pendingBytes,
+          current.uploadBytes - original.uploadBytes + output.data.count <= ShareLimits.batchBytes
+        else { throw ShareFailure.quota }
+        let temporary = try directory(id).appendingPathComponent(
+          "photo-upload-" + UUID().uuidString + ".part")
+        try write(output.data.count, to: temporary.appendingPathExtension("reservation"))
+        return temporary
+      }
+      defer {
+        try? coordinated {
+          try? fm.removeItem(at: temporary)
+          try? fm.removeItem(at: temporary.appendingPathExtension("reservation"))
+        }
+      }
+      try writeBytes(output.data, to: temporary)
+      try cancellation.check()
+      try coordinated { try validateOwner(load(id), owner) }
+      var uploaded = original
+      uploaded.name = output.filename(original.name)
+      uploaded.mime = output.mime
+      uploaded.bytes = output.data.count
+      uploaded.digest = SHA256.hash(data: output.data).map { String(format: "%02x", $0) }.joined()
+      return try use(temporary, uploaded)
+    }
+  }
+
+  private struct PhotoCache: Codable {
+    var originalDigest: String
+    var data: Data
+    var digest: String
+  }
+  private static let photoCacheBytes = 3 * 1024 * 1024
+  private func photoCacheURL(_ id: String, file: String) throws -> URL {
+    guard UUID(uuidString: file) != nil else { throw ShareFailure.invalid }
+    return try directory(id).appendingPathComponent(file + ".preview")
+  }
+  private func cachePhotoThumbnail(_ id: String, file: String, owner: String, digest: String, data: Data) throws {
+    guard data.count <= ShareLimits.thumbnailBytes else { throw ShareFailure.quota }
+    let cache = PhotoCache(originalDigest: digest, data: data,
+      digest: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())
+    let encoded = try JSONEncoder().encode(cache)
+    guard encoded.count <= Self.photoCacheBytes else { throw ShareFailure.quota }
+    let target = try coordinated { () throws -> URL in
+      let manifest = try load(id)
+      try validateOwner(manifest, owner)
+      guard manifest.files.contains(where: { $0.id == file && $0.digest == digest && !$0.thumbnail }) else { throw ShareFailure.stale }
+      let target = try photoCacheURL(id, file: file)
+      try? fm.removeItem(at: target)
+      guard try usedBytes(readAll()) + encoded.count <= ShareLimits.pendingBytes else { throw ShareFailure.quota }
+      let temporary = try directory(id).appendingPathComponent("photo-preview-" + UUID().uuidString + ".part")
+      try write(encoded.count, to: temporary.appendingPathExtension("reservation"))
+      return temporary
+    }
+    defer { try? coordinated {
+      try? fm.removeItem(at: target)
+      try? fm.removeItem(at: target.appendingPathExtension("reservation"))
+    } }
+    try writeBytes(encoded, to: target)
+    try coordinated {
+      let manifest = try load(id)
+      try validateOwner(manifest, owner)
+      guard manifest.files.contains(where: { $0.id == file && $0.digest == digest && !$0.thumbnail }) else { throw ShareFailure.stale }
+      let final = try photoCacheURL(id, file: file)
+      guard rename(target.path, final.path) == 0 else { throw ShareFailure.unavailable }
+    }
+  }
+  /// Display derivatives are bounded and tied to the immutable source digest.
+  /// Legacy drafts generate one cache; repeated presentation never hashes originals.
+  public func photoThumbnail(_ id: String, file: String, owner: String) throws -> Data {
+    let cached = try coordinated { () throws -> Data? in
+      let manifest = try load(id)
+      try validateOwner(manifest, owner)
+      guard let original = manifest.files.first(where: { $0.id == file && !$0.thumbnail }), original.mime.hasPrefix("image/") else { throw ShareFailure.invalid }
+      let path = try photoCacheURL(id, file: file)
+      let fd = open(path.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+      guard fd >= 0 else { return nil }
+      let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+      defer { try? handle.close() }
+      var info = stat()
+      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+        info.st_size >= 0, info.st_size <= Self.photoCacheBytes,
+        let bytes = try? handle.read(upToCount: Self.photoCacheBytes + 1),
+        let cache = try? JSONDecoder().decode(PhotoCache.self, from: bytes),
+        cache.originalDigest == original.digest, cache.data.count <= ShareLimits.thumbnailBytes,
+        SHA256.hash(data: cache.data).map({ String(format: "%02x", $0) }).joined() == cache.digest
+      else { return nil }
+      return cache.data
+    }
+    if let cached { return cached }
+    let (data, digest) = try withVerifiedFile(id, file: file, owner: owner) { url, original in
+      (try PhotoShare.thumbnail(url), original.digest)
+    }
+    try cachePhotoThumbnail(id, file: file, owner: owner, digest: digest, data: data)
+    return data
   }
 
   public func readFile(_ id: String, file: String, owner: String, offset: Int, count: Int) throws
@@ -644,6 +945,7 @@ public final class ShareStore {
       guard
         manifest.bytes + data.count + (try reservations(in: directory(id)))
           <= ShareLimits.batchBytes,
+        manifest.uploadBytes + data.count <= ShareLimits.batchBytes,
         (try usedBytes(readAll())) + data.count <= ShareLimits.pendingBytes
       else { throw ShareFailure.quota }
       let destination = try directory(id).appendingPathComponent(fileId)
@@ -815,9 +1117,11 @@ public final class ShareStore {
         let thumbnails = Set(manifest.previews?.compactMap(\.thumbnail) ?? [])
         manifest.files.removeAll { $0.thumbnail && !thumbnails.contains($0.id) }
         Self.releaseForRecovery(&manifest)
-        let retained = Set(manifest.files.map(\.id) + ["manifest.json"])
+        let retained = Set(manifest.files.map(\.id) + manifest.files.filter { !$0.thumbnail }.map { $0.id + ".preview" } + ["manifest.json"])
         let stagedFiles = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-        if stagedFiles.contains(where: { $0.pathExtension == "reservation" })
+        if stagedFiles.contains(where: {
+          $0.pathExtension == "reservation" && !$0.lastPathComponent.hasPrefix("photo-upload-") && !$0.lastPathComponent.hasPrefix("photo-preview-")
+        })
           && !manifest.importFailures.contains("incomplete_import")
         {
           manifest.importFailures.append("incomplete_import")
@@ -843,7 +1147,9 @@ public final class ShareStore {
       for file in try fm.contentsOfDirectory(
         at: directory(record.id), includingPropertiesForKeys: [.fileSizeKey])
       {
-        // A killed rename/publish or failed unlink can leave a complete file
+        // Published .preview caches are deliberately outside manifest.files
+        // and charged here, even after their reservation has been removed.
+        // A killed rename/publish or failed unlink can also leave a complete file
         // outside its manifest. Charge it until ownership reconciliation can
         // remove it. In-progress .part bytes are already covered by reservation.
         if !referenced.contains(file.lastPathComponent) && file.pathExtension != "part"
@@ -912,14 +1218,23 @@ public final class ShareStore {
   private func load(_ id: String) throws -> ShareManifest {
     let value = try decode(
       ShareManifest.self, from: directory(id).appendingPathComponent("manifest.json"))
-    guard value.version == 1, value.id == id, value.text.utf8.count <= ShareLimits.textBytes,
+    guard [1, 2, 3, 4].contains(value.version), value.id == id,
+      value.captionBytes <= ShareLimits.textBytes,
       value.files.count <= ShareLimits.files + 16,
       value.files.allSatisfy({
         UUID(uuidString: $0.id) != nil && $0.bytes >= 0 && $0.bytes <= ShareLimits.batchBytes
+          && (value.version >= 2 || ($0.photoSize == nil && $0.photoBytes == nil))
+          && ($0.photoBytes.map { $0 >= 0 && $0 <= ShareLimits.batchBytes } ?? true)
+          && (($0.photoSize == nil) == ($0.photoBytes == nil))
+          && ($0.photoSize == nil || $0.mime.hasPrefix("image/"))
+          && (!$0.thumbnail || ($0.photoSize == nil && $0.photoBytes == nil))
+          && ($0.caption == nil || (value.version >= 3 && !$0.thumbnail))
+          && (value.version < 4 || $0.thumbnail || $0.caption != nil)
+          && ($0.thumbnail || $0.operation != nil)
       }),
       (value.previews?.count ?? 0) <= 8
     else { throw ShareFailure.invalid }
-    return value
+    return value.canonicalized()
   }
   private func save(_ manifest: ShareManifest, didPublish: () -> Void = {}) throws {
     try write(

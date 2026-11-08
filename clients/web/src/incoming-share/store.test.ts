@@ -35,7 +35,11 @@ function fixture(
         record.owner = 'owner'
         return structuredClone(record) as T
       }
-      if (action === 'update') {
+      if (
+        action === 'update' ||
+        action === 'remove_file' ||
+        action === 'reorder_files'
+      ) {
         const next = args?.manifest as IncomingShare
         if (
           next.session !== record.session ||
@@ -43,6 +47,18 @@ function fixture(
         )
           throw new Error('stale')
         record = { ...structuredClone(next), revision: next.revision + 1 }
+        if (args?.release) {
+          delete record.owner
+          delete record.leaseUntil
+        }
+        if (action === 'reorder_files') {
+          const order = args?.order as string[]
+          record.files = order
+            .map((id) => record.files.find((file) => file.id === id)!)
+            .concat(record.files.filter((file) => file.thumbnail))
+        }
+        if (action === 'remove_file')
+          record.files = record.files.filter((file) => file.id !== args?.file)
         return structuredClone(record) as T
       }
       if (action === 'upload' && uploadFailure) throw { code: 'missingFile' }
@@ -92,6 +108,106 @@ function fixture(
 }
 
 describe('durable incoming-share recovery', () => {
+  it('releases a claim that completes after page navigation and waits before reopening', async () => {
+    const f = fixture()
+    const original = f.port.call
+    let complete!: () => void
+    let delay = true
+    f.port.call = async (action, args) => {
+      if (action === 'claim') {
+        if (delay)
+          await new Promise<void>((resolve) => {
+            complete = resolve
+          })
+        if (f.record().owner) throw { code: 'busy' }
+      }
+      return original(action, args)
+    }
+    const opening = f.store.open('share')
+    await vi.waitFor(() => expect(complete).toBeDefined())
+    expect(f.store.openingId.value).toBe('share')
+    const closing = f.store.close()
+    complete()
+    await Promise.all([opening, closing])
+    expect(f.record().owner).toBeUndefined()
+    expect(f.store.selected.value).toBeNull()
+    delay = false
+    await f.store.open('share')
+    expect(f.store.selected.value?.id).toBe('share')
+    expect(f.store.error.value).toBeNull()
+  })
+
+  it('serializes repeated closes and reopening across a pending release', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    const original = f.port.call
+    let release!: () => void
+    f.port.call = async (action, args) => {
+      if (action === 'update' && args?.release)
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+      if (action === 'claim' && f.record().owner) throw { code: 'busy' }
+      return original(action, args)
+    }
+    const closing = f.store.close()
+    const duplicate = f.store.close()
+    await vi.waitFor(() => expect(release).toBeDefined())
+    const reopening = f.store.open('share')
+    release()
+    await Promise.all([closing, duplicate, reopening])
+    expect(f.calls.filter((call) => call.args?.release)).toHaveLength(1)
+    expect(f.store.selected.value?.id).toBe('share')
+  })
+
+  it('keeps unsaved edits visible when closing cannot persist them', async () => {
+    const f = fixture()
+    await f.store.open('share')
+    await f.store.edit('keep this message')
+    const original = f.port.call
+    f.port.call = async (action, args) => {
+      if (action === 'update') throw { code: 'quota' }
+      return original(action, args)
+    }
+    await expect(f.store.close()).rejects.toEqual({ code: 'quota' })
+    expect(f.store.selected.value?.id).toBe('share')
+    expect(f.store.editorText.value).toBe('keep this message')
+  })
+
+  it('applies a master caption to all photos without changing the source and preserves captions when reordered', async () => {
+    const f = fixture()
+    f.seed({
+      version: 4,
+      files: ['a', 'b'].map((id) => ({
+        id,
+        name: id + '.png',
+        mime: 'image/png',
+        bytes: 10,
+        digest: 'hash',
+        thumbnail: false,
+        caption: id,
+        operation: { id: 'op-' + id, state: 'ready' },
+      })),
+    })
+    await f.store.open('share')
+    expect(f.store.masterCaption.value).toBe('')
+    await f.store.editMasterCaption('Together 🌊')
+    expect(f.store.editorCaption('a')).toBe('Together 🌊')
+    expect(f.store.editorCaption('b')).toBe('Together 🌊')
+    await f.store.editPhotoCaption('b', 'Different')
+    expect(f.store.masterCaption.value).toBe('')
+    await f.store.reorderPhotos(['b', 'a'])
+    expect(f.record().files.map((file) => [file.id, file.caption])).toEqual([
+      ['b', 'Different'],
+      ['a', 'Together 🌊'],
+    ])
+    expect(f.record().text).toBe('https://example.org')
+    await f.store.editMasterCaption('')
+    await f.store.flushEdits()
+    expect(f.record().files.map((file) => file.caption)).toEqual(['', ''])
+    await f.store.close()
+  })
+
   it('keeps credential publication failures separate from successful inbox reads', async () => {
     const f = fixture()
     f.store.sessionError.value = 'Sharing credentials are unavailable.'
@@ -903,5 +1019,124 @@ describe('durable incoming-share recovery', () => {
     resolve([f.initial])
     await reading
     expect(store.pending.value).toEqual([])
+  })
+})
+
+describe('photo recovery', () => {
+  const photo = {
+    id: 'photo',
+    name: 'photo.heic',
+    mime: 'image/heic',
+    bytes: 90 * 1024 * 1024,
+    digest: 'fixture',
+    thumbnail: false,
+    operation: { id: 'photo-op', state: 'ready' as const },
+  }
+  it('requests a bounded native thumbnail instead of reading the full original', async () => {
+    const f = fixture()
+    f.seed({ files: [photo] })
+    const call = f.port.call.bind(f.port)
+    f.port.call = async <T>(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> =>
+      action === 'photo_thumbnail'
+        ? ({ bytes: btoa('bounded JPEG fixture') } as T)
+        : call<T>(action, args)
+    await f.store.open('share')
+    const image = await f.store.thumbnail('photo')
+    expect(image.type).toBe('image/jpeg')
+    expect(image.size).toBe(20)
+    expect(f.calls.filter(({ action }) => action === 'read')).toHaveLength(0)
+    f.store.dispose()
+  })
+  it('serializes a mounted batch of photo previews', async () => {
+    const f = fixture()
+    f.seed({ files: [photo, { ...photo, id: 'second' }] })
+    const call = f.port.call.bind(f.port)
+    let active = 0
+    let maximum = 0
+    f.port.call = async <T>(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => {
+      if (action !== 'photo_thumbnail') return call<T>(action, args)
+      active += 1
+      maximum = Math.max(maximum, active)
+      await Promise.resolve()
+      active -= 1
+      return { bytes: btoa('bounded JPEG fixture') } as T
+    }
+    await f.store.open('share')
+    await Promise.all([f.store.thumbnail('photo'), f.store.thumbnail('second')])
+    expect(maximum).toBe(1)
+    f.store.dispose()
+  })
+  it('saves distinct captions, sends each one, and retains the photo association on removal', async () => {
+    const f = fixture()
+    f.seed({
+      files: [
+        photo,
+        { ...photo, id: 'second', operation: { id: 'op-two', state: 'ready' } },
+      ],
+    })
+    await f.store.open('share')
+    await f.store.editPhotoCaption('photo', 'First caption')
+    await f.store.editPhotoCaption('second', 'Second café 🌊\nNew line')
+    expect(f.store.editorCaption('photo')).toBe('First caption')
+    expect(f.store.editorCaption('second')).toBe('Second café 🌊\nNew line')
+    await f.store.flushEdits()
+    expect(f.record().version).toBe(4)
+    await f.store.reorderPhotos(['second', 'photo'])
+    await f.store.send()
+    expect(f.post.mock.calls[0][1].body.body).toBe('https://example.org')
+    expect(
+      f.post.mock.calls.slice(1).map((call) => call[1].body.caption),
+    ).toEqual(['Second café 🌊\nNew line', 'First caption'])
+    f.store.dispose()
+  })
+  it('preserves source text and remaining captions when the first photo is removed', async () => {
+    const f = fixture()
+    f.seed({ files: [photo, { ...photo, id: 'second' }] })
+    await f.store.open('share')
+    await f.store.editPhotoCaption('photo', 'First caption')
+    await f.store.editPhotoCaption('second', 'Second caption')
+    await f.store.removeFile('photo')
+    expect(f.store.editorCaption('second')).toBe('Second caption')
+    expect(f.record().text).toBe('https://example.org')
+    expect(f.record().files[0].caption).toBe('Second caption')
+    f.store.dispose()
+  })
+  it('validates a later caption before uploading or sending any photo', async () => {
+    const f = fixture()
+    f.seed({
+      version: 3,
+      files: [
+        photo,
+        { ...photo, id: 'second', caption: 'x'.repeat(64 * 1024) },
+      ],
+    })
+    await f.store.open('share')
+    await f.store.send()
+    expect(f.post).not.toHaveBeenCalled()
+    expect(f.calls.some(({ action }) => action === 'upload')).toBe(false)
+    expect(f.store.error.value).toContain('Cannot send')
+    f.store.dispose()
+  })
+  it('flushes the caption before atomically removing a photo', async () => {
+    const f = fixture()
+    f.seed({ files: [photo] })
+    await f.store.open('share')
+    await f.store.edit('Keep this caption')
+    await f.store.removeFile('photo')
+    expect(
+      f.calls.find(({ action }) => action === 'remove_file')?.args?.manifest,
+    ).toMatchObject({ text: 'Keep this caption' })
+    expect(f.record().text).toBe('Keep this caption')
+    expect(f.record().files).toEqual([])
+    expect(
+      f.calls.filter(({ action }) => action === 'remove_file'),
+    ).toHaveLength(1)
+    f.store.dispose()
   })
 })

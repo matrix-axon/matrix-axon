@@ -25,8 +25,11 @@
       // asking for an NSSecureCoding object does not request URL contents.
       let box = ResultBox<NSSecureCoding>()
       provider.loadItem(forTypeIdentifier: type, options: nil) { value, _ in
-        if let value { box.finish(.success(value)) }
-        else { box.finish(.failure(ShareFailure.unavailable)) }
+        if let value {
+          box.finish(.success(value))
+        } else {
+          box.finish(.failure(ShareFailure.unavailable))
+        }
       }
       var supplied: NSSecureCoding?
       do {
@@ -41,8 +44,11 @@
       if provider.canLoadObject(ofClass: NSURL.self) {
         let typed = ResultBox<NSSecureCoding>()
         let progress = provider.loadObject(ofClass: NSURL.self) { value, _ in
-          if let url = value as? NSURL { typed.finish(.success(url)) }
-          else { typed.finish(.failure(ShareFailure.invalid)) }
+          if let url = value as? NSURL {
+            typed.finish(.success(url))
+          } else {
+            typed.finish(.failure(ShareFailure.invalid))
+          }
         }
         do { return try typed.wait(cancellation: cancellation) } catch {
           progress.cancel()
@@ -82,7 +88,44 @@
       }
     }
 
-    private static func text(_ provider: NSItemProvider, cancellation: ShareCancellation) throws -> String {
+    private static func photo(
+      _ provider: NSItemProvider, type: String, manifest: ShareManifest,
+      store: ShareStore, deadline: Date, cancellation: ShareCancellation
+    ) throws -> ShareManifest {
+      let box = ResultBox<ShareManifest>()
+      let stopped = ShareCancellation()
+      let progress = provider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
+        do {
+          guard let url, url.isFileURL else { throw ShareFailure.unavailable }
+          // Apple's temporary file expires when this callback returns. Stream
+          // directly into protected staging while provider access is valid.
+          let imported = try store.importFile(
+            manifest.id, owner: manifest.owner!, source: url,
+            name: provider.suggestedName ?? url.lastPathComponent, mime: "image/*", photo: true,
+            check: {
+              try cancellation.check()
+              try stopped.check()
+              guard Date() < deadline else { throw ShareFailure.expired }
+            })
+          box.finish(.success(imported))
+        } catch { box.finish(.failure(error)) }
+      }
+      do {
+        return try box.wait(
+          timeout: min(60, max(0, deadline.timeIntervalSinceNow)), cancellation: cancellation)
+      } catch {
+        stopped.cancel()
+        progress.cancel()
+        // Pair timeout with the store lock: an already-publishing completion
+        // finishes before this fence; later completions fail check under it.
+        _ = try? store.refreshOwned(manifest.id, owner: manifest.owner!)
+        throw error
+      }
+    }
+
+    private static func text(_ provider: NSItemProvider, cancellation: ShareCancellation) throws
+      -> String
+    {
       // Ask for the concrete public representation when available. Some
       // cross-process providers cannot vend a file for its abstract parent.
       let type =
@@ -92,7 +135,8 @@
           UTType($0)?.conforms(to: .plainText) == true
         } ?? UTType.plainText.identifier
       do {
-        let data = try bytes(provider, type: type, limit: ShareLimits.textBytes, cancellation: cancellation)
+        let data = try bytes(
+          provider, type: type, limit: ShareLimits.textBytes, cancellation: cancellation)
         let encoding: String.Encoding =
           UTType(type)?.conforms(to: .utf16PlainText) == true ? .utf16 : .utf8
         guard let value = String(data: data, encoding: encoding) else {
@@ -165,7 +209,8 @@
 
     public static func importItems(
       _ items: [NSExtensionItem], store: ShareStore,
-      cancellation: ShareCancellation = ShareCancellation(), staged: (ShareManifest) -> Void = { _ in }
+      cancellation: ShareCancellation = ShareCancellation(),
+      staged: (ShareManifest) -> Void = { _ in }
     ) throws
       -> ShareManifest
     {
@@ -177,7 +222,8 @@
       var urls: [String] = []
       var metadata: [SourceMetadata] = []
       var failures: [String] = []
-      let deadline = Date().addingTimeInterval(20)
+      var photos: [(NSItemProvider, String)] = []
+      let deadline = Date().addingTimeInterval(120)
       for input in items {
         try cancellation.check()
         let urlStart = urls.count
@@ -198,13 +244,19 @@
           // Counts and fixed known-type flags are sufficient for device input
           // measurements. Never log sender-controlled identifiers or content.
           log.info(
-            "share_provider url=\(provider.hasItemConformingToTypeIdentifier(UTType.url.identifier)) text=\(provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)) representations=\(provider.registeredTypeIdentifiers.count)"
+            "share_provider url=\(provider.hasItemConformingToTypeIdentifier(UTType.url.identifier)) text=\(provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)) image=\(provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)) representations=\(provider.registeredTypeIdentifiers.count)"
           )
           do {
-            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+            // Local image providers remain photos. Non-image providers may
+            // advertise file-url as an alternative to a valid remote URL.
+            let localImage = provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+              && provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) && !localImage
+            {
               let urlStart = urls.count
               do {
-                let value = try item(provider, type: UTType.url.identifier, cancellation: cancellation)
+                let value = try item(
+                  provider, type: UTType.url.identifier, cancellation: cancellation)
                 log.info(
                   "share_url_representation url=\(value is URL) nsurl=\(value is NSURL) text=\(value is String) bytes=\(value is Data) metadata=\(value is LPLinkMetadata)"
                 )
@@ -258,6 +310,18 @@
               if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
                 text.append(try Self.text(provider, cancellation: cancellation))
               }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+              // Provider order is logical attachment order. Request only one
+              // concrete representation, preserving the source's preference.
+              let type =
+                provider.registeredTypeIdentifiers.first {
+                  UTType($0)?.conforms(to: .image) == true
+                } ?? UTType.image.identifier
+              if photos.count < ShareLimits.files {
+                photos.append((provider, type))
+              } else {
+                failures.append("too_many_photos")
+              }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
               text.append(try Self.text(provider, cancellation: cancellation))
             } else {
@@ -281,12 +345,39 @@
         }
       }
       try cancellation.check()
-      let normalized = try TextShare.normalize(text: text, urls: urls)
-      var manifest = try store.claim(store.create(text: normalized).id)
+      let normalized = try TextShare.normalize(text: text, urls: urls, allowEmpty: !photos.isEmpty)
+      var manifest = try store.claim(
+        store.create(text: normalized, importFailures: ["incomplete_import"]).id)
       staged(manifest)
+      // A killed import must never look like an intentionally smaller batch.
+      manifest.importFailures = failures + ["incomplete_import"]
+      manifest = try store.update(manifest)
+      staged(manifest)
+      // Never silently send a subset of the user's selection. An over-limit
+      // selection stages no photos; any earlier failure also stops photo and
+      // preview loading. Retained partial drafts remain explicitly unsendable.
+      for (provider, type) in photos {
+        guard failures.isEmpty else { break }
+        try cancellation.check()
+        do {
+          manifest = try photo(
+            provider, type: type, manifest: manifest, store: store,
+            deadline: deadline, cancellation: cancellation)
+        } catch {
+          try cancellation.check()
+          let category = (error as? ShareFailure)?.rawValue ?? "provider_unavailable"
+          failures.append(category)
+          log.error("share_photo_failed category=\(category, privacy: .public)")
+          manifest = try store.refreshOwned(manifest.id, owner: manifest.owner!)
+        }
+        staged(manifest)
+      }
       manifest.importFailures = failures
+      // Keep the incomplete marker until preview intake finishes as well.
+      manifest.importFailures.append("incomplete_import")
       manifest = try store.update(manifest)
       for link in metadata {
+        guard failures.isEmpty else { break }
         try cancellation.check()
         guard let raw = TextShare.matchedLink(link.url, in: normalized) else { continue }
         if (manifest.previews?.count ?? 0) >= 8
@@ -294,7 +385,7 @@
         {
           manifest.importFailures.append("too_many_source_previews")
           manifest = try store.update(manifest)
-          continue
+          break
         }
         let title = TextShare.previewField(link.title, limit: 300)
         guard title != nil || link.imageProvider != nil else { continue }
@@ -328,6 +419,10 @@
         }
       }
       try cancellation.check()
+      manifest.importFailures.removeAll { $0 == "incomplete_import" }
+      manifest = try store.update(manifest)
+      staged(manifest)
+      log.info("share_imported photos=\(photos.count) failures=\(manifest.importFailures.count)")
       return manifest
     }
   }

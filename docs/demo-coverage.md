@@ -296,7 +296,9 @@ The checks cover full-width caption geometry, top-right 44-pixel download target
 Viewer download errors remaining visible on the card after close have component-test coverage; native image/gallery taps with double-tap disabled are covered by `clients/web/e2e/message-gestures.spec.ts` on iPhone/WebKit.
 The existing `media` recording still demonstrates image galleries; a recorded audio/text/PDF/video attachment-card scene remains outstanding.
 
-The native iOS text/link Share Extension adds an account/room picker with validated last-destination restore, editable message/card preview, supplied metadata followed by explicit restricted HTTPS preview acquisition, separately confirmed homeserver lookup, Send, and durable draft/unknown-outcome recovery.
+The native iOS text/link/photo Share Extension adds an account/room picker with validated last-destination restore, editable message/card preview, supplied metadata followed by explicit restricted HTTPS preview acquisition, separately confirmed homeserver lookup, Send, and durable draft/unknown-outcome recovery.
+The photo increment adds ordered photo thumbnails/filenames, compact multiline-capable captions below each filename, an independent source message, cached previews with retry, top-right trash controls, automatic dismissal after confirmed success, removal before sending, individual and batch size pickers with upload estimates, and per-item partial-delivery recovery.
+Photo-specific native/simulator and browser recovery tests complement the signed iPhone/iPad checklist; signed photo acceptance and a native photo recording remain outstanding.
 Settings → Sharing keeps a recovery link available when the inbox is empty.
 Recovery now also has a conditional toolbar entry with a count or read-failure badge and confirmed bulk clearing that fences idle composers and preserves in-flight sends and newly arriving shares.
 The native composer omits routine introductory instructions, places an accessible reload icon beside Destination, and shows image removal only for previews that contain an image.
@@ -306,3 +308,8 @@ Link preview controls place the preview action beside the link-only status, with
 Homeserver preview confirmation is anchored to the corresponding link's button.
 It is not covered by the browser demo driver or recorded tours.
 Native XCTest and the signed-device checklist in [iOS sharing](ios-sharing.md) cover this separate OS surface; a new native recording remains outstanding.
+
+The native photo composer also provides a master caption, drag ordering, and filenames edited inline with their current values prefilled.
+Routine ready labels are hidden; Sending progress and failure/uncertain outcomes remain visible.
+These native views remain outside the browser-only recorded tour.
+Simulator UI checks exercise inline filename edits, the empty state after removing the final photo, per-photo captions and size selection, and native drag ordering; signed-device photo acceptance remains separate.

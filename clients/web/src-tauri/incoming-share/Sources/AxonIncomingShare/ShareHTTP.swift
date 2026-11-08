@@ -54,7 +54,10 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
 
   public func close() {
     lock.lock()
-    guard !closed else { lock.unlock(); return }
+    guard !closed else {
+      lock.unlock()
+      return
+    }
     closed = true
     lock.unlock()
     session.invalidateAndCancel()
@@ -70,7 +73,7 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
       ? "accounts"
       : path == "/v1/rooms" || path.hasPrefix("/v1/rooms?")
         ? "rooms"
-        : path.hasSuffix("/send")
+        : path.hasSuffix("/send") || path.hasSuffix("/send-media")
           ? "send"
           : path.hasSuffix("/generate") ? "generate" : "media"
     guard URL(string: descriptor.server)?.scheme == "https" else {
@@ -99,7 +102,10 @@ public final class ShareHTTP: NSObject, URLSessionDataDelegate, URLSessionTaskDe
     // Closing and task creation/resume share one lock. Invalidation can race
     // a caller that already passed its ownership/cancellation checks.
     lock.lock()
-    guard !closed else { lock.unlock(); throw ShareFailure.cancelled }
+    guard !closed else {
+      lock.unlock()
+      throw ShareFailure.cancelled
+    }
     let task: URLSessionTask =
       file.map { session.uploadTask(with: request, fromFile: $0) }
       ?? session.dataTask(with: request)

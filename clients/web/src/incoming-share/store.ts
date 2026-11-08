@@ -5,7 +5,12 @@ import type { SendProgress } from '../stores/timeline'
 import { matchUrls } from '../html/linkify'
 import { nativePreviewLinks } from './urls'
 import { previewPreflight, type PreviewInput } from './contract'
-import { shareCompleted, shareOperations } from './types'
+import {
+  canonicalShare,
+  photoCaption,
+  shareCompleted,
+  shareOperations,
+} from './types'
 import type {
   IncomingShare,
   IncomingSharePort,
@@ -16,11 +21,30 @@ import type {
 export type IncomingShareStore = ReturnType<typeof createIncomingShareStore>
 
 export function createIncomingShareStore(
-  port: IncomingSharePort,
+  incomingPort: IncomingSharePort,
   api: ApiClient,
   timelines: TimelineStoreCache,
   accessToken?: () => Promise<string | null>,
 ) {
+  const normalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(normalize)
+    if (
+      value &&
+      typeof value === 'object' &&
+      'version' in value &&
+      'files' in value &&
+      'text' in value
+    )
+      return canonicalShare(value as IncomingShare)
+    return value
+  }
+  const port: IncomingSharePort = {
+    subscribe: (listener) => incomingPort.subscribe(listener),
+    call: async <T>(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<T> => normalize(await incomingPort.call(action, args)) as T,
+  }
   const pending = signal<IncomingShare[]>([])
   const selected = signal<IncomingShare | null>(null)
   const busy = signal(false)
@@ -36,6 +60,7 @@ export function createIncomingShareStore(
   }
   let deviceRequest: DeviceRequest | null = null
   let previewWork: Promise<void> | null = null
+  let thumbnailWork: Promise<void> = Promise.resolve()
   function cancelPreview() {
     const request = deviceRequest
     if (request !== null) request.cancelled = true
@@ -50,13 +75,14 @@ export function createIncomingShareStore(
   let tail: Promise<void> = Promise.resolve()
   let sessionReady = () => Promise.resolve()
   let stopRequested = false
-  const drafts = signal<Record<string, string>>({})
+  type CaptionDraft = { text?: string; captions?: Record<string, string> }
+  const drafts = signal<Record<string, CaptionDraft>>({})
   const editorText = computed(() => {
     const record = selected.value
-    return record === null ? '' : (drafts.value[record.id] ?? record.text)
+    return record === null ? '' : (drafts.value[record.id]?.text ?? record.text)
   })
   let flushingEdit:
-    { id: string; text: string; promise: Promise<void> } | undefined
+    { id: string; draft: CaptionDraft; promise: Promise<void> } | undefined
   let editTimer: ReturnType<typeof setTimeout> | undefined
   let editDeadline: ReturnType<typeof setTimeout> | undefined
   const problem = (code: string) => Object.assign(new Error(code), { code })
@@ -70,29 +96,56 @@ export function createIncomingShareStore(
     clearEditTimers()
     const id = selected.peek()?.id
     if (id === undefined) return
-    const text = drafts.peek()[id]
-    if (text === undefined) return
-    if (flushingEdit?.id === id && flushingEdit.text === text)
+    const draft = drafts.peek()[id]
+    if (draft === undefined) return
+    if (flushingEdit?.id === id && flushingEdit.draft === draft)
       return flushingEdit.promise
-    const urls = new Set(matchUrls(text).map((match) => match.url))
-    const promise = change((record) => ({
-      ...record,
-      text,
-      previews: record.previews?.filter((preview) =>
-        urls.has(preview.matched_url),
-      ),
-    }))
-    flushingEdit = { id, text, promise }
+    const promise = change((record) => {
+      const text = draft.text ?? record.text
+      const urls = new Set(matchUrls(text).map((match) => match.url))
+      return {
+        ...record,
+        version: 4,
+        text,
+        files: record.files.map((file) =>
+          draft.captions?.[file.id] === undefined
+            ? file
+            : { ...file, caption: draft.captions[file.id] },
+        ),
+        previews: record.previews?.filter((preview) =>
+          urls.has(preview.matched_url),
+        ),
+      }
+    })
+    flushingEdit = { id, draft, promise }
     try {
       await promise
     } finally {
       if (flushingEdit?.promise === promise) flushingEdit = undefined
     }
-    if (drafts.peek()[id] === text) {
+    if (drafts.peek()[id] === draft) {
       const next = { ...drafts.peek() }
       delete next[id]
       drafts.value = next
     }
+  }
+
+  function scheduleEdit(id: string, draft: CaptionDraft) {
+    drafts.value = { ...drafts.peek(), [id]: draft }
+    clearTimeout(editTimer)
+    const persist = () => {
+      void flushEdits().catch(() => {})
+    }
+    editTimer = setTimeout(persist, 250)
+    editDeadline ??= setTimeout(persist, 1000)
+  }
+  function editorCaption(file: string): string {
+    const record = selected.value
+    const photo = record?.files.find((item) => item.id === file)
+    if (!record || !photo) return ''
+    return (
+      drafts.value[record.id]?.captions?.[file] ?? photoCaption(record, photo)
+    )
   }
 
   function failureCode(cause: unknown): string | null {
@@ -210,6 +263,8 @@ export function createIncomingShareStore(
   function change(
     update: (record: IncomingShare) => IncomingShare,
     release = false,
+    removeFile?: string,
+    order?: string[],
   ): Promise<void> {
     const generation = epoch
     const id = selected.peek()?.id
@@ -217,10 +272,19 @@ export function createIncomingShareStore(
       if (generation !== epoch) throw problem('stale')
       const record = selected.peek()
       if (record === null || record.id !== id) throw problem('stale')
-      const next = await port.call<IncomingShare>('update', {
-        manifest: update(structuredClone(record)),
-        release,
-      })
+      const next = await port.call<IncomingShare>(
+        order !== undefined
+          ? 'reorder_files'
+          : removeFile === undefined
+            ? 'update'
+            : 'remove_file',
+        {
+          manifest: update(structuredClone(record)),
+          release,
+          ...(order === undefined ? {} : { order }),
+          ...(removeFile === undefined ? {} : { file: removeFile }),
+        },
+      )
       if (generation !== epoch) throw problem('stale')
       selected.value = next
     })
@@ -250,39 +314,73 @@ export function createIncomingShareStore(
       })
     }
   }
-  async function open(id: string) {
+  let opening: Promise<void> | undefined
+  let closing: Promise<boolean> | undefined
+  const openingId = signal<string | null>(null)
+  async function performOpen(id: string) {
+    await closing?.catch(() => {})
     if (busy.peek()) return
     const generation = epoch
     busy.value = true
+    openingId.value = id
+    error.value = null
     try {
-      if (selected.peek() !== null) await close(true)
+      await releaseSelection()
       const record = await port.call<IncomingShare>('claim', { id })
-      if (generation === epoch) {
-        selected.value = record
-        error.value = null
-      }
+      if (generation === epoch) selected.value = record
     } catch (cause) {
       if (generation === epoch) describeFailure(cause)
     } finally {
-      if (generation === epoch) busy.value = false
-    }
-  }
-  async function close(fromOpen = false) {
-    const work = previewWork
-    await cancelPreview()
-    if (work !== null) await work
-    if (busy.peek() && !fromOpen) return
-    if (selected.peek() === null) return
-    const generation = epoch
-    try {
-      await flushEdits()
-      await change((record) => record, true)
-    } finally {
       if (generation === epoch) {
-        selected.value = null
-        await refresh()
+        busy.value = false
+        openingId.value = null
       }
     }
+  }
+  function open(id: string) {
+    if (opening) return opening
+    const task = performOpen(id)
+    opening = task
+    void task.finally(() => {
+      if (opening === task) opening = undefined
+    })
+    return task
+  }
+  async function releaseSelection() {
+    const generation = epoch
+    if (selected.peek() === null) return
+    await flushEdits()
+    await change((record) => record, true)
+    if (generation === epoch) selected.value = null
+  }
+  function close() {
+    if (closing) return closing
+    // Navigation may unmount the page while claim is still in flight.
+    // Release that claim too; otherwise it remains locked for five minutes.
+    const claim = opening
+    const generation = epoch
+    const task = (async () => {
+      await claim
+      const work = previewWork
+      await cancelPreview()
+      if (work !== null) await work
+      if (generation !== epoch || busy.peek()) return false
+      busy.value = true
+      try {
+        await releaseSelection()
+        await refresh()
+        return true
+      } finally {
+        if (generation === epoch) busy.value = false
+      }
+    })()
+    closing = task
+    void task
+      .finally(() => {
+        if (closing === task) closing = undefined
+      })
+      .catch(() => {})
+    return task
   }
   async function discardRecord(record: IncomingShare, generation: number) {
     if (generation !== epoch) return
@@ -384,7 +482,7 @@ export function createIncomingShareStore(
     )
       return
     const previewUploads =
-      operations[0]?.state === 'sent'
+      record.operation.state === 'sent'
         ? []
         : (record.previews?.flatMap((preview) =>
             preview.image_upload_id == null ? [] : [preview.image_upload_id],
@@ -589,10 +687,9 @@ export function createIncomingShareStore(
       )
         throw problem('room')
       const attachments = record.files.filter((file) => !file.thumbnail)
-      const captionPending =
-        attachments.length === 0
-          ? record.operation.state !== 'sent'
-          : attachments[0].operation?.state !== 'sent'
+      const messagePending =
+        (record.text.trim() !== '' || attachments.length === 0) &&
+        record.operation.state !== 'sent'
       const operations = shareOperations(record)
       if (
         operations.some((operation) =>
@@ -623,22 +720,34 @@ export function createIncomingShareStore(
         }),
       )
       let budget = ''
-      const failure = captionPending
+      const failure = messagePending
         ? previewPreflight(
             { body: record.text, url_previews: wire ?? [] },
-            attachments.length > 0,
+            false,
             (field, measured, limit) => {
               budget = `${field}: ${measured} / ${limit}. `
             },
           )
         : null
-      if (failure !== null) {
-        error.value = `Cannot send: ${failure}. ${budget}Shorten the text or remove excess previews. Your draft is retained.`
+      const photoFailure = attachments
+        .filter((file) => file.operation?.state !== 'sent')
+        .map((file) =>
+          previewPreflight(
+            {
+              body: photoCaption(record!, file),
+              url_previews: [],
+            },
+            true,
+          ),
+        )
+        .find((value) => value !== null)
+      if (failure !== null || photoFailure !== undefined) {
+        error.value = `Cannot send: ${failure ?? photoFailure}. ${budget}Shorten the text or remove excess previews. Your draft is retained.`
         return
       }
       // Retained thumbnails are always re-uploaded on an explicit Send. This
       // avoids relying on a server handle's independent TTL and never refetches a page.
-      for (const preview of captionPending ? (record.previews ?? []) : []) {
+      for (const preview of messagePending ? (record.previews ?? []) : []) {
         if (stopRequested) return
         if (preview.thumbnail !== undefined) {
           const uploadId = await upload(preview.thumbnail)
@@ -669,15 +778,15 @@ export function createIncomingShareStore(
       )
       const timeline = timelines.acquire(record.accountId!, record.roomId!)
       let success = true
-      if (attachments.length === 0) {
-        if (record.operation.state !== 'sent')
-          success = await timeline.send(record.text, {
-            formattedBody: null,
-            urlPreviews: previews,
-            progress: progress(),
-          })
-      } else {
-        for (const [index, file] of attachments.entries()) {
+      if (messagePending) {
+        success = await timeline.send(record.text, {
+          formattedBody: null,
+          urlPreviews: previews,
+          progress: progress(),
+        })
+      }
+      if (success) {
+        for (const file of attachments) {
           if (stopRequested) {
             success = false
             break
@@ -715,9 +824,9 @@ export function createIncomingShareStore(
           }
           success = await timeline.sendStagedMedia(
             uploadId,
-            index === 0 ? record.text : '',
+            photoCaption(record, file),
             {
-              urlPreviews: index === 0 ? previews : undefined,
+              urlPreviews: undefined,
               progress: progress(file.id),
             },
           )
@@ -755,6 +864,7 @@ export function createIncomingShareStore(
     pending,
     selected,
     editorText,
+    editorCaption,
     flushEdits,
     busy,
     error,
@@ -763,6 +873,32 @@ export function createIncomingShareStore(
     sessionError,
     refresh,
     open,
+    openingId,
+    masterCaption: computed(() => {
+      const photos =
+        selected.value?.files.filter((file) => !file.thumbnail) ?? []
+      const captions = photos.map((file) => editorCaption(file.id))
+      return captions.every((caption) => caption === captions[0])
+        ? (captions[0] ?? '')
+        : ''
+    }),
+    async editMasterCaption(caption: string) {
+      const record = selected.peek()
+      if (!record || busy.peek()) return
+      scheduleEdit(record.id, {
+        ...drafts.peek()[record.id],
+        captions: Object.fromEntries(
+          record.files
+            .filter((file) => !file.thumbnail)
+            .map((file) => [file.id, caption]),
+        ),
+      })
+    },
+    async reorderPhotos(order: string[]) {
+      if (busy.peek()) return
+      await flushEdits()
+      await change((record) => record, false, undefined, order)
+    },
     close,
     discard,
     discardAll,
@@ -778,17 +914,46 @@ export function createIncomingShareStore(
     async thumbnail(fileId: string): Promise<Blob> {
       const record = selected.peek()
       const generation = epoch
-      const file = record?.files.find(
-        (candidate) => candidate.id === fileId && candidate.thumbnail,
-      )
+      const file = record?.files.find((candidate) => candidate.id === fileId)
       if (
         record === null ||
         file === undefined ||
-        !['image/png', 'image/jpeg', 'image/webp'].includes(file.mime) ||
+        !file.mime.startsWith('image/') ||
         file.bytes <= 0 ||
-        file.bytes > 2 * 1024 * 1024
+        (file.thumbnail && file.bytes > 2 * 1024 * 1024)
       )
         throw new Error('thumbnail unavailable')
+      if (!file.thumbnail) {
+        // Ten photo views can mount together. Admit one decode at a time,
+        // leaving the native transfer pool available for a concurrent send.
+        const task = thumbnailWork.then(async () => {
+          if (
+            generation !== epoch ||
+            selected.peek()?.id !== record.id ||
+            selected.peek()?.owner !== record.owner
+          )
+            throw problem('stale')
+          return port.call<{ bytes: string }>('photo_thumbnail', {
+            id: record.id,
+            owner: record.owner,
+            file: fileId,
+          })
+        })
+        thumbnailWork = task.then(
+          () => {},
+          () => {},
+        )
+        const result = await task
+        if (generation !== epoch || selected.peek()?.id !== record.id)
+          throw problem('stale')
+        if (typeof result.bytes !== 'string' || result.bytes.length > 2_796_204)
+          throw problem('invalid')
+        const bytes = Uint8Array.from(atob(result.bytes), (character) =>
+          character.charCodeAt(0),
+        )
+        if (bytes.length > 2 * 1024 * 1024) throw problem('invalid')
+        return new Blob([bytes], { type: 'image/jpeg' })
+      }
       const data = new Uint8Array(file.bytes)
       for (let offset = 0; offset < file.bytes; offset += 64 * 1024) {
         const result = await port.call<{ bytes: string }>('read', {
@@ -837,13 +1002,21 @@ export function createIncomingShareStore(
     async edit(text: string) {
       const id = selected.peek()?.id
       if (id === undefined || busy.peek()) return
-      drafts.value = { ...drafts.peek(), [id]: text }
-      clearTimeout(editTimer)
-      const persist = () => {
-        void flushEdits().catch(() => {})
-      }
-      editTimer = setTimeout(persist, 250)
-      editDeadline ??= setTimeout(persist, 1000)
+      scheduleEdit(id, { ...drafts.peek()[id], text })
+    },
+    async editPhotoCaption(file: string, caption: string) {
+      const record = selected.peek()
+      if (
+        !record ||
+        busy.peek() ||
+        !record.files.some((item) => item.id === file && !item.thumbnail)
+      )
+        return
+      const draft = drafts.peek()[record.id]
+      scheduleEdit(record.id, {
+        ...draft,
+        captions: { ...draft?.captions, [file]: caption },
+      })
     },
     async destination(accountId: string, roomId?: string) {
       await flushEdits()
@@ -859,6 +1032,11 @@ export function createIncomingShareStore(
                 image_upload_id: undefined,
               })),
       }))
+    },
+    async removeFile(file: string) {
+      if (busy.peek()) return
+      await flushEdits()
+      await change((record) => record, false, file)
     },
     async removePreview(url: string, imageOnly = false) {
       await flushEdits()

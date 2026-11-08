@@ -10,7 +10,7 @@ The foundation below supplies its shared session, protected staging, and recover
 ## Recovering a draft
 
 Open Pending shares and choose **Review share**.
-Confirm the sending Matrix account and joined room, edit the text or first attachment caption, and review previews and saved delivery outcomes.
+Confirm the sending Matrix account and joined room, edit the text or each photo's caption, and review previews and saved delivery outcomes.
 Native destination changes also update the session-bound preference used to preselect the next Share Extension destination; each existing draft keeps its own account and room.
 An ordinary room draft stays separate.
 Typing is saved after 250 milliseconds of idle time, with a one-second maximum batching window; leaving the editor, hiding the page, and Send flush pending text.
@@ -39,14 +39,15 @@ Send validates the destination against current rooms and preserves oversized dra
 The import ceiling is 64 KiB of UTF-8 text; it is not a send allowance.
 Preview fields use the server's UTF-16 limits, with a separate 32 KiB canonical preview budget and 40 KiB content budget including protocol aliases and media/encryption reservations.
 Storage is bounded to 20 shares/200 MiB, with ten user attachments and 100 MiB per file/batch; thumbnail bytes count toward storage without becoming separate messages.
+Published photo-preview caches also count toward the pending-storage cap after their reservations are removed.
 The total includes conservative reservations for metadata and atomic replacement: 2 MiB per record plus 16 KiB for session control files.
 Thus a nearly full inbox can reject a batch below its independent 100 MiB ceiling; existing drafts are never evicted to admit it.
 
 Confirmed items retain their event IDs and are never resent during recovery.
 An interrupted dispatch is **outcome unknown**, because the server may have accepted it without returning a response.
-Inspect the destination before explicitly allowing a resend; the duplicate-risk checkbox never triggers a send itself.
+Choose Retry item to prepare an uncertain item for the next explicit send; no confirmation checkbox is required.
 Stopping a batch prevents subsequent dispatches after the current request finishes, and cannot recall a message already accepted upstream.
-Discarding a partial batch never deletes preview upload handles already associated with its delivered caption or first attachment.
+Discarding a partial batch never deletes preview upload handles already associated with its delivered source message or a combined legacy first attachment.
 
 ## Session and storage boundaries
 
@@ -76,6 +77,18 @@ A deferred push deletion rechecks the remaining sign-out barriers and visibly re
 
 A cross-process file lock guards descriptors, quota reservations, revisions, and ownership fences.
 Files and manifests are published atomically with filesystem synchronization.
+Manifest version 4 separates the source message and its delivery operation from uniform per-file captions.
+Versions 1–3 are upgraded at the read boundary; legacy confirmed or uncertain combined message/photo outcomes also fence the source message against automatic replay.
+Removing a photo does not alter the source message, cards, or other captions.
+The combined source/caption text counts toward the 64 KiB UTF-8 ceiling and pending-storage quota; every outgoing message is validated before any send.
+Bounded protected JPEG previews are prepared during intake and tied to the immutable original digest.
+Their cache files count toward pending quota and survive claim/reconciliation; interrupted preview generation is not an incomplete provider import.
+Cached preview reads verify only the bounded derivative, while uploads still verify the full original snapshot.
+Read-only preview requests use the serial local-work queue rather than consuming network-transfer slots; failed presentation offers an explicit retry.
+Both consumers regenerate the chosen representation from verified retained originals, using protected temporary files that reserve pending-storage quota.
+Choosing sizes for a batch publishes all choices in one manifest update; a crash before publication retains the previous choices.
+An interrupted rendition upload is recovered as an upload, without being mistaken for incomplete provider intake.
+Older app builds reject unsupported manifest versions rather than ignoring their size choices or captions.
 Network and provider waits run outside that lock, and all locks, leases, copies, transfers, and response bodies are bounded.
 Resume reconciliation reports incomplete imports, removes orphaned temporary data, and turns interrupted dispatches into unknown outcomes without replay.
 Heartbeats and delivery-state changes avoid global quota scans; growing content still checks authoritative cross-process totals under the lock.
@@ -230,7 +243,8 @@ A subsequent read of that room found exactly one timeline event containing its u
 An attempted response interception did not modify Tauri's immutable invocation function, so that successful send is not evidence of a network interruption.
 A separate synthetic record was advanced through the real native bridge to a durable dispatch checkpoint before process termination, without making a network request.
 After lease expiry, the relaunched app retained the text, reclaimed ownership, and displayed outcome unknown.
-Explicit resend remained disabled while duplicate-risk consent was unchecked.
+At that earlier validation, explicit resend remained disabled while duplicate-risk consent was unchecked.
+The current UI replaces that checkbox with a direct Retry item action.
 The synthetic uncertain record was then discarded without resending.
 This distinguishes physical crash-checkpoint recovery from an interrupted live transfer.
 Full VoiceOver use, Dynamic Type, split-view interaction, and real extension transfer interruption remain later-stage device checks.

@@ -62,7 +62,9 @@ public enum TextShare {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty || trimmed.utf16.count > limit ? nil : trimmed
   }
-  public static func normalize(text: [String], urls: [String]) throws -> String {
+  public static func normalize(text: [String], urls: [String], allowEmpty: Bool = false) throws
+    -> String
+  {
     guard text.count <= 32, urls.count <= 32 else { throw ShareFailure.quota }
     var pieces: [String] = []
     for part in text where !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -88,7 +90,7 @@ public enum TextShare {
       }
     }
     guard result.utf8.count <= ShareLimits.textBytes else { throw ShareFailure.quota }
-    guard !result.isEmpty else { throw ShareFailure.invalid }
+    guard allowEmpty || !result.isEmpty else { throw ShareFailure.invalid }
     return result
   }
 
@@ -128,7 +130,9 @@ public enum TextShare {
       .filter(validURL)
   }
 
-  public static func wire(_ manifest: ShareManifest, reserveImages: Bool = false) -> [String: Any] {
+  public static func wire(
+    _ manifest: ShareManifest, reserveImages: Bool = false
+  ) -> [String: Any] {
     let previews: [[String: Any]] = (manifest.previews ?? []).map { preview in
       var entry: [String: Any] = ["matched_url": preview.matched_url]
       entry["title"] = preview.title
@@ -142,8 +146,16 @@ public enum TextShare {
     return ["body": manifest.text, "url_previews": previews]
   }
 
+  public static func photoWire(_ file: ShareFile, uploadId: String = "00000000-0000-4000-8000-000000000001") -> [String: Any] {
+    ["upload_id": uploadId, "caption": file.caption ?? "", "url_previews": []]
+  }
+
   public static func validation(_ manifest: ShareManifest) -> String? {
-    guard !manifest.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    let manifest = manifest.canonicalized()
+    let photos = manifest.files.filter { !$0.thumbnail }
+    let media = !photos.isEmpty
+    guard manifest.captionBytes <= ShareLimits.textBytes else { return "text_too_large" }
+    guard media || !manifest.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return "empty_text"
     }
     for preview in manifest.previews ?? [] {
@@ -151,7 +163,13 @@ public enum TextShare {
       if (preview.description?.utf16.count ?? 0) > 1000 { return "preview_description_too_large" }
       if (preview.site_name?.utf16.count ?? 0) > 120 { return "preview_site_name_too_large" }
     }
-    return PreviewContract.check(wire(manifest, reserveImages: true))
+    if manifest.hasMessage {
+      if let failure = PreviewContract.check(wire(manifest, reserveImages: true), media: false) { return failure }
+    }
+    for photo in photos {
+      if let failure = PreviewContract.check(photoWire(photo), media: true) { return failure }
+    }
+    return nil
   }
 
   public static func definiteRejection(status: Int, code: String?) -> Bool {
@@ -349,9 +367,13 @@ public final class TextShareSender {
   public func send(_ input: ShareManifest, checkpoint: (ShareManifest) -> Void = { _ in }) throws
     -> ShareManifest
   {
-    guard input.operation.state == .ready, input.importFailures.isEmpty,
-      input.files.allSatisfy(\.thumbnail), let room = input.roomId,
-      TextShare.validation(input) == nil
+    let attachments = input.files.filter { !$0.thumbnail }
+    guard !input.completed, (!input.hasMessage || [.ready, .sent].contains(input.operation.state)), input.importFailures.isEmpty,
+      let room = input.roomId, TextShare.validation(input) == nil,
+      attachments.allSatisfy({
+        $0.mime.hasPrefix("image/")
+          && $0.operation.map { [.ready, .uploaded, .sent].contains($0.state) } == true
+      })
     else { throw ShareFailure.invalid }
     let path = try accountPath(input)
     guard
@@ -359,6 +381,65 @@ public final class TextShareSender {
         $0.account_id == input.accountId && $0.room_id == room
       })
     else { throw ShareFailure.stale }
+    var next = input
+    if next.hasMessage && next.operation.state != .sent {
+      next = try uploadPreviews(next, path: path, checkpoint: checkpoint)
+      let body = try JSONSerialization.data(
+        withJSONObject: TextShare.wire(next), options: [.sortedKeys, .withoutEscapingSlashes])
+      next = try dispatch(next, path: path, room: room, body: body, file: nil, checkpoint: checkpoint)
+      checkpoint(next)
+      if next.operation.state != .sent { return next }
+    }
+    if attachments.isEmpty { return next }
+    for attachment in attachments {
+      try cancellation.check()
+      if attachment.operation?.state == .sent { continue }
+      var operation = next.files.first { $0.id == attachment.id }!.operation!
+      operation.state = .uploading
+      operation.failure = nil
+      operation.uploadId = nil
+      next = try save(operation, in: next, file: attachment.id)
+      checkpoint(next)
+      do {
+        let uploaded = try store.withUploadFile(
+          next.id, file: attachment.id, owner: next.owner!, cancellation: cancellation
+        ) { url, file in
+          let name = file.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+          return try self.object(
+            self.call(
+              next, path + "/media/uploads?kind=image&filename=" + name,
+              method: "POST", file: url, mime: file.mime))
+        }
+        guard let id = uploaded["upload_id"] as? String, UUID(uuidString: id) != nil else {
+          throw ShareFailure.invalidResponse
+        }
+        operation.state = .uploaded
+        operation.uploadId = id
+      } catch {
+        // Uploads do not send a message. Their failure is safe to retry,
+        // including when a handle was created but its response was lost.
+        operation.state = .failed
+        operation.failure = "upload_failed"
+        next = try save(operation, in: next, file: attachment.id)
+        checkpoint(next)
+        throw error
+      }
+      next = try save(operation, in: next, file: attachment.id)
+      checkpoint(next)
+      let wire = TextShare.photoWire(attachment, uploadId: operation.uploadId!)
+      guard PreviewContract.check(wire, media: true) == nil else { throw ShareFailure.invalid }
+      let body = try JSONSerialization.data(
+        withJSONObject: wire, options: [.sortedKeys, .withoutEscapingSlashes])
+      next = try dispatch(
+        next, path: path, room: room, body: body, file: attachment.id, checkpoint: checkpoint)
+      if next.files.first(where: { $0.id == attachment.id })?.operation?.state != .sent { break }
+    }
+    return next
+  }
+
+  private func uploadPreviews(
+    _ input: ShareManifest, path: String, checkpoint: (ShareManifest) -> Void
+  ) throws -> ShareManifest {
     var next = input
     // Explicit sends always restore a fresh account-owned handle from retained
     // bytes. Neither handle expiry nor a missing copy triggers regeneration.
@@ -382,36 +463,60 @@ public final class TextShareSender {
         throw ShareFailure.missingFile
       }
     }
-    let body = try JSONSerialization.data(
-      withJSONObject: TextShare.wire(next), options: [.sortedKeys, .withoutEscapingSlashes])
+    return next
+  }
+
+  private func save(_ operation: ShareOperation, in input: ShareManifest, file: String?) throws
+    -> ShareManifest
+  {
+    var next = input
+    if let file {
+      guard let index = next.files.firstIndex(where: { $0.id == file }) else {
+        throw ShareFailure.missingFile
+      }
+      next.files[index].operation = operation
+    } else {
+      next.operation = operation
+    }
+    return try store.update(next)
+  }
+
+  private func dispatch(
+    _ input: ShareManifest, path: String, room: String, body: Data, file: String?,
+    checkpoint: (ShareManifest) -> Void
+  ) throws -> ShareManifest {
+    var next = input
+    var operation =
+      file.flatMap { id in input.files.first { $0.id == id }?.operation } ?? input.operation
     // Validate credentials before persisting dispatch intent, then recheck the
     // session/owner immediately before the outbound request as well.
     _ = try authorize(next)
-    next.operation.state = .dispatching
-    next = try store.update(next)
+    operation.state = .dispatching
+    next = try save(operation, in: next, file: file)
     checkpoint(next)
     let authority: (ShareSession, String)
     do { authority = try authorize(next) } catch {
-      next.operation.state = .failed
-      next.operation.failure = "pre_dispatch_validation"
-      return try store.update(next)
+      operation.state = .failed
+      operation.failure = "pre_dispatch_validation"
+      return try save(operation, in: next, file: file)
     }
     do {
       let encodedRoom = room.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
       let response = try request(
-        authority.0, authority.1, path + "/rooms/" + encodedRoom + "/send", "POST", body, nil,
+        authority.0, authority.1,
+        path + "/rooms/" + encodedRoom + (file == nil ? "/send" : "/send-media"), "POST", body, nil,
         "application/json", 256 * 1024)
       let envelope = (try? JSONSerialization.jsonObject(with: response.1)) as? [String: Any]
       let data = envelope?["data"] as? [String: Any]
       if response.0 == 200, let event = data?["event_id"] as? String, !event.isEmpty {
-        next.operation.state = .sent
-        next.operation.eventId = event
+        operation.state = .sent
+        operation.eventId = event
       } else {
         let code = (envelope?["error"] as? [String: Any])?["code"] as? String
-        next.operation.state =
+        operation.state =
           TextShare.definiteRejection(status: response.0, code: code) ? .failed : .unknown
-        next.operation.failure =
-          next.operation.state == .failed ? (code ?? "definite_rejection") : "unconfirmed_dispatch"
+        operation.failure =
+          operation.state == .failed ? (code ?? "definite_rejection") : "unconfirmed_dispatch"
       }
     } catch {
       // These adapter failures occur before URLSession resumes a task. A
@@ -420,11 +525,11 @@ public final class TextShareSender {
         (error as? ShareFailure).map {
           [ShareFailure.authentication, .httpsRequired, .invalid, .busy, .cancelled].contains($0)
         } ?? false
-      next.operation.state = rejectedBeforeDispatch ? .failed : .unknown
-      next.operation.failure =
+      operation.state = rejectedBeforeDispatch ? .failed : .unknown
+      operation.failure =
         rejectedBeforeDispatch ? "pre_dispatch_validation" : "unconfirmed_dispatch"
     }
     // A failed completion write deliberately leaves the dispatch breadcrumb.
-    return try store.update(next)
+    return try save(operation, in: next, file: file)
   }
 }

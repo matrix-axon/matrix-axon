@@ -34,6 +34,41 @@ test.beforeEach(async ({ page }) => {
       localStorage.setItem('fixture.incoming', JSON.stringify([record]))
   }, record)
 })
+test('an empty reviewed draft disables Send until a message is entered', async ({
+  page,
+}) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem(
+      'fixture.incoming',
+      JSON.stringify([
+        {
+          ...record,
+          text: ' \n',
+          previews: [],
+          operation: { id: 'source', state: 'ready' },
+        },
+      ]),
+    )
+  }, record)
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(
+    page.getByText('Nothing to send.', { exact: true }),
+  ).toBeVisible()
+  const send = page.getByRole('button', {
+    name: 'Send reviewed share',
+    exact: true,
+  })
+  await expect(send).toBeDisabled()
+  await page
+    .getByRole('textbox', { name: 'Message', exact: true })
+    .fill('Now there is a message')
+  await expect(send).toBeEnabled()
+  await expect(page.getByText('Nothing to send.', { exact: true })).toHaveCount(
+    0,
+  )
+})
+
 test('settings retains the recovery route when the inbox is empty', async ({
   page,
 }) => {
@@ -195,9 +230,7 @@ test('leaving recovery cancels device acquisition and releases ownership', async
   await page
     .getByRole('button', { name: 'Include preview:', exact: false })
     .click()
-  await expect(
-    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
-  ).toBeDisabled()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toBeDisabled()
   await page.getByRole('link', { name: 'Settings', exact: true }).click()
   await expect
     .poll(() =>
@@ -210,9 +243,7 @@ test('leaving recovery cancels device acquisition and releases ownership', async
     .getByRole('link', { name: 'Pending shares, 1', exact: true })
     .click()
   await page.getByRole('button', { name: 'Review share', exact: true }).click()
-  await expect(
-    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
-  ).toBeEnabled()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toBeEnabled()
 })
 test('preview work disables the caption and preserves its saved text', async ({
   page,
@@ -242,7 +273,7 @@ test('preview work disables the caption and preserves its saved text', async ({
   await page.goto('/e2e/incoming-share.html')
   await page.getByRole('button', { name: 'Review share', exact: true }).click()
   const caption = page.getByRole('textbox', {
-    name: 'Message or first attachment caption',
+    name: 'Message',
   })
   await expect(caption).toBeEnabled()
   await page
@@ -324,9 +355,8 @@ test('recovery preserves cards and uncertain outcomes until explicit discard', a
   await expect(
     page.getByRole('button', { name: 'Send reviewed share' }),
   ).toBeDisabled()
-  await expect(
-    page.getByRole('button', { name: 'Allow explicit resend' }),
-  ).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Retry item' })).toBeEnabled()
+  await expect(page.getByRole('checkbox')).toHaveCount(0)
   await page.getByRole('button', { name: 'Keep draft', exact: true }).click()
   await page.evaluate(() => location.assign('/e2e/incoming-share.html'))
   await page.getByRole('button', { name: 'Review share', exact: true }).click()
@@ -365,7 +395,7 @@ test('typing persists in batches and refresh recovers expired ownership', async 
   )
   await page.getByRole('button', { name: 'Review share', exact: true }).click()
   const editor = page.getByRole('textbox', {
-    name: 'Message or first attachment caption',
+    name: 'Message',
   })
   const suffix = 'x'.repeat(200)
   await editor.press('End')
@@ -390,9 +420,7 @@ test('typing persists in batches and refresh recovers expired ownership', async 
     localStorage.setItem('fixture.incoming', JSON.stringify(records))
     window.dispatchEvent(new Event('focus'))
   })
-  await expect(
-    page.getByText('Ownership renewed', { exact: false }),
-  ).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText('Ownership renewed')
   await expect(editor).toHaveValue(expected)
   await editor.fill('Reclaimed draft https://example.org/article')
   await page.getByRole('button', { name: 'Keep draft', exact: true }).click()
@@ -429,8 +457,265 @@ test('HTTP native sharing explains the restriction and retains the draft', async
   await expect(page.getByRole('alert')).toContainText(
     'requires an HTTPS server',
   )
-  await expect(
-    page.getByRole('textbox', { name: 'Message or first attachment caption' }),
-  ).toHaveValue(record.text)
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue(
+    record.text,
+  )
   expect(sends).toEqual([])
+})
+
+for (const partial of [false, true]) {
+  test(`photo recovery ${partial ? 'protects a confirmed caption and uncertain outcomes' : 'previews and removes photos in order'}`, async ({
+    page,
+  }) => {
+    await page.addInitScript(
+      ({ record, partial }) => {
+        if (localStorage.getItem('fixture.photoSeeded') === 'true') return
+        localStorage.setItem('fixture.photoSeeded', 'true')
+        localStorage.setItem('fixture.thumbnailFailureOnce', 'true')
+        localStorage.setItem(
+          'fixture.incoming',
+          JSON.stringify([
+            {
+              ...record,
+              version: 4,
+              text: 'Independent source message',
+              previews: [],
+              operation: {
+                id: 'batch',
+                state: partial ? 'sent' : 'ready',
+                ...(partial ? { eventId: '$source' } : {}),
+              },
+              files: ['first.heic', 'second.png'].map((name, index) => ({
+                id: `photo-${index}`,
+                name,
+                mime: index === 0 ? 'image/heic' : 'image/png',
+                bytes: 3 * 1024 * 1024,
+                photoSize: 'small',
+                photoBytes: 512,
+                caption: index === 0 ? 'Photo caption' : 'Second caption',
+                digest: 'fixture',
+                thumbnail: false,
+                operation: {
+                  id: `operation-${index}`,
+                  state: partial ? (index === 0 ? 'sent' : 'unknown') : 'ready',
+                  ...(partial && index === 0 ? { eventId: '$confirmed' } : {}),
+                },
+              })),
+            },
+          ]),
+        )
+      },
+      { record, partial },
+    )
+    await page.goto('/e2e/incoming-share.html')
+    await page
+      .getByRole('button', { name: 'Review share', exact: true })
+      .click()
+    const photos = page.getByRole('group', { name: 'Photos in sending order' })
+    await photos.getByRole('button', { name: 'Retry image preview' }).click()
+    await expect(
+      page.getByRole('textbox', { name: 'Shared message', exact: true }),
+    ).toHaveValue('Independent source message')
+    await expect(photos.getByRole('img', { name: 'Shared photo' })).toHaveCount(
+      2,
+    )
+    await expect(photos.getByRole('img').first()).toBeVisible()
+    await expect(photos).toContainText('small · ~1 KiB upload')
+    expect(
+      await photos
+        .getByRole('button', { name: /^Remove photo:/ })
+        .allTextContents(),
+    ).toEqual(['Remove photo: first.heic', 'Remove photo: second.png'])
+    const caption = page.getByRole('textbox', {
+      name: 'Caption for first.heic',
+    })
+    const secondCaption = page.getByRole('textbox', {
+      name: 'Caption for second.png',
+    })
+    await expect(caption).toHaveValue('Photo caption')
+    await expect(secondCaption).toHaveValue('Second caption')
+    if (partial) {
+      await expect(caption).toBeDisabled()
+      await expect(secondCaption).toBeDisabled()
+      for (const button of await photos.getByRole('button').all())
+        await expect(button).toBeDisabled()
+      const retry = page.getByRole('button', {
+        name: 'Retry item',
+        exact: true,
+      })
+      await expect(retry).toBeEnabled()
+      await expect(page.getByRole('checkbox')).toHaveCount(0)
+      await retry.click()
+      await expect(
+        page.getByRole('list', { name: 'Delivery outcomes' }),
+      ).toContainText('$confirmed')
+      await expect(
+        page.getByRole('list', { name: 'Delivery outcomes' }),
+      ).toContainText('second.png: ready')
+    } else {
+      const sourceMessage = page.getByRole('textbox', {
+        name: 'Shared message',
+        exact: true,
+      })
+      await sourceMessage.fill('')
+      await expect(sourceMessage).toBeVisible()
+      await sourceMessage.fill('Independent source message')
+      await secondCaption.fill('Edited second caption')
+      await photos
+        .getByRole('button', { name: 'Remove photo: first.heic', exact: true })
+        .click()
+      await expect(
+        photos.getByRole('button', { name: /^Remove photo:/ }),
+      ).toHaveCount(1)
+      await expect(secondCaption).toHaveValue('Edited second caption')
+      await expect(
+        page.getByRole('textbox', { name: 'Shared message', exact: true }),
+      ).toHaveValue('Independent source message')
+      await page
+        .getByRole('button', { name: 'Keep draft', exact: true })
+        .click()
+      await page.goto('/e2e/incoming-share.html')
+      await page
+        .getByRole('button', { name: 'Review share', exact: true })
+        .click()
+      await expect(
+        page
+          .getByRole('group', { name: 'Photos in sending order' })
+          .getByRole('button'),
+      ).toHaveText('Remove photo: second.png')
+      await expect(
+        page.getByRole('textbox', { name: 'Caption for second.png' }),
+      ).toHaveValue('Edited second caption')
+    }
+  })
+}
+
+test('text-only preview overflow explains the link limit without reporting an unsupported image', async ({
+  page,
+}) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem(
+      'fixture.incoming',
+      JSON.stringify([
+        {
+          ...record,
+          version: 4,
+          operation: { ...record.operation, state: 'ready' },
+          importFailures: ['too_many_source_previews'],
+        },
+      ]),
+    )
+  }, record)
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(
+    page.getByText(
+      'The source supplied more than eight link previews. Share fewer links.',
+      { exact: true },
+    ),
+  ).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: 'Send reviewed share' }),
+  ).toBeDisabled()
+})
+
+test('master caption, drag ordering and close preserve the photo draft on immediate return', async ({
+  page,
+}) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem('fixture.strictClaim', 'true')
+    localStorage.setItem(
+      'fixture.incoming',
+      JSON.stringify([
+        {
+          ...record,
+          version: 4,
+          text: 'Separate source',
+          previews: [],
+          operation: { id: 'source', state: 'ready' },
+          files: ['first.png', 'second.png'].map((name, index) => ({
+            id: `photo-${index}`,
+            name,
+            mime: 'image/png',
+            bytes: 1024,
+            digest: 'fixture',
+            caption: '',
+            thumbnail: false,
+            operation: { id: `op-${index}`, state: 'ready' },
+          })),
+        },
+      ]),
+    )
+  }, record)
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await page
+    .getByRole('textbox', { name: 'Master caption', exact: true })
+    .fill('Together 🌊')
+  await expect(
+    page.getByRole('textbox', { name: 'Caption for first.png' }),
+  ).toHaveValue('Together 🌊')
+  await expect(
+    page.getByRole('textbox', { name: 'Caption for second.png' }),
+  ).toHaveValue('Together 🌊')
+  await page
+    .getByRole('textbox', { name: 'Caption for second.png' })
+    .fill('Individual mountain')
+  const photos = page.locator('.pending-photo-block')
+  await page
+    .getByRole('button', { name: 'Drag second.png to reorder' })
+    .dragTo(page.getByRole('button', { name: 'Drag first.png to reorder' }))
+  await expect(photos.first()).toContainText('second.png')
+  await page
+    .getByRole('button', { name: 'Close pending shares', exact: true })
+    .click()
+  await expect(
+    page.getByRole('heading', { name: 'Pending shares', exact: true }),
+  ).toHaveCount(0)
+  await page.getByRole('link', { name: /^Pending shares/ }).click()
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(
+    page.getByRole('textbox', { name: 'Shared message', exact: true }),
+  ).toHaveValue('Separate source')
+  await expect(photos.first()).toContainText('second.png')
+  await expect(
+    page.getByRole('textbox', { name: 'Caption for second.png' }),
+  ).toHaveValue('Individual mountain')
+  await page.getByRole('button', { name: 'Move second.png down' }).click()
+  await expect(photos.first()).toContainText('first.png')
+})
+
+test('navigation during review acquisition releases ownership before an immediate return', async ({
+  page,
+}) => {
+  await page.addInitScript((record) => {
+    localStorage.setItem('fixture.strictClaim', 'true')
+    localStorage.setItem('fixture.delayClaimOnce', 'true')
+    localStorage.setItem('fixture.incoming', JSON.stringify([record]))
+  }, record)
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(
+    page.getByRole('button', { name: 'Opening share…', exact: true }),
+  ).toBeVisible()
+  await page.getByRole('link', { name: 'Settings', exact: true }).click()
+  await page.getByRole('link', { name: 'Pending shares', exact: true }).click()
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(
+    page.getByRole('textbox', { name: 'Message', exact: true }),
+  ).toHaveValue(record.text)
+})
+
+test('a busy review shows its failure beside the review button', async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem('fixture.claimBusy', 'true'),
+  )
+  await page.goto('/e2e/incoming-share.html')
+  await page.getByRole('button', { name: 'Review share', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText(
+    'Another share operation is active',
+  )
+  await expect(page.getByRole('alert')).toBeInViewport()
 })

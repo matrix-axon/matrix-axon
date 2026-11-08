@@ -9,6 +9,42 @@
   @testable import AxonIncomingShare
 
   final class ShareIntakeTests: XCTestCase {
+    private final class TrackedPhoto: NSItemProvider {
+      var loads = 0
+      init(source: URL?) {
+        super.init()
+        suggestedName = "IMG_1234"
+        registerFileRepresentation(forTypeIdentifier: UTType.png.identifier, fileOptions: [], visibility: .all) { [weak self] complete in
+          self?.loads += 1
+          complete(source, false, source == nil ? NSError(domain: "fixture", code: 1) : nil)
+          return Progress(totalUnitCount: 1)
+        }
+      }
+    }
+    func testPhotoFailureStopsRemainingProvidersAndOverLimitSelectionCopiesNothing() throws {
+      let source = root.appendingPathComponent("source.png")
+      try PhotoFixture.write(source)
+      let failed = TrackedPhoto(source: nil)
+      let untouched = TrackedPhoto(source: source)
+      let item = NSExtensionItem()
+      item.attachments = [failed, untouched]
+      let draft = try ShareIntake.importItems([item], store: store)
+      XCTAssertFalse(draft.importFailures.isEmpty)
+      XCTAssertEqual(failed.loads, 1)
+      XCTAssertEqual(untouched.loads, 0)
+      XCTAssertTrue(draft.files.isEmpty)
+      let over = NSExtensionItem()
+      over.attachments = (0..<11).map { _ in untouched }
+      let overDraft = try ShareIntake.importItems([over], store: store)
+      XCTAssertTrue(overDraft.importFailures.contains("too_many_photos"))
+      XCTAssertEqual(untouched.loads, 0)
+      let single = NSExtensionItem()
+      single.attachments = [untouched]
+      let imported = try ShareIntake.importItems([single], store: store)
+      XCTAssertEqual(imported.files.first?.name, "IMG_1234.png")
+      XCTAssertEqual(untouched.loads, 1)
+    }
+
     private final class OversizedAttributedText: NSAttributedString {
       private(set) var readString = false
       override init() { super.init() }
@@ -35,9 +71,11 @@
         super.init()
         registerObject(metadata.originalURL! as NSURL, visibility: .all)
       }
-      override func loadItem(forTypeIdentifier typeIdentifier: String,
-                             options: [AnyHashable: Any]? = nil,
-                             completionHandler: NSItemProvider.CompletionHandler? = nil) {
+      override func loadItem(
+        forTypeIdentifier typeIdentifier: String,
+        options: [AnyHashable: Any]? = nil,
+        completionHandler: NSItemProvider.CompletionHandler? = nil
+      ) {
         completionHandler?(metadata, nil)
       }
     }
@@ -122,7 +160,9 @@
       cancellation.cancel()
       let item = NSExtensionItem()
       item.attachments = [NSItemProvider(object: URL(string: link)! as NSURL)]
-      XCTAssertThrowsError(try ShareIntake.importItems([item], store: store, cancellation: cancellation)) {
+      XCTAssertThrowsError(
+        try ShareIntake.importItems([item], store: store, cancellation: cancellation)
+      ) {
         XCTAssertEqual($0 as? ShareFailure, .cancelled)
       }
       XCTAssertTrue(try store.list().isEmpty)
@@ -131,7 +171,9 @@
       let cancellation = ShareCancellation()
       let started = expectation(description: "provider read started")
       let provider = NSItemProvider()
-      provider.registerDataRepresentation(forTypeIdentifier: UTType.url.identifier, visibility: .all) { _ in
+      provider.registerDataRepresentation(
+        forTypeIdentifier: UTType.url.identifier, visibility: .all
+      ) { _ in
         started.fulfill()
         return Progress(totalUnitCount: 1)
       }
@@ -148,6 +190,49 @@
       }
       XCTAssertTrue(try store.list().isEmpty)
     }
+    func testNonImageDualURLProvidersKeepRemoteLinksAndRejectLocalURLs() async throws {
+      for raw in [link, "file:///private/fixture.html"] {
+        let provider = NSItemProvider()
+        provider.registerItem(forTypeIdentifier: UTType.url.identifier) { complete, _, _ in
+          complete?(URL(string: raw)! as NSURL, nil)
+        }
+        provider.registerItem(forTypeIdentifier: UTType.fileURL.identifier) { complete, _, _ in
+          XCTFail("The local-file alternative must not be requested")
+          complete?(nil, NSError(domain: "fixture", code: 1))
+        }
+        let item = NSExtensionItem()
+        item.attributedContentText = NSAttributedString(string: "Keep accompanying text")
+        item.attachments = [provider]
+        let result = try await Task.detached { try ShareIntake.importItems([item], store: self.store) }.value
+        XCTAssertTrue(result.files.isEmpty)
+        XCTAssertTrue(result.text.contains("Keep accompanying text"))
+        if raw == link {
+          XCTAssertTrue(result.text.contains(link))
+          XCTAssertTrue(result.importFailures.isEmpty)
+        } else {
+          XCTAssertEqual(result.importFailures, ["unsupported_url"])
+        }
+      }
+    }
+
+    func testDualURLImageProviderStillStagesAPhotoInsteadOfItsFileURL() throws {
+      let source = root.appendingPathComponent("source.png")
+      try PhotoFixture.write(source)
+      let provider = TrackedPhoto(source: source)
+      for type in [UTType.url, .fileURL] {
+        provider.registerItem(forTypeIdentifier: type.identifier) { complete, _, _ in
+          XCTFail("Local images must use their image representation")
+          complete?(nil, NSError(domain: "fixture", code: 1))
+        }
+      }
+      let item = NSExtensionItem()
+      item.attachments = [provider]
+      let result = try ShareIntake.importItems([item], store: store)
+      XCTAssertEqual(result.files.filter { !$0.thumbnail }.count, 1)
+      XCTAssertTrue(result.importFailures.isEmpty)
+      XCTAssertEqual(provider.loads, 1)
+    }
+
     func testPublicURLAndAccompanyingTextImportOnceWithoutFetching() async throws {
       let item = NSExtensionItem()
       item.attributedContentText = NSAttributedString(string: "Useful accompanying prose " + link)
@@ -359,7 +444,7 @@
         try store.readFile(
           result.id, file: file.id, owner: result.owner!, offset: 0, count: 1024), data)
     }
-    func testSeparateImageAttachmentIsRejectedRatherThanInferredAsThumbnail() async throws {
+    func testSeparatePhotoIsImportedRatherThanInferredAsLinkThumbnail() async throws {
       let image = NSItemProvider()
       let data = png
       image.registerDataRepresentation(forTypeIdentifier: UTType.png.identifier, visibility: .all) {
@@ -373,9 +458,119 @@
         try ShareIntake.importItems([item], store: self.store)
       }.value
       XCTAssertEqual(result.text, link)
-      XCTAssertEqual(result.importFailures, ["unsupported_input"])
-      XCTAssertTrue(result.files.isEmpty)
+      XCTAssertTrue(result.importFailures.isEmpty)
+      XCTAssertEqual(result.files.filter { !$0.thumbnail }.count, 1)
+      XCTAssertFalse(result.files[0].thumbnail)
       XCTAssertNil(result.previews)
+    }
+    func testPhotosPreserveOrderAndOneConcreteRepresentationWhileAccessIsValid() async throws {
+      let item = NSExtensionItem()
+      var providers: [NSItemProvider] = []
+      for (name, type) in [("first.heic", UTType.heic), ("second.png", UTType.png)] {
+        let url = root.appendingPathComponent(name)
+        try PhotoFixture.write(url, type: type)
+        let provider = NSItemProvider()
+        provider.suggestedName = name
+        provider.registerFileRepresentation(
+          forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all
+        ) { completion in
+          completion(url, false, nil)
+          // Provider access expires here, before importItems returns.
+          try? FileManager.default.removeItem(at: url)
+          return nil
+        }
+        provider.registerDataRepresentation(
+          forTypeIdentifier: UTType.jpeg.identifier, visibility: .all
+        ) { _ in
+          XCTFail("A logical photo must not be imported twice through its alternatives")
+          return nil
+        }
+        providers.append(provider)
+      }
+      item.attachments = providers
+      let result = try await Task.detached {
+        try ShareIntake.importItems([item], store: self.store)
+      }.value
+      XCTAssertEqual(result.files.map(\.name), ["first.heic", "second.png"])
+      XCTAssertEqual(result.files.map(\.mime), ["image/heic", "image/png"])
+      XCTAssertTrue(result.importFailures.isEmpty)
+      XCTAssertEqual(result.text, "")
+      for file in result.files {
+        try store.withVerifiedFile(result.id, file: file.id, owner: result.owner!) { url, _ in
+          XCTAssertEqual(try PhotoShare.mime(url), file.mime)
+        }
+      }
+    }
+    func testInterruptedPhotoBatchNeverBecomesASendablePartialSelection() async throws {
+      let source = root.appendingPathComponent("photo.png")
+      try PhotoFixture.write(source)
+      let provider = NSItemProvider()
+      provider.registerFileRepresentation(
+        forTypeIdentifier: UTType.png.identifier, fileOptions: [], visibility: .all
+      ) { completion in
+        completion(source, false, nil)
+        return nil
+      }
+      let item = NSExtensionItem()
+      item.attributedContentText = NSAttributedString(string: "Keep this caption")
+      item.attachments = [provider, provider]
+      let cancellation = ShareCancellation()
+      do {
+        _ = try await Task.detached {
+          try ShareIntake.importItems(
+            [item], store: self.store, cancellation: cancellation,
+            staged: { record in
+              if record.files.count == 1 { cancellation.cancel() }
+            })
+        }.value
+        XCTFail("Interrupted import must not complete")
+      } catch { XCTAssertEqual(error as? ShareFailure, .cancelled) }
+      let saved = try XCTUnwrap(store.list().first)
+      XCTAssertEqual(saved.files.count, 1)
+      XCTAssertEqual(saved.text, "Keep this caption")
+      XCTAssertTrue(saved.importFailures.contains("incomplete_import"))
+    }
+    func testSystemUIImageProviderImportsAPhotoWithoutText() async throws {
+      let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 24)).image { context in
+        UIColor.systemBlue.setFill()
+        context.fill(CGRect(x: 0, y: 0, width: 32, height: 24))
+      }
+      let item = NSExtensionItem()
+      item.attachments = [NSItemProvider(object: image)]
+      let result = try await Task.detached {
+        try ShareIntake.importItems([item], store: self.store)
+      }.value
+      XCTAssertEqual(result.files.filter { !$0.thumbnail }.count, 1)
+      XCTAssertTrue(result.importFailures.isEmpty)
+      XCTAssertNil(TextShare.validation(result))
+    }
+    func testTooManyPhotosAndUnreadablePhotoCannotSendAPartialImport() async throws {
+      let provider = NSItemProvider()
+      let url = root.appendingPathComponent("photo.png")
+      try PhotoFixture.write(url)
+      provider.registerFileRepresentation(
+        forTypeIdentifier: UTType.png.identifier, fileOptions: [], visibility: .all
+      ) { completion in
+        completion(url, false, nil)
+        return nil
+      }
+      let broken = NSItemProvider()
+      broken.registerFileRepresentation(
+        forTypeIdentifier: UTType.png.identifier, fileOptions: [], visibility: .all
+      ) { completion in
+        completion(nil, false, NSError(domain: "synthetic", code: 1))
+        return nil
+      }
+      for providers in [Array(repeating: provider, count: 11), [provider, broken]] {
+        let item = NSExtensionItem()
+        item.attachments = providers
+        let result = try await Task.detached {
+          try ShareIntake.importItems([item], store: self.store)
+        }.value
+        XCTAssertFalse(result.importFailures.isEmpty)
+        XCTAssertFalse(result.importFailures.contains("incomplete_import"))
+        XCTAssertLessThanOrEqual(result.files.count, 10)
+      }
     }
     func testOversizedOptionalSourceTitleNeverBlocksTextSending() async throws {
       for metadataTitle in [false, true] {

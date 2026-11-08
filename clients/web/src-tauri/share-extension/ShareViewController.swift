@@ -32,6 +32,8 @@ final class ShareViewController: UIViewController {
 final class ShareComposer: ObservableObject {
   private static let log = Logger(subsystem: "org.matrixaxon.axon", category: "share-extension")
   @Published var text = ""
+  @Published var photoCaptions: [String: String] = [:]
+  @Published var photoNames: [String: String] = [:]
   @Published var account = ""
   @Published var room = ""
   @Published var roomSearch = ""
@@ -50,6 +52,8 @@ final class ShareComposer: ObservableObject {
   private let cancellation = ShareCancellation()
   // Only accessed on queue.
   private var current: ShareManifest?
+  private var photoImages: [String: UIImage] = [:]
+  private var photoPreviewAttempts: Set<String> = []
   private var heartbeat: Timer?
   private let heartbeatInterval: TimeInterval
   private var editSave: DispatchWorkItem?
@@ -61,11 +65,13 @@ final class ShareComposer: ObservableObject {
     let credential: () throws -> (ShareSession, String)
 
     static func live() throws -> Session {
-      guard let root = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: SharedSession.group),
+      guard
+        let root = FileManager.default.containerURL(
+          forSecurityApplicationGroupIdentifier: SharedSession.group),
         let group = Bundle.main.object(forInfoDictionaryKey: "AxonSharedKeychainGroup") as? String
       else { throw ShareFailure.unavailable }
-      let store = try ShareStore(root: root.appendingPathComponent("IncomingShares", isDirectory: true))
+      let store = try ShareStore(
+        root: root.appendingPathComponent("IncomingShares", isDirectory: true))
       let session = SharedSession(store: store, accessGroup: group)
       return Session(store: store, credential: { try session.credential() })
     }
@@ -119,23 +125,136 @@ final class ShareComposer: ObservableObject {
     room = id
     save()
   }
-  var editable: Bool {
+  var operations: [ShareOperation] { record?.deliveryOperations ?? [] }
+  private var fixedContent: Bool {
+    operations.contains { [.sent, .dispatching, .unknown].contains($0.state) }
+  }
+  private var owned: Bool {
     !busy && record?.owner != nil && (record?.leaseUntil ?? 0) > Date().timeIntervalSince1970
-      && record?.operation.state != .unknown && record?.operation.state != .sent
-      && record?.operation.state != .dispatching
+  }
+  var editable: Bool {
+    owned && !fixedContent
   }
   var validation: String? {
     guard var draft = record else { return "No draft" }
     draft.text = text
+    Self.applyCaptions(photoCaptions, to: &draft)
     let links = Set(TextShare.links(text))
     draft.previews = draft.previews?.filter { links.contains($0.matched_url) }
-    return TextShare.validation(draft)
+    if let reason = TextShare.validation(draft) { return reason }
+    if draft.files.contains(where: { !$0.thumbnail && !ShareStore.validPhotoName(photoName($0.id)) }) {
+      return "invalid_filename"
+    }
+    return nil
+  }
+  var validationMessage: String? {
+    guard let validation else { return nil }
+    if validation == "empty_text" { return "Nothing to send." }
+    if validation == "invalid_filename" {
+      let names = record?.files.filter { !$0.thumbnail }.map { photoName($0.id).trimmingCharacters(in: .whitespacesAndNewlines) } ?? []
+      if names.contains(where: { $0.isEmpty }) { return "Enter a filename for each photo." }
+      if names.contains(where: { $0.utf8.count > 255 }) { return "A filename is too long. Shorten it." }
+      return "A filename contains unsupported characters. Remove slashes or control characters."
+    }
+    return "Cannot send: \(validation). Shorten the text or captions, or remove excess cards. The editable draft is retained."
   }
   var canSend: Bool {
-    editable && !room.isEmpty && !account.isEmpty && validation == nil
+    owned && record?.completed == false && !room.isEmpty && !account.isEmpty && validation == nil
       && record?.importFailures.isEmpty == true
+      && !operations.contains { [.unknown, .dispatching, .uploading].contains($0.state) }
+      && !(record?.files.contains { $0.operation?.state == .failed } ?? false)
   }
 
+  static func importProblem(_ category: String) -> String {
+    switch category {
+    case "quota": return "A source item or selection exceeds the import/storage limits. Reduce the selection or text."
+    case "too_many_photos": return "The selection exceeds the limit of 10 photos."
+    case "expired", "provider_timeout": return "A source took too long to provide its content."
+    case "incomplete_import": return "Import was interrupted before the selection was complete."
+    case "unsupported_input", "unsupported_url":
+      return "The selection contains unsupported content."
+    case "too_many_source_previews": return "The source supplied more than eight link previews. Share fewer links."
+    case "invalid": return "A source item is invalid or could not be decoded."
+    case "unreadable_manifest": return "Saved draft metadata could not be read. Check the destination before discarding it."
+    case "missingFile": return "A source file is missing or no longer readable."
+    case "provider_unavailable", "unavailable": return "The source app could not provide an item."
+    default: return "A source item could not be imported. Share the intended selection again."
+    }
+  }
+  func photoName(_ file: String) -> String {
+    photoNames[file] ?? record?.files.first(where: { $0.id == file })?.name ?? ""
+  }
+  func setPhotoName(_ name: String, file: String) {
+    guard editable, record?.files.contains(where: { $0.id == file && !$0.thumbnail }) == true else { return }
+    photoNames[file] = name
+    edited()
+  }
+  func photoCaption(_ file: String) -> String {
+    photoCaptions[file] ?? record?.files.first(where: { $0.id == file })?.caption ?? ""
+  }
+  func setPhotoCaption(_ caption: String, file: String) {
+    guard editable, record?.files.contains(where: { $0.id == file && !$0.thumbnail }) == true else { return }
+    photoCaptions[file] = caption
+    edited()
+  }
+  var masterCaption: String {
+    let captions = record?.files.filter { !$0.thumbnail }.map { photoCaption($0.id) } ?? []
+    return Set(captions).count == 1 ? captions.first! : ""
+  }
+  func setMasterCaption(_ caption: String) {
+    guard editable else { return }
+    for photo in record?.files.filter({ !$0.thumbnail }) ?? [] { photoCaptions[photo.id] = caption }
+    edited()
+  }
+  func movePhotos(from offsets: IndexSet, to destination: Int) {
+    guard editable else { return }
+    var order = record?.files.filter { !$0.thumbnail }.map(\.id) ?? []
+    guard offsets.allSatisfy({ order.indices.contains($0) }), (0...order.count).contains(destination) else { return }
+    order.move(fromOffsets: offsets, toOffset: destination)
+    let text = text, captions = photoCaptions, names = photoNames, account = account, room = room
+    run {
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
+      self.current = try self.store!.reorderFiles(self.current!, order: order)
+      return "Photo order saved."
+    }
+  }
+  private static func applyCaptions(_ captions: [String: String], to draft: inout ShareManifest) {
+    for index in draft.files.indices where !draft.files[index].thumbnail {
+      if let caption = captions[draft.files[index].id] { draft.files[index].caption = caption }
+    }
+  }
+  var commonPhotoSize: SharePhotoSize? {
+    let photos = record?.files.filter { !$0.thumbnail } ?? []
+    let sizes = Set(photos.map { $0.photoSize ?? .original })
+    return sizes.count == 1 ? sizes.first : nil
+  }
+  var photoUploadBytes: Int {
+    record?.files.filter { !$0.thumbnail }.reduce(0) { $0 + $1.uploadBytes } ?? 0
+  }
+  static func byteCount(_ bytes: Int) -> String {
+    ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+  }
+  func setPhotoSize(_ size: SharePhotoSize, file: String? = nil) {
+    guard editable else { return }
+    editSave?.cancel()
+    let text = text
+    let captions = photoCaptions
+    let names = photoNames
+    let account = account
+    let room = room
+    run {
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
+      self.current = try self.store!.setPhotoSize(
+        self.current!, size: size, file: file, cancellation: self.cancellation)
+      if file == nil && size != .original {
+        let originals = self.current!.files.filter { !$0.thumbnail && $0.photoSize != size }.map(\.name)
+        if !originals.isEmpty {
+          return "Photo sizes updated. Kept Original: " + originals.joined(separator: ", ") + "."
+        }
+      }
+      return "Photo size updated. Review the estimated upload size before sending."
+    }
+  }
   func start(_ items: [NSExtensionItem]) {
     guard !closing else { return }
     run {
@@ -157,7 +276,8 @@ final class ShareComposer: ObservableObject {
       DispatchQueue.main.async { self.text = importedText }
       return try self.loadDestinations(text: importedText)
     }
-    heartbeat = Timer.scheduledTimer(withTimeInterval: heartbeatInterval, repeats: true) { [weak self] _ in
+    heartbeat = Timer.scheduledTimer(withTimeInterval: heartbeatInterval, repeats: true) {
+      [weak self] _ in
       guard let self, !self.busy else { return }
       self.renew()
     }
@@ -191,7 +311,9 @@ final class ShareComposer: ObservableObject {
       } catch {
         let fenced = self.refreshAfterFailure()
         let record = self.current
-        Self.log.error("share_heartbeat_failed fenced=\(fenced) category=\((error as? ShareFailure)?.rawValue ?? "storage", privacy: .public)")
+        Self.log.error(
+          "share_heartbeat_failed fenced=\(fenced) category=\((error as? ShareFailure)?.rawValue ?? "storage", privacy: .public)"
+        )
         DispatchQueue.main.async {
           guard !self.closing else { return }
           self.record = record
@@ -203,14 +325,19 @@ final class ShareComposer: ObservableObject {
       }
     }
   }
-  func run(blocking: Bool = true, _ action: @escaping () throws -> String) {
+  func run(
+    blocking: Bool = true, dismissOnSuccess: Bool = false,
+    _ action: @escaping () throws -> String
+  ) {
     guard !closing else { return }
     if blocking { busy = true }
     queue.async {
       let message: String
+      var succeeded = false
       do {
         try self.cancellation.check()
         message = try action()
+        succeeded = true
       } catch {
         if (try? self.cancellation.check()) != nil {
           Self.log.error(
@@ -220,11 +347,18 @@ final class ShareComposer: ObservableObject {
         // A thumbnail upload may have saved a newer revision, or a peer may
         // have discarded the draft. Never leave stale Send authority enabled.
         let fenced = self.refreshAfterFailure()
-        if let state = self.current?.operation.state, [.dispatching, .unknown].contains(state) {
+        let outcomes = self.current.map { $0.deliveryOperations } ?? []
+        let confirmed = outcomes.filter { $0.state == .sent }.count
+        if outcomes.contains(where: { [.dispatching, .unknown].contains($0.state) }) {
           message =
             "Delivery outcome unknown. A dispatched message may have been delivered. Check the destination before any explicit resend in Axon."
+        } else if !fenced && confirmed > 0 {
+          message = self.current?.completed == true
+            ? "Sent successfully. The completed draft could not be removed. Tap Done to retry closing; nothing will be resent."
+            : "Confirmed items: \(confirmed). Sending stopped. Review the remaining items in Axon → Pending shares; confirmed photos will not be resent."
         } else {
-          message = Self.explain(fenced ? ShareFailure.stale : error, draftSaved: self.current != nil)
+          message = Self.explain(
+            fenced ? ShareFailure.stale : error, draftSaved: self.current != nil)
         }
       }
       let record = self.current
@@ -250,6 +384,23 @@ final class ShareComposer: ObservableObject {
           }
         }
       }
+      let photos = record?.files.filter({ !$0.thumbnail }) ?? []
+      self.photoImages = self.photoImages.filter { key, _ in photos.contains { $0.id == key } }
+      self.photoPreviewAttempts = self.photoPreviewAttempts.intersection(Set(photos.map(\.id)))
+      for file in photos {
+        do { try self.cancellation.check() } catch { break }
+        if let record, let owner = record.owner, let store = self.store {
+          if let cached = self.photoImages[file.id] {
+            images[file.id] = cached
+            continue
+          }
+          guard self.photoPreviewAttempts.insert(file.id).inserted else { continue }
+          if let data = try? store.photoThumbnail(record.id, file: file.id, owner: owner) {
+            images[file.id] = UIImage(data: data)
+          }
+          self.photoImages[file.id] = images[file.id]
+        }
+      }
       DispatchQueue.main.async {
         guard !self.closing else { return }
         self.record = record
@@ -261,12 +412,26 @@ final class ShareComposer: ObservableObject {
         if blocking { self.busy = false }
         // A debounce can fire while a blocking action disables saving. Retry
         // the current editor text after it settles; never revive a fenced draft.
-        if blocking && self.editable && self.text != record?.text { self.edited() }
+        if blocking && self.editable && (self.text != record?.text || self.photoCaptions.contains {
+          id, caption in record?.files.first(where: { $0.id == id })?.caption != caption
+        } || self.photoNames.contains { id, name in
+          guard let file = record?.files.first(where: { $0.id == id }), ShareStore.validPhotoName(name) else { return false }
+          return file.name != name.trimmingCharacters(in: .whitespacesAndNewlines)
+        }) { self.edited() }
         if !message.isEmpty { UIAccessibility.post(notification: .announcement, argument: message) }
+        if dismissOnSuccess && succeeded && record?.completed == true {
+          // Reuse the acknowledged-completion cleanup before ending the request.
+          // Cleanup failure leaves Done available and cannot replay a send.
+          self.finish(discard: false)
+        }
       }
     }
   }
   private static func explain(_ error: Error, draftSaved: Bool = true) -> String {
+    if (error as? ShareFailure) == .photoResizeUnsupported {
+      return
+        "This format cannot be reduced here. Keep Original for animated or unsupported images; no photo sizes were changed."
+    }
     if let failure = error as? DevicePreviewFailure {
       return failure.explanation
         + " Your original link remains sendable. You can explicitly choose Use homeserver instead."
@@ -343,7 +508,7 @@ final class ShareComposer: ObservableObject {
         "This session, room, or draft ownership changed. Open Axon → Pending shares to review. Nothing new was sent."
     case .quota:
       return
-        "The share exceeds the import/storage limit. Shorten the source text and share again. Nothing was sent."
+        "The share exceeds the import/storage limit. Reduce the photo selection, text, or previews and share again. Nothing was sent."
     case .invalid:
       return
         "This share is invalid or too large. Edit the text or remove its card. Nothing new was sent."
@@ -352,9 +517,13 @@ final class ShareComposer: ObservableObject {
         "The server or source is unavailable or timed out. Your saved draft remains in Axon → Pending shares. Review it before retrying."
     }
   }
-  private func persist(text: String, account: String, room: String, retry: Bool = false) throws {
+  private func persist(
+    text: String, captions: [String: String]? = nil, names: [String: String]? = nil, account: String, room: String,
+    retry: Bool = false
+  ) throws {
     guard var next = current, let store else { throw ShareFailure.unavailable }
     next.text = text
+    if let captions { Self.applyCaptions(captions, to: &next) }
     next.accountId = account.isEmpty ? nil : account
     next.roomId = room.isEmpty ? nil : room
     let links = Set(TextShare.links(text))
@@ -371,6 +540,40 @@ final class ShareComposer: ObservableObject {
       next.operation.failure = nil
     }
     if next != current { current = try store.update(next) }
+    if let names {
+      // A filename can be temporarily empty/invalid while typing. Keep the last
+      // valid durable name, and retain the editor draft until the user fixes it.
+      for file in current!.files where !file.thumbnail {
+        guard let name = names[file.id], ShareStore.validPhotoName(name) else { continue }
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized != file.name {
+          current = try store.renameFile(current!, file: file.id, name: normalized)
+        }
+      }
+    }
+  }
+  func retryPhotoPreview(_ file: String) {
+    guard !busy, record?.owner != nil else { return }
+    run { self.photoPreviewAttempts.remove(file); return "Retrying photo preview." }
+  }
+  func removePhoto(_ file: String) {
+    guard editable else { return }
+    let text = text
+    let captions = photoCaptions
+    let names = photoNames
+    let account = account
+    let room = room
+    run {
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
+      self.current = try self.store!.removeFile(self.current!, file: file)
+      let remaining = self.current!
+      DispatchQueue.main.async {
+        let retained = Set(remaining.files.filter { !$0.thumbnail }.map(\.id))
+        self.photoCaptions = self.photoCaptions.filter { retained.contains($0.key) }
+        self.photoNames = self.photoNames.filter { retained.contains($0.key) }
+      }
+      return TextShare.validation(remaining) == "empty_text" ? "" : "Photo removed. Review the remaining selection before sending."
+    }
   }
   func edited() {
     editSave?.cancel()
@@ -381,10 +584,12 @@ final class ShareComposer: ObservableObject {
   func save() {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
+    let names = photoNames
     let account = account
     let room = room
     run(blocking: false) {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
       // Autosave must preserve actionable authentication/offline and delivery
       // status, including the first programmatic population of the editor.
       return ""
@@ -393,10 +598,12 @@ final class ShareComposer: ObservableObject {
   func reloadDestinations() {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
+    let names = photoNames
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
       return try self.loadDestinations(text: text)
     }
   }
@@ -434,31 +641,44 @@ final class ShareComposer: ObservableObject {
   }
   func send() {
     guard canSend else { return }
+    status = "Sending…"
     editSave?.cancel()
     let text = text
+    let captions = photoCaptions
+    let names = photoNames
     let account = account
     let room = room
-    run {
-      try self.persist(text: text, account: account, room: room, retry: true)
+    run(dismissOnSuccess: true) {
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room, retry: true)
       self.current = try self.sender!.send(self.current!, checkpoint: { self.current = $0 })
-      switch self.current!.operation.state {
-      case .sent: return "Sent successfully."
-      case .failed:
-        return
-          "Not sent: \(self.current!.operation.failure ?? "definite rejection"). Edit the text/remove excess cards, or open Axon to sign in. Your draft is retained."
-      default:
-        return
-          "Delivery outcome unknown. Check the destination before resending in Axon → Pending shares; resending may duplicate the message."
+      let record = self.current!
+      let outcomes = record.deliveryOperations
+      if record.completed { return "Sent successfully." }
+      if !record.files.contains(where: { !$0.thumbnail }) {
+        if [.dispatching, .unknown].contains(record.operation.state) {
+          return "Delivery outcome unknown. Check the destination before any explicit resend in Axon → Pending shares."
+        }
+        return "Not sent: \(record.operation.failure ?? "unavailable"). Edit the text or remove excess cards, or open Axon to sign in."
       }
+      let delivered = outcomes.filter { $0.state == .sent }.count
+      if outcomes.contains(where: { [.dispatching, .unknown].contains($0.state) }) {
+        return
+          "\(delivered) confirmed. Delivery outcome unknown for an item. Check the destination before resending in Axon → Pending shares; resending may duplicate it."
+      }
+      return
+        "\(delivered) confirmed. Sending stopped. Open Axon → Pending shares to review each outcome and explicitly retry remaining items."
+
     }
   }
   func generateOnDevice(_ url: String, refresh: Bool) {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
+    let names = photoNames
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
       let outcome = try self.devicePreview!.include(self.current!, url: url, refresh: refresh)
       self.current = outcome.manifest
       if outcome.reused { return "Supplied preview retained. Review before sending." }
@@ -476,10 +696,12 @@ final class ShareComposer: ObservableObject {
   func generateUsingHomeserver(_ url: String) {
     guard editable, !account.isEmpty else { return }
     let text = text
+    let captions = photoCaptions
+    let names = photoNames
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
       var imageState = SharePreviewImageState.absent
       self.current = try self.sender!.generate(
         self.current!, url: url, imageState: { imageState = $0 })
@@ -497,10 +719,12 @@ final class ShareComposer: ObservableObject {
   func removePreview(imageOnly: Bool, url: String? = nil) {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
+    let names = photoNames
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
       var next = self.current!
       if imageOnly {
         next.previews = next.previews?.map { p in
@@ -523,10 +747,12 @@ final class ShareComposer: ObservableObject {
   func editPreview(url: String, title: String, description: String) {
     guard editable else { return }
     let text = text
+    let captions = photoCaptions
+    let names = photoNames
     let account = account
     let room = room
     run {
-      try self.persist(text: text, account: account, room: room)
+      try self.persist(text: text, captions: captions, names: names, account: account, room: room)
       var next = self.current!
       next.previews = next.previews?.map { preview in
         var p = preview
@@ -543,16 +769,20 @@ final class ShareComposer: ObservableObject {
   func finish(discard: Bool) {
     guard !busy else { return }
     let text = text
+    let captions = photoCaptions
+    let names = photoNames
     let account = account
     let room = room
     run {
       if let record = self.current, let store = self.store {
-        if discard || record.operation.state == .sent {
+        if discard || record.completed {
           try store.discard(
-            record.id, owner: record.owner, completed: record.operation.state == .sent)
+            record.id, owner: record.owner, completed: record.completed)
         } else {
-          if record.operation.state != .unknown {
-            try self.persist(text: text, account: account, room: room)
+          if !record.deliveryOperations.contains(where: {
+            [.unknown, .dispatching].contains($0.state)
+          }) {
+            try self.persist(text: text, captions: captions, names: names, account: account, room: room)
           }
           self.current = try store.update(self.current!, release: true)
         }
@@ -586,7 +816,9 @@ final class ShareComposer: ObservableObject {
     queue.async {
       if let record = self.current, let store = self.store {
         do { try store.cancelComposer(record) } catch {
-          Self.log.error("share_cancel_cleanup_failed category=\((error as? ShareFailure)?.rawValue ?? "storage", privacy: .public)")
+          Self.log.error(
+            "share_cancel_cleanup_failed category=\((error as? ShareFailure)?.rawValue ?? "storage", privacy: .public)"
+          )
         }
       }
       DispatchQueue.main.async { self.complete() }
@@ -603,16 +835,72 @@ private enum SharePreviewInformation: String, Identifiable {
   var message: String {
     switch self {
     case .device:
-      return "Generate a link preview on this device, sending a request to the server hosting the link."
+      return
+        "Generate a link preview on this device, sending a request to the server hosting the link."
     case .homeserver:
-      return "Generate a link preview from your account's Matrix homeserver, which may log the URL even for an encrypted room."
+      return
+        "Generate a link preview from your account's Matrix homeserver, which may log the URL even for an encrypted room."
     }
   }
 }
 
-private struct ShareComposeView: View {
+/// A focused empty editor has no placeholder text to select or delete.
+private struct SharePhotoCaption: View {
+  @Binding var text: String
+  let file: String
+  var title: String = "Caption"
+  @FocusState private var focused: Bool
+  var body: some View {
+    ZStack(alignment: .leading) {
+      TextEditor(text: $text).frame(height: 44)
+        .focused($focused).accessibilityLabel(title)
+        .accessibilityIdentifier(file == "master" ? "share-master-caption" : "share-photo-caption-" + file)
+        .toolbar {
+          ToolbarItemGroup(placement: .keyboard) {
+            if focused {
+              Spacer()
+              Button("Done") { focused = false }
+                .accessibilityIdentifier("share-photo-caption-done")
+            }
+          }
+        }
+      if text.isEmpty && !focused {
+        Text(title).foregroundColor(.secondary).padding(.leading, 5)
+          .allowsHitTesting(false).accessibilityHidden(true)
+      }
+    }
+  }
+}
+
+private struct SharePhotoFilename: View {
+  @Binding var text: String
+  let file: String
+  @FocusState private var focused: Bool
+  var body: some View {
+    TextField("Filename", text: $text)
+      .textInputAutocapitalization(.never).disableAutocorrection(true)
+      .textFieldStyle(.plain).frame(minHeight: 44)
+      .focused($focused).submitLabel(.done)
+      .accessibilityLabel("Filename")
+      .accessibilityIdentifier("share-photo-filename-" + file)
+      .onSubmit { focused = false }
+      .toolbar {
+        ToolbarItemGroup(placement: .keyboard) {
+          if focused {
+            Spacer()
+            Button("Done") { focused = false }
+              .accessibilityIdentifier("share-photo-filename-done")
+          }
+        }
+      }
+  }
+}
+
+struct ShareComposeView: View {
   @ObservedObject var model: ShareComposer
   @Environment(\.sizeCategory) private var sizeCategory
+  @State private var photoEditMode: EditMode = .inactive
+  @State private var keepMessageEditor = false
   @State private var previewInformation: SharePreviewInformation?
   @State private var previewSearch = ""
   @State private var editingCard = false
@@ -654,7 +942,9 @@ private struct ShareComposeView: View {
           HStack {
             Text("Destination")
             Spacer()
-            Button { model.reloadDestinations() } label: {
+            Button {
+              model.reloadDestinations()
+            } label: {
               Image(systemName: "arrow.clockwise").font(.body)
                 .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
             }
@@ -720,13 +1010,98 @@ private struct ShareComposeView: View {
             }
           }
         }
-        Section(header: Text("Message")) {
-          TextEditor(text: $model.text).frame(minHeight: 140).accessibilityLabel("Message text")
-            .disabled(!model.editable).onChange(of: model.text) { _ in model.edited() }
-          if let validation = model.validation, model.record != nil {
-            Text(
-              "Cannot send: \(validation). Shorten the text or remove excess cards. The editable draft is retained."
-            ).foregroundColor(.red)
+        if let photos = model.record?.files.filter({ !$0.thumbnail }), !photos.isEmpty {
+          Section(header: Text("Photos (\(photos.count))")) {
+            if photos.count > 1 {
+              SharePhotoCaption(
+                text: Binding(get: { model.masterCaption }, set: { model.setMasterCaption($0) }),
+                file: "master", title: "Master caption"
+              ).disabled(!model.editable)
+              Button(photoEditMode == .active ? "Done reordering" : "Reorder photos") {
+                photoEditMode = photoEditMode == .active ? .inactive : .active
+              }.disabled(!model.editable).accessibilityIdentifier("share-photo-reorder")
+              Picker(
+                "Size for all photos",
+                selection: Binding<SharePhotoSize?>(
+                  get: { model.commonPhotoSize },
+                  set: { if let size = $0 { model.setPhotoSize(size) } }
+                )
+              ) {
+                if model.commonPhotoSize == nil { Text("Mixed").tag(nil as SharePhotoSize?) }
+                ForEach(SharePhotoSize.allCases, id: \.self) { size in
+                  Text(size.label).tag(Optional(size))
+                }
+              }.pickerStyle(.menu).disabled(!model.editable)
+                .accessibilityIdentifier("share-photo-size-all")
+            }
+            Text("Estimated photos upload: \(ShareComposer.byteCount(model.photoUploadBytes))")
+              .accessibilityIdentifier("share-photo-upload-total")
+            ForEach(photos, id: \.id) { photo in
+              VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top) {
+                  if let image = model.images[photo.id] {
+                    Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: photoEditMode == .active ? 60 : 160)
+                      .accessibilityLabel("Photo: \(photo.name)")
+                  } else {
+                    VStack {
+                      Text("Photo preview unavailable").font(.caption)
+                      Button("Retry photo preview") { model.retryPhotoPreview(photo.id) }.buttonStyle(.borderless)
+                    }
+                  }
+                  Spacer(minLength: 12)
+                  Button { model.removePhoto(photo.id) } label: {
+                    Image(systemName: "trash").frame(width: 44, height: 44).contentShape(Rectangle())
+                  }
+                  .buttonStyle(.borderless).disabled(!model.editable)
+                  .accessibilityLabel("Remove photo")
+                  .accessibilityHint(photo.name)
+                  .accessibilityIdentifier("share-photo-remove-" + photo.id)
+                }
+                SharePhotoFilename(
+                  text: Binding(get: { model.photoName(photo.id) }, set: { model.setPhotoName($0, file: photo.id) }),
+                  file: photo.id
+                ).disabled(!model.editable || photoEditMode == .active)
+                if photoEditMode != .active {
+                  SharePhotoCaption(
+                    text: Binding(
+                      get: { model.photoCaption(photo.id) },
+                      set: { model.setPhotoCaption($0, file: photo.id) }),
+                    file: photo.id
+                  ).disabled(!model.editable)
+                  Text(
+                    "Original: \(ShareComposer.byteCount(photo.bytes)) · Upload: ~\(ShareComposer.byteCount(photo.uploadBytes))"
+                  )
+                  .font(.caption)
+                  Picker(
+                    "Photo size",
+                    selection: Binding(
+                      get: { photo.photoSize ?? .original },
+                      set: { model.setPhotoSize($0, file: photo.id) }
+                    )
+                  ) {
+                    ForEach(SharePhotoSize.allCases, id: \.self) { size in
+                      Text(size.label).tag(size)
+                    }
+                  }.pickerStyle(.menu).disabled(!model.editable)
+                    .accessibilityIdentifier("share-photo-size-item-" + photo.id)
+                  if let state = photo.operation?.state, state != .ready {
+                    Text(photoStatus(state)).font(.caption)
+                  }
+                }
+              }.moveDisabled(!model.editable)
+            }.onMove { model.movePhotos(from: $0, to: $1) }
+          }
+        }
+        if keepMessageEditor || !model.text.isEmpty || model.record?.files.contains(where: { !$0.thumbnail }) != true {
+          Section(header: Text(model.record?.files.contains(where: { !$0.thumbnail }) == true ? "Shared message" : "Message")) {
+            TextEditor(text: $model.text).frame(minHeight: 140).accessibilityLabel("Message text")
+              .disabled(!model.editable).onChange(of: model.text) { _ in model.edited() }
+          }
+        }
+        if let message = model.validationMessage, model.record != nil {
+          Section {
+            Text(message).foregroundColor(model.validation == "empty_text" ? .secondary : .red)
+              .accessibilityIdentifier("share-validation-message")
           }
         }
         if let previews = model.record?.previews?.filter({
@@ -771,15 +1146,26 @@ private struct ShareComposeView: View {
         Section {
           if model.record?.importFailures.isEmpty == false {
             Text(
-              "Some source content could not be imported. Open Pending shares to review; sending is disabled."
+              "The selection could not be fully imported. Share it again from the source; sending is disabled."
             )
+            ForEach(Array(Set(model.record?.importFailures ?? [])).sorted(), id: \.self) {
+              category in
+              Text(ShareComposer.importProblem(category)).font(.caption)
+            }
           }
-          if let record = model.record, record.operation.state != .sent {
+          if let record = model.record, !record.completed {
             Button("Keep draft in Axon") { model.finish(discard: false) }.disabled(model.busy)
           }
         }
       }
+      .environment(\.editMode, $photoEditMode)
+      .onChange(of: model.record?.files.filter { !$0.thumbnail }.count) { count in
+        if (count ?? 0) < 2 { photoEditMode = .inactive }
+      }
       .navigationTitle("Share to Axon")
+      .onChange(of: model.record?.id) { _ in
+        if !model.text.isEmpty { keepMessageEditor = true }
+      }
       .alert(item: $previewInformation) { information in
         Alert(
           title: Text(information.title), message: Text(information.message),
@@ -816,7 +1202,7 @@ private struct ShareComposeView: View {
           Button("Cancel") { model.cancel() }
         }
         ToolbarItem(placement: .confirmationAction) {
-          if model.record?.operation.state == .sent {
+          if model.record?.completed == true {
             Button("Done") { model.finish(discard: false) }.disabled(model.busy)
           } else {
             Button("Send") { model.send() }.disabled(!model.canSend)
@@ -827,8 +1213,22 @@ private struct ShareComposeView: View {
     }.navigationViewStyle(.stack)
   }
 
+  private func photoStatus(_ state: DeliveryState) -> String {
+    switch state {
+    case .ready: return ""
+    case .uploading: return "Uploading…"
+    case .uploaded: return "Uploaded"
+    case .dispatching: return "Sending…"
+    case .sent: return "Sent"
+    case .failed: return "Not sent"
+    case .unknown: return "Delivery not confirmed"
+    }
+  }
+
   private func informationButton(_ information: SharePreviewInformation) -> some View {
-    Button { previewInformation = information } label: {
+    Button {
+      previewInformation = information
+    } label: {
       Image(systemName: "info.circle")
         .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
     }
@@ -843,13 +1243,15 @@ private struct ShareComposeView: View {
     } label: {
       Label(
         included ? "Refresh on this device" : "Include preview",
-        systemImage: "photo.on.rectangle")
-        .fixedSize(horizontal: false, vertical: true)
+        systemImage: "photo.on.rectangle"
+      )
+      .fixedSize(horizontal: false, vertical: true)
     }
     .buttonStyle(.bordered).frame(minHeight: 44)
     .accessibilityIdentifier("share-device-preview")
     .accessibilityLabel(
-      (included ? "Refresh on-device preview for " : "Include on-device preview for ") + url)
+      (included ? "Refresh on-device preview for " : "Include on-device preview for ") + url
+    )
     .accessibilityHint("Uses this device to fetch a title and optional image")
     .disabled(!model.editable)
   }

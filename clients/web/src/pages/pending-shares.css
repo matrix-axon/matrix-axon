@@ -35,3 +35,31 @@
   height: 6rem;
   object-fit: contain;
 }
+
+.pending-shares-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.pending-shares-header button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+}
+.pending-shares-page textarea.pending-photo-caption {
+  min-height: 2.75rem;
+  height: 2.75rem;
+}
+
+.pending-photo-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.pending-photo-handle {
+  cursor: grab;
+  touch-action: auto;
+}

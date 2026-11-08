@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { useServices } from '../services'
 import { nativePreviewLinks } from '../incoming-share/urls'
 import { LinkPreviews } from '../components/LinkPreviews'
@@ -11,14 +12,19 @@ function RecoveryThumbnail({
   store,
   file,
   delivered,
+  photo = false,
 }: {
   store: IncomingShareStore
   file: string
   delivered: boolean
+  photo?: boolean
 }) {
   const [url, setUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
+    setFailed(false)
+    setUrl(null)
     let active = true
     let objectUrl: string | null = null
     void store.thumbnail(file).then(
@@ -35,33 +41,43 @@ function RecoveryThumbnail({
       active = false
       if (objectUrl !== null) URL.revokeObjectURL(objectUrl)
     }
-  }, [store, file])
+  }, [store, file, attempt])
   return failed ? (
-    <p role="alert">
-      {delivered
-        ? 'The preview was delivered with the first item; its local image is unavailable.'
-        : 'The retained image is missing or corrupt. Replace or remove it before sending.'}
-    </p>
+    <div role="alert">
+      <p>
+        {photo
+          ? 'Photo preview unavailable. The retained original is checked again before upload.'
+          : delivered
+            ? 'The preview was delivered with the shared message; its local image is unavailable.'
+            : 'The retained image is missing or corrupt. Replace or remove it before sending.'}
+      </p>
+      <button type="button" onClick={() => setAttempt((value) => value + 1)}>
+        Retry image preview
+      </button>
+    </div>
   ) : url === null ? (
     <p>Loading retained image…</p>
   ) : (
     <img
       class="pending-share-thumbnail"
       src={url}
-      alt="Retained link preview"
+      alt={photo ? 'Shared photo' : 'Retained link preview'}
       onError={() => setFailed(true)}
     />
   )
 }
 
 export function PendingSharesPage() {
+  const location = useLocation()
   const { incomingShares: store, accounts, rooms, auth } = useServices()
-  const [duplicateRisk, setDuplicateRisk] = useState(false)
+  const [closing, setClosing] = useState(false)
+  const [reviewId, setReviewId] = useState<string | null>(null)
+  const [draggedPhoto, setDraggedPhoto] = useState<string | null>(null)
+  const [messageEditorId, setMessageEditorId] = useState<string | null>(null)
   const [homeserverURL, setHomeserverURL] = useState<string | null>(null)
   const [clearIds, setClearIds] = useState<string[] | null>(null)
   const selectedId = store?.selected.value?.id
   useEffect(() => {
-    setDuplicateRisk(false)
     setHomeserverURL(null)
   }, [selectedId])
   useEffect(() => {
@@ -93,6 +109,8 @@ export function PendingSharesPage() {
     )
   const record = store.selected.value
   const busy = store.busy.value
+  const reviewError =
+    record === null && store.pending.value.some((item) => item.id === reviewId)
   const act = (action: Promise<unknown>) => {
     void action.catch(() => {})
   }
@@ -106,10 +124,10 @@ export function PendingSharesPage() {
       {(item.state === 'failed' || item.state === 'unknown') && (
         <button
           type="button"
-          disabled={busy || (item.state === 'unknown' && !duplicateRisk)}
-          onClick={() => act(store.retry(item.id, duplicateRisk))}
+          disabled={busy}
+          onClick={() => act(store.retry(item.id, true))}
         >
-          {item.state === 'unknown' ? 'Allow explicit resend' : 'Prepare retry'}
+          {item.state === 'unknown' ? 'Retry item' : 'Prepare retry'}
         </button>
       )}
     </li>
@@ -123,6 +141,25 @@ export function PendingSharesPage() {
   const previewLinks = [
     ...new Set(nativePreviewLinks(store.editorText.value)),
   ].filter((url) => /^https?:/i.test(url))
+  const importProblems: Record<string, string> = {
+    quota:
+      'A source item or the selection exceeded the staging/storage limits.',
+    too_many_photos: 'The selection exceeds the limit of 10 photos.',
+    expired: 'A source took too long to provide its content.',
+    provider_timeout: 'A source took too long to provide its content.',
+    incomplete_import:
+      'Import was interrupted before the selection was complete.',
+    unsupported_input: 'The selection contains unsupported content.',
+    unsupported_url: 'The selection contains an unsupported URL.',
+    too_many_source_previews:
+      'The source supplied more than eight link previews. Share fewer links.',
+    invalid: 'A source item is invalid or could not be decoded.',
+    unreadable_manifest:
+      'Saved draft metadata could not be read. Check the destination before discarding it.',
+    missingFile: 'A source file is missing or no longer readable.',
+    provider_unavailable: 'The source app could not provide an item.',
+    unavailable: 'The source app could not provide an item.',
+  }
   const blocked =
     record !== null &&
     shareOperations(record).some((item) =>
@@ -133,22 +170,49 @@ export function PendingSharesPage() {
     shareOperations(record).some((item) =>
       ['sent', 'dispatching', 'unknown'].includes(item.state),
     )
-  const deliveredOperations =
-    record?.files.flatMap((file) =>
-      file.operation === undefined ? [] : [file.operation],
-    ) ?? []
   const complete = record !== null && shareCompleted(record)
-  const captionSent =
+  const empty =
     record !== null &&
-    (deliveredOperations[0] ?? record.operation).state === 'sent'
+    store.editorText.value.trim() === '' &&
+    !record.files.some((file) => !file.thumbnail)
+  const captionSent = record?.operation.state === 'sent'
   return (
     <section class="pending-shares-page">
-      <h1>Pending shares</h1>
+      <div class="pending-shares-header">
+        <h1>Pending shares</h1>
+        <button
+          type="button"
+          aria-label="Close pending shares"
+          disabled={busy || closing}
+          onClick={() => {
+            setClosing(true)
+            void store
+              .close()
+              .then((closed) => {
+                if (closed) location.route('/')
+              })
+              .catch(() => {})
+              .finally(() => setClosing(false))
+          }}
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="m6 6 12 12M18 6 6 18"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+      </div>
       <p>
         Saved on this device for up to 24 hours. Saving a share does not send
         it.
       </p>
-      {store.error.value !== null && <p role="alert">{store.error.value}</p>}
+      {store.error.value !== null && !reviewError && (
+        <p role="alert">{store.error.value}</p>
+      )}
       {store.sessionError.value !== null && (
         <p role="alert">{store.sessionError.value}</p>
       )}
@@ -235,9 +299,14 @@ export function PendingSharesPage() {
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => act(store.open(item.id))}
+                  onClick={() => {
+                    setReviewId(item.id)
+                    act(store.open(item.id))
+                  }}
                 >
-                  Review share
+                  {store.openingId.value === item.id
+                    ? 'Opening share…'
+                    : 'Review share'}
                 </button>
                 <button
                   type="button"
@@ -246,6 +315,9 @@ export function PendingSharesPage() {
                 >
                   Discard share
                 </button>
+                {reviewId === item.id && store.error.value !== null && (
+                  <p role="alert">{store.error.value}</p>
+                )}
               </li>
             ))}
           </ul>
@@ -294,15 +366,24 @@ export function PendingSharesPage() {
                   ))}
               </select>
             </label>
-            <label>
-              Message or first attachment caption
-              <textarea
-                key={record.id}
-                value={store.editorText.value}
-                onBlur={() => act(store.flushEdits())}
-                onInput={(event) => act(store.edit(event.currentTarget.value))}
-              />
-            </label>
+            {(messageEditorId === record.id ||
+              store.editorText.value !== '' ||
+              !record.files.some((file) => !file.thumbnail)) && (
+              <label>
+                {record.files.some((file) => !file.thumbnail)
+                  ? 'Shared message'
+                  : 'Message'}
+                <textarea
+                  key={record.id}
+                  onFocus={() => setMessageEditorId(record.id)}
+                  value={store.editorText.value}
+                  onBlur={() => act(store.flushEdits())}
+                  onInput={(event) =>
+                    act(store.edit(event.currentTarget.value))
+                  }
+                />
+              </label>
+            )}
             <LinkPreviews
               accountId={record.accountId ?? ''}
               body={store.editorText.value}
@@ -402,31 +483,183 @@ export function PendingSharesPage() {
               </div>
             )}
           </fieldset>
+          {record.files.some((file) => !file.thumbnail) && (
+            <fieldset>
+              <legend>Photos in sending order</legend>
+              {record.files.filter((file) => !file.thumbnail).length > 1 && (
+                <label>
+                  Master caption
+                  <textarea
+                    class="pending-photo-caption"
+                    rows={1}
+                    placeholder="Master caption"
+                    disabled={busy || fixedDestination}
+                    value={store.masterCaption.value}
+                    onInput={(event) =>
+                      act(store.editMasterCaption(event.currentTarget.value))
+                    }
+                    onBlur={() => act(store.flushEdits())}
+                  />
+                </label>
+              )}
+              {record.files
+                .filter((file) => !file.thumbnail)
+                .map((file) => (
+                  <div
+                    key={file.id}
+                    class="pending-photo-block"
+                    onDragStart={(event) => {
+                      setDraggedPhoto(file.id)
+                      event.dataTransfer?.setData('text/plain', file.id)
+                    }}
+                    onDragEnd={() => setDraggedPhoto(null)}
+                    onDragOver={(event) => {
+                      if (draggedPhoto && !busy && !fixedDestination)
+                        event.preventDefault()
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      if (
+                        !draggedPhoto ||
+                        busy ||
+                        fixedDestination ||
+                        draggedPhoto === file.id
+                      )
+                        return
+                      const order = record.files
+                        .filter((photo) => !photo.thumbnail)
+                        .map((photo) => photo.id)
+                      order.splice(order.indexOf(draggedPhoto), 1)
+                      order.splice(order.indexOf(file.id), 0, draggedPhoto)
+                      setDraggedPhoto(null)
+                      act(store.reorderPhotos(order))
+                    }}
+                  >
+                    <RecoveryThumbnail
+                      store={store}
+                      file={file.id}
+                      photo
+                      delivered={file.operation?.state === 'sent'}
+                    />
+                    <p class="pending-photo-name">
+                      {file.name}
+                      {record.files.filter((photo) => !photo.thumbnail).length >
+                        1 && (
+                        <button
+                          type="button"
+                          draggable={!busy && !fixedDestination}
+                          disabled={busy || fixedDestination}
+                          class="pending-photo-handle"
+                          aria-label={`Drag ${file.name} to reorder`}
+                        >
+                          ⠿
+                        </button>
+                      )}
+                    </p>
+                    <textarea
+                      class="pending-photo-caption"
+                      rows={1}
+                      aria-label={`Caption for ${file.name}`}
+                      placeholder="Caption"
+                      disabled={busy || fixedDestination}
+                      value={store.editorCaption(file.id)}
+                      onBlur={() => act(store.flushEdits())}
+                      onInput={(event) =>
+                        act(
+                          store.editPhotoCaption(
+                            file.id,
+                            event.currentTarget.value,
+                          ),
+                        )
+                      }
+                    />
+                    {record.files.filter((photo) => !photo.thumbnail).length >
+                      1 && (
+                      <div class="pending-share-actions">
+                        {[-1, 1].map((direction) => {
+                          const order = record.files
+                            .filter((photo) => !photo.thumbnail)
+                            .map((photo) => photo.id)
+                          const index = order.indexOf(file.id)
+                          const target = index + direction
+                          return (
+                            <button
+                              type="button"
+                              disabled={
+                                busy ||
+                                fixedDestination ||
+                                target < 0 ||
+                                target >= order.length
+                              }
+                              aria-label={`Move ${file.name} ${direction < 0 ? 'up' : 'down'}`}
+                              onClick={() => {
+                                ;[order[index], order[target]] = [
+                                  order[target],
+                                  order[index],
+                                ]
+                                act(store.reorderPhotos(order))
+                              }}
+                            >
+                              {direction < 0 ? '↑' : '↓'}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                    <p>
+                      {Math.ceil(file.bytes / 1024)} KiB original
+                      {file.photoSize !== undefined &&
+                        file.photoSize !== 'original' && (
+                          <>
+                            {' '}
+                            · {file.photoSize} · ~
+                            {Math.ceil((file.photoBytes ?? file.bytes) / 1024)}{' '}
+                            KiB upload
+                          </>
+                        )}
+                    </p>
+                    <button
+                      type="button"
+                      disabled={busy || fixedDestination}
+                      onClick={() => act(store.removeFile(file.id))}
+                    >
+                      Remove photo: {file.name}
+                    </button>
+                  </div>
+                ))}
+            </fieldset>
+          )}
           {record.importFailures.length > 0 && (
-            <p role="alert">
-              Some items could not be imported. This share cannot be sent as a
-              partial selection; discard it and import the intended selection
-              again.
-            </p>
+            <div role="alert">
+              <p>
+                Some items could not be imported. This share cannot be sent as a
+                partial selection; discard it and import the intended selection
+                again.
+              </p>
+              <ul>
+                {[...new Set(record.importFailures)].map((failure) => (
+                  <li key={failure}>
+                    {importProblems[failure] ??
+                      'A source item could not be imported. Share the intended selection again.'}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           <ul aria-label="Delivery outcomes">
+            {record.text.trim() !== '' &&
+              record.files.some((file) => !file.thumbnail) &&
+              operation(record.operation, 'Shared message')}
             {record.files.some((file) => !file.thumbnail)
               ? record.files
                   .filter((file) => !file.thumbnail)
                   .map((file) => operation(file.operation!, file.name))
               : operation(record.operation, 'Message')}
           </ul>
-          <label>
-            <input
-              type="checkbox"
-              checked={duplicateRisk}
-              onChange={(event) =>
-                setDuplicateRisk(event.currentTarget.checked)
-              }
-            />
-            I understand an uncertain item may already have been delivered and
-            resending can create a duplicate.
-          </label>
+          {store.error.value !== null && (
+            <p class="pending-share-exit-error">{store.error.value}</p>
+          )}
+          {empty && !complete && <p role="status">Nothing to send.</p>}
           <div class="pending-share-actions">
             {busy && (
               <button type="button" onClick={() => store.cancel()}>
@@ -438,6 +671,7 @@ export function PendingSharesPage() {
               disabled={
                 busy ||
                 blocked ||
+                (empty && !complete) ||
                 !record.accountId ||
                 !record.roomId ||
                 record.importFailures.length > 0
