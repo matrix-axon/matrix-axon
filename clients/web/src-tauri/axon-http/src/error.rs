@@ -313,7 +313,15 @@ pub(crate) fn is_reset_failure(err: &reqwest::Error) -> bool {
 
 /// `detail` for a connection hyper closed because a keep-alive ping went
 /// unanswered (ADR 0127's 2026-11-07 amendment). Every request on that
-/// connection fails with it at once.
+/// connection still waiting for headers fails with it at once, as
+/// `kind=other`.
+///
+/// A body already being read fails as a plain `kind=body` with no detail.
+/// hyper reports the keep-alive only to the response future: once the
+/// connection is dropped, a body read gets h2's broken pipe wrapped in an
+/// `h2::Error`, which exposes no source, so nothing tells it apart from any
+/// other HTTP/2 body failure.
+/// `a_keep_alive_close_mid_body_is_a_plain_body_failure` pins that down.
 pub(crate) const KEEP_ALIVE_DETAIL: &str = "KeepAlive";
 
 /// hyper closed the connection because a keep-alive ping went unanswered.
@@ -330,9 +338,6 @@ fn is_keep_alive_timeout(causes: &[&(dyn StdError + 'static)]) -> bool {
 /// The category of a failure while reading a body that had started.
 pub(crate) fn classify_body(err: &reqwest::Error) -> TransportError {
     let causes = causes(err);
-    if is_keep_alive_timeout(&causes) {
-        return TransportError::with(Kind::Body, KEEP_ALIVE_DETAIL);
-    }
     match find_io(&causes) {
         Some(_) if is_decode_failure(&causes) => TransportError::with(Kind::Body, DECODE_DETAIL),
         Some(io) => TransportError::with(Kind::Body, io_kind_name(io.kind())),

@@ -1973,3 +1973,49 @@ async fn a_keep_alive_timeout_is_reported_as_keep_alive() {
     assert_eq!(err.kind, Kind::Other);
     assert_eq!(err.detail.as_deref(), Some(crate::error::KEEP_ALIVE_DETAIL));
 }
+
+#[tokio::test]
+async fn a_keep_alive_close_mid_body_is_a_plain_body_failure() {
+    // hyper reports the keep-alive only to a response still waiting for its
+    // head. A body read gets h2's broken pipe inside an `h2::Error`, which
+    // exposes no source, so the transport cannot name the cause. If a hyper
+    // bump starts exposing it, this fails, and the body can be labelled too.
+    let gates = Arc::new(Mutex::new(Vec::new()));
+    let kept = gates.clone();
+    let server = Server::start(
+        true,
+        handler(move |req: hyper::Request<Incoming>| {
+            let gated = req.uri().path() == "/gated";
+            let (tx, rx) = oneshot::channel::<Bytes>();
+            kept.lock().unwrap().push(tx);
+            async move {
+                if gated {
+                    reply(
+                        200,
+                        TestBody::Gated(Some(Bytes::from_static(b"first")), Some(rx)),
+                    )
+                } else {
+                    reply(200, TestBody::text("ok"))
+                }
+            }
+        }),
+    )
+    .await;
+    let link = BloatedLink::start(server.port, 64 << 20).await;
+    let transport = keep_alive_transport(Duration::from_millis(200), Duration::from_millis(300));
+    warm_link(&transport, &link).await;
+    let head = transport
+        .send(key(1), get(&link.url("/gated")))
+        .await
+        .unwrap();
+    assert!(head.body);
+    assert_eq!(
+        transport.read_body(&key(1)).await.unwrap().unwrap(),
+        b"first"
+    );
+    link.pause();
+    let err = promptly(transport.read_body(&key(1))).await.unwrap_err();
+    assert_eq!(err.kind, Kind::Body);
+    assert_eq!(err.detail, None);
+    drop(gates);
+}

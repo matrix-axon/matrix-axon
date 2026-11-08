@@ -403,22 +403,29 @@ Data still arriving after the ping does not stop the timeout.
 
 **Decision.**
 
-1. **Adaptive flow control.** `http2_adaptive_window(true)`: the receive windows start at the protocol's 64 KiB and grow from measured bandwidth (hyper's BDP estimate), only while throughput grows.
-   On a slow link they stay near what the link carries in one round trip, so a ping's answer, or a new response's head, is never queued behind more than that.
+1. **Adaptive flow control.** `http2_adaptive_window(true)`: the receive windows start at the protocol's 64 KiB and grow from measured bandwidth (hyper's BDP estimate), only when a sample beats the highest bandwidth seen so far.
+   On a connection that starts on a slow link they stay near what the link carries in one round trip, so a ping's answer, or a new response's head, is not queued behind much more than that.
    On a fast link they open up to hyper's 16 MiB limit.
-   This also helps head-of-line blocking in general: the server can no longer commit megabytes of one response ahead of the next one's headers.
+   The estimate only ratchets up: it never shrinks when the link later slows.
+   A connection that ramped up on a fast link and then lost speed while in the foreground keeps its large window, so it can queue as much as before this amendment, or more.
+   Examples are weak Wi-Fi in the same session, or Network Link Conditioner switched on mid-session.
+   Resume does not hit this, because § 6 builds a new client.
+   hyper offers no way to decay the window, and nothing in the captures has hit this case.
+   This also helps head-of-line blocking in general: on a slow link the server can no longer commit megabytes of one response ahead of the next one's headers.
 2. **Keep-alive timeout 20 s** (was 10 s).
    With the queue bounded, this is margin rather than the fix.
    A connection that dies under load is still closed within 40 s of its last read.
-3. **Report it.** A keep-alive close is `detail=KeepAlive`: under `kind=other` before headers, and under `kind=body` mid-body.
+3. **Report it.** A request still waiting for headers when hyper closes the connection on a keep-alive fails as `kind=other detail=KeepAlive`.
    It was `other`/`TimedOut`, indistinguishable from the OS giving up.
    hyper's error type is private, but it is the only client-side source of `hyper::Error::is_timeout`.
-   A test pins that down.
+   A body already being read cannot be labelled: hyper reports the keep-alive only to the response future, and a body read gets h2's broken pipe inside an `h2::Error` that exposes no source.
+   It reads `kind=body detail=null`, like any other HTTP/2 body failure.
+   A test pins each case.
 4. **The connect timeout stays at 10 s**, decided rather than defaulted.
    On a lossy link, what makes a handshake slow is retransmission, and a shorter timeout restarts the handshake from the beginning, throwing that progress away.
    Choosing a better number needs connect durations, which nothing records yet.
 
-**Verification.** Two tests use a proxy that buffers the server's output without limit and releases it at a fixed rate: a bufferbloated link.
+**Verification.** Three tests use a proxy that buffers the server's output without limit and releases it at a fixed rate: a bufferbloated link.
 At 1 MB/s with a 300 ms / 600 ms keep-alive, a request whose 8 MiB body is cancelled must not take the next request down with the connection.
 With the adaptive window turned off, it does, failing as `KeepAlive`.
-With delivery paused, the request fails as `KeepAlive`, not `TimedOut`.
+With delivery paused, a request waiting for headers fails as `KeepAlive`, not `TimedOut`, and a body already being read fails as a plain `body`.

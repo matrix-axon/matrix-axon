@@ -141,13 +141,11 @@ pub(crate) fn build(
         .http2_keep_alive_while_idle(false)
         // Size the HTTP/2 receive windows from measured bandwidth (BDP),
         // starting at the protocol's 64 KiB, instead of hyper's fixed 5 MiB
-        // per connection and 2 MiB per stream. The window is how much the
-        // server may have in flight ahead of anything it sends next: a
-        // response head, or the answer to a keep-alive ping. At 5 MiB a 3G
-        // link (~100 KB/s) could be holding close to a minute of data, so a
-        // ping went unanswered and hyper closed a connection that was
-        // working (#991). The window grows only while throughput grows, so it
-        // stays small on a slow link and still opens up on a fast one.
+        // per connection and 2 MiB per stream. The window bounds what can
+        // queue ahead of a keep-alive ping's answer or a new response head.
+        // hyper's estimate only ratchets up, to 16 MiB: a connection that
+        // ramped up on a fast link keeps its window after the link slows.
+        // See ADR 0127's 2026-11-07 amendment (#991).
         .http2_adaptive_window(true)
         // The transport follows redirects itself, choosing the client for
         // each hop.
