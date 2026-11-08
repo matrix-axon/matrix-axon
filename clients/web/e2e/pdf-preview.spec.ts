@@ -47,6 +47,7 @@ function pdfFixture(): Buffer {
 }
 
 async function openPdf(page: Page, body: Buffer) {
+  const authorizations: (string | undefined)[] = []
   await page.route('**/*', async (route) => {
     if (route.request().resourceType() !== 'document') return route.fallback()
     const response = await route.fetch()
@@ -92,7 +93,7 @@ async function openPdf(page: Page, body: Buffer) {
     }),
   )
   await page.route(/\/v1\/media\/[^/]+\/hs\/pdf-preview$/, (route) => {
-    expect(route.request().headers().authorization).toBe('Bearer e2e-token')
+    authorizations.push(route.request().headers().authorization)
     // The media proxy deliberately downgrades PDFs to octet-stream.
     return route.fulfill({ contentType: 'application/octet-stream', body })
   })
@@ -102,12 +103,13 @@ async function openPdf(page: Page, body: Buffer) {
     .getByRole('button', { name: 'Open pages.pdf', exact: true })
     .click()
   await expect(page.getByRole('dialog')).toBeVisible()
+  return authorizations
 }
 
 test('PDF preview paints every page under the packaged shell CSP', async ({
   page,
 }) => {
-  await openPdf(page, pdfFixture())
+  const authorizations = await openPdf(page, pdfFixture())
   await expect(page.locator('.pdf-page-count')).toHaveText('1 / 2')
   for (const [number, color] of [
     [1, [255, 0, 0, 255]],
@@ -135,12 +137,16 @@ test('PDF preview paints every page under the packaged shell CSP', async ({
     .getByRole('button', { name: 'Open pages.pdf', exact: true })
     .click()
   await expect(page.locator('.pdf-page-count')).toHaveText('1 / 2')
+  expect(authorizations).toEqual(['Bearer e2e-token'])
 })
 
 test('an invalid PDF still offers Download under the packaged shell CSP', async ({
   page,
 }) => {
-  await openPdf(page, Buffer.from('<html>This is not a PDF.</html>'))
+  const authorizations = await openPdf(
+    page,
+    Buffer.from('<html>This is not a PDF.</html>'),
+  )
   await expect(
     page.getByText(
       'Could not render this PDF — use Download to open it in another app.',
@@ -151,4 +157,5 @@ test('an invalid PDF still offers Download under the packaged shell CSP', async 
       .getByRole('dialog')
       .getByRole('button', { name: 'Download pages.pdf', exact: true }),
   ).toBeVisible()
+  expect(authorizations).toEqual(['Bearer e2e-token'])
 })
