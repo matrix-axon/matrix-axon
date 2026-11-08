@@ -328,6 +328,11 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy",
             get(routes::rooms::space_hierarchy),
         )
+        // One selected unjoined room's summary (ADR 0128 decision 5).
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/discovery",
+            get(routes::rooms::room_discovery),
+        )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/space/parents",
             get(routes::rooms::space_parents),

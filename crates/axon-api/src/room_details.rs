@@ -61,7 +61,7 @@ pub enum RefreshFailure {
 }
 
 impl RefreshFailure {
-    fn parse(category: &str) -> Option<Self> {
+    pub(crate) fn parse(category: &str) -> Option<Self> {
         Some(match category {
             "timeout" => Self::Timeout,
             "server_error" => Self::ServerError,

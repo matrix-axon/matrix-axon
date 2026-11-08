@@ -593,6 +593,10 @@ struct Script {
     /// How long the first request waits for its gate permit.
     admission_delay: Mutex<Option<Duration>>,
     admitted: Mutex<Vec<Instant>>,
+    /// What `/versions` advertises; `None` is Matrix v1.15 or later.
+    summary_endpoint: Mutex<Option<summary::SummaryEndpoint>>,
+    /// How many times the worker read `/versions`.
+    versions_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -627,6 +631,14 @@ impl Upstream for Arc<Script> {
             .get(&path)
             .cloned()
             .unwrap_or_else(|| status(404, Some("M_NOT_FOUND")))
+    }
+
+    async fn summary_endpoint(&self) -> summary::SummaryEndpoint {
+        self.versions_reads.fetch_add(1, Ordering::SeqCst);
+        self.summary_endpoint
+            .lock()
+            .unwrap()
+            .unwrap_or(summary::SummaryEndpoint::Stable)
     }
 }
 
@@ -1029,3 +1041,4 @@ async fn requests_are_paced_from_their_admission() {
 }
 
 mod hierarchy;
+mod room_summary;

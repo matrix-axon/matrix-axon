@@ -277,6 +277,14 @@ Each step is one server-silo PR, with OpenAPI, the regenerated web schema, `docs
    Field names in `discovered` are the Matrix spec's (`num_joined_members`, `guest_can_join`).
    An `enrich` read also requires the space to link at least one child the account has not joined: on the production instance a bridge's portal space linked 4,864 rooms, 4,795 of them joined, and a space with every child joined could discover nothing at a cost of up to 40 requests per `CRAWL_TTL`.
 4. **Room summaries:** decision 5 and the `discovery` source; closes issue 622.
+   The response is `{ room_id, eligible, discovered, support, refresh }`: `eligible` says whether the room qualifies under decision 2, `discovered` is the shared `room_discovery` row (always `null` for a joined room), and `support` is `unknown`, `supported`, or `unsupported`.
+   What a request leaves besides a summary (support, the last failure, and the backoff) lives in a `room_discovery_refresh` row per account and room, deleted wherever the room's `room_discovery` row is.
+   `unsupported` is recorded per room, from `/versions` without a request or from a `404`/`405` answer, and its `next_attempt_at` is the end of `UNSUPPORTED_TTL`; a `/versions` read that fails, or finds the SDK's cache empty, is a `transport` failure with backoff. A failure keeps the room's `support`, so an `unsupported` room keeps its crawl fallback through the backoff. The worker never fetches `/versions` itself, since that fetch would bypass the homeserver gate and the summary timeout; the SDK fills the cache on its own requests and keeps it in its state store.
+   "Unknown or expired" means no `room_discovery` row, or one past its `expires_at`, whatever its source, so a fresh crawl summary is not asked again.
+   The unstable path is MSC3266's original `…/unstable/im.nheko.summary/rooms/{roomId}/summary`, which every Synapse that advertises the feature serves.
+   `via` is the distinct servers of the room's current links from joined spaces, in space id order and then link order, keeping only valid server names, at most `MAX_VIA_SERVERS`.
+   A summary is about the room, not the space, so the commit takes share locks on every linking joined space's summary row and checks that at least one remains, rather than recording a membership epoch.
+   The fallback crawl is of the first linking joined space, by room id, whose crawl is due.
 
 Client adoption follows as separate PRs: web (issue 623), TUI (issue 624), and the TUI's oversized-space handling (issue 553).
 

@@ -20,7 +20,7 @@ use crate::extract::{Path, Query};
 use crate::member_profiles::{MemberProfile, MemberProfileService};
 use crate::response::{ApiError, ApiResponse};
 use crate::room_details::RoomDetailAcquirer;
-use crate::space_discovery::SpaceDiscoveryDto;
+use crate::space_discovery::{RoomDiscoveryDto, SpaceDiscoveryDto};
 use axon_core::{JobActivity, RoomDetailJob};
 
 /// Default timeline page size when `limit` is omitted.
@@ -416,9 +416,10 @@ pub struct SpaceHierarchyQuery {
 /// children, is an empty page (200), not a 404.
 ///
 /// Each unjoined child also carries `discovered`: what the account's
-/// homeserver said about it when Axon last crawled the space's hierarchy, or
-/// `null` (ADR 0128). Show the child's synced fields when it is joined, its
-/// `discovered` fields when it is not and `discovered.status` is
+/// homeserver last said about it, from a crawl of the space's hierarchy or a
+/// `GET …/discovery` read of the child, or `null` (ADR 0128). Show the
+/// child's synced fields when it is joined, its `discovered` fields when it
+/// is not and `discovered.status` is
 /// `available`, and otherwise the synced fields, then the room id. With
 /// `enrich=true`, a read of a joined space that links at least one unjoined
 /// child schedules a crawl in the background when none is fresh (a crawl
@@ -524,6 +525,95 @@ pub async fn space_hierarchy(
         total_children: page.total_children,
         discovery: SpaceDiscoveryDto::new(&crawl, current),
     }))
+}
+
+/// Get an unjoined room's discovered summary
+///
+/// Read what the account's homeserver said about one room the account has
+/// not joined, such as a space child a user selected in Room Information
+/// (ADR 0128). `discovered` is the cached summary, from a room-summary
+/// request or from a crawl of a space that links the room, or `null`; it is
+/// always `null` for a joined room, whose synced state is authoritative.
+///
+/// Returns at once and never waits for the homeserver. When the room is
+/// `eligible` (the account has not joined it and a joined space links it
+/// with a current `m.space.child`) and its summary is unknown or expired
+/// with no backoff in force, the read schedules one
+/// `GET /_matrix/client/v1/room_summary/{roomId}` in the background, with
+/// `via` taken from the links; `refresh` reports it. A summary stays fresh
+/// for an hour. Any other room, including unknown room IDs, makes no
+/// request. When `support` is `unsupported`, the read instead schedules a
+/// crawl of one joined space that links the room, as a `space/hierarchy`
+/// read with `enrich=true` would. Re-read on a `room_details.changed`
+/// WebSocket frame for this room whose `sources` include `discovery`, and,
+/// while `support` is `unsupported`, on one for the linking space naming
+/// `space_hierarchy`.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{account_id}/rooms/{room_id}/discovery",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+        ("room_id" = String, Path, description = "Matrix room id of an unjoined room"),
+    ),
+    responses(
+        (status = 200, description = "The room's cached summary and refresh state", body = ApiResponse<RoomDiscoveryDto>),
+        (status = 400, description = "A room id containing a control character", body = crate::response::ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = crate::response::ErrorResponse),
+        (status = 500, description = "Internal database failure", body = crate::response::ErrorResponse),
+    ),
+    tag = "rooms",
+)]
+pub async fn room_discovery(
+    State(store): State<Store>,
+    State(acquirer): State<Arc<dyn RoomDetailAcquirer>>,
+    Path((account_id, room_id)): Path<(Uuid, String)>,
+) -> Result<ApiResponse<RoomDiscoveryDto>, ApiError> {
+    // As in `space_hierarchy`: a NUL would otherwise be a 500 (issue 932).
+    if room_id.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(ApiError::bad_request("invalid room id"));
+    }
+    let snapshot = store.room_summary_snapshot(account_id, &room_id).await?;
+    let activity = || {
+        if snapshot.eligible {
+            acquirer.activity(account_id, &room_id, RoomDetailJob::Summary)
+        } else {
+            JobActivity::Idle
+        }
+    };
+    // Queue first, so this response already shows the summary coming; a
+    // client polling while it is queued or running asks nothing more.
+    let mut current = activity();
+    let scheduled = snapshot.due && current == JobActivity::Idle;
+    if scheduled {
+        acquirer.request(account_id, &room_id, RoomDetailJob::Summary);
+        current = activity();
+    }
+    // Without the endpoint, a crawl of a linking space is the only source
+    // (ADR 0128 decision 5), under the crawl's own TTL and backoff.
+    let mut fallback = None;
+    if snapshot.unsupported {
+        if let Some(space) = store
+            .room_summary_fallback_space(account_id, &room_id)
+            .await?
+        {
+            if acquirer.activity(account_id, &space, RoomDetailJob::Hierarchy) == JobActivity::Idle
+            {
+                acquirer.request(account_id, &space, RoomDetailJob::Hierarchy);
+                fallback = Some(space);
+            }
+        }
+    }
+    tracing::debug!(
+        %account_id,
+        %room_id,
+        eligible = snapshot.eligible,
+        scheduled,
+        fallback_space = fallback.as_deref(),
+        "room discovery read"
+    );
+    Ok(ApiResponse::new(RoomDiscoveryDto::new(
+        room_id, snapshot, current,
+    )))
 }
 
 /// List a room's parent spaces

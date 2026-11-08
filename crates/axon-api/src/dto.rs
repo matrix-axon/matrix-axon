@@ -682,9 +682,9 @@ pub struct SpaceHierarchyChildDto {
     pub parent_room_id: String,
     /// Whether the account's own membership in the child is `join`.
     pub joined: bool,
-    /// What the account's homeserver said about the child when a crawl of a
-    /// linking space last reached it (ADR 0128 decision 4), or `null` when
-    /// Axon has no such answer. Always `null` for a joined child, whose
+    /// What the account's homeserver last said about the child, from a crawl
+    /// of a linking space or a room-summary read of the child (ADR 0128
+    /// decisions 4 and 5), or `null` when Axon has no such answer. Always `null` for a joined child, whose
     /// synced fields are authoritative. A child that a later complete crawl
     /// no longer returned keeps a non-null value with status `not_returned`
     /// and no summary fields.

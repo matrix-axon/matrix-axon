@@ -1,6 +1,7 @@
 //! Discovered summaries of unjoined space children and the crawl that finds
-//! them (ADR 0128 decisions 1-4): the wire shapes `GET …/space/hierarchy`
-//! adds, built from the store's rows.
+//! them (ADR 0128 decisions 1-5): the wire shapes `GET …/space/hierarchy`
+//! adds, and `GET …/discovery` of one selected room, built from the store's
+//! rows.
 //!
 //! Discovered fields are never merged into synced fields (ADR 0111): a
 //! client shows a child's synced fields when it is joined, and its
@@ -8,12 +9,12 @@
 //! `available`.
 
 use axon_core::JobActivity;
-use axon_store::{DiscoveredRow, SpaceCrawlSnapshot};
+use axon_store::{DiscoveredRow, RoomSummarySnapshot, SpaceCrawlSnapshot};
 use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::room_details::RefreshState;
+use crate::room_details::{DetailRefreshDto, RefreshFailure, RefreshState};
 
 /// What the homeserver last said about a discovered room.
 #[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
@@ -268,6 +269,83 @@ impl SpaceDiscoveryDto {
             },
             failure: crawl.failure.as_deref().and_then(CrawlFailure::parse),
             next_attempt_at: crawl.next_attempt_at,
+        }
+    }
+}
+
+/// Whether the account's homeserver serves room summaries for this room
+/// (ADR 0128 decision 5).
+#[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SummarySupport {
+    /// No summary request has had an answer yet.
+    Unknown,
+    Supported,
+    /// The homeserver advertises neither Matrix v1.15 nor MSC3266's
+    /// `im.nheko.summary`, or answered that it lacks the endpoint. No
+    /// summary is requested until `refresh.next_attempt_at`; meanwhile the
+    /// room's summary comes only from a crawl of a joined space that links
+    /// it, which this read schedules.
+    Unsupported,
+}
+
+/// What Axon knows about one unjoined room from the account's homeserver, and
+/// where its room-summary refresh stands (ADR 0128 decision 5).
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq)]
+pub struct RoomDiscoveryDto {
+    pub room_id: String,
+    /// Axon may ask the homeserver about this room: the account has not
+    /// joined it, and a space the account has joined links it with a current
+    /// `m.space.child`. Any other room is never requested.
+    pub eligible: bool,
+    /// The cached summary, from a room-summary request or a crawl of a
+    /// linking space, or `null` when Axon has none. Always `null` for a
+    /// joined room, whose synced state is authoritative.
+    pub discovered: Option<DiscoveredRoomDto>,
+    pub support: SummarySupport,
+    /// The room-summary refresh. `state` is the worker's activity while a
+    /// summary is due, and `idle` otherwise; `next_attempt_at` is the end of
+    /// a failure backoff, or when an `unsupported` endpoint is checked again.
+    pub refresh: DetailRefreshDto,
+}
+
+impl RoomDiscoveryDto {
+    /// The DTO for `room_id`'s `snapshot`, with the worker's `activity` for
+    /// its summary job. As in ADR 0126, a due summary has no attempt time:
+    /// the read has just asked for it.
+    pub fn new(room_id: String, snapshot: RoomSummarySnapshot, activity: JobActivity) -> Self {
+        let refresh = snapshot.refresh.as_ref();
+        let support = match refresh.map(|r| r.support.as_str()) {
+            Some("supported") => SummarySupport::Supported,
+            Some("unsupported") => SummarySupport::Unsupported,
+            _ => SummarySupport::Unknown,
+        };
+        let state = if snapshot.due {
+            match activity {
+                JobActivity::Idle => RefreshState::Idle,
+                JobActivity::Queued => RefreshState::Queued,
+                JobActivity::Running => RefreshState::Running,
+            }
+        } else {
+            RefreshState::Idle
+        };
+        Self {
+            room_id,
+            eligible: snapshot.eligible,
+            discovered: snapshot
+                .discovered
+                .filter(|_| !snapshot.joined)
+                .and_then(DiscoveredRoomDto::from_row),
+            support,
+            refresh: DetailRefreshDto {
+                state,
+                failure: refresh
+                    .and_then(|r| r.failure.as_deref())
+                    .and_then(RefreshFailure::parse),
+                next_attempt_at: refresh
+                    .and_then(|r| r.next_attempt_at)
+                    .filter(|_| !snapshot.due),
+            },
         }
     }
 }
