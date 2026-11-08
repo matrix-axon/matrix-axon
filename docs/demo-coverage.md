@@ -296,6 +296,9 @@ The checks cover full-width caption geometry, top-right 44-pixel download target
 Viewer download errors remaining visible on the card after close have component-test coverage; native image/gallery taps with double-tap disabled are covered by `clients/web/e2e/message-gestures.spec.ts` on iPhone/WebKit.
 The existing `media` recording still demonstrates image galleries; a recorded audio/text/PDF/video attachment-card scene remains outstanding.
 
+`clients/web/e2e/pdf-preview.spec.ts` verifies PDF page pixels and reopen behavior under the packaged shell CSP, plus the invalid-document fallback (#995).
+This automated coverage does not add a recorded scene.
+
 The native iOS text/link/photo Share Extension adds an account/room picker with validated last-destination restore, editable message/card preview, supplied metadata followed by explicit restricted HTTPS preview acquisition, separately confirmed homeserver lookup, Send, and durable draft/unknown-outcome recovery.
 The photo increment adds ordered photo thumbnails/filenames, compact multiline-capable captions below each filename, an independent source message, cached previews with retry, top-right trash controls, automatic dismissal after confirmed success, removal before sending, individual and batch size pickers with upload estimates, and per-item partial-delivery recovery.
 Photo-specific native/simulator and browser recovery tests complement the signed iPhone/iPad checklist; signed photo acceptance and a native photo recording remain outstanding.

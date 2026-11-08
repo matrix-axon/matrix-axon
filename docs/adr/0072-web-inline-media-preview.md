@@ -173,6 +173,11 @@ The forced `application/pdf` blob type keeps doing the security work it did for
 the frame: pdf.js parses the bytes as a document, so an attachment whose bytes
 are really HTML fails to parse rather than rendering as markup in our origin.
 
+The packaged shell must allow `blob:` in its CSP's `connect-src` directive.
+PDF.js reads the media service's object URL with XHR; allowing blobs only in `media-src` and `worker-src` does not authorize that read.
+Without it the shell blocks the document after the authenticated download succeeds, although the browser client renders it (#995).
+`e2e/pdf-preview.spec.ts` applies the shipping shell policy to the built client, checks pixels on both pages of a PDF served as `application/octet-stream`, reopens the viewer, and verifies the invalid-document fallback.
+
 Text takes a different route entirely: `MediaService.fetchText()` decodes the
 bytes to a string that Preact escapes into a `<pre>`. No object URL, no MIME
 type, and nothing that could be interpreted as markup regardless of what the
