@@ -386,7 +386,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "/verify [device_id|@user:server]",
         insert_text: "/verify ",
         description:
-            "verify another of your devices, or another user. With no argument, pick a device from the list; incoming requests open automatically",
+            "verify your other devices, or another user. Omit argument to pick your device from a list; incoming requests open automatically",
     },
     HelpCommand {
         label: "/bundle <event_id>",
