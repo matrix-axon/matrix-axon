@@ -10,13 +10,15 @@
 //!
 //! PUT is a merge-upsert (`null` = delete, stored as a tombstone) and wins by
 //! server-clock arrival order; GET returns the last-write-wins merged view
-//! across all the account's devices. A successful PUT fans out one
+//! across all the account's devices, or with `?since=` only the keys written
+//! since an earlier read (ADR 0131). A successful PUT fans out one
 //! `device_state.changed` frame over `/v1/ws`; receivers drop frames carrying
 //! their own device id (echo suppression).
 
 use axon_core::{DeviceStateFrame, LiveFrame};
-use axon_store::{DeviceStateUpsert, Store};
+use axon_store::{DeviceStateRead, DeviceStateUpsert, Store};
 use axum::extract::State;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use utoipa::IntoParams;
@@ -57,6 +59,38 @@ pub struct DeviceStateQueryDto {
     pub account_id: Uuid,
 }
 
+/// Query parameters for the device-state GET: the account, and optionally the
+/// cursor of an earlier read to ask for only what changed since (ADR 0131).
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct DeviceStateGetQueryDto {
+    /// The Axon account this state belongs to.
+    pub account_id: Uuid,
+    /// The `cursor` of an earlier read of this namespace. With it, the response
+    /// holds only the keys written since that read (`full: false`), deleted
+    /// ones as `null`; the server may still answer in full (`full: true`).
+    /// Opaque: pass back exactly what a response gave.
+    pub since: Option<String>,
+}
+
+/// Encode a read's clock as its opaque cursor (ADR 0131): microseconds since
+/// the epoch. Clients never parse it, so the format can change.
+fn encode_cursor(as_of: DateTime<Utc>) -> String {
+    as_of.timestamp_micros().to_string()
+}
+
+/// Decode a `since` cursor; anything [`encode_cursor`] could not have written
+/// is a `400`, including non-canonical integers such as `+123` or `00123`.
+fn decode_cursor(cursor: &str) -> Result<DateTime<Utc>, ApiError> {
+    cursor
+        .parse::<i64>()
+        .ok()
+        .filter(|micros| *micros >= 0)
+        .and_then(DateTime::from_timestamp_micros)
+        .filter(|as_of| encode_cursor(*as_of) == cursor)
+        .ok_or_else(|| ApiError::bad_request("since is not a cursor from this endpoint"))
+}
+
 /// Confirm the account exists — an unknown account is a `404`, matching the
 /// accounts routes.
 async fn require_account(store: &Store, account_id: Uuid) -> Result<(), ApiError> {
@@ -73,17 +107,24 @@ async fn require_account(store: &Store, account_id: Uuid) -> Result<(), ApiError
 /// across all the account's devices** (per key, the newest write wins; deleted
 /// keys are absent). A namespace never written is an empty map, not a `404`.
 /// The `device_id` names the calling device; the merge is account-wide.
+///
+/// Every response carries a `cursor`. Passing it back as `since` returns only
+/// the keys written since that read, each with its current winner and deleted
+/// keys as `null` (`full: false`), for the caller to merge into what it holds.
+/// The delta may repeat keys the caller already has. A response with
+/// `full: true` is the whole namespace, to replace what the caller holds
+/// (ADR 0131).
 #[utoipa::path(
     get,
     path = "/v1/devices/{device_id}/state/{namespace}",
     params(
         ("device_id" = Uuid, Path, description = "The calling device (client-supplied UUID)"),
         ("namespace" = String, Path, description = "The state namespace, e.g. `drafts`"),
-        DeviceStateQueryDto,
+        DeviceStateGetQueryDto,
     ),
     responses(
-        (status = 200, description = "The merged namespace state", body = ApiResponse<DeviceStateDto>),
-        (status = 400, description = "Missing account_id or malformed device_id", body = crate::response::ErrorResponse),
+        (status = 200, description = "The merged namespace state, or the changes since `since`", body = ApiResponse<DeviceStateDto>),
+        (status = 400, description = "Missing account_id, malformed device_id, or a malformed since cursor", body = crate::response::ErrorResponse),
         (status = 404, description = "No such account", body = crate::response::ErrorResponse),
     ),
     tag = "device-state",
@@ -91,16 +132,23 @@ async fn require_account(store: &Store, account_id: Uuid) -> Result<(), ApiError
 pub async fn get_device_state(
     State(store): State<Store>,
     Path((_device_id, namespace)): Path<(Uuid, String)>,
-    Query(DeviceStateQueryDto { account_id }): Query<DeviceStateQueryDto>,
+    Query(DeviceStateGetQueryDto { account_id, since }): Query<DeviceStateGetQueryDto>,
 ) -> Result<ApiResponse<DeviceStateDto>, ApiError> {
+    let since = since.as_deref().map(decode_cursor).transpose()?;
     require_account(&store, account_id).await?;
-    let entries = store
-        .merged_device_state(account_id, &namespace)
-        .await?
+    let DeviceStateRead { full, rows, as_of } = store
+        .read_device_state(account_id, &namespace, since)
+        .await?;
+    let entries = rows
         .into_iter()
         .map(|row| (row.key.clone(), DeviceStateEntryDto::from(row)))
         .collect();
-    Ok(ApiResponse::new(DeviceStateDto { namespace, entries }))
+    Ok(ApiResponse::new(DeviceStateDto {
+        namespace,
+        entries,
+        full,
+        cursor: encode_cursor(as_of),
+    }))
 }
 
 /// Update device state

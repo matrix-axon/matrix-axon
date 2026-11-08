@@ -42,7 +42,7 @@ pub use accounts::{
     Account, AccountAuthKind, AccountState, MatrixOAuthRegistration, StoredAccountSession,
 };
 pub use backfill::{AccountBackfillProgress, RoomBackfillFailure, RoomBackfillState};
-pub use device_state::{DeviceStateRow, DeviceStateUpsert};
+pub use device_state::{DeviceStateRead, DeviceStateRow, DeviceStateUpsert};
 pub use display_names::DisplayNameWrite;
 pub use error::StoreError;
 pub use events::{
@@ -120,6 +120,8 @@ pub struct Store {
     refresh_sweep: Arc<Mutex<Option<Instant>>>,
     purge_retry_cursor: Arc<Mutex<Option<(uuid::Uuid, String)>>>,
     purge_wakeup: Arc<Notify>,
+    // How far a device-state delta reaches behind its cursor (ADR 0131).
+    device_state_overlap: chrono::Duration,
 }
 
 impl Store {
@@ -262,6 +264,7 @@ impl Store {
             refresh_sweep: Arc::new(Mutex::new(None)),
             purge_retry_cursor: Arc::new(Mutex::new(None)),
             purge_wakeup: Arc::new(Notify::new()),
+            device_state_overlap: device_state::overlap_for(config.timeouts.statement_secs),
         })
     }
 
