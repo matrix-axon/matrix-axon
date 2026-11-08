@@ -13,6 +13,10 @@ final class SourceApp: UIResponder, UIApplicationDelegate {
     _ application: UIApplication,
     didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    // This disposable host tests settled UI state. On CI, XCTest repeatedly
+    // waited 60 seconds for a missing animation-complete notification after
+    // dismissing the caption keyboard, although later queries and typing worked.
+    UIView.setAnimationsEnabled(false)
     let window = UIWindow(frame: UIScreen.main.bounds)
     window.rootViewController = SourceController()
     window.makeKeyAndVisible()
@@ -40,10 +44,14 @@ private final class DecoratedURL: NSObject, UIActivityItemSource {
 }
 
 private final class SourceController: UIViewController {
-  static func image() -> UIImage {
-    UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16)).image { context in
+  static func image(size: CGSize = CGSize(width: 16, height: 16)) -> UIImage {
+    // The fixture dimensions are pixels, independent of simulator display scale.
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = true
+    return UIGraphicsImageRenderer(size: size, format: format).image { context in
       UIColor.systemBlue.setFill()
-      context.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+      context.fill(CGRect(origin: .zero, size: size))
     }
   }
   override func viewDidLoad() {
@@ -120,11 +128,7 @@ private final class SourceController: UIViewController {
           self?.dismiss(animated: true)
           try? FileManager.default.removeItem(at: root)
         })
-      let image = UIGraphicsImageRenderer(size: CGSize(width: 2400, height: 1600)).image {
-        context in
-        UIColor.systemBlue.setFill()
-        context.fill(CGRect(x: 0, y: 0, width: 2400, height: 1600))
-      }
+      let image = Self.image(size: CGSize(width: 2400, height: 1600))
       let item = NSExtensionItem()
       if !message.isEmpty { item.attributedContentText = NSAttributedString(string: message) }
       item.attachments = (0..<count).map { _ in NSItemProvider(object: image) }
