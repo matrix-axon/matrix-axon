@@ -30,12 +30,18 @@
 //! The [`BootstrapOutcome::Rooms`] stage doubles as the post-startup room
 //! refresh: a live frame for an unknown room asks for one, and requests are
 //! coalesced so a backlog of such frames cannot stack up N full room fetches.
+//!
+//! Pending invites are fetched beside the room list, on this same channel.
+//! That read does not advance startup. The rooms outcome is still what moves
+//! the chain on to device state.
 
 use std::future::Future;
 
 use uuid::Uuid;
 
-use crate::api::{AccountDto, ApiError, AxonClient, DeviceStateDto, RoomListSnapshot};
+use crate::api::{
+    AccountDto, ApiError, AxonClient, DeviceStateDto, InviteListSnapshot, RoomListSnapshot,
+};
 
 use super::drafts::DRAFTS_NAMESPACE;
 use super::read_markers::READ_MARKERS_NAMESPACE;
@@ -53,6 +59,9 @@ pub(crate) enum BootstrapOutcome {
         markers: DeviceStateReads,
         drafts: DeviceStateReads,
     },
+    /// A pending-invite list. Applied whenever it arrives. It does not advance
+    /// [`BootstrapStage`].
+    Invites(Result<InviteListSnapshot, ApiError>),
 }
 
 /// How far startup has got. Rendered in the rooms-panel title so a slow first
@@ -110,7 +119,7 @@ async fn read_namespace(
 
 impl App {
     /// Spawn `work` and deliver its outcome to the main loop.
-    fn spawn_bootstrap<F>(&self, work: F)
+    pub(super) fn spawn_bootstrap<F>(&self, work: F)
     where
         F: Future<Output = BootstrapOutcome> + Send + 'static,
     {
@@ -159,6 +168,16 @@ impl App {
         self.spawn_bootstrap(async move {
             BootstrapOutcome::Rooms(client.list_rooms(account_filter).await)
         });
+    }
+
+    /// Spaces, rooms, and pending invites.
+    ///
+    /// `/refresh` and the refresh shortcut both call this, so one of them
+    /// cannot grow a list the other forgets.
+    pub(crate) fn refresh_lists(&mut self) {
+        self.refresh_spaces();
+        self.request_rooms_refresh();
+        self.request_invites_refresh();
     }
 
     /// Record a `Connected` live frame, returning whether it warrants a
@@ -235,6 +254,7 @@ impl App {
                 // the panel saying "connecting" forever.
                 self.bootstrap = BootstrapStage::Rooms;
                 self.request_rooms_refresh();
+                self.request_invites_refresh();
             }
             BootstrapOutcome::Rooms(result) => {
                 // Keep this read marked in flight while applying it so overflow
@@ -297,6 +317,16 @@ impl App {
                         self.load_selected_timeline().await;
                         self.note_stage_elapsed("first timeline");
                     }
+                }
+            }
+            BootstrapOutcome::Invites(result) => {
+                // Keep the in-flight flag set while applying so live maps are
+                // still the ones this fetch owns. The flag drops after.
+                self.apply_invite_fetch(result);
+                self.invites_fetch_inflight = false;
+                if self.invites_fetch_again {
+                    self.invites_fetch_again = false;
+                    self.request_invites_refresh();
                 }
             }
         }

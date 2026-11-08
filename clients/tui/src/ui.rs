@@ -13,8 +13,8 @@ use crate::app::frame::{PaneAreas, PopupView};
 use crate::app::{
     account_localpart, date_separator_line, format_date, format_time, overlay_selection_on_page,
     selected_line_style, AccountSelection, App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey,
-    ProtocolState, RoomFilter, RoomKey, SearchKind, UnreadThreadEntry, VerificationDirection,
-    VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
+    ProtocolState, RoomFilter, RoomKey, SearchKind, Status, UnreadThreadEntry,
+    VerificationDirection, VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
@@ -515,6 +515,26 @@ pub(crate) fn room_info_popup_title(app: &App, inner_width: usize) -> String {
     fit_popup_title(&full, inner_width)
 }
 
+/// Shorten a reject question from the title, keeping the `[y/N]` ending.
+fn fit_reject_question(question: &str, inner_width: usize) -> String {
+    const SUFFIX: &str = "? [y/N]";
+    if inner_width == 0 {
+        return String::new();
+    }
+    if display_width(question) <= inner_width {
+        return question.to_owned();
+    }
+    let Some(stem) = question.strip_suffix(SUFFIX) else {
+        return fit_popup_title(question, inner_width);
+    };
+    let suffix_width = display_width(SUFFIX);
+    if suffix_width + 3 >= inner_width {
+        return fit_popup_title(question, inner_width);
+    }
+    let budget = inner_width - suffix_width - 3;
+    format!("{}...{SUFFIX}", take_display_width(stem, budget))
+}
+
 fn fit_popup_title(text: &str, inner_width: usize) -> String {
     if inner_width == 0 || display_width(text) <= inner_width {
         return if inner_width == 0 {
@@ -529,13 +549,48 @@ fn fit_popup_title(text: &str, inner_width: usize) -> String {
     format!("{}...", take_display_width(text, inner_width - 3))
 }
 
+/// Rooms-pane title, including the pending-invite count when it is above zero.
+///
+/// The count uses the same account and room filter as the `/pending` popup.
+/// Zero invites leaves the title unchanged, including a bootstrap label, a
+/// search or name-filter title, and the unsaved-order suffix.
+pub(crate) fn rooms_pane_title(app: &App) -> String {
+    let mut rooms_title = if let Some(stage) = app.bootstrap.label() {
+        // Startup is still fetching. Say so, or an empty panel reads as
+        // "this account has no rooms" (#189).
+        format!("Rooms — {stage}…")
+    } else if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
+        format!("Rooms  Search: {q}")
+    } else if let Mode::Search(SearchKind::RoomNameFilter, q) = &app.mode {
+        format!("Rooms  Filter: {q}")
+    } else {
+        // Show the active sort, and the filter when it is not the default.
+        match &app.room_filter {
+            RoomFilter::All => format!("Rooms — {}", app.room_sort.label()),
+            other => format!("Rooms — {} · {}", other.label(), app.room_sort.label()),
+        }
+    };
+    if app.spaces.order_error.is_some() {
+        rooms_title.push_str(" — order unsaved/unavailable");
+    }
+    app.append_invite_count(&mut rooms_title);
+    rooms_title
+}
+
 /// Build the open popup's body and settle its scroll against it.
 ///
 /// The clamp at the end is load-bearing: the popup scroll keys add and
 /// subtract without an upper bound of their own (`keymap.rs`), because only
 /// here is the line count known.
 fn prepare_popup(app: &mut App, screen: Rect) {
-    let Mode::Popup(kind) = app.mode else {
+    // Confirm keeps the inbox on screen. The status line alone can lose the
+    // question to a later status write, or clip `[y/N]` when the title is long.
+    let confirming_reject = matches!(app.mode, Mode::ConfirmInviteReject { .. });
+    let kind = if confirming_reject {
+        PopupKind::Invites
+    } else if let Mode::Popup(kind) = &app.mode {
+        *kind
+    } else {
         app.frame.popup = None;
         app.reveal_room_info_members = false;
         return;
@@ -620,6 +675,29 @@ fn prepare_popup(app: &mut App, screen: Rect) {
             )
         }
         PopupKind::MediaPreview => unreachable!("media preview returned above"),
+        PopupKind::Invites => {
+            // A filter change can hide the stored row between frames. Sync
+            // before drawing so the next frame marks a row that is still
+            // visible. Accept and reject do not act on that retarget until
+            // the user presses the key again. The confirm question keeps the
+            // key it asked about, so it does not sync onto a different row.
+            if !confirming_reject {
+                app.sync_invite_selection();
+            }
+            let width = usize::from(area.width.saturating_sub(2));
+            let (lines, ranges, selected) = app.invite_popup_lines(width);
+            app.reveal_selected_invite(&ranges, selected, page_size);
+            let title = if confirming_reject {
+                let question = app.invite_reject_question();
+                // Put the question back each frame. A status write between
+                // keys would otherwise be what the next frame paints.
+                app.status = Status::from(question.clone());
+                fit_reject_question(&question, width)
+            } else {
+                app.invites_popup_title()
+            };
+            (title, lines)
+        }
     };
     if kind == PopupKind::RoomInfo && app.reveal_room_info_members {
         app.reveal_room_info_members = false;
@@ -877,24 +955,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             Style::default().fg(app.colors.border)
         };
-        let mut rooms_title = if let Some(stage) = app.bootstrap.label() {
-            // Startup is still fetching. Say so, or an empty panel reads as
-            // "this account has no rooms" (#189).
-            format!("Rooms — {stage}…")
-        } else if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
-            format!("Rooms  Search: {q}")
-        } else if let Mode::Search(SearchKind::RoomNameFilter, q) = &app.mode {
-            format!("Rooms  Filter: {q}")
-        } else {
-            // Show the active sort, and the filter when it is not the default.
-            match &app.room_filter {
-                RoomFilter::All => format!("Rooms — {}", app.room_sort.label()),
-                other => format!("Rooms — {} · {}", other.label(), app.room_sort.label()),
-            }
-        };
-        if app.spaces.order_error.is_some() {
-            rooms_title.push_str(" — order unsaved/unavailable");
-        }
+        let rooms_title = rooms_pane_title(app);
         let rooms = List::new(room_items).block(
             Block::default()
                 .style(
@@ -2132,7 +2193,7 @@ fn blocking_popup_area(app: &App, screen: Rect) -> Option<Rect> {
             let command_response = app.pending_command_response.as_deref().unwrap_or_default();
             Some(command_response_popup_area(command_response, screen))
         }
-        Mode::Popup(_) => Some(centered_rect(72, 80, screen)),
+        Mode::Popup(_) | Mode::ConfirmInviteReject { .. } => Some(centered_rect(72, 80, screen)),
         _ => None,
     }
 }
@@ -3047,7 +3108,10 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
             shortcuts.toggle_rooms_panel.label(),
             "show/hide Rooms panel",
         ),
-        Row::Kv(shortcuts.refresh.label(), "refresh rooms and redraw"),
+        Row::Kv(
+            shortcuts.refresh.label(),
+            "refresh rooms, pending invites, and redraw",
+        ),
         Row::Blank,
         Row::Section("Room list sort & filter:"),
         Row::Kv(
@@ -3152,6 +3216,16 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         Row::Kv(
             shortcuts.move_space_down.label(),
             "move focused space down (saved across clients)",
+        ),
+        Row::Blank,
+        Row::Section("Invites:"),
+        Row::Kv(
+            format!(
+                "{} / {}",
+                shortcuts.submit.label(),
+                shortcuts.reject_invite.label()
+            ),
+            "accept / reject the selected invite (/pending; reject asks first)",
         ),
         Row::Blank,
         Row::Section("Room information:"),
@@ -3622,6 +3696,8 @@ mod tests {
         assert!(text.contains("react to message"));
         assert!(text.contains("withdraw your reaction"));
         assert!(text.contains("open image preview"));
+        assert!(text.contains("accept / reject the selected invite"));
+        assert!(text.contains(&config.shortcuts.reject_invite.label()));
         assert!(text.contains("Up / Down"));
         assert!(text.contains("select previous / next message"));
     }

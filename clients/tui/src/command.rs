@@ -33,6 +33,8 @@ pub enum Command {
     Reply,
     Thread,
     UnreadThreads,
+    /// Open the pending-invite inbox (`/pending`).
+    Invites,
     /// Start an outgoing SAS verification. The argument is either a device ID
     /// (self-verification, ADR 0028) or a `@user:server` (cross-user, ADR 0040).
     Verify(Option<String>),
@@ -151,6 +153,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/thread", false),
     SlashCommand::supported("/unreadthreads", false),
     SlashCommand::supported("/ut", false),
+    SlashCommand::supported("/pending", false),
     SlashCommand::supported("/verify", true),
     SlashCommand::supported("/bundle", true),
     SlashCommand::supported("/help", false),
@@ -182,13 +185,13 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
 pub(crate) const HELP_COMMAND_GROUPS: &[(usize, &str)] = &[
     (0, "Messaging"),
     (8, "Navigation"),
-    (14, "Account management"),
-    (19, "Information"),
-    (23, "Message actions"),
-    (28, "Room actions"),
-    (35, "Verification"),
-    (37, "System"),
-    (43, "Pending"),
+    (15, "Account management"),
+    (20, "Information"),
+    (24, "Message actions"),
+    (29, "Room actions"),
+    (36, "Verification"),
+    (38, "System"),
+    (44, "Pending"),
 ];
 
 pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
@@ -263,6 +266,11 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "/unreadthreads, /ut",
         insert_text: "/unreadthreads",
         description: "open the unread thread picker",
+    },
+    HelpCommand {
+        label: "/pending",
+        insert_text: "/pending",
+        description: "open the pending-invite inbox",
     },
     // ── Account management ───────────────────────────────────────────────────
     HelpCommand {
@@ -399,7 +407,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/refresh, /rooms",
         insert_text: "/refresh",
-        description: "refresh rooms and redraw the display",
+        description: "refresh rooms, pending invites, and redraw the display",
     },
     HelpCommand {
         label: "/saveconfig",
@@ -507,6 +515,8 @@ pub fn parse(input: &str) -> Command {
         "reply" => Command::Reply,
         "thread" => Command::Thread,
         "unreadthreads" | "ut" => Command::UnreadThreads,
+        "pending" if arg.trim().is_empty() => Command::Invites,
+        "pending" => Command::Invalid("/pending takes no arguments".to_owned()),
         "verify" => {
             let mut tokens = arg.split_whitespace();
             let target = tokens.next().map(str::to_owned);

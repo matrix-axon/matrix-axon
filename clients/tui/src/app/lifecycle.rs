@@ -1238,6 +1238,12 @@ impl App {
             Ok(accounts) => self.set_accounts(accounts),
             Err(err) => warnings.push(format!("account refresh failed: {err}")),
         }
+        // Login, logout, recover, backup enable, and delete all land here.
+        // A second account, or one that was logged out, can already have
+        // invites. `invite.added` only covers ones that arrive later.
+        // The target-resolution outcomes do not call this, so they do not
+        // refresh before the active set has changed.
+        self.request_invites_refresh();
         match self.client.list_rooms(self.account_filter).await {
             Ok(rooms) => {
                 self.apply_room_refresh(rooms);
@@ -1764,6 +1770,21 @@ mod tests {
             .accounts
             .iter()
             .all(|a| a.state == AccountState::Active));
+        // Resolving a target has not changed who is active yet.
+        assert!(!app.invites_fetch_inflight);
+    }
+
+    #[tokio::test]
+    async fn an_account_change_refreshes_pending_invites() {
+        let mut app = App::new(
+            AxonClient::new("http://127.0.0.1:1".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        let warning = app.refresh_after_lifecycle_change().await;
+        assert!(warning.is_some());
+        assert!(app.invites_fetch_inflight);
     }
 
     #[test]

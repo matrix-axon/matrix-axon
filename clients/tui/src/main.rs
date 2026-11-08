@@ -479,6 +479,7 @@ async fn run_app(
     let (room_info_tx, mut room_info_rx) = mpsc::unbounded_channel();
     let (drafts_tx, mut drafts_rx) = mpsc::unbounded_channel();
     let (room_action_tx, mut room_action_rx) = mpsc::unbounded_channel();
+    let (invite_action_tx, mut invite_action_rx) = mpsc::unbounded_channel();
     let (space_tx, mut space_rx) = mpsc::unbounded_channel();
     let (tag_write_tx, mut tag_write_rx) = mpsc::unbounded_channel();
     let (bootstrap_tx, mut bootstrap_rx) = mpsc::unbounded_channel();
@@ -491,6 +492,7 @@ async fn run_app(
     app.room_info.tx = Some(room_info_tx);
     app.set_drafts_sender(drafts_tx);
     app.set_room_action_sender(room_action_tx);
+    app.set_invite_action_sender(invite_action_tx);
     app.set_tag_write_sender(tag_write_tx);
     app.spaces.tx = Some(space_tx);
     app.set_bootstrap_sender(bootstrap_tx);
@@ -536,9 +538,15 @@ async fn run_app(
                 // Re-read the room list for a leave axon timed out on, until
                 // the room drops off it (ADR 0121 decision 5, #743).
                 app.poll_pending_memberships(now);
+                app.poll_pending_invite_rejects(now);
                 // A join whose room was not listed yet opens when a later
                 // list contains it. The extra reads are a few seconds apart.
                 app.poll_pending_join_open(now).await;
+                // An accept the homeserver has not answered yet also re-reads
+                // the invite list, so a missed `invite.removed` does not leave
+                // the row in the inbox. These reads are separate from the
+                // room-list watch above.
+                app.poll_invite_accept_followup(now);
                 // Pull in list titles for rooms scrolling or filtering has just
                 // brought on screen. Bounded and idempotent — already-titled
                 // rooms are skipped (#189).
@@ -644,6 +652,7 @@ async fn run_app(
                 if reconnected && app.note_connected_frame() {
                     app.request_device_state();
                     app.request_space_reconnect_refresh(std::time::Instant::now());
+                    app.request_invites_refresh();
                 }
             }
             Some(outcome) = bootstrap_rx.recv() => {
@@ -654,6 +663,9 @@ async fn run_app(
             }
             Some(outcome) = room_action_rx.recv() => {
                 app.handle_room_action_outcome(outcome).await;
+            }
+            Some(outcome) = invite_action_rx.recv() => {
+                app.handle_invite_action_outcome(outcome).await;
             }
             Some(outcome) = space_rx.recv() => {
                 app.apply_space_outcome(outcome);

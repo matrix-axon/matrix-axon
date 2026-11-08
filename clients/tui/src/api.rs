@@ -45,6 +45,10 @@ const ROOM_SUMMARY_READ_LIMIT: usize = 64 * 1024;
 /// the lazily loaded projection, the same size as `/metadata`. A larger body
 /// fails the read instead of being decoded.
 pub(crate) const ROOM_MEMBERS_LIMIT: usize = 2 * 1024 * 1024;
+/// `GET /v1/invites` is one row per pending invite. 1 MiB is the same cap the
+/// space-children read uses, and it fails the read instead of allocating from
+/// a peer-chosen length.
+const INVITE_LIST_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -93,6 +97,32 @@ impl AxonClient {
             started,
             account_filter: account_id,
         })
+    }
+
+    /// Every pending invite, across accounts.
+    ///
+    /// The query is always omitted. The TUI filters by account itself.
+    /// A 404 is an older server that has no invite list: an empty inbox, and
+    /// not an error the status line should show (ADR 0130).
+    pub async fn list_invites(&self) -> Result<InviteListSnapshot, ApiError> {
+        let started = Instant::now();
+        let request = self.http.get(format!("{}/v1/invites", self.base_url));
+        match self
+            .send_bounded(read_request(request), INVITE_LIST_LIMIT)
+            .await
+        {
+            Ok(invites) => Ok(InviteListSnapshot {
+                invites,
+                started,
+                not_found: false,
+            }),
+            Err(err) if err.is_not_found() => Ok(InviteListSnapshot {
+                invites: Vec::new(),
+                started,
+                not_found: true,
+            }),
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn list_accounts(&self) -> Result<Vec<AccountDto>, ApiError> {
@@ -1237,6 +1267,30 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
             Ok(payload) => Some(LiveFrame::Preferences(payload)),
             Err(err) => Some(LiveFrame::ProtocolError(err.to_string())),
         },
+        "invite.added" => {
+            let invite: InviteDto = match serde_json::from_value(envelope.payload) {
+                Ok(invite) => invite,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            if envelope.account_id != invite.account_id {
+                return Some(LiveFrame::ProtocolError(
+                    "live frame account_id did not match payload".to_owned(),
+                ));
+            }
+            Some(LiveFrame::InviteAdded(invite))
+        }
+        "invite.removed" => {
+            // The account is the envelope's. The payload is only `room_id`;
+            // an extra `account_id` field is ignored.
+            let payload: InviteRemovedDto = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::InviteRemoved {
+                account_id: envelope.account_id,
+                room_id: payload.room_id,
+            })
+        }
         _ => None,
     }
 }
@@ -1295,6 +1349,14 @@ pub enum LiveFrame {
     UnreadCounts {
         account_id: Uuid,
         payload: UnreadCountsChangedDto,
+    },
+    /// An `invite.added` frame (ADR 0091). The payload carries its account.
+    InviteAdded(InviteDto),
+    /// An `invite.removed` frame. The payload is only `room_id`; `account_id`
+    /// is the envelope's, so two accounts invited to one room stay distinct.
+    InviteRemoved {
+        account_id: Uuid,
+        room_id: String,
     },
 }
 
@@ -1903,6 +1965,66 @@ pub struct RoomListSnapshot {
     /// The account the list was read for, or `None` for every account. A
     /// room missing from a read for another account says nothing about it.
     pub account_filter: Option<Uuid>,
+}
+
+/// One pending invite (`GET /v1/invites`, ADR 0091).
+///
+/// Identity is `(account_id, room_id)`. Optional fields default so an older
+/// payload that omits them still decodes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct InviteDto {
+    pub account_id: Uuid,
+    pub account_user_id: String,
+    pub room_id: String,
+    pub inviter_user_id: String,
+    pub is_direct: bool,
+    pub encrypted: bool,
+    /// RFC 3339 timestamp. Axon stores it as a string, not a parsed instant.
+    pub invited_at: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub canonical_alias: Option<String>,
+    #[serde(default)]
+    pub room_type: Option<String>,
+    #[serde(default)]
+    pub inviter_display_name: Option<String>,
+}
+
+impl InviteDto {
+    /// Nonblank name, then canonical alias, then the room id.
+    ///
+    /// Invites have no SDK `display_name`. Room-title ADR 0118 does not apply
+    /// that field here.
+    pub fn title(&self) -> &str {
+        [self.name.as_deref(), self.canonical_alias.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|title| !title.trim().is_empty())
+            .unwrap_or(&self.room_id)
+    }
+}
+
+/// `GET /v1/invites` plus when the read started.
+///
+/// `not_found` is an older server (HTTP 404): an empty inbox, and not a
+/// reconcile that clears suppression or settles a pending reject.
+#[derive(Debug)]
+pub struct InviteListSnapshot {
+    pub invites: Vec<InviteDto>,
+    pub started: Instant,
+    pub not_found: bool,
+}
+
+/// `invite.removed` payload. The account is the WebSocket envelope's.
+/// An extra `account_id` field is ignored.
+#[derive(Debug, Deserialize)]
+struct InviteRemovedDto {
+    room_id: String,
 }
 
 #[cfg(test)]
@@ -3308,5 +3430,226 @@ mod tests {
             response.data.upload_id,
             Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
         );
+    }
+
+    fn sample_invite(account_id: Uuid) -> serde_json::Value {
+        serde_json::json!({
+            "account_id": account_id,
+            "account_user_id": "@alice:example.com",
+            "room_id": "!room:example.com",
+            "inviter_user_id": "@bob:example.com",
+            "is_direct": false,
+            "encrypted": true,
+            "invited_at": "2026-01-02T03:04:05Z",
+            "name": "Ops",
+        })
+    }
+
+    #[test]
+    fn invite_title_uses_name_then_alias_then_room_id() {
+        let mut invite: InviteDto = serde_json::from_value(sample_invite(Uuid::nil())).unwrap();
+        assert_eq!(invite.title(), "Ops");
+        invite.name = Some("  ".to_owned());
+        invite.canonical_alias = Some("#ops:example.com".to_owned());
+        assert_eq!(invite.title(), "#ops:example.com");
+        invite.canonical_alias = Some("".to_owned());
+        assert_eq!(invite.title(), "!room:example.com");
+    }
+
+    #[test]
+    fn invite_added_uses_the_envelope_account_and_rejects_a_mismatch() {
+        let account_id = Uuid::from_u128(7);
+        let body = serde_json::json!({
+            "type": "invite.added",
+            "account_id": account_id,
+            "payload": sample_invite(account_id),
+        });
+        match decode_ws_frame(&body.to_string()) {
+            Some(LiveFrame::InviteAdded(invite)) => {
+                assert_eq!(invite.account_id, account_id);
+                assert_eq!(invite.room_id, "!room:example.com");
+                assert_eq!(invite.title(), "Ops");
+            }
+            other => panic!("expected invite.added, got {other:?}"),
+        }
+
+        let mut mismatched = body;
+        mismatched["payload"]["account_id"] = serde_json::json!(Uuid::from_u128(8));
+        match decode_ws_frame(&mismatched.to_string()) {
+            Some(LiveFrame::ProtocolError(message)) => {
+                assert_eq!(message, "live frame account_id did not match payload");
+            }
+            other => panic!("expected a protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invite_removed_takes_the_account_from_the_envelope() {
+        let account_id = Uuid::from_u128(9);
+        let body = serde_json::json!({
+            "type": "invite.removed",
+            "account_id": account_id,
+            "payload": {
+                "room_id": "!room:example.com",
+                "account_id": Uuid::from_u128(3),
+            },
+        });
+        match decode_ws_frame(&body.to_string()) {
+            Some(LiveFrame::InviteRemoved {
+                account_id: actual,
+                room_id,
+            }) => {
+                assert_eq!(actual, account_id);
+                assert_eq!(room_id, "!room:example.com");
+            }
+            other => panic!("expected invite.removed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_invite_frame_is_a_protocol_error_and_unknown_stays_none() {
+        let added = serde_json::json!({
+            "type": "invite.added",
+            "account_id": Uuid::nil(),
+            "payload": {},
+        });
+        assert!(matches!(
+            decode_ws_frame(&added.to_string()),
+            Some(LiveFrame::ProtocolError(_))
+        ));
+        let removed = serde_json::json!({
+            "type": "invite.removed",
+            "account_id": Uuid::nil(),
+            "payload": {},
+        });
+        assert!(matches!(
+            decode_ws_frame(&removed.to_string()),
+            Some(LiveFrame::ProtocolError(_))
+        ));
+        assert!(decode_ws_frame(
+            r#"{"type":"future.invite","account_id":"00000000-0000-0000-0000-000000000000","payload":{}}"#
+        )
+        .is_none());
+    }
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 2048];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "request ended before the headers");
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn list_invites_omits_account_id_and_treats_404_as_an_empty_inbox() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            tx.send(request).unwrap();
+            let response = http_response("404 Not Found", "");
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let snapshot = client.list_invites().await.unwrap();
+        assert!(snapshot.not_found);
+        assert!(snapshot.invites.is_empty());
+        let request = rx.await.unwrap();
+        assert!(request.starts_with("GET /v1/invites HTTP/1.1"), "{request}");
+        assert!(!request.contains("account_id"), "{request}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_invites_returns_rows_and_surfaces_a_server_error() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            let body = r#"{"data":[]}"#;
+            socket
+                .write_all(http_response("200 OK", body).as_bytes())
+                .await
+                .unwrap();
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            socket
+                .write_all(http_response("500 Internal Server Error", "").as_bytes())
+                .await
+                .unwrap();
+        });
+        let client = AxonClient::new(format!("http://{address}"), None);
+        let snapshot = client.list_invites().await.unwrap();
+        assert!(!snapshot.not_found);
+        assert!(snapshot.invites.is_empty());
+        let err = client.list_invites().await.unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::Status {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                ..
+            }
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_invites_rejects_a_body_over_one_mebibyte() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            let len = 1024 * 1024 + 1;
+            let header =
+                format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n");
+            let _ = socket.write_all(header.as_bytes()).await;
+            let _ = socket.write_all(&vec![b'x'; len]).await;
+        });
+        let err = client.list_invites().await.unwrap_err();
+        assert!(
+            err.to_string().contains("API response exceeds size limit"),
+            "{err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn leave_room_empty_body_504_is_a_gateway_timeout() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            let response =
+                "HTTP/1.1 504 Gateway Timeout\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let err = client
+            .leave_room(Uuid::nil(), "!room:example.com")
+            .await
+            .unwrap_err();
+        assert!(err.is_gateway_timeout(), "{err}");
+        server.await.unwrap();
     }
 }

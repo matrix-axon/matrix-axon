@@ -27,7 +27,7 @@ pub(crate) const PENDING_MEMBERSHIP_CHECK_DELAYS: [Duration; 4] = [
 
 /// How long the last check's room-list read gets to land before a leave still
 /// listed is reported as possibly failed.
-const PENDING_MEMBERSHIP_FINAL_GRACE: Duration = Duration::from_secs(30);
+pub(super) const PENDING_MEMBERSHIP_FINAL_GRACE: Duration = Duration::from_secs(30);
 
 /// Extra room-list reads after a join whose room was not listed yet.
 /// The immediate read already happened. Two more, a few seconds apart,
@@ -66,6 +66,40 @@ pub(crate) struct PendingMembership {
     /// Whether a room-list read that could speak for this room has listed it
     /// since the `504`. Only then can the window's end say it is still listed.
     pub(crate) seen_listed: bool,
+}
+
+/// One step of [`PendingMembership`]'s schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MembershipStep {
+    /// A check is due. The caller asks for the read that can settle it.
+    Advance,
+    /// The grace period after the last check has elapsed.
+    Expired,
+}
+
+impl PendingMembership {
+    /// Advance one due check, or report that the grace window has elapsed.
+    ///
+    /// `None` when `now` is still before `next_check`. The next check is
+    /// counted from the scheduled time, not the tick that noticed it, so the
+    /// checks land 30/90/210/450 s after the `504`. After a long stall the
+    /// overdue checks catch up one per tick. Both the membership map and the
+    /// invite-reject map use this, so the two schedules cannot drift.
+    pub(crate) fn advance(&mut self, now: Instant) -> Option<MembershipStep> {
+        if now < self.next_check {
+            return None;
+        }
+        if self.step >= PENDING_MEMBERSHIP_CHECK_DELAYS.len() {
+            return Some(MembershipStep::Expired);
+        }
+        self.step += 1;
+        self.retryable = true;
+        self.next_check += PENDING_MEMBERSHIP_CHECK_DELAYS
+            .get(self.step)
+            .copied()
+            .unwrap_or(PENDING_MEMBERSHIP_FINAL_GRACE);
+        Some(MembershipStep::Advance)
+    }
 }
 
 /// A join the room list has not shown yet.
@@ -552,32 +586,85 @@ impl App {
             }
             Err(failure) if failure.timed_out => {
                 let refresh_error = self.refresh_room_list().await;
-                let listed = if refresh_error.is_none() {
-                    self.find_joined_room(account_id, &typed)
-                } else {
-                    None
-                };
-                if let Some(index) = listed {
-                    self.open_or_defer_joined_room(index, account_id, &typed)
-                        .await;
-                } else {
-                    self.arm_pending_join_open(account_id, &typed);
-                    // A failed read is not "the homeserver has not answered":
-                    // the join may have landed and the list is what we lack.
-                    let status = match refresh_error {
-                        Some(err) => {
-                            format!("the join result is unknown for {typed}; room refresh failed: {err}")
-                        }
-                        None => format!("the homeserver hasn't answered for {typed}"),
-                    };
-                    self.show_join_status(status);
-                    self.restore_join_line_if_composer_is_empty(&outcome.action);
-                }
+                self.settle_timed_out_join(
+                    account_id,
+                    &typed,
+                    &typed,
+                    refresh_error,
+                    "join",
+                    Some(&outcome.action),
+                )
+                .await;
             }
             Err(err) => {
                 self.show_join_status(format!("/join failed for {typed}: {err}"));
                 self.restore_join_line_if_composer_is_empty(&outcome.action);
             }
+        }
+    }
+
+    /// An inbox accept's room-list follow-up.
+    ///
+    /// A 200 selects the room id Axon resolved, falling back to the invite's
+    /// own room id. A 504 selects that invite room id when the list already
+    /// contains it, and otherwise watches the room list. The composer is left
+    /// as it was: this path does not restore `/join`.
+    pub(super) async fn finish_invite_accept(
+        &mut self,
+        account_id: Uuid,
+        room_id: &str,
+        title: &str,
+        timed_out: bool,
+    ) {
+        let refresh_error = self.refresh_room_list().await;
+        if !timed_out {
+            self.settle_listed_join(account_id, room_id, title, refresh_error)
+                .await;
+            return;
+        }
+        self.settle_timed_out_join(account_id, room_id, title, refresh_error, "accept", None)
+            .await;
+    }
+
+    /// A join or an inbox accept whose HTTP call returned 504.
+    ///
+    /// `lookup` is what the room list is searched for: the typed id or alias
+    /// for `/join`, the invite's room id for an accept. `title` is the text
+    /// in the status line. `restore` puts `/join` back when the composer is
+    /// empty; an inbox accept passes `None` and leaves the composer alone.
+    async fn settle_timed_out_join(
+        &mut self,
+        account_id: Uuid,
+        lookup: &str,
+        title: &str,
+        refresh_error: Option<String>,
+        result_noun: &str,
+        restore: Option<&PendingRoomAction>,
+    ) {
+        let listed = if refresh_error.is_none() {
+            self.find_joined_room(account_id, lookup)
+        } else {
+            None
+        };
+        if let Some(index) = listed {
+            self.open_or_defer_joined_room(index, account_id, lookup)
+                .await;
+            return;
+        }
+        self.arm_pending_join_open(account_id, lookup);
+        // A failed read is not "the homeserver has not answered":
+        // the join may have landed and the list is what we lack.
+        let status = match refresh_error {
+            Some(err) => {
+                format!(
+                    "the {result_noun} result is unknown for {title}; room refresh failed: {err}"
+                )
+            }
+            None => format!("the homeserver hasn't answered for {title}"),
+        };
+        self.show_join_status(status);
+        if let Some(action) = restore {
+            self.restore_join_line_if_composer_is_empty(action);
         }
     }
 
@@ -884,24 +971,11 @@ impl App {
         let mut refresh = false;
         let mut expired = Vec::new();
         for ((key, kind), pending) in &mut self.pending_memberships {
-            if now < pending.next_check {
-                continue;
+            match pending.advance(now) {
+                Some(MembershipStep::Advance) => refresh |= *kind == RoomActionKind::Leave,
+                Some(MembershipStep::Expired) => expired.push((key.clone(), *kind)),
+                None => {}
             }
-            if pending.step >= PENDING_MEMBERSHIP_CHECK_DELAYS.len() {
-                expired.push((key.clone(), *kind));
-                continue;
-            }
-            pending.step += 1;
-            pending.retryable = true;
-            // From the scheduled time, not the tick that noticed it, so the
-            // checks land 30/90/210/450 s after the `504`. After a long stall
-            // (a suspended laptop) the overdue checks catch up one per tick,
-            // which is intended: each asks for one coalesced room-list read.
-            pending.next_check += PENDING_MEMBERSHIP_CHECK_DELAYS
-                .get(pending.step)
-                .copied()
-                .unwrap_or(PENDING_MEMBERSHIP_FINAL_GRACE);
-            refresh |= *kind == RoomActionKind::Leave;
         }
         for (key, kind) in expired {
             let Some(pending) = self.pending_memberships.remove(&(key, kind)) else {

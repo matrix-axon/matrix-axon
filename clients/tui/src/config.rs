@@ -79,6 +79,7 @@ room_filter_all = "alt-0"
 room_filter_by_name = "alt-/"
 room_sort_recent = "alt-1"
 room_sort_alpha = "alt-2"
+reject_invite = "r"
 
 # Select one theme by leaving its lines uncommented; comment out all others.
 # Named foreground colors: border, selected_room, unread_count, message_sender,
@@ -380,6 +381,15 @@ pub struct Shortcuts {
     pub room_filter_by_name: KeyBinding,
     pub room_sort_recent: KeyBinding,
     pub room_sort_alpha: KeyBinding,
+    /// Reject the selected invite in the `/pending` popup. Default `r`.
+    /// Applies only while that popup is open, so it does not collide with
+    /// `reply`, which is also `r` in the message list. A confirm still asks
+    /// before the leave is sent. When this binding and submit are the same
+    /// key, accept wins, and the popup title does not advertise reject.
+    /// The title also omits it when the binding is a shortcut handled before
+    /// the popup. A page binding is checked after reject, so that key still
+    /// rejects and the title still names it.
+    pub reject_invite: KeyBinding,
 }
 
 #[derive(Debug, Clone)]
@@ -600,6 +610,7 @@ impl RawConfig {
                 room_filter_by_name: "alt-/".to_owned(),
                 room_sort_recent: "alt-1".to_owned(),
                 room_sort_alpha: "alt-2".to_owned(),
+                reject_invite: "r".to_owned(),
             },
             colors: RawColorScheme {
                 border: "gray".to_owned(),
@@ -825,6 +836,7 @@ room_filter_all = "{room_filter_all}"
 room_filter_by_name = "{room_filter_by_name}"
 room_sort_recent = "{room_sort_recent}"
 room_sort_alpha = "{room_sort_alpha}"
+reject_invite = "{reject_invite}"
 
 # Select one theme by leaving its lines uncommented; comment out all others.
 # Named foreground colors: border, selected_room, unread_count, message_sender,
@@ -968,6 +980,7 @@ accept_incoming_verification = {accept_incoming_verification}
             room_filter_by_name = self.shortcuts.room_filter_by_name,
             room_sort_recent = self.shortcuts.room_sort_recent,
             room_sort_alpha = self.shortcuts.room_sort_alpha,
+            reject_invite = self.shortcuts.reject_invite,
             border = self.colors.border,
             selected_room = self.colors.selected_room,
             unread_count = self.colors.unread_count,
@@ -1165,6 +1178,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "room_filter_by_name"
                 | "room_sort_recent"
                 | "room_sort_alpha"
+                | "reject_invite"
         ),
         Some("colors") => matches!(
             key,
@@ -1281,6 +1295,7 @@ struct RawShortcuts {
     room_filter_by_name: String,
     room_sort_recent: String,
     room_sort_alpha: String,
+    reject_invite: String,
 }
 
 impl RawShortcuts {
@@ -1423,6 +1438,7 @@ impl RawShortcuts {
             partial.room_sort_alpha,
             &mut missing,
         );
+        assign_or_flag(&mut self.reject_invite, partial.reject_invite, &mut missing);
         missing
     }
 
@@ -1515,6 +1531,7 @@ impl RawShortcuts {
                 &self.room_sort_recent,
             )?,
             room_sort_alpha: parse_key_binding("shortcuts.room_sort_alpha", &self.room_sort_alpha)?,
+            reject_invite: parse_key_binding("shortcuts.reject_invite", &self.reject_invite)?,
         })
     }
 }
@@ -1577,6 +1594,7 @@ struct PartialRawShortcuts {
     room_filter_by_name: Option<String>,
     room_sort_recent: Option<String>,
     room_sort_alpha: Option<String>,
+    reject_invite: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2243,6 +2261,15 @@ bearer_token = "secret-token"
         assert!(repaired.contains("highlight_selected_line = false"));
         assert!(repaired.contains("confirm_logout = true"));
         assert!(repaired.contains("base_url = \"https://axon.example.com\""));
+        assert!(repaired.contains("reject_invite = \"r\""));
+        assert!(config
+            .shortcuts
+            .reject_invite
+            .matches(KeyEvent::from(KeyCode::Char('r'))));
+        assert!(!config
+            .shortcuts
+            .reject_invite
+            .matches(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::SHIFT)));
         assert!(repaired.contains("bearer_token = \"secret-token\""));
         assert_eq!(config.base_url.as_deref(), Some("https://axon.example.com"));
         assert_eq!(config.token.as_deref(), Some("secret-token"));
