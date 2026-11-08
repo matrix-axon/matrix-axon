@@ -4653,7 +4653,7 @@ async fn device_state_since_cursor_returns_a_delta() {
         "the cursor never moves backwards"
     );
 
-    for bad in ["nope", "-1", "1.5", ""] {
+    for bad in ["nope", "-1", "1.5", "", "00123", "%2B123", "0123"] {
         let (status, body) = get(&app, &format!("{base}&since={bad}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "since={bad:?}");
         assert_eq!(body["error"]["code"], "bad_request");

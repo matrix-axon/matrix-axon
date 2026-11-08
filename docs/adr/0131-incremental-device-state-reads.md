@@ -66,6 +66,10 @@ A strict `updated_at > cursor` would miss it forever.
 So a delta returns every key written after `cursor − overlap`.
 Every device-state write is one autocommit statement, bounded by the ordinary pool's `statement_timeout` (`database.timeouts.statement_secs`, default 10 s, which also bounds its lock waits).
 The overlap is twice that timeout, with a floor of five minutes, so a write can be missed only if its commit lands more than the overlap after its statement started.
+This rests on two invariants of the writers.
+Each write must stay a single statement outside any wider transaction, because `now()` is the transaction's start, so a transaction held open across statements could commit later than the overlap allows.
+And only the ordinary pool writes device state; the maintenance and index pools have longer statement timeouts.
+Deleting an account removes its rows by cascade, which needs no cursor.
 The cost of the overlap is a few re-sent keys per delta, which the client's merge treats as no-ops.
 
 A transaction-id watermark (`pg_snapshot_xmin`) would close this window exactly.
@@ -92,3 +96,5 @@ An index on `updated_at` would cost every marker write to save a few millisecond
 - The overlap means a delta right after a bulk write, such as marking every room read, re-sends that batch for up to five minutes. That is bounded by what was written and is idempotent.
 - Restoring the database from an older backup loses writes newer than the backup. A client holding them keeps them until its next full read, and its next write to that key re-creates the row. For markers and drafts that is benign; a namespace where a lost write matters should force a full read after a restore.
 - Raising `statement_secs` widens the overlap in step, so the guarantee holds at any configured timeout.
+- Tombstones are never purged today, so a cursor of any age is safe. A future purge must answer `full: true` for any cursor older than its purge horizon, or a client holding that cursor never learns of the purged deletions.
+- A cursor is not tied to a database lineage. After a restore or a failover to a lagging replica, an old cursor that is still before the database clock is trusted. The writes the restore lost are lost to a full read too, so this trade-off is the one the restore consequence above accepts.

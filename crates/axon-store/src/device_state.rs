@@ -62,8 +62,10 @@ const MIN_OVERLAP_SECS: i64 = 300;
 ///
 /// A write's `updated_at` is its statement's start, not its commit, so a write
 /// that started before a read and committed after it is older than that read's
-/// cursor. Every device-state write is one autocommit statement bounded by the
-/// statement timeout, so reaching back this far catches it.
+/// cursor. Every device-state write is one autocommit statement on the
+/// ordinary pool, bounded by its statement timeout, so reaching back this far
+/// catches it. The longer-deadline maintenance and index pools never write
+/// device state; a writer added there must widen this to their timeout.
 pub(crate) fn overlap_for(statement_secs: u32) -> chrono::Duration {
     chrono::Duration::seconds((2 * i64::from(statement_secs)).max(MIN_OVERLAP_SECS))
 }
@@ -83,7 +85,8 @@ pub struct DeviceStateRead {
 }
 
 impl Store {
-    /// How far a delta reaches behind its cursor (ADR 0131).
+    /// How far a delta reaches behind its cursor (ADR 0131). Public for the
+    /// store's integration tests, which backdate rows across this boundary.
     pub fn device_state_overlap(&self) -> chrono::Duration {
         self.device_state_overlap
     }
@@ -160,6 +163,12 @@ impl Store {
     /// Tombstones ride the value array as JSON `null` and are folded to SQL
     /// `NULL` by `NULLIF` — unambiguous because the API layer already reserves
     /// JSON `null` to mean deletion, so it can never be a stored value.
+    ///
+    /// **Keep this one autocommit statement on `self.pool`.** ADR 0131's delta
+    /// overlap assumes a write commits within one statement timeout of its
+    /// `now()`, which is the *transaction's* start. Moving this into a wider
+    /// transaction, or onto a pool with a longer timeout, lets a delta miss
+    /// the write for good unless `overlap_for` grows to match.
     pub async fn upsert_device_state(
         &self,
         u: &DeviceStateUpsert<'_>,

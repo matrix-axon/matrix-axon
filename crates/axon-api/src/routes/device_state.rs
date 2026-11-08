@@ -80,13 +80,14 @@ fn encode_cursor(as_of: DateTime<Utc>) -> String {
 }
 
 /// Decode a `since` cursor; anything [`encode_cursor`] could not have written
-/// is a `400`.
+/// is a `400`, including non-canonical integers such as `+123` or `00123`.
 fn decode_cursor(cursor: &str) -> Result<DateTime<Utc>, ApiError> {
     cursor
         .parse::<i64>()
         .ok()
         .filter(|micros| *micros >= 0)
         .and_then(DateTime::from_timestamp_micros)
+        .filter(|as_of| encode_cursor(*as_of) == cursor)
         .ok_or_else(|| ApiError::bad_request("since is not a cursor from this endpoint"))
 }
 
