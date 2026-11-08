@@ -3,6 +3,22 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.25 - 2026-11-08
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(server): discover unjoined space children from the homeserver hierarchy (ADR 0128 step 3) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/985
+* feat(web): render a shared gallery caption once by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/987
+* feat(tui): show pending invites in a /pending popup by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/986
+* feat(ios): share photos with captions, sizing, and recovery by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/989
+#### Build and CI
+* ci(playwright): switch apt mirror after a stalled install attempt by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/988
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.24...v0.1.25
+
 ## v0.1.24 - 2026-11-06
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
