@@ -332,6 +332,11 @@ pub(crate) const DECODE_DETAIL: &str = "Decode";
 /// connection underneath reaches reqwest as hyper's error, which the decoder
 /// passes up unchanged. `a_body_that_fails_to_decode_is_named` and
 /// `a_connection_lost_mid_body_is_not_a_decode_failure` pin both sides.
+///
+/// Index 1 is how reqwest 0.12.28 nests the decoder's error, not a promise,
+/// and `Cargo.toml` takes any 0.12. A reqwest bump that changes the depth
+/// fails one of those two tests rather than misreporting: they are the guard,
+/// so update this check and them together.
 fn is_decode_failure(causes: &[&(dyn StdError + 'static)]) -> bool {
     causes.get(1).is_some_and(|cause| cause.is::<io::Error>())
 }
