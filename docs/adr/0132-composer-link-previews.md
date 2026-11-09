@@ -100,6 +100,9 @@ Metadata uses the same fields in the same order as the Swift reader:
 - site name: `og:site_name`
 - image: `og:image:secure_url`, `og:image`, `twitter:image`, `twitter:image:src`
 
+Each text field is normalized as `TextShare.previewField` does: whitespace is trimmed, and a value that is empty or longer than the send contract's limit (300, 1,000 and 120 UTF-16 code units for title, description and site name) is dropped, not truncated.
+The composer applies the same rule again to every card, from either source, before it can be sent, so an out-of-range field can never reach the server.
+
 The page is parsed with the [`webpage`](https://crates.io/crates/webpage) crate (MIT), built without its `curl` feature so it only parses what the plugin fetched.
 It builds on html5ever, never runs scripts, and uses the same html5ever 0.39 already in the shell's lockfile.
 The image is decoded with the `image` crate, also already in the lockfile, with decoder limits set before allocation.
@@ -132,6 +135,7 @@ The settings page explains that a device lookup shows the site your address when
 - Each card shows the site's host name prominently, with the title, description and image, and an X that discards it.
   A discarded link is remembered for the rest of that draft and not looked up again.
 - Results are cached in memory for about 20 links, so retyping or moving a link does not fetch it again.
+  The cache holds normalized metadata and thumbnail bytes, never an `image_upload_id` (see section 7).
 - Lookups start only from the user's own input.
   A draft restored when a room opens gets cards only after the user edits it, so opening a room never causes a fetch.
 - No cards in edit mode, for a message with attachments, or for a message containing a spoiler, which the renderer would hide anyway.
@@ -139,16 +143,60 @@ The settings page explains that a device lookup shows the site your address when
 
 ### 6. What is sent
 
-Cards that are still in the text at send time decide the field:
+MSC4095 gives the field three meanings, and the composer chooses between them deliberately.
+A non-empty list is the whole set of previews: recipients' clients preview those links and no others.
+An empty list means the sender wants no previews.
+An omitted field leaves recipients' clients free to scan the body and build their own.
 
-- One or more kept, ready cards: `url_previews` carries them in text order.
-  Device images are uploaded through the existing media upload first, in parallel, and referenced by `image_upload_id`; a homeserver result already has one.
-  If an image upload fails, that card is sent without an image.
-  If the list exceeds the 32 KiB budget, images are dropped first, then trailing cards.
-- Every card discarded: `url_previews: []`, so recipients' clients know the sender wanted none and need not ask a homeserver.
-- Setting off, or nothing ready (still loading, or failed): the field is omitted, exactly as today.
+At send time, only cards whose link appears as a complete bare link in the body being sent count; this is the body after composer formatting, the same one the server matches against.
+The first rule that matches decides the field:
+
+1. **Setting `off`:** omit the field, exactly as today.
+2. **At least one card kept and ready** after the size check below: send those cards, in text order.
+   Links that were discarded, still loading, failed or past the third therefore get no preview from any recipient.
+3. **At least one card discarded** by the user: send `url_previews: []`.
+   One discard is enough, even when other cards are still loading or failed, because omitting the field would let a recipient's client preview the link the user removed, and perhaps disclose it to that recipient's homeserver.
+4. **Otherwise** (every card still loading or failed): omit the field.
 
 A lookup in progress never delays sending.
+
+**The size check covers the whole message, not only the previews.**
+The server enforces both a 32 KiB preview budget and a 40 KiB limit on the serialized content: body, formatted body, reply and thread relations, and both preview spellings.
+So before any image is uploaded, the composer builds the exact request it is about to send and runs the existing `previewPreflight` on it (`incoming-share/contract.ts`, which mirrors the server and already reserves room for each encrypted image descriptor).
+Image slots are checked with a placeholder upload id, since the real ids do not exist yet.
+If the check fails, the composer degrades in a fixed order and re-checks after each step:
+
+1. Drop the last card's image, then the image of the card before it, and so on.
+2. Drop the last card, then the one before it, and so on.
+
+Once a card is dropped for size, the rules above are re-applied to what remains, so a draft with a discarded link can still end up as `[]`.
+If even `[]` fails the check, which can only happen when the body alone is near the limit, the field is omitted, and the server's ordinary limits decide the send exactly as they do today.
+A preview never turns a sendable draft into a rejected one.
+
+A server rejection of a request that carried previews, despite the check, is a definite failure, not an unknown outcome, and means the client's mirror of the limits has drifted.
+That is HTTP 413 with `preview_too_large` or `event_too_large`, or HTTP 400 `bad_request`, which the server returns for invalid preview metadata without a more specific code.
+The message stays a failed echo with its usual Retry and Discard actions, and the echo records that its previews were rejected.
+Retry then sends the same text with the field omitted, because resending the same previews would only be rejected again.
+A 400 caused by something other than the previews loses them on Retry too, which costs only the cards.
+Nothing is retried automatically.
+
+### 7. Thumbnails are bytes until the moment of sending
+
+A staged upload handle is owned by the account, expires on the server's schedule rather than the draft's, and is consumed when a send succeeds.
+A handle kept in a cache or a draft can therefore be gone by the time it is used, and the whole send then fails with 404 when the server claims it.
+So a card holds its thumbnail as bytes, and a handle exists only for the length of one send attempt:
+
+- **Device result:** the plugin returns the re-encoded bytes.
+- **Homeserver result:** the composer immediately reads the generated thumbnail with `GET /v1/accounts/{account_id}/media/uploads/{upload_id}/preview`, the same retrieval share recovery uses ([Durable thumbnail recovery](../bundled-link-previews.md#durable-thumbnail-recovery)), keeps the bytes, and forgets the handle, leaving that staged upload to expire.
+  If the read fails (404, 413, 400 or 503), the card keeps its text and visibly loses its image.
+  The page is never regenerated to recover an image.
+- **Each send attempt** uploads the kept cards' bytes through the existing media upload, in parallel, and uses the new ids in that one request.
+  The bytes travel in the send options, not the ids, so the timeline's Retry on a failed echo uploads them again, the way a failed media send already re-uploads its retained `File`.
+  If one upload fails, that card is sent without an image.
+  If the parent send fails, its staged uploads are left to expire.
+
+Because Retry rebuilds the uploads, a handle that was consumed or has expired is never sent.
+Whether to retry a send whose outcome is unknown stays the user's choice, as it is for every send today.
 
 ## Consequences
 
@@ -168,6 +216,8 @@ A lookup in progress never delays sending.
 
 1. This ADR.
 2. **Shell:** the `axon-link-preview` plugin, its capability, the shared boundary fixture (also read by the Swift tests), and an optional `Platform.linkPreview(url, signal)` binding that the browser leaves undefined.
-3. **Web:** the setting, the composer cards, the send wiring, and updates to `docs/bundled-link-previews.md` and `docs/client-parity.md`.
+3. **Web:** the setting, the composer cards, and the send wiring.
+   The send wiring includes the timeline store's per-attempt thumbnail uploads, carried as bytes in the send options, and the failed echo's record that its previews were rejected.
+   This PR also updates `docs/bundled-link-previews.md` and `docs/client-parity.md`.
 
 Both implementation PRs are in the `clients/web` silo, and each carries its own tests.
