@@ -30,6 +30,23 @@ const MEMBERS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 pub(crate) const MEMBERS_WORKERS: usize = 4;
 const UNREAD_THREAD_PREVIEW_LIMIT: usize = 3;
 
+/// One loaded event a live redaction can patch, found in a single scan.
+enum RedactionTarget {
+    Reaction {
+        annotated: String,
+        key: String,
+        sender: String,
+    },
+    /// An `m.reaction` row that does not name its target. Not a message.
+    UnparsedReaction,
+    /// An `m.replace` row. Masking it leaves the original showing the edit.
+    Edit {
+        original_id: String,
+    },
+    Message,
+    Absent,
+}
+
 /// Result of a background `/members` refresh ([`App::spawn_members_refresh`]),
 /// drained by the main loop and applied via [`App::apply_members_outcome`].
 pub(crate) struct MembersOutcome {
@@ -38,6 +55,109 @@ pub(crate) struct MembersOutcome {
     /// caller can tell "no members to name this room after" (a permanent
     /// answer) from "the request did not land" (retry after the cooldown).
     pub(super) members: Option<Vec<MemberDto>>,
+}
+
+/// A loaded timeline that missed a live redaction and is waiting on a read.
+#[derive(Default)]
+pub(super) struct StaleRedaction {
+    /// A timeline page or single-event read is already in flight.
+    inflight: bool,
+    /// Another miss arrived while that read was in flight. Run once more.
+    again: bool,
+    /// The latest page was already applied for this mark. Further restores
+    /// are single-event reads, so a target outside that page cannot spin.
+    page_done: bool,
+    /// Original messages whose edit was redacted. The previous body is not
+    /// stored locally, so the heal copies the server row onto these ids.
+    restore_events: Vec<String>,
+}
+
+fn tally_aggregate_eq(left: &crate::api::ReactionTally, right: &crate::api::ReactionTally) -> bool {
+    left.count == right.count
+        && left.me == right.me
+        && left.senders == right.senders
+        && left.my_event_ids == right.my_event_ids
+}
+
+fn reaction_maps_match(
+    local: Option<&HashMap<String, crate::api::ReactionTally>>,
+    server: Option<&HashMap<String, crate::api::ReactionTally>>,
+) -> bool {
+    match (local, server) {
+        (None, None) => true,
+        (None, Some(map)) | (Some(map), None) if map.is_empty() => true,
+        (Some(local), Some(server)) => {
+            local.len() == server.len()
+                && local.iter().all(|(key, tally)| {
+                    server
+                        .get(key)
+                        .is_some_and(|other| tally_aggregate_eq(tally, other))
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Copy the server aggregate onto `local`.
+///
+/// Live redactions remember each sender's event ids in `sender_event_ids`,
+/// which a timeline read does not carry. Replacing the map wholesale would
+/// forget those ids and the next named redaction would drop the sender.
+/// Ids the server dropped from `my_event_ids` are pruned; ids for a sender
+/// the server still lists are kept.
+fn adopt_server_reactions(
+    local: &mut Option<HashMap<String, crate::api::ReactionTally>>,
+    server: &Option<HashMap<String, crate::api::ReactionTally>>,
+) {
+    if reaction_maps_match(local.as_ref(), server.as_ref()) {
+        return;
+    }
+    let previous = local.clone();
+    *local = server.clone();
+    let (Some(local_map), Some(previous)) = (local.as_mut(), previous.as_ref()) else {
+        return;
+    };
+    for (key, tally) in local_map.iter_mut() {
+        let Some(old) = previous.get(key) else {
+            continue;
+        };
+        let mut kept = HashMap::new();
+        for sender in &tally.senders {
+            let Some(ids) = old.sender_event_ids.get(sender) else {
+                continue;
+            };
+            let ids: Vec<String> = ids
+                .iter()
+                .filter(|id| {
+                    let was_ours = old.my_event_ids.contains(*id);
+                    let still_ours = tally.my_event_ids.contains(*id);
+                    !was_ours || still_ours
+                })
+                .cloned()
+                .collect();
+            if !ids.is_empty() {
+                kept.insert(sender.clone(), ids);
+            }
+        }
+        tally.sender_event_ids = kept;
+    }
+}
+
+/// A background read started because a live redaction could not be applied.
+pub(crate) enum RedactionReconcile {
+    /// Latest timeline page. `None` when the read failed.
+    Page {
+        room_key: RoomKey,
+        events: Option<Vec<EventDto>>,
+    },
+    /// One event, used while a history jump must not be replaced by the latest page.
+    ///
+    /// `EventDto` is large. Box it so this variant does not bloat every outcome.
+    Event {
+        room_key: RoomKey,
+        event_id: String,
+        event: Option<Box<EventDto>>,
+    },
 }
 
 impl App {
@@ -245,6 +365,9 @@ impl App {
         // Before the early returns: a metadata event or redaction still
         // refreshes an open `/whereami` when this function does not append the row.
         self.note_room_info_timeline_event(&key, &event.event_type, Instant::now());
+        // A heal already in flight for this room is reading a snapshot that
+        // does not include this frame. Ask it to run once more when it lands.
+        self.note_redaction_heal_conflict(&key);
         // Apply title state before timeline dedup/history guards: it also affects
         // off-screen rooms and must not wait for the SDK reconciler.
         if event.state_key() == Some("") {
@@ -273,6 +396,20 @@ impl App {
                     target.body = Some(new_body.to_owned());
                     target.content = Some(new_content.clone());
                 }
+            }
+            return LiveFrameAction::None;
+        }
+        // A redaction is the same shape as an edit: patch the loaded target
+        // and do not append. The row would be blank, and it must not move
+        // the read marker or the room badge. The patch still runs while the
+        // user is in a history jump, because the target is in that slice.
+        // A frame with no `content.redacts` cannot name a target. It is
+        // marked stale instead of dropped with no record.
+        if event.event_type == "m.room.redaction" {
+            if let Some(target_id) = event.redaction_target() {
+                self.apply_live_redaction(&key, &event.event_id, target_id);
+            } else {
+                self.note_unnamed_redaction(&key);
             }
             return LiveFrameAction::None;
         }
@@ -465,6 +602,424 @@ impl App {
             .find(|room| RoomKey::from(*room) == *key)
             .and_then(|room| room.account_user_id.as_deref())
             == Some(state_key)
+    }
+
+    /// Patch a loaded target for one live `m.room.redaction` and leave the
+    /// redaction itself out of the slice.
+    ///
+    /// One scan classifies the loaded row. A reaction withdraws that sender
+    /// and stays in the slice. An edit is removed and the original is
+    /// refetched: the previous body is not stored on the TUI event, so masking
+    /// the edit row would leave the edited text in place. Anything else loaded
+    /// under the target id is masked the way a timeline read masks a redacted
+    /// event. A target that names nothing loaded may still be an edit that was
+    /// folded into the original; the room is marked stale so a read can heal it.
+    fn apply_live_redaction(&mut self, room: &RoomKey, redaction_event_id: &str, target_id: &str) {
+        match self.classify_redaction_target(room, target_id) {
+            RedactionTarget::Reaction {
+                annotated,
+                key,
+                sender,
+            } => {
+                self.withdraw_loaded_reaction(room, &annotated, &key, target_id, Some(&sender));
+            }
+            RedactionTarget::UnparsedReaction => {
+                // Leave the row in place. Only a tally that recorded the id changes.
+                let _ = self.withdraw_own_recorded_reaction(room, target_id);
+            }
+            RedactionTarget::Edit { original_id } => {
+                self.discard_redacted_edit(room, target_id, redaction_event_id);
+                self.note_stale_redaction(room, Some(original_id), false);
+            }
+            RedactionTarget::Message => {
+                self.mask_redacted_message(room, target_id, redaction_event_id);
+            }
+            RedactionTarget::Absent => {
+                if self.withdraw_own_recorded_reaction(room, target_id) {
+                    return;
+                }
+                self.mask_redacted_message(room, target_id, redaction_event_id);
+                self.note_stale_redaction(room, None, false);
+            }
+        }
+    }
+
+    /// The loaded row `target_id` points at, or [`RedactionTarget::Absent`].
+    fn classify_redaction_target(&self, room: &RoomKey, target_id: &str) -> RedactionTarget {
+        let Some(event) = self
+            .messages
+            .events
+            .get(room)
+            .and_then(|events| events.iter().find(|event| event.event_id == target_id))
+        else {
+            return RedactionTarget::Absent;
+        };
+        if event.event_type == "m.reaction" {
+            return match event.reaction_relation() {
+                Some((annotated, key)) => RedactionTarget::Reaction {
+                    annotated: annotated.to_owned(),
+                    key: key.to_owned(),
+                    sender: event.sender.clone(),
+                },
+                None => RedactionTarget::UnparsedReaction,
+            };
+        }
+        if let Some((original_id, _, _)) = event.edit_relation() {
+            return RedactionTarget::Edit {
+                original_id: original_id.to_owned(),
+            };
+        }
+        RedactionTarget::Message
+    }
+
+    /// Drop a redacted `m.replace` row. It is not the message the edit changed.
+    ///
+    /// A search hit for that same event is masked: the hit is the edit, and
+    /// leaving its body would keep the replacement text after the original
+    /// is restored. Timeline context drops the row so the jumped slice does
+    /// not grow a tombstone.
+    fn discard_redacted_edit(&mut self, room: &RoomKey, event_id: &str, redaction_event_id: &str) {
+        if let Some(events) = self.messages.events.get_mut(room) {
+            events.retain(|event| event.event_id != event_id);
+        }
+        self.reply_targets
+            .remove(&(room.account_id, event_id.to_owned()));
+        if let Some(search) = self.search_results.as_mut() {
+            for result in &mut search.results {
+                let event = &mut result.event;
+                if event.account_id == room.account_id && event.event_id == event_id {
+                    event.mask_as_redacted(redaction_event_id);
+                }
+            }
+            for context in search.context_cache.values_mut() {
+                context.events.retain(|event| {
+                    !(event.account_id == room.account_id && event.event_id == event_id)
+                });
+            }
+        }
+    }
+
+    /// Match a timeline read of a redacted message: the row stays, and the
+    /// body, content, and reaction tally are gone. Search hits, search
+    /// context, and the reply-preview cache each hold their own copy.
+    pub(super) fn mask_redacted_message(
+        &mut self,
+        room: &RoomKey,
+        event_id: &str,
+        redaction_event_id: &str,
+    ) {
+        let mut thread_root = None;
+        if let Some(events) = self.messages.events.get_mut(room) {
+            if let Some(event) = events.iter_mut().find(|event| event.event_id == event_id) {
+                if !event.redacted {
+                    thread_root = event.thread_relation().map(str::to_owned);
+                }
+                event.mask_as_redacted(redaction_event_id);
+            }
+        }
+        if let Some(cached) = self
+            .reply_targets
+            .get_mut(&(room.account_id, event_id.to_owned()))
+        {
+            cached.mask_as_redacted(redaction_event_id);
+        }
+        if let Some(search) = self.search_results.as_mut() {
+            for result in &mut search.results {
+                let event = &mut result.event;
+                if event.account_id == room.account_id && event.event_id == event_id {
+                    event.mask_as_redacted(redaction_event_id);
+                }
+            }
+            for context in search.context_cache.values_mut() {
+                for event in &mut context.events {
+                    if event.account_id == room.account_id && event.event_id == event_id {
+                        event.mask_as_redacted(redaction_event_id);
+                    }
+                }
+            }
+        }
+        if let Some(root) = thread_root {
+            self.note_thread_member_redacted(room, &root);
+        }
+    }
+
+    /// A redacted thread member no longer counts in `room_threads`.
+    fn note_thread_member_redacted(&mut self, room: &RoomKey, root: &str) {
+        let Some(summaries) = self.thread_summaries.get_mut(room) else {
+            return;
+        };
+        let Some(summary) = summaries.get_mut(root) else {
+            return;
+        };
+        summary.reply_count = summary.reply_count.saturating_sub(1);
+        if summary.reply_count <= 0 {
+            summaries.remove(root);
+        }
+    }
+
+    /// A pre-v11 redaction often carries its target only in the top-level
+    /// `redacts` field, which `/v1/ws` does not. The row is not appended.
+    /// The loaded view is marked stale so the next read heals it.
+    fn note_unnamed_redaction(&mut self, room: &RoomKey) {
+        self.note_stale_redaction(room, None, true);
+    }
+
+    fn note_stale_redaction(
+        &mut self,
+        room: &RoomKey,
+        restore_event: Option<String>,
+        unnamed: bool,
+    ) {
+        if self.display.debug && !self.is_mid_command() {
+            let text = if unnamed {
+                "live redaction has no content.redacts; the loaded timeline is stale until the next read"
+            } else {
+                "redacted edit cannot be reverted locally; the loaded timeline is stale until the next read"
+            };
+            self.status = Status::Debug(text.to_owned());
+        }
+        {
+            let state = self.stale_redactions.entry(room.clone()).or_default();
+            if let Some(event_id) = restore_event {
+                if !state.restore_events.iter().any(|known| known == &event_id) {
+                    state.restore_events.push(event_id);
+                }
+            }
+            if state.inflight {
+                state.again = true;
+                return;
+            }
+        }
+        self.spawn_redaction_heal(room);
+    }
+
+    pub(super) fn note_redaction_heal_conflict(&mut self, room: &RoomKey) {
+        if let Some(state) = self.stale_redactions.get_mut(room) {
+            if state.inflight {
+                state.again = true;
+            }
+        }
+    }
+
+    /// The selected room is showing a history window. A latest-page read must
+    /// not be written over that window.
+    fn selected_history_jump(&self, room: &RoomKey) -> bool {
+        self.last_jump_ts.is_some()
+            && self
+                .selected_room()
+                .is_some_and(|selected| RoomKey::from(selected) == *room)
+    }
+
+    /// One coalesced read for a room. Bursts set `again` instead of starting
+    /// another request. A history jump, and any original the latest page did
+    /// not carry, fetches that one event so the jumped slice stays put.
+    fn spawn_redaction_heal(&mut self, room: &RoomKey) {
+        let Some(tx) = self.redaction_tx.clone() else {
+            return;
+        };
+        let jump = self.selected_history_jump(room);
+        let Some(state) = self.stale_redactions.get_mut(room) else {
+            return;
+        };
+        if state.inflight {
+            return;
+        }
+        let client = self.client.clone();
+        let account_id = room.account_id;
+        let room_id = room.room_id.clone();
+        let room_key = room.clone();
+        let event_id = state.restore_events.first().cloned();
+        let fetch_event = jump || state.page_done;
+        if fetch_event {
+            let Some(event_id) = event_id else {
+                return;
+            };
+            state.inflight = true;
+            tokio::spawn(async move {
+                let event = client
+                    .get_event(account_id, &event_id)
+                    .await
+                    .ok()
+                    .map(Box::new);
+                let _ = tx.send(RedactionReconcile::Event {
+                    room_key,
+                    event_id,
+                    event,
+                });
+            });
+            return;
+        }
+        state.inflight = true;
+        tokio::spawn(async move {
+            let events = client
+                .room_timeline(account_id, &room_id, None, None, super::TIMELINE_LIMIT)
+                .await
+                .ok()
+                .map(|page| page.events);
+            let _ = tx.send(RedactionReconcile::Page { room_key, events });
+        });
+    }
+
+    /// Apply a heal read. Does not move the read marker, the selection, or a
+    /// history jump. A read that lands after a full timeline replace is dropped.
+    pub(crate) fn apply_redaction_reconcile(&mut self, outcome: RedactionReconcile) {
+        match outcome {
+            RedactionReconcile::Page { room_key, events } => {
+                self.finish_redaction_page(room_key, events);
+            }
+            RedactionReconcile::Event {
+                room_key,
+                event_id,
+                event,
+            } => self.finish_redaction_event(room_key, event_id, event.as_deref()),
+        }
+    }
+
+    fn finish_redaction_page(&mut self, room: RoomKey, events: Option<Vec<EventDto>>) {
+        let again = {
+            let Some(state) = self.stale_redactions.get_mut(&room) else {
+                return;
+            };
+            let again = state.again;
+            state.inflight = false;
+            state.again = false;
+            again
+        };
+        // Matching ids only. A history jump keeps every row the page does not
+        // name, and a page event that was not loaded is not appended.
+        if let Some(events) = events.as_ref() {
+            self.patch_room_from_server(&room, events);
+            if let Some(state) = self.stale_redactions.get_mut(&room) {
+                state.page_done = !again;
+                state
+                    .restore_events
+                    .retain(|id| !events.iter().any(|event| &event.event_id == id));
+            }
+        }
+        let more = self
+            .stale_redactions
+            .get(&room)
+            .is_some_and(|state| !state.restore_events.is_empty());
+        if again || (more && events.is_some()) {
+            self.spawn_redaction_heal(&room);
+            return;
+        }
+        if events.is_some() && !more {
+            self.stale_redactions.remove(&room);
+        }
+    }
+
+    fn finish_redaction_event(
+        &mut self,
+        room: RoomKey,
+        event_id: String,
+        event: Option<&EventDto>,
+    ) {
+        if !self.stale_redactions.contains_key(&room) {
+            return;
+        }
+        if let Some(event) = event {
+            self.restore_event_from_server(&room, event);
+        }
+        let (again, more) = {
+            let Some(state) = self.stale_redactions.get_mut(&room) else {
+                return;
+            };
+            state.inflight = false;
+            let again = state.again;
+            state.again = false;
+            if event.is_some() {
+                state.restore_events.retain(|id| id != &event_id);
+            }
+            (again, !state.restore_events.is_empty())
+        };
+        if again || (more && event.is_some()) {
+            self.spawn_redaction_heal(&room);
+            return;
+        }
+        if event.is_some() && !more {
+            self.stale_redactions.remove(&room);
+        }
+    }
+
+    /// Copy one server snapshot onto loaded copies of the same ids.
+    ///
+    /// A redacted server row masks. An unredacted row copies body, content,
+    /// and the reaction aggregate, which is how a folded `m.replace` — the
+    /// edit row was never stored, and the original is showing the edited
+    /// text — gets its previous body back. Rows the page does not mention
+    /// stay as they are. A local mask is not cleared by an unredacted snapshot.
+    fn patch_room_from_server(&mut self, room: &RoomKey, events: &[EventDto]) {
+        let events = events.to_vec();
+        for event in &events {
+            if event.redacted {
+                let id = event.redaction_event_id.clone().unwrap_or_default();
+                self.mask_redacted_message(room, &event.event_id, &id);
+            } else {
+                self.restore_event_from_server(room, event);
+            }
+        }
+    }
+
+    /// Replace a loaded original with the server row after its edit was redacted.
+    ///
+    /// A local mask is left in place. The server row is the previous body only
+    /// when the redaction has already landed; until then the stale mark stays.
+    fn restore_event_from_server(&mut self, room: &RoomKey, server: &EventDto) {
+        if server.redacted {
+            let id = server.redaction_event_id.clone().unwrap_or_default();
+            self.mask_redacted_message(room, &server.event_id, &id);
+            return;
+        }
+        let body = server.body.clone();
+        let content = server.content.clone();
+        let reactions = server.reactions.clone();
+        self.with_loaded_copies(room, &server.event_id, |event| {
+            if event.redacted {
+                return;
+            }
+            event.body = body.clone();
+            event.content = content.clone();
+            adopt_server_reactions(&mut event.reactions, &reactions);
+        });
+    }
+
+    fn with_loaded_copies(
+        &mut self,
+        room: &RoomKey,
+        event_id: &str,
+        mut apply: impl FnMut(&mut EventDto),
+    ) {
+        if let Some(events) = self.messages.events.get_mut(room) {
+            if let Some(event) = events.iter_mut().find(|event| event.event_id == event_id) {
+                apply(event);
+            }
+        }
+        if let Some(cached) = self
+            .reply_targets
+            .get_mut(&(room.account_id, event_id.to_owned()))
+        {
+            apply(cached);
+        }
+        if let Some(search) = self.search_results.as_mut() {
+            for result in &mut search.results {
+                let event = &mut result.event;
+                if event.account_id == room.account_id && event.event_id == event_id {
+                    apply(event);
+                }
+            }
+            for context in search.context_cache.values_mut() {
+                for event in &mut context.events {
+                    if event.account_id == room.account_id && event.event_id == event_id {
+                        apply(event);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn clear_stale_redaction(&mut self, room: &RoomKey) {
+        self.stale_redactions.remove(room);
     }
 
     pub(crate) fn is_own_event(&self, event: &EventDto) -> bool {

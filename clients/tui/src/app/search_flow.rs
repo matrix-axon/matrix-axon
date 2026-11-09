@@ -971,12 +971,14 @@ fn merge_search_jump_thread_load(events: &mut Vec<EventDto>, load: SearchJumpThr
 
 fn merge_events_into(events: &mut Vec<EventDto>, incoming: impl IntoIterator<Item = EventDto>) {
     for event in incoming {
-        if !events
-            .iter()
-            .any(|existing| existing.event_id == event.event_id)
+        if let Some(existing) = events
+            .iter_mut()
+            .find(|existing| existing.event_id == event.event_id)
         {
-            events.push(event);
+            EventDto::merge_redaction(existing, &event);
+            continue;
         }
+        events.push(event);
     }
     events.sort_by_key(|event| (event.origin_ts, event.event_id.clone()));
 }

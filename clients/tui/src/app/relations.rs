@@ -354,7 +354,7 @@ impl App {
         let has_members = self
             .selected_raw_events()
             .iter()
-            .any(|event| event.thread_relation() == Some(event_id));
+            .any(|event| !event.redacted && event.thread_relation() == Some(event_id));
         let has_summary = self
             .selected_room()
             .map(RoomKey::from)
@@ -474,13 +474,15 @@ impl App {
         let slice = self.messages.events.entry(key.clone()).or_default();
         let mut changed = false;
         for event in incoming {
-            if !slice
-                .iter()
-                .any(|existing| existing.event_id == event.event_id)
+            if let Some(existing) = slice
+                .iter_mut()
+                .find(|existing| existing.event_id == event.event_id)
             {
-                slice.push(event);
-                changed = true;
+                crate::api::EventDto::merge_redaction(existing, &event);
+                continue;
             }
+            slice.push(event);
+            changed = true;
         }
         if changed {
             slice.sort_by_key(|event| event.origin_ts);
@@ -498,7 +500,9 @@ impl App {
         let members: Vec<&EventDto> = self
             .selected_raw_events()
             .iter()
-            .filter(|candidate| candidate.thread_relation() == Some(event.event_id.as_str()))
+            .filter(|candidate| {
+                !candidate.redacted && candidate.thread_relation() == Some(event.event_id.as_str())
+            })
             .collect();
         let server_count = summaries
             .and_then(|map| map.get(&event.event_id))

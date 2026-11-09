@@ -476,6 +476,7 @@ async fn run_app(
     let (search_tx, mut search_rx) = mpsc::unbounded_channel();
     let (relations_tx, mut relations_rx) = mpsc::unbounded_channel();
     let (members_tx, mut members_rx) = mpsc::unbounded_channel();
+    let (redaction_tx, mut redaction_rx) = mpsc::unbounded_channel();
     let (room_info_tx, mut room_info_rx) = mpsc::unbounded_channel();
     let (drafts_tx, mut drafts_rx) = mpsc::unbounded_channel();
     let (room_action_tx, mut room_action_rx) = mpsc::unbounded_channel();
@@ -489,6 +490,7 @@ async fn run_app(
     app.set_search_sender(search_tx);
     app.set_relations_sender(relations_tx);
     app.set_members_sender(members_tx);
+    app.set_redaction_sender(redaction_tx);
     app.room_info.tx = Some(room_info_tx);
     app.set_drafts_sender(drafts_tx);
     app.set_room_action_sender(room_action_tx);
@@ -684,6 +686,9 @@ async fn run_app(
             }
             Some(outcome) = members_rx.recv() => {
                 app.apply_members_outcome(outcome);
+            }
+            Some(outcome) = redaction_rx.recv() => {
+                app.apply_redaction_reconcile(outcome);
             }
             Some(outcome) = room_info_rx.recv() => {
                 app.apply_room_info_outcome(outcome);
