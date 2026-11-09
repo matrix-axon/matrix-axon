@@ -95,9 +95,11 @@ The web client sends `since` on every read of a scope it holds a cursor for, the
 It applies `full: true` as a replacement, removing keys the response omits, and `full: false` as a merge, removing keys that come back as `null`.
 Either way a key with a local write the server has not acknowledged keeps its local value, the rule every read already follows.
 So does a key a sibling's frame changed after the read was sent, because the server's snapshot predates that frame.
+The cursor still covers a key a read left alone, so no later delta resends it unless it changes again; the next read that may apply it sets it from the server's view instead, unless that read carries the key itself.
 Reads of one scope run one at a time, so a slow full read cannot land over the delta that followed it, and a read asked for while another is queued and unsent joins it.
 A `400` to a read with `since` means the server will not take that cursor, after a format change or a bad record.
 The client then drops the cursor, on disk too, and reads in full once; a timeout or a `5xx` keeps the cursor for the retry.
+A `200` without a cursor, from an older server, drops the cursor on disk as well.
 
 `read_markers` and `thread_read_markers` are also persisted, with their cursor, in the [ADR 0085](0085-web-offline-first-cache.md) cache.
 A cold start restores them before its first read, so that read is a delta too.

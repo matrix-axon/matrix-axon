@@ -69,6 +69,9 @@ export function createDeviceStateCache({
   namespace,
   enabled,
 }: DeviceStateCacheOptions): DeviceStateCache {
+  /** The reader prefix whose previous-reader sweep has finished. */
+  let swept: string | null = null
+
   async function readerPrefix(): Promise<string | null> {
     if (!enabled()) {
       return null
@@ -151,7 +154,11 @@ export function createDeviceStateCache({
         // A token replaced without a sign-out leaves the previous reader's
         // records behind, unreadable under the new key. Drop them, but only
         // while no wipe has started: after one, a key outside this prefix may
-        // be the next session's own record (review).
+        // be the next session's own record (review). Once per reader: later
+        // writes under the same prefix would find nothing to drop (review).
+        if (swept === prefix) {
+          return
+        }
         const keys = await cache.keys(AREA)
         for (const stale of keys) {
           if (cache.generation !== generation) {
@@ -161,6 +168,7 @@ export function createDeviceStateCache({
             await cache.drop(AREA, stale)
           }
         }
+        swept = prefix
       })()
     },
   }

@@ -369,9 +369,19 @@ export function createDeviceStateStore(
   /**
    * The `clock` tick at which a sibling's frame last changed each key. A read
    * issued before that tick answered from a snapshot the frame is newer than,
-   * so it must leave the key alone. Pruned per scope as each read lands.
+   * so it must leave the key alone. Stamped only while a read of the scope is
+   * chained, since a read issued later has a higher tick anyway, and cleared
+   * when the chain empties, so the map is bounded by frames during reads
+   * (review).
    */
   const framed = new Map<string, number>()
+  /**
+   * Per scope, the keys a read left alone (`readMayApply`) although its cursor
+   * covers them, so no later delta resends the server's value. The next read
+   * that may apply them sets each from `views`, the server's latest word on
+   * it, unless that read carries the key itself (review).
+   */
+  const skipped = new Map<string, Set<string>>()
 
   function noteWrite(ck: string): void {
     const rec = local.get(ck)
@@ -557,6 +567,13 @@ export function createDeviceStateStore(
     void next.then(() => {
       if (reads.get(sk) === next) {
         reads.delete(sk)
+        // No read of the scope is chained, so no stamp can outrank one.
+        const prefix = `${sk}${SEP}`
+        for (const ck of framed.keys()) {
+          if (ck.startsWith(prefix)) {
+            framed.delete(ck)
+          }
+        }
       }
     })
     return next
@@ -638,17 +655,34 @@ export function createDeviceStateStore(
       ([key, entry]) =>
         [key, (entry as { value?: unknown } | null)?.value] as const,
     )
+    const view = full
+      ? new Map<string, unknown>()
+      : (views.get(sk) ?? new Map())
+    for (const [key, value] of fetched) {
+      if (value === null || value === undefined) {
+        view.delete(key)
+      } else {
+        view.set(key, value)
+      }
+    }
+    views.set(sk, view)
+
+    // A full read resends every key, so earlier skips are settled by it.
+    const carried = full ? undefined : skipped.get(sk)
+    const skips = new Set<string>()
     const next = new Map(entries.value)
     if (full) {
       // A full read is the whole namespace, so a key it leaves out is unset.
       const prefix = `${sk}${SEP}`
       for (const ck of entries.value.keys()) {
-        if (
-          ck.startsWith(prefix) &&
-          !Object.hasOwn(read.entries, ck.slice(prefix.length)) &&
-          readMayApply(ck, issued)
-        ) {
+        const key = ck.slice(prefix.length)
+        if (!ck.startsWith(prefix) || Object.hasOwn(read.entries, key)) {
+          continue
+        }
+        if (readMayApply(ck, issued)) {
           next.delete(ck)
+        } else {
+          skips.add(key)
         }
       }
     }
@@ -657,6 +691,7 @@ export function createDeviceStateStore(
       // Never let the fetched view clobber an edit the server hasn't acked,
       // or a sibling's frame that arrived after this read was issued.
       if (!readMayApply(ck, issued)) {
+        skips.add(key)
         continue
       }
       if (value === null || value === undefined) {
@@ -664,6 +699,30 @@ export function createDeviceStateStore(
       } else {
         next.set(ck, value)
       }
+    }
+    // A key an earlier read skipped is covered by the cursor, so this delta
+    // resends it only if it changed again. If not, the view holds the server's
+    // value: set it now, as a full re-read used to on every reconnect.
+    for (const key of carried ?? []) {
+      if (Object.hasOwn(read.entries, key)) {
+        continue
+      }
+      const ck = cacheKey(accountId, namespace, key)
+      if (!readMayApply(ck, issued)) {
+        skips.add(key)
+        continue
+      }
+      const value = view.get(key)
+      if (value === null || value === undefined) {
+        next.delete(ck)
+      } else {
+        next.set(ck, value)
+      }
+    }
+    if (skips.size > 0) {
+      skipped.set(sk, skips)
+    } else {
+      skipped.delete(sk)
     }
     // A frame stamped before this read was issued can no longer outrank any
     // later read of the scope, so its stamp is spent.
@@ -677,19 +736,13 @@ export function createDeviceStateStore(
     bumpScope(accountId, namespace)
     updateScope(accountId, namespace, { hydrated: true, settled: true })
 
-    const view = full
-      ? new Map<string, unknown>()
-      : (views.get(sk) ?? new Map())
-    for (const [key, value] of fetched) {
-      if (value === null || value === undefined) {
-        view.delete(key)
-      } else {
-        view.set(key, value)
-      }
-    }
-    views.set(sk, view)
     if (typeof read.cursor !== 'string' || read.cursor === '') {
       cursors.delete(sk)
+      if (since !== undefined) {
+        // A record on disk would restore that cursor next launch, and no
+        // write replaces it while answers carry none (review).
+        options.cache?.forget(accountId, namespace)
+      }
       return
     }
     cursors.set(sk, read.cursor)
@@ -888,6 +941,7 @@ export function createDeviceStateStore(
     }
     const next = new Map(entries.value)
     const tick = ++clock
+    const reading = reads.has(scopeKey(frame.accountId, change.namespace))
     for (const [key, value] of Object.entries(change.entries)) {
       const ck = cacheKey(frame.accountId, change.namespace, key)
       // A sibling's write loses to a local edit the server hasn't acked yet —
@@ -897,7 +951,9 @@ export function createDeviceStateStore(
       if (rec !== undefined && rec.written > rec.acked) {
         continue
       }
-      framed.set(ck, tick)
+      if (reading) {
+        framed.set(ck, tick)
+      }
       if (value === null) {
         next.delete(ck)
       } else {

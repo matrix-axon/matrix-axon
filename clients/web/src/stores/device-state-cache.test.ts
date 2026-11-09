@@ -124,6 +124,44 @@ describe('createDeviceStateCache (ADR 0131)', () => {
     expect(await cache.keys('meta')).toHaveLength(1)
   })
 
+  it('sweeps for previous readers once per reader, not on every write', async () => {
+    const memory = createMemoryCacheStore()
+    let listings = 0
+    const counting: CacheStore = {
+      read: (area, key) => memory.read(area, key),
+      write: (area, key, value) => memory.write(area, key, value),
+      drop: (area, key) => memory.drop(area, key),
+      keys: (area) => {
+        listings += 1
+        return memory.keys(area)
+      },
+      clear: () => memory.clear(),
+      get generation() {
+        return memory.generation
+      },
+    }
+    let reader = 'reader-1'
+    const deviceStateCache = createDeviceStateCache({
+      cache: counting,
+      namespace: () => Promise.resolve(reader),
+      enabled: () => true,
+    })
+    deviceStateCache.write(ACCT, 'read_markers', scope('100'))
+    await settle()
+    deviceStateCache.write(ACCT, 'read_markers', scope('200'))
+    deviceStateCache.write(ACCT, 'thread_read_markers', scope('200'))
+    await settle()
+    expect(listings).toBe(1)
+
+    reader = 'reader-2'
+    deviceStateCache.write(ACCT, 'read_markers', scope('300'))
+    await settle()
+    expect(listings).toBe(2)
+    expect(
+      (await memory.keys('meta')).filter((key) => key.includes('reader-1')),
+    ).toEqual([])
+  })
+
   it('a wipe during the previous-reader sweep spares the next session', async () => {
     const memory = createMemoryCacheStore()
     let releaseKeys!: () => void

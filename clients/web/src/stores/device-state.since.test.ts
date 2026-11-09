@@ -508,6 +508,40 @@ describe('device-state review fixes', () => {
     expect(writes.at(-1)?.cursor).toBe('900')
   })
 
+  it('a key a read skipped takes the server value on the next read', async () => {
+    vi.useFakeTimers()
+    const full = held(() => read(true, '100', { '!a:hs': marker('$a2', 2) }))
+    scriptGets(full.respond, () => read(false, '200', {}))
+    const { store, reconnect, frame } = setup()
+    const first = store.ensureHydrated(ACCT, NS)
+    await vi.advanceTimersByTimeAsync(0)
+    // A delayed frame carries an older value than the read, and the frame for
+    // the newer write was lost. The read must skip the key, and its cursor
+    // covers it, so the next delta has nothing to say about it.
+    frame({ '!a:hs': marker('$a1', 1) })
+    full.release()
+    await first
+    expect(store.readMarker(ACCT, '!a:hs')?.eventId).toBe('$a1')
+
+    await reconnect()
+    expect(store.readMarker(ACCT, '!a:hs')?.eventId).toBe('$a2')
+  })
+
+  it('a 200 with no cursor forgets the record on disk', async () => {
+    const sinces = scriptGets(() =>
+      HttpResponse.json({ data: { namespace: NS, entries: {} } }),
+    )
+    const { cache, forgotten, writes } = memoryCache({
+      cursor: '400',
+      entries: new Map([['!a:hs', marker('$a1', 1)]]),
+    })
+    const { store } = setup({ cache })
+    await store.ensureHydrated(ACCT, NS)
+    expect(sinces).toEqual(['400'])
+    expect(forgotten()).toBe(1)
+    expect(writes).toEqual([])
+  })
+
   it('a 5xx keeps the cursor for the retry', async () => {
     vi.useFakeTimers()
     const sinces = scriptGets(
