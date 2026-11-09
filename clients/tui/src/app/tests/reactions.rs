@@ -739,6 +739,49 @@ fn redacting_an_unknown_own_id_keeps_the_other_device() {
     assert_eq!(own[0].event_ids, vec!["$device-two:example.com".to_owned()]);
 }
 
+/// The server counted a sender for an id this client never stored. A later
+/// live id must not keep that sender after the original id is redacted; the
+/// room is marked so the next read replaces the tally.
+#[test]
+fn redacting_an_untracked_remote_id_marks_the_tally_stale() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    let key = RoomKey::from(&room);
+    let mut aggregate = tally(1, false, &[]);
+    aggregate.senders = vec!["@bob:example.com".to_owned()];
+    aggregate.sender_event_ids.insert(
+        "@bob:example.com".to_owned(),
+        vec!["$bob-live:example.com".to_owned()],
+    );
+    let message = message_with_reactions("$target:example.com", vec![("\u{1f44d}", aggregate)]);
+    let row = reaction_frame(
+        "$bob-original:example.com",
+        "$target:example.com",
+        "\u{1f44d}",
+        "@bob:example.com",
+    );
+    app.messages.events.insert(key.clone(), vec![message, row]);
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact:example.com",
+        "$bob-original:example.com",
+    ))));
+
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 1);
+    assert!(app.stale_redactions.contains_key(&key));
+
+    let mut healed = message_with_reactions("$target:example.com", Vec::new());
+    healed.reactions = None;
+    app.apply_redaction_reconcile(crate::app::timeline::RedactionReconcile::Page {
+        room_key: key.clone(),
+        events: Some(vec![healed]),
+        epoch: 0,
+    });
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 0);
+    assert!(!app.stale_redactions.contains_key(&key));
+}
+
 /// Local unreact when this client cannot name itself still clears `me` once.
 #[test]
 fn remove_local_reaction_with_no_user_id_clears_me_once() {

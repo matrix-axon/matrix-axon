@@ -138,12 +138,16 @@ fn drop_sender(tally: &mut crate::api::ReactionTally, sender: &str) {
 /// counted us without listing the id, and the local unreact path when our
 /// user id is unresolved and `my_event_ids` is empty. A server tally with no
 /// per-sender ids still drops that sender on the first untracked id.
+///
+/// Returns whether the id was not one this sender had recorded, while some
+/// other id of theirs still is. The tally is left as it is in that case: the
+/// caller marks the room stale so the next read replaces the aggregate.
 fn withdraw_recorded_reaction(
     tally: &mut crate::api::ReactionTally,
     reactor: Option<&str>,
     reaction_event_id: &str,
     own_user_id: Option<&str>,
-) {
+) -> bool {
     let had_own_id = tally.my_event_ids.iter().any(|id| id == reaction_event_id);
     if had_own_id {
         tally.my_event_ids.retain(|id| id != reaction_event_id);
@@ -154,30 +158,34 @@ fn withdraw_recorded_reaction(
                 .get(reactor)
                 .is_some_and(|ids| !ids.is_empty())
             {
-                return;
+                return false;
             }
         }
         if !tally.my_event_ids.is_empty() {
-            return;
+            return false;
         }
         if tally.me {
             clear_own_contribution(tally, reactor);
         }
-        return;
+        return false;
     }
     if let Some(reactor) = reactor {
         match forget_sender_event(tally, reactor, reaction_event_id) {
-            TrackedIds::Remains | TrackedIds::Other => return,
+            TrackedIds::Remains => return false,
+            // This id was never recorded, and another id for the sender was.
+            // The count may belong to the untracked id. Leave the badge and
+            // let a read replace it.
+            TrackedIds::Other => return true,
             TrackedIds::Last => {
                 let own = own_user_id == Some(reactor);
                 if own && !tally.my_event_ids.is_empty() {
-                    return;
+                    return false;
                 }
                 drop_sender(tally, reactor);
                 if own {
                     tally.me = false;
                 }
-                return;
+                return false;
             }
             TrackedIds::Untracked => {}
         }
@@ -188,15 +196,16 @@ fn withdraw_recorded_reaction(
     let own_reactor = own_user_id.is_some() && own_user_id == reactor;
     if own_reactor || reactor.is_none() {
         if !tally.my_event_ids.is_empty() || !tally.me {
-            return;
+            return false;
         }
         clear_own_contribution(tally, reactor.or(own_user_id));
-        return;
+        return false;
     }
     let Some(reactor) = reactor else {
-        return;
+        return false;
     };
     drop_sender(tally, reactor);
+    false
 }
 
 fn drop_empty_reaction_key(reactions: &mut HashMap<String, crate::api::ReactionTally>, key: &str) {
@@ -322,34 +331,41 @@ impl App {
         let room_key = RoomKey::from(&room);
         // The in-flight heal snapshot does not include this withdrawal.
         self.note_redaction_heal_conflict(&room_key);
-        let Some(events) = self.messages.events.get_mut(&room_key) else {
-            return;
-        };
-        let Some(event) = events.iter_mut().find(|e| e.event_id == target_event_id) else {
-            return;
-        };
-        let Some(reactions) = event.reactions.as_mut() else {
-            return;
-        };
-        if reactions.contains_key(key) {
-            for id in withdrawn {
-                let Some(tally) = reactions.get_mut(key) else {
-                    break;
-                };
-                // One id at a time so a second of our devices still in
-                // `my_event_ids` does not decrement, and a repeat of an id
-                // already removed does not take the remote-sender arm.
-                withdraw_recorded_reaction(
-                    tally,
-                    own_user_id.as_deref(),
-                    id,
-                    own_user_id.as_deref(),
-                );
+        let heal = {
+            let Some(events) = self.messages.events.get_mut(&room_key) else {
+                return;
+            };
+            let Some(event) = events.iter_mut().find(|e| e.event_id == target_event_id) else {
+                return;
+            };
+            let Some(reactions) = event.reactions.as_mut() else {
+                return;
+            };
+            let mut heal = false;
+            if reactions.contains_key(key) {
+                for id in withdrawn {
+                    let Some(tally) = reactions.get_mut(key) else {
+                        break;
+                    };
+                    // One id at a time so a second of our devices still in
+                    // `my_event_ids` does not decrement, and a repeat of an id
+                    // already removed does not take the remote-sender arm.
+                    heal |= withdraw_recorded_reaction(
+                        tally,
+                        own_user_id.as_deref(),
+                        id,
+                        own_user_id.as_deref(),
+                    );
+                }
+                drop_empty_reaction_key(reactions, key);
             }
-            drop_empty_reaction_key(reactions, key);
-        }
-        if reactions.is_empty() {
-            event.reactions = None;
+            if reactions.is_empty() {
+                event.reactions = None;
+            }
+            heal
+        };
+        if heal {
+            self.note_stale_redaction(&room_key, None, false);
         }
     }
 
@@ -431,24 +447,37 @@ impl App {
             let mine: Vec<&str> = mine.iter().map(String::as_str).collect();
             self.own_user_id_from_reaction_rows(room, &mine)
         });
-        let Some(events) = self.messages.events.get_mut(room) else {
-            return;
+        let heal = {
+            let Some(events) = self.messages.events.get_mut(room) else {
+                return;
+            };
+            let Some(event) = events
+                .iter_mut()
+                .find(|item| item.event_id == annotated_event_id)
+            else {
+                return;
+            };
+            let Some(reactions) = event.reactions.as_mut() else {
+                return;
+            };
+            let heal = if let Some(tally) = reactions.get_mut(key) {
+                withdraw_recorded_reaction(
+                    tally,
+                    reactor,
+                    reaction_event_id,
+                    own_user_id.as_deref(),
+                )
+            } else {
+                false
+            };
+            drop_empty_reaction_key(reactions, key);
+            if reactions.is_empty() {
+                event.reactions = None;
+            }
+            heal
         };
-        let Some(event) = events
-            .iter_mut()
-            .find(|item| item.event_id == annotated_event_id)
-        else {
-            return;
-        };
-        let Some(reactions) = event.reactions.as_mut() else {
-            return;
-        };
-        if let Some(tally) = reactions.get_mut(key) {
-            withdraw_recorded_reaction(tally, reactor, reaction_event_id, own_user_id.as_deref());
-        }
-        drop_empty_reaction_key(reactions, key);
-        if reactions.is_empty() {
-            event.reactions = None;
+        if heal {
+            self.note_stale_redaction(room, None, false);
         }
     }
 

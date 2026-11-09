@@ -1181,6 +1181,9 @@ pub(crate) struct App {
     /// Rooms whose loaded slice missed a live redaction. Cleared when a
     /// timeline read replaces that slice.
     stale_redactions: HashMap<RoomKey, timeline::StaleRedaction>,
+    /// Bumped when a room's stale mark is cleared, so a heal already in
+    /// flight cannot apply onto a mark created after that clear.
+    redaction_epochs: HashMap<RoomKey, u64>,
     /// Cached-state reads behind the `/whereami` popup (ADR 0114).
     pub(crate) room_info: room_info::RoomInfoCache,
     /// Earliest instant a room may trigger another background `/members` refresh,
@@ -1476,6 +1479,7 @@ impl App {
             members_tx: None,
             redaction_tx: None,
             stale_redactions: HashMap::new(),
+            redaction_epochs: HashMap::new(),
             room_info: room_info::RoomInfoCache::default(),
             members_refresh_after: HashMap::new(),
             members_workers: Arc::new(Semaphore::new(MEMBERS_WORKERS)),

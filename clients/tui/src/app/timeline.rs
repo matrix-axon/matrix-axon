@@ -149,14 +149,20 @@ pub(crate) enum RedactionReconcile {
     Page {
         room_key: RoomKey,
         events: Option<Vec<EventDto>>,
+        /// Room epoch at spawn. A later clear makes this stale.
+        epoch: u64,
     },
     /// One event, used while a history jump must not be replaced by the latest page.
     ///
     /// `EventDto` is large. Box it so this variant does not bloat every outcome.
+    /// `get_event` uses the same read projection as the timeline, so `body` is
+    /// already the latest edit that is still valid.
     Event {
         room_key: RoomKey,
         event_id: String,
         event: Option<Box<EventDto>>,
+        /// Room epoch at spawn. A later clear makes this stale.
+        epoch: u64,
     },
 }
 
@@ -639,7 +645,13 @@ impl App {
                     return;
                 }
                 self.mask_redacted_message(room, target_id, redaction_event_id);
-                self.note_stale_redaction(room, None, false);
+                // The collapsed timeline does not carry edit event ids, so an
+                // absent target in the open room may be the edit behind the
+                // text on screen. A room that is not open is replaced the
+                // next time it is loaded.
+                if self.timeline_is_open(room) {
+                    self.note_stale_redaction(room, None, false);
+                }
             }
         }
     }
@@ -764,7 +776,7 @@ impl App {
         self.note_stale_redaction(room, None, true);
     }
 
-    fn note_stale_redaction(
+    pub(super) fn note_stale_redaction(
         &mut self,
         room: &RoomKey,
         restore_event: Option<String>,
@@ -801,6 +813,21 @@ impl App {
         }
     }
 
+    /// The room the user is looking at, with rows a folded edit could have changed.
+    fn timeline_is_open(&self, room: &RoomKey) -> bool {
+        self.selected_room()
+            .is_some_and(|selected| RoomKey::from(selected) == *room)
+            && self
+                .messages
+                .events
+                .get(room)
+                .is_some_and(|events| !events.is_empty())
+    }
+
+    fn redaction_epoch(&self, room: &RoomKey) -> u64 {
+        self.redaction_epochs.get(room).copied().unwrap_or(0)
+    }
+
     /// The selected room is showing a history window. A latest-page read must
     /// not be written over that window.
     fn selected_history_jump(&self, room: &RoomKey) -> bool {
@@ -818,6 +845,7 @@ impl App {
             return;
         };
         let jump = self.selected_history_jump(room);
+        let epoch = self.redaction_epoch(room);
         let Some(state) = self.stale_redactions.get_mut(room) else {
             return;
         };
@@ -845,6 +873,7 @@ impl App {
                     room_key,
                     event_id,
                     event,
+                    epoch,
                 });
             });
             return;
@@ -856,7 +885,11 @@ impl App {
                 .await
                 .ok()
                 .map(|page| page.events);
-            let _ = tx.send(RedactionReconcile::Page { room_key, events });
+            let _ = tx.send(RedactionReconcile::Page {
+                room_key,
+                events,
+                epoch,
+            });
         });
     }
 
@@ -864,18 +897,26 @@ impl App {
     /// history jump. A read that lands after a full timeline replace is dropped.
     pub(crate) fn apply_redaction_reconcile(&mut self, outcome: RedactionReconcile) {
         match outcome {
-            RedactionReconcile::Page { room_key, events } => {
-                self.finish_redaction_page(room_key, events);
+            RedactionReconcile::Page {
+                room_key,
+                events,
+                epoch,
+            } => {
+                self.finish_redaction_page(room_key, events, epoch);
             }
             RedactionReconcile::Event {
                 room_key,
                 event_id,
                 event,
-            } => self.finish_redaction_event(room_key, event_id, event.as_deref()),
+                epoch,
+            } => self.finish_redaction_event(room_key, event_id, event.as_deref(), epoch),
         }
     }
 
-    fn finish_redaction_page(&mut self, room: RoomKey, events: Option<Vec<EventDto>>) {
+    fn finish_redaction_page(&mut self, room: RoomKey, events: Option<Vec<EventDto>>, epoch: u64) {
+        if self.redaction_epoch(&room) != epoch {
+            return;
+        }
         let again = {
             let Some(state) = self.stale_redactions.get_mut(&room) else {
                 return;
@@ -914,8 +955,9 @@ impl App {
         room: RoomKey,
         event_id: String,
         event: Option<&EventDto>,
+        epoch: u64,
     ) {
-        if !self.stale_redactions.contains_key(&room) {
+        if self.redaction_epoch(&room) != epoch || !self.stale_redactions.contains_key(&room) {
             return;
         }
         if let Some(event) = event {
@@ -944,13 +986,23 @@ impl App {
 
     /// Copy one server snapshot onto loaded copies of the same ids.
     ///
-    /// A redacted server row masks. An unredacted row copies body, content,
-    /// and the reaction aggregate, which is how a folded `m.replace` — the
-    /// edit row was never stored, and the original is showing the edited
-    /// text — gets its previous body back. Rows the page does not mention
-    /// stay as they are. A local mask is not cleared by an unredacted snapshot.
+    /// A timeline page is newest-first and may still carry `m.replace` rows.
+    /// Fold those the way [`super::rooms::apply_edits`] does on load, oldest
+    /// first, so a message that already shows its latest edit is not replaced
+    /// by the original body. A redacted server row masks. An unredacted row
+    /// copies body, content, and the reaction aggregate, which is how a folded
+    /// `m.replace` — the edit row was never stored, and the original is showing
+    /// the edited text — gets its previous body back when that edit is gone.
+    /// Rows the page does not mention stay as they are. A local mask is not
+    /// cleared by an unredacted snapshot.
     fn patch_room_from_server(&mut self, room: &RoomKey, events: &[EventDto]) {
-        let events = events.to_vec();
+        let mut events = events.to_vec();
+        events.sort_by(|left, right| {
+            left.origin_ts
+                .cmp(&right.origin_ts)
+                .then(left.arrival_order.cmp(&right.arrival_order))
+        });
+        super::rooms::apply_edits(&mut events);
         for event in &events {
             if event.redacted {
                 let id = event.redaction_event_id.clone().unwrap_or_default();
@@ -1020,6 +1072,8 @@ impl App {
 
     pub(super) fn clear_stale_redaction(&mut self, room: &RoomKey) {
         self.stale_redactions.remove(room);
+        let epoch = self.redaction_epochs.entry(room.clone()).or_default();
+        *epoch = epoch.saturating_add(1);
     }
 
     pub(crate) fn is_own_event(&self, event: &EventDto) -> bool {

@@ -1121,6 +1121,7 @@ fn a_page_heal_masks_a_server_redacted_message_and_keeps_a_local_mask() {
     app.apply_redaction_reconcile(RedactionReconcile::Page {
         room_key: key.clone(),
         events: Some(vec![server.clone(), extra]),
+        epoch: 0,
     });
 
     let events = &app.messages.events[&key];
@@ -1157,6 +1158,7 @@ fn a_page_heal_masks_a_server_redacted_message_and_keeps_a_local_mask() {
     app.apply_redaction_reconcile(RedactionReconcile::Page {
         room_key: key.clone(),
         events: Some(vec![server]),
+        epoch: 0,
     });
 
     let events = &app.messages.events[&key];
@@ -1208,6 +1210,7 @@ fn redacting_a_loaded_edit_discards_the_row_and_restores_the_original() {
         room_key: key.clone(),
         event_id: "$orig:example.com".to_owned(),
         event: Some(Box::new(restored)),
+        epoch: 0,
     });
 
     let events = &app.messages.events[&key];
@@ -1238,6 +1241,7 @@ fn a_folded_edit_redaction_copies_the_server_body_onto_the_original() {
     app.apply_redaction_reconcile(RedactionReconcile::Page {
         room_key: key.clone(),
         events: Some(vec![healed]),
+        epoch: 0,
     });
 
     let events = &app.messages.events[&key];
@@ -1245,6 +1249,104 @@ fn a_folded_edit_redaction_copies_the_server_body_onto_the_original() {
     assert_eq!(events[0].body.as_deref(), Some("hello"));
     assert!(!events[0].redacted);
     assert_eq!(events[1].body.as_deref(), Some("older"));
+    assert!(!app.stale_redactions.contains_key(&key));
+}
+
+/// A heal page is newest-first and still carries `m.replace` rows. Folding
+/// them before the copy keeps a message that was not the redaction's target.
+#[test]
+fn an_unnamed_redaction_keeps_an_unrelated_edit() {
+    let (mut app, key) = selected_room_app();
+    app.messages.events.insert(
+        key.clone(),
+        vec![text_message("$kept:example.com", "second edit")],
+    );
+    let frame = event_with_id(
+        "$redact:example.com",
+        "m.room.redaction",
+        None,
+        serde_json::json!({}),
+    );
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(frame)));
+
+    let mut original = text_message("$kept:example.com", "original");
+    original.origin_ts = 1;
+    let mut older = edit_event("$edit-old:example.com", "$kept:example.com", "first edit");
+    older.origin_ts = 2;
+    let mut newer = edit_event("$edit-new:example.com", "$kept:example.com", "second edit");
+    newer.origin_ts = 3;
+    app.apply_redaction_reconcile(RedactionReconcile::Page {
+        room_key: key.clone(),
+        events: Some(vec![newer, older, original]),
+        epoch: 0,
+    });
+
+    let events = &app.messages.events[&key];
+    assert_eq!(events.len(), 1, "edit rows are not appended");
+    assert_eq!(events[0].body.as_deref(), Some("second edit"));
+    assert!(!app.stale_redactions.contains_key(&key));
+}
+
+#[test]
+fn an_unloaded_target_outside_the_open_room_does_not_mark_it_stale() {
+    let (mut app, key) = selected_room_app();
+    app.messages
+        .events
+        .insert(key.clone(), vec![text_message("$open:example.com", "open")]);
+    let other = RoomKey {
+        account_id: key.account_id,
+        room_id: "!other:example.com".to_owned(),
+    };
+    let mut hidden = text_message("$hidden:example.com", "edited");
+    hidden.room_id = other.room_id.clone();
+    app.messages.events.insert(other.clone(), vec![hidden]);
+    let mut frame = redaction_frame("$redact:example.com", "$edit:example.com");
+    frame.room_id = other.room_id.clone();
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(frame)));
+
+    assert!(!app.stale_redactions.contains_key(&other));
+    assert!(!app.stale_redactions.contains_key(&key));
+    assert_eq!(
+        app.messages.events[&other][0].body.as_deref(),
+        Some("edited")
+    );
+}
+
+#[test]
+fn a_page_from_a_cleared_heal_does_not_overwrite_a_newer_mark() {
+    let (mut app, key) = selected_room_app();
+    app.messages.events.insert(
+        key.clone(),
+        vec![text_message("$msg:example.com", "edited")],
+    );
+    let unnamed = || {
+        event_with_id(
+            "$redact:example.com",
+            "m.room.redaction",
+            None,
+            serde_json::json!({}),
+        )
+    };
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(unnamed())));
+    app.clear_stale_redaction(&key);
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(unnamed())));
+    assert!(app.stale_redactions.contains_key(&key));
+
+    app.apply_redaction_reconcile(RedactionReconcile::Page {
+        room_key: key.clone(),
+        events: Some(vec![text_message("$msg:example.com", "original")]),
+        epoch: 0,
+    });
+    assert_eq!(app.messages.events[&key][0].body.as_deref(), Some("edited"));
+    assert!(app.stale_redactions.contains_key(&key));
+
+    app.apply_redaction_reconcile(RedactionReconcile::Page {
+        room_key: key.clone(),
+        events: Some(vec![text_message("$msg:example.com", "edited")]),
+        epoch: 1,
+    });
+    assert_eq!(app.messages.events[&key][0].body.as_deref(), Some("edited"));
     assert!(!app.stale_redactions.contains_key(&key));
 }
 
