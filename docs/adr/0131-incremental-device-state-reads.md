@@ -94,7 +94,10 @@ An index on `updated_at` would cost every marker write to save a few millisecond
 The web client sends `since` on every read of a scope it holds a cursor for, the reconnect re-read included.
 It applies `full: true` as a replacement, removing keys the response omits, and `full: false` as a merge, removing keys that come back as `null`.
 Either way a key with a local write the server has not acknowledged keeps its local value, the rule every read already follows.
-Reads of one scope run one at a time, so a slow full read cannot land over the delta that followed it.
+So does a key a sibling's frame changed after the read was sent, because the server's snapshot predates that frame.
+Reads of one scope run one at a time, so a slow full read cannot land over the delta that followed it, and a read asked for while another is queued and unsent joins it.
+A `400` to a read with `since` means the server will not take that cursor, after a format change or a bad record.
+The client then drops the cursor, on disk too, and reads in full once; a timeout or a `5xx` keeps the cursor for the retry.
 
 `read_markers` and `thread_read_markers` are also persisted, with their cursor, in the [ADR 0085](0085-web-offline-first-cache.md) cache.
 A cold start restores them before its first read, so that read is a delta too.
@@ -107,6 +110,7 @@ The markers are metadata, event ids and timestamps, of the same class as the roo
 It is a few keys, so its full read on a cold start costs little; it still uses `since` on reconnect.
 
 A marker scope with no cursor, on the first launch or with the cache off, waits for the room list's first refresh to settle before its full read.
+Every read of the scope waits, the reconnect re-read included, so a socket drop during the wait cannot start the download early.
 That full read is the 411 KB download measured above, and sharing the link with `GET /v1/rooms` is what pushed the room list past its deadline.
 The wait ends when the refresh settles, whether it succeeds or fails, so the markers are at most one room-list deadline late.
 A scope restored with a cursor does not wait, because its read is a few hundred bytes.

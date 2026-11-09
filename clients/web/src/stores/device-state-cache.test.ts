@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createMemoryCacheStore } from './cache-store'
+import { createMemoryCacheStore, type CacheStore } from './cache-store'
 import { createDeviceStateCache } from './device-state-cache'
 
 const ACCT = '6b53f7f0-0000-4000-8000-000000000001'
@@ -111,5 +111,61 @@ describe('createDeviceStateCache (ADR 0131)', () => {
     expect(await deviceStateCache.read(ACCT, 'read_markers')).toBe(undefined)
     await cache.write('meta', key, { version: 99, cursor: '1', entries: {} })
     expect(await deviceStateCache.read(ACCT, 'read_markers')).toBe(undefined)
+  })
+
+  it('forgets a scope whose cursor the server refused', async () => {
+    const { cache, deviceStateCache } = setup()
+    deviceStateCache.write(ACCT, 'read_markers', scope('100'))
+    deviceStateCache.write(ACCT, 'thread_read_markers', scope('100'))
+    await settle()
+    deviceStateCache.forget(ACCT, 'read_markers')
+    await settle()
+    expect(await deviceStateCache.read(ACCT, 'read_markers')).toBe(undefined)
+    expect(await cache.keys('meta')).toHaveLength(1)
+  })
+
+  it('a wipe during the previous-reader sweep spares the next session', async () => {
+    const memory = createMemoryCacheStore()
+    let releaseKeys!: () => void
+    const keysHeld = new Promise<void>((resolve) => {
+      releaseKeys = resolve
+    })
+    let holdKeys = false
+    const slow: CacheStore = {
+      read: (area, key) => memory.read(area, key),
+      write: (area, key, value) => memory.write(area, key, value),
+      drop: (area, key) => memory.drop(area, key),
+      keys: async (area) => {
+        if (holdKeys) {
+          await keysHeld
+        }
+        return memory.keys(area)
+      },
+      clear: () => memory.clear(),
+      get generation() {
+        return memory.generation
+      },
+    }
+    let reader = 'reader-1'
+    const deviceStateCache = createDeviceStateCache({
+      cache: slow,
+      namespace: () => Promise.resolve(reader),
+      enabled: () => true,
+    })
+    holdKeys = true
+    deviceStateCache.write(ACCT, 'read_markers', scope('100'))
+    await settle()
+    // Sign-out wipes, and the next reader's write lands, while the first
+    // write's sweep is still listing keys.
+    await slow.clear()
+    reader = 'reader-2'
+    holdKeys = false
+    deviceStateCache.write(ACCT, 'read_markers', scope('200'))
+    await settle()
+    releaseKeys()
+    await settle()
+    expect((await deviceStateCache.read(ACCT, 'read_markers'))?.cursor).toBe(
+      '200',
+    )
   })
 })

@@ -20,6 +20,8 @@ export interface DeviceStateCache {
     accountId: string,
     namespace: string,
   ): Promise<CachedDeviceStateScope | undefined>
+  /** Drop a scope's record, whose cursor the server refused. Fire-and-forget. */
+  forget(accountId: string, namespace: string): void
   /** Persist a scope's server view. Fire-and-forget. */
   write(
     accountId: string,
@@ -109,6 +111,18 @@ export function createDeviceStateCache({
       }
     },
 
+    forget(accountId, scopeNamespace) {
+      if (!PERSISTED_NAMESPACES.has(scopeNamespace)) {
+        return
+      }
+      void (async () => {
+        const prefix = await readerPrefix()
+        if (prefix !== null) {
+          await cache.drop(AREA, `${prefix}${accountId}\0${scopeNamespace}`)
+        }
+      })()
+    },
+
     write(accountId, scopeNamespace, scope) {
       if (!PERSISTED_NAMESPACES.has(scopeNamespace)) {
         return
@@ -135,8 +149,14 @@ export function createDeviceStateCache({
           return
         }
         // A token replaced without a sign-out leaves the previous reader's
-        // records behind, unreadable under the new key. Drop them.
-        for (const stale of await cache.keys(AREA)) {
+        // records behind, unreadable under the new key. Drop them, but only
+        // while no wipe has started: after one, a key outside this prefix may
+        // be the next session's own record (review).
+        const keys = await cache.keys(AREA)
+        for (const stale of keys) {
+          if (cache.generation !== generation) {
+            return
+          }
           if (stale.startsWith(KEY_PREFIX) && !stale.startsWith(prefix)) {
             await cache.drop(AREA, stale)
           }
