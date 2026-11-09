@@ -40,6 +40,10 @@ pub fn run() {
     // once, the first time it needs them.
     #[cfg(target_os = "macos")]
     macos_text::enable_spell_checking_by_default();
+    // Before the window can be hidden: App Nap starts timing a backgrounded
+    // app from the moment it loses the screen.
+    #[cfg(target_os = "macos")]
+    macos_activity::keep_awake_in_background();
 
     let builder = tauri::Builder::default();
 
@@ -135,6 +139,32 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running the Axon shell");
+}
+
+/// Keeps macOS from napping the app while its window is hidden.
+///
+/// App Nap throttles timers and I/O in an app that is not visible, so the
+/// page's live socket stalls and the dock badge (and toasts) wait until the
+/// window comes back. A chat client has to hear the server while it is in the
+/// background, so this holds a user-initiated activity for the life of the
+/// process.
+///
+/// `UserInitiatedAllowingIdleSystemSleep` rather than `UserInitiated`: it stops
+/// App Nap and leaves the Mac free to sleep when it is idle. It must not hold
+/// a display or system-sleep assertion.
+#[cfg(target_os = "macos")]
+mod macos_activity {
+    use objc2_foundation::{ns_string, NSActivityOptions, NSProcessInfo};
+
+    pub(super) fn keep_awake_in_background() {
+        let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+            ns_string!("Axon listens for new messages while in the background"),
+        );
+        // The activity ends when the token is released, and the token is
+        // never released: the assertion is meant to last until exit.
+        std::mem::forget(activity);
+    }
 }
 
 /// The text services a Mac user expects in a text field, which a WKWebView app
