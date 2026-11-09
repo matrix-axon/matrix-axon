@@ -250,6 +250,15 @@ if [ -n "$build_number" ]; then
   config_args=(--config "{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$build_number\"}}}")
 fi
 
+# The URL scheme the .ipa is checked against below, read from the same
+# configuration the build uses — `plugins.deep-link.desktop.schemes` with
+# `config_args` merged over it — rather than repeated here as a literal, so a
+# fork or a test bundle with its own scheme is checked against that one. Read
+# now, before `rm -rf gen/apple`, so a config with no scheme stops the run
+# while the Xcode project is still there.
+expected_scheme=$(python3 "$repo_root/scripts/lib/read-ios-url-scheme.py" \
+  "$tauri_dir/tauri.conf.json" ${config_args[@]+"${config_args[@]}"})
+
 echo "==> regenerating the iOS project"
 rm -rf "$tauri_dir/gen/apple"
 pnpm tauri ios init --ci ${config_args[@]+"${config_args[@]}"}
@@ -320,7 +329,6 @@ echo "==> built $ipa"
 #
 # Fatal, not a warning: a line in thousands of lines of build output is not
 # read, and `--upload` would go on to ship the broken bundle.
-expected_scheme=org.matrixaxon.axon
 ipa_check=$(mktemp -d)
 unzip -q "$ipa" 'Payload/*' -d "$ipa_check"
 shipped_app=$(ls -d "$ipa_check"/Payload/*.app | head -1)
