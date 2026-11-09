@@ -3,6 +3,26 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.26 - 2026-11-09
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(server): fill in a selected unjoined room from the homeserver's room summary (ADR 0128 step 4) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1003
+* feat(tui): pick a device for SAS verification by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1004
+#### Bug Fixes
+* fix(shell): restore PDF previews in packaged apps by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1002
+#### Performance
+* fix(shell): ask for compressed responses in the shell transport by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/994
+* fix(shell): keep a busy HTTP/2 connection alive on a slow link by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/999
+* feat(api): incremental device-state reads with a since cursor by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1018
+#### Build and CI
+* build: print each distinct license text once in the THIRDPARTY notices by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1006
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.25...v0.1.26
+
 ## v0.1.25 - 2026-11-08
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
