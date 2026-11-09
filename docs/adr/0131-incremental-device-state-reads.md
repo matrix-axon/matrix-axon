@@ -1,6 +1,6 @@
 # ADR 0131 — Incremental device-state reads
 
-**Status:** Proposed; the server half is implemented for [issue 280](https://github.com/matrix-axon/matrix-axon/issues/280). The web client half follows in its own PR.
+**Status:** Accepted. The server half shipped in [#1018](https://github.com/matrix-axon/matrix-axon/pull/1018); the web client half is [issue 280](https://github.com/matrix-axon/matrix-axon/issues/280)'s follow-up PR.
 
 ## Context
 
@@ -89,9 +89,34 @@ The delta is a scan of one `(account, namespace)` range of `device_state_merge_i
 On the production account above, with 8,086 `read_markers` rows, a delta over a day's writes ran in 12.6 ms, against 31 ms for the full read.
 An index on `updated_at` would cost every marker write to save a few milliseconds per reconnect, so this ADR adds none.
 
+### The web client keeps the marker namespaces and their cursor
+
+The web client sends `since` on every read of a scope it holds a cursor for, the reconnect re-read included.
+It applies `full: true` as a replacement, removing keys the response omits, and `full: false` as a merge, removing keys that come back as `null`.
+Either way a key with a local write the server has not acknowledged keeps its local value, the rule every read already follows.
+Reads of one scope run one at a time, so a slow full read cannot land over the delta that followed it.
+
+`read_markers` and `thread_read_markers` are also persisted, with their cursor, in the [ADR 0085](0085-web-offline-first-cache.md) cache.
+A cold start restores them before its first read, so that read is a delta too.
+What is persisted is the server's view as of the cursor, from read responses only, never the local cache.
+A local write or a sibling's frame lands after the cursor and so reappears in the next delta; persisting it would store a value the server may never have accepted.
+A delta with no entries leaves the record alone, so most resumes write nothing to disk.
+
+The markers are metadata, event ids and timestamps, of the same class as the room list, so they follow the room-list cache's setting, on by default, and are wiped with it.
+`drafts` is not persisted: a draft is message text the user typed, and ADR 0085 keeps plaintext off the disk unless the user opts in.
+It is a few keys, so its full read on a cold start costs little; it still uses `since` on reconnect.
+
+A marker scope with no cursor, on the first launch or with the cache off, waits for the room list's first refresh to settle before its full read.
+That full read is the 411 KB download measured above, and sharing the link with `GET /v1/rooms` is what pushed the room list past its deadline.
+The wait ends when the refresh settles, whether it succeeds or fails, so the markers are at most one room-list deadline late.
+A scope restored with a cursor does not wait, because its read is a few hundred bytes.
+
+`hydrated` still means a read has answered.
+A restored scope shows its markers at once but is not hydrated until its delta lands, because the forward-only guard of a write must compare against the server's view, not a copy that may be days old.
+
 ## Consequences
 
-- A client that keeps its namespaces and cursor across launches pays the full download once per install, then a few hundred bytes per cold start or resume. The web client's persisting of them in the [ADR 0085](0085-web-offline-first-cache.md) store is the follow-up PR.
+- A client that keeps its namespaces and cursor across launches pays the full download once per install, then a few hundred bytes per cold start or resume. The web client does this for the marker namespaces while the room-list cache is on.
 - A client that keeps nothing across launches still saves every reconnect re-read after the first.
 - The overlap means a delta right after a bulk write, such as marking every room read, re-sends that batch for up to five minutes. That is bounded by what was written and is idempotent.
 - Restoring the database from an older backup loses writes newer than the backup. A client holding them keeps them until its next full read, and its next write to that key re-creates the row. For markers and drafts that is benign; a namespace where a lost write matters should force a full read after a restore.

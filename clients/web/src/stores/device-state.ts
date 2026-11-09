@@ -3,6 +3,7 @@ import type { ApiClient } from '../api/client'
 import { isTransientStatus } from '../api/client'
 import { deviceStateChange } from '../api/frames'
 import { randomId } from '../random-id'
+import type { DeviceStateCache } from './device-state-cache'
 import type { LiveConnection } from './live-connection'
 import type { RoomDto } from './room-list'
 import { parseInlineEmoji, type InlineEmojiReference } from '../inline-emoji'
@@ -233,6 +234,21 @@ export function threadReadMarkerKey(
   return `${encodeURIComponent(roomId)}:${encodeURIComponent(rootEventId)}`
 }
 
+export interface DeviceStateOptions {
+  /**
+   * Where scopes and their cursors persist across launches (ADR 0131). Absent,
+   * every launch starts with a full read.
+   */
+  cache?: DeviceStateCache
+  /**
+   * Resolves when a scope with no cursor may make its first full read. The app
+   * holds the marker namespaces behind the room list's first refresh, so the
+   * two large downloads do not share a slow link (ADR 0131). A rejection is
+   * treated as a resolve.
+   */
+  beforeFullRead?: (namespace: string) => Promise<void>
+}
+
 /** Read the persisted device id, minting and storing one on first run. */
 function loadDeviceId(storage: Storage): string {
   const existing = storage.getItem(DEVICE_ID_KEY)
@@ -261,11 +277,16 @@ const scopeKey = (accountId: string, namespace: string) =>
  * paths: `device_state.changed` frames (echo-suppressed by our own device id)
  * and a re-`GET` of every hydrated scope on reconnect (the bus is lossy, so a
  * reconnecting client re-reads rather than trusting frames it may have missed).
+ *
+ * Each read after the first passes the previous read's cursor as `since` and
+ * gets back only what changed (ADR 0131). With a `cache`, the marker scopes
+ * and their cursors also survive a relaunch, so a cold start reads a delta too.
  */
 export function createDeviceStateStore(
   api: ApiClient,
   live: LiveConnection,
   storage: Storage = window.localStorage,
+  options: DeviceStateOptions = {},
 ): DeviceStateStore {
   const deviceId = loadDeviceId(storage)
   const entries = signal<ReadonlyMap<string, unknown>>(new Map())
@@ -320,6 +341,19 @@ export function createDeviceStateStore(
    * absent.
    */
   const local = new Map<string, LocalWrite>()
+  /** The cursor from each scope's last answered read (ADR 0131). */
+  const cursors = new Map<string, string>()
+  /**
+   * Each scope as the server last described it — read responses only, never a
+   * local write or a frame, both of which land after the cursor and so come
+   * back in the next delta. This is what persists, so the cache never holds a
+   * value the server may not have accepted.
+   */
+  const views = new Map<string, Map<string, unknown>>()
+  /** The one restore from `options.cache` per scope; every read awaits it. */
+  const restores = new Map<string, Promise<void>>()
+  /** Tail of each scope's read chain, so one scope's reads never overlap. */
+  const reads = new Map<string, Promise<void>>()
 
   function noteWrite(ck: string): void {
     const rec = local.get(ck)
@@ -402,10 +436,71 @@ export function createDeviceStateStore(
     })
   }
 
+  /**
+   * Restore a scope from the durable cache, once, before its first read. Keys
+   * already present (a frame or a local write got there first) are newer and
+   * kept. A restored scope is *not* hydrated: the forward-only guards must
+   * compare against an answered read, not a copy that may be days old.
+   */
+  function restore(accountId: string, namespace: string): Promise<void> {
+    const sk = scopeKey(accountId, namespace)
+    const existing = restores.get(sk)
+    if (existing !== undefined) {
+      return existing
+    }
+    const started = (async () => {
+      let cached
+      try {
+        cached = await options.cache?.read(accountId, namespace)
+      } catch {
+        return
+      }
+      if (cached === undefined || cursors.has(sk)) {
+        return
+      }
+      cursors.set(sk, cached.cursor)
+      views.set(sk, new Map(cached.entries))
+      const next = new Map(entries.value)
+      for (const [key, value] of cached.entries) {
+        const ck = cacheKey(accountId, namespace, key)
+        if (value !== null && !next.has(ck) && !local.has(ck)) {
+          next.set(ck, value)
+        }
+      }
+      entries.value = next
+      bumpScope(accountId, namespace)
+    })()
+    restores.set(sk, started)
+    return started
+  }
+
+  /** Read a scope behind any read of it already in flight. */
+  function readScope(accountId: string, namespace: string): Promise<void> {
+    const sk = scopeKey(accountId, namespace)
+    const next = (reads.get(sk) ?? Promise.resolve()).then(() =>
+      fetchScope(accountId, namespace),
+    )
+    reads.set(sk, next)
+    void next.then(() => {
+      if (reads.get(sk) === next) {
+        reads.delete(sk)
+      }
+    })
+    return next
+  }
+
+  /**
+   * One read of a scope: a delta when a cursor is held, else in full. Only
+   * `readScope` calls this, so a slow full read can never land over the delta
+   * that followed it.
+   */
   async function fetchScope(
     accountId: string,
     namespace: string,
   ): Promise<void> {
+    await restore(accountId, namespace)
+    const sk = scopeKey(accountId, namespace)
+    const since = cursors.get(sk)
     // Best-effort: a hydrate that fails leaves the cache empty until the next
     // reconnect re-read; a rejection must not escape the fire-and-forget call
     // sites (WCR-02).
@@ -415,7 +510,10 @@ export function createDeviceStateStore(
       ;({ data } = await api.GET('/v1/devices/{device_id}/state/{namespace}', {
         params: {
           path: { device_id: deviceId, namespace },
-          query: { account_id: accountId },
+          query: {
+            account_id: accountId,
+            ...(since !== undefined && { since }),
+          },
         },
       }))
     } catch {
@@ -426,17 +524,65 @@ export function createDeviceStateStore(
       updateScope(accountId, namespace, { settled: true })
       return
     }
+    const read = data.data
+    // A server older than ADR 0131 sends neither field: its answer is always
+    // the whole namespace, and there is no cursor to keep.
+    const full = read.full !== false
+    const fetched = Object.entries(read.entries)
     const next = new Map(entries.value)
-    for (const [key, entry] of Object.entries(data.data.entries)) {
+    if (full) {
+      // A full read is the whole namespace, so a key it leaves out is unset.
+      const prefix = `${sk}${SEP}`
+      for (const ck of entries.value.keys()) {
+        if (
+          ck.startsWith(prefix) &&
+          !Object.hasOwn(read.entries, ck.slice(prefix.length)) &&
+          settled(ck, issued)
+        ) {
+          next.delete(ck)
+        }
+      }
+    }
+    for (const [key, entry] of fetched) {
       const ck = cacheKey(accountId, namespace, key)
       // Never let the fetched view clobber an edit the server hasn't acked.
-      if (settled(ck, issued)) {
+      if (!settled(ck, issued)) {
+        continue
+      }
+      if (entry.value === null || entry.value === undefined) {
+        next.delete(ck)
+      } else {
         next.set(ck, entry.value)
       }
     }
     entries.value = next
     bumpScope(accountId, namespace)
     updateScope(accountId, namespace, { hydrated: true, settled: true })
+
+    const view = full
+      ? new Map<string, unknown>()
+      : (views.get(sk) ?? new Map())
+    for (const [key, entry] of fetched) {
+      if (entry.value === null || entry.value === undefined) {
+        view.delete(key)
+      } else {
+        view.set(key, entry.value)
+      }
+    }
+    views.set(sk, view)
+    if (typeof read.cursor !== 'string' || read.cursor === '') {
+      cursors.delete(sk)
+      return
+    }
+    cursors.set(sk, read.cursor)
+    // An empty delta changes nothing on disk. Keeping the older cursor there
+    // costs only a delta that reaches back a little further next launch.
+    if (full || fetched.length > 0) {
+      options.cache?.write(accountId, namespace, {
+        cursor: read.cursor,
+        entries: view,
+      })
+    }
   }
 
   async function putEntries(
@@ -652,7 +798,7 @@ export function createDeviceStateStore(
     }
     for (const scope of hydrations.keys()) {
       const [accountId, namespace] = scope.split(SEP)
-      void fetchScope(accountId, namespace)
+      void readScope(accountId, namespace)
     }
   })
 
@@ -675,7 +821,18 @@ export function createDeviceStateStore(
     if (existing !== undefined) {
       return existing
     }
-    const started = fetchScope(accountId, namespace)
+    const started = (async () => {
+      await restore(accountId, namespace)
+      // Only a read with no cursor is the large one worth holding back.
+      if (!cursors.has(sk) && options.beforeFullRead !== undefined) {
+        try {
+          await options.beforeFullRead(namespace)
+        } catch {
+          // A failed gate is still an open one.
+        }
+      }
+      await readScope(accountId, namespace)
+    })()
     hydrations.set(sk, started)
     return started
   }
