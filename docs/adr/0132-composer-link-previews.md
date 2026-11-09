@@ -54,6 +54,9 @@ MSC4095 adds the rules this ADR relies on: an empty `m.url_previews` means the s
 ### 1. The composer authors bundled previews, up to three per message
 
 Each distinct eligible link in the draft gets its own card, in the order the links appear, up to three.
+Two links are the same link when their WHATWG URL serializations are equal: `new URL(link).href` in the composer, which is what `previewPreflight` compares, and the `url` crate's serialization on the server, which rejects a send whose previews name one destination twice.
+So host case, a default port, an empty path versus `/`, and the percent-encoding the parser normalizes all collapse to one link, while a different fragment, or a trailing slash on a non-empty path, does not.
+A repeated link shares the card of its first occurrence, whose exact text is the card's `matched_url`, and discarding that card discards every occurrence.
 The fourth and later links get no card.
 Discarding a card does not give its slot to a later link, which would surprise the user and cost another fetch.
 Three is a composer limit, well inside the server and renderer cap of eight and the 32 KiB metadata budget.
@@ -67,7 +70,7 @@ That check moves to a shared module, because the composer and share recovery mus
    Available only in the shell.
 2. **The homeserver**, through the existing `/link-previews/generate`.
    Used only when the user taps "Try homeserver" on a card that the device could not fill, and only if the setting allows it.
-   In the browser, where there is no device source, a card starts in that state.
+   In the browser, where there is no device source, a card starts in that state when the setting allows the homeserver.
 
 The homeserver is never asked automatically.
 ADR 0125's reason holds here: its plaintext request can enter the homeserver's logs even when the destination room is encrypted, so each disclosure is a separate, explicit choice for that link.
@@ -104,8 +107,10 @@ Each text field is normalized as `TextShare.previewField` does: whitespace is tr
 The composer applies the same rule again to every card, from either source, before it can be sent, so an out-of-range field can never reach the server.
 
 The page is parsed with the [`webpage`](https://crates.io/crates/webpage) crate (MIT), built without its `curl` feature so it only parses what the plugin fetched.
-It builds on html5ever, never runs scripts, and uses the same html5ever 0.39 already in the shell's lockfile.
-The image is decoded with the `image` crate, also already in the lockfile, with decoder limits set before allocation.
+It builds on html5ever and never runs scripts.
+`webpage` 2.1.0 requires `html5ever` ^0.39 and `markup5ever_rcdom` ^0.39; the shell's lockfile already has `html5ever` and `markup5ever` 0.39.0, so only `markup5ever_rcdom` is new and the parser is not duplicated.
+The image is decoded with the `image` crate, whose 0.25 release is already in the lockfile, with decoder limits set before allocation.
+The lockfile builds it only with its PNG and TIFF codecs, so the plugin enables JPEG, GIF and WebP decoding and JPEG encoding, which adds those codec crates.
 It is scaled to at most 1200 pixels on its longest side and re-encoded as JPEG, or PNG when it has transparency, so it always fits the upload contract (2 MiB, 4,000,000 pixels).
 Re-encoding also drops EXIF and other embedded metadata.
 SVG and animated formats are not accepted as previews; a GIF contributes its first frame.
@@ -124,7 +129,12 @@ So the host, address and NAT64 cases become one shared fixture that both test su
 - `device`: build previews on this device only.
 - `device+homeserver`: as `device`, plus the per-card "Try homeserver" button.
 
-The default is `device` in the shell, and `off` in the browser, where "on this device" is shown as unavailable.
+A value names what the user permits; a source the platform lacks is unavailable rather than an error.
+The shell offers all three values.
+The browser offers two: Off, and "Homeserver, when I ask", stored as `device+homeserver`, with "on this device" shown as unavailable.
+A browser card therefore starts in the "Try homeserver" state, and a stored `device` behaves as `off` there.
+Stored values do not move between the browser and the shell, because each has its own origin and so its own localStorage, but this rule makes any stored value safe on either.
+The default is `device` in the shell and `off` in the browser.
 The setting is per device, like Element's encrypted-room settings, because what a device can do and which network it is on differ between devices.
 The settings page explains that a device lookup shows the site your address when you type a link, before you send it, and that the homeserver option discloses the link to your homeserver even in encrypted rooms.
 
@@ -136,8 +146,12 @@ The settings page explains that a device lookup shows the site your address when
   A discarded link is remembered for the rest of that draft and not looked up again.
 - Results are cached in memory for about 20 links, so retyping or moving a link does not fetch it again.
   The cache holds normalized metadata and thumbnail bytes, never an `image_upload_id` (see section 7).
-- Lookups start only from the user's own input.
-  A draft restored when a room opens gets cards only after the user edits it, so opening a room never causes a fetch.
+- Lookups start only for links the user adds.
+  A link is added when an edit makes it appear in the text, by typing, pasting, or changing an existing link.
+  Links already present in a restored draft are not added: they get no card and no lookup, even after the user edits other text, until the user retypes or re-pastes them.
+  Opening a room or editing unrelated words therefore never causes a fetch.
+- A pasted link is looked up as soon as it is pasted, as in Signal, so the site sees the user's address before the card can be discarded.
+  Deferring that lookup is tracked in [issue 1031](https://github.com/matrix-axon/matrix-axon/issues/1031).
 - No cards in edit mode, for a message with attachments, or for a message containing a spoiler, which the renderer would hide anyway.
   The thread composer behaves the same as the room composer.
 
@@ -170,14 +184,28 @@ If the check fails, the composer degrades in a fixed order and re-checks after e
 2. Drop the last card, then the one before it, and so on.
 
 Once a card is dropped for size, the rules above are re-applied to what remains, so a draft with a discarded link can still end up as `[]`.
-If even `[]` fails the check, which can only happen when the body alone is near the limit, the field is omitted, and the server's ordinary limits decide the send exactly as they do today.
-A preview never turns a sendable draft into a rejected one.
+Even `[]` can fail the check, but only when the body alone is near the limit, because the ordinary send path without the field allows a larger body.
+If no card was discarded, the field is then omitted, and the server's ordinary limits decide the send exactly as they do today.
+If a card was discarded, omitting the field would expose that link, so the composer does not do it silently: it says the message is too long to carry its "no previews" marker, and the user either shortens it or sends it without the marker.
+A preview therefore never turns a sendable draft into a rejected one, and a discarded link is never exposed without the user's choice.
 
-A server rejection of a request that carried previews, despite the check, is a definite failure, not an unknown outcome, and means the client's mirror of the limits has drifted.
-That is HTTP 413 with `preview_too_large` or `event_too_large`, or HTTP 400 `bad_request`, which the server returns for invalid preview metadata without a more specific code.
+A server rejection of a request that carried previews, despite the check, is a definite failure, not an unknown outcome.
+These responses count as a preview rejection:
+
+| Response                | Cause on a preview send                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 413 `preview_too_large` | The 32 KiB preview budget                                                                                                 |
+| 413 `event_too_large`   | The 40 KiB content budget, which means the client's mirror has drifted, or an explicit size rejection from the homeserver |
+| 413 `payload_too_large` | A thumbnail's bytes, when the server claims the upload                                                                    |
+| 400 `bad_request`       | Invalid preview metadata or image; the server has no more specific code                                                   |
+| 404 `not_found`         | A thumbnail upload the server could not claim, because it expired, was consumed, or belongs to another account            |
+
 The message stays a failed echo with its usual Retry and Discard actions, and the echo records that its previews were rejected.
-Retry then sends the same text with the field omitted, because resending the same previews would only be rejected again.
-A 400 caused by something other than the previews loses them on Retry too, which costs only the cards.
+Retry then sends the same text with no cards, and the rules above decide the field for an empty set of ready cards: `[]` if the user discarded any card, otherwise omitted.
+Resending the same previews would only be rejected again, and omitting the field after a discard would expose the discarded link, so Retry does neither.
+If the rejected request already carried `[]` and failed for size, Retry asks the same question as the size check above.
+One of these codes caused by something other than the previews, such as a 404 for the room, loses the cards on Retry too, which costs only the cards.
+Any other failure, such as a 5xx, a timeout or an unknown outcome, keeps the cards, and Retry uploads their thumbnails again as section 7 describes.
 Nothing is retried automatically.
 
 ### 7. Thumbnails are bytes until the moment of sending
@@ -206,7 +234,13 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
   The setting can turn it off, and nothing is fetched until the user writes a link.
 - Recipients see what the sender's device saw.
   Bundled metadata is the sender's claim, which is why the card leads with the link's real host name.
-- The shell gains a dependency (`webpage`, plus `markup5ever_rcdom`); its html5ever and `image` versions are already present.
+- The shell gains dependencies, each to be checked against `deny.toml` and recorded in `THIRDPARTY.md` in the plugin PR:
+  - `webpage` and `markup5ever_rcdom`; `html5ever` 0.39 is already present.
+  - The `image` crate's JPEG, GIF and WebP codecs; the crate itself is already present.
+  - A resolver that can ask for A records only and, separately, for the AAAA records of `ipv4only.arpa`.
+    Rust's standard `ToSocketAddrs` can do neither, so the plugin uses either the platform's `getaddrinfo` with an address-family hint (for example the `dns-lookup` crate) or `hickory-resolver`, chosen in that PR.
+  - TLS pinned to the validated address while verifying the original host name.
+    `rustls` 0.23 and `tokio-rustls` are already present, and rustls takes the server name separately from the socket, so this should need no new crate.
 - Two implementations of the fetch boundary exist, held together by a shared fixture.
 - Edits keep their current behavior; editing a message with previews is left for a later decision.
 - The TUI remains a gap in `docs/client-parity.md`.
