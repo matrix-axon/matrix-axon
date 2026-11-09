@@ -46,8 +46,10 @@ import {
   type MatrixOAuthQrGrantStore,
   type MatrixOAuthQrStore,
 } from './stores/matrix-oauth-qr'
+import { createDeviceStateCache } from './stores/device-state-cache'
 import {
   createDeviceStateStore,
+  DRAFTS_NAMESPACE,
   parseThreadReadMarker,
   READ_MARKERS_NAMESPACE,
   THREAD_READ_MARKERS_NAMESPACE,
@@ -1610,6 +1612,22 @@ export function connectEphemeralPassthrough(
   }
 }
 
+/**
+ * When a device-state scope with no cursor may make its full read (ADR 0131).
+ *
+ * A marker scope with nothing cached is a download as large as the room list
+ * itself. On a slow link the two shared it, and the room list missed its
+ * deadline, so the markers wait for the room list's first refresh to settle,
+ * whether it succeeds or fails. Drafts are a few keys and prefill the
+ * composer, so they never wait.
+ */
+export function deviceStateFullReadGate(
+  rooms: Pick<RoomsStore, 'ensureLoaded'>,
+): (namespace: string) => Promise<void> {
+  return (namespace) =>
+    namespace === DRAFTS_NAMESPACE ? Promise.resolve() : rooms.ensureLoaded()
+}
+
 export function createServices(
   storage: Storage = window.localStorage,
   sessionStorage: Storage = window.sessionStorage,
@@ -1768,7 +1786,16 @@ export function createServices(
   const activeRoom = signal<string | null>(null)
   const activeThread = signal<ActiveThread | null>(null)
   const composerFocus = signal(0)
-  const deviceState = createDeviceStateStore(api, live, storage)
+  const deviceState = createDeviceStateStore(api, live, storage, {
+    // The marker scopes and their cursors, under the room list's setting:
+    // both are metadata (ADR 0131, ADR 0085).
+    cache: createDeviceStateCache({
+      cache,
+      namespace,
+      enabled: () => settings.cacheRoomList.peek(),
+    }),
+    beforeFullRead: deviceStateFullReadGate(rooms),
+  })
   const messageGestures = createMessageGestureStore(
     api,
     live,

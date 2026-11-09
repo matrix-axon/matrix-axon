@@ -3,6 +3,7 @@ import type { ApiClient } from '../api/client'
 import { isTransientStatus } from '../api/client'
 import { deviceStateChange } from '../api/frames'
 import { randomId } from '../random-id'
+import type { DeviceStateCache } from './device-state-cache'
 import type { LiveConnection } from './live-connection'
 import type { RoomDto } from './room-list'
 import { parseInlineEmoji, type InlineEmojiReference } from '../inline-emoji'
@@ -233,6 +234,21 @@ export function threadReadMarkerKey(
   return `${encodeURIComponent(roomId)}:${encodeURIComponent(rootEventId)}`
 }
 
+export interface DeviceStateOptions {
+  /**
+   * Where scopes and their cursors persist across launches (ADR 0131). Absent,
+   * every launch starts with a full read.
+   */
+  cache?: DeviceStateCache
+  /**
+   * Resolves when a scope with no cursor may make its first full read. The app
+   * holds the marker namespaces behind the room list's first refresh, so the
+   * two large downloads do not share a slow link (ADR 0131). A rejection is
+   * treated as a resolve.
+   */
+  beforeFullRead?: (namespace: string) => Promise<void>
+}
+
 /** Read the persisted device id, minting and storing one on first run. */
 function loadDeviceId(storage: Storage): string {
   const existing = storage.getItem(DEVICE_ID_KEY)
@@ -261,11 +277,16 @@ const scopeKey = (accountId: string, namespace: string) =>
  * paths: `device_state.changed` frames (echo-suppressed by our own device id)
  * and a re-`GET` of every hydrated scope on reconnect (the bus is lossy, so a
  * reconnecting client re-reads rather than trusting frames it may have missed).
+ *
+ * Each read after the first passes the previous read's cursor as `since` and
+ * gets back only what changed (ADR 0131). With a `cache`, the marker scopes
+ * and their cursors also survive a relaunch, so a cold start reads a delta too.
  */
 export function createDeviceStateStore(
   api: ApiClient,
   live: LiveConnection,
   storage: Storage = window.localStorage,
+  options: DeviceStateOptions = {},
 ): DeviceStateStore {
   const deviceId = loadDeviceId(storage)
   const entries = signal<ReadonlyMap<string, unknown>>(new Map())
@@ -320,6 +341,47 @@ export function createDeviceStateStore(
    * absent.
    */
   const local = new Map<string, LocalWrite>()
+  /** The cursor from each scope's last answered read (ADR 0131). */
+  const cursors = new Map<string, string>()
+  /**
+   * Each scope as the server last described it — read responses only, never a
+   * local write or a frame, both of which land after the cursor and so come
+   * back in the next delta. This is what persists, so the cache never holds a
+   * value the server may not have accepted.
+   */
+  const views = new Map<string, Map<string, unknown>>()
+  /** The one restore from `options.cache` per scope; every read awaits it. */
+  const restores = new Map<string, Promise<void>>()
+  /** Tail of each scope's read chain, so one scope's reads never overlap. */
+  const reads = new Map<string, Promise<void>>()
+  /**
+   * A read queued behind the chain that has not started yet. A second request
+   * for the scope joins it: a read that has not been sent will be at least as
+   * fresh as the one asked for.
+   */
+  const queued = new Map<string, Promise<void>>()
+  /**
+   * The full-read gate per scope, taken once, by the first read that finds no
+   * cursor. Memoized, so a later full read (after a failed first one) does not
+   * wait again.
+   */
+  const gates = new Map<string, Promise<void>>()
+  /**
+   * The `clock` tick at which a sibling's frame last changed each key. A read
+   * issued before that tick answered from a snapshot the frame is newer than,
+   * so it must leave the key alone. Stamped only while a read of the scope is
+   * chained, since a read issued later has a higher tick anyway, and cleared
+   * when the chain empties, so the map is bounded by frames during reads
+   * (review).
+   */
+  const framed = new Map<string, number>()
+  /**
+   * Per scope, the keys a read left alone (`readMayApply`) although its cursor
+   * covers them, so no later delta resends the server's value. The next read
+   * that may apply them sets each from `views`, the server's latest word on
+   * it, unless that read carries the key itself (review).
+   */
+  const skipped = new Map<string, Set<string>>()
 
   function noteWrite(ck: string): void {
     const rec = local.get(ck)
@@ -358,6 +420,17 @@ export function createDeviceStateStore(
     return (
       rec === undefined || (rec.written <= rec.acked && rec.ackedAt < issued)
     )
+  }
+
+  /**
+   * Whether a read issued at `issued` may change a key: no unacked local write
+   * (`settled`), and no sibling frame since the read was issued. The frame is
+   * the newer news either way; a read that missed it would roll the key back
+   * for the rest of the session, and a later local write could make that
+   * stick (review).
+   */
+  function readMayApply(ck: string, issued: number): boolean {
+    return settled(ck, issued) && (framed.get(ck) ?? -1) < issued
   }
 
   function writeCache(
@@ -402,41 +475,285 @@ export function createDeviceStateStore(
     })
   }
 
+  /**
+   * Restore a scope from the durable cache, once, before its first read. Keys
+   * already present (a frame or a local write got there first) are newer and
+   * kept. A restored scope is *not* hydrated: the forward-only guards must
+   * compare against an answered read, not a copy that may be days old.
+   */
+  function restore(accountId: string, namespace: string): Promise<void> {
+    const sk = scopeKey(accountId, namespace)
+    const existing = restores.get(sk)
+    if (existing !== undefined) {
+      return existing
+    }
+    const started = (async () => {
+      let cached
+      try {
+        cached = await options.cache?.read(accountId, namespace)
+      } catch {
+        return
+      }
+      if (cached === undefined || cursors.has(sk)) {
+        return
+      }
+      cursors.set(sk, cached.cursor)
+      views.set(sk, new Map(cached.entries))
+      const next = new Map(entries.value)
+      for (const [key, value] of cached.entries) {
+        const ck = cacheKey(accountId, namespace, key)
+        if (value !== null && !next.has(ck) && !local.has(ck)) {
+          next.set(ck, value)
+        }
+      }
+      entries.value = next
+      bumpScope(accountId, namespace)
+    })()
+    restores.set(sk, started)
+    return started
+  }
+
+  /**
+   * Wait until a scope may be read: its restore has run, and, if it still has
+   * no cursor, the full-read gate has opened. Every read passes through here,
+   * the reconnect re-read included, so a drop during the wait cannot start the
+   * full download early (review).
+   */
+  async function readyToRead(
+    accountId: string,
+    namespace: string,
+  ): Promise<void> {
+    await restore(accountId, namespace)
+    const sk = scopeKey(accountId, namespace)
+    if (cursors.has(sk) || options.beforeFullRead === undefined) {
+      return
+    }
+    let gate = gates.get(sk)
+    if (gate === undefined) {
+      gate = options.beforeFullRead(namespace).catch(() => {
+        // A failed gate is still an open one.
+      })
+      gates.set(sk, gate)
+    }
+    await gate
+  }
+
+  /**
+   * Read a scope behind any read of it already in flight, joining one that is
+   * queued and not yet sent. Never rejects: a failed read must not stop the
+   * chain, or every later read of the scope would be skipped (review).
+   */
+  function readScope(accountId: string, namespace: string): Promise<void> {
+    const sk = scopeKey(accountId, namespace)
+    const waiting = queued.get(sk)
+    if (waiting !== undefined) {
+      return waiting
+    }
+    const next: Promise<void> = (reads.get(sk) ?? Promise.resolve())
+      .then(() => readyToRead(accountId, namespace))
+      .then(() => {
+        if (queued.get(sk) === next) {
+          queued.delete(sk)
+        }
+        return fetchScope(accountId, namespace)
+      })
+      .catch(() => {
+        if (queued.get(sk) === next) {
+          queued.delete(sk)
+        }
+      })
+    queued.set(sk, next)
+    reads.set(sk, next)
+    void next.then(() => {
+      if (reads.get(sk) === next) {
+        reads.delete(sk)
+        // No read of the scope is chained, so no stamp can outrank one.
+        const prefix = `${sk}${SEP}`
+        for (const ck of framed.keys()) {
+          if (ck.startsWith(prefix)) {
+            framed.delete(ck)
+          }
+        }
+      }
+    })
+    return next
+  }
+
+  /**
+   * One read of a scope: a delta when a cursor is held, else in full. Only
+   * `readScope` calls this, so a slow full read can never land over the delta
+   * that followed it.
+   */
   async function fetchScope(
     accountId: string,
     namespace: string,
   ): Promise<void> {
+    try {
+      await readScopeOnce(accountId, namespace)
+    } catch {
+      // A body that broke the apply: settled, not hydrated, chain intact.
+      updateScope(accountId, namespace, { settled: true })
+    }
+  }
+
+  async function readScopeOnce(
+    accountId: string,
+    namespace: string,
+  ): Promise<void> {
+    const sk = scopeKey(accountId, namespace)
+    const since = cursors.get(sk)
     // Best-effort: a hydrate that fails leaves the cache empty until the next
     // reconnect re-read; a rejection must not escape the fire-and-forget call
     // sites (WCR-02).
     const issued = ++clock
     let data
+    let response: Response
     try {
-      ;({ data } = await api.GET('/v1/devices/{device_id}/state/{namespace}', {
-        params: {
-          path: { device_id: deviceId, namespace },
-          query: { account_id: accountId },
+      ;({ data, response } = await api.GET(
+        '/v1/devices/{device_id}/state/{namespace}',
+        {
+          params: {
+            path: { device_id: deviceId, namespace },
+            query: {
+              account_id: accountId,
+              ...(since !== undefined && { since }),
+            },
+          },
         },
-      }))
+      ))
     } catch {
       updateScope(accountId, namespace, { settled: true })
       return
     }
-    if (data === undefined) {
+    if (data === undefined && response.status === 400 && since !== undefined) {
+      // The server does not take this cursor: its format changed, or the
+      // record is bad. A 5xx or a timeout keeps it, since retrying the same
+      // `since` skips nothing; a 400 would repeat for good. Drop it, on disk
+      // too, and read in full once (review).
+      cursors.delete(sk)
+      views.delete(sk)
+      options.cache?.forget(accountId, namespace)
+      await readScopeOnce(accountId, namespace)
+      return
+    }
+    const read = data?.data
+    if (
+      typeof read !== 'object' ||
+      read === null ||
+      typeof read.entries !== 'object' ||
+      read.entries === null
+    ) {
+      // An error, or a 200 that is not a usable snapshot. Either way not
+      // something to replace the scope with.
       updateScope(accountId, namespace, { settled: true })
       return
     }
+    // A server older than ADR 0131 sends neither field: its answer is always
+    // the whole namespace, and there is no cursor to keep.
+    const full = read.full !== false
+    const fetched = Object.entries(read.entries).map(
+      ([key, entry]) =>
+        [key, (entry as { value?: unknown } | null)?.value] as const,
+    )
+    const view = full
+      ? new Map<string, unknown>()
+      : (views.get(sk) ?? new Map())
+    for (const [key, value] of fetched) {
+      if (value === null || value === undefined) {
+        view.delete(key)
+      } else {
+        view.set(key, value)
+      }
+    }
+    views.set(sk, view)
+
+    // A full read resends every key, so earlier skips are settled by it.
+    const carried = full ? undefined : skipped.get(sk)
+    const skips = new Set<string>()
     const next = new Map(entries.value)
-    for (const [key, entry] of Object.entries(data.data.entries)) {
+    if (full) {
+      // A full read is the whole namespace, so a key it leaves out is unset.
+      const prefix = `${sk}${SEP}`
+      for (const ck of entries.value.keys()) {
+        const key = ck.slice(prefix.length)
+        if (!ck.startsWith(prefix) || Object.hasOwn(read.entries, key)) {
+          continue
+        }
+        if (readMayApply(ck, issued)) {
+          next.delete(ck)
+        } else {
+          skips.add(key)
+        }
+      }
+    }
+    for (const [key, value] of fetched) {
       const ck = cacheKey(accountId, namespace, key)
-      // Never let the fetched view clobber an edit the server hasn't acked.
-      if (settled(ck, issued)) {
-        next.set(ck, entry.value)
+      // Never let the fetched view clobber an edit the server hasn't acked,
+      // or a sibling's frame that arrived after this read was issued.
+      if (!readMayApply(ck, issued)) {
+        skips.add(key)
+        continue
+      }
+      if (value === null || value === undefined) {
+        next.delete(ck)
+      } else {
+        next.set(ck, value)
+      }
+    }
+    // A key an earlier read skipped is covered by the cursor, so this delta
+    // resends it only if it changed again. If not, the view holds the server's
+    // value: set it now, as a full re-read used to on every reconnect.
+    for (const key of carried ?? []) {
+      if (Object.hasOwn(read.entries, key)) {
+        continue
+      }
+      const ck = cacheKey(accountId, namespace, key)
+      if (!readMayApply(ck, issued)) {
+        skips.add(key)
+        continue
+      }
+      const value = view.get(key)
+      if (value === null || value === undefined) {
+        next.delete(ck)
+      } else {
+        next.set(ck, value)
+      }
+    }
+    if (skips.size > 0) {
+      skipped.set(sk, skips)
+    } else {
+      skipped.delete(sk)
+    }
+    // A frame stamped before this read was issued can no longer outrank any
+    // later read of the scope, so its stamp is spent.
+    const scopePrefix = `${sk}${SEP}`
+    for (const [ck, tick] of framed) {
+      if (tick < issued && ck.startsWith(scopePrefix)) {
+        framed.delete(ck)
       }
     }
     entries.value = next
     bumpScope(accountId, namespace)
     updateScope(accountId, namespace, { hydrated: true, settled: true })
+
+    if (typeof read.cursor !== 'string' || read.cursor === '') {
+      cursors.delete(sk)
+      if (since !== undefined) {
+        // A record on disk would restore that cursor next launch, and no
+        // write replaces it while answers carry none (review).
+        options.cache?.forget(accountId, namespace)
+      }
+      return
+    }
+    cursors.set(sk, read.cursor)
+    // An empty delta changes nothing on disk. Keeping the older cursor there
+    // costs only a delta that reaches back a little further next launch.
+    if (full || fetched.length > 0) {
+      options.cache?.write(accountId, namespace, {
+        cursor: read.cursor,
+        entries: view,
+      })
+    }
   }
 
   async function putEntries(
@@ -623,6 +940,8 @@ export function createDeviceStateStore(
       return
     }
     const next = new Map(entries.value)
+    const tick = ++clock
+    const reading = reads.has(scopeKey(frame.accountId, change.namespace))
     for (const [key, value] of Object.entries(change.entries)) {
       const ck = cacheKey(frame.accountId, change.namespace, key)
       // A sibling's write loses to a local edit the server hasn't acked yet —
@@ -631,6 +950,9 @@ export function createDeviceStateStore(
       const rec = local.get(ck)
       if (rec !== undefined && rec.written > rec.acked) {
         continue
+      }
+      if (reading) {
+        framed.set(ck, tick)
       }
       if (value === null) {
         next.delete(ck)
@@ -652,7 +974,7 @@ export function createDeviceStateStore(
     }
     for (const scope of hydrations.keys()) {
       const [accountId, namespace] = scope.split(SEP)
-      void fetchScope(accountId, namespace)
+      void readScope(accountId, namespace)
     }
   })
 
@@ -675,7 +997,9 @@ export function createDeviceStateStore(
     if (existing !== undefined) {
       return existing
     }
-    const started = fetchScope(accountId, namespace)
+    // `readScope` restores first, then holds a read with no cursor behind the
+    // full-read gate.
+    const started = readScope(accountId, namespace)
     hydrations.set(sk, started)
     return started
   }
