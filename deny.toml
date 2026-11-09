@@ -68,4 +68,7 @@ ignore = [
   # tantivy uses only the bulk API (documented as unaffected). Same exit (#853).
   { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7.2.4, via tantivy; seekable feature is off" },
   { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7.2.4, via tantivy; only the stream write Decoder is affected and tantivy uses the bulk API" },
+  # matrix-sdk depends indirectly on libsqlite3-sys, new sdk release is needed to update
+  # tracked in https://github.com/matrix-org/matrix-rust-sdk/issues/7456
+  { id = "RUSTSEC-2026-0459", reason = "matrix-sdk; no upgrade exists" },
 ]
