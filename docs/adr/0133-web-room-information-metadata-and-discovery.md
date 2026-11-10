@@ -1,4 +1,4 @@
-# ADR 0132 — Web Room Information: typed metadata and progressive discovery
+# ADR 0133 — Web Room Information: typed metadata and progressive discovery
 
 **Status:** Proposed for [issue 623](https://github.com/matrix-axon/matrix-axon/issues/623), the web step of tracker [issue 618](https://github.com/matrix-axon/matrix-axon/issues/618).
 Implementation follows in two web PRs and one smoke PR (see Delivery).
@@ -52,7 +52,7 @@ This is the panel's freshness story under AGENTS.md rule 8.
 | `/info` | the frame names `member_counts` |
 | `/homeserver_details` | the frame names `homeserver_details` |
 | `space/hierarchy` | the frame's `room_id` is the shown space and it names `space_hierarchy` |
-| `/discovery` | the frame's `room_id` is the previewed room and it names `discovery`; while the response says `support: unsupported` and the preview is still waiting for a summary, also any frame for this account naming `space_hierarchy` |
+| `/discovery` | the frame's `room_id` is the previewed room and it names `discovery`; while the response says `support: unsupported` and the preview is still waiting for an answer, also any frame for this account naming `space_hierarchy` |
 | all of the above | the socket reconnects, or the panel or preview is opened again |
 
 The frame is a signal, never a diff, and the bus is lossy, so reconnect re-reads everything the store currently holds.
@@ -64,8 +64,9 @@ The server already coalesces frames per account (100 ms quiet, 1 s at most), so 
 
 When the homeserver has no room-summary endpoint, the `/discovery` read schedules a crawl of one joined space that links the room instead (ADR 0128 decision 5).
 The server picks that space (the first linking space, by room ID, whose crawl is due), and the response does not say which one, so its summary arrives as a `space_hierarchy` frame for a space the client cannot predict: often not the space the row was opened from, and never a known space for a Matrix-link preview, which has none.
-So while `support` is `unsupported`, a `space_hierarchy` frame for any space re-reads the one previewed room's `/discovery`, but only while the preview is still waiting for a summary: `discovered` is `null`, its status is not `available`, or its `expires_at` has passed.
-Once a read returns an unexpired `available` summary, frames no longer re-read it; a reconnect or reopen still does.
+So while `support` is `unsupported`, a `space_hierarchy` frame for any space re-reads the one previewed room's `/discovery`, but only while the preview is still waiting for an answer: `discovered` is `null`, or its `expires_at` has passed.
+Every `discovered` status is a conclusive answer with its own expiry (ADR 0128): `available`, and the denials `not_returned`, `forbidden` and `not_found`, which decision 3 shows as "Not visible in the space directory".
+So once a read returns an unexpired `discovered` of any status, frames no longer re-read it; a reconnect or reopen still does.
 
 Each of those reads can itself schedule a crawl.
 The server's fallback runs on every read while `support` is `unsupported`, and picks a linking space whose crawl is due, so once one space's crawl ends the next read picks another ([issue 1035](https://github.com/matrix-axon/matrix-axon/issues/1035) narrows this to rooms whose summary is unknown or expired).
@@ -205,7 +206,12 @@ When the panel shows a space, its children come from `space/hierarchy` instead o
   It replaces the first 500 rows with the response, keeps the loaded tail, and keeps the tail's cursor; the response's own `next_cursor` is discarded.
   A tail row that the refreshed rows now contain is dropped, so each room appears once.
   The cursor is a keyset position (the last row's `order`, `origin_ts` and room ID; `SpaceHierarchyCursor`), so the tail's cursor still continues after the tail's last child and "Load more" neither repeats nor skips past it.
-  The cost is that tail rows keep the fields they were loaded with, and a child removed from the space can linger in the tail, until the next reconnect or reopen.
+  The cost is that tail rows keep the fields they were loaded with, a child removed from the space can linger in the tail, and a child newly linked into the tail's range (or just ahead of it) is missing, until the next reconnect or reopen.
+- A frame re-read keeps the tail only if the refreshed rows include every room ID of the first 500 loaded rows; otherwise it drops the tail as a reconnect does.
+  A child linked (or re-ordered) into the first 500 positions pushes the old rows near position 500 out of the response, and the kept tail starts after the old 500th row, so those rows would be in neither part and vanish until a reconnect or reopen.
+  A child unlinked from the first 500 drops the tail too, since the client cannot tell a removal from a shift.
+  Rows carry `order` and room ID but not `origin_ts`, so the client cannot compare keyset positions directly; the room-ID check needs only what it has.
+  Crawl frames change `discovered` fields, not links, so they never fail this check; only a real link change near the head collapses the list.
   A crawl publishes `space_hierarchy` for each changed page, about once a second, so collapsing to 500 rows on every frame would undo the user's paging while they scroll.
 - A **reconnect or reopen** re-read of a list past 500 rows replaces it with the first 500 and that response's cursor, dropping the tail.
   A tail kept across a reconnect may be missing any number of changes, while a frame re-read follows a change the client has just been told about.
@@ -287,6 +293,7 @@ That follow-up, not this ADR, unblocks deprecating `space/children` (ADR 0128 de
 - **Re-read the preview's `/discovery` only on frames for the space the row was opened from.** The server, not the client, picks the space it crawls for an unsupported summary, and does not report it; a Matrix-link preview has no such space at all.
 - **Keep the loaded tail on every re-read, including a reconnect.** A tail kept across a reconnect may be missing any number of changes, and nothing re-reads it until the panel is reopened.
 - **Drop rows past 500 on every frame re-read.** Consistent, but a crawl publishes a frame about once a second, so a user who had paged past 500 rows would see the list collapse while scrolling.
+- **Detect the gap by keyset comparison** (drop the tail when the refreshed 500th row sorts before the tail's first). Exact, but rows carry no `origin_ts`, the tie-breaker after `order`, so the client cannot order rows; it would need to decode the opaque cursor or a new field.
 - **Continue a kept tail from the refreshed page's `next_cursor`.** That cursor continues after the new 500th child, not after the tail, so "Load more" would repeat or skip children.
 - **Never set `enrich` after the first read.** A crawl page dropped from the server's queue, or a transient failure, would then stall until the panel is reopened, while the panel showed it as finished.
 - **Re-read every detail source on any frame for the room.** Simpler, but one hierarchy page during a crawl would re-read `/metadata` and `/homeserver_details` each time.
@@ -315,7 +322,7 @@ Each web PR updates `docs/client-parity.md`, `docs/room-metadata.md`, `docs/demo
 
 ## Verification
 
-- Unit tests for the formatter (every row of decision 3's tables, including the overlapping cases its order settles, and every progress row in decision 6), the frame decoder, and the store: only the named sources are re-read; account and room filtering; reconnect; abort on key change; dirty-bit coalescing; `enrich` only on the first page of an open space panel, plus one resume read for a paused crawl, none for a frame whose re-read sees the next page `queued`, and timer reads for a transient failure that start at no less than 5 s and double when the server declines (a fast client clock), never a resume read prompted by its own response; a frame re-read past 500 loaded rows keeps the tail and its cursor, while a reconnect re-read drops it; and, while `support` is `unsupported`, a `space_hierarchy` frame for any space re-reads the previewed room's `/discovery` until an unexpired `available` summary arrives, and not after.
+- Unit tests for the formatter (every row of decision 3's tables, including the overlapping cases its order settles, and every progress row in decision 6), the frame decoder, and the store: only the named sources are re-read; account and room filtering; reconnect; abort on key change; dirty-bit coalescing; `enrich` only on the first page of an open space panel, plus one resume read for a paused crawl, none for a frame whose re-read sees the next page `queued`, and timer reads for a transient failure that start at no less than 5 s and double when the server declines (a fast client clock), never a resume read prompted by its own response; a frame re-read past 500 loaded rows keeps the tail and its cursor when the refreshed rows contain every room ID of the first 500 loaded rows, and drops it when a child linked into the first 500 positions pushes a loaded row out (no row vanishes), while a reconnect re-read always drops it; and, while `support` is `unsupported`, a `space_hierarchy` frame for any space re-reads the previewed room's `/discovery` until an unexpired `discovered` of any status arrives (`available`, or a `not_returned`, `forbidden` or `not_found` denial), and not after.
 - Panel and dialog tests for each state, including a room switch mid-read.
 - Playwright layout tests at the supported desktop and mobile sizes, with mock-server routes for the new reads.
 - A live run on the local demo stack: absence states fill in within seconds of opening a joined room, a space's crawl progress advances and unjoined children gain names, the preview fills from `/discovery`, and a reconnect restores state with no polling in the network log.
