@@ -21,6 +21,7 @@
 //! back-fill and must never take down the sync task. See ADR 0014.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,12 +38,20 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::homeserver_gate::{outcome_of, Caller, HomeserverGate, Outcome};
+use crate::homeserver_gate::{Caller, GateError, HomeserverGate, Outcome};
 use tokio::time::error::Elapsed;
 
-/// Bound on one room's key-backup download, retries included: the SDK's own
-/// 30 s timeout applies to each attempt, not the call (ADR 0122 decision 1).
-const BACKUP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound on one room's key-backup download, retries and the local key import
+/// included: the SDK's own 30 s timeout applies to each HTTP attempt, not the
+/// call (ADR 0122 decision 1).
+///
+/// Longer than one attempt because the import can be what runs long. On
+/// 2026-11-08 (#1005) Synapse served a room's keys in 13 ms, and the call still
+/// had not returned 30 s later, during the account's first sync. Reaching this
+/// bound halves the gate's limit but holds no slot (see [`backup_outcome`]). A
+/// sweep's cancellation still ends the download at once ([`unless_cancelled`]),
+/// so recover keeps its own shorter deadline.
+const BACKUP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Which pending rows an account-wide sweep should load.
 #[derive(Debug, Clone, Copy)]
@@ -311,18 +320,89 @@ async fn download_backup_keys(
     } else {
         Caller::Interactive
     };
-    backup
-        .gate
-        .call_classified(
-            caller,
-            BACKUP_DOWNLOAD_TIMEOUT,
-            backups.download_room_keys_for_room(room_id),
-            |result| match result {
-                Ok(Ok(())) => Outcome::Local,
-                other => outcome_of(other),
-            },
-        )
+    gated_backup_download(
+        backup.gate,
+        caller,
+        BACKUP_DOWNLOAD_TIMEOUT,
+        backups.download_room_keys_for_room(room_id),
+    )
+    .await
+}
+
+/// Run one key-backup download through `gate` as `caller`, bounded by `bound`
+/// and read by [`backup_outcome`].
+async fn gated_backup_download(
+    gate: &Arc<HomeserverGate>,
+    caller: Caller,
+    bound: Duration,
+    download: impl Future<Output = Result<(), matrix_sdk::Error>>,
+) -> Result<Result<(), matrix_sdk::Error>, Elapsed> {
+    gate.call_classified(caller, bound, download, backup_outcome)
         .await
+}
+
+/// How a key-backup download reads to the gate (ADR 0122, amendment of
+/// 2026-11-10).
+///
+/// - A success is [`Outcome::Local`]: it may have been a no-op that sent
+///   nothing (see [`download_backup_keys`]).
+/// - Reaching the bound is [`Outcome::Overloaded`]: it halves the limit, and
+///   fails the breaker's probe, but **holds no slot**. Which of two causes it
+///   was cannot be told apart. One is the client's default request config
+///   retrying a 5xx or 429 without limit, which hides the server's errors
+///   inside the timeout, so it must still count as load. The other is the
+///   local import of the keys into the crypto store, inside the same SDK call
+///   (`OlmMachine` is crate-private, so the two can't be timed apart). On
+///   2026-11-08 the import was what ran long (#1005). Read as a timeout, it
+///   held a slot for `TIMEOUT_HOLD`, which at a limit of 1 stopped all of the
+///   account's background work for 15 minutes on a healthy homeserver.
+/// - Any other error is read by the gate's own rule, except that a timeout
+///   holds no slot here either.
+///
+/// The hold (decision 4) assumes that abandoned work is still running at the
+/// homeserver. A per-room download is a cheap indexed read for Synapse, at
+/// most 0.34 s for 139 downloads in its logs from 2026-11-07 to 2026-11-10,
+/// so that assumption does not hold for this request.
+fn backup_outcome(result: &Result<Result<(), matrix_sdk::Error>, Elapsed>) -> Outcome {
+    match result {
+        Ok(Ok(())) => Outcome::Local,
+        Err(_) => Outcome::Overloaded,
+        Ok(Err(error)) => match error.outcome() {
+            Outcome::TimedOut => Outcome::Overloaded,
+            outcome => outcome,
+        },
+    }
+}
+
+/// One room's key-backup download for a sweep, or `None` if the sweep is
+/// cancelled first (see [`unless_cancelled`]).
+async fn download_for_sweep(
+    client: &Client,
+    backup: BackupSource<'_>,
+    room_id: &RoomId,
+    cancel: Option<&CancellationToken>,
+) -> Option<Result<Result<(), matrix_sdk::Error>, Elapsed>> {
+    unless_cancelled(cancel, download_backup_keys(client, backup, room_id)).await
+}
+
+/// `future`'s output, or `None` if `cancel` fires first. Recover and manual
+/// re-decryption end a sweep by cancelling its token at their own deadline,
+/// which is shorter than [`BACKUP_DOWNLOAD_TIMEOUT`] for recover. A download in
+/// flight must end there too, not run out its own bound. Dropping it is safe:
+/// the import is one transaction, and the permit's slot is freed without
+/// teaching the gate anything.
+async fn unless_cancelled<F: Future>(
+    cancel: Option<&CancellationToken>,
+    future: F,
+) -> Option<F::Output> {
+    match cancel {
+        Some(cancel) => tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            output = future => Some(output),
+        },
+        None => Some(future.await),
+    }
 }
 
 /// Re-decrypt a set of pending rows, fetching each `Room` handle once. Per-row
@@ -358,7 +438,14 @@ async fn redecrypt_rows(
             continue;
         };
         if let Some(backup) = backup {
-            match download_backup_keys(client, backup, room.room_id()).await {
+            let Some(result) = download_for_sweep(client, backup, room.room_id(), cancel).await
+            else {
+                // This room's rows were not attempted, so they stay unmarked
+                // for the next sweep.
+                summary.timed_out = true;
+                break;
+            };
+            match result {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
                     tracing::warn!(%account_id, room_id, error = %err, "failed to download room keys from backup; rows may stay UTD");
@@ -663,6 +750,221 @@ mod backup_gate_tests {
         assert!(
             matches!(snapshot.breaker, BreakerSnapshot::Open { .. }) && snapshot.limit == 0,
             "{snapshot:?}"
+        );
+    }
+
+    /// Any request bound, for the permits these tests take directly.
+    const T: Duration = Duration::from_secs(30);
+
+    /// A download that never returns, as when the key import stalls locally.
+    fn stalled() -> impl Future<Output = Result<(), matrix_sdk::Error>> {
+        std::future::pending()
+    }
+
+    /// #1005: a download that ran out its bound held its slot for
+    /// `TIMEOUT_HOLD`. The limit had already halved to 1, so the held slot shut
+    /// the gate, and every other background request waited 15 minutes on a
+    /// healthy homeserver. The download still halves the limit, but the next
+    /// request is admitted at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_download_halves_the_limit_but_holds_no_slot() {
+        let gate = HomeserverGate::for_test();
+        let started = tokio::time::Instant::now();
+        let result = gated_backup_download(
+            &gate,
+            Caller::Background,
+            BACKUP_DOWNLOAD_TIMEOUT,
+            stalled(),
+        )
+        .await;
+        assert!(result.is_err(), "the download is cut at its bound");
+        assert_eq!(started.elapsed(), BACKUP_DOWNLOAD_TIMEOUT);
+
+        let snapshot = gate.snapshot();
+        assert_eq!(
+            (snapshot.limit, snapshot.active, snapshot.held),
+            (INITIAL_LIMIT / 2, 0, 0),
+            "{snapshot:?}"
+        );
+        gate.try_acquire(T)
+            .expect("the next background request is admitted at once")
+            .finish(Outcome::Success);
+    }
+
+    /// A stalled download that is the breaker's probe fails it, so the breaker
+    /// reopens for its doubled cooldown, but holds no slot: the next probe is
+    /// not pushed out to `TIMEOUT_HOLD`.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_download_fails_the_probe_without_holding_a_slot() {
+        let gate = HomeserverGate::for_test();
+        gate.open_for_test();
+        let result = gated_backup_download(
+            &gate,
+            Caller::Background,
+            BACKUP_DOWNLOAD_TIMEOUT,
+            stalled(),
+        )
+        .await;
+        assert!(result.is_err());
+        let snapshot = gate.snapshot();
+        assert_eq!(snapshot.held, 0, "{snapshot:?}");
+        let BreakerSnapshot::Open { next_probe_at, .. } = snapshot.breaker else {
+            panic!("a failed probe reopens the breaker: {snapshot:?}");
+        };
+        let wait = next_probe_at
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default();
+        // Reopened from probing once: a doubled cooldown, not the hold, and
+        // not a probe passed straight on.
+        let cooldown = crate::homeserver_gate::COOLDOWN * 2;
+        assert!(
+            wait > cooldown - Duration::from_secs(5) && wait <= cooldown,
+            "next probe in {wait:?}"
+        );
+    }
+
+    /// A client with backups created and enabled, against `app` as its
+    /// homeserver. `app` must answer backup creation (`POST
+    /// /room_keys/version`) with a version.
+    async fn client_with_backup(app: Router) -> Client {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::builder()
+            .homeserver_url(format!("http://{address}"))
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            .build()
+            .await
+            .unwrap();
+        client
+            .matrix_auth()
+            .restore_session(
+                MatrixSession {
+                    meta: SessionMeta {
+                        user_id: "@backup:localhost".parse().unwrap(),
+                        device_id: "BACKUPDEV".into(),
+                    },
+                    tokens: SessionTokens {
+                        access_token: "backup-token".into(),
+                        refresh_token: None,
+                    },
+                },
+                RoomLoadSettings::default(),
+            )
+            .await
+            .unwrap();
+        client.encryption().backups().create().await.unwrap();
+        assert!(client.encryption().backups().are_enabled().await);
+        client
+    }
+
+    /// A download refused by an overloaded homeserver is still load.
+    #[tokio::test(start_paused = true)]
+    async fn a_download_that_meets_a_refused_connection_still_halves_the_limit() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let refused = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        let gate = HomeserverGate::for_test();
+        let result =
+            gated_backup_download(&gate, Caller::Background, BACKUP_DOWNLOAD_TIMEOUT, async {
+                Err(refused.into())
+            })
+            .await;
+        assert!(matches!(result, Ok(Err(_))));
+        assert_eq!(gate.snapshot().limit, INITIAL_LIMIT / 2);
+    }
+
+    /// The SDK retries a 503 without limit under the client's default request
+    /// config, so a homeserver that keeps answering 503 never surfaces as an
+    /// error: the download only ever reaches its bound. That still has to
+    /// count as load. Real SDK, real loopback server, a short bound in real
+    /// time.
+    #[tokio::test]
+    async fn a_download_the_sdk_keeps_retrying_on_503_still_halves_the_limit() {
+        let downloads = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&downloads);
+        let app =
+            Router::new().fallback(move |method: axum::http::Method, uri: axum::http::Uri| {
+                let count = Arc::clone(&count);
+                async move {
+                    if method == axum::http::Method::GET && uri.path().contains("/room_keys/keys/")
+                    {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"errcode": "M_UNKNOWN", "error": "busy"})),
+                        )
+                    } else {
+                        // Backup creation and anything else the SDK asks for.
+                        (axum::http::StatusCode::OK, Json(json!({"version": "1"})))
+                    }
+                }
+            });
+        let client = client_with_backup(app).await;
+
+        let gate = HomeserverGate::for_test();
+        let result = gated_backup_download(
+            &gate,
+            Caller::Background,
+            Duration::from_secs(3),
+            client
+                .encryption()
+                .backups()
+                .download_room_keys_for_room(room()),
+        )
+        .await;
+        assert!(result.is_err(), "the SDK hid the 503s: {result:?}");
+        assert!(downloads.load(Ordering::SeqCst) >= 1);
+        let snapshot = gate.snapshot();
+        assert_eq!(
+            (snapshot.limit, snapshot.held),
+            (INITIAL_LIMIT / 2, 0),
+            "{snapshot:?}"
+        );
+    }
+
+    /// Recover ends its sweep by cancelling it at 30 s. A download in flight
+    /// then must end too, not run out its own 120 s bound with the identity
+    /// lock held. Real SDK, against a homeserver that never answers the
+    /// download, in real time.
+    #[tokio::test]
+    async fn cancelling_a_sweep_ends_the_download_in_flight() {
+        let app = Router::new().fallback(
+            |method: axum::http::Method, uri: axum::http::Uri| async move {
+                if method == axum::http::Method::GET && uri.path().contains("/room_keys/keys/") {
+                    std::future::pending::<()>().await;
+                }
+                Json(json!({"version": "1"}))
+            },
+        );
+        let client = client_with_backup(app).await;
+        let gate = HomeserverGate::for_test();
+        let cancel = CancellationToken::new();
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            canceller.cancel();
+        });
+        let started = std::time::Instant::now();
+        let result = download_for_sweep(&client, background(&gate), room(), Some(&cancel)).await;
+        assert!(result.is_none(), "the sweep's cancellation won: {result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let snapshot = gate.snapshot();
+        assert_eq!(
+            (snapshot.limit, snapshot.active, snapshot.held),
+            (INITIAL_LIMIT, 0, 0),
+            "a cancelled download teaches the gate nothing: {snapshot:?}"
         );
     }
 }
