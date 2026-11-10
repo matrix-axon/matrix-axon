@@ -250,6 +250,19 @@ if [ -n "$build_number" ]; then
   config_args=(--config "{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$build_number\"}}}")
 fi
 
+# The URL scheme the build is configured to declare, which the .ipa is checked
+# against below: `plugins.deep-link.desktop.schemes` in tauri.conf.json, with
+# the iOS platform file and then `config_args` merged over it, as Tauri layers
+# them. This is the declared scheme, not the shipped one — the bundle's
+# CFBundleURLTypes comes from Info.ios.plist, so a build that changes the scheme
+# has to change both, and this check is what catches the two disagreeing. Read
+# now, before `rm -rf gen/apple`, so a config with no scheme stops the run
+# while the Xcode project is still there.
+expected_scheme=$(python3 "$repo_root/scripts/lib/read-ios-url-scheme.py" \
+  "$tauri_dir/tauri.conf.json" "$tauri_dir/tauri.ios.conf.json" \
+  ${config_args[@]+"${config_args[@]}"})
+bundle_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["identifier"])' "$tauri_dir/tauri.conf.json")
+
 echo "==> regenerating the iOS project"
 rm -rf "$tauri_dir/gen/apple"
 pnpm tauri ios init --ci ${config_args[@]+"${config_args[@]}"}
@@ -320,7 +333,6 @@ echo "==> built $ipa"
 #
 # Fatal, not a warning: a line in thousands of lines of build output is not
 # read, and `--upload` would go on to ship the broken bundle.
-expected_scheme=org.matrixaxon.axon
 ipa_check=$(mktemp -d)
 unzip -q "$ipa" 'Payload/*' -d "$ipa_check"
 shipped_app=$(ls -d "$ipa_check"/Payload/*.app | head -1)
@@ -364,7 +376,7 @@ shipped_aps=$(codesign -d --entitlements - --xml "$shipped_app" 2>/dev/null \
 echo "    aps-environment: ${shipped_aps:-"(none)"}"
 if [ "${shipped_aps:-}" != "$aps_environment" ]; then
   echo "error: the signed app declares aps-environment '${shipped_aps:-"(none)"}', not '$aps_environment'" >&2
-  echo "       Push Notifications must be enabled for org.matrixaxon.axon, and the export method selects development or production" >&2
+  echo "       Push Notifications must be enabled for $bundle_id, and the export method selects development or production" >&2
   problems=1
 fi
 # Absent UIBackgroundModes is the intended bundle. remote-notification would

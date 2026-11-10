@@ -29,6 +29,10 @@
     The scheme is the one in `src/platform/tauri.ts`'s `OAUTH_CLIENT` and in
     `plugins.deep-link.desktop.schemes`. All three have to agree, and the
     operator's server needs the matching `redirect_uris` entry.
+    The scheme in this file is what ships on iOS; `desktop.schemes` does not
+    reach the iOS bundle. `scripts/package-ios.sh` checks the .ipa against
+    `desktop.schemes`, so changing the scheme means changing both, and the
+    check fails if they disagree.
   -->
   <!--
     No UIBackgroundModes.
