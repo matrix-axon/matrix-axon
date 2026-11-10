@@ -140,18 +140,19 @@ The settings page explains that a device lookup shows the site your address when
 
 ### 5. Composer behavior
 
-- A link's lookup starts about 400 ms after the link is complete (followed by whitespace, or pasted), not while the cursor is still inside it.
+- A typed link's lookup starts about 400 ms after the link is complete, that is, followed by whitespace, not while the cursor is still inside it.
+  A pasted link's lookup starts at once, as in Signal, so the site sees the user's address before the card can be discarded.
+  Deferring the pasted case is tracked in [issue 1031](https://github.com/matrix-axon/matrix-axon/issues/1031).
 - Removing a link from the text cancels its lookup and removes its card.
 - Each card shows the site's host name prominently, with the title, description and image, and an X that discards it.
-  A discarded link is remembered for the rest of that draft and not looked up again.
+  A discarded link is remembered, by link identity, for the rest of that draft: it is not looked up again and gets no new card, even if the user deletes it and types it again.
+  That record only governs cards; what is sent depends on the body alone (section 6).
 - Results are cached in memory for about 20 links, so retyping or moving a link does not fetch it again.
   The cache holds normalized metadata and thumbnail bytes, never an `image_upload_id` (see section 7).
 - Lookups start only for links the user adds.
   A link is added when an edit makes it appear in the text, by typing, pasting, or changing an existing link.
   Links already present in a restored draft are not added: they get no card and no lookup, even after the user edits other text, until the user retypes or re-pastes them.
   Opening a room or editing unrelated words therefore never causes a fetch.
-- A pasted link is looked up as soon as it is pasted, as in Signal, so the site sees the user's address before the card can be discarded.
-  Deferring that lookup is tracked in [issue 1031](https://github.com/matrix-axon/matrix-axon/issues/1031).
 - No cards in edit mode, for a message with attachments, or for a message containing a spoiler, which the renderer would hide anyway.
   The thread composer behaves the same as the room composer.
 
@@ -162,15 +163,19 @@ A non-empty list is the whole set of previews: recipients' clients preview those
 An empty list means the sender wants no previews.
 An omitted field leaves recipients' clients free to scan the body and build their own.
 
-At send time, only cards whose link appears as a complete bare link in the body being sent count; this is the body after composer formatting, the same one the server matches against.
+The body being sent is authoritative: this is the body after composer formatting, the same one the server matches against, and only cards whose link appears in it as a complete bare link count.
 The first rule that matches decides the field:
 
-1. **Setting `off`:** omit the field, exactly as today.
+1. **Setting `off`, or a send the composer does not author previews for** (an edit, a message with attachments, or one containing a spoiler; section 5): omit the field, exactly as today.
 2. **At least one card kept and ready** after the size check below: send those cards, in text order.
-   Links that were discarded, still loading, failed or past the third therefore get no preview from any recipient.
-3. **At least one card discarded** by the user: send `url_previews: []`.
-   One discard is enough, even when other cards are still loading or failed, because omitting the field would let a recipient's client preview the link the user removed, and perhaps disclose it to that recipient's homeserver.
-4. **Otherwise** (every card still loading or failed): omit the field.
+3. **The body contains any eligible link** (section 1): send `url_previews: []`.
+   This covers a link whose card was discarded, is still loading or failed, a link past the third, a discarded link the user deleted and typed again, and a link from a restored draft.
+4. **Otherwise** (no eligible link in the body): omit the field.
+
+So once previews are on, an eligible link is previewed only from a card the user kept.
+Omitting the field instead would let a recipient's client build a preview the sender never saw, and perhaps disclose the link to that recipient's homeserver.
+The cost is that a link sent before its lookup finishes, or whose lookup failed, has no preview for anyone, as in Signal.
+Links the static check rejects, such as plain `http` links, get no card and do not trigger rule 3, so a message containing only those still omits the field.
 
 A lookup in progress never delays sending.
 
@@ -183,10 +188,11 @@ If the check fails, the composer degrades in a fixed order and re-checks after e
 1. Drop the last card's image, then the image of the card before it, and so on.
 2. Drop the last card, then the one before it, and so on.
 
-Once a card is dropped for size, the rules above are re-applied to what remains, so a draft with a discarded link can still end up as `[]`.
+Once every card is dropped for size, rule 3 applies and the field is `[]`.
 Even `[]` can fail the check, but only when the body alone is near the limit, because the ordinary send path without the field allows a larger body.
-If no card was discarded, the field is then omitted, and the server's ordinary limits decide the send exactly as they do today.
-If a card was discarded, omitting the field would expose that link, so the composer does not do it silently: it says the message is too long to carry its "no previews" marker, and the user either shortens it or sends it without the marker.
+If the user discarded none of the body's links, the field is then omitted, and the server's ordinary limits decide the send exactly as they do today.
+If the user discarded one of them, omitting the field would expose that link, so the composer does not do it silently: it says the message is too long to carry its "no previews" marker, and the user either shortens it or sends it without the marker.
+This is the only use of the discard record at send time, and it counts only discarded links present in the body being sent.
 A preview therefore never turns a sendable draft into a rejected one, and a discarded link is never exposed without the user's choice.
 
 A server rejection of a request that carried previews, despite the check, is a definite failure, not an unknown outcome.
@@ -201,10 +207,10 @@ These responses count as a preview rejection:
 | 404 `not_found`         | A thumbnail upload the server could not claim, because it expired, was consumed, or belongs to another account            |
 
 The message stays a failed echo with its usual Retry and Discard actions, and the echo records that its previews were rejected.
-Retry then sends the same text with no cards, and the rules above decide the field for an empty set of ready cards: `[]` if the user discarded any card, otherwise omitted.
-Resending the same previews would only be rejected again, and omitting the field after a discard would expose the discarded link, so Retry does neither.
-If the rejected request already carried `[]` and failed for size, Retry asks the same question as the size check above.
-One of these codes caused by something other than the previews, such as a 404 for the room, loses the cards on Retry too, which costs only the cards.
+Retry then sends the same text with no cards, so rule 3 sends `[]`.
+Resending the same previews would only be rejected again, and omitting the field would hand the links back to recipients' clients, so Retry does neither.
+If the rejected request already carried `[]` and failed for size, Retry applies the size check above to `[]`, including its question when a discarded link is in the body.
+One of these codes caused by something other than the previews, such as a 404 for the room, loses the cards on Retry too; that Retry fails for the same reason anyway, so only the cards are lost.
 Any other failure, such as a 5xx, a timeout or an unknown outcome, keeps the cards, and Retry uploads their thumbnails again as section 7 describes.
 Nothing is retried automatically.
 
@@ -237,8 +243,10 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
 - The shell gains dependencies, each to be checked against `deny.toml` and recorded in `THIRDPARTY.md` in the plugin PR:
   - `webpage` and `markup5ever_rcdom`; `html5ever` 0.39 is already present.
   - The `image` crate's JPEG, GIF and WebP codecs; the crate itself is already present.
-  - A resolver that can ask for A records only and, separately, for the AAAA records of `ipv4only.arpa`.
-    Rust's standard `ToSocketAddrs` can do neither, so the plugin uses either the platform's `getaddrinfo` with an address-family hint (for example the `dns-lookup` crate) or `hickory-resolver`, chosen in that PR.
+  - A resolver that, on every one of the five platforms, sends only A queries for the origin and a separate AAAA query for `ipv4only.arpa`, never an AAAA query for the origin.
+    Rust's standard `ToSocketAddrs` cannot.
+    The plugin PR chooses the implementation by that requirement and proves it on each platform with a test, rather than relying on an address-family hint being honored.
+    The candidates are a platform lookup restricted to IPv4, which is what the Swift reader uses (`DNSServiceGetAddrInfo` with `kDNSServiceProtocol_IPv4`), and a DNS client such as `hickory-resolver`, which sends the queries itself but must discover the platform's nameservers, which is harder on Android and iOS.
   - TLS pinned to the validated address while verifying the original host name.
     `rustls` 0.23 and `tokio-rustls` are already present, and rustls takes the server name separately from the socket, so this should need no new crate.
 - Two implementations of the fetch boundary exist, held together by a shared fixture.
@@ -252,6 +260,9 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
 2. **Shell:** the `axon-link-preview` plugin, its capability, the shared boundary fixture (also read by the Swift tests), and an optional `Platform.linkPreview(url, signal)` binding that the browser leaves undefined.
 3. **Web:** the setting, the composer cards, and the send wiring.
    The send wiring includes the timeline store's per-attempt thumbnail uploads, carried as bytes in the send options, and the failed echo's record that its previews were rejected.
+   It adds a fixture of link-identity cases (host case, default ports, empty paths, fragments, trailing slashes, percent-encoding), each with the expected `new URL(...).href`, checked by the web tests.
    This PR also updates `docs/bundled-link-previews.md` and `docs/client-parity.md`.
+4. **Server:** a test in `axon-core` that reads the same link-identity fixture and checks it against the `url` crate, so a difference between the two parsers fails a test instead of a send.
+   Internationalized host names cannot differ, because the static check in section 1 rejects them.
 
-Both implementation PRs are in the `clients/web` silo, and each carries its own tests.
+The shell and web PRs are in the `clients/web` silo, the fixture test is in the server silo, and each carries its own tests.
