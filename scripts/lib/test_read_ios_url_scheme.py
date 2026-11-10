@@ -57,6 +57,26 @@ class ReadSchemeTest(unittest.TestCase):
         r = self.run_helper(conf("org.fork.axon"), "--config", override)
         self.assertEqual((r.returncode, r.stdout), (0, "org.fork.axon\n"), r.stderr)
 
+    def test_a_platform_file_layers_over_the_base_and_under_an_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            platform = Path(d) / "tauri.ios.conf.json"
+            platform.write_text(json.dumps(conf("org.platform.axon")))
+            r = self.run_helper(conf(), str(platform))
+            self.assertEqual((r.returncode, r.stdout), (0, "org.platform.axon\n"), r.stderr)
+            r = self.run_helper(conf(), str(platform), json.dumps(conf("org.override.axon")))
+            self.assertEqual(r.stdout, "org.override.axon\n", r.stderr)
+
+    def test_a_platform_file_without_the_scheme_leaves_the_base_alone(self):
+        # The shipped tauri.ios.conf.json sets only plugins.deep-link.mobile.
+        with tempfile.TemporaryDirectory() as d:
+            platform = Path(d) / "tauri.ios.conf.json"
+            platform.write_text('{"plugins":{"deep-link":{"mobile":[{"scheme":["x"]}]}}}')
+            r = self.run_helper(conf("org.base.axon"), str(platform))
+            self.assertEqual((r.returncode, r.stdout), (0, "org.base.axon\n"), r.stderr)
+
+    def test_a_missing_platform_file_fails(self):
+        self.assertEqual(self.run_helper(conf(), "/nonexistent/tauri.ios.conf.json").returncode, 1)
+
     def test_a_missing_scheme_fails(self):
         for bad in ({}, {"plugins": {}}, conf(""), {"plugins": {"deep-link": {"desktop": {"schemes": []}}}}):
             with self.subTest(bad=bad):
