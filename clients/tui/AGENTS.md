@@ -243,6 +243,15 @@ The four write operations map to these Axon API endpoints:
 All return `{ "data": { "event_id": "..." } }`.
 
 `Mode::Editing`, `Mode::Reacting`, and `Mode::Unreacting` own their respective input flows. Redact fires immediately with no pending state. Unreact uses the redaction endpoint against the current user's reaction event ID; when several distinct reactions exist, Tab cycles the choices before Enter confirms.
+A live `m.room.redaction` masks a loaded message, withdraws a loaded reaction, or drops a loaded edit and refetches the original, and is not inserted into the timeline.
+One sender stays on a reaction tally until their last known event id for that key is withdrawn.
+A frame with no `content.redacts` cannot name its target.
+Pre-v11 redactions often put that id only in the top-level `redacts` field, which `/v1/ws` does not carry.
+That frame is logged when debug display is on, and the room's loaded timeline is marked stale.
+A background read folds `m.replace` rows the way a timeline load does, then copies that snapshot onto the loaded rows, including a body left by a redacted edit, and does not append new rows.
+An unloaded target marks only the open room.
+A room that is not open keeps its rows until the next time it is loaded.
+A search jump clears that in-flight read, the same way a timeline load does, so the old snapshot cannot land on the new slice.
 
 Send media (ADR 0059/0062, `/send <path> [caption]`) is a two-step client call, off the event loop like the other mutations above:
 

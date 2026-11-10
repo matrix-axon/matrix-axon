@@ -742,7 +742,7 @@ impl App {
         }
     }
 
-    fn apply_timeline_around_search_event(
+    pub(super) fn apply_timeline_around_search_event(
         &mut self,
         hit: EventDto,
         result: Result<TimelinePage, ApiError>,
@@ -778,6 +778,9 @@ impl App {
             .position(|event| event.event_id == hit.event_id)
             .unwrap_or(0);
         self.messages.events.insert(key.clone(), page.events);
+        // The slice is a new window. An in-flight heal still carries the old
+        // one, and its epoch has to move or that read lands here.
+        self.clear_stale_redaction(&key);
         self.clear_room_unread(&key);
         self.last_jump_ts = Some(hit.origin_ts);
         self.thread_panel = None;
@@ -971,12 +974,14 @@ fn merge_search_jump_thread_load(events: &mut Vec<EventDto>, load: SearchJumpThr
 
 fn merge_events_into(events: &mut Vec<EventDto>, incoming: impl IntoIterator<Item = EventDto>) {
     for event in incoming {
-        if !events
-            .iter()
-            .any(|existing| existing.event_id == event.event_id)
+        if let Some(existing) = events
+            .iter_mut()
+            .find(|existing| existing.event_id == event.event_id)
         {
-            events.push(event);
+            EventDto::merge_redaction(existing, &event);
+            continue;
         }
+        events.push(event);
     }
     events.sort_by_key(|event| (event.origin_ts, event.event_id.clone()));
 }

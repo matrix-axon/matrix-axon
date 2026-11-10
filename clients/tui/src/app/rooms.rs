@@ -432,6 +432,7 @@ impl App {
             self.note_room_read(key.clone(), targets.marker, Some(targets.receipt));
         }
         self.messages.events.insert(key.clone(), page.events);
+        self.clear_stale_redaction(&key);
         for (account_id, root) in unseen_thread_roots {
             self.spawn_live_thread_root_fetch(account_id, &key, &root);
         }
@@ -605,7 +606,8 @@ impl App {
         }
         self.reseed_display_names(&room, &page.events).await;
         let earliest_ts = page.events.first().map(|e| e.origin_ts);
-        self.messages.events.insert(key, page.events);
+        self.messages.events.insert(key.clone(), page.events);
+        self.clear_stale_redaction(&key);
         self.messages.selection = None;
         self.last_jump_ts = Some(ts);
         self.messages.scroll = 0;
@@ -689,7 +691,8 @@ impl App {
             }
         }
         self.reseed_display_names(&room, &page.events).await;
-        self.messages.events.insert(key, page.events);
+        self.messages.events.insert(key.clone(), page.events);
+        self.clear_stale_redaction(&key);
         self.messages.selection = None;
         // Mark a historical view so live frames stop appending and PageDown pages
         // forward; pivot 0 keeps us anchored before all history.
@@ -1410,8 +1413,13 @@ pub(crate) fn apply_edits(events: &mut Vec<EventDto>) {
     let mut applied: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (target_id, new_body, new_content) in &edits {
         if let Some(event) = events.iter_mut().find(|event| &event.event_id == target_id) {
-            event.body = Some(new_body.clone());
-            event.content = Some(new_content.clone());
+            // A redacted original stays masked. Re-applying the edit would
+            // put the body back under a tombstone, and a later read would
+            // not.
+            if !event.redacted {
+                event.body = Some(new_body.clone());
+                event.content = Some(new_content.clone());
+            }
             applied.insert(target_id.clone());
         }
     }
@@ -1708,6 +1716,24 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_id, "$b");
         assert_eq!(events[1].event_id, "$edit");
+    }
+
+    #[test]
+    fn apply_edits_keeps_a_redacted_original_masked() {
+        let mut original = msg("$orig", "hello");
+        original.redacted = true;
+        original.body = None;
+        original.content = None;
+        original.redaction_event_id = Some("$redact".to_owned());
+        let mut events = vec![original, edit("$edit", "$orig", "hello world")];
+
+        apply_edits(&mut events);
+
+        assert_eq!(events.len(), 1, "the edit row is still collapsed");
+        assert!(events[0].redacted);
+        assert!(events[0].body.is_none());
+        assert!(events[0].content.is_none());
+        assert_eq!(events[0].redaction_event_id.as_deref(), Some("$redact"));
     }
 
     #[test]

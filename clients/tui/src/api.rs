@@ -2235,6 +2235,15 @@ pub struct ReactionTally {
     pub senders: Vec<String>,
     #[serde(default)]
     pub my_event_ids: Vec<String>,
+    /// Reaction event ids observed live, per sender.
+    ///
+    /// The server tally names senders but not their event ids. A later live
+    /// redaction of one of several events from the same sender must not drop
+    /// that sender while another of their ids is still known. Empty for a
+    /// tally that arrived on a timeline read; an id that was never recorded
+    /// then still withdraws the sender once.
+    #[serde(default)]
+    pub sender_event_ids: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -2352,6 +2361,9 @@ impl EventDto {
     }
 
     fn parsed_media(&self) -> Option<ParsedMedia<'_>> {
+        if self.redacted {
+            return None;
+        }
         let content = self.content.as_ref()?;
         let kind = match content.get("msgtype").and_then(|value| value.as_str()) {
             Some("m.image") => MediaKind::Image,
@@ -2392,10 +2404,54 @@ impl EventDto {
     }
 
     pub fn formatted_body(&self) -> Option<&str> {
+        if self.redacted {
+            return None;
+        }
         let content = self.content.as_ref()?;
         (content.get("format")?.as_str()? == "org.matrix.custom.html")
             .then(|| content.get("formatted_body")?.as_str())
             .flatten()
+    }
+
+    /// The event id an `m.room.redaction` targets, from `content.redacts`.
+    ///
+    /// Room v11 puts the target there. Older rooms often put it only in the
+    /// top-level `redacts` field, which the live frame does not carry, so
+    /// those frames return `None`.
+    pub fn redaction_target(&self) -> Option<&str> {
+        if self.event_type != "m.room.redaction" {
+            return None;
+        }
+        self.content.as_ref()?.get("redacts")?.as_str()
+    }
+
+    /// Match a timeline read of a redacted event.
+    ///
+    /// The row stays. Body, decrypted content, and the reaction tally are
+    /// cleared, which is what drops formatted text and media derived from
+    /// `content`. `relates_to` stays: a read keeps it, so a redacted reply or
+    /// thread member is still that relation. This DTO has no edit or
+    /// `thread_id` fields for a read to clear.
+    pub(crate) fn mask_as_redacted(&mut self, redaction_event_id: &str) {
+        self.redacted = true;
+        if self.redaction_event_id.is_none() && !redaction_event_id.is_empty() {
+            self.redaction_event_id = Some(redaction_event_id.to_owned());
+        }
+        self.body = None;
+        self.content = None;
+        self.reactions = None;
+    }
+
+    /// Fold `incoming` into `existing` when both are the same event.
+    ///
+    /// A local mask wins over a stale unredacted copy. An incoming redacted
+    /// copy masks the row we already hold. Callers must not copy `body` or
+    /// `content` across after this returns.
+    pub(crate) fn merge_redaction(existing: &mut Self, incoming: &Self) {
+        if incoming.redacted && !existing.redacted {
+            let id = incoming.redaction_event_id.as_deref().unwrap_or("");
+            existing.mask_as_redacted(id);
+        }
     }
 
     pub fn is_message_event(&self) -> bool {

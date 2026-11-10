@@ -1175,6 +1175,15 @@ pub(crate) struct App {
     /// display names for live messages from unknown senders. `None` until the
     /// main loop wires it up (and in unit tests).
     pub(crate) members_tx: Option<mpsc::UnboundedSender<timeline::MembersOutcome>>,
+    /// Sender for a coalesced read that heals a live redaction the loaded
+    /// slice could not apply. `None` in unit tests.
+    redaction_tx: Option<mpsc::UnboundedSender<timeline::RedactionReconcile>>,
+    /// Rooms whose loaded slice missed a live redaction. Cleared when a
+    /// timeline read replaces that slice.
+    stale_redactions: HashMap<RoomKey, timeline::StaleRedaction>,
+    /// Bumped when a room's stale mark is cleared, so a heal already in
+    /// flight cannot apply onto a mark created after that clear.
+    redaction_epochs: HashMap<RoomKey, u64>,
     /// Cached-state reads behind the `/whereami` popup (ADR 0114).
     pub(crate) room_info: room_info::RoomInfoCache,
     /// Earliest instant a room may trigger another background `/members` refresh,
@@ -1468,6 +1477,9 @@ impl App {
             relation_refresh_latest: HashMap::new(),
             relations_tx: None,
             members_tx: None,
+            redaction_tx: None,
+            stale_redactions: HashMap::new(),
+            redaction_epochs: HashMap::new(),
             room_info: room_info::RoomInfoCache::default(),
             members_refresh_after: HashMap::new(),
             members_workers: Arc::new(Semaphore::new(MEMBERS_WORKERS)),
@@ -1560,6 +1572,14 @@ impl App {
         tx: mpsc::UnboundedSender<timeline::MembersOutcome>,
     ) {
         self.members_tx = Some(tx);
+    }
+
+    /// Wire up the channel the main loop drains for a redaction heal read.
+    pub(crate) fn set_redaction_sender(
+        &mut self,
+        tx: mpsc::UnboundedSender<timeline::RedactionReconcile>,
+    ) {
+        self.redaction_tx = Some(tx);
     }
 
     /// Shared state/SDK title used throughout the client.
@@ -2748,6 +2768,7 @@ impl App {
                         e.body = Some(body.to_owned());
                     }
                 }
+                self.note_redaction_heal_conflict(&key);
                 self.status = Status::EventAction {
                     debug: format!("edited: {}", result.event_id),
                     redacted: "edited",
@@ -2775,11 +2796,7 @@ impl App {
         {
             Ok(result) => {
                 let key = RoomKey::from(&room);
-                if let Some(events) = self.messages.events.get_mut(&key) {
-                    if let Some(e) = events.iter_mut().find(|e| e.event_id == event_id) {
-                        e.redacted = true;
-                    }
-                }
+                self.mask_redacted_message(&key, &event_id, &result.event_id);
                 self.status = Status::EventAction {
                     debug: format!("redacted: {}", result.event_id),
                     redacted: "redacted",

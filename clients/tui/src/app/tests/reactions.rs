@@ -427,6 +427,394 @@ fn two_senders_on_one_key_both_count() {
     );
 }
 
+fn reaction_count(app: &App, event_id: &str, key: &str) -> i64 {
+    app.selected_raw_events()
+        .iter()
+        .find(|event| event.event_id == event_id)
+        .and_then(|event| event.reactions.as_ref())
+        .and_then(|reactions| reactions.get(key))
+        .map(|tally| tally.count)
+        .unwrap_or(0)
+}
+
+/// A loaded reaction row is withdrawn from the target tally and is not itself
+/// turned into a tombstone. Redacting it again must not drive `count` negative.
+#[test]
+fn redacting_a_loaded_reaction_drops_that_sender_once() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    app.messages.events.insert(
+        RoomKey::from(&room),
+        vec![message_with_reactions("$target:example.com", Vec::new())],
+    );
+    for (id, sender) in [
+        ("$bob:example.com", "@bob:example.com"),
+        ("$carol:example.com", "@carol:example.com"),
+    ] {
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            id,
+            "$target:example.com",
+            "\u{1f44d}",
+            sender,
+        ))));
+    }
+
+    let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact:example.com",
+        "$bob:example.com",
+    ))));
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$again:example.com",
+        "$bob:example.com",
+    ))));
+
+    assert_eq!(action, LiveFrameAction::None);
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 1);
+    assert_eq!(
+        app.selected_reactions().get("$target:example.com"),
+        Some(&vec![("\u{1f44d}".to_owned(), 1)])
+    );
+    let reaction = app
+        .selected_raw_events()
+        .iter()
+        .find(|event| event.event_id == "$bob:example.com")
+        .expect("the reaction row stays in the slice");
+    assert!(!reaction.redacted);
+    assert!(app
+        .selected_raw_events()
+        .iter()
+        .all(|event| event.event_id != "$redact:example.com"));
+}
+
+#[test]
+fn redacting_our_other_devices_reaction_clears_it() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    app.messages.events.insert(
+        RoomKey::from(&room),
+        vec![message_with_reactions("$target:example.com", Vec::new())],
+    );
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+        "$from-phone:example.com",
+        "$target:example.com",
+        "\u{1f44d}",
+        "@alice:example.com",
+    ))));
+    assert_eq!(
+        app.own_reactions_for("$target:example.com")
+            .expect("loaded")
+            .len(),
+        1
+    );
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact:example.com",
+        "$from-phone:example.com",
+    ))));
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$again:example.com",
+        "$from-phone:example.com",
+    ))));
+
+    assert!(app
+        .own_reactions_for("$target:example.com")
+        .expect("loaded")
+        .is_empty());
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 0);
+    assert_eq!(app.selected_reactions().get("$target:example.com"), None);
+}
+
+/// One person, two devices: redacting one id leaves the other counted, and a
+/// repeat of the removed id must not drop the sender that is still live.
+#[test]
+fn redacting_one_of_two_own_reaction_ids_keeps_the_count() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    app.messages.events.insert(
+        RoomKey::from(&room),
+        vec![message_with_reactions("$target:example.com", Vec::new())],
+    );
+    app.live.own_senders.clear();
+    app.rooms.rooms[0].account_user_id = None;
+    app.accounts.accounts.clear();
+    app.accounts.client_visible.clear();
+
+    app.apply_local_reaction(
+        "$target:example.com",
+        "\u{1f44d}",
+        "$device-one:example.com".to_owned(),
+    );
+    for id in ["$device-one:example.com", "$device-two:example.com"] {
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            id,
+            "$target:example.com",
+            "\u{1f44d}",
+            "@alice:example.com",
+        ))));
+    }
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 1);
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact-one:example.com",
+        "$device-one:example.com",
+    ))));
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact-one-again:example.com",
+        "$device-one:example.com",
+    ))));
+
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 1);
+    let own = app
+        .own_reactions_for("$target:example.com")
+        .expect("loaded");
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].event_ids, vec!["$device-two:example.com".to_owned()]);
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact-two:example.com",
+        "$device-two:example.com",
+    ))));
+    assert!(app
+        .own_reactions_for("$target:example.com")
+        .expect("loaded")
+        .is_empty());
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 0);
+}
+
+/// The tally is patched before the history-jump guard, and the raw row is not
+/// stored. The redaction still has to find the id in `my_event_ids`.
+#[test]
+fn redacting_an_own_reaction_missing_its_row_clears_it() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    app.last_jump_ts = Some(1);
+    app.messages.events.insert(
+        RoomKey::from(&room),
+        vec![message_with_reactions("$target:example.com", Vec::new())],
+    );
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+        "$from-phone:example.com",
+        "$target:example.com",
+        "\u{1f44d}",
+        "@alice:example.com",
+    ))));
+    assert!(app
+        .selected_raw_events()
+        .iter()
+        .all(|event| event.event_id != "$from-phone:example.com"));
+    assert_eq!(
+        app.own_reactions_for("$target:example.com")
+            .expect("loaded")
+            .len(),
+        1
+    );
+
+    let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact:example.com",
+        "$from-phone:example.com",
+    ))));
+
+    assert_eq!(action, LiveFrameAction::None);
+    assert!(app
+        .own_reactions_for("$target:example.com")
+        .expect("loaded")
+        .is_empty());
+    assert_eq!(app.selected_reactions().get("$target:example.com"), None);
+    assert_eq!(app.selected_raw_events().len(), 1);
+}
+
+/// Two live reaction events from one remote sender share a count. Redacting
+/// one leaves the sender in place; redacting the other drops them once.
+#[test]
+fn redacting_one_of_two_remote_reaction_ids_keeps_the_sender() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    app.messages.events.insert(
+        RoomKey::from(&room),
+        vec![message_with_reactions("$target:example.com", Vec::new())],
+    );
+    for id in ["$bob-phone:example.com", "$bob-desktop:example.com"] {
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            id,
+            "$target:example.com",
+            "\u{1f44d}",
+            "@bob:example.com",
+        ))));
+    }
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 1);
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact-phone:example.com",
+        "$bob-phone:example.com",
+    ))));
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact-phone-again:example.com",
+        "$bob-phone:example.com",
+    ))));
+
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 1);
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact-desktop:example.com",
+        "$bob-desktop:example.com",
+    ))));
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact-desktop-again:example.com",
+        "$bob-desktop:example.com",
+    ))));
+
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 0);
+    assert_eq!(app.selected_reactions().get("$target:example.com"), None);
+}
+
+/// A history tally can say the reaction is ours without listing the event id.
+/// Redacting the loaded row still clears that contribution, once.
+#[test]
+fn redacting_an_own_reaction_missing_from_my_event_ids_clears_it_once() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    let message = message_with_reactions(
+        "$target:example.com",
+        vec![("\u{1f44d}", tally(1, true, &[]))],
+    );
+    let row = reaction_frame(
+        "$from-phone:example.com",
+        "$target:example.com",
+        "\u{1f44d}",
+        "@alice:example.com",
+    );
+    app.messages
+        .events
+        .insert(RoomKey::from(&room), vec![message, row]);
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact:example.com",
+        "$from-phone:example.com",
+    ))));
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$again:example.com",
+        "$from-phone:example.com",
+    ))));
+
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 0);
+    assert_eq!(app.selected_reactions().get("$target:example.com"), None);
+}
+
+/// An unknown own id must not drop the count while another of our ids is live.
+#[test]
+fn redacting_an_unknown_own_id_keeps_the_other_device() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    let message = message_with_reactions(
+        "$target:example.com",
+        vec![("\u{1f44d}", tally(1, true, &["$device-two:example.com"]))],
+    );
+    let row = reaction_frame(
+        "$device-one:example.com",
+        "$target:example.com",
+        "\u{1f44d}",
+        "@alice:example.com",
+    );
+    app.messages
+        .events
+        .insert(RoomKey::from(&room), vec![message, row]);
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact:example.com",
+        "$device-one:example.com",
+    ))));
+
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 1);
+    let own = app
+        .own_reactions_for("$target:example.com")
+        .expect("loaded");
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].event_ids, vec!["$device-two:example.com".to_owned()]);
+}
+
+/// The server counted a sender for an id this client never stored. A later
+/// live id must not keep that sender after the original id is redacted; the
+/// room is marked so the next read replaces the tally.
+#[test]
+fn redacting_an_untracked_remote_id_marks_the_tally_stale() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    let key = RoomKey::from(&room);
+    let mut aggregate = tally(1, false, &[]);
+    aggregate.senders = vec!["@bob:example.com".to_owned()];
+    aggregate.sender_event_ids.insert(
+        "@bob:example.com".to_owned(),
+        vec!["$bob-live:example.com".to_owned()],
+    );
+    let message = message_with_reactions("$target:example.com", vec![("\u{1f44d}", aggregate)]);
+    let row = reaction_frame(
+        "$bob-original:example.com",
+        "$target:example.com",
+        "\u{1f44d}",
+        "@bob:example.com",
+    );
+    app.messages.events.insert(key.clone(), vec![message, row]);
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction_frame(
+        "$redact:example.com",
+        "$bob-original:example.com",
+    ))));
+
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 1);
+    assert!(app.stale_redactions.contains_key(&key));
+
+    let mut healed = message_with_reactions("$target:example.com", Vec::new());
+    healed.reactions = None;
+    app.apply_redaction_reconcile(crate::app::timeline::RedactionReconcile::Page {
+        room_key: key.clone(),
+        events: Some(vec![healed]),
+        epoch: 0,
+    });
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 0);
+    assert!(!app.stale_redactions.contains_key(&key));
+}
+
+/// Local unreact when this client cannot name itself still clears `me` once.
+#[test]
+fn remove_local_reaction_with_no_user_id_clears_me_once() {
+    let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+    app.live.own_senders.clear();
+    app.rooms.rooms[0].account_user_id = None;
+    app.accounts.accounts.clear();
+    app.accounts.client_visible.clear();
+    app.messages.events.insert(
+        RoomKey::from(&room),
+        vec![message_with_reactions(
+            "$target:example.com",
+            vec![("\u{1f44d}", tally(1, true, &["$mine:example.com"]))],
+        )],
+    );
+
+    app.remove_local_reaction(
+        "$target:example.com",
+        "\u{1f44d}",
+        &["$mine:example.com".to_owned()],
+    );
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 0);
+
+    app.remove_local_reaction(
+        "$target:example.com",
+        "\u{1f44d}",
+        &["$mine:example.com".to_owned()],
+    );
+    assert_eq!(reaction_count(&app, "$target:example.com", "\u{1f44d}"), 0);
+}
+
 #[tokio::test]
 async fn global_message_navigation_abandons_edit_mode() {
     let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));

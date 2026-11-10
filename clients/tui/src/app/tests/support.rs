@@ -72,6 +72,18 @@ pub(super) fn event_with_state_key(
     }
 }
 
+/// A live `m.room.redaction` whose target is `content.redacts` (room v11).
+pub(super) fn redaction_frame(event_id: &str, target: &str) -> EventDto {
+    let mut event = event_with_id(
+        event_id,
+        "m.room.redaction",
+        None,
+        serde_json::json!({ "redacts": target }),
+    );
+    event.sender = "@bob:example.com".to_owned();
+    event
+}
+
 pub(super) fn event(event_type: &str, body: Option<&str>, content: serde_json::Value) -> EventDto {
     event_with_id(
         &format!("${event_type}:example.com"),
@@ -98,6 +110,7 @@ pub(super) fn tally(count: i64, me: bool, my_event_ids: &[&str]) -> crate::api::
         me,
         senders,
         my_event_ids: my_event_ids.iter().map(|s| (*s).to_owned()).collect(),
+        sender_event_ids: std::collections::HashMap::new(),
     }
 }
 
