@@ -251,6 +251,7 @@ That frame is logged when debug display is on, and the room's loaded timeline is
 A background read folds `m.replace` rows the way a timeline load does, then copies that snapshot onto the loaded rows, including a body left by a redacted edit, and does not append new rows.
 An unloaded target marks only the open room.
 A room that is not open keeps its rows until the next time it is loaded.
+A search jump clears that in-flight read, the same way a timeline load does, so the old snapshot cannot land on the new slice.
 
 Send media (ADR 0059/0062, `/send <path> [caption]`) is a two-step client call, off the event loop like the other mutations above:
 

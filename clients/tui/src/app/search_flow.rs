@@ -742,7 +742,7 @@ impl App {
         }
     }
 
-    fn apply_timeline_around_search_event(
+    pub(super) fn apply_timeline_around_search_event(
         &mut self,
         hit: EventDto,
         result: Result<TimelinePage, ApiError>,
@@ -778,6 +778,9 @@ impl App {
             .position(|event| event.event_id == hit.event_id)
             .unwrap_or(0);
         self.messages.events.insert(key.clone(), page.events);
+        // The slice is a new window. An in-flight heal still carries the old
+        // one, and its epoch has to move or that read lands here.
+        self.clear_stale_redaction(&key);
         self.clear_room_unread(&key);
         self.last_jump_ts = Some(hit.origin_ts);
         self.thread_panel = None;

@@ -1351,6 +1351,55 @@ fn a_page_from_a_cleared_heal_does_not_overwrite_a_newer_mark() {
 }
 
 #[test]
+fn a_search_jump_drops_an_in_flight_redaction_heal() {
+    let (mut app, key) = selected_room_app();
+    app.messages.events.insert(
+        key.clone(),
+        vec![text_message("$kept:example.com", "edited")],
+    );
+    let unnamed = || {
+        event_with_id(
+            "$redact:example.com",
+            "m.room.redaction",
+            None,
+            serde_json::json!({}),
+        )
+    };
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(unnamed())));
+    assert!(app.stale_redactions.contains_key(&key));
+
+    let jumped = text_message("$kept:example.com", "from the jump");
+    app.apply_timeline_around_search_event(
+        jumped.clone(),
+        Ok(TimelinePage {
+            events: vec![jumped],
+            next_cursor: None,
+        }),
+        None,
+    );
+    assert_eq!(
+        app.messages.events[&key][0].body.as_deref(),
+        Some("from the jump")
+    );
+    assert!(!app.stale_redactions.contains_key(&key));
+
+    // A redaction after the jump starts a new heal. The read that was already
+    // in flight belongs to the previous epoch and must not clear this one.
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(unnamed())));
+    assert!(app.stale_redactions.contains_key(&key));
+    app.apply_redaction_reconcile(RedactionReconcile::Page {
+        room_key: key.clone(),
+        events: Some(vec![text_message("$kept:example.com", "original")]),
+        epoch: 0,
+    });
+    assert_eq!(
+        app.messages.events[&key][0].body.as_deref(),
+        Some("from the jump")
+    );
+    assert!(app.stale_redactions.contains_key(&key));
+}
+
+#[test]
 fn a_live_redaction_masks_search_copies_of_the_target() {
     let (mut app, key) = selected_room_app();
     let message = text_message("$msg:example.com", "hello");
