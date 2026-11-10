@@ -186,9 +186,11 @@ pub(crate) async fn run(
 /// crypto store (from a prior run or a just-finished `recover()`) won't fire the
 /// arrival stream, so we retry the full backlog once at boot.
 ///
-/// `cancel` is checked per room so a recover/manual timeout can stop the sweep
-/// and still return the partial summary (ADR 0098). The boot path races this
-/// against the supervised task's cancel token.
+/// `cancel` is checked between rooms and between rows, and raced against each
+/// room's key-backup download while it is in flight ([`unless_cancelled`]), so
+/// a recover/manual deadline stops the sweep at once and still returns the
+/// partial summary (ADR 0098). The boot path races this against the supervised
+/// task's cancel token.
 ///
 /// Each room's key-backup download goes through `backup` (ADR 0122): the boot
 /// sweep waits for a permit, while recover and manual re-decryption, which a
@@ -388,9 +390,13 @@ async fn download_for_sweep(
 /// `future`'s output, or `None` if `cancel` fires first. Recover and manual
 /// re-decryption end a sweep by cancelling its token at their own deadline,
 /// which is shorter than [`BACKUP_DOWNLOAD_TIMEOUT`] for recover. A download in
-/// flight must end there too, not run out its own bound. Dropping it is safe:
-/// the import is one transaction, and the permit's slot is freed without
-/// teaching the gate anything.
+/// flight must end there too, not run out its own bound. Dropping it is safe,
+/// since the import is one transaction, and it records no outcome:
+///
+/// - Sent as [`Caller::Background`], it frees its permit's slot. If it was the
+///   breaker's probe, the probe is dropped and the next waiter probes at once.
+/// - Sent as [`Caller::Interactive`] (backups not yet enabled, or a sweep a
+///   user is waiting on), it held no slot and reports nothing.
 async fn unless_cancelled<F: Future>(
     cancel: Option<&CancellationToken>,
     future: F,
@@ -965,6 +971,100 @@ mod backup_gate_tests {
             (snapshot.limit, snapshot.active, snapshot.held),
             (INITIAL_LIMIT, 0, 0),
             "a cancelled download teaches the gate nothing: {snapshot:?}"
+        );
+    }
+
+    /// Cancel `cancel` after `after`, from another task.
+    fn cancel_after(cancel: &CancellationToken, after: Duration) {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            cancel.cancel();
+        });
+    }
+
+    /// A stalled download that is the breaker's probe and is cancelled neither
+    /// passes nor fails the probe: the breaker stays open, and the next waiter
+    /// probes at once instead of after another cooldown.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_the_probe_download_lets_the_next_request_probe() {
+        let gate = HomeserverGate::for_test();
+        gate.open_for_test();
+        let cancel = CancellationToken::new();
+        // Cancel once the cooldown is over and the download has become the
+        // probe, noting the breaker's state just before.
+        let canceller = {
+            let (gate, cancel) = (gate.clone(), cancel.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(crate::homeserver_gate::COOLDOWN + Duration::from_secs(5)).await;
+                let before = gate.snapshot().breaker;
+                cancel.cancel();
+                before
+            })
+        };
+        let result = unless_cancelled(
+            Some(&cancel),
+            gated_backup_download(
+                &gate,
+                Caller::Background,
+                BACKUP_DOWNLOAD_TIMEOUT,
+                stalled(),
+            ),
+        )
+        .await;
+        assert!(result.is_none(), "the cancellation won: {result:?}");
+        let before = canceller.await.expect("canceller task");
+        assert!(
+            matches!(before, BreakerSnapshot::Probing { .. }),
+            "the download was the probe when cancelled: {before:?}"
+        );
+
+        let snapshot = gate.snapshot();
+        assert_eq!((snapshot.active, snapshot.held), (0, 0), "{snapshot:?}");
+        let BreakerSnapshot::Open { next_probe_at, .. } = snapshot.breaker else {
+            panic!("a dropped probe leaves the breaker open: {snapshot:?}");
+        };
+        let wait = next_probe_at
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default();
+        assert!(wait < Duration::from_secs(1), "next probe in {wait:?}");
+        gate.try_acquire(T)
+            .expect("the next request is admitted as the probe")
+            .finish(Outcome::Success);
+        assert!(
+            matches!(gate.snapshot().breaker, BreakerSnapshot::Closed),
+            "{:?}",
+            gate.snapshot()
+        );
+    }
+
+    /// An interactive download takes no permit, so a cancelled one leaves the
+    /// gate exactly as it was: no halving, no slot, no breaker change.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_an_interactive_download_reports_nothing() {
+        let gate = HomeserverGate::for_test();
+        let cancel = CancellationToken::new();
+        cancel_after(&cancel, Duration::from_secs(5));
+        let result = unless_cancelled(
+            Some(&cancel),
+            gated_backup_download(
+                &gate,
+                Caller::Interactive,
+                BACKUP_DOWNLOAD_TIMEOUT,
+                stalled(),
+            ),
+        )
+        .await;
+        assert!(result.is_none(), "the cancellation won: {result:?}");
+        let snapshot = gate.snapshot();
+        assert_eq!(
+            (snapshot.limit, snapshot.active, snapshot.held),
+            (INITIAL_LIMIT, 0, 0),
+            "{snapshot:?}"
+        );
+        assert!(
+            matches!(snapshot.breaker, BreakerSnapshot::Closed),
+            "{snapshot:?}"
         );
     }
 }

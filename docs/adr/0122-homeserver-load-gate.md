@@ -114,6 +114,11 @@ permit.finish(Outcome::of(&result, elapsed)); // feeds the limit
     fails. A timeout during the import is also recorded as a homeserver
     timeout. Both are accepted: the import is local and short next to a 30 s
     bound, so the timeout almost always fires during the request.
+
+    _Amended 2026-11-10 for `download_room_keys_for_room`: #1005 showed the
+    import is not always short. That download's bound is now 120 s, and
+    reaching it reads as `Overloaded` with no hold. See "Amendment —
+    key-backup downloads never hold a slot" below._
 - **A permit dropped without `finish`** (cancellation, shutdown) releases its
   slot and teaches the gate nothing.
 
