@@ -14,6 +14,10 @@
       "comment": "The shell's own HTTP transport (ADR 0127): one pooled client for every `/v1` and media request. Any `http` or `https` URL on any host and port, because the server is the user's own and is chosen at runtime (ADR 0102 \u00a7 3), so there is no build-time host to narrow this to. The command enforces the scheme itself, on the request and on every redirect hop; narrowing the authority is issue 893."
     },
     {
+      "identifier": "axon-link-preview:default",
+      "comment": "Build a link preview on this device for a link the user wrote in the composer, and cancel it (ADR 0132). Unscoped because the command enforces its own boundary on every hop: HTTPS to a public DNS name, the origin's A records only, a connection to the validated public address, TLS verified against the original name, 25 seconds and two lookups at a time. The page cannot widen that; it chooses only which link to ask about."
+    },
+    {
       "identifier": "dialog:allow-save",
       "comment": "Ask the user where to put a downloaded attachment. The dialog is the only thing that chooses a path; nothing here can pick one on the user's behalf."
     },

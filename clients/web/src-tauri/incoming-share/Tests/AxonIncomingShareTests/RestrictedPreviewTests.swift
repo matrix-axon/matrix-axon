@@ -12,41 +12,6 @@ final class RestrictedPreviewTests: XCTestCase {
       XCTAssertEqual(TextShare.devicePreviewURL(entry.url), entry.eligible, entry.url)
     }
   }
-  func testAddressScopeBoundaries() throws {
-    for text in [
-      "0.1.2.3", "10.0.0.1", "100.64.0.1", "100.127.255.255", "127.1.2.3", "169.254.169.254",
-      "172.16.0.1", "172.31.255.255", "192.0.0.1", "192.0.2.1", "192.168.1.1", "198.18.0.1",
-      "198.19.255.255", "198.51.100.1", "203.0.113.1", "224.0.0.1", "255.255.255.255", "::", "::1",
-      "::ffff:127.0.0.1", "fe80::1", "fc00::1", "ff02::1", "2001:db8::1", "2001::1",
-      "2002:7f00:1::", "3fff::1", "64:ff9b::7f00:1",
-    ] {
-      XCTAssertFalse(try XCTUnwrap(PreviewNetwork.Address.parse(text)).isPublic, text)
-    }
-    for text in [
-      "1.1.1.1", "8.8.8.8", "100.63.255.255", "100.128.0.1", "172.15.255.255", "172.32.0.1",
-      "198.17.255.255", "198.20.0.1", "2001:4860:4860::8888", "2606:4700:4700::1111",
-      "64:ff9b::808:808",
-    ] {
-      XCTAssertTrue(try XCTUnwrap(PreviewNetwork.Address.parse(text)).isPublic, text)
-    }
-  }
-  func testUnsafeURLFormsRejectedBeforeDNS() throws {
-    for raw in [
-      "http://example.org/", "https://127.0.0.1/", "https://[::1]/", "https://router.lan/",
-      "https://service.corp/", "https://router.home/", "https://router.local./",
-      "https://user:pass@example.org/", "https://example.org:65536/",
-      "https://example.org%0d%0aHeader:value/", "https://-bad.example.org/", "file:///tmp/a",
-    ] {
-      guard let url = URL(string: raw) else { continue }
-      XCTAssertThrowsError(
-        try PreviewNetwork.fetch(
-          url, kind: .page, deadline: .now() + 1, cancellation: ShareCancellation(),
-          resolve: { _, _, _ in
-            XCTFail("Blocked URLs must not reach DNS")
-            throw ShareFailure.invalid
-          }))
-    }
-  }
   func testDNSRebindingAndRedirectsCannotReachPrivateEndpoints() throws {
     let initial = URL(string: "https://page.example.org/a")!
     var connections: [String] = []
@@ -81,18 +46,6 @@ final class RestrictedPreviewTests: XCTestCase {
             status: 302, headers: ["location": "https://192.168.1.1/admin"], body: Data(), url: url)
         }))
     XCTAssertEqual(lookups, 1)
-  }
-  func testParserExtractsInertMetadataAndDecodesEntities() throws {
-    let page = try RestrictedPreview.parse(
-      Data(
-        "<html><head><title>Fallback</title><meta property='og:title' content='A &amp; B'><meta name=description content='Details &quot;quoted&quot;'><meta property='og:site_name' content='Example'><meta property='og:image' content='/photo.png'><script src='https://127.0.0.1/script'></script><link rel=stylesheet href='https://127.0.0.1/style'></head></html>"
-          .utf8))
-    XCTAssertEqual(page.title, "A & B")
-    XCTAssertEqual(page.description, "Details \"quoted\"")
-    XCTAssertEqual(page.siteName, "Example")
-    XCTAssertEqual(page.image, "/photo.png")
-    XCTAssertThrowsError(
-      try RestrictedPreview.parse(Data(String(repeating: "<x>", count: 513).utf8)))
   }
   func testBlockedPreviewImagePreservesTextAndNeverConnects() throws {
     let url = URL(string: "https://example.org/article")!

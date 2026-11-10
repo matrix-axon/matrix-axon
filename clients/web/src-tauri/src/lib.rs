@@ -77,6 +77,10 @@ pub fn run() {
         // every `/v1` and media request uses.
         .plugin(tauri_plugin_axon_http::init())
         .plugin(tauri_plugin_websocket::init())
+        // The composer's link previews (ADR 0132): a restricted reader of
+        // public HTTPS pages, separate from `axon-http` so it neither borrows
+        // that transport's reach nor stands in the way of narrowing it.
+        .plugin(tauri_plugin_axon_link_preview::init())
         // Saving an attachment: a save dialog and a real write, because
         // `<a download>` does nothing from a custom scheme.
         .plugin(tauri_plugin_dialog::init())

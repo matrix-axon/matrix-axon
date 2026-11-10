@@ -25,7 +25,7 @@ generates their attribution for us. They are recorded here deliberately.
   <https://webkit.org/licensing-webkit/>.
 
 ## OVERVIEW
-- MIT License (used by 438 crates)
+- MIT License (used by 443 crates)
 - Unicode License v3 (used by 19 crates)
 - ISC License (used by 18 crates)
 - Apache License 2.0 (used by 11 crates)
@@ -2006,7 +2006,9 @@ third-party/chromium/LICENSE.
   - Copyright (c) 2014 The html5ever Project Developers
       - html5ever 0.39.0
       - markup5ever 0.39.0
+      - markup5ever_rcdom 0.39.0+unofficial
       - web_atoms 0.2.6
+      - xml5ever 0.39.0
   - Copyright (c) 2017 http-rs authors
       - http 1.5.0
   - Copyright (c) 2019-2026 Sean McArthur &amp; Hyper Contributors
@@ -2322,6 +2324,8 @@ DEALINGS IN THE SOFTWARE.
   - Copyright (c) 2015 Alice Maz
       - base64 0.21.7
       - base64 0.22.1
+  - Copyright (c) 2016 PistonDevelopers
+      - color_quant 1.1.0
   - Copyright (c) 2019 The Crossbeam Project Developers
       - crossbeam-channel 0.5.16
       - crossbeam-utils 0.8.22
@@ -2337,6 +2341,8 @@ DEALINGS IN THE SOFTWARE.
       - embed-resource 3.0.11
   - Copyright (c) 2015 Bartłomiej Kamiński
       - generic-array 0.14.7
+  - Copyright (c) 2015 nwin
+      - gif 0.14.2
   - Copyright (c) 2013-2021, The Gtk-rs Project Developers.
     Copyright (c) 2021, Tauri Programme within The Commons Conservancy.
       - javascriptcore-rs 1.1.2
@@ -2494,6 +2500,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       - half 2.7.1
       - ident_case 1.0.1
       - image 0.25.10
+      - image-webp 0.2.4
 ================================================================================
 MIT License
 
