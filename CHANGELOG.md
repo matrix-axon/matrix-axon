@@ -3,6 +3,26 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.27 - 2026-11-10
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* ignore rustsec-2026-0459 security vulnerability on libsqlite3-sys until upstream rust-sdk updates this dependency by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1026
+#### Features
+* feat(tui): apply live redactions to the open timeline by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1027
+#### Performance
+* feat(web): incremental device-state reads with a persisted cursor by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1023
+#### Documentation
+* docs(adr): composer link previews on every platform (ADR 0132) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1025
+* docs(adr): web Room Information metadata and progressive discovery (ADR 0133) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1028
+#### Build and CI
+* build(ios): derive the expected URL scheme from tauri.conf.json by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1029
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.26...v0.1.27
+
 ## v0.1.26 - 2026-11-09
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
