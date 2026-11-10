@@ -114,6 +114,11 @@ permit.finish(Outcome::of(&result, elapsed)); // feeds the limit
     fails. A timeout during the import is also recorded as a homeserver
     timeout. Both are accepted: the import is local and short next to a 30 s
     bound, so the timeout almost always fires during the request.
+
+    _Amended 2026-11-10 for `download_room_keys_for_room`: #1005 showed the
+    import is not always short. That download's bound is now 120 s, and
+    reaching it reads as `Overloaded` with no hold. See "Amendment —
+    key-backup downloads never hold a slot" below._
 - **A permit dropped without `finish`** (cancellation, shutdown) releases its
   slot and teaches the gate nothing.
 
@@ -433,3 +438,75 @@ background requests.
   one user's rate limit slow every account on the homeserver. The SDK's
   default retries also replay a 429 inside a user call's deadline, so a
   persistent one reports as a timeout. Both are left to #885.
+
+## Amendment — key-backup downloads never hold a slot (2026-11-10)
+
+The step 1 amendment accepted that a key-backup download's outer timeout
+"can fire while the downloaded keys are being imported", and recorded such a
+timeout as a homeserver timeout, because "the import is local and short next to
+a 30 s bound". #1005 shows that assumption was wrong, at a cost of 15 minutes of
+background work.
+
+### What happened on 2026-11-08
+
+A local build began the startup re-decryption sweep against bostoncoop.net at
+15:12:14 UTC, during the account's first sync. Synapse's access log shows the
+sweep's first per-room download (`GET /room_keys/keys/{roomId}`) served in
+13 ms, a 699-byte response. Axon reported the same call as timed out at
+15:12:44. That timeout halved the limit to 1 and held the slot for
+`TIMEOUT_HOLD`. Synapse logged no other per-room download from that host
+until the hold ended at 15:27:45. The remaining 97 rooms then downloaded in
+about a minute, none taking longer than 0.34 s on Synapse. So the 30 s were
+spent inside the SDK call after the response arrived, in the key import. Every
+other request in that window was answered quickly.
+
+More generally, the 139 per-room downloads in Synapse's logs from 2026-11-07
+to 2026-11-10 took at most 0.34 s server-side, for responses of up to 1.6 MB.
+For Synapse, a per-room download is an indexed read. Decision 4's premise, that
+an abandoned request keeps the homeserver busy for minutes, was measured on
+`/messages` and does not carry over to it.
+
+### Decision
+
+- **A key-backup download never holds a slot.** When a download reaches its
+  bound, or ends in an HTTP timeout, the gate reads it as `Overloaded`, not
+  `TimedOut`. It still halves the limit, still fails the breaker's probe (which
+  reopens for its doubled cooldown), and still counts toward one burst. It just
+  skips decision 4's hold. A 5xx, 429 or transport error that surfaces counts
+  as before, and a success stays `Local`.
+- **Why not neutral.** A first draft read the bound as `Local`, teaching the gate
+  nothing. Review showed that hides overload. The client's default request
+  config retries a 5xx or 429 without limit, so against a homeserver that keeps
+  answering 503 the download never surfaces an error and only reaches its
+  bound. A timeout is the only signal this caller can give, and it can't be
+  told apart from a slow local import. Axon can't send the request itself with
+  retries disabled and then import the response: `OlmMachine`, the backup
+  decryption key and the backup version are all crate-private in matrix-sdk
+  0.19.1. Halving without a hold keeps the overload signal and costs the
+  import case only a halving, which growth undoes.
+- **The bound is 120 s, not 30 s,** so a slow import can finish and its room's
+  rows get decrypted. That matters because the default startup sweep tries each
+  row only once. A homeserver that keeps answering 503 is now noticed after
+  120 s, not 30 s, while one request at a time retries under the SDK's backoff.
+- **A sweep's cancellation ends the download in flight.** Recover gives its
+  whole sweep 30 s and ends it by cancelling the sweep's token. The
+  re-decryption loop used to check that token only between rooms, so with a
+  120 s bound a stalled first download would have kept recover, and its
+  identity lock, waiting for 120 s. Each download now races the token. A
+  cancelled download is dropped, which frees its permit without teaching the
+  gate anything, and its room's rows stay unattempted for the next sweep.
+- **The permit is held for the whole call.** Releasing it at 30 s and letting
+  the call run on without one was rejected, for the same unlimited-retry
+  reason.
+
+### Consequences
+
+- In #1005's case, one stalled download at the starting limit of 2 halves it
+  to 1 and leaves no held slot, so the next background request is admitted at
+  once, not 15 minutes later. At a limit of 1, a stalled download opens the
+  breaker for its one-minute cooldown, not for `TIMEOUT_HOLD`.
+- A homeserver that keeps failing this one endpoint gets at most one retrying
+  download at a time, for 120 s each, before the breaker opens. After that,
+  probes are spaced by the doubling cooldown and not by the hold, so a probe
+  can come as soon as 2 minutes after a failed one. Decision 4's hold remains
+  for every other caller.
