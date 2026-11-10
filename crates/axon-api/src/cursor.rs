@@ -1,5 +1,5 @@
 //! Opaque pagination cursors: the timeline's, search's, and the space
-//! hierarchy's.
+//! hierarchy's, and the clock cursors of incremental reads (ADR 0131, ADR 0134).
 //!
 //! The store's [`TimelineCursor`] is a `(origin_ts, id)` sort key with public
 //! fields. We don't expose those on the wire — instead a cursor is the
@@ -13,6 +13,7 @@
 use axon_store::{SpaceHierarchyCursor, TimelineCursor};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -22,6 +23,24 @@ use uuid::Uuid;
 /// anything materially longer is malformed (or hostile) — reject it before we
 /// spend work base64-decoding it. Universal hygiene applied by every decoder here.
 const MAX_ENCODED_LEN: usize = 64;
+
+/// Encode a read's database clock as an incremental read's opaque cursor
+/// (ADR 0131, ADR 0134): microseconds since the epoch. Clients never parse it,
+/// so the format can change.
+pub fn encode_clock(as_of: DateTime<Utc>) -> String {
+    as_of.timestamp_micros().to_string()
+}
+
+/// Decode a clock cursor; `None` for anything [`encode_clock`] could not have
+/// written, including non-canonical integers such as `+123` or `00123`.
+pub fn decode_clock(cursor: &str) -> Option<DateTime<Utc>> {
+    cursor
+        .parse::<i64>()
+        .ok()
+        .filter(|micros| *micros >= 0)
+        .and_then(DateTime::from_timestamp_micros)
+        .filter(|as_of| encode_clock(*as_of) == cursor)
+}
 
 /// Encode a sort key into an opaque cursor string.
 pub fn encode(cursor: TimelineCursor) -> String {

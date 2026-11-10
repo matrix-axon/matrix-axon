@@ -75,7 +75,7 @@ pub use room_detail_acquisition::{
 pub use room_summary_discovery::{
     RoomSummarySnapshot, SummaryBegin, SummaryLimits, SummaryRefreshRow, SummaryStep, SummaryWrite,
 };
-pub use rooms::{RoomSummary, RoomTag};
+pub use rooms::{RoomListRead, RoomSummary, RoomTag};
 pub use search::{
     room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,
     SEARCH_OUTBOX_ROOM_PURGE_PREFIX,
@@ -122,6 +122,8 @@ pub struct Store {
     purge_wakeup: Arc<Notify>,
     // How far a device-state delta reaches behind its cursor (ADR 0131).
     device_state_overlap: chrono::Duration,
+    // How far a room-list delta reaches behind its cursor (ADR 0134).
+    room_list_overlap: chrono::Duration,
 }
 
 impl Store {
@@ -265,6 +267,9 @@ impl Store {
             purge_retry_cursor: Arc::new(Mutex::new(None)),
             purge_wakeup: Arc::new(Notify::new()),
             device_state_overlap: device_state::overlap_for(config.timeouts.statement_secs),
+            room_list_overlap: rooms::room_list_overlap_for(
+                config.timeouts.maintenance_statement_secs,
+            ),
         })
     }
 

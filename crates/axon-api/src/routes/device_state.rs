@@ -24,6 +24,7 @@ use tokio::sync::broadcast;
 use utoipa::IntoParams;
 use uuid::Uuid;
 
+use crate::cursor;
 use crate::dto::{
     DeviceStateDto, DeviceStateEntryDto, PutDeviceStateRequest, PutDeviceStateResponse,
 };
@@ -73,21 +74,10 @@ pub struct DeviceStateGetQueryDto {
     pub since: Option<String>,
 }
 
-/// Encode a read's clock as its opaque cursor (ADR 0131): microseconds since
-/// the epoch. Clients never parse it, so the format can change.
-fn encode_cursor(as_of: DateTime<Utc>) -> String {
-    as_of.timestamp_micros().to_string()
-}
-
-/// Decode a `since` cursor; anything [`encode_cursor`] could not have written
-/// is a `400`, including non-canonical integers such as `+123` or `00123`.
-fn decode_cursor(cursor: &str) -> Result<DateTime<Utc>, ApiError> {
-    cursor
-        .parse::<i64>()
-        .ok()
-        .filter(|micros| *micros >= 0)
-        .and_then(DateTime::from_timestamp_micros)
-        .filter(|as_of| encode_cursor(*as_of) == cursor)
+/// Decode a `since` cursor; anything [`cursor::encode_clock`] could not have
+/// written is a `400`.
+fn decode_cursor(since: &str) -> Result<DateTime<Utc>, ApiError> {
+    cursor::decode_clock(since)
         .ok_or_else(|| ApiError::bad_request("since is not a cursor from this endpoint"))
 }
 
@@ -147,7 +137,7 @@ pub async fn get_device_state(
         namespace,
         entries,
         full,
-        cursor: encode_cursor(as_of),
+        cursor: cursor::encode_clock(as_of),
     }))
 }
 

@@ -2290,6 +2290,13 @@ export interface paths {
         /**
          * List rooms
          * @description List rooms across accounts, most-recent-activity first.
+         *
+         *     Every response carries a `cursor`. Passing it back as `since` returns only
+         *     the rooms that changed since that read, with the rooms that left the list
+         *     in `removed` (`full: false`), for the caller to merge into what it holds.
+         *     `total` is the size of the whole list; a merged list of any other size has
+         *     missed a removal, and the caller should read again without `since`
+         *     (ADR 0134).
          */
         get: operations["list_rooms"];
         put?: never;
@@ -3631,78 +3638,6 @@ export interface components {
                  *     bound but cannot produce a session.
                  */
                 sign_in_available: boolean;
-            }[];
-        };
-        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
-        ApiResponse_Vec_RoomDto: {
-            data: {
-                /**
-                 * Format: uuid
-                 * @description Axon account this room belongs to.
-                 */
-                account_id: string;
-                /** @description Matrix user ID for this Axon account. */
-                account_user_id: string;
-                /** @description Avatar `mxc://` URI (`m.room.avatar`), if set. */
-                avatar_url?: string | null;
-                /** @description Canonical alias (`m.room.canonical_alias`), if set. */
-                canonical_alias?: string | null;
-                /**
-                 * @description The room's display name as Matrix clients calculate it (ADR 0118):
-                 *     `m.room.name`, else the canonical alias, else a name built from the
-                 *     room's other members, such as `Alice, Bob` or `Empty Room (was Alice)`.
-                 *     Computed by matrix-rust-sdk and cached by Axon; `null` until the sync
-                 *     engine has stored a value. `name` and `canonical_alias` update first
-                 *     when state changes, so titles should prefer them, then this.
-                 */
-                display_name?: string | null;
-                /**
-                 * Format: int64
-                 * @description SDK-derived highlight count (issue #313, ADR 0070), from
-                 *     `Room::num_unread_mentions()`.
-                 */
-                highlight_count: number;
-                /**
-                 * @description Whether this room appears in the account's global `m.direct` map
-                 *     (ADR 0103 / ADR 0055 Tier 1).
-                 */
-                is_direct: boolean;
-                /**
-                 * Format: int64
-                 * @description `origin_server_ts` of the most recent content-bearing event (a real
-                 *     message, not a membership/state/redaction/reaction event), in
-                 *     milliseconds — the sort key. Falls back to the room's most recent
-                 *     event of any type when it has no content-bearing event yet.
-                 */
-                last_activity_ts: number;
-                /**
-                 * @description The most recent content-bearing event's id, if the room has any
-                 *     events (with the same any-type fallback as `last_activity_ts`).
-                 */
-                last_event_id?: string | null;
-                /** @description Room name (`m.room.name`), if set. */
-                name?: string | null;
-                /**
-                 * Format: int64
-                 * @description SDK-derived unread notification count (issue #313, ADR 0070). This is
-                 *     matrix-sdk's client-side read-receipt-derived
-                 *     `Room::num_unread_notifications()` value, cached by Axon so a fresh
-                 *     client load can show a real number without first observing a live event
-                 *     this session. `0` until the sync engine has captured a value for this
-                 *     room.
-                 */
-                notification_count: number;
-                /** @description Matrix room ID. */
-                room_id: string;
-                /** @description The room's `m.room.create` `type`, if any (for example `m.space`). */
-                room_type?: string | null;
-                /**
-                 * @description This account's `m.tag` entries on the room (ADR 0103). Omitted when
-                 *     empty so untagged rooms do not grow the already-large list.
-                 */
-                tags?: components["schemas"]["RoomTag"][];
-                /** @description Room topic (`m.room.topic`), if set. */
-                topic?: string | null;
             }[];
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -5772,6 +5707,48 @@ export interface components {
             room_id?: string | null;
             type: string;
         };
+        /**
+         * @description `GET /v1/rooms`: the room list, in full or as a delta (ADR 0134).
+         *
+         *     `data` keeps its meaning from before the delta existed, the listed rooms,
+         *     so a client that ignores the other fields still reads a full list. The
+         *     other fields sit beside `data` rather than inside it for that reason.
+         */
+        RoomListResponse: {
+            /**
+             * @description Opaque cursor for this read. Pass it as `since` on the next read in the
+             *     same scope to get only what changed.
+             */
+            cursor: string;
+            /**
+             * @description Rooms, newest activity first. With `full: true`, every listed room.
+             *     With `full: false`, only the listed rooms that changed since `since`.
+             */
+            data: components["schemas"]["RoomDto"][];
+            /**
+             * @description `true`: `data` is the whole list; replace what you hold. `false`:
+             *     `data` and `removed` are a delta since the `since` cursor; merge them
+             *     into what you hold. A read without `since` is always full, and one with
+             *     `since` may still be.
+             */
+            full: boolean;
+            /**
+             * @description Rooms that were listed and no longer are (left, upgraded, or their
+             *     account no longer active), when `full` is `false`. Always empty when
+             *     `full` is `true`. A room removed outright, such as by a purge or by
+             *     deleting its account, is not named here;
+             *     `total` is how a client notices it.
+             */
+            removed: components["schemas"]["RoomRefDto"][];
+            /**
+             * Format: int64
+             * @description How many rooms the list holds at this read, in this request's
+             *     `account_id` scope. After merging a delta, a client holding a different
+             *     number of rooms for that scope has missed a removal and should read in
+             *     full.
+             */
+            total: number;
+        };
         /** @description Cached SDK summary, independent of the partial member list. */
         RoomMemberCountsDto: {
             /** Format: int64 */
@@ -5819,6 +5796,16 @@ export interface components {
          * @enum {string}
          */
         RoomPresetDto: "private_chat" | "public_chat" | "trusted_private_chat";
+        /** @description A room named by its identity in the list: `(account_id, room_id)`. */
+        RoomRefDto: {
+            /**
+             * Format: uuid
+             * @description Axon account the room belongs to.
+             */
+            account_id: string;
+            /** @description Matrix room ID. */
+            room_id: string;
+        };
         /**
          * @description One tag on a room (`GET /v1/rooms`, ADR 0103). `name` is the Matrix wire
          *     form (`m.favourite`, `m.lowpriority`, `u.work`, …); `order` is the
@@ -13477,6 +13464,13 @@ export interface operations {
             query?: {
                 /** @description Narrow the list to a single account. Omit for all accounts. */
                 account_id?: string;
+                /**
+                 * @description The `cursor` of an earlier read in the same `account_id` scope. With
+                 *     it, the response holds only the rooms that changed since that read
+                 *     (`full: false`); the server may still answer in full (`full: true`).
+                 *     Opaque: pass back exactly what a response gave.
+                 */
+                since?: string;
             };
             header?: never;
             path?: never;
@@ -13484,13 +13478,22 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Rooms, newest activity first */
+            /** @description Rooms, newest activity first: the whole list, or the changes since `since` */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApiResponse_Vec_RoomDto"];
+                    "application/json": components["schemas"]["RoomListResponse"];
+                };
+            };
+            /** @description A malformed account_id or since cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Missing, malformed, or revoked bearer token */

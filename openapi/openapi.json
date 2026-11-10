@@ -9924,7 +9924,7 @@
           "rooms"
         ],
         "summary": "List rooms",
-        "description": "List rooms across accounts, most-recent-activity first.",
+        "description": "List rooms across accounts, most-recent-activity first.\n\nEvery response carries a `cursor`. Passing it back as `since` returns only\nthe rooms that changed since that read, with the rooms that left the list\nin `removed` (`full: false`), for the caller to merge into what it holds.\n`total` is the size of the whole list; a merged list of any other size has\nmissed a removal, and the caller should read again without `since`\n(ADR 0134).",
         "operationId": "list_rooms",
         "parameters": [
           {
@@ -9936,15 +9936,34 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The `cursor` of an earlier read in the same `account_id` scope. With\nit, the response holds only the rooms that changed since that read\n(`full: false`); the server may still answer in full (`full: true`).\nOpaque: pass back exactly what a response gave.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Rooms, newest activity first",
+            "description": "Rooms, newest activity first: the whole list, or the changes since `since`",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiResponse_Vec_RoomDto"
+                  "$ref": "#/components/schemas/RoomListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed account_id or since cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -12556,121 +12575,6 @@
                 "sign_in_available": {
                   "type": "boolean",
                   "description": "Whether a sign-in with this identity is currently possible: OAuth is\nenabled and so is this identity's provider. False means the identity is\nbound but cannot produce a session."
-                }
-              }
-            }
-          }
-        }
-      },
-      "ApiResponse_Vec_RoomDto": {
-        "type": "object",
-        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
-        "required": [
-          "data"
-        ],
-        "properties": {
-          "data": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "description": "A room in the cross-account list (`GET /v1/rooms`). Identity is\n`(account_id, room_id)` — a room joined by two accounts appears twice.",
-              "required": [
-                "account_id",
-                "account_user_id",
-                "room_id",
-                "last_activity_ts",
-                "notification_count",
-                "highlight_count",
-                "is_direct"
-              ],
-              "properties": {
-                "account_id": {
-                  "type": "string",
-                  "format": "uuid",
-                  "description": "Axon account this room belongs to."
-                },
-                "account_user_id": {
-                  "type": "string",
-                  "description": "Matrix user ID for this Axon account."
-                },
-                "avatar_url": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Avatar `mxc://` URI (`m.room.avatar`), if set."
-                },
-                "canonical_alias": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Canonical alias (`m.room.canonical_alias`), if set."
-                },
-                "display_name": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "The room's display name as Matrix clients calculate it (ADR 0118):\n`m.room.name`, else the canonical alias, else a name built from the\nroom's other members, such as `Alice, Bob` or `Empty Room (was Alice)`.\nComputed by matrix-rust-sdk and cached by Axon; `null` until the sync\nengine has stored a value. `name` and `canonical_alias` update first\nwhen state changes, so titles should prefer them, then this."
-                },
-                "highlight_count": {
-                  "type": "integer",
-                  "format": "int64",
-                  "description": "SDK-derived highlight count (issue #313, ADR 0070), from\n`Room::num_unread_mentions()`."
-                },
-                "is_direct": {
-                  "type": "boolean",
-                  "description": "Whether this room appears in the account's global `m.direct` map\n(ADR 0103 / ADR 0055 Tier 1)."
-                },
-                "last_activity_ts": {
-                  "type": "integer",
-                  "format": "int64",
-                  "description": "`origin_server_ts` of the most recent content-bearing event (a real\nmessage, not a membership/state/redaction/reaction event), in\nmilliseconds — the sort key. Falls back to the room's most recent\nevent of any type when it has no content-bearing event yet."
-                },
-                "last_event_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "The most recent content-bearing event's id, if the room has any\nevents (with the same any-type fallback as `last_activity_ts`)."
-                },
-                "name": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Room name (`m.room.name`), if set."
-                },
-                "notification_count": {
-                  "type": "integer",
-                  "format": "int64",
-                  "description": "SDK-derived unread notification count (issue #313, ADR 0070). This is\nmatrix-sdk's client-side read-receipt-derived\n`Room::num_unread_notifications()` value, cached by Axon so a fresh\nclient load can show a real number without first observing a live event\nthis session. `0` until the sync engine has captured a value for this\nroom."
-                },
-                "room_id": {
-                  "type": "string",
-                  "description": "Matrix room ID."
-                },
-                "room_type": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "The room's `m.room.create` `type`, if any (for example `m.space`)."
-                },
-                "tags": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/RoomTag"
-                  },
-                  "description": "This account's `m.tag` entries on the room (ADR 0103). Omitted when\nempty so untagged rooms do not grow the already-large list."
-                },
-                "topic": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Room topic (`m.room.topic`), if set."
                 }
               }
             }
@@ -16762,6 +16666,47 @@
           }
         }
       },
+      "RoomListResponse": {
+        "type": "object",
+        "description": "`GET /v1/rooms`: the room list, in full or as a delta (ADR 0134).\n\n`data` keeps its meaning from before the delta existed, the listed rooms,\nso a client that ignores the other fields still reads a full list. The\nother fields sit beside `data` rather than inside it for that reason.",
+        "required": [
+          "data",
+          "full",
+          "removed",
+          "total",
+          "cursor"
+        ],
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "description": "Opaque cursor for this read. Pass it as `since` on the next read in the\nsame scope to get only what changed."
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomDto"
+            },
+            "description": "Rooms, newest activity first. With `full: true`, every listed room.\nWith `full: false`, only the listed rooms that changed since `since`."
+          },
+          "full": {
+            "type": "boolean",
+            "description": "`true`: `data` is the whole list; replace what you hold. `false`:\n`data` and `removed` are a delta since the `since` cursor; merge them\ninto what you hold. A read without `since` is always full, and one with\n`since` may still be."
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomRefDto"
+            },
+            "description": "Rooms that were listed and no longer are (left, upgraded, or their\naccount no longer active), when `full` is `false`. Always empty when\n`full` is `true`. A room removed outright, such as by a purge or by\ndeleting its account, is not named here;\n`total` is how a client notices it."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many rooms the list holds at this read, in this request's\n`account_id` scope. After merging a delta, a client holding a different\nnumber of rooms for that scope has missed a removal and should read in\nfull.",
+            "minimum": 0
+          }
+        }
+      },
       "RoomMemberCountsDto": {
         "type": "object",
         "description": "Cached SDK summary, independent of the partial member list.",
@@ -16876,6 +16821,25 @@
           "public_chat",
           "trusted_private_chat"
         ]
+      },
+      "RoomRefDto": {
+        "type": "object",
+        "description": "A room named by its identity in the list: `(account_id, room_id)`.",
+        "required": [
+          "account_id",
+          "room_id"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Axon account the room belongs to."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "Matrix room ID."
+          }
+        }
       },
       "RoomTag": {
         "type": "object",

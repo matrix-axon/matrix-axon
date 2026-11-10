@@ -230,6 +230,8 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::EnableBackupRequest,
         crate::dto::EnableBackupResponseDto,
         crate::dto::RoomDto,
+        crate::dto::RoomListResponse,
+        crate::dto::RoomRefDto,
         crate::dto::RoomTag,
         crate::dto::InviteDto,
         crate::dto::MemberDto,

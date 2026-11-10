@@ -9,7 +9,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sqlx_core::from_row::FromRow;
 use sqlx_core::row::Row;
 use sqlx_core::transaction::Transaction;
 use sqlx_postgres::{PgRow, Postgres};
@@ -36,14 +38,62 @@ pub struct RoomTag {
 /// second.
 const LISTED_ROOMS_FROM: &str = "\
  FROM room_summaries a \
- JOIN accounts ac ON ac.account_id = a.account_id AND ac.state = 'active' \
+ JOIN accounts ac ON ac.account_id = a.account_id \
  LEFT JOIN room_unread_counts ruc \
    ON ruc.account_id = a.account_id AND ruc.room_id = a.room_id ";
 
+/// Whether the summary row `a` of account `ac` is listed, given
+/// [`LISTED_ROOMS_FROM`]'s joins. A macro so [`LISTED_ROOMS_WHERE`] and the
+/// delta read's `listed` column are one predicate. The account's state is
+/// here rather than in the join so the delta can see an inactive account's
+/// rows and report them as removed (ADR 0134).
+macro_rules! listed_room_predicate {
+    () => {
+        "ac.state = 'active' AND NOT a.hidden_left AND NOT a.hidden_tombstoned"
+    };
+}
+
 /// See [`LISTED_ROOMS_FROM`].
-const LISTED_ROOMS_WHERE: &str = "\
- WHERE NOT a.hidden_left \
-   AND NOT a.hidden_tombstoned ";
+const LISTED_ROOMS_WHERE: &str = concat!(" WHERE ", listed_room_predicate!(), " ");
+
+/// The least a room-list delta reaches behind its cursor (ADR 0134).
+const MIN_ROOM_LIST_OVERLAP_SECS: i64 = 15 * 60;
+
+/// How far a room-list delta reaches behind its cursor (ADR 0134): four
+/// maintenance statement timeouts, with a floor of
+/// [`MIN_ROOM_LIST_OVERLAP_SECS`].
+///
+/// A listed value's stamp is taken when its statement runs, not when its
+/// transaction commits, so a write that commits after a read whose clock is
+/// later than its stamp is missed by that read. The longest writer is the
+/// summary rebuild on the maintenance pool: a row it inserts commits after at
+/// most four more maintenance statements.
+pub(crate) fn room_list_overlap_for(maintenance_statement_secs: u32) -> chrono::Duration {
+    chrono::Duration::seconds(
+        (4 * i64::from(maintenance_statement_secs)).max(MIN_ROOM_LIST_OVERLAP_SECS),
+    )
+}
+
+/// One room-list read (ADR 0134): every listed room, or what changed since an
+/// earlier read, and the cursor to pass back next time.
+#[derive(Debug, Clone)]
+pub struct RoomListRead {
+    /// `true`: `rooms` is every listed room and `removed` is empty.
+    /// `false`: `rooms` is every listed room that changed after the cursor
+    /// (less the overlap), and `removed` the rooms that changed and are no
+    /// longer listed.
+    pub full: bool,
+    /// Listed rooms, newest activity first.
+    pub rooms: Vec<RoomSummary>,
+    /// `(account_id, room_id)` of each room a delta saw leave the list. A row
+    /// that was deleted outright (a purge, a rebuild, a deleted account) is
+    /// not named here; `total` is how a caller notices it.
+    pub removed: Vec<(Uuid, String)>,
+    /// How many rooms the list holds at this read, in the request's scope.
+    pub total: u64,
+    /// The database clock taken just before the rows; the next read's cursor.
+    pub as_of: DateTime<Utc>,
+}
 
 /// Incremental `room_summaries` write (ADR 0095). Prepended with a
 /// `WITH ins AS ( <event write> RETURNING account_id, room_id, event_id,
@@ -137,7 +187,7 @@ pub struct RoomSummary {
     pub is_direct: bool,
 }
 
-impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
+impl FromRow<'_, PgRow> for RoomSummary {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
         Ok(RoomSummary {
             account_id: row.try_get("account_id")?,
@@ -180,6 +230,9 @@ fn parse_room_tags(content: Option<Value>) -> Vec<RoomTag> {
 }
 
 /// Room ids listed in any array of an `m.direct` content object.
+///
+/// The SQL function `direct_map_room_ids` reads the map the same way, to find
+/// the rooms an `m.direct` write flips (ADR 0134). Change both together.
 fn room_ids_in_direct_map(content: &Value) -> impl Iterator<Item = &str> {
     content
         .as_object()
@@ -235,6 +288,13 @@ impl Store {
     /// Tombstoned rooms (upgraded via `m.room.tombstone`) are excluded via
     /// `hidden_tombstoned`: the old room is superseded by its replacement and
     /// should not appear alongside the new room in the list.
+    ///
+    /// A delta read ([`read_room_list`](Self::read_room_list), ADR 0134) finds
+    /// changed rooms by `room_summaries.list_changed_at`, which a trigger
+    /// stamps when one of the summary columns selected here changes. A summary
+    /// column added to this list must be added to that trigger's column list
+    /// too (migration `20261110120000_room_list_changed_at`, in a new
+    /// migration), or a change to it alone never reaches a delta.
     pub async fn list_rooms(
         &self,
         account_id: Option<Uuid>,
@@ -262,6 +322,114 @@ impl Store {
             .await?;
         self.apply_is_direct(&mut rows).await?;
         Ok(rows)
+    }
+
+    /// How far a room-list delta reaches behind its cursor (ADR 0134). Public
+    /// for the store's integration tests, which backdate rows across it.
+    pub fn room_list_overlap(&self) -> chrono::Duration {
+        self.room_list_overlap
+    }
+
+    /// Read the room list in full, or as a delta since an earlier read's
+    /// `as_of` (ADR 0134).
+    ///
+    /// The clock is read **before** the rows, so every change this read misses
+    /// carries a stamp no older than `as_of − overlap` and is in the next
+    /// delta. A `since` later than the database clock did not come from this
+    /// clock, so it is answered in full rather than trusted.
+    pub async fn read_room_list(
+        &self,
+        account_id: Option<Uuid>,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<RoomListRead, StoreError> {
+        let as_of: DateTime<Utc> = sqlx_core::query_scalar::query_scalar("SELECT now()")
+            .fetch_one(&self.pool)
+            .await?;
+        match since {
+            Some(since) if since <= as_of => {
+                self.room_list_changes(account_id, since - self.room_list_overlap, as_of)
+                    .await
+            }
+            _ => {
+                let rooms = self.list_rooms(account_id).await?;
+                Ok(RoomListRead {
+                    full: true,
+                    total: rooms.len() as u64,
+                    rooms,
+                    removed: Vec::new(),
+                    as_of,
+                })
+            }
+        }
+    }
+
+    /// The rooms in scope whose listed values changed after `after`, split
+    /// into listed rooms and rooms no longer listed, with the listed count.
+    /// A room's account entering or leaving `active` is a change to every one
+    /// of its rows, through `accounts.list_changed_at`.
+    ///
+    /// One statement, so the rows and `total` share a snapshot: the count
+    /// cannot disagree with the rows it is read with. The `LEFT JOIN LATERAL`
+    /// keeps the count's row when nothing changed; that row has a `NULL`
+    /// `room_id`.
+    async fn room_list_changes(
+        &self,
+        account_id: Option<Uuid>,
+        after: DateTime<Utc>,
+        as_of: DateTime<Utc>,
+    ) -> Result<RoomListRead, StoreError> {
+        let sql = format!(
+            "SELECT t.total, c.* \
+             FROM (SELECT count(*) AS total {LISTED_ROOMS_FROM} {LISTED_ROOMS_WHERE} \
+                     AND ($1::uuid IS NULL OR a.account_id = $1)) t \
+             LEFT JOIN LATERAL ( \
+                 SELECT a.account_id, ac.user_id AS account_user_id, a.room_id, \
+                        a.last_activity_ts, a.last_event_id, \
+                        a.name, a.topic, a.avatar_url, a.canonical_alias, a.room_type, \
+                        a.display_name, \
+                        COALESCE(ruc.notification_count, 0) AS notification_count, \
+                        COALESCE(ruc.highlight_count, 0) AS highlight_count, \
+                        ad_tag.content AS tag_content, \
+                        ({listed}) AS listed \
+                 {LISTED_ROOMS_FROM} \
+                 LEFT JOIN account_data ad_tag \
+                   ON ad_tag.account_id = a.account_id \
+                  AND ad_tag.room_id = a.room_id \
+                  AND ad_tag.event_type = 'm.tag' \
+                 WHERE ($1::uuid IS NULL OR a.account_id = $1) \
+                   AND GREATEST(a.list_changed_at, ac.list_changed_at, ruc.updated_at, ad_tag.updated_at) > $2 \
+             ) c ON true \
+             ORDER BY c.last_activity_ts DESC, c.room_id",
+            listed = listed_room_predicate!(),
+        );
+        let rows = sqlx_core::query::query::<Postgres>(&sql)
+            .bind(account_id)
+            .bind(after)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut total = 0_i64;
+        let mut rooms = Vec::new();
+        let mut removed = Vec::new();
+        for row in rows {
+            total = row.try_get("total")?;
+            let Some(room_id) = row.try_get::<Option<String>, _>("room_id")? else {
+                continue;
+            };
+            if row.try_get::<bool, _>("listed")? {
+                rooms.push(<RoomSummary as FromRow<'_, PgRow>>::from_row(&row)?);
+            } else {
+                removed.push((row.try_get("account_id")?, room_id));
+            }
+        }
+        self.apply_is_direct(&mut rooms).await?;
+        Ok(RoomListRead {
+            full: false,
+            rooms,
+            removed,
+            // A negative count is impossible, but must not wrap.
+            total: u64::try_from(total).unwrap_or(0),
+            as_of,
+        })
     }
 
     /// The instance's unread total: the sum of `notification_count` over the
@@ -452,7 +620,15 @@ impl Store {
 mod parse_tests {
     use serde_json::json;
 
-    use super::{parse_room_tags, room_ids_in_direct_map, RoomTag};
+    use super::{parse_room_tags, room_ids_in_direct_map, room_list_overlap_for, RoomTag};
+
+    #[test]
+    fn room_list_overlap_is_four_maintenance_timeouts_with_a_floor() {
+        assert_eq!(room_list_overlap_for(120), chrono::Duration::minutes(15));
+        assert_eq!(room_list_overlap_for(225), chrono::Duration::minutes(15));
+        assert_eq!(room_list_overlap_for(226), chrono::Duration::seconds(904));
+        assert_eq!(room_list_overlap_for(3_600), chrono::Duration::hours(4));
+    }
 
     #[test]
     fn parse_room_tags_reads_name_and_optional_order() {
