@@ -778,9 +778,10 @@ test('room information derives a parent space from its child relationship', asyn
 })
 
 /**
- * The Details and Pinned sections render the room-state reads (ADR 0084), not
- * the "Unavailable" fallbacks. The mock's values are distinct from every
- * fallback string, so a read that fails cannot pass this.
+ * The Details and Pinned sections render the room-state reads (ADR 0084) and
+ * the typed detail reads (ADR 0133), not the "Unavailable" or "Loading…"
+ * fallbacks. The mock's values are distinct from every fallback string, so a
+ * read that fails cannot pass this.
  */
 test('room information shows the room-state reads', async ({ page }) => {
   await signIn(page)
@@ -799,8 +800,58 @@ test('room information shows the room-state reads', async ({ page }) => {
   await expect(detail('Access')).toHaveText('invite')
   await expect(detail('History visibility')).toHaveText('shared')
   await expect(detail('Guest access')).toHaveText('forbidden')
+  await expect(detail('Members')).toHaveText('2 joined · 1 invited')
+  await expect(detail('Advertised aliases')).toHaveText('#e2e-alt:e2e.test')
+  await expect(detail('Aliases on your homeserver')).toHaveText(
+    '#e2e-local:e2e.test',
+  )
+  // The Advanced group starts collapsed and opens on its summary.
+  const serverAcl = detail('Server ACL')
+  await expect(serverAcl).toBeHidden()
+  await panel.getByText('Advanced', { exact: true }).click()
+  await expect(serverAcl).toHaveText('No server ACL (no servers denied)')
+  await expect(detail('Directory visibility')).toHaveText('Private')
   await expect(panel.getByText('No pinned messages.')).toBeVisible()
   await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
+/**
+ * The ADR 0133 rows carry long values (alias lists, the server ACL summary)
+ * and notes; at phone width they must wrap inside the panel, Advanced group
+ * included, rather than widen it past the viewport.
+ */
+test('narrow: room information details wrap inside the panel', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(ROOM_URL)
+
+  await page
+    .getByRole('button', { name: 'Open room information' })
+    .first()
+    .click()
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+  await expect(
+    panel
+      .locator('dt')
+      .filter({ hasText: /^Members$/ })
+      .locator('+ dd'),
+  ).toHaveText('2 joined · 1 invited')
+  await panel.getByText('Advanced', { exact: true }).click()
+  await expect(
+    panel
+      .locator('dt')
+      .filter({ hasText: /^Server ACL$/ })
+      .locator('+ dd'),
+  ).toBeVisible()
+  const overflow = await panel.evaluate((node) => ({
+    scroll: node.scrollWidth,
+    client: node.clientWidth,
+    right: node.getBoundingClientRect().right,
+  }))
+  expect(overflow.scroll).toBeLessThanOrEqual(overflow.client)
+  expect(overflow.right).toBeLessThanOrEqual(390)
 })
 
 test('narrow: room information scrolls when the member list overflows', async ({

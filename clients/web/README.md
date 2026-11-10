@@ -58,8 +58,12 @@ surface with Join, DM, Create, and Find flows (M19-W3/W4: direct room
 ID/alias/Matrix-link entry, public room-directory search defaulting to the
 account homeserver, DM creation/opening, and room creation), Room Information
 actions for copying a room link, inviting users, canceling pending invites,
-leaving with confirmation, opening member DMs, room-state details (access,
-encryption, pinned messages, space relationships, and upgrade links), editing
+leaving with confirmation, opening member DMs, room-state details (typed
+metadata per ADR 0133 — encryption, access, history and guest access with
+honest unknown/checking/confirmed-absent states, advertised and
+homeserver-local aliases as separate rows, member counts, and a collapsed
+Advanced group — plus pinned messages, space relationships, and upgrade
+links), editing
 the room's name, topic and avatar (M19-W6/ADR 0100: an Edit button beside
 Close, offered only when your power level allows it, with avatar images staged
 through the existing upload flow), and a

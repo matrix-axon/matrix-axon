@@ -23,12 +23,37 @@ import {
   type MemberDto,
   type RoomDto,
 } from '../stores/room-list'
+import {
+  emptyRoomDetails,
+  roomDetailsKey,
+  type RoomDetailsSlot,
+} from '../stores/room-details'
 import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
 import { useCopyFeedback } from './CopyableText'
-import { DetailRow } from './DetailRow'
+import { DetailRow, shownProps } from './DetailRow'
+import {
+  accessShown,
+  advertisedAliasesShown,
+  canonicalAliasShown,
+  createdShown,
+  creatorShown,
+  directoryVisibilityShown,
+  encryptionShown,
+  guestAccessShown,
+  historyVisibilityShown,
+  localAliasesShown,
+  memberCountsShown,
+  predecessorShown,
+  roomVersionShown,
+  serverAclShown,
+  shownLabel,
+  shownValue,
+  UNKNOWN_NOT_CACHED,
+  type Shown,
+} from './room-details-format'
 import { Lightbox, LightboxImage } from './Lightbox'
 import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
 import { RoomSettingsForm } from './RoomSettingsForm'
@@ -37,7 +62,6 @@ import { useModalFocus } from './use-modal-focus'
 import { useStartDm } from './use-start-dm'
 import { UserAvatar } from './UserAvatar'
 
-type RoomInfoDto = components['schemas']['RoomInfoDto']
 type RoomUpgradeDto = components['schemas']['RoomUpgradeDto']
 type SpaceChildDto = components['schemas']['SpaceChildDto']
 type SpaceParentDto = components['schemas']['SpaceParentDto']
@@ -45,12 +69,11 @@ type PowerLevelsDto = components['schemas']['PowerLevelsDto']
 type EventDto = components['schemas']['EventDto']
 
 type RoomStateKey =
-  'info' | 'pinned' | 'children' | 'parents' | 'upgrade' | 'powerLevels'
+  'pinned' | 'children' | 'parents' | 'upgrade' | 'powerLevels'
 
 interface RoomStateSlice {
   /** `accountId/roomId` the rest of this slice was loaded for. */
   key: string
-  info: RoomInfoDto | null
   pinned: readonly EventDto[] | null
   children: readonly SpaceChildDto[] | null
   parents: readonly SpaceParentDto[] | null
@@ -62,7 +85,6 @@ interface RoomStateSlice {
 function emptyRoomState(key: string): RoomStateSlice {
   return {
     key,
-    info: null,
     pinned: null,
     children: null,
     parents: null,
@@ -95,7 +117,7 @@ export function RoomInfoPanel({
   onClose: () => void
 }) {
   const location = useLocation()
-  const { rooms, search, spaces, api, live } = useServices()
+  const { rooms, search, spaces, api, live, roomDetails } = useServices()
   const inviteInput = useRef<HTMLInputElement>(null)
   const { status: copyStatus, copy } = useCopyFeedback()
   const [filter, setFilter] = useState('')
@@ -144,11 +166,53 @@ export function RoomInfoPanel({
     loadedState.key === roomStateKey
       ? loadedState
       : emptyRoomState(roomStateKey)
-  /** Room-state details, with a failed `/info` reported rather than pending. */
-  const infoValue = (pick: (info: RoomInfoDto) => string) => {
-    if (roomState.info !== null) return pick(roomState.info)
-    return roomState.errors.info === undefined ? 'Loading…' : 'Unavailable'
+  // The typed detail reads (ADR 0133) live in the room-details store, which
+  // owns their freshness. The store is told which room to show in an effect,
+  // so the first render after a switch still holds the previous room's
+  // answers: compare the key during render, as for `RoomStateSlice` above.
+  // A room in the room list is one the account has joined.
+  const joined = room !== undefined
+  const detailsKey = roomDetailsKey(accountId, roomId)
+  const storedDetails = roomDetails.state.value
+  const details =
+    storedDetails.key === detailsKey
+      ? storedDetails
+      : emptyRoomDetails(detailsKey)
+  /**
+   * A detail from a store read, with a failed read reported, not pending.
+   * `pick` gets the time the answer arrived, to judge its server timestamps.
+   */
+  const fromRead = <T,>(
+    slot: RoomDetailsSlot<T>,
+    pick: (value: T, now: number) => Shown,
+    requestable = true,
+  ): Shown => {
+    if (slot.value !== null) return pick(slot.value, slot.receivedAt ?? 0)
+    if (slot.error !== null) return shownLabel('Unavailable')
+    // Never requested and never will be: the server has nothing for it.
+    if (!requestable) return shownLabel(UNKNOWN_NOT_CACHED)
+    return shownLabel('Loading…')
   }
+  const roomName = (target: string) => {
+    const known = rooms.rooms.value.find(
+      (candidate) =>
+        candidate.account_id === accountId && candidate.room_id === target,
+    )
+    return known !== undefined ? roomTitle(known, roomTitles) || target : target
+  }
+  const formatTime = (ts: number) => new Date(ts).toLocaleString()
+  // Before `/metadata` answers, the canonical alias comes from the room-list
+  // summary, so the row is filled the moment the panel opens (decision 4).
+  const canonicalAlias =
+    details.metadata.value === null && (room?.canonical_alias ?? null) !== null
+      ? shownValue(room?.canonical_alias ?? '')
+      : fromRead(details.metadata, (metadata, now) =>
+          canonicalAliasShown(metadata, now),
+        )
+  const detailsFailed =
+    details.metadata.error !== null ||
+    details.info.error !== null ||
+    details.homeserverDetails.error !== null
   const [roomStateVersion, setRoomStateVersion] = useState(0)
   // Keyed by room for the same reason `RoomStateSlice` is: `RoomPage` keeps
   // one panel instance across room navigation, so an unkeyed `editing` flag
@@ -314,10 +378,6 @@ export function RoomInfoPanel({
       params: { path: { account_id: accountId, room_id: roomId } },
     }
     load(
-      'info',
-      api.GET('/v1/accounts/{account_id}/rooms/{room_id}/info', params),
-    )
-    load(
       'pinned',
       api.GET('/v1/accounts/{account_id}/rooms/{room_id}/pinned', params),
     )
@@ -356,11 +416,10 @@ export function RoomInfoPanel({
         event !== null &&
         event.account_id === accountId &&
         event.room_id === roomId &&
+        // Join rules, history visibility, guest access and encryption are the
+        // room-details store's: the server publishes `room_details.changed`
+        // naming `metadata` when the stored tuple changes (ADR 0133).
         [
-          'm.room.join_rules',
-          'm.room.history_visibility',
-          'm.room.guest_access',
-          'm.room.encryption',
           'm.room.pinned_events',
           'm.space.child',
           'm.space.parent',
@@ -374,6 +433,11 @@ export function RoomInfoPanel({
       }
     })
   }, [live, accountId, roomId])
+  // Closing the panel stops showing the room, so opening it again re-reads.
+  useEffect(() => () => roomDetails.show(null), [roomDetails])
+  useEffect(() => {
+    roomDetails.show({ accountId, roomId, joined })
+  }, [roomDetails, accountId, roomId, joined])
   useEffect(() => {
     if (live.reconnects.value > 0) {
       setRoomStateVersion((version) => version + 1)
@@ -624,67 +688,148 @@ export function RoomInfoPanel({
           />
           <DetailRow
             label="Your Matrix ID"
-            value={room?.account_user_id ?? 'Unavailable from room summary'}
-            code={room?.account_user_id !== undefined}
+            value={room?.account_user_id}
+            empty="Unavailable from room summary"
+            code
           />
           <DetailRow
             label="Canonical alias"
-            value={room?.canonical_alias ?? 'None'}
-            code={
-              room?.canonical_alias !== undefined &&
-              room.canonical_alias !== null
-            }
+            {...shownProps(canonicalAlias)}
+            code
           />
           <DetailRow
-            label="Full alias list"
-            value="Unavailable from current API"
+            label="Advertised aliases"
+            {...shownProps(
+              fromRead(details.metadata, (metadata, now) =>
+                advertisedAliasesShown(metadata, now),
+              ),
+            )}
+            code
           />
+          <DetailRow
+            label="Aliases on your homeserver"
+            {...shownProps(
+              fromRead(
+                details.homeserverDetails,
+                (homeserver, now) => localAliasesShown(homeserver, now),
+                joined,
+              ),
+            )}
+            code
+          />
+          {!editing && <DetailRow label="Topic" value={room?.topic} />}
           {!editing && (
-            <DetailRow label="Topic" value={room?.topic ?? 'None'} />
-          )}
-          {!editing && (
-            <DetailRow label="Avatar" value={room?.avatar_url ?? 'None'} code />
+            <DetailRow label="Avatar" value={room?.avatar_url} code />
           )}
           <DetailRow
             label="Last activity"
             value={
               room !== undefined
                 ? new Date(room.last_activity_ts).toLocaleString()
-                : 'Unavailable from room summary'
+                : null
             }
+            empty="Unavailable from room summary"
           />
+          <DetailRow label="Last event" value={room?.last_event_id} code />
           <DetailRow
-            label="Last event"
-            value={room?.last_event_id ?? 'None'}
-            code={
-              room?.last_event_id !== undefined && room.last_event_id !== null
-            }
+            label="Members"
+            {...shownProps(fromRead(details.info, memberCountsShown))}
           />
           <DetailRow
             label="Encryption"
-            value={infoValue(
-              (info) => info.encryption_algorithm ?? 'Unencrypted',
+            {...shownProps(
+              fromRead(details.metadata, (metadata, now) =>
+                encryptionShown(metadata, now),
+              ),
             )}
           />
           <DetailRow
             label="Access"
-            value={infoValue((info) => info.join_rule ?? 'Unavailable')}
+            {...shownProps(
+              fromRead(details.metadata, (metadata, now) =>
+                accessShown(metadata, now, roomName),
+              ),
+            )}
           />
           <DetailRow
             label="History visibility"
-            value={infoValue(
-              (info) => info.history_visibility ?? 'Unavailable',
+            {...shownProps(
+              fromRead(details.metadata, (metadata, now) =>
+                historyVisibilityShown(metadata, now),
+              ),
             )}
           />
           <DetailRow
             label="Guest access"
-            value={infoValue((info) => info.guest_access ?? 'Unavailable')}
+            {...shownProps(
+              fromRead(details.metadata, (metadata, now) =>
+                guestAccessShown(metadata, now),
+              ),
+            )}
           />
-          <DetailRow label="Room type" value={room?.room_type ?? 'None'} />
+          <DetailRow label="Room type" value={room?.room_type} />
         </dl>
-        {roomState.errors.info !== undefined && (
+        <details class="room-info-advanced">
+          <summary>Advanced</summary>
+          <dl class="detail-list">
+            <DetailRow
+              label="Room version"
+              {...shownProps(
+                fromRead(details.metadata, (metadata, now) =>
+                  roomVersionShown(metadata, now),
+                ),
+              )}
+            />
+            <DetailRow
+              label="Creator"
+              {...shownProps(
+                fromRead(details.metadata, (metadata, now) =>
+                  creatorShown(metadata, now),
+                ),
+              )}
+              code
+            />
+            <DetailRow
+              label="Created"
+              {...shownProps(
+                fromRead(details.metadata, (metadata, now) =>
+                  createdShown(metadata, now, formatTime),
+                ),
+              )}
+            />
+            <DetailRow
+              label="Predecessor room"
+              {...shownProps(
+                fromRead(details.metadata, (metadata, now) =>
+                  predecessorShown(metadata, now),
+                ),
+              )}
+              code
+            />
+            <DetailRow
+              label="Directory visibility"
+              {...shownProps(
+                fromRead(
+                  details.homeserverDetails,
+                  (homeserver, now) =>
+                    directoryVisibilityShown(homeserver, now),
+                  joined,
+                ),
+              )}
+            />
+            <DetailRow
+              label="Server ACL"
+              {...shownProps(
+                fromRead(details.metadata, (metadata, now) =>
+                  serverAclShown(metadata, now),
+                ),
+              )}
+            />
+          </dl>
+        </details>
+        {detailsFailed && (
           <p class="error" role="alert">
-            {roomState.errors.info}
+            Could not load this section.
           </p>
         )}
       </section>

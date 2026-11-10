@@ -48,6 +48,7 @@ import { createVerificationStore } from '../stores/verification'
 import { createRoomsStore } from '../stores/rooms'
 import { createSearchStore } from '../stores/search'
 import { createSettingsStore } from '../stores/settings'
+import { createRoomDetailsStore } from '../stores/room-details'
 import { createSpacesStore } from '../stores/spaces'
 import {
   createThreadUnreadStore,
@@ -228,6 +229,7 @@ export function testServices(
   // Auto-hydrating every shared harness would add an unrelated preference GET
   // to hundreds of MSW tests that are deliberately scoped to another route.
   const spaces = createSpacesStore(api, rooms, live)
+  const roomDetails = createRoomDetailsStore(api, live)
   const updates = createUpdateChecker({
     currentVersion: options.currentVersion ?? 'test-build',
     fetchManifest: options.versionManifest ?? (() => Promise.resolve(null)),
@@ -286,6 +288,7 @@ export function testServices(
     invites,
     verification,
     spaces,
+    roomDetails,
     search,
     threadUnread,
     live,
