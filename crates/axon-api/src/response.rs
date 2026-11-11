@@ -4,12 +4,19 @@
 //! `{ "error": { "code", "message" } }` ([`ApiError`]). Handlers return
 //! `Result<ApiResponse<T>, ApiError>` and the [`IntoResponse`] impls here pick
 //! the status code and serialize the body, so every route is consistent.
+//!
+//! One success body carries fields beside `data`: `GET /v1/rooms`'s
+//! [`RoomListResponse`] (ADR 0134), which keeps `data` the room array every
+//! existing client reads. Its impl lives here too, so every success body is
+//! serialized in this module.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 use utoipa::ToSchema;
+
+use crate::dto::RoomListResponse;
 
 /// Success envelope: a 2xx body is always `{ "data": <T> }`.
 #[derive(Debug, Serialize, ToSchema)]
@@ -26,6 +33,12 @@ impl<T> ApiResponse<T> {
 }
 
 impl<T: Serialize> IntoResponse for ApiResponse<T> {
+    fn into_response(self) -> Response {
+        Json(self).into_response()
+    }
+}
+
+impl IntoResponse for RoomListResponse {
     fn into_response(self) -> Response {
         Json(self).into_response()
     }

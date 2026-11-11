@@ -192,6 +192,48 @@ pub struct RoomDto {
     pub is_direct: bool,
 }
 
+/// `GET /v1/rooms`: the room list, in full or as a delta (ADR 0134).
+///
+/// `data` keeps its meaning from before the delta existed, the listed rooms,
+/// so a client that ignores the other fields still reads a full list. The
+/// other fields sit beside `data` rather than inside it for that reason.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RoomListResponse {
+    /// Rooms, newest activity first. With `full: true`, every listed room.
+    /// With `full: false`, only the listed rooms that changed since `since`.
+    pub data: Vec<RoomDto>,
+    /// `true`: `data` is the whole list; replace what you hold. `false`:
+    /// `data` and `removed` are a delta since the `since` cursor; merge them
+    /// into what you hold. A read without `since` is always full, and one with
+    /// `since` may still be.
+    pub full: bool,
+    /// Rooms that were listed and no longer are (left, upgraded, or their
+    /// account no longer active), when `full` is `false`. Always empty when
+    /// `full` is `true`. A room removed outright, such as by a purge or by
+    /// deleting its account, is not named here;
+    /// `total` is how a client notices it. May name a room the client does
+    /// not hold; ignore those.
+    pub removed: Vec<RoomRefDto>,
+    /// How many rooms the list holds at this read, in this request's
+    /// `account_id` scope. After merging a delta, a client holding a different
+    /// number of rooms for that scope has missed a removal and should read in
+    /// full.
+    pub total: u64,
+    /// Opaque cursor for this read. Pass it as `since` on the next read in the
+    /// same `account_id` scope to get only what changed; in another scope it
+    /// is answered in full.
+    pub cursor: String,
+}
+
+/// A room named by its identity in the list: `(account_id, room_id)`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RoomRefDto {
+    /// Axon account the room belongs to.
+    pub account_id: Uuid,
+    /// Matrix room ID.
+    pub room_id: String,
+}
+
 /// One tag on a room (`GET /v1/rooms`, ADR 0103). `name` is the Matrix wire
 /// form (`m.favourite`, `m.lowpriority`, `u.work`, …); `order` is the
 /// optional sort key in `[0, 1]`.

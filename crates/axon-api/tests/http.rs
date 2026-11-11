@@ -1496,6 +1496,63 @@ async fn read_api_end_to_end() {
         room["tags"],
         json!([{ "name": "m.favourite", "order": 0.25 }])
     );
+    // A read without `since` is the whole list, with a cursor for the next
+    // one (ADR 0134).
+    assert_eq!(body["full"], true);
+    assert_eq!(body["removed"], json!([]));
+    assert_eq!(body["total"], rooms.len());
+    let list_cursor = body["cursor"].as_str().expect("cursor").to_owned();
+
+    // Passing it back is a delta. The room was written moments ago, inside the
+    // overlap, so it is repeated in full; the count is still the whole list's.
+    let (status, delta) = get(
+        &app,
+        &format!("/v1/rooms?account_id={account_id}&since={list_cursor}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(delta["full"], false);
+    assert_eq!(delta["total"], rooms.len());
+    assert_eq!(delta["removed"], json!([]));
+    let repeated = delta["data"]
+        .as_array()
+        .expect("data array")
+        .iter()
+        .find(|r| r["room_id"] == room_id.as_str())
+        .expect("recent room repeated");
+    assert_eq!(repeated, room, "a delta row is a complete RoomDto");
+    assert!(delta["cursor"].as_str().is_some());
+
+    // The cursor is bound to its `account_id` scope: passed back with no
+    // `account_id`, or another one, it would miss that scope's older rooms,
+    // so the read is answered in full.
+    let (status, other_scope) = get(&app, &format!("/v1/rooms?since={list_cursor}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other_scope["full"], true);
+    let unscoped_cursor = other_scope["cursor"].as_str().expect("cursor").to_owned();
+    let (status, other_scope) = get(
+        &app,
+        &format!("/v1/rooms?account_id={account_id}&since={unscoped_cursor}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other_scope["full"], true);
+    let (status, same_scope) = get(&app, &format!("/v1/rooms?since={unscoped_cursor}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(same_scope["full"], false);
+
+    // A cursor this endpoint could not have written is a 400.
+    for bad in [
+        "not-a-cursor",
+        "-1",
+        "%2B123",
+        "00123",
+        "123.not-an-account",
+    ] {
+        let (status, err) = get(&app, &format!("/v1/rooms?since={bad}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "since={bad}");
+        assert_eq!(err["error"]["code"], "bad_request");
+    }
 
     // Timeline, page 1 (newest): limit 1 -> [e2] with a next_cursor.
     let base = format!("/v1/accounts/{account_id}/rooms/{room_id}/timeline");

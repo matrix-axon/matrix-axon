@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axon_store::Store;
+use axon_store::{RoomListRead, Store};
 use axum::extract::State;
 use futures_util::future::{try_join, try_join5};
 use serde::Deserialize;
@@ -13,8 +13,9 @@ use uuid::Uuid;
 
 use crate::cursor;
 use crate::dto::{
-    EventDto, MemberDto, RoomDto, RoomInfoDto, RoomUpgradeDto, SpaceChildDto,
-    SpaceHierarchyChildDto, SpaceHierarchyPage, SpaceParentDto, ThreadSummaryDto, TimelinePage,
+    EventDto, MemberDto, RoomDto, RoomInfoDto, RoomListResponse, RoomRefDto, RoomUpgradeDto,
+    SpaceChildDto, SpaceHierarchyChildDto, SpaceHierarchyPage, SpaceParentDto, ThreadSummaryDto,
+    TimelinePage,
 };
 use crate::extract::{Path, Query};
 use crate::member_profiles::{MemberProfile, MemberProfileService};
@@ -34,28 +35,69 @@ const MAX_LIMIT: i64 = 200;
 pub struct RoomsQuery {
     /// Narrow the list to a single account. Omit for all accounts.
     pub account_id: Option<Uuid>,
+    /// The `cursor` of an earlier read in the same `account_id` scope. With
+    /// it, the response holds only the rooms that changed since that read
+    /// (`full: false`); the server may still answer in full (`full: true`),
+    /// and does for a cursor from another scope. Opaque: pass back exactly
+    /// what a response gave.
+    pub since: Option<String>,
 }
 
 /// List rooms
 ///
 /// List rooms across accounts, most-recent-activity first.
+///
+/// Every response carries a `cursor`. Passing it back as `since` returns only
+/// the rooms that changed since that read, with the rooms that left the list
+/// in `removed` (`full: false`), for the caller to merge into what it holds.
+/// `total` is the size of the whole list; a merged list of any other size has
+/// missed a removal, and the caller should read again without `since`
+/// (ADR 0134).
 #[utoipa::path(
     get,
     path = "/v1/rooms",
     params(RoomsQuery),
     responses(
-        (status = 200, description = "Rooms, newest activity first", body = ApiResponse<Vec<RoomDto>>),
+        (status = 200, description = "Rooms, newest activity first: the whole list, or the changes since `since`", body = RoomListResponse),
+        (status = 400, description = "A malformed account_id or since cursor", body = crate::response::ErrorResponse),
     ),
     tag = "rooms",
 )]
 pub async fn list_rooms(
     State(store): State<Store>,
     Query(q): Query<RoomsQuery>,
-) -> Result<ApiResponse<Vec<RoomDto>>, ApiError> {
-    let rooms = store.list_rooms(q.account_id).await?;
-    Ok(ApiResponse::new(
-        rooms.into_iter().map(RoomDto::from).collect(),
-    ))
+) -> Result<RoomListResponse, ApiError> {
+    let since = q
+        .since
+        .as_deref()
+        .map(|since| {
+            cursor::decode_scoped_clock(since)
+                .ok_or_else(|| ApiError::bad_request("since is not a cursor from this endpoint"))
+        })
+        .transpose()?
+        // A cursor from another `account_id` scope says nothing about this
+        // one's older rooms, so it is answered in full.
+        .and_then(|(since, scope)| (scope == q.account_id).then_some(since));
+    let RoomListRead {
+        full,
+        rooms,
+        removed,
+        total,
+        as_of,
+    } = store.read_room_list(q.account_id, since).await?;
+    Ok(RoomListResponse {
+        data: rooms.into_iter().map(RoomDto::from).collect(),
+        full,
+        removed: removed
+            .into_iter()
+            .map(|(account_id, room_id)| RoomRefDto {
+                account_id,
+                room_id,
+            })
+            .collect(),
+        total,
+        cursor: cursor::encode_scoped_clock(as_of, q.account_id),
+    })
 }
 
 /// Query parameters for the timeline read.
