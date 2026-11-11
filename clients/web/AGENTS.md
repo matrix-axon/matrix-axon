@@ -131,7 +131,13 @@ before starting a milestone.
   response said: the painted rows carry live patches (one of them in place, in
   `noteActivityRoom`), which is why `doRefresh` hands the pipeline copies. A
   merged list whose length is not the response's `total`, or a `400` to a
-  cursor, drops the record and reads in full once.
+  cursor, drops the record and reads in full once. The restore of this record
+  is off the critical path in two ways: a refresh waits on it for at most
+  `SERVER_VIEW_RESTORE_DEADLINE_MS` and then reads in full, and a restore that
+  found nothing is retried by the next refresh rather than memoised. Reads,
+  writes and drops of the record all run through one queue in the cache module,
+  because the "already saved" mark that lets an unchanged delta skip its write
+  is only true in the order those operations happened.
 
   Two rules the cache needs that a wipe alone cannot give it, both found in
   review:

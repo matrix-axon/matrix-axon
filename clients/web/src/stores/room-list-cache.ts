@@ -90,6 +90,12 @@ interface RoomListRecord {
  * The latest-message preview is deliberately absent and is not a `RoomDto`
  * field at all: it is fetched per room (`fetchPreview`) and it *is* message
  * body text, so caching it belongs to phase 3's opt-in, not here.
+ *
+ * It is also the room list's definition of an unchanged row (ADR 0134's
+ * delta merge compares projections). So a field added to `RoomDto` fails to
+ * compile here until it is either listed or named in
+ * {@link UnpersistedRoomField}; left out silently, a server-side change to it
+ * alone would be ignored by the merge.
  */
 export function persistable(room: RoomDto): RoomDto {
   return {
@@ -108,8 +114,14 @@ export function persistable(room: RoomDto): RoomDto {
     highlight_count: count(room.highlight_count),
     is_direct: room.is_direct === true,
     tags: persistableTags(room.tags),
-  }
+  } satisfies Required<Omit<RoomDto, UnpersistedRoomField>>
 }
+
+/**
+ * `RoomDto` fields deliberately kept off disk, and so out of the delta
+ * merge's comparison. None today.
+ */
+type UnpersistedRoomField = never
 
 function persistableTags(value: RoomDto['tags']): NonNullable<RoomDto['tags']> {
   if (!Array.isArray(value)) {
@@ -196,8 +208,17 @@ export function createRoomListCache({
    * full read that replaces it) could land after the write and delete it.
    */
   let serverViewQueue: Promise<void> = Promise.resolve()
-  function enqueueServerView(op: () => Promise<void>): void {
-    serverViewQueue = serverViewQueue.then(op, op).catch(() => {})
+  function enqueueServerView<T>(op: () => Promise<T>): Promise<T> {
+    const run = serverViewQueue.then(op, op)
+    serverViewQueue = run.then(
+      () => {},
+      () => {},
+    )
+    return run
+  }
+  /** Queue a write or drop. Fire-and-forget: a failed one costs a full read. */
+  function queueServerViewWrite(op: () => Promise<void>): void {
+    enqueueServerView(op).catch(() => {})
   }
 
   /**
@@ -274,44 +295,47 @@ export function createRoomListCache({
       })()
     },
 
-    async readServerView() {
-      // After any write or drop already asked for, so a read sees it.
-      await serverViewQueue
-      const generation = cache.generation
-      const cacheKey = await key()
-      if (cacheKey === null) {
-        return undefined
-      }
-      const ownKey = `${SERVER_VIEW_PREFIX}${cacheKey}`
-      const record = await cache.read<RoomListServerViewRecord>(
-        SERVER_VIEW_AREA,
-        ownKey,
-      )
-      if (
-        typeof record !== 'object' ||
-        record === null ||
-        record.version !== SERVER_VIEW_VERSION ||
-        typeof record.cursor !== 'string' ||
-        record.cursor === '' ||
-        !Array.isArray(record.rooms)
-      ) {
-        return undefined
-      }
-      // All or nothing, unlike the painted rows. A delta is merged into this
-      // list, and a list missing a row would fail the merge's count check
-      // and cost a full read anyway; saying so here is clearer.
-      if (!record.rooms.every(validRoom)) {
-        return undefined
-      }
-      if (cache.generation === generation) {
-        savedServerView = savedAs(generation, ownKey)
-      }
-      return { cursor: record.cursor, rooms: record.rooms }
+    readServerView() {
+      // In the queue: after any write or drop already asked for, so the read
+      // sees it, and before any asked for later, so a drop cannot land
+      // between this read and the saved mark it sets.
+      return enqueueServerView(async () => {
+        const generation = cache.generation
+        const cacheKey = await key()
+        if (cacheKey === null) {
+          return undefined
+        }
+        const ownKey = `${SERVER_VIEW_PREFIX}${cacheKey}`
+        const record = await cache.read<RoomListServerViewRecord>(
+          SERVER_VIEW_AREA,
+          ownKey,
+        )
+        if (
+          typeof record !== 'object' ||
+          record === null ||
+          record.version !== SERVER_VIEW_VERSION ||
+          typeof record.cursor !== 'string' ||
+          record.cursor === '' ||
+          !Array.isArray(record.rooms)
+        ) {
+          return undefined
+        }
+        // All or nothing, unlike the painted rows. A delta is merged into this
+        // list, and a list missing a row would fail the merge's count check
+        // and cost a full read anyway; saying so here is clearer.
+        if (!record.rooms.every(validRoom)) {
+          return undefined
+        }
+        if (cache.generation === generation) {
+          savedServerView = savedAs(generation, ownKey)
+        }
+        return { cursor: record.cursor, rooms: record.rooms }
+      })
     },
 
     writeServerView(view, options = {}) {
       const generation = cache.generation
-      enqueueServerView(async () => {
+      queueServerViewWrite(async () => {
         const cacheKey = await key()
         if (cacheKey === null || cache.generation !== generation) {
           return
@@ -346,7 +370,7 @@ export function createRoomListCache({
     },
 
     forgetServerView() {
-      enqueueServerView(async () => {
+      queueServerViewWrite(async () => {
         savedServerView = null
         const cacheKey = await key()
         if (cacheKey !== null) {

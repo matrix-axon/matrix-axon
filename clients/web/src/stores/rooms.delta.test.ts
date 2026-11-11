@@ -352,6 +352,67 @@ describe('incremental room-list refresh (ADR 0134)', () => {
     expect(shown(store)).toEqual(['!a:hs', '!b:hs'])
   })
 
+  it('does not let a stalled restore hold up the list', async () => {
+    // An IndexedDB open blocked by another tab: the read never settles.
+    const { roomList } = harness()
+    const stalled: typeof roomList = {
+      ...roomList,
+      readServerView: () => new Promise(() => {}),
+    }
+    const sinces = serveRooms([full([A, B], 'c1'), delta([], 2, 'c2')])
+    const store = createRoomsStore(api(), memoryStorage(), stalled, {
+      serverViewRestoreDeadlineMs: 20,
+    })
+    await store.refresh()
+    expect(shown(store)).toEqual(['!a:hs', '!b:hs'])
+    // The full read's view is held, so later refreshes stop waiting.
+    await store.refresh()
+    expect(sinces).toEqual([null, 'c1'])
+  })
+
+  it('looks for the record again once the cache is on, after a restore that found nothing', async () => {
+    const cache = createMemoryCacheStore()
+    const seeded = harness(cache).roomList
+    seeded.writeServerView({ cursor: 'c1', rooms: [A, B] })
+    await waitForView(seeded, (view) => view?.cursor === 'c1')
+
+    // Built with the cache off, as a store built before sign-in sees it.
+    let on = false
+    const { roomList } = harness(cache, () => on)
+    const sinces = serveRooms([delta([], 2, 'c2')])
+    const store = createRoomsStore(api(), memoryStorage(), roomList)
+    await settle()
+    on = true
+    await store.refresh()
+    expect(sinces).toEqual(['c1'])
+    expect(shown(store)).toEqual(['!a:hs', '!b:hs'])
+  })
+
+  it('never lets a drop asked for after a read leave the record marked saved', async () => {
+    const base = createMemoryCacheStore()
+    const slowDrops: typeof base = Object.assign(Object.create(base), {
+      drop: async (...args: Parameters<typeof base.drop>) => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        return base.drop(...args)
+      },
+    })
+    const { roomList } = harness(slowDrops)
+    roomList.writeServerView({ cursor: 'c1', rooms: [A] })
+    await waitForView(roomList, (view) => view?.cursor === 'c1')
+
+    const read = roomList.readServerView()
+    roomList.forgetServerView()
+    expect((await read)?.cursor).toBe('c1')
+    // The drop came after the read, so nothing is saved: an unchanged view
+    // must still be written.
+    roomList.writeServerView(
+      { cursor: 'c2', rooms: [A] },
+      { unlessSaved: true },
+    )
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect((await roomList.readServerView())?.cursor).toBe('c2')
+  })
+
   it('writes an unchanged view after a drop, since nothing is saved any more', async () => {
     const { roomList } = harness()
     roomList.writeServerView({ cursor: 'c1', rooms: [A] })

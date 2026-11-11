@@ -25,9 +25,11 @@ export function compareRoomOrder(a: RoomDto, b: RoomDto): number {
 }
 
 function sameRoom(a: RoomDto, b: RoomDto): boolean {
-  // The persisted projection lists every field the list shows, normalized
+  // The persisted projection lists every field of `RoomDto`, normalized
   // (`null` for absent, `[]` for no tags), so a row read back from disk
-  // compares equal to the same row fresh from the server.
+  // compares equal to the same row fresh from the server. It doubles as the
+  // definition of equality here, which is why `persistable` is checked at
+  // compile time to name every field.
   return JSON.stringify(persistable(a)) === JSON.stringify(persistable(b))
 }
 
@@ -56,7 +58,8 @@ export function mergeRoomListDelta(
     }
   }
   if (!changed) {
-    // Keep the held array's order and identity: nothing moved.
+    // Keep the held rows and their order: nothing moved. A copy of the
+    // array, since the result is the caller's to keep.
     return { rooms: [...base], changed }
   }
   return { rooms: [...byKey.values()].sort(compareRoomOrder), changed }

@@ -278,9 +278,19 @@ const ROOM_TITLE_CACHE_KEY = 'axon.room_titles.v1'
  */
 const LIVE_PATCH_CACHE_WRITE_DELAY_MS = 5_000
 
+/**
+ * How long a room-list request waits on the server-view restore (ADR 0134)
+ * before it goes out as a full read. A healthy restore is a namespace digest
+ * and one IndexedDB read, tens of milliseconds; a stalled one, such as an open
+ * blocked by another tab on an older schema, must not stall the list.
+ */
+const SERVER_VIEW_RESTORE_DEADLINE_MS = 500
+
 export interface RoomsStoreOptions {
   /** Overrides `LIVE_PATCH_CACHE_WRITE_DELAY_MS`; tests pass 0. */
   cacheWriteDelayMs?: number
+  /** Overrides `SERVER_VIEW_RESTORE_DEADLINE_MS`. */
+  serverViewRestoreDeadlineMs?: number
 }
 
 /**
@@ -299,6 +309,8 @@ export function createRoomsStore(
 ): RoomsStore {
   const cacheWriteDelayMs =
     options.cacheWriteDelayMs ?? LIVE_PATCH_CACHE_WRITE_DELAY_MS
+  const serverViewRestoreDeadlineMs =
+    options.serverViewRestoreDeadlineMs ?? SERVER_VIEW_RESTORE_DEADLINE_MS
   const rooms = signal<RoomDto[]>([])
   const unreadKeys = signal<ReadonlySet<string>>(new Set())
   /** Sum of every room's `notificationCount` (ADR 0080's app-icon badge). */
@@ -819,38 +831,71 @@ export function createRoomsStore(
    */
   let serverView: RoomListServerView | null = null
   /** The restore of the persisted server view, once per session generation. */
-  let serverViewRestore: { generation: number; done: Promise<void> } | null =
-    null
+  let serverViewRestore: {
+    generation: number
+    attempt: number
+    done: Promise<void>
+  } | null = null
+  let serverViewRestoreAttempts = 0
 
   /**
    * Restore the persisted server view so this session's first refresh can be
-   * a delta. Awaited by every refresh, but only the first per generation
-   * reads the disk; the rest get the settled promise back.
+   * a delta. Awaited by every refresh until a view is held; a restore that
+   * found a view is read once per generation, and the rest get the settled
+   * promise back.
    */
   function restoreServerView(): Promise<void> {
     if (serverViewRestore?.generation === sessionGeneration) {
       return serverViewRestore.done
     }
     const generation = sessionGeneration
+    serverViewRestoreAttempts += 1
+    const attempt = serverViewRestoreAttempts
     const done = (async () => {
       let restored: RoomListServerView | undefined
       try {
         restored = await cache?.readServerView()
       } catch {
         // Best-effort, like every cache read: a failure is a full read.
+        restored = undefined
+      }
+      if (restored === undefined) {
+        // Nothing to restore: signed out, the cache off, a cold disk, or a
+        // failed read. Forget the attempt, so a later refresh looks again,
+        // since a record may be readable by then. It stops looking once a
+        // refresh holds a view of its own.
+        if (serverViewRestore?.attempt === attempt) {
+          serverViewRestore = null
+        }
         return
       }
       // A refresh that already landed holds a newer view than the disk.
-      if (
-        restored !== undefined &&
-        generation === sessionGeneration &&
-        serverView === null
-      ) {
+      if (generation === sessionGeneration && serverView === null) {
         serverView = restored
       }
     })()
-    serverViewRestore = { generation, done }
+    serverViewRestore = { generation, attempt, done }
     return done
+  }
+
+  /**
+   * Wait for the restore, but no longer than the deadline: past it, the
+   * request goes out as a full read. A restore that lands later is still
+   * taken, unless a refresh already holds a newer view.
+   */
+  async function settleServerViewRestore(): Promise<void> {
+    if (serverView !== null) {
+      return
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, serverViewRestoreDeadlineMs)
+    })
+    try {
+      await Promise.race([restoreServerView(), deadline])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   function forgetServerView(): void {
@@ -873,7 +918,7 @@ export function createRoomsStore(
   async function readServerList(
     generation: number,
   ): Promise<ServerListRead | null> {
-    await restoreServerView()
+    await settleServerViewRestore()
     if (generation !== sessionGeneration) {
       return null
     }
