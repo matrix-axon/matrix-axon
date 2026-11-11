@@ -91,6 +91,19 @@ export interface RoomDetailsStore {
    * Showing `null` then the same room again is a reopen, and re-reads.
    */
   show(target: RoomDetailsTarget | null): void
+  /**
+   * Repeat every read whose latest attempt failed, for the room shown. The
+   * panel's Retry: a failure otherwise waits for a frame, a reconnect or a
+   * reopen.
+   */
+  retry(): void
+  /**
+   * Stop listening: the frame subscription, the reconnect effect, the
+   * `visibilitychange` listener and the clock timer, and abort the shown
+   * room's reads. The app graph keeps the store for the page's life; tests
+   * and anything else that builds a store for less call this.
+   */
+  dispose(): void
 }
 
 /** A composite in-memory key (`'\0'`-joined; `clients/web/AGENTS.md`). */
@@ -214,10 +227,11 @@ export function createRoomDetailsStore(
     armClock()
   }
 
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'visible') tick()
+  }
   if (typeof document !== 'undefined') {
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') tick()
-    })
+    document.addEventListener('visibilitychange', onVisibilityChange)
   }
 
   async function fetchRead(
@@ -278,6 +292,11 @@ export function createRoomDetailsStore(
         // dropped; its request was aborted, but a settled one can still land.
         if (session !== owner) return
         owner.inFlight.delete(which)
+        // The room was left mid-read: its homeserver answer no longer applies.
+        if (which === 'homeserverDetails' && !owner.target.joined) {
+          owner.dirty.delete(which)
+          return
+        }
         const slot = state.value[which]
         state.value = {
           ...state.value,
@@ -297,8 +316,20 @@ export function createRoomDetailsStore(
       target === null ? null : roomDetailsKey(target.accountId, target.roomId)
     if (session !== null && key === session.key && target !== null) {
       const becameJoined = target.joined && !session.target.joined
+      const left = !target.joined && session.target.joined
       session.target = target
       if (becameJoined) read(session, 'homeserverDetails')
+      if (left) {
+        // Frames for it are ignored from now on, so a held answer would sit
+        // unrefreshed with no note. Forget it: the row reads "not cached",
+        // as it does for any room the account has not joined.
+        session.dirty.delete('homeserverDetails')
+        state.value = {
+          ...state.value,
+          homeserverDetails: { value: null, error: null, requested: false },
+        }
+        armClock()
+      }
       return
     }
     session?.controller.abort()
@@ -319,7 +350,7 @@ export function createRoomDetailsStore(
     if (target.joined) read(owner, 'homeserverDetails')
   }
 
-  live.subscribe((frame) => {
+  const unsubscribe = live.subscribe((frame) => {
     const change = roomDetailsChange(frame)
     const owner = session
     if (
@@ -342,7 +373,7 @@ export function createRoomDetailsStore(
   // count handled is tracked here, not tested as `> 0`, so a panel opened long
   // after an old reconnect does not issue a second round of reads.
   let handledReconnects = live.reconnects.peek()
-  effect(() => {
+  const disposeReconnects = effect(() => {
     const reconnects = live.reconnects.value
     if (reconnects === handledReconnects) return
     handledReconnects = reconnects
@@ -355,5 +386,23 @@ export function createRoomDetailsStore(
     })
   })
 
-  return { state, show }
+  function retry(): void {
+    const owner = session
+    if (owner === null) return
+    for (const which of ['metadata', 'info', 'homeserverDetails'] as const) {
+      if (which === 'homeserverDetails' && !owner.target.joined) continue
+      if (state.value[which].error !== null) read(owner, which)
+    }
+  }
+
+  function dispose(): void {
+    show(null)
+    unsubscribe()
+    disposeReconnects()
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }
+
+  return { state, show, retry, dispose }
 }

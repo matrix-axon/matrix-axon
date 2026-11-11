@@ -120,6 +120,11 @@ export interface UnreadCountsChange {
  * The payload of a `room_display_name.changed` frame (ADR 0118): the same
  * value `RoomDto.display_name` now returns for the room.
  */
+export interface RoomDisplayNameChange {
+  roomId: string
+  displayName: string
+}
+
 /**
  * A read a `room_details.changed` frame names (`docs/room-metadata.md`
  * § Change notification). Each names one endpoint to re-read:
@@ -153,11 +158,6 @@ export interface RoomDetailsChange {
   roomId: string
   /** The known sources the frame names; values this client predates are dropped. */
   sources: ReadonlySet<RoomDetailSource>
-}
-
-export interface RoomDisplayNameChange {
-  roomId: string
-  displayName: string
 }
 
 /**

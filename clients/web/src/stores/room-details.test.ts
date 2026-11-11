@@ -20,8 +20,11 @@ const ROOM = '!room:hs'
 const NEXT = '!next:hs'
 
 const server = setupServer()
+/** Every store a test built, disposed after it so none outlives its test. */
+const disposers: Array<() => void> = []
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
+  for (const dispose of disposers.splice(0)) dispose()
   server.resetHandlers()
   vi.useRealTimers()
 })
@@ -84,6 +87,7 @@ function harness() {
     BASE_URL,
   )
   const store = createRoomDetailsStore(api, live)
+  disposers.push(() => store.dispose())
   const frame = (
     sources: readonly string[],
     roomId = ROOM,
@@ -111,6 +115,7 @@ function harness() {
       for (const resolve of held.splice(0)) resolve()
     },
     heldCount: () => held.length,
+    listenerCount: () => listeners.size,
   }
 }
 
@@ -299,6 +304,90 @@ it('keeps the last answer through a failed re-read and reports the failure', asy
     expect(h.store.state.value.metadata.error).toBe('offline'),
   )
   expect(h.store.state.value.metadata.value).not.toBeNull()
+})
+
+it('retry repeats only the reads that failed', async () => {
+  const h = harness()
+  server.use(
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/metadata`,
+      () =>
+        HttpResponse.json(
+          { error: { code: 'unavailable', message: 'offline' } },
+          { status: 503 },
+        ),
+      { once: true },
+    ),
+  )
+  show(h)
+  await vi.waitFor(() => {
+    expect(h.store.state.value.metadata.error).toBe('offline')
+    expect(h.store.state.value.info.value).not.toBeNull()
+    expect(h.store.state.value.homeserverDetails.value).not.toBeNull()
+  })
+  h.store.retry()
+  await vi.waitFor(() =>
+    expect(h.store.state.value.metadata.value).not.toBeNull(),
+  )
+  expect(h.store.state.value.metadata.error).toBeNull()
+  expect(h.count('metadata')).toBe(1)
+  expect(h.count('info')).toBe(1)
+  expect(h.count('homeserver_details')).toBe(1)
+})
+
+it('forgets homeserver details when the room is left with the panel open', async () => {
+  const h = harness()
+  show(h)
+  await vi.waitFor(() =>
+    expect(h.store.state.value.homeserverDetails.value).not.toBeNull(),
+  )
+  show(h, ROOM, false)
+  expect(h.store.state.value.homeserverDetails).toEqual({
+    value: null,
+    error: null,
+    requested: false,
+  })
+  // The rest of the room's answers stay, and its frames no longer read it.
+  expect(h.store.state.value.metadata.value).not.toBeNull()
+  h.frame(['homeserver_details'])
+  await Promise.resolve()
+  expect(h.count('homeserver_details')).toBe(1)
+})
+
+it('drops a homeserver answer that lands after the room was left', async () => {
+  const h = harness()
+  h.hold()
+  show(h)
+  await vi.waitFor(() => expect(h.heldCount()).toBe(3))
+  show(h, ROOM, false)
+  h.release()
+  await vi.waitFor(() =>
+    expect(h.store.state.value.metadata.value).not.toBeNull(),
+  )
+  await vi.waitFor(() => expect(h.store.state.value.info.value).not.toBeNull())
+  expect(h.store.state.value.homeserverDetails.value).toBeNull()
+})
+
+it('dispose releases the frame listener, the reconnect effect and the visibility listener', async () => {
+  const removed = vi.spyOn(document, 'removeEventListener')
+  const h = harness()
+  show(h)
+  await vi.waitFor(() =>
+    expect(h.store.state.value.homeserverDetails.value).not.toBeNull(),
+  )
+  expect(h.listenerCount()).toBe(1)
+  h.store.dispose()
+  expect(h.store.state.value.key).toBeNull()
+  expect(h.listenerCount()).toBe(0)
+  expect(removed).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+  removed.mockRestore()
+  // A store shown again after dispose (nothing should) proves the reconnect
+  // effect is gone: a live one would re-read all three.
+  show(h)
+  await vi.waitFor(() => expect(h.calls).toHaveLength(6))
+  h.reconnects.value += 1
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(h.calls).toHaveLength(6)
 })
 
 /**

@@ -4371,6 +4371,20 @@ span.composer-attachment-thumb {
   margin-bottom: 0.45rem;
 }
 
+/* Failed detail reads, each named, with one Retry. */
+.room-info-details-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.room-info-details-error > p {
+  margin: 0;
+}
+
 .room-info-actions {
   display: flex;
   align-items: center;

@@ -471,3 +471,41 @@ describe('memberListCoverage', () => {
     expect(memberListCoverage(3, null)).toBeNull()
   })
 })
+
+describe('the canonical alias with a room-summary alias to fall back on', () => {
+  const shown = (aliases: unknown) =>
+    text(
+      canonicalAliasShown(
+        metadataDto({ aliases: aliases as never }),
+        NOW,
+        '#summary:hs',
+      ),
+    )
+
+  it('uses the summary alias where the snapshot has no answer', () => {
+    expect(shown(unknownSnapshot())).toBe('#summary:hs')
+    expect(
+      shown(unknownSnapshot({ absence_check: { state: 'running' } })),
+    ).toBe('#summary:hs')
+    expect(shown(unknownSnapshot({ status: 'unavailable' }))).toBe(
+      '#summary:hs',
+    )
+  })
+
+  it('keeps the snapshot’s own answer wherever it has one', () => {
+    expect(shown(snapshot({ alias: '#meta:hs' }))).toBe('#meta:hs')
+    expect(shown(snapshot({}))).toBe('None')
+    expect(
+      shown(unknownSnapshot({ absence_confirmed_at: 1_700_000_000_000 })),
+    ).toBe('None')
+    expect(
+      shown(unknownSnapshot({ status: 'unavailable', redacted: true })),
+    ).toBe('Redacted')
+    expect(shown(unknownSnapshot({ status: 'invalid' }))).toBe(
+      'Unavailable (malformed state)',
+    )
+    expect(shown(unknownSnapshot({ status: 'too_large' }))).toBe(
+      'Unavailable (state too large)',
+    )
+  })
+})

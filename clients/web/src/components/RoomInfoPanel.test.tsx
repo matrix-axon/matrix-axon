@@ -286,12 +286,25 @@ it('never shows the previous room’s state after a room switch', async () => {
 
 it('reports a failed room-state read instead of pending forever', async () => {
   server.use(...handlers({ failSecond: true }))
-  const { showRoom, findByText } = renderPanel(FIRST)
+  const { showRoom, findByText, getByRole } = renderPanel(FIRST)
   await waitFor(() => expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'))
 
   showRoom(SECOND)
   await waitFor(() => expect(detail('Encryption')).toBe('Unavailable'))
-  expect(await findByText('Could not load this section.')).toBeTruthy()
+  // Each failed read is named, with the server's reason, and Retry re-reads.
+  expect(await findByText('Could not load room settings: offline')).toBeTruthy()
+  expect(await findByText('Could not load member counts: offline')).toBeTruthy()
+  expect(
+    await findByText(
+      'Could not load homeserver aliases and directory visibility: offline',
+    ),
+  ).toBeTruthy()
+  server.use(...handlers())
+  fireEvent.click(getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(detail('Encryption')).toBe('Not encrypted'))
+  await waitFor(() =>
+    expect(document.querySelector('.room-info-details-error')).toBeNull(),
+  )
 })
 
 it('confirms before joining a relationship link, and reports a failed join', async () => {
@@ -1296,6 +1309,68 @@ it('fills the canonical alias from the room summary before /metadata answers', a
   expect(detail('Encryption')).toBe('Loading…')
 })
 
+it('keeps the summary canonical alias while the aliases snapshot has no answer', async () => {
+  server.use(
+    ...detailHandlers({
+      metadata: () => metadataDto({ aliases: unknownSnapshot() }),
+    }),
+    ...handlers(),
+  )
+  renderPanel(FIRST, { canonical_alias: '#summary:hs' })
+  await waitFor(() =>
+    expect(detail('Advertised aliases')).toBe('Unknown (not cached)'),
+  )
+  expect(detail('Canonical alias')).toBe('#summary:hs')
+})
+
+it('lets a confirmed absence of aliases override the summary alias', async () => {
+  server.use(
+    ...detailHandlers({
+      metadata: () =>
+        metadataDto({
+          aliases: unknownSnapshot({ absence_confirmed_at: 1_700_000_000_000 }),
+        }),
+    }),
+    ...handlers(),
+  )
+  renderPanel(FIRST, { canonical_alias: '#summary:hs' })
+  await waitFor(() => expect(detail('Canonical alias')).toBe('None'))
+})
+
+it('keeps a shown answer, with no alarm, when a later re-read fails', async () => {
+  let fail = false
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/metadata`,
+      () =>
+        fail
+          ? HttpResponse.json(
+              { error: { code: 'unavailable', message: 'offline' } },
+              { status: 503 },
+            )
+          : HttpResponse.json({ data: metadataDto() }),
+    ),
+    ...handlers(),
+  )
+  const { services, queryByRole } = renderPanel(FIRST)
+  await waitFor(() => expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'))
+  fail = true
+  services.live.start()
+  services.sockets[0]!.emitOpen()
+  services.sockets[0]!.emitMessage(
+    JSON.stringify({
+      type: 'room_details.changed',
+      account_id: ACCOUNT,
+      payload: { room_id: FIRST, sources: ['metadata'] },
+    }),
+  )
+  await waitFor(() =>
+    expect(services.roomDetails.state.value.metadata.error).toBe('offline'),
+  )
+  expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2')
+  expect(queryByRole('alert')).toBeNull()
+})
+
 it('never calls an uncached encryption state unencrypted', async () => {
   server.use(
     ...detailHandlers({
@@ -1491,6 +1566,8 @@ it('never renders details the store holds for a different room', () => {
   const stuck: RoomDetailsStore = {
     state: signal(firstRoomDetails),
     show: () => {},
+    retry: () => {},
+    dispose: () => {},
   }
   render(
     <ServicesContext.Provider value={{ ...services, roomDetails: stuck }}>

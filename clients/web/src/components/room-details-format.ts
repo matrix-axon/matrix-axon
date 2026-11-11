@@ -281,10 +281,33 @@ export function guestAccessShown(
 export function canonicalAliasShown(
   metadata: RoomMetadataDto,
   now: number,
+  summaryAlias: string | null = null,
 ): Shown {
   const view = snapshotView<AliasesContent>(metadata.aliases, 'aliases', now)
-  if (view.content === null) return labelOf(view)
+  if (view.content === null) {
+    // A snapshot with no answer contradicts nothing, so the room-list
+    // summary's alias stands in for it (decision 4). A redaction, a confirmed
+    // absence or withheld state is an answer, and keeps its label.
+    return summaryAlias !== null && snapshotSilent(metadata.aliases)
+      ? shownValue(summaryAlias)
+      : labelOf(view)
+  }
   return scalar(view, 'alias', view.content.alias, 'None')
+}
+
+/**
+ * Whether a snapshot says nothing about its state event: no content, not
+ * redacted, not withheld as malformed or too large, and no confirmed absence.
+ * That is `unknown` (however its check stands) and `unavailable`.
+ */
+function snapshotSilent(snapshot: Snapshot<unknown>): boolean {
+  if (snapshot.redacted === true || (snapshot.content ?? null) !== null) {
+    return false
+  }
+  if (snapshot.status === 'invalid' || snapshot.status === 'too_large') {
+    return false
+  }
+  return typeof snapshot.absence_confirmed_at !== 'number'
 }
 
 /**

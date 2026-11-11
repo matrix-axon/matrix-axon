@@ -203,18 +203,33 @@ export function RoomInfoPanel({
     return known !== undefined ? roomTitle(known, roomTitles) || target : target
   }
   const formatTime = (ts: number) => new Date(ts).toLocaleString()
-  // Before `/metadata` answers, the canonical alias comes from the room-list
-  // summary, so the row is filled the moment the panel opens (decision 4).
+  // Until `/metadata` answers, and while its aliases snapshot has no answer,
+  // the canonical alias comes from the room-list summary, so the row is filled
+  // the moment the panel opens (decision 4).
+  const summaryAlias = room?.canonical_alias ?? null
   const canonicalAlias =
-    details.metadata.value === null && (room?.canonical_alias ?? null) !== null
-      ? shownValue(room?.canonical_alias ?? '')
+    details.metadata.value === null && summaryAlias !== null
+      ? shownValue(summaryAlias)
       : fromRead(details.metadata, (metadata, now) =>
-          canonicalAliasShown(metadata, now),
+          canonicalAliasShown(metadata, now, summaryAlias),
         )
-  const detailsFailed =
-    details.metadata.error !== null ||
-    details.info.error !== null ||
-    details.homeserverDetails.error !== null
+  // A failed read whose rows have nothing else to show. One that failed
+  // after an answer keeps that answer on screen instead, and the next frame,
+  // reconnect or reopen reads it again.
+  const detailFailures = (
+    [
+      ['room settings', details.metadata],
+      ['member counts', details.info],
+      [
+        'homeserver aliases and directory visibility',
+        details.homeserverDetails,
+      ],
+    ] as const
+  ).flatMap(([section, slot]) =>
+    slot.value === null && slot.error !== null
+      ? [{ section, error: slot.error }]
+      : [],
+  )
   const [roomStateVersion, setRoomStateVersion] = useState(0)
   // Keyed by room for the same reason `RoomStateSlice` is: `RoomPage` keeps
   // one panel instance across room navigation, so an unkeyed `editing` flag
@@ -841,10 +856,21 @@ export function RoomInfoPanel({
             />
           </dl>
         </details>
-        {detailsFailed && (
-          <p class="error" role="alert">
-            Could not load this section.
-          </p>
+        {detailFailures.length > 0 && (
+          <div class="room-info-details-error" role="alert">
+            {detailFailures.map(({ section, error }) => (
+              <p key={section} class="error">
+                Could not load {section}: {error}
+              </p>
+            ))}
+            <button
+              type="button"
+              class="ghost"
+              onClick={() => roomDetails.retry()}
+            >
+              Retry
+            </button>
+          </div>
         )}
       </section>
 
