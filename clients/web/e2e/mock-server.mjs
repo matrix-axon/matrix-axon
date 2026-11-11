@@ -1075,6 +1075,76 @@ async function handleApi(req, res, url) {
         join_rule: 'invite',
         history_visibility: 'shared',
         guest_access: 'forbidden',
+        member_counts: {
+          joined: 2,
+          invited: 1,
+          observed_at: 1_700_000_000_000,
+        },
+      },
+    })
+  }
+  // The typed detail reads behind Room Information (ADR 0133). Every snapshot
+  // is cached except server ACL, whose absence the homeserver has confirmed,
+  // so the panel shows real values and one spec default — never "Unknown".
+  if (method === 'GET' && /\/rooms\/[^/]+\/metadata$/.test(pathname)) {
+    const cached = (content) => ({
+      status: 'available',
+      content,
+      invalid_fields: [],
+      event_id: '$state',
+      sender: '@alice:e2e.test',
+      origin_ts: 1_700_000_000_000,
+      redacted: null,
+      absence_confirmed_at: null,
+      absence_check: null,
+    })
+    return json(res, {
+      data: {
+        aliases: cached({
+          alias: '#e2e:e2e.test',
+          alt_aliases: ['#e2e-alt:e2e.test'],
+        }),
+        creation: cached({ room_version: '11', creator: null }),
+        encryption: cached({ algorithm: 'm.megolm.v1.aes-sha2' }),
+        guest_access: cached({ guest_access: 'forbidden' }),
+        history_visibility: cached({ history_visibility: 'shared' }),
+        join_rules: cached({ join_rule: 'invite' }),
+        power_levels: {
+          status: 'unknown',
+          invalid_fields: [],
+          absence_confirmed_at: null,
+          absence_check: { state: 'idle' },
+        },
+        server_acl: {
+          status: 'unknown',
+          invalid_fields: [],
+          absence_confirmed_at: 1_700_000_000_000,
+          absence_check: { state: 'idle' },
+        },
+      },
+    })
+  }
+  if (
+    method === 'GET' &&
+    /\/rooms\/[^/]+\/homeserver_details$/.test(pathname)
+  ) {
+    const fresh = {
+      fetched_at: Date.now(),
+      expires_at: Date.now() + 15 * 60_000,
+      refresh: { state: 'idle' },
+    }
+    return json(res, {
+      data: {
+        local_aliases: {
+          status: 'available',
+          aliases: ['#e2e-local:e2e.test'],
+          ...fresh,
+        },
+        directory_visibility: {
+          status: 'available',
+          visibility: 'private',
+          ...fresh,
+        },
       },
     })
   }

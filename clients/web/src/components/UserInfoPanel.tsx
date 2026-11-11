@@ -380,7 +380,7 @@ export function UserInfoPanel({
       <section class="room-info-section" aria-labelledby="user-info-details">
         <h3 id="user-info-details">Details</h3>
         <dl class="detail-list">
-          <DetailRow label="Matrix ID" value={userId} code copyable />
+          <DetailRow label="Matrix ID" value={userId} code />
           <DetailRow
             label="Membership"
             copyable={false}
@@ -393,60 +393,29 @@ export function UserInfoPanel({
             }
           />
           {roomMember !== undefined && (
-            <DetailRow
-              label="Room display name"
-              value={roomName ?? 'None'}
-              copyable={roomName !== null}
-            />
+            <DetailRow label="Room display name" value={roomName} />
           )}
           {roomMember !== undefined && (
-            <DetailRow
-              label="Room avatar"
-              value={roomAvatar ?? 'None'}
-              code
-              copyable={roomAvatar !== null}
-            />
+            <DetailRow label="Room avatar" value={roomAvatar} code />
           )}
           {profile.status === 'loading' && (
-            <DetailRow
-              label="Global profile"
-              value="Loading…"
-              copyable={false}
-            />
+            <DetailRow label="Global profile" value={null} empty="Loading…" />
           )}
           {roomMember === undefined && profile.status === 'ready' && (
-            <DetailRow
-              label="Display name"
-              value={globalName ?? 'None'}
-              copyable={globalName !== null}
-            />
+            <DetailRow label="Display name" value={globalName} />
           )}
           {roomMember === undefined && profile.status === 'ready' && (
-            <DetailRow
-              label="Avatar"
-              value={globalAvatar ?? 'None'}
-              code
-              copyable={globalAvatar !== null}
-            />
+            <DetailRow label="Avatar" value={globalAvatar} code />
           )}
           {roomMember !== undefined &&
             profile.status === 'ready' &&
             globalName !== roomName && (
-              <DetailRow
-                label="Global display name"
-                value={globalName ?? 'None'}
-                copyable={globalName !== null}
-              />
+              <DetailRow label="Global display name" value={globalName} />
             )}
           {roomMember !== undefined &&
             profile.status === 'ready' &&
             globalAvatar !== roomAvatar && (
-              <DetailRow
-                label="Global avatar"
-                value={globalAvatar ?? 'None'}
-                code
-                copyable={globalAvatar !== null}
-              />
+              <DetailRow label="Global avatar" value={globalAvatar} code />
             )}
         </dl>
         {profile.status === 'error' && (

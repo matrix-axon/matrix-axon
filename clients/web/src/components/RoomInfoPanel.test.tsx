@@ -5,13 +5,25 @@ import {
   waitFor,
   type RenderResult,
 } from '@testing-library/preact'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { LocationProvider } from 'preact-iso'
+import { signal } from '@preact/signals'
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { ServicesContext } from '../services'
 import { createMembersStore } from '../stores/members'
+import {
+  emptyRoomDetails,
+  roomDetailsKey,
+  type RoomDetailsStore,
+} from '../stores/room-details'
 import type { RoomDto } from '../stores/room-list'
+import {
+  homeserverDetailsDto,
+  metadataDto,
+  snapshot,
+  unknownSnapshot,
+} from '../test/room-details'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomInfoPanel } from './RoomInfoPanel'
 
@@ -45,9 +57,10 @@ const room = (
   }) as unknown as RoomDto
 
 /**
- * `/info` answers per room; every other read is empty. `failSecond` makes the
- * second room's reads fail, which is what a room switch while offline looks
- * like.
+ * `/metadata` answers per room: the first is encrypted and invite-only, the
+ * second's homeserver confirmed it has no encryption state, and it is public.
+ * Every other read is empty. `failSecond` makes the second room's detail reads
+ * fail, which is what a room switch while offline looks like.
  */
 function handlers(
   options: {
@@ -58,21 +71,40 @@ function handlers(
   } = {},
 ) {
   const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
-  const infoFor = (roomId: string) =>
+  const metadataFor = (roomId: string) =>
     decodeURIComponent(roomId) === FIRST
-      ? { encryption_algorithm: 'm.megolm.v1.aes-sha2', join_rule: 'invite' }
-      : { encryption_algorithm: null, join_rule: 'public' }
+      ? metadataDto()
+      : metadataDto({
+          encryption: unknownSnapshot({
+            absence_confirmed_at: 1_700_000_000_000,
+          }),
+          join_rules: snapshot({ join_rule: 'public' }),
+        })
+  const offline = (roomId: unknown) =>
+    options.failSecond === true && decodeURIComponent(String(roomId)) !== FIRST
+  const unavailable = () =>
+    HttpResponse.json(
+      { error: { code: 'unavailable', message: 'offline' } },
+      { status: 503 },
+    )
   return [
-    http.get(`${base}/info`, ({ params }) => {
-      const roomId = String(params.roomId)
-      if (options.failSecond === true && decodeURIComponent(roomId) !== FIRST) {
-        return HttpResponse.json(
-          { error: { code: 'unavailable', message: 'offline' } },
-          { status: 503 },
-        )
-      }
-      return HttpResponse.json({ data: infoFor(roomId) })
-    }),
+    http.get(`${base}/metadata`, ({ params }) =>
+      offline(params.roomId)
+        ? unavailable()
+        : HttpResponse.json({ data: metadataFor(String(params.roomId)) }),
+    ),
+    http.get(`${base}/info`, ({ params }) =>
+      offline(params.roomId)
+        ? unavailable()
+        : HttpResponse.json({
+            data: { member_counts: { joined: 3, invited: 1, observed_at: 0 } },
+          }),
+    ),
+    http.get(`${base}/homeserver_details`, ({ params }) =>
+      offline(params.roomId)
+        ? unavailable()
+        : HttpResponse.json({ data: homeserverDetailsDto() }),
+    ),
     http.get(`${base}/pinned`, () => HttpResponse.json({ data: [] })),
     http.get(`${base}/space/children`, () => HttpResponse.json({ data: [] })),
     http.get(`${base}/space/parents`, () => HttpResponse.json({ data: [] })),
@@ -149,7 +181,7 @@ function renderPanel(
         </LocationProvider>
       </ServicesContext.Provider>,
     )
-  return { ...view, showRoom }
+  return { ...view, showRoom, services, members }
 }
 
 const detail = (label: string): string => {
@@ -172,7 +204,7 @@ it('copies a populated detail on click and skips placeholders', async () => {
   await waitFor(() => expect(writeText).toHaveBeenCalledWith('First'))
 
   expect(queryByRole('button', { name: 'Copy Topic' })).toBeNull()
-  expect(queryByRole('button', { name: 'Copy Full alias list' })).toBeNull()
+  expect(queryByRole('button', { name: 'Copy Avatar' })).toBeNull()
 })
 
 it('shows only the rendered title, never a stale cached one (ADR 0118)', () => {
@@ -248,18 +280,31 @@ it('never shows the previous room’s state after a room switch', async () => {
   // survive here — and encryption is exactly the field that must not lie.
   showRoom(SECOND)
   expect(detail('Encryption')).toBe('Loading…')
-  await waitFor(() => expect(detail('Encryption')).toBe('Unencrypted'))
+  await waitFor(() => expect(detail('Encryption')).toBe('Not encrypted'))
   expect(detail('Access')).toBe('public')
 })
 
 it('reports a failed room-state read instead of pending forever', async () => {
   server.use(...handlers({ failSecond: true }))
-  const { showRoom, findByText } = renderPanel(FIRST)
+  const { showRoom, findByText, getByRole } = renderPanel(FIRST)
   await waitFor(() => expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'))
 
   showRoom(SECOND)
   await waitFor(() => expect(detail('Encryption')).toBe('Unavailable'))
-  expect(await findByText('Could not load this section.')).toBeTruthy()
+  // Each failed read is named, with the server's reason, and Retry re-reads.
+  expect(await findByText('Could not load room settings: offline')).toBeTruthy()
+  expect(await findByText('Could not load member counts: offline')).toBeTruthy()
+  expect(
+    await findByText(
+      'Could not load homeserver aliases and directory visibility: offline',
+    ),
+  ).toBeTruthy()
+  server.use(...handlers())
+  fireEvent.click(getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(detail('Encryption')).toBe('Not encrypted'))
+  await waitFor(() =>
+    expect(document.querySelector('.room-info-details-error')).toBeNull(),
+  )
 })
 
 it('confirms before joining a relationship link, and reports a failed join', async () => {
@@ -1192,5 +1237,401 @@ it('does not infer a parent from a removed cached space relationship', async () 
   await waitFor(() => expect(services.spaces.loading.value.size).toBe(0))
   expect(
     view.queryByRole('button', { name: 'Parent: Removed Parent' }),
+  ).toBeNull()
+})
+
+/**
+ * Serve one room's detail reads. msw serves the first match, so these go
+ * before `handlers()` in a `server.use` call.
+ */
+function detailHandlers(reads: {
+  metadata?: () => unknown
+  info?: () => unknown
+  homeserverDetails?: () => unknown
+}) {
+  const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
+  return [
+    ...(reads.metadata === undefined
+      ? []
+      : [
+          http.get(`${base}/metadata`, () =>
+            HttpResponse.json({ data: reads.metadata?.() }),
+          ),
+        ]),
+    ...(reads.info === undefined
+      ? []
+      : [
+          http.get(`${base}/info`, () =>
+            HttpResponse.json({ data: reads.info?.() }),
+          ),
+        ]),
+    ...(reads.homeserverDetails === undefined
+      ? []
+      : [
+          http.get(`${base}/homeserver_details`, () =>
+            HttpResponse.json({ data: reads.homeserverDetails?.() }),
+          ),
+        ]),
+  ]
+}
+
+it('labels advertised and homeserver aliases as separate lists (ADR 0133)', async () => {
+  server.use(...handlers())
+  const { queryByText, getByRole } = renderPanel(FIRST)
+  await waitFor(() => expect(detail('Advertised aliases')).toBe('#alt:hs'))
+  expect(detail('Canonical alias')).toBe('#room:hs')
+  await waitFor(() =>
+    expect(detail('Aliases on your homeserver')).toBe('#local:hs'),
+  )
+  expect(queryByText('Full alias list')).toBeNull()
+  expect(queryByText('Unavailable from current API')).toBeNull()
+  // Real aliases are data, so they copy.
+  expect(getByRole('button', { name: 'Copy Advertised aliases' })).toBeTruthy()
+})
+
+it('fills the canonical alias from the room summary before /metadata answers', async () => {
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/metadata`,
+      async () => {
+        await delay('infinite')
+        return HttpResponse.json({})
+      },
+    ),
+    ...handlers(),
+  )
+  renderPanel(FIRST, { canonical_alias: '#summary:hs' })
+  expect(detail('Canonical alias')).toBe('#summary:hs')
+  // No row waits for another read: member counts fill while /metadata hangs.
+  await waitFor(() => expect(detail('Members')).toBe('3 joined · 1 invited'))
+  expect(detail('Canonical alias')).toBe('#summary:hs')
+  expect(detail('Advertised aliases')).toBe('Loading…')
+  expect(detail('Encryption')).toBe('Loading…')
+})
+
+it('keeps the summary canonical alias while the aliases snapshot has no answer', async () => {
+  server.use(
+    ...detailHandlers({
+      metadata: () => metadataDto({ aliases: unknownSnapshot() }),
+    }),
+    ...handlers(),
+  )
+  renderPanel(FIRST, { canonical_alias: '#summary:hs' })
+  await waitFor(() =>
+    expect(detail('Advertised aliases')).toBe('Unknown (not cached)'),
+  )
+  expect(detail('Canonical alias')).toBe('#summary:hs')
+})
+
+it('lets a confirmed absence of aliases override the summary alias', async () => {
+  server.use(
+    ...detailHandlers({
+      metadata: () =>
+        metadataDto({
+          aliases: unknownSnapshot({ absence_confirmed_at: 1_700_000_000_000 }),
+        }),
+    }),
+    ...handlers(),
+  )
+  renderPanel(FIRST, { canonical_alias: '#summary:hs' })
+  await waitFor(() => expect(detail('Canonical alias')).toBe('None'))
+})
+
+it('keeps a shown answer, with no alarm, when a later re-read fails', async () => {
+  let fail = false
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/metadata`,
+      () =>
+        fail
+          ? HttpResponse.json(
+              { error: { code: 'unavailable', message: 'offline' } },
+              { status: 503 },
+            )
+          : HttpResponse.json({ data: metadataDto() }),
+    ),
+    ...handlers(),
+  )
+  const { services, queryByRole } = renderPanel(FIRST)
+  await waitFor(() => expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'))
+  fail = true
+  services.live.start()
+  services.sockets[0]!.emitOpen()
+  services.sockets[0]!.emitMessage(
+    JSON.stringify({
+      type: 'room_details.changed',
+      account_id: ACCOUNT,
+      payload: { room_id: FIRST, sources: ['metadata'] },
+    }),
+  )
+  await waitFor(() =>
+    expect(services.roomDetails.state.value.metadata.error).toBe('offline'),
+  )
+  expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2')
+  expect(queryByRole('alert')).toBeNull()
+})
+
+it('never calls an uncached encryption state unencrypted', async () => {
+  server.use(
+    ...detailHandlers({
+      metadata: () => metadataDto({ encryption: unknownSnapshot() }),
+    }),
+    ...handlers(),
+  )
+  const { queryByRole } = renderPanel(FIRST)
+  await waitFor(() => expect(detail('Encryption')).toBe('Unknown (not cached)'))
+  expect(queryByRole('button', { name: 'Copy Encryption' })).toBeNull()
+})
+
+it('shows the encryption default only once the homeserver confirms the absence', async () => {
+  let encryption: unknown = unknownSnapshot({
+    absence_check: { state: 'queued' },
+  })
+  server.use(
+    ...detailHandlers({ metadata: () => metadataDto({ encryption }) }),
+    ...handlers(),
+  )
+  const { services } = renderPanel(FIRST)
+  await waitFor(() => expect(detail('Encryption')).toBe('Checking…'))
+
+  // The absence job finishes; the server publishes `metadata` and the panel
+  // re-reads without polling.
+  encryption = unknownSnapshot({ absence_confirmed_at: 1_700_000_000_000 })
+  services.live.start()
+  services.sockets[0]!.emitOpen()
+  services.sockets[0]!.emitMessage(
+    JSON.stringify({
+      type: 'room_details.changed',
+      account_id: ACCOUNT,
+      payload: { room_id: FIRST, sources: ['metadata'] },
+    }),
+  )
+  await waitFor(() => expect(detail('Encryption')).toBe('Not encrypted'))
+})
+
+it('shows redacted state as redacted, with retained fields noted', async () => {
+  server.use(
+    ...detailHandlers({
+      metadata: () =>
+        metadataDto({
+          join_rules: snapshot(
+            { join_rule: 'invite' },
+            { redacted: true, status: 'unavailable' },
+          ),
+          history_visibility: unknownSnapshot({
+            status: 'unavailable',
+            redacted: true,
+          }),
+        }),
+    }),
+    ...handlers(),
+  )
+  renderPanel(FIRST)
+  await waitFor(() =>
+    expect(detail('Access')).toBe('invite · redacted; retained fields shown'),
+  )
+  expect(detail('History visibility')).toBe('Redacted')
+})
+
+it('keeps a stale homeserver value visible beside a failed refresh', async () => {
+  server.use(
+    ...detailHandlers({
+      homeserverDetails: () =>
+        homeserverDetailsDto({
+          local_aliases: {
+            status: 'available',
+            aliases: ['#old:hs'],
+            fetched_at: 1,
+            expires_at: 2,
+            refresh: { state: 'idle', failure: 'timeout' },
+          },
+        }),
+    }),
+    ...handlers(),
+  )
+  renderPanel(FIRST)
+  await waitFor(() =>
+    expect(detail('Aliases on your homeserver')).toBe(
+      "#old:hs · may be out of date · couldn't refresh",
+    ),
+  )
+})
+
+it('shows member counts, and unknown rather than zero before they are observed', async () => {
+  server.use(...handlers())
+  renderPanel(FIRST)
+  await waitFor(() => expect(detail('Members')).toBe('3 joined · 1 invited'))
+
+  cleanup()
+  server.use(...detailHandlers({ info: () => ({ member_counts: null }) }))
+  renderPanel(FIRST)
+  await waitFor(() =>
+    expect(detail('Members')).toBe('Unknown (not yet observed)'),
+  )
+})
+
+it('shows creation, directory and ACL details in a collapsed Advanced group', async () => {
+  server.use(
+    ...detailHandlers({
+      metadata: () =>
+        metadataDto({
+          creation: snapshot(
+            {
+              room_version: '12',
+              predecessor: { room_id: '!old:hs' },
+              additional_creators: ['@co:hs'],
+            },
+            { sender: '@creator:hs' },
+          ),
+          server_acl: snapshot({ allow: ['*'], deny: ['bad.example'] }),
+        }),
+    }),
+    ...handlers(),
+  )
+  const { container } = renderPanel(FIRST)
+  const advanced = container.querySelector('details.room-info-advanced')
+  expect(advanced).toBeTruthy()
+  expect((advanced as HTMLDetailsElement).open).toBe(false)
+  await waitFor(() => expect(detail('Room version')).toBe('12'))
+  expect(detail('Creator')).toBe('@creator:hs, @co:hs')
+  expect(detail('Predecessor room')).toBe('!old:hs')
+  expect(detail('Server ACL')).toBe(
+    '1 allowed · 1 denied · IP literals not specified',
+  )
+  await waitFor(() => expect(detail('Directory visibility')).toBe('Private'))
+})
+
+it('does not read homeserver details for a room missing from the joined list', async () => {
+  const homeserverReads = vi.fn()
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/homeserver_details`,
+      () => {
+        homeserverReads()
+        return HttpResponse.json({ data: homeserverDetailsDto() })
+      },
+    ),
+    ...handlers(),
+  )
+  const services = testServices()
+  const members = createMembersStore(services.api, ACCOUNT, FIRST)
+  render(
+    <ServicesContext.Provider value={services}>
+      <LocationProvider>
+        <RoomInfoPanel
+          accountId={ACCOUNT}
+          roomId={FIRST}
+          room={undefined}
+          roomTitles={new Map()}
+          members={members}
+          onClose={() => {}}
+        />
+      </LocationProvider>
+    </ServicesContext.Provider>,
+  )
+  await waitFor(() => expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'))
+  expect(detail('Aliases on your homeserver')).toBe('Unknown (not cached)')
+  expect(homeserverReads).not.toHaveBeenCalled()
+})
+
+it('treats a topic that is literally "None" as data (issue 252)', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  server.use(...handlers())
+  const { getByRole } = renderPanel(FIRST, { topic: 'None' })
+  fireEvent.click(getByRole('button', { name: 'Copy Topic' }))
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith('None'))
+})
+
+it('never renders details the store holds for a different room', () => {
+  // The store learns of a room switch in an effect, after the render that
+  // shows the new room; in a browser that render paints. `act()` flushes the
+  // effect before a test can look, so hold the store on the first room
+  // explicitly and render the second.
+  server.use(...handlers())
+  const services = testServices()
+  const firstRoomDetails = {
+    ...emptyRoomDetails(roomDetailsKey(ACCOUNT, FIRST)),
+    metadata: {
+      value: metadataDto(),
+      error: null,
+      requested: true,
+    },
+    info: {
+      value: { member_counts: { joined: 9, invited: 0, observed_at: 0 } },
+      error: null,
+      requested: true,
+    },
+  }
+  const stuck: RoomDetailsStore = {
+    state: signal(firstRoomDetails),
+    show: () => {},
+    retry: () => {},
+    dispose: () => {},
+  }
+  render(
+    <ServicesContext.Provider value={{ ...services, roomDetails: stuck }}>
+      <LocationProvider>
+        <RoomInfoPanel
+          accountId={ACCOUNT}
+          roomId={SECOND}
+          room={room(SECOND, 'Second')}
+          roomTitles={new Map()}
+          members={createMembersStore(services.api, ACCOUNT, SECOND)}
+          onClose={() => {}}
+        />
+      </LocationProvider>
+    </ServicesContext.Provider>,
+  )
+  expect(detail('Encryption')).toBe('Loading…')
+  expect(detail('Members')).toBe('Loading…')
+})
+
+it('says when the member list is shorter than the joined count (issue 659)', async () => {
+  const memberRow = (userId: string, membership: string) => ({
+    user_id: userId,
+    membership,
+    display_name: userId.slice(1, userId.indexOf(':')),
+    avatar_url: null,
+  })
+  let loaded = [
+    memberRow('@me:example.org', 'join'),
+    memberRow('@alice:hs', 'join'),
+    // Invites do not count toward the joined total.
+    memberRow('@carol:hs', 'invite'),
+  ]
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+      () => HttpResponse.json({ data: loaded }),
+    ),
+    ...handlers(),
+  )
+  const { container, getByLabelText, members } = renderPanel(FIRST)
+  // `RoomPage` loads the roster; the panel only renders it.
+  await members.refresh()
+  const coverage = () =>
+    container.querySelector('.room-info-member-coverage')?.textContent ?? null
+  await waitFor(() =>
+    expect(coverage()).toBe(
+      'Showing 2 of 3 joined members: Axon lists only the members your homeserver has sent it so far.',
+    ),
+  )
+  // The note is about what Axon has, so filtering the list does not change it.
+  fireEvent.input(getByLabelText('Filter members'), {
+    target: { value: 'alice' },
+  })
+  expect(coverage()).toContain('Showing 2 of 3')
+
+  cleanup()
+  loaded = [...loaded, memberRow('@bob:hs', 'join')]
+  const complete = renderPanel(FIRST)
+  await complete.members.refresh()
+  await waitFor(() =>
+    expect(complete.container.querySelectorAll('.member-row').length).toBe(4),
+  )
+  await waitFor(() => expect(detail('Members')).toBe('3 joined · 1 invited'))
+  expect(
+    complete.container.querySelector('.room-info-member-coverage'),
   ).toBeNull()
 })

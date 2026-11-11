@@ -1,49 +1,71 @@
 import type { ComponentChildren } from 'preact'
 import { CopyableText } from './CopyableText'
+import type { Shown } from './room-details-format'
 
-/** Placeholders are not worth copying; real IDs, names, and state are. */
-function isPopulatedDetail(value: string | null | undefined): value is string {
-  return (
-    typeof value === 'string' &&
-    value !== '' &&
-    value !== 'None' &&
-    value !== 'Unavailable' &&
-    value !== 'Loading…' &&
-    !value.startsWith('Unavailable from')
-  )
-}
-
+/**
+ * One `<dt>`/`<dd>` pair in a detail list.
+ *
+ * `value` is real data, or `null`/empty when there is none; the row then shows
+ * `empty` instead. Missing is never encoded as a magic string (issue 252): a
+ * topic that is literally the word "None" is data, stays copyable, and is
+ * never mistaken for the placeholder.
+ */
 export function DetailRow({
   label,
   value,
+  empty = 'None',
+  notes = [],
   code = false,
   copyable,
 }: {
   label: string
   value: string | null | undefined
+  /** Shown when `value` is `null` or empty; never copyable, never code. */
+  empty?: string
+  /** Muted qualifiers after the value or placeholder, e.g. "may be out of date". */
+  notes?: readonly string[]
   code?: boolean
   /**
-   * Overrides the placeholder heuristic. Room information leaves this unset.
-   * User information sets it so a display name of "None" stays copyable and
-   * status text such as "Joined" does not.
+   * Whether a present `value` offers Copy; defaults to yes. User information
+   * sets it to `false` for status text such as "Joined", which is a label
+   * rather than data even though it is never empty.
    */
   copyable?: boolean
 }) {
-  const text = value ?? ''
-  const displayed: ComponentChildren = code ? <code>{text}</code> : text
-  const canCopy = copyable ?? isPopulatedDetail(value)
+  const present = typeof value === 'string' && value !== ''
+  const displayed: ComponentChildren = !present ? (
+    empty
+  ) : code ? (
+    <code>{value}</code>
+  ) : (
+    value
+  )
   return (
     <>
       <dt>{label}</dt>
       <dd>
-        {canCopy && typeof value === 'string' && value !== '' ? (
+        {present && (copyable ?? true) ? (
           <CopyableText text={value} label={label}>
             {displayed}
           </CopyableText>
         ) : (
           displayed
         )}
+        {notes.length > 0 && (
+          <span class="detail-note muted"> · {notes.join(' · ')}</span>
+        )}
       </dd>
     </>
   )
+}
+
+/** `DetailRow` props for a formatted room detail (ADR 0133 decision 3). */
+export function shownProps(shown: Shown): {
+  value: string | null
+  empty: string
+  notes: readonly string[]
+} {
+  return shown.value !== null
+    ? { value: shown.value, empty: 'None', notes: shown.notes }
+    : { value: null, empty: shown.label, notes: shown.notes }
 }

@@ -163,7 +163,8 @@ Withheld fields (`withheld`) are left out, not shown as empty.
 
 The advertised set is the canonical alias plus `alt_aliases` from `/metadata` `aliases` (ADR 0111), shown as two rows so the canonical alias appears once:
 
-- **Canonical alias** stays its own row: `aliases.content.alias` labeled per decision 3, filled from the room-list summary until `/metadata` arrives.
+- **Canonical alias** stays its own row: `aliases.content.alias` labeled per decision 3, filled from the room-list summary until `/metadata` arrives and while the snapshot has no answer (`unknown` with no confirmed absence, or `unavailable`).
+  A redaction, a confirmed absence, or withheld state is an answer and keeps its label (amended in #1044 review).
 - **Advertised aliases** lists `alt_aliases` only, as the TUI's `alias_lines` does: "None" when the list is empty or absent, never hidden, so it cannot be confused with a row that has not loaded.
   When the snapshot has no content, the row takes decision 3's label for the snapshot, like the canonical row.
 - **Aliases on your homeserver** are `local_aliases` from `/homeserver_details`.

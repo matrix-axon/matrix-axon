@@ -189,7 +189,8 @@ Completion means every page was traversed; rooms whose SDK counts remain unknown
 
 Each stored or cleared pair publishes a `room_details.changed` frame naming `member_counts`; clients re-read `/info` on that frame, on reconnect, and on reopen.
 A local leave clears counts in the database without the worker, so it publishes no `member_counts` frame; clients learn of the leave from its own membership events.
-Server counts complete [issue 620](https://github.com/matrix-axon/matrix-axon/issues/620); web and TUI presentation remain separate follow-ups.
+Server counts complete [issue 620](https://github.com/matrix-axon/matrix-axon/issues/620).
+The TUI's `/whereami` (ADR 0114) and the web client's Room Information Members row ([ADR 0133](adr/0133-web-room-information-metadata-and-discovery.md)) show them; both show "unknown (not yet observed)" for a null pair, never zero.
 
 Two maintenance improvements remain deferred: sharing each account's traversal between the count and redaction workers to reduce database round trips, and automatically checking that the documented SDK patch reproduces the vendored source from the pinned release archive.
 The workers currently share traversal code but keep independent cursors and deadlines.
@@ -525,7 +526,8 @@ Instead the homeserver confirms absence in the background (see [Known absence](#
 Authoritative member counts are cached separately as described above; the lazily loaded member list is not an authoritative count.
 Unjoined-room discovery ([issue 622](https://github.com/matrix-axon/matrix-axon/issues/622)) is in place: the paged read, hierarchy crawls, and room summaries of a selected room (see [Unjoined-room discovery](#unjoined-room-discovery)).
 The discovery cache, progressive updates, and acquisition budgets follow ADR 0111 and are not implemented by the cached state endpoint.
-Web and TUI consumption are [issue 623](https://github.com/matrix-axon/matrix-axon/issues/623) and [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
+The web client's Room Information panel reads `/metadata`, `/homeserver_details`, and member counts, and re-reads each on the `room_details.changed` source that names it ([ADR 0133](adr/0133-web-room-information-metadata-and-discovery.md) decisions 1–5); its move to the paged hierarchy and `/discovery` is the second half of [issue 623](https://github.com/matrix-axon/matrix-axon/issues/623).
+TUI consumption is [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
 
 ## Verification
 

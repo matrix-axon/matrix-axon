@@ -74,6 +74,7 @@ shows it.
 | Spaces: picker, filtering, hierarchy (ADR 0084)         | **not covered**       | `spaces`                                                                                                  | `rooms`         |
 | Single-pane navigation and Back (ADR 0062)              | **n/a**               | **n/a**                                                                                                   | `rooms`         |
 | Room information panel                                  | **not covered**       | `rooms`                                                                                                   | `timeline`      |
+| Room information typed details (ADR 0133)               | **not covered**       | `rooms` — shows the rows, but the corpus has no `alt_aliases` yet (smoke PR next)                         | `timeline`      |
 | User information panel                                  | **n/a**               | **not covered** — no demo scene opens a timeline sender                                                   | **not covered** |
 | Unread thread picker (Alt-T)                            | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Search result sort / group / edit toggles               | **not covered**       | **not covered**                                                                                           | **not covered** |

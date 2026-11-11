@@ -101,6 +101,10 @@ import {
 } from './stores/space-order'
 import { createSearchStore, type SearchStore } from './stores/search'
 import { createSettingsStore, type SettingsStore } from './stores/settings'
+import {
+  createRoomDetailsStore,
+  type RoomDetailsStore,
+} from './stores/room-details'
 import { createSpacesStore, type SpacesStore } from './stores/spaces'
 import {
   createThreadUnreadStore,
@@ -148,6 +152,8 @@ export interface AppServices {
   invites: InvitesStore
   verification: VerificationStore
   spaces: SpacesStore
+  /** The typed detail reads behind Room Information (ADR 0133). */
+  roomDetails: RoomDetailsStore
   search: SearchStore
   threadUnread: ThreadUnreadStore
   live: LiveConnection
@@ -1815,6 +1821,7 @@ export function createServices(
     settings,
   )
   const spaces = createSpacesStore(api, rooms, live)
+  const roomDetails = createRoomDetailsStore(api, live)
   const invites = createInvitesStore(api, rooms)
   const verification = createVerificationStore(api)
   connectUnreadCounts(live, rooms)
@@ -1951,6 +1958,7 @@ export function createServices(
     invites,
     verification,
     spaces,
+    roomDetails,
     search,
     threadUnread,
     live,

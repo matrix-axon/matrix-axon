@@ -4347,6 +4347,44 @@ span.composer-attachment-thumb {
   overflow-wrap: anywhere;
 }
 
+/* Qualifiers after a detail ("may be out of date"); never part of a copy. */
+.detail-note {
+  font-size: 0.85em;
+}
+
+/* Room Information's collapsed Advanced group (ADR 0133 decision 5). */
+.room-info-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.room-info-advanced > summary {
+  cursor: pointer;
+  width: fit-content;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.room-info-advanced[open] > summary {
+  margin-bottom: 0.45rem;
+}
+
+/* Failed detail reads, each named, with one Retry. */
+.room-info-details-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.room-info-details-error > p {
+  margin: 0;
+}
+
 .room-info-actions {
   display: flex;
   align-items: center;

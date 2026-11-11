@@ -12,6 +12,8 @@ import {
   ACCOUNT_DATA_CHANGED,
   preferenceChange,
   PREFERENCES_CHANGED,
+  roomDetailsChange,
+  ROOM_DETAILS_CHANGED,
   roomDisplayNameChange,
   ROOM_DISPLAY_NAME_CHANGED,
   timelineEvent,
@@ -330,6 +332,62 @@ describe('roomDisplayNameChange', () => {
     ).toBeNull()
     expect(
       roomDisplayNameChange(nameFrame({ room_id: 1, display_name: 'x' })),
+    ).toBeNull()
+  })
+})
+
+describe('roomDetailsChange', () => {
+  const detailsFrame = (payload: unknown) =>
+    decodeFrame(envelope(ROOM_DETAILS_CHANGED, 'acct-1', payload))!
+
+  it('extracts the room and the sources to re-read (ADR 0126)', () => {
+    // The wire shape pinned by `room_details_changed_frame_wire_shape` in
+    // `crates/axon-api/src/ws.rs`.
+    const frame = detailsFrame({
+      room_id: '!r:hs',
+      sources: ['metadata', 'member_counts', 'homeserver_details'],
+    })
+    expect(frame.accountId).toBe('acct-1')
+    const change = roomDetailsChange(frame)
+    expect(change?.roomId).toBe('!r:hs')
+    expect([...(change?.sources ?? [])]).toEqual([
+      'metadata',
+      'member_counts',
+      'homeserver_details',
+    ])
+  })
+
+  it('drops sources this client does not know', () => {
+    const change = roomDetailsChange(
+      detailsFrame({
+        room_id: '!r:hs',
+        sources: ['future_source', 'space_hierarchy', 7, 'discovery'],
+      }),
+    )
+    expect([...(change?.sources ?? [])]).toEqual([
+      'space_hierarchy',
+      'discovery',
+    ])
+    expect(
+      roomDetailsChange(
+        detailsFrame({ room_id: '!r:hs', sources: ['future_source'] }),
+      ),
+    ).toBeNull()
+  })
+
+  it('returns null for other tags and malformed payloads', () => {
+    expect(
+      roomDetailsChange(decodeFrame(envelope(TIMELINE_EVENT, 'a', {}))!),
+    ).toBeNull()
+    expect(roomDetailsChange(detailsFrame(null))).toBeNull()
+    expect(roomDetailsChange(detailsFrame({ room_id: '!r:hs' }))).toBeNull()
+    expect(
+      roomDetailsChange(detailsFrame({ room_id: 1, sources: ['metadata'] })),
+    ).toBeNull()
+    expect(
+      roomDetailsChange(
+        detailsFrame({ room_id: '!r:hs', sources: 'metadata' }),
+      ),
     ).toBeNull()
   })
 })

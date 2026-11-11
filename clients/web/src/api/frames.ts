@@ -13,7 +13,7 @@ export type EventDto = components['schemas']['EventDto']
  * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`,
  * `unread_counts.changed`, `room_display_name.changed`, `invite.added`,
  * `invite.removed`, `account_data.changed`, `preferences.changed`,
- * `heartbeat`.
+ * `room_details.changed`, `heartbeat`.
  */
 export interface LiveFrame {
   /** Namespaced tag, e.g. `timeline.event`. */
@@ -38,6 +38,12 @@ export const UNREAD_COUNTS_CHANGED = 'unread_counts.changed'
 
 /** The `type` tag for a room's newly stored calculated name (ADR 0118). */
 export const ROOM_DISPLAY_NAME_CHANGED = 'room_display_name.changed'
+
+/**
+ * The `type` tag telling a client which of a room's detail reads to repeat
+ * (`ws.rs` `ROOM_DETAILS_CHANGED`, ADR 0126 decision 5).
+ */
+export const ROOM_DETAILS_CHANGED = 'room_details.changed'
 
 /** The `type` tag for a newly persisted pending invite (ADR 0091). */
 export const INVITE_ADDED = 'invite.added'
@@ -117,6 +123,41 @@ export interface UnreadCountsChange {
 export interface RoomDisplayNameChange {
   roomId: string
   displayName: string
+}
+
+/**
+ * A read a `room_details.changed` frame names (`docs/room-metadata.md`
+ * § Change notification). Each names one endpoint to re-read:
+ *
+ * - `metadata`: `GET …/metadata`
+ * - `member_counts`: `GET …/info`
+ * - `homeserver_details`: `GET …/homeserver_details`
+ * - `space_hierarchy`: `GET …/space/hierarchy` (the frame's room is the space)
+ * - `discovery`: `GET …/discovery` (the frame's room is the unjoined room)
+ */
+export type RoomDetailSource =
+  | 'metadata'
+  | 'member_counts'
+  | 'homeserver_details'
+  | 'space_hierarchy'
+  | 'discovery'
+
+const ROOM_DETAIL_SOURCES: ReadonlySet<string> = new Set<RoomDetailSource>([
+  'metadata',
+  'member_counts',
+  'homeserver_details',
+  'space_hierarchy',
+  'discovery',
+])
+
+/**
+ * The payload of a `room_details.changed` frame: a signal to re-read, never a
+ * diff (ADR 0133 decision 2). The frame's account is on the envelope.
+ */
+export interface RoomDetailsChange {
+  roomId: string
+  /** The known sources the frame names; values this client predates are dropped. */
+  sources: ReadonlySet<RoomDetailSource>
 }
 
 /**
@@ -313,6 +354,34 @@ export function roomDisplayNameChange(
     return null
   }
   return { roomId, displayName }
+}
+
+/**
+ * Which of a room's reads to repeat, or `null` for any other tag, a malformed
+ * payload, or a frame naming only sources this client does not know — the
+ * server adds sources additively and clients must ignore unknown ones.
+ */
+export function roomDetailsChange(frame: LiveFrame): RoomDetailsChange | null {
+  if (frame.type !== ROOM_DETAILS_CHANGED) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const { room_id: roomId, sources: raw } = frame.payload as Record<
+    string,
+    unknown
+  >
+  if (typeof roomId !== 'string' || !Array.isArray(raw)) {
+    return null
+  }
+  const sources = new Set<RoomDetailSource>()
+  for (const source of raw) {
+    if (typeof source === 'string' && ROOM_DETAIL_SOURCES.has(source)) {
+      sources.add(source as RoomDetailSource)
+    }
+  }
+  return sources.size === 0 ? null : { roomId, sources }
 }
 
 function isCount(value: unknown): value is number {

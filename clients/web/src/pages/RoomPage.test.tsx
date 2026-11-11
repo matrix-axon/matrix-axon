@@ -491,9 +491,11 @@ describe('RoomPage', () => {
     })
     expect(within(panel).getAllByText('Daily operations').length).toBe(2)
     expect(within(panel).getByText('#ops:hs')).toBeTruthy()
-    expect(
-      within(panel).getAllByText('Unavailable from current API').length,
-    ).toBeGreaterThan(0)
+    // The placeholder row is gone; the alias rows say whose list they are
+    // (ADR 0133 decision 4).
+    expect(within(panel).queryByText('Full alias list')).toBeNull()
+    expect(within(panel).getByText('Advertised aliases')).toBeTruthy()
+    expect(within(panel).getByText('Aliases on your homeserver')).toBeTruthy()
     expect(within(panel).getByText('Alice')).toBeTruthy()
   })
 
