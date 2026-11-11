@@ -27,9 +27,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     add_space_child, create_dm, create_space, login_matrix, redact_appservice_event,
-    register_appservice_user, register_user, send_appservice_event, set_direct_account_data,
-    set_membership, set_profile, set_room_avatar, set_room_name, set_room_topic, upload_media,
-    MatrixAccount, RoomResponse, SERVER_NAME,
+    register_appservice_user, register_user, send_appservice_event, send_appservice_state,
+    set_direct_account_data, set_membership, set_profile, set_room_avatar, set_room_name,
+    set_room_topic, upload_media, url_path, MatrixAccount, RoomResponse, AS_TOKEN, SERVER_NAME,
 };
 
 /// Reaction, edit and redaction offsets from the message they attach to. They
@@ -113,7 +113,49 @@ struct Room {
     /// A DM: no name, no topic, and `m.direct` account data on the viewer.
     #[serde(default)]
     direct: bool,
+    /// The persona that creates the room and holds PL100 in it; the viewer
+    /// unless set. Only a room created by someone else can leave the viewer
+    /// out of `members`.
+    #[serde(default)]
+    creator: Option<String>,
+    /// Anyone may join, and the room is listed in the homeserver's directory.
+    /// A room the viewer has not joined needs this to be named by the viewer's
+    /// homeserver from the space hierarchy (ADR 0128); without it the honest
+    /// answer is "not visible in the space directory".
+    #[serde(default)]
+    public: bool,
+    /// The viewer need not be among them. A room without the viewer reaches
+    /// axon only as a space child, so it must be one (`validate`).
     members: Vec<String>,
+    /// Alias localparts on this homeserver. `canonical_alias` and `alt_aliases`
+    /// are advertised in `m.room.canonical_alias`; `unadvertised_aliases` only
+    /// resolve in the homeserver's directory, so a client listing the
+    /// homeserver's aliases sees them and one reading room state does not
+    /// (ADR 0133 decision 4).
+    #[serde(default)]
+    canonical_alias: Option<String>,
+    #[serde(default)]
+    alt_aliases: Vec<String>,
+    #[serde(default)]
+    unadvertised_aliases: Vec<String>,
+}
+
+impl Room {
+    fn creator<'a>(&'a self, viewer: &'a str) -> &'a str {
+        self.creator.as_deref().unwrap_or(viewer)
+    }
+
+    fn joined_by(&self, viewer: &str) -> bool {
+        self.members.iter().any(|m| m == viewer)
+    }
+
+    /// Every alias localpart the room claims, in creation order.
+    fn alias_localparts(&self) -> impl Iterator<Item = &String> {
+        self.canonical_alias
+            .iter()
+            .chain(&self.alt_aliases)
+            .chain(&self.unadvertised_aliases)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +252,27 @@ pub struct DemoRoom {
     pub name: Option<String>,
     pub direct: bool,
     pub members: Vec<String>,
+    /// Whether the viewer is a member. A room it is not in appears in axon only
+    /// as a space child; it is absent from `/v1/rooms`.
+    ///
+    /// The fields below default so a manifest written before they existed
+    /// still reads (`info`, `down`).
+    #[serde(default = "joined_default")]
+    pub joined: bool,
+    /// Full room aliases (`#localpart:server`), as `m.room.canonical_alias`
+    /// advertises them.
+    #[serde(default)]
+    pub canonical_alias: Option<String>,
+    #[serde(default)]
+    pub alt_aliases: Vec<String>,
+    /// Aliases that resolve on the homeserver but that the room does not
+    /// advertise.
+    #[serde(default)]
+    pub unadvertised_aliases: Vec<String>,
+}
+
+fn joined_default() -> bool {
+    true
 }
 
 /// The seeded world, plus what `up` needs to point axon at it.
@@ -334,9 +397,10 @@ pub async fn seed(
     }
     let now_ms = now.timestamp_millis();
 
-    // Rooms. The viewer creates every room, so it holds PL100 everywhere and
-    // the demo can exercise anything that needs power; the other personas are
-    // invited and join through the appservice.
+    // Rooms. The viewer creates every room it is in, so it holds PL100 in all
+    // of them and the demo can exercise anything that needs power; the other
+    // personas are invited (or, to a public room, simply join) through the
+    // appservice. A room the viewer is not in is created by its `creator`.
     //
     // Everything after `/createRoom` is backdated to just before the room's
     // first message, because both clients render membership and state changes
@@ -346,17 +410,11 @@ pub async fn seed(
     let mut rooms: BTreeMap<String, DemoRoom> = BTreeMap::new();
     let mut direct: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for room in &corpus.room {
-        if !room.members.iter().any(|m| m == &viewer_persona.id) {
-            bail!(
-                "corpus room {} does not include the viewer {}; axon would never see it",
-                room.id,
-                viewer_persona.id
-            );
-        }
+        let creator = user_id(room.creator(&viewer_persona.id))?;
         let others: Vec<String> = room
             .members
             .iter()
-            .filter(|m| *m != &viewer_persona.id)
+            .filter(|m| *m != room.creator(&viewer_persona.id))
             .map(|m| user_id(m))
             .collect::<anyhow::Result<_>>()?;
         let ts = *setup_ts
@@ -372,15 +430,22 @@ pub async fn seed(
             direct.entry(peer).or_default().push(room_id.clone());
             (room_id, true)
         } else {
-            (create_named_room(client, hs, &viewer_token).await?, false)
+            (
+                create_named_room(client, hs, &creator, room.public).await?,
+                false,
+            )
         };
 
         for peer in &others {
-            let mut invite = serde_json::json!({ "membership": "invite" });
-            if is_direct {
-                invite["is_direct"] = serde_json::json!(true);
+            // A public room needs no invite, and a member list with no
+            // "invited" rows is what a room people found for themselves has.
+            if !room.public {
+                let mut invite = serde_json::json!({ "membership": "invite" });
+                if is_direct {
+                    invite["is_direct"] = serde_json::json!(true);
+                }
+                set_membership(client, hs, &room_id, &creator, peer, invite, ts).await?;
             }
-            set_membership(client, hs, &room_id, &viewer.user_id, peer, invite, ts).await?;
             set_membership(
                 client,
                 hs,
@@ -394,22 +459,51 @@ pub async fn seed(
         }
 
         if let Some(name) = &room.name {
-            set_room_name(client, hs, &room_id, &viewer.user_id, name, ts + 2_000).await?;
+            set_room_name(client, hs, &room_id, &creator, name, ts + 2_000).await?;
         }
         if let Some(topic) = &room.topic {
-            set_room_topic(client, hs, &room_id, &viewer.user_id, topic, ts + 3_000).await?;
+            set_room_topic(client, hs, &room_id, &creator, topic, ts + 3_000).await?;
         }
         if let Some(avatar) = &room.avatar {
             set_room_avatar(
                 client,
                 hs,
                 &room_id,
-                &viewer.user_id,
+                &creator,
                 &uploaded_mxc(&media, avatar)?,
                 ts + 4_000,
             )
             .await?;
         }
+
+        // Directory entries first: Synapse refuses an `m.room.canonical_alias`
+        // naming an alias that does not already resolve to this room.
+        for localpart in room.alias_localparts() {
+            create_alias(client, hs, &creator, &full_alias(localpart), &room_id).await?;
+        }
+        let canonical_alias = room.canonical_alias.as_deref().map(full_alias);
+        let alt_aliases: Vec<String> = room.alt_aliases.iter().map(|a| full_alias(a)).collect();
+        if canonical_alias.is_some() || !alt_aliases.is_empty() {
+            let mut content = serde_json::json!({});
+            if let Some(alias) = &canonical_alias {
+                content["alias"] = serde_json::json!(alias);
+            }
+            if !alt_aliases.is_empty() {
+                content["alt_aliases"] = serde_json::json!(alt_aliases);
+            }
+            send_appservice_state(
+                client,
+                hs,
+                &room_id,
+                &creator,
+                "m.room.canonical_alias",
+                "",
+                content,
+                ts + 4_500,
+            )
+            .await?;
+        }
+
         rooms.insert(
             room.id.clone(),
             DemoRoom {
@@ -417,6 +511,14 @@ pub async fn seed(
                 name: room.name.clone(),
                 direct: room.direct,
                 members: room.members.clone(),
+                joined: room.joined_by(&viewer_persona.id),
+                canonical_alias,
+                alt_aliases,
+                unadvertised_aliases: room
+                    .unadvertised_aliases
+                    .iter()
+                    .map(|a| full_alias(a))
+                    .collect(),
             },
         );
     }
@@ -457,10 +559,26 @@ pub async fn seed(
                 .get(child)
                 .ok_or_else(|| anyhow!("space {} names unknown room {child}", space.id))?
                 .room_id;
+            let child_creator = corpus
+                .room
+                .iter()
+                .find(|r| &r.id == child)
+                .map(|r| user_id(r.creator(&viewer_persona.id)))
+                .transpose()?
+                .ok_or_else(|| anyhow!("space {} names unknown room {child}", space.id))?;
             let ts = *setup_ts
                 .get(child.as_str())
                 .unwrap_or(&(now_ms - SETUP_LEAD_MS));
-            add_space_child(client, hs, &viewer.user_id, &space_id, child_id, ts + 5_000).await?;
+            add_space_child(
+                client,
+                hs,
+                &viewer.user_id,
+                &child_creator,
+                &space_id,
+                child_id,
+                ts + 5_000,
+            )
+            .await?;
         }
         spaces.insert(
             space.id.clone(),
@@ -571,13 +689,14 @@ pub async fn seed(
     // Any joined room proves axon's sync has caught up with the seeding, so this
     // is deliberately *a* room and not *the* room — nothing downstream should
     // read significance into which one. `rooms` is a BTreeMap, so this is the
-    // alphabetically first corpus room id: arbitrary, but stable across runs,
-    // which is what a probe wants.
+    // alphabetically first joined corpus room id: arbitrary, but stable across
+    // runs, which is what a probe wants. Never a room the viewer is not in —
+    // axon would wait for it forever.
     let sync_probe_room = rooms
         .values()
+        .find(|r| r.joined)
         .map(|r| r.room_id.clone())
-        .next()
-        .ok_or_else(|| anyhow!("corpus declares no rooms"))?;
+        .ok_or_else(|| anyhow!("corpus declares no room the viewer is in"))?;
 
     Ok(SeededCorpus {
         viewer: viewer.clone(),
@@ -613,7 +732,9 @@ fn validate(corpus: &Corpus, now: chrono::DateTime<Utc>) -> anyhow::Result<()> {
             bail!("duplicate persona id {}", persona.id);
         }
     }
+    let viewer = corpus.meta.viewer.as_str();
     let mut room_ids = HashSet::new();
+    let mut aliases = HashSet::new();
     for room in &corpus.room {
         if !room_ids.insert(room.id.as_str()) {
             bail!("duplicate room id {}", room.id);
@@ -621,13 +742,35 @@ fn validate(corpus: &Corpus, now: chrono::DateTime<Utc>) -> anyhow::Result<()> {
         if room.direct && (room.name.is_some() || room.topic.is_some()) {
             bail!("corpus DM {} must have no name or topic", room.id);
         }
+        if room.direct && (room.creator.is_some() || room.public) {
+            // `seed` creates a DM with the viewer's own token and records it
+            // in the viewer's `m.direct`; neither fits anyone else's room.
+            bail!("corpus DM {} must not set `creator` or `public`", room.id);
+        }
         for member in &room.members {
             if !seen.contains(member.as_str()) {
                 bail!("room {} has unknown member {member}", room.id);
             }
         }
+        for localpart in room.alias_localparts() {
+            if localpart.is_empty()
+                || !localpart
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._=-".contains(c))
+            {
+                bail!(
+                    "room {} alias {localpart:?} must be a bare lowercase localpart, \
+                     without the leading # or the :server",
+                    room.id
+                );
+            }
+            if !aliases.insert(localpart.as_str()) {
+                bail!("alias {localpart} is claimed twice");
+            }
+        }
     }
     let mut space_ids = HashSet::new();
+    let mut space_children = HashSet::new();
     for space in &corpus.space {
         if !space_ids.insert(space.id.as_str()) {
             bail!("duplicate space id {}", space.id);
@@ -635,6 +778,37 @@ fn validate(corpus: &Corpus, now: chrono::DateTime<Utc>) -> anyhow::Result<()> {
         for child in &space.children {
             if !room_ids.contains(child.as_str()) {
                 bail!("space {} names unknown room {child}", space.id);
+            }
+            space_children.insert(child.as_str());
+        }
+    }
+    for room in &corpus.room {
+        // The only way a room the viewer is not in reaches axon is as a child
+        // of a space the viewer is in; any other such room seeds nothing a
+        // client could ever show.
+        if !room.joined_by(viewer) && !space_children.contains(room.id.as_str()) {
+            bail!(
+                "room {} does not include the viewer {viewer} and is no space's child; \
+                 axon would never see it",
+                room.id
+            );
+        }
+        // After the space-child check, so a room missing both the viewer and
+        // a space hears about the space first: that is the rule it broke
+        // first, and this message would otherwise blame a `creator` the
+        // author never wrote.
+        if !room.joined_by(room.creator(viewer)) {
+            match &room.creator {
+                Some(creator) => bail!(
+                    "room {} is created by {creator}, who is not among its members",
+                    room.id
+                ),
+                None => bail!(
+                    "room {} sets no `creator`, so the viewer {viewer} is assumed, but \
+                     {viewer} is not among its members; a room without the viewer \
+                     needs a `creator` who is",
+                    room.id
+                ),
             }
         }
     }
@@ -948,19 +1122,71 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-/// A corpus room: private and invite-only. Name, topic, avatar and membership
-/// all arrive afterwards as backdated state; a DM goes through `create_dm`.
-async fn create_named_room(client: &Client, hs: &str, token: &str) -> anyhow::Result<String> {
+/// A corpus room, created by `creator` through the appservice: private and
+/// invite-only unless `public`, which makes it joinable by anyone and lists it
+/// in the homeserver's room directory. Name, topic, avatar and membership all
+/// arrive afterwards as backdated state; a DM goes through `create_dm`.
+async fn create_named_room(
+    client: &Client,
+    hs: &str,
+    creator: &str,
+    public: bool,
+) -> anyhow::Result<String> {
+    let body = if public {
+        serde_json::json!({ "preset": "public_chat", "visibility": "public" })
+    } else {
+        serde_json::json!({ "preset": "private_chat", "visibility": "private" })
+    };
     let resp: RoomResponse = client
         .post(format!("{hs}/_matrix/client/v3/createRoom"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "preset": "private_chat", "visibility": "private" }))
+        .bearer_auth(AS_TOKEN)
+        .query(&[("user_id", creator)])
+        .json(&body)
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
     Ok(resp.room_id)
+}
+
+/// `#localpart:server` for a corpus alias localpart.
+fn full_alias(localpart: &str) -> String {
+    format!("#{localpart}:{SERVER_NAME}")
+}
+
+/// Point `alias` at `room_id` in the homeserver's directory, as `actor`.
+///
+/// Through the appservice, so it works for a room the viewer has not joined;
+/// that relies on the registration's alias namespace (`prepare_synapse_config`).
+/// A directory entry is not an event, so there is nothing to backdate.
+async fn create_alias(
+    client: &Client,
+    hs: &str,
+    actor: &str,
+    alias: &str,
+    room_id: &str,
+) -> anyhow::Result<()> {
+    let resp = client
+        .put(format!(
+            "{hs}/_matrix/client/v3/directory/room/{}",
+            url_path(alias)
+        ))
+        .bearer_auth(AS_TOKEN)
+        .query(&[("user_id", actor)])
+        .json(&serde_json::json!({ "room_id": room_id }))
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        // The status alone cannot tell the likely refusals apart — an alias
+        // already taken (M_ROOM_IN_USE), one outside the appservice namespace
+        // (M_EXCLUSIVE), or a homeserver alias-creation rule (M_FORBIDDEN) —
+        // so the error carries Synapse's own `errcode` and `error`.
+        let body = resp.text().await.unwrap_or_default();
+        bail!("create alias {alias} as {actor}: {status}: {body}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -996,6 +1222,161 @@ mod tests {
             err.to_string().contains("erases the edit"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn committed_corpus_has_the_adr_0133_fixtures() {
+        // Web PR B records these states (ADR 0133 delivery step 3); losing
+        // either one would leave its scene recording a placeholder.
+        let corpus = corpus();
+        let viewer = corpus.meta.viewer.as_str();
+        let unjoined: Vec<&Room> = corpus
+            .room
+            .iter()
+            .filter(|r| !r.joined_by(viewer))
+            .collect();
+        assert!(
+            unjoined
+                .iter()
+                .any(|r| r.public && r.name.is_some() && r.canonical_alias.is_some()),
+            "no public, named, aliased room the viewer has not joined"
+        );
+        assert!(
+            corpus.room.iter().any(|r| r.joined_by(viewer)
+                && r.canonical_alias.is_some()
+                && !r.alt_aliases.is_empty()
+                && !r.unadvertised_aliases.is_empty()),
+            "no joined room with canonical, alternative and unadvertised aliases"
+        );
+    }
+
+    #[test]
+    fn a_room_without_the_viewer_must_be_a_space_child() {
+        let mut corpus = corpus();
+        for space in &mut corpus.space {
+            space.children.retain(|c| c != "salmon-count");
+        }
+        let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
+        assert!(
+            err.to_string().contains("axon would never see it"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_viewerless_room_without_a_creator_names_the_default() {
+        // Still a space child, so the space check passes and the creator
+        // check is the one that fires — and it has to say the viewer was
+        // assumed, since the author wrote no `creator` at all.
+        let mut corpus = corpus();
+        let room = corpus
+            .room
+            .iter_mut()
+            .find(|r| r.id == "salmon-count")
+            .expect("committed corpus has salmon-count");
+        room.creator = None;
+        let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
+        assert!(
+            err.to_string()
+                .contains("sets no `creator`, so the viewer alex is assumed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_viewerless_orphan_hears_about_the_space_first() {
+        let mut corpus = corpus();
+        corpus
+            .room
+            .iter_mut()
+            .find(|r| r.id == "salmon-count")
+            .expect("committed corpus has salmon-count")
+            .creator = None;
+        for space in &mut corpus.space {
+            space.children.retain(|c| c != "salmon-count");
+        }
+        let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
+        assert!(
+            err.to_string().contains("is no space's child"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_creator_must_be_a_member() {
+        let mut corpus = corpus();
+        let room = corpus
+            .room
+            .iter_mut()
+            .find(|r| r.id == "salmon-count")
+            .expect("committed corpus has salmon-count");
+        room.creator = Some("maya".to_owned());
+        let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
+        assert!(
+            err.to_string().contains("not among its members"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn aliases_are_bare_localparts_claimed_once() {
+        let mut corpus = corpus();
+        let room = corpus
+            .room
+            .iter_mut()
+            .find(|r| r.id == "general")
+            .expect("committed corpus has general");
+        room.alt_aliases = vec!["salmon-count".to_owned()];
+        let err = validate(&corpus, Utc::now()).expect_err("duplicate must be rejected");
+        assert!(
+            err.to_string().contains("claimed twice"),
+            "unexpected error: {err}"
+        );
+
+        let mut corpus = self::corpus();
+        let room = corpus
+            .room
+            .iter_mut()
+            .find(|r| r.id == "general")
+            .expect("committed corpus has general");
+        room.alt_aliases = vec!["#general:localhost".to_owned()];
+        let err = validate(&corpus, Utc::now()).expect_err("full alias must be rejected");
+        assert!(
+            err.to_string().contains("bare lowercase localpart"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_dm_takes_no_creator_or_public_flag() {
+        let mut corpus = corpus();
+        let dm = corpus
+            .room
+            .iter_mut()
+            .find(|r| r.direct)
+            .expect("committed corpus has a DM");
+        dm.public = true;
+        let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
+        assert!(
+            err.to_string()
+                .contains("must not set `creator` or `public`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_from_before_the_room_fields_still_reads() {
+        // `info` and `down` read whatever manifest the running stack wrote,
+        // which may predate these fields.
+        let room: DemoRoom = serde_json::from_value(serde_json::json!({
+            "room_id": "!r:localhost",
+            "name": "general",
+            "direct": false,
+            "members": ["alex"],
+        }))
+        .expect("old manifest room parses");
+        assert!(room.joined);
+        assert!(room.canonical_alias.is_none() && room.alt_aliases.is_empty());
     }
 
     #[test]

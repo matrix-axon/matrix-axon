@@ -87,6 +87,7 @@ const ROOMS = [
   'room-gear-swap',
   'room-water-quality',
   'room-field-notes',
+  'room-salmon-count',
 ]
 
 async function render(style, seed, outDir, extra = {}) {

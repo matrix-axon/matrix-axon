@@ -630,7 +630,7 @@ rc_joins:
         .with_context(|| format!("write {}", homeserver_path.display()))?;
     std::fs::write(
         &appservice_path,
-        r#"id: axon-smoke-appservice
+        r##"id: axon-smoke-appservice
 url: null
 as_token: "axon-smoke-appservice-token"
 hs_token: "axon-smoke-homeserver-token"
@@ -648,9 +648,16 @@ namespaces:
     # registration file is generated per run — see ADR 0086.
     - exclusive: false
       regex: "@.*:localhost"
-  aliases: []
+  # Same reasoning for aliases: Synapse lets an appservice create an alias only
+  # inside its alias namespace, and the corpus creates each alias as the
+  # persona that created the room — including a room the viewer has not
+  # joined, where the viewer's own token would be refused. Non-exclusive, and
+  # `url` is null, so Synapse never asks this appservice about unknown aliases.
+  aliases:
+    - exclusive: false
+      regex: "#.*:localhost"
   rooms: []
-"#,
+"##,
     )
     .with_context(|| format!("write {}", appservice_path.display()))?;
 
@@ -1392,10 +1399,15 @@ async fn create_space(client: &Client, hs: &str, token: &str) -> anyhow::Result<
 /// Link a room into a space, from both ends: `m.space.child` in the space and
 /// `m.space.parent` in the child. Clients read the child list, but the parent
 /// edge is what lets a room name the space it belongs to.
+///
+/// Each edge is written by someone with power in the room it lands in —
+/// `space_actor` in the space, `child_actor` in the child. They differ for a
+/// child the space's owner has not joined.
 async fn add_space_child(
     client: &Client,
     hs: &str,
-    actor: &str,
+    space_actor: &str,
+    child_actor: &str,
     space_id: &str,
     child_id: &str,
     ts: i64,
@@ -1404,7 +1416,7 @@ async fn add_space_child(
         client,
         hs,
         space_id,
-        actor,
+        space_actor,
         "m.space.child",
         child_id,
         serde_json::json!({ "via": [SERVER_NAME], "suggested": true }),
@@ -1415,7 +1427,7 @@ async fn add_space_child(
         client,
         hs,
         child_id,
-        actor,
+        child_actor,
         "m.space.parent",
         space_id,
         serde_json::json!({ "via": [SERVER_NAME], "canonical": true }),
@@ -1837,12 +1849,19 @@ fn workspace_root() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("cannot derive workspace root from {}", manifest.display()))
 }
 
+/// Percent-encode a Matrix identifier for one URL path segment.
+///
+/// `#` (a room alias sigil) and `?` matter most: left bare, reqwest reads the
+/// rest of the URL as a fragment or a query, and the request silently goes to
+/// the route's parent path.
 fn url_path(value: &str) -> String {
     value
         .replace('%', "%25")
         .replace('!', "%21")
+        .replace('#', "%23")
         .replace('$', "%24")
         .replace(':', "%3A")
+        .replace('?', "%3F")
         .replace('@', "%40")
         .replace('/', "%2F")
 }
@@ -1858,7 +1877,18 @@ fn date_ms(date: &str) -> anyhow::Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::CleanupManifest;
+    use super::{url_path, CleanupManifest};
+
+    #[test]
+    fn url_path_escapes_every_matrix_sigil() {
+        assert_eq!(
+            url_path("#trail-work:localhost"),
+            "%23trail-work%3Alocalhost"
+        );
+        assert_eq!(url_path("!room:localhost"), "%21room%3Alocalhost");
+        assert_eq!(url_path("@alex:localhost"), "%40alex%3Alocalhost");
+        assert_eq!(url_path("a?b/c%d"), "a%3Fb%2Fc%25d");
+    }
 
     #[test]
     fn cleanup_manifest_accepts_pre_fixture_schema() {

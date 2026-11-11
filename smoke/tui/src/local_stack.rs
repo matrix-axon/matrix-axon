@@ -86,6 +86,16 @@ pub struct DemoRoom {
     pub name: Option<String>,
     pub direct: bool,
     pub members: Vec<String>,
+    /// Whether the viewer is a member. A room it is not in (ADR 0133's
+    /// unjoined space child) never reaches the TUI's room list, so a scene
+    /// that waits for it would only time out. Defaults to true for a manifest
+    /// written before the field existed.
+    #[serde(default = "joined_default")]
+    pub joined: bool,
+}
+
+fn joined_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
