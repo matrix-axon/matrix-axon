@@ -92,8 +92,12 @@ It enforces the same boundary as the Swift reader in `incoming-share/Sources/Axo
 - **Redirects:** followed by hand, at most six hops, each one validated as a new request.
 - **Responses:** only status 200 is used.
   Headers are capped at 32 KiB and an image at 2 MiB.
-  A page is read only until the end of its `<head>` or 256 KiB, whichever comes first, and is not parsed if those bytes hold more than 512 `<` characters.
-- **Time:** one 25-second deadline covers the page, its redirects and its image, and the caller can cancel at any point.
+  A page is read only until the end of its `<head>` or 256 KiB, whichever comes first.
+  The head ends at `</head` or `<body` followed by whitespace, `/` or `>`; neither reader tokenizes, so one inside a script still ends it.
+  Only the bytes before the 513th `<` are parsed, which bounds the tree.
+  A heavier head keeps the metadata that came before the cut instead of losing its card; on 36 measured pages none passed 292 `<`, and every preview tag came within the first 160.
+- **Time:** one 25-second deadline covers the wait for a slot, the page, its redirects and its image, and the caller can cancel at any point.
+  An image that misses it is unavailable, and the page's text is kept.
 - **Concurrency:** at most two lookups at once across the app.
 
 Metadata uses the same fields in the same order as the Swift reader:

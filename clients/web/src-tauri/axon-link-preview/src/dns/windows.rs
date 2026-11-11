@@ -3,9 +3,11 @@
 //!
 //! Declared here rather than through the `windows` crate: two functions and
 //! one record layout, from `windns.h`, are smaller to review than a feature of
-//! a generated binding. The call blocks, so it runs on a blocking thread; a
-//! cancelled or expired lookup stops waiting for it, and the thread ends when
-//! the DNS Client answers.
+//! a generated binding. The call blocks, so it runs on a blocking thread, and
+//! cannot be cancelled: a cancelled or expired lookup stops waiting for it,
+//! and the thread ends when the DNS Client answers. [`IN_FLIGHT`] bounds how
+//! many threads such calls can hold. `DnsQueryEx` with `DnsCancelQuery` would
+//! end them early instead; that is issue 1058.
 
 use super::{Answer, Dns, RecordType};
 use crate::error::{Failure, Result};
@@ -52,6 +54,13 @@ const DNS_ERROR_RCODE_NAME_ERROR: i32 = 9003;
 const DNS_INFO_NO_RECORDS: i32 = 9501;
 
 pub(crate) struct WindowsDns;
+
+/// At most this many `DnsQuery_W` calls run at once, abandoned ones included.
+/// A lookup asks two questions at once and two lookups run at once, so four
+/// is what normal use needs; past it, a query waits for a slot inside its own
+/// deadline and fails as expired if none frees up.
+const IN_FLIGHT: usize = 4;
+static CALLS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(IN_FLIGHT);
 
 fn lookup(name: &str, record: RecordType) -> Result<Answer> {
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -136,9 +145,19 @@ impl Dns for WindowsDns {
         cancel: &Cancel,
     ) -> Result<Answer> {
         let owned = name.to_owned();
-        let call = tokio::task::spawn_blocking(move || lookup(&owned, record));
+        let call = async move {
+            let slot = CALLS.acquire().await.map_err(|_| Failure::Unavailable)?;
+            // The slot travels with the call, so it is held until the call
+            // really returns, not just until this lookup stops waiting.
+            tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                lookup(&owned, record)
+            })
+            .await
+            .unwrap_or(Err(Failure::Unavailable))
+        };
         tokio::select! {
-            result = call => result.unwrap_or(Err(Failure::Unavailable)),
+            result = call => result,
             () = tokio::time::sleep_until(deadline) => Err(Failure::Expired),
             () = cancel.cancelled() => Err(Failure::Cancelled),
         }

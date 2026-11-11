@@ -69,6 +69,22 @@ final class RestrictedPreviewTests: XCTestCase {
     XCTAssertTrue(result.imageUnavailable)
     XCTAssertNil(result.image)
   }
+  func testUnresolvableImageIsUnavailableAndKeepsText() throws {
+    var connections = 0
+    let result = try RestrictedPreview.fetch(
+      URL(string: "https://example.org/article")!, cancellation: ShareCancellation()
+    ) { target, _, _, _ in
+      connections += 1
+      return .init(
+        status: 200, headers: ["content-type": "text/html"],
+        body: Data("<title>Kept</title><meta property='og:image' content='https://['>".utf8),
+        url: target)
+    }
+    XCTAssertEqual(connections, 1)
+    XCTAssertEqual(result.title, "Kept")
+    XCTAssertTrue(result.imageUnavailable)
+    XCTAssertNil(result.image)
+  }
   func testRelativeImageUsesValidatedTransportAndOneDeadline() throws {
     let url = URL(string: "https://example.org/path/article")!
     var urls: [URL] = []

@@ -122,6 +122,7 @@ describe('shellLinkPreview', () => {
     'no_metadata',
     'unavailable',
     'busy',
+    'cancelled',
   ])('rejects with the plugin kind %s', async (kind) => {
     answer = () => Promise.reject({ kind })
     await expect(shellLinkPreview('https://example.org/')).rejects.toEqual(
@@ -130,12 +131,7 @@ describe('shellLinkPreview', () => {
   })
 
   it('reports anything else as unavailable', async () => {
-    for (const error of [
-      { kind: 'cancelled' },
-      'a string',
-      null,
-      { kind: 7 },
-    ]) {
+    for (const error of [{ kind: 'dropped' }, 'a string', null, { kind: 7 }]) {
       answer = () => Promise.reject(error)
       const rejection = await shellLinkPreview('https://example.org/').catch(
         (e: unknown) => e,

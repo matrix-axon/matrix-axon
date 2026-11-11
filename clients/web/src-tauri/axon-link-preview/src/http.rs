@@ -61,10 +61,20 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle))
+/// `</head` or `<body`, in any case, followed by what ends an HTML tag name:
+/// whitespace, `/` or `>`. So `<bodyguard>` does not end a head. One inside
+/// script or comment text still does; the reader does not tokenize. The Swift
+/// reader (`PreviewHTTPParser.endsHead`) applies the same rule.
+pub(crate) fn ends_head(bytes: &[u8]) -> bool {
+    [&b"</head"[..], &b"<body"[..]].iter().any(|marker| {
+        bytes.windows(marker.len() + 1).any(|window| {
+            window[..marker.len()].eq_ignore_ascii_case(marker)
+                && matches!(
+                    window[marker.len()],
+                    b'\t' | b'\n' | 0x0C | b'\r' | b' ' | b'/' | b'>'
+                )
+        })
+    })
 }
 
 /// Header bytes as ISO-8859-1, which is what a header field is.
@@ -362,10 +372,7 @@ impl Parser {
             // Only the new tail, so a large head is not rescanned per read.
             let start = self.body.len().saturating_sub(wanted + 8);
             let tail = &self.body[start..];
-            if contains_ignore_case(tail, b"</head>")
-                || contains_ignore_case(tail, b"<body")
-                || self.body.len() == HEAD_BYTES
-            {
+            if ends_head(tail) || self.body.len() == HEAD_BYTES {
                 self.finished = true;
             }
         }
@@ -444,6 +451,19 @@ mod tests {
             .append(b"HTTP/1.1 200 OK\r\n\r\n<title>T</title></he", false)
             .unwrap());
         assert!(parser.append(b"ad>", false).unwrap());
+    }
+
+    #[test]
+    fn a_head_end_split_across_reads_is_found_once_its_boundary_arrives() {
+        // The cases themselves are the shared fixture's `headEnds`.
+        let mut parser = Parser::new(Kind::Page);
+        assert!(!parser
+            .append(
+                b"HTTP/1.1 200 OK\r\n\r\n<title>T</title><bodyguard><body",
+                false
+            )
+            .unwrap());
+        assert!(parser.append(b">", false).unwrap());
     }
 
     #[test]

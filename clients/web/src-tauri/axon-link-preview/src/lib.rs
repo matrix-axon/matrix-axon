@@ -56,6 +56,8 @@ const RUNNING: usize = 2;
 /// More lookups than this registered at once is refused as busy. The page
 /// asks for at most three cards per composer.
 const REGISTERED: usize = 16;
+/// How many cancellations of not-yet-registered lookups are remembered.
+const EARLY_CANCELS: usize = 16;
 
 type Key = (String, u64);
 
@@ -67,11 +69,22 @@ struct Registration {
     cancel: Cancel,
 }
 
+/// The registrations, and the keys cancelled before their lookup registered,
+/// under one lock so the two cannot disagree.
+#[derive(Default)]
+struct Book {
+    registered: HashMap<Key, Registration>,
+    /// `cancel` is a plain command and `lookup` an async one, so a page's
+    /// cancel can be handled before the lookup it cancels has registered.
+    /// Remembered here, oldest first and only a few, until it does.
+    early_cancels: std::collections::VecDeque<Key>,
+}
+
 struct Lookups {
     network: Arc<net::Network<dns::System, net::Direct>>,
     running: Arc<Semaphore>,
     normalizer: preview::Normalizer,
-    registered: Mutex<HashMap<Key, Registration>>,
+    book: Mutex<Book>,
     generations: std::sync::atomic::AtomicU64,
 }
 
@@ -86,14 +99,24 @@ impl Lookups {
             }),
             running: Arc::new(Semaphore::new(RUNNING)),
             normalizer: preview::Normalizer::new(),
-            registered: Mutex::new(HashMap::new()),
+            book: Mutex::new(Book::default()),
             generations: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// The registration's generation and its cancellation.
+    fn book(&self) -> std::sync::MutexGuard<'_, Book> {
+        self.book.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The registration's generation and its cancellation, or `Cancelled`
+    /// when the page already cancelled this id.
     fn register(&self, key: Key) -> Result<(u64, Cancel), LookupError> {
-        let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
+        let mut book = self.book();
+        if let Some(index) = book.early_cancels.iter().position(|early| *early == key) {
+            book.early_cancels.remove(index);
+            return Err(Kind::Cancelled.into());
+        }
+        let registered = &mut book.registered;
         if registered.len() >= REGISTERED || registered.contains_key(&key) {
             return Err(Kind::Busy.into());
         }
@@ -114,7 +137,7 @@ impl Lookups {
     /// Forget `key` only if it is still this command's registration, so an
     /// old command finishing cannot unregister a new one under the same key.
     fn finish(&self, key: &Key, generation: u64) {
-        let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
+        let registered = &mut self.book().registered;
         if registered
             .get(key)
             .is_some_and(|entry| entry.generation == generation)
@@ -124,26 +147,62 @@ impl Lookups {
     }
 
     fn cancel(&self, key: &Key) {
-        if let Some(entry) = self
-            .registered
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(key)
-        {
+        let mut book = self.book();
+        if let Some(entry) = book.registered.remove(key) {
             entry.cancel.cancel();
+            return;
         }
+        // Either the lookup has not registered yet, or it already finished.
+        // Remembering a finished one is harmless: a page never reuses an id,
+        // and a reload forgets its window's ids.
+        if book.early_cancels.len() == EARLY_CANCELS {
+            book.early_cancels.pop_front();
+        }
+        book.early_cancels.push_back(key.clone());
+    }
+
+    /// One lookup, from registration to cleanup: what the `lookup` command
+    /// does, apart from the webview it takes its key from.
+    async fn run<H: net::Hop>(
+        &self,
+        hop: &H,
+        key: Key,
+        url: &str,
+    ) -> Result<preview::Preview, LookupError> {
+        // One deadline from here: waiting for a slot spends the same 25
+        // seconds the lookup has, so the page waits 25 seconds at most.
+        let deadline = tokio::time::Instant::now() + preview::DEADLINE;
+        let (generation, cancel) = self.register(key.clone())?;
+        let result = async {
+            let _slot = tokio::select! {
+                permit = tokio::time::timeout_at(deadline, self.running.clone().acquire_owned()) => match permit {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => return Err(LookupError::from(Kind::Unavailable)),
+                    Err(_) => return Err(Kind::Timeout.into()),
+                },
+                () = cancel.cancelled() => return Err(Kind::Cancelled.into()),
+            };
+            preview::lookup(hop, url, deadline, &cancel, &self.normalizer).await
+        }
+        .await;
+        self.finish(&key, generation);
+        if let Err(error) = &result {
+            log::event(&format!("device_preview_failed kind={:?}", error.kind));
+        }
+        result
     }
 
     /// A reload or a closed window leaves no page to receive what the old one
     /// asked for.
     fn forget_webview(&self, label: &str) {
-        let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
-        registered.retain(|(owner, _), entry| {
+        let mut book = self.book();
+        book.registered.retain(|(owner, _), entry| {
             if owner == label {
                 entry.cancel.cancel();
             }
             owner != label
         });
+        book.early_cancels.retain(|(owner, _)| owner != label);
     }
 }
 
@@ -202,29 +261,14 @@ async fn lookup<R: Runtime>(
     id: u64,
     url: String,
 ) -> Result<Response, LookupError> {
-    let key = (webview.label().to_owned(), id);
-    let (generation, cancel) = lookups.register(key.clone())?;
-    let network = lookups.network.clone();
-    let running = lookups.running.clone();
-    let result = async {
-        // Waiting for a slot is cancellable, and bounded by the same
-        // deadline a running lookup has.
-        let _slot = tokio::select! {
-            permit = tokio::time::timeout(preview::DEADLINE, running.acquire_owned()) => match permit {
-                Ok(Ok(permit)) => permit,
-                Ok(Err(_)) => return Err(LookupError::from(Kind::Unavailable)),
-                Err(_) => return Err(Kind::Timeout.into()),
-            },
-            () = cancel.cancelled() => return Err(Kind::Cancelled.into()),
-        };
-        preview::lookup(&*network, &url, &cancel, &lookups.normalizer).await
-    }
-    .await;
-    lookups.finish(&key, generation);
-    if let Err(error) = &result {
-        log::event(&format!("device_preview_failed kind={:?}", error.kind));
-    }
-    result.map(|preview| Response::new(frame(&preview)))
+    let preview = lookups
+        .run(
+            &*lookups.network.clone(),
+            (webview.label().to_owned(), id),
+            &url,
+        )
+        .await?;
+    Ok(Response::new(frame(&preview)))
 }
 
 #[tauri::command]

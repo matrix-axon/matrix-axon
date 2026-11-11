@@ -43,17 +43,21 @@ enum RestrictedPreview {
     var metadata = Metadata(
       originalURL: url, url: response.url, title: page.title,
       description: page.description, siteName: page.siteName)
-    if let image = page.image,
-      let target = URL(string: image, relativeTo: response.url)?.absoluteURL
-    {
+    if let image = page.image {
+      // A named image that cannot be used counts as unavailable, whether it
+      // fails to resolve here or to load below.
       metadata.imageUnavailable = true
-      do {
-        let response = try request(target, .image, deadline, cancellation)
-        guard response.body.count <= ShareLimits.thumbnailBytes else { throw ShareFailure.quota }
-        metadata.image = response.body
-        metadata.imageUnavailable = false
-      } catch {
-        try cancellation.check()
+      if let target = URL(string: image, relativeTo: response.url)?.absoluteURL {
+        do {
+          let response = try request(target, .image, deadline, cancellation)
+          guard response.body.count <= ShareLimits.thumbnailBytes else { throw ShareFailure.quota }
+          metadata.image = response.body
+          metadata.imageUnavailable = false
+        } catch {
+          try cancellation.check()
+          log.info("device_preview_image_unavailable")
+        }
+      } else {
         log.info("device_preview_image_unavailable")
       }
     }
@@ -74,17 +78,24 @@ enum RestrictedPreview {
   static func parse(_ data: Data, contentType: String = "text/html") throws -> Page {
     guard data.count <= PreviewNetwork.headBytes else { throw ShareFailure.quota }
     // Bound the parser's potential tree and recursive destruction before DOM
-    // allocation. Over-complex pages retain their plain-link fallback.
-    guard data.reduce(0, { $0 + ($1 == 60 ? 1 : 0) }) <= 512 else { throw ShareFailure.quota }
+    // allocation: only the bytes before the 513th `<` are parsed. Preview
+    // tags come early in a head, so a heavy page keeps its metadata rather
+    // than its card. A tag the cut ends is dropped whole. The Rust reader
+    // (`axon-link-preview/src/page.rs`) makes the same cut.
+    var tags = 0
+    let bounded = data.prefix { byte in
+      if byte == 60 { tags += 1 }
+      return tags <= 512
+    }
     let html: String
-    if let utf8 = String(data: data, encoding: .utf8) {
+    if let utf8 = String(data: bounded, encoding: .utf8) {
       html = utf8
     } else if contentType.contains("iso-8859-1") || contentType.contains("windows-1252"),
-      let legacy = String(data: data, encoding: .windowsCP1252)
+      let legacy = String(data: bounded, encoding: .windowsCP1252)
     {
       html = legacy
     } else {
-      html = String(decoding: data, as: UTF8.self)
+      html = String(decoding: bounded, as: UTF8.self)
     }
     let document = try SwiftSoup.parse(html)
     func content(_ selectors: [String], limit: Int) throws -> String? {

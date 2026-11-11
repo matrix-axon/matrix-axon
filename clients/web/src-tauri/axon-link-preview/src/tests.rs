@@ -93,11 +93,18 @@ struct UrlCase {
 struct Boundary {
     #[serde(rename = "rejectedBeforeDNS")]
     rejected_before_dns: Vec<String>,
+    head_ends: Vec<HeadEnd>,
     addresses: Addresses,
     operator_mappings: Vec<String>,
     nat64: Nat64,
     resolution: Vec<Resolution>,
     metadata: Vec<Metadata>,
+}
+
+#[derive(Deserialize)]
+struct HeadEnd {
+    text: String,
+    ends: bool,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +197,18 @@ fn fixture_urls_are_rejected_before_dns() {
             url_check::validate(&raw).err(),
             Some(Failure::PreviewUnavailable),
             "{raw}"
+        );
+    }
+}
+
+#[test]
+fn fixture_head_ends() {
+    for case in boundary().head_ends {
+        assert_eq!(
+            crate::http::ends_head(case.text.as_bytes()),
+            case.ends,
+            "{:?}",
+            case.text
         );
     }
 }
@@ -607,6 +626,7 @@ struct Scripted {
     lookups: AtomicUsize,
     exchanges: AtomicUsize,
     resolve_delay: Duration,
+    image_delay: Duration,
 }
 
 impl Scripted {
@@ -617,6 +637,7 @@ impl Scripted {
             lookups: AtomicUsize::new(0),
             exchanges: AtomicUsize::new(0),
             resolve_delay: Duration::ZERO,
+            image_delay: Duration::ZERO,
         }
     }
 }
@@ -641,6 +662,9 @@ impl Hop for Scripted {
         _deadline: Instant,
     ) -> Result<Response, Failure> {
         self.exchanges.fetch_add(1, Ordering::SeqCst);
+        if kind == Resource::Image {
+            tokio::time::sleep(self.image_delay).await;
+        }
         (self.exchange)(checked, addresses, kind)
     }
 }
@@ -905,10 +929,16 @@ async fn a_lookup_reports_the_kinds_the_page_sees() {
     let failure = |url: &'static str| {
         let hop = &hop;
         async move {
-            preview::lookup(hop, url, &Cancel::new(), &preview::Normalizer::new())
-                .await
-                .unwrap_err()
-                .kind
+            preview::lookup(
+                hop,
+                url,
+                Instant::now() + preview::DEADLINE,
+                &Cancel::new(),
+                &preview::Normalizer::new(),
+            )
+            .await
+            .unwrap_err()
+            .kind
         }
     };
     assert_eq!(failure("http://example.org/").await, Kind::UnsupportedUrl);
@@ -932,6 +962,7 @@ async fn a_lookup_reports_the_kinds_the_page_sees() {
     let preview = preview::lookup(
         &empty,
         "https://example.org/",
+        Instant::now() + preview::DEADLINE,
         &Cancel::new(),
         &preview::Normalizer::new(),
     )
@@ -1011,7 +1042,14 @@ fn spawn_lookup(
     cancel: Cancel,
 ) -> tokio::task::JoinHandle<Result<preview::Preview, crate::LookupError>> {
     tokio::spawn(async move {
-        preview::lookup(&*hop, "https://example.org/a", &cancel, &normalizer).await
+        preview::lookup(
+            &*hop,
+            "https://example.org/a",
+            Instant::now() + preview::DEADLINE,
+            &cancel,
+            &normalizer,
+        )
+        .await
     })
 }
 
@@ -1060,8 +1098,97 @@ async fn the_deadline_covers_decoding_and_abandoned_decodes_stay_within_budget()
     assert_eq!(started, 2);
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_image_that_misses_the_deadline_costs_only_the_image() {
+    let hop = page_with_image();
+    let mut hop = Arc::try_unwrap(hop).ok().unwrap();
+    hop.image_delay = preview::DEADLINE * 2;
+    let preview = preview::lookup(
+        &hop,
+        "https://example.org/a",
+        Instant::now() + preview::DEADLINE,
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview.title.as_deref(), Some("Kept"));
+    assert!(preview.image_unavailable);
+}
+
+#[tokio::test]
+async fn an_image_url_that_cannot_be_resolved_is_unavailable() {
+    let hop = Scripted::new(
+        Box::new(public),
+        Box::new(|checked, _, _| {
+            Ok(response(
+                200,
+                &[("content-type", "text/html")],
+                b"<title>Kept</title><meta property='og:image' content='https://['>",
+                &checked.url,
+            ))
+        }),
+    );
+    let fetched = preview::fetch(&hop, "https://example.org/a", soon(), &Cancel::new())
+        .await
+        .unwrap();
+    assert_eq!(fetched.title.as_deref(), Some("Kept"));
+    assert!(fetched.image_unavailable);
+    assert_eq!(hop.exchanges.load(Ordering::SeqCst), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Registrations, as the commands make them.
+
+#[tokio::test]
+async fn a_cancel_that_arrives_before_its_lookup_still_cancels_it() {
+    let lookups = crate::Lookups::new();
+    let key = ("main".to_owned(), 7);
+    lookups.cancel(&key);
+    let hop = Scripted::new(
+        Box::new(|_| panic!("a cancelled lookup resolved")),
+        Box::new(|_, _, _| panic!("a cancelled lookup connected")),
+    );
+    let result = lookups.run(&hop, key.clone(), "https://example.org/").await;
+    assert_eq!(result.unwrap_err().kind, Kind::Cancelled);
+    assert!(lookups.book().early_cancels.is_empty(), "used once");
+    // Bounded, and a reload forgets its window's.
+    for id in 0..40 {
+        lookups.cancel(&("main".to_owned(), id));
+    }
+    assert_eq!(lookups.book().early_cancels.len(), 16);
+    lookups.forget_webview("main");
+    assert!(lookups.book().early_cancels.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiting_for_a_slot_spends_the_lookups_own_deadline() {
+    let lookups = Arc::new(crate::Lookups::new());
+    // Both slots busy for 20 seconds; then the page's DNS takes 10.
+    let held = lookups.running.clone().acquire_many_owned(2).await.unwrap();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        drop(held);
+    });
+    let mut hop = Scripted::new(
+        Box::new(public),
+        Box::new(|checked, _, _| {
+            Ok(response(
+                200,
+                &[("content-type", "text/html")],
+                b"<title>T</title>",
+                &checked.url,
+            ))
+        }),
+    );
+    hop.resolve_delay = Duration::from_secs(10);
+    let begun = Instant::now();
+    let result = lookups
+        .run(&hop, ("main".to_owned(), 1), "https://example.org/")
+        .await;
+    assert_eq!(result.unwrap_err().kind, Kind::Timeout);
+    assert_eq!(Instant::now() - begun, preview::DEADLINE);
+}
 
 #[test]
 fn an_old_command_finishing_keeps_a_new_registration_under_the_same_key() {
@@ -1080,7 +1207,7 @@ fn an_old_command_finishing_keeps_a_new_registration_under_the_same_key() {
         new_cancel.is_cancelled(),
         "the new lookup can still be cancelled"
     );
-    assert!(lookups.registered.lock().unwrap().is_empty());
+    assert!(lookups.book().registered.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,6 +1430,7 @@ async fn a_lookup_end_to_end_over_tls() {
     let preview = preview::lookup(
         &network,
         "https://page.example.org/start?x=1#frag",
+        Instant::now() + preview::DEADLINE,
         &Cancel::new(),
         &preview::Normalizer::new(),
     )
@@ -1346,6 +1474,7 @@ async fn tls_is_verified_against_the_original_host_name() {
     let result = preview::lookup(
         &network,
         "https://other.example.org/",
+        Instant::now() + preview::DEADLINE,
         &Cancel::new(),
         &preview::Normalizer::new(),
     )
@@ -1359,6 +1488,7 @@ async fn tls_is_verified_against_the_original_host_name() {
     let result = preview::lookup(
         &network,
         "https://page.example.org/",
+        Instant::now() + preview::DEADLINE,
         &Cancel::new(),
         &preview::Normalizer::new(),
     )
@@ -1388,6 +1518,7 @@ async fn a_cancelled_lookup_stops_waiting() {
     let result = preview::lookup(
         &network,
         "https://page.example.org/",
+        Instant::now() + preview::DEADLINE,
         &cancel,
         &preview::Normalizer::new(),
     )
@@ -1468,9 +1599,15 @@ async fn live_public_https_metadata() {
         return;
     };
     let url = std::env::var("AXON_PREVIEW_URL").unwrap_or_else(|_| "https://example.com/".into());
-    let preview = preview::lookup(&network, &url, &Cancel::new(), &preview::Normalizer::new())
-        .await
-        .unwrap();
+    let preview = preview::lookup(
+        &network,
+        &url,
+        Instant::now() + preview::DEADLINE,
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await
+    .unwrap();
     assert!(preview.title.is_some());
     println!(
         "PREVIEW_LIVE title={} image_bytes={} image_unavailable={}",
@@ -1488,6 +1625,7 @@ async fn live_ipv6_only_origin_reports_public_ipv4_requirement() {
     let result = preview::lookup(
         &network,
         "https://ipv6.google.com/",
+        Instant::now() + preview::DEADLINE,
         &Cancel::new(),
         &preview::Normalizer::new(),
     )

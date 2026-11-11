@@ -14,19 +14,19 @@ transport's any-URL reach nor stands in the way of narrowing it (issue 893).
 The same one as the Share Extension's Swift reader
 (`incoming-share/Sources/AxonIncomingShare/PreviewNetwork.swift`), rule for rule:
 
-| Rule        | Where                                                                                                              |
-| ----------- | ------------------------------------------------------------------------------------------------------------------ |
-| Hosts       | `url_check.rs`: HTTPS, a public-looking DNS name, no IP literal, credentials, `xn--` label or reserved suffix      |
-| DNS         | `dns/`: the origin's A records only; NAT64 through `ipv4only.arpa` (RFC 7050)                                      |
-| Addresses   | `address.rs`: a public IPv4 address, or an IPv6 address synthesized here from one                                  |
-| Connection  | `net.rs`: to the validated address only, no proxy; TLS 1.2+ against the original name, Mozilla's bundled roots     |
-| Request     | `net.rs`: a plain `GET`, no cookies or credentials, `Accept-Encoding: identity`                                    |
-| Redirects   | `net.rs`: by hand, six requests at most, each validated as a new one                                               |
-| Responses   | `http.rs`: status 200 only; 32 KiB of headers; a page until its head ends or 256 KiB; an image up to 2 MiB         |
-| Parsing     | `page.rs`: no page with more than 512 `<`; the Swift reader's fields, selectors and trimming                       |
-| Image       | `image.rs`: PNG, JPEG, GIF or WebP; at most 1200 px; re-encoded as JPEG, or PNG when transparent; no metadata kept |
-| Time        | `preview.rs`: one 25-second deadline for the page, its redirects and its image; cancellable throughout             |
-| Concurrency | `lib.rs`: two lookups at once across the app; 16 registered at most                                                |
+| Rule        | Where                                                                                                                                                                               |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hosts       | `url_check.rs`: HTTPS, a public-looking DNS name, no IP literal, credentials, `xn--` label or reserved suffix                                                                       |
+| DNS         | `dns/`: the origin's A records only; NAT64 through `ipv4only.arpa` (RFC 7050)                                                                                                       |
+| Addresses   | `address.rs`: a public IPv4 address, or an IPv6 address synthesized here from one                                                                                                   |
+| Connection  | `net.rs`: to the validated address only, no proxy; TLS 1.2+ against the original name, Mozilla's bundled roots                                                                      |
+| Request     | `net.rs`: a plain `GET`, no cookies or credentials, `Accept-Encoding: identity`                                                                                                     |
+| Redirects   | `net.rs`: by hand, six requests at most, each validated as a new one                                                                                                                |
+| Responses   | `http.rs`: status 200 only; 32 KiB of headers; a page until `</head` or `<body` followed by a tag-name boundary, or 256 KiB; an image up to 2 MiB                                   |
+| Parsing     | `page.rs`: only the bytes before a head's 513th `<`; the Swift reader's fields, selectors and trimming                                                                              |
+| Image       | `image.rs`: PNG, JPEG, GIF or WebP; at most 1200 px; re-encoded as JPEG, or PNG when transparent; no metadata kept                                                                  |
+| Time        | `preview.rs`: one 25-second deadline for the page, its redirects and its image; cancellable throughout                                                                              |
+| Concurrency | `lib.rs`: two lookups at once across the app, 16 registered; one 25 s deadline from before the wait for a slot; decodes and Windows DNS calls have small bounded pools of their own |
 
 `src/incoming-share/fixtures/preview-boundary.json` holds the cases both readers
 must agree on: URLs, address scope, operator NAT64 mappings, RFC 6052 vectors,

@@ -15,8 +15,12 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-/// One deadline covers the page, its redirects and its image.
+/// One deadline covers the wait for a slot, the page, its redirects and its
+/// image.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(25);
+
+/// How long after the deadline the lookup's backstop timer fires.
+const BACKSTOP: Duration = Duration::from_secs(1);
 
 /// At most this many images are decoded at once, counting decodes a
 /// cancelled or expired lookup stopped waiting for.
@@ -123,13 +127,23 @@ fn last_path_component(url: &url::Url) -> Option<String> {
 }
 
 /// `RestrictedPreview.fetch`, after a lookup slot is held.
+///
+/// The page and the image each run under `deadline` explicitly. A page that
+/// misses it fails the lookup as expired; an image that misses it only makes
+/// the image unavailable, so text already parsed is always kept. No outer
+/// timer races the image's.
 pub(crate) async fn fetch<H: Hop>(
     hop: &H,
     url: &str,
     deadline: Instant,
     cancel: &Cancel,
 ) -> Result<Fetched, Failure> {
-    let response = net::fetch(hop, url, Resource::Page, deadline, cancel).await?;
+    let response = tokio::time::timeout_at(
+        deadline,
+        net::fetch(hop, url, Resource::Page, deadline, cancel),
+    )
+    .await
+    .unwrap_or(Err(Failure::Expired))?;
     if cancel.is_cancelled() {
         return Err(Failure::Cancelled);
     }
@@ -158,9 +172,20 @@ pub(crate) async fn fetch<H: Hop>(
         site_name: page.site_name,
         ..Fetched::default()
     };
-    if let Some(target) = page.image.and_then(|image| response.url.join(&image).ok()) {
+    if let Some(image) = page.image {
+        // A named image that cannot be used is unavailable, whether its URL
+        // fails to resolve or its fetch fails.
         fetched.image_unavailable = true;
-        match net::fetch(hop, target.as_str(), Resource::Image, deadline, cancel).await {
+        let fetched_image = match response.url.join(&image) {
+            Ok(target) => tokio::time::timeout_at(
+                deadline,
+                net::fetch(hop, target.as_str(), Resource::Image, deadline, cancel),
+            )
+            .await
+            .unwrap_or(Err(Failure::Expired)),
+            Err(_) => Err(Failure::PreviewUnavailable),
+        };
+        match fetched_image {
             Ok(image) if image.body.len() <= THUMBNAIL_BYTES => {
                 fetched.image = Some(image.body);
                 fetched.image_unavailable = false;
@@ -191,6 +216,9 @@ pub(crate) async fn fetch<H: Hop>(
 /// the static check first, then [`fetch`], then the image is normalized and
 /// every field checked again, as `DevicePreview.include` does.
 ///
+/// `deadline` is the lookup's one deadline, which the caller starts before
+/// waiting for a slot, so queueing counts against the same 25 seconds.
+///
 /// The image is decoded inside the same deadline and cancellation as the
 /// fetch. A deadline that passes while it decodes leaves a card with its text
 /// and no image, as an image fetch that runs out of time does; with no text
@@ -198,16 +226,19 @@ pub(crate) async fn fetch<H: Hop>(
 pub(crate) async fn lookup<H: Hop>(
     hop: &H,
     url: &str,
+    deadline: Instant,
     cancel: &Cancel,
     normalizer: &Normalizer,
 ) -> Result<Preview, LookupError> {
     if url_check::validate(url).is_err() {
         return Err(Kind::UnsupportedUrl.into());
     }
-    let deadline = Instant::now() + DEADLINE;
+    // `fetch` keeps the deadline itself, page and image separately. This
+    // timer is only a backstop, a moment later, so it never wins a race with
+    // the image's own and costs the text.
     let work = fetch(hop, url, deadline, cancel);
     let fetched = tokio::select! {
-        result = tokio::time::timeout_at(deadline, work) => match result {
+        result = tokio::time::timeout_at(deadline + BACKSTOP, work) => match result {
             Ok(result) => result?,
             Err(_) => return Err(Failure::Expired.into()),
         },

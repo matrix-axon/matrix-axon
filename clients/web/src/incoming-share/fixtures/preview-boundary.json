@@ -1,5 +1,5 @@
 {
-  "comment": "The device-preview fetch boundary (ADR 0132 section 3), read by both implementations: the Share Extension's Swift reader (incoming-share/Tests/AxonIncomingShareTests/BoundaryFixtureTests.swift) and the shell's Rust plugin (axon-link-preview/src/tests.rs). A change to either reader that disagrees with a case here fails that reader's tests. Static URL eligibility, which the composer shares too, is device-preview-urls.json beside this file.",
+  "comment": "The device-preview fetch boundary (ADR 0132 section 3), read by both implementations: the Share Extension's Swift reader (incoming-share/Tests/AxonIncomingShareTests/BoundaryFixtureTests.swift) and the shell's Rust plugin (axon-link-preview/src/tests.rs). A change to either reader that disagrees with a case here fails that reader's tests. headEnds are the byte sequences that end a page's head when they arrive (the script case is accepted: neither reader tokenizes). Static URL eligibility, which the composer shares too, is device-preview-urls.json beside this file.",
   "rejectedBeforeDNS": [
     "http://example.org/",
     "https://127.0.0.1/",
@@ -301,9 +301,55 @@
       "title": "Caf�"
     },
     {
-      "name": "too many tags is not parsed",
-      "html": "<x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><title>T</title>",
-      "failure": "quota"
+      "name": "only the bytes before the 513th < are parsed",
+      "html": "<meta property=og:title content=Early><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><meta name=description content=Late><title>T</title>",
+      "title": "Early"
+    }
+  ],
+  "headEnds": [
+    {
+      "text": "<title>T</title></head>",
+      "ends": true
+    },
+    {
+      "text": "</HEAD >",
+      "ends": true
+    },
+    {
+      "text": "<body class=x>",
+      "ends": true
+    },
+    {
+      "text": "<BODY>",
+      "ends": true
+    },
+    {
+      "text": "<body/>",
+      "ends": true
+    },
+    {
+      "text": "<body\n",
+      "ends": true
+    },
+    {
+      "text": "<bodyguard>",
+      "ends": false
+    },
+    {
+      "text": "</header>",
+      "ends": false
+    },
+    {
+      "text": "</headline>",
+      "ends": false
+    },
+    {
+      "text": "<body",
+      "ends": false
+    },
+    {
+      "text": "<script>var t='<body class=x>'</script>",
+      "ends": true
     }
   ]
 }

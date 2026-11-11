@@ -41,7 +41,12 @@ final class BoundaryFixtureTests: XCTestCase {
       let image: String?
       let failure: String?
     }
+    struct HeadEnd: Decodable {
+      let text: String
+      let ends: Bool
+    }
     let rejectedBeforeDNS: [String]
+    let headEnds: [HeadEnd]
     let addresses: Addresses
     let operatorMappings: [String]
     let nat64: NAT64
@@ -144,6 +149,17 @@ final class BoundaryFixtureTests: XCTestCase {
         XCTAssertEqual(failure.rawValue, entry.failure, entry.name)
       }
     }
+  }
+
+  func testHeadEnds() throws {
+    for entry in try fixture().headEnds {
+      XCTAssertEqual(PreviewHTTPParser.endsHead(Data(entry.text.utf8)), entry.ends, entry.text)
+    }
+    // A marker split across reads ends the head once its boundary arrives.
+    var parser = PreviewHTTPParser(kind: .page)
+    XCTAssertFalse(
+      try parser.append(Data("HTTP/1.1 200 OK\r\n\r\n<title>T</title><bodyguard><body".utf8)))
+    XCTAssertTrue(try parser.append(Data(">".utf8)))
   }
 
   func testMetadata() throws {

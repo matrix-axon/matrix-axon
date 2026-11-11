@@ -29,6 +29,7 @@ const FAILURES: ReadonlySet<string> = new Set<LinkPreviewFailure>([
   'no_metadata',
   'unavailable',
   'busy',
+  'cancelled',
 ])
 
 /** The JSON half of a frame (`Head` in `axon-link-preview/src/lib.rs`). */

@@ -128,10 +128,12 @@ fn interface_index(_name: &str) -> Option<u32> {
     None
 }
 
-fn random_id() -> u16 {
+/// A message id from the OS generator. A predictable id would make spoofing
+/// an answer cheaper, so without one the query is not sent at all.
+fn random_id() -> Result<u16> {
     let mut bytes = [0u8; 2];
-    // The OS generator; a predictable id would make spoofing cheaper.
-    getrandom::fill(&mut bytes).map_or(0x5aa5, |()| u16::from_be_bytes(bytes))
+    getrandom::fill(&mut bytes).map_err(|_| Failure::Unavailable)?;
+    Ok(u16::from_be_bytes(bytes))
 }
 
 impl Dns for WireDns {
@@ -166,7 +168,7 @@ impl Dns for WireDns {
 
 /// One server: UDP, then TCP if the answer was truncated.
 async fn ask(server: SocketAddr, name: &str, record: RecordType) -> Result<Answer> {
-    let id = random_id();
+    let id = random_id()?;
     let request = message::query(id, name, record).ok_or(Failure::PreviewUnavailable)?;
     let bind: SocketAddr = match server {
         SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),

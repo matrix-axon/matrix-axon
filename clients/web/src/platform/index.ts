@@ -133,6 +133,13 @@ export type LinkPreviewFailure =
   | 'no_metadata'
   | 'unavailable'
   | 'busy'
+  /**
+   * The plugin stopped the lookup itself: the page reloaded, or its window
+   * closed. Not a property of the link, so never a reason to show an error
+   * or to remember the link as having no preview. A caller's own abort
+   * rejects with the signal's reason instead.
+   */
+  | 'cancelled'
 
 /**
  * Thrown by `Platform.linkPreview` when this device built no preview. A
