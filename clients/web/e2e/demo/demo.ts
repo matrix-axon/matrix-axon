@@ -129,6 +129,14 @@ export function spaceName(id: string): string {
   return space.name
 }
 
+/** A rail entry's label can gain or lose an unread count during a scene. */
+export function spaceButton(page: Page, name: string): Locator {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return page.locator('.space-picker').getByRole('button', {
+    name: new RegExp(`^${escaped}(?:, \\d+ unread)?$`),
+  })
+}
+
 let accountIdCache: string | null = null
 
 /**

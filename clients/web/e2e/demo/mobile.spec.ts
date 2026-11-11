@@ -5,6 +5,7 @@ import {
   dwell,
   resetRoom,
   roomUrl,
+  spaceButton,
   spaceName,
   stage,
   tap,
@@ -51,16 +52,12 @@ test('rooms — one pane, chosen by the route', async ({ page }) => {
   // The spaces rail is reachable on a phone too, and filters the same way.
   // Scoped to the rail: its `All rooms` entry and the room-list filter chip of
   // the same name would otherwise both match.
-  const rail = page.locator('.space-picker')
-  await tap(
-    page,
-    rail.getByRole('button', { name: spaceName('watershed'), exact: true }),
-  )
+  await tap(page, spaceButton(page, spaceName('watershed')))
   await expect(list).toContainText('water-quality')
   await expect(list).not.toContainText('trail-work')
   await dwell(page, LONG)
 
-  await tap(page, rail.getByRole('button', { name: 'All rooms', exact: true }))
+  await tap(page, spaceButton(page, 'All rooms'))
   await expect(list).toContainText('trail-work')
   await dwell(page, BEAT)
 
