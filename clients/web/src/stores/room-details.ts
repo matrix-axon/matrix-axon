@@ -10,6 +10,19 @@
  * change it stores and at the end of every background job a read saw queued or
  * running, so an open panel learns of each answer without asking.
  *
+ * One thing changes without the server saying so: time. An answer's
+ * `expires_at` or a backoff's `next_attempt_at` passing changes its label
+ * ("may be out of date", "Unknown (couldn't check)" becoming "Unknown (not
+ * cached)"), but stores nothing, so no frame follows. The state therefore
+ * carries the presentation clock, `now`, which a one-shot timer moves forward
+ * at the next such deadline in the answers held — a local re-render, never a
+ * request. A page coming back into view moves it too, because a suspended
+ * device (iOS especially) does not run that timer while asleep. And because a
+ * laptop that sleeps with the tab in view gets no `visibilitychange`, while its
+ * timers lose the time asleep, the timer never waits more than a minute before
+ * comparing the wall clock with the deadline; it changes the state only once a
+ * deadline has actually passed.
+ *
  * `/pinned`, `/space/parents`, `/upgrade` and `/power_levels` stay in the
  * panel's own loader; they are not part of issue 618.
  */
@@ -41,13 +54,6 @@ export interface RoomDetailsSlot<T> {
   error: string | null
   /** Whether the store has asked for this read for the shown room at all. */
   requested: boolean
-  /**
-   * Client time the latest response arrived. Server timestamps in it
-   * (`expires_at`, `next_attempt_at`) are judged against this, so a label
-   * describes the answer as of its read, and changes only with the next read —
-   * which every change the server stores prompts with a frame.
-   */
-  receivedAt: number | null
 }
 
 export interface RoomDetailsState {
@@ -56,6 +62,13 @@ export interface RoomDetailsState {
   metadata: RoomDetailsSlot<RoomMetadataDto>
   homeserverDetails: RoomDetailsSlot<RoomHomeserverDetailsDto>
   info: RoomDetailsSlot<RoomInfoDto>
+  /**
+   * The client time labels are judged at: server timestamps in the answers
+   * (`expires_at`, `next_attempt_at`) are compared against it. Moved forward
+   * by every answer, by a timer at the next deadline the answers name, and when
+   * the page becomes visible again.
+   */
+  now: number
 }
 
 export interface RoomDetailsTarget {
@@ -86,16 +99,65 @@ export function roomDetailsKey(accountId: string, roomId: string): string {
 }
 
 function emptySlot<T>(): RoomDetailsSlot<T> {
-  return { value: null, error: null, requested: false, receivedAt: null }
+  return { value: null, error: null, requested: false }
 }
 
-export function emptyRoomDetails(key: string | null): RoomDetailsState {
+export function emptyRoomDetails(
+  key: string | null,
+  now = 0,
+): RoomDetailsState {
   return {
     key,
     metadata: emptySlot(),
     homeserverDetails: emptySlot(),
     info: emptySlot(),
+    now,
   }
+}
+
+/**
+ * The longest the clock timer waits before comparing the wall clock with the
+ * next deadline. Timers lose the time a sleeping machine spends asleep, so a
+ * deadline timer alone could fire hours late; this bounds how late a label
+ * can be to a minute. It reads no network and writes no state until a
+ * deadline passes.
+ */
+const CLOCK_RECHECK_MS = 60_000
+
+/**
+ * The earliest server timestamp after `now` at which a label in `state`
+ * changes, or `null` when none will. These are exactly the comparisons the
+ * formatter makes (`room-details-format.ts`): a homeserver detail's
+ * `expires_at` (the staleness note) and `refresh.next_attempt_at` (a held
+ * refresh), and a snapshot's `absence_check.next_attempt_at` (a held check).
+ */
+export function nextLabelDeadline(
+  state: RoomDetailsState,
+  now: number,
+): number | null {
+  const deadlines: Array<number | null | undefined> = []
+  const homeserver = state.homeserverDetails.value
+  if (homeserver !== null) {
+    for (const detail of [
+      homeserver.local_aliases,
+      homeserver.directory_visibility,
+    ]) {
+      deadlines.push(detail.expires_at, detail.refresh.next_attempt_at)
+    }
+  }
+  const metadata = state.metadata.value
+  if (metadata !== null) {
+    for (const snapshot of Object.values(metadata)) {
+      deadlines.push(snapshot.absence_check?.next_attempt_at)
+    }
+  }
+  let next: number | null = null
+  for (const deadline of deadlines) {
+    if (typeof deadline === 'number' && deadline >= now) {
+      next = next === null ? deadline : Math.min(next, deadline)
+    }
+  }
+  return next
 }
 
 /** One shown room: its identity, its reads' abort handle, and their bookkeeping. */
@@ -116,6 +178,47 @@ export function createRoomDetailsStore(
 ): RoomDetailsStore {
   const state = signal<RoomDetailsState>(emptyRoomDetails(null))
   let session: Session | null = null
+  let clockTimer: ReturnType<typeof setTimeout> | null = null
+
+  function stopClock(): void {
+    if (clockTimer !== null) {
+      clearTimeout(clockTimer)
+      clockTimer = null
+    }
+  }
+
+  /** Arm one timer for the next deadline the held answers name, if any. */
+  function armClock(): void {
+    stopClock()
+    if (session === null) return
+    const next = nextLabelDeadline(state.value, state.value.now)
+    if (next === null) return
+    // A label compares `deadline < now`, so it changes just after the deadline.
+    const wait = Math.max(0, next - Date.now()) + 1
+    clockTimer = setTimeout(tick, Math.min(wait, CLOCK_RECHECK_MS))
+  }
+
+  /**
+   * Move the presentation clock to the current time if a deadline has passed
+   * since it last moved, then re-arm. A check that finds nothing due changes
+   * nothing, so it renders nothing.
+   */
+  function tick(): void {
+    clockTimer = null
+    if (session === null) return
+    const now = Date.now()
+    const next = nextLabelDeadline(state.value, state.value.now)
+    if (next !== null && next < now) {
+      state.value = { ...state.value, now }
+    }
+    armClock()
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') tick()
+    })
+  }
 
   async function fetchRead(
     read: RoomDetailsRead,
@@ -179,14 +282,11 @@ export function createRoomDetailsStore(
         state.value = {
           ...state.value,
           [which]: result.ok
-            ? {
-                value: result.value,
-                error: null,
-                requested: true,
-                receivedAt: Date.now(),
-              }
+            ? { value: result.value, error: null, requested: true }
             : { ...slot, error: result.message },
+          now: Date.now(),
         }
+        armClock()
         if (owner.dirty.delete(which)) read(owner, which)
       },
     )
@@ -203,7 +303,8 @@ export function createRoomDetailsStore(
     }
     session?.controller.abort()
     session = null
-    state.value = emptyRoomDetails(key)
+    stopClock()
+    state.value = emptyRoomDetails(key, Date.now())
     if (target === null || key === null) return
     const owner: Session = {
       key,

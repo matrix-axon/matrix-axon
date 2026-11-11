@@ -180,14 +180,15 @@ export function RoomInfoPanel({
       : emptyRoomDetails(detailsKey)
   /**
    * A detail from a store read, with a failed read reported, not pending.
-   * `pick` gets the time the answer arrived, to judge its server timestamps.
+   * `pick` gets the store's presentation clock, which moves forward at each
+   * deadline the answers name, to judge their server timestamps.
    */
   const fromRead = <T,>(
     slot: RoomDetailsSlot<T>,
     pick: (value: T, now: number) => Shown,
     requestable = true,
   ): Shown => {
-    if (slot.value !== null) return pick(slot.value, slot.receivedAt ?? 0)
+    if (slot.value !== null) return pick(slot.value, details.now)
     if (slot.error !== null) return shownLabel('Unavailable')
     // Never requested and never will be: the server has nothing for it.
     if (!requestable) return shownLabel(UNKNOWN_NOT_CACHED)

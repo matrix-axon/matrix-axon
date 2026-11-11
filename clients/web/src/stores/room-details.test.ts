@@ -6,7 +6,12 @@ import { createApiClient } from '../api/client'
 import { ROOM_DETAILS_CHANGED, type LiveFrame } from '../api/frames'
 import { homeserverDetailsDto, metadataDto } from '../test/room-details'
 import type { LiveConnection } from './live-connection'
-import { createRoomDetailsStore, roomDetailsKey } from './room-details'
+import {
+  createRoomDetailsStore,
+  emptyRoomDetails,
+  nextLabelDeadline,
+  roomDetailsKey,
+} from './room-details'
 
 const BASE_URL = 'http://axon.test'
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
@@ -16,7 +21,10 @@ const NEXT = '!next:hs'
 
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
-afterEach(() => server.resetHandlers())
+afterEach(() => {
+  server.resetHandlers()
+  vi.useRealTimers()
+})
 afterAll(() => server.close())
 
 type Read = 'metadata' | 'info' | 'homeserver_details'
@@ -291,4 +299,180 @@ it('keeps the last answer through a failed re-read and reports the failure', asy
     expect(h.store.state.value.metadata.error).toBe('offline'),
   )
   expect(h.store.state.value.metadata.value).not.toBeNull()
+})
+
+/**
+ * Serve `/homeserver_details` with both details expiring at `expiresAt`, and
+ * report how many times it was read.
+ */
+function expiringHomeserverDetails(expiresAt: number): () => number {
+  let reads = 0
+  const detail = {
+    fetched_at: expiresAt - 15 * 60_000,
+    expires_at: expiresAt,
+    refresh: { state: 'idle' as const },
+  }
+  server.use(
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/homeserver_details`,
+      () => {
+        reads += 1
+        return HttpResponse.json({
+          data: homeserverDetailsDto({
+            local_aliases: {
+              status: 'available',
+              aliases: ['#a:hs'],
+              ...detail,
+            },
+            directory_visibility: {
+              status: 'available',
+              visibility: 'private',
+              ...detail,
+            },
+          }),
+        })
+      },
+    ),
+  )
+  return () => reads
+}
+
+it('moves the presentation clock past an expiry with no frame and no request', async () => {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'Date'],
+    shouldAdvanceTime: true,
+  })
+  const h = harness()
+  const expiresAt = Date.now() + 15_000
+  const homeserverReads = expiringHomeserverDetails(expiresAt)
+  show(h)
+  await vi.waitFor(() =>
+    expect(h.store.state.value.homeserverDetails.value).not.toBeNull(),
+  )
+  await vi.waitFor(() => expect(h.calls).toHaveLength(2))
+  expect(homeserverReads()).toBe(1)
+  expect(h.store.state.value.now).toBeLessThan(expiresAt)
+
+  // The panel sits open and quiet: no frame, no reconnect.
+  vi.advanceTimersByTime(15_001)
+  expect(h.store.state.value.now).toBeGreaterThan(expiresAt)
+  // Nothing was asked of the server to get there.
+  expect(homeserverReads()).toBe(1)
+  expect(h.calls).toHaveLength(2)
+})
+
+it('moves the clock when the page becomes visible after the device slept', async () => {
+  const h = harness()
+  show(h)
+  await vi.waitFor(() => expect(h.calls).toHaveLength(3))
+  const before = h.store.state.value.now
+  // A suspended device does not run timers; wall time jumps meanwhile.
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(before + 60 * 60_000)
+  document.dispatchEvent(new Event('visibilitychange'))
+  expect(h.store.state.value.now).toBe(before + 60 * 60_000)
+  expect(h.calls).toHaveLength(3)
+})
+
+it('arms nothing once every deadline has passed, so the clock never spins', () => {
+  const state = {
+    ...emptyRoomDetails('k'),
+    homeserverDetails: {
+      value: homeserverDetailsDto({
+        local_aliases: {
+          status: 'available',
+          aliases: [],
+          expires_at: 100,
+          refresh: { state: 'idle', next_attempt_at: 50 },
+        },
+        directory_visibility: {
+          status: 'available',
+          visibility: 'public',
+          expires_at: 300,
+          refresh: { state: 'idle' },
+        },
+      }),
+      error: null,
+      requested: true,
+    },
+  }
+  expect(nextLabelDeadline(state, 0)).toBe(50)
+  expect(nextLabelDeadline(state, 60)).toBe(100)
+  expect(nextLabelDeadline(state, 200)).toBe(300)
+  expect(nextLabelDeadline(state, 301)).toBeNull()
+})
+
+it('includes a held absence check, whose backoff ending changes its label', () => {
+  const state = {
+    ...emptyRoomDetails('k'),
+    metadata: {
+      value: metadataDto({
+        encryption: {
+          status: 'unknown',
+          invalid_fields: [],
+          absence_confirmed_at: null,
+          absence_check: { state: 'idle', next_attempt_at: 500 },
+        },
+      }),
+      error: null,
+      requested: true,
+    },
+  }
+  expect(nextLabelDeadline(state, 0)).toBe(500)
+})
+
+it('stops the clock when the panel closes', async () => {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'Date'],
+    shouldAdvanceTime: true,
+  })
+  const h = harness()
+  const expiresAt = Date.now() + 15_000
+  expiringHomeserverDetails(expiresAt)
+  show(h)
+  await vi.waitFor(() =>
+    expect(h.store.state.value.homeserverDetails.value).not.toBeNull(),
+  )
+  h.store.show(null)
+  const closed = h.store.state.value
+  vi.advanceTimersByTime(15_001)
+  expect(h.store.state.value).toBe(closed)
+})
+
+it('catches up within a minute after a laptop sleeps with the tab in view', async () => {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'Date'],
+    shouldAdvanceTime: true,
+  })
+  const h = harness()
+  const expiresAt = Date.now() + 10 * 60_000
+  expiringHomeserverDetails(expiresAt)
+  show(h)
+  await vi.waitFor(() =>
+    expect(h.store.state.value.homeserverDetails.value).not.toBeNull(),
+  )
+  const opened = h.store.state.value.now
+
+  // Two hours asleep: the wall clock moves, the timers do not, and the page
+  // was never hidden.
+  vi.setSystemTime(opened + 2 * 60 * 60_000)
+  vi.advanceTimersByTime(60_001)
+  expect(h.store.state.value.now).toBeGreaterThan(expiresAt)
+})
+
+it('a recheck that finds nothing due leaves the state alone', async () => {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'Date'],
+    shouldAdvanceTime: true,
+  })
+  const h = harness()
+  expiringHomeserverDetails(Date.now() + 10 * 60_000)
+  show(h)
+  await vi.waitFor(() =>
+    expect(h.store.state.value.homeserverDetails.value).not.toBeNull(),
+  )
+  await vi.waitFor(() => expect(h.calls).toHaveLength(2))
+  const settled = h.store.state.value
+  vi.advanceTimersByTime(3 * 60_000)
+  expect(h.store.state.value).toBe(settled)
 })

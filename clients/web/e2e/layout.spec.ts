@@ -816,6 +816,40 @@ test('room information shows the room-state reads', async ({ page }) => {
 })
 
 /**
+ * A homeserver answer that expires while the panel sits open and quiet must
+ * say so (ADR 0133 decision 3): the server publishes nothing when a timestamp
+ * merely passes, so the panel's own clock has to move. The mock's answers
+ * expire 15 minutes after it serves them; the page clock starts at real time
+ * and is run forward past that, firing the panel's timer, with no frame,
+ * reconnect, or interaction in between.
+ */
+test('room information marks a homeserver answer stale when it expires', async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date() })
+  await signIn(page)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(ROOM_URL)
+
+  await page.getByRole('button', { name: 'Open room information' }).click()
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+  const detail = (label: string) =>
+    panel
+      .locator('dt')
+      .filter({ hasText: new RegExp(`^${label}$`) })
+      .locator('+ dd')
+  const aliases = detail('Aliases on your homeserver')
+  await expect(aliases).toHaveText('#e2e-local:e2e.test')
+
+  await page.clock.runFor(16 * 60_000)
+  await expect(aliases).toHaveText('#e2e-local:e2e.test · may be out of date')
+  await panel.getByText('Advanced', { exact: true }).click()
+  await expect(detail('Directory visibility')).toHaveText(
+    'Private · may be out of date',
+  )
+})
+
+/**
  * The ADR 0133 rows carry long values (alias lists, the server ACL summary)
  * and notes; at phone width they must wrap inside the panel, Advanced group
  * included, rather than widen it past the viewport.

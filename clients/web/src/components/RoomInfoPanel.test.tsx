@@ -1481,13 +1481,11 @@ it('never renders details the store holds for a different room', () => {
       value: metadataDto(),
       error: null,
       requested: true,
-      receivedAt: 0,
     },
     info: {
       value: { member_counts: { joined: 9, invited: 0, observed_at: 0 } },
       error: null,
       requested: true,
-      receivedAt: 0,
     },
   }
   const stuck: RoomDetailsStore = {
