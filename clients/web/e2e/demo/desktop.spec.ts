@@ -8,6 +8,7 @@ import {
   point,
   resetRoom,
   roomUrl,
+  spaceButton,
   spaceName,
   stage,
   typeInto,
@@ -65,10 +66,6 @@ async function settledTotal(page: Page): Promise<number> {
     .toBeGreaterThanOrEqual(0)
   return resultTotal(page)
 }
-
-/** A spaces-rail entry, scoped for the same reason. */
-const space = (page: Page, name: string) =>
-  page.locator('.space-picker').getByRole('button', { name, exact: true })
 
 test('rooms — the room list sorts, filters, and derives a DM title', async ({
   page,
@@ -159,17 +156,17 @@ test('spaces — the rail filters the room list by space hierarchy', async ({
 
   // Ridgeline holds the trail rooms; the watershed council's rooms are not its
   // children, so `water-quality` leaving the list is what proves the filter.
-  await point(page, space(page, spaceName('ridgeline')))
+  await point(page, spaceButton(page, spaceName('ridgeline')))
   await expect(list).toContainText('trail-work')
   await expect(list).not.toContainText('water-quality')
   await dwell(page, LONG)
 
-  await point(page, space(page, spaceName('watershed')))
+  await point(page, spaceButton(page, spaceName('watershed')))
   await expect(list).toContainText('water-quality')
   await expect(list).not.toContainText('trail-work')
   await dwell(page, LONG)
 
-  await point(page, space(page, 'All rooms'))
+  await point(page, spaceButton(page, 'All rooms'))
   await expect(list).toContainText('trail-work')
   await expect(list).toContainText('water-quality')
   await dwell(page, BEAT)
