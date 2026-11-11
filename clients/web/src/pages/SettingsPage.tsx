@@ -372,6 +372,15 @@ function SettingsPageContents() {
         · built{' '}
         <time dateTime={BUILD_INFO.builtAt}>{BUILD_INFO.builtAtLabel}</time>
         {' · '}
+        {/* The id this install's device-state requests carry
+            (`/v1/devices/{id}/state/…`, ADR 0048). Not the Matrix device id the
+            Accounts page shows: it is minted per install, so it is what ties a
+            server or proxy log line back to one phone, tablet or browser. */}
+        install{' '}
+        <CopyableText text={deviceState.deviceId} label="install ID">
+          <code>{deviceState.deviceId.slice(0, 8)}</code>
+        </CopyableText>
+        {' · '}
         <a href="/licenses">Open-source licenses</a>
         {' · '}
         <a href="/privacy">Privacy policy</a>
