@@ -19,6 +19,7 @@ import {
   connectEphemeralPassthrough,
   connectReadMarkers,
   connectAttachmentReset,
+  connectLinkPreviewCacheReset,
   connectThreadReadMarkers,
   connectTimelineCacheReset,
   connectUnreadCounts,
@@ -48,6 +49,7 @@ import { createVerificationStore } from '../stores/verification'
 import { createRoomsStore } from '../stores/rooms'
 import { createSearchStore } from '../stores/search'
 import { createSettingsStore } from '../stores/settings'
+import { createLinkPreviewCache } from '../composer-link-previews'
 import { createRoomDetailsStore } from '../stores/room-details'
 import { createSpacesStore } from '../stores/spaces'
 import {
@@ -269,6 +271,8 @@ export function testServices(
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
+  const linkPreviews = createLinkPreviewCache()
+  connectLinkPreviewCacheReset(auth, linkPreviews)
   return {
     auth,
     api,
@@ -278,6 +282,7 @@ export function testServices(
     cache,
     telemetry,
     attachments,
+    linkPreviews,
     settings,
     accounts,
     matrixOAuthQr,

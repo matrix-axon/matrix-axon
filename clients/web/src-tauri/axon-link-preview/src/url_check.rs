@@ -3,7 +3,7 @@
 //!
 //! Ported from `PreviewNetwork.validate` and `TextShare.previewURL` in the
 //! Swift reader, and kept equal to `nativePreviewLinks` in
-//! `src/incoming-share/urls.ts`, which is what decides that the composer shows
+//! `src/preview-links.ts`, which is what decides that the composer shows
 //! a card at all. All three read `src/incoming-share/fixtures/device-preview-urls.json`.
 //!
 //! Two places where the parsers differ, and what keeps the rule the same:

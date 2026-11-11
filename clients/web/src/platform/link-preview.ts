@@ -4,6 +4,7 @@ import {
   LinkPreviewError,
   type LinkPreviewFailure,
 } from './index'
+import { PREVIEW_FIELD_LIMITS } from '../preview-links'
 
 /**
  * The page's side of the shell's link-preview fetcher (ADR 0132 § 3), the
@@ -46,9 +47,6 @@ interface FrameHead {
   }
   imageUnavailable: boolean
 }
-
-/** Send-contract limits, in UTF-16 code units, which is what `length` counts. */
-const LIMITS = { title: 300, description: 1000, siteName: 120 } as const
 
 function invalid(): LinkPreviewError {
   return new LinkPreviewError('unavailable')
@@ -108,9 +106,12 @@ export function decodeFrame(frame: ArrayBuffer): DeviceLinkPreview {
     url: head.url,
     imageUnavailable: head.imageUnavailable,
   }
-  const title = optionalText(head.title, LIMITS.title)
-  const description = optionalText(head.description, LIMITS.description)
-  const siteName = optionalText(head.siteName, LIMITS.siteName)
+  const title = optionalText(head.title, PREVIEW_FIELD_LIMITS.title)
+  const description = optionalText(
+    head.description,
+    PREVIEW_FIELD_LIMITS.description,
+  )
+  const siteName = optionalText(head.siteName, PREVIEW_FIELD_LIMITS.siteName)
   if (title !== undefined) preview.title = title
   if (description !== undefined) preview.description = description
   if (siteName !== undefined) preview.siteName = siteName

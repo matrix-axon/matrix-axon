@@ -100,6 +100,61 @@ describe('SettingsPage', () => {
     expect((getByLabelText('Dark') as HTMLInputElement).checked).toBe(true)
   })
 
+  it('offers all three link-preview choices in the shell (ADR 0132 § 4)', () => {
+    const services = testServices({
+      platform: { linkPreview: vi.fn() },
+    })
+    services.settings.linkPreviews.value = 'device'
+    const { getByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    const group = getByRole('radiogroup', { name: 'Link previews' })
+    const device = within(group).getByRole('radio', {
+      name: 'On this device',
+    }) as HTMLInputElement
+    expect(device.checked).toBe(true)
+    expect(device.disabled).toBe(false)
+    expect(device.getAttribute('aria-describedby')).toBe('link-previews-device')
+    fireEvent.click(
+      within(group).getByRole('radio', {
+        name: 'On this device, or your homeserver when you ask',
+      }),
+    )
+    expect(services.settings.linkPreviews.value).toBe('device+homeserver')
+    fireEvent.click(within(group).getByRole('radio', { name: 'Off' }))
+    expect(services.settings.linkPreviews.value).toBe('off')
+  })
+
+  it('offers Off and the homeserver on request in a browser', () => {
+    const services = testServices()
+    services.settings.linkPreviews.value = 'device'
+    const { getByRole, getByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    const group = getByRole('radiogroup', { name: 'Link previews' })
+    const device = within(group).getByRole('radio', {
+      name: 'On this device',
+    }) as HTMLInputElement
+    expect(device.disabled).toBe(true)
+    // A stored `device` behaves as off here, and shows as Off.
+    expect(
+      (within(group).getByRole('radio', { name: 'Off' }) as HTMLInputElement)
+        .checked,
+    ).toBe(true)
+    expect(getByText(/cannot read other sites/)).toBeTruthy()
+    fireEvent.click(
+      within(group).getByRole('radio', {
+        name: 'Your homeserver, when you ask',
+      }),
+    )
+    expect(services.settings.linkPreviews.value).toBe('device+homeserver')
+    expect(getByText(/even in an encrypted room/)).toBeTruthy()
+  })
+
   it('picks a state-event tier, persisted rather than per-room', () => {
     const services = testServices()
     const { getByLabelText } = render(

@@ -15,7 +15,9 @@ pub(crate) enum Failure {
     /// The URL, a redirect target, an image URL, or a resolved address is
     /// outside the boundary, or the page answered with something unusable.
     PreviewUnavailable,
-    /// The origin has no A record. IPv6-only sites are not supported.
+    /// The origin has no A record: an IPv6-only site, or a name that does
+    /// not exist. No backend tells the two apart (issue 1059), so the page's
+    /// copy names both.
     PublicIpv4Required,
     /// The response broke HTTP framing.
     InvalidResponse,
@@ -39,7 +41,8 @@ pub(crate) type Result<T> = std::result::Result<T, Failure>;
 pub enum Kind {
     /// The link is not one this device may look up.
     UnsupportedUrl,
-    /// The site has no public IPv4 address.
+    /// The site has no IPv4 address: it is IPv6-only, or the name does not
+    /// exist.
     PublicIpv4Required,
     /// The 25-second deadline passed.
     Timeout,

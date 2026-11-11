@@ -97,7 +97,17 @@ Images load as their cards approach the viewport, with a 2 MiB download ceiling;
 Temporary media failures offer **Retry image** and retry after reconnect without navigating to the article.
 Large plain source images can still use bounded server thumbnails; encrypted originals retain their stricter metadata limits.
 Cards never fetch the linked webpage or an external image URL.
-Preview authoring and opt-in generation are not yet exposed in the ordinary web composer; the iOS [native Share Extension](../../docs/ios-sharing.md) and [pending-share recovery surface](../../docs/ios-sharing-foundation.md) provide explicit preview generation, removal, and durable recovery.
+The iOS [native Share Extension](../../docs/ios-sharing.md) and [pending-share recovery surface](../../docs/ios-sharing-foundation.md) provide explicit preview generation, removal, and durable recovery.
+
+The room and thread composers build preview cards for the links you add ([ADR 0132](../../docs/adr/0132-composer-link-previews.md)), up to three per message, and send the cards you keep with the message.
+**Settings → Link previews** chooses who may build them, per device.
+In the app, the default is **On this device**: Axon reads the page from your device when you add a link, through the shell's own restricted fetcher, before you send.
+**On this device, or your homeserver when you ask** adds a **Try homeserver** button to a card the device could not fill; choosing it shows the link to your homeserver, even in an encrypted room.
+A browser cannot read other sites, so it offers only **Off** (the default) and **Your homeserver, when you ask**.
+A typed link is looked up about 400 ms after you finish it with a space or a new line, and a pasted link at once.
+The ✕ on a card sends the message without that preview, and the link is not looked up again in that draft.
+Links in a restored draft get no card until you type or paste them again.
+With previews on, a link sent without a card carries the "no previews" marker (`m.url_previews: []`), so other apps do not preview it either.
 The iOS extension also accepts single/multiple photos with an optional first-photo caption, bounded HEIC previews, and per-photo delivery recovery; signed-device photo acceptance remains pending.
 Formatted messages containing spoilers omit preview cards, even after the spoiler is revealed.
 Malformed or oversized preview metadata is ignored.

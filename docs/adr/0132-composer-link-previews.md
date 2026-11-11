@@ -61,8 +61,8 @@ The fourth and later links get no card.
 Discarding a card does not give its slot to a later link, which would surprise the user and cost another fetch.
 Three is a composer limit, well inside the server and renderer cap of eight and the 32 KiB metadata budget.
 
-A link is eligible when the existing static check accepts it (`nativePreviewLinks`, today in `incoming-share/urls.ts`): HTTPS, a public-looking DNS name with no IP literal, no credentials, no internationalized label, and no reserved suffix such as `.local`, `.onion` or `.test`.
-That check moves to a shared module, because the composer and share recovery must agree on it.
+A link is eligible when the existing static check accepts it (`nativePreviewLinks`, first in `incoming-share/urls.ts`): HTTPS, a public-looking DNS name with no IP literal, no credentials, no internationalized label, and no reserved suffix such as `.local`, `.onion` or `.test`.
+That check moves to a shared module, because the composer and share recovery must agree on it; the web PR moved it to `clients/web/src/preview-links.ts`, beside the link identity.
 
 ### 2. Two sources, in a fixed order, never escalating on their own
 
@@ -86,6 +86,9 @@ It enforces the same boundary as the Swift reader in `incoming-share/Sources/Axo
 - **DNS:** query only the origin's A records, and require a public IPv4 address.
   An origin's AAAA records are never used, because a global IPv6 address can be an operator's NAT64 mapping of a private IPv4 service.
   On an IPv6-only network, a public IPv4 target is reached through a NAT64 prefix discovered with RFC 7050 (`ipv4only.arpa`), as `PreviewNAT64.swift` does.
+  An origin with no A record fails as `public_ipv4_required`, whether the site is IPv6-only or the name does not exist ([issue 1059](https://github.com/matrix-axon/matrix-axon/issues/1059)).
+  The Apple resolver cannot tell the two apart: `DNSServiceGetAddrInfo` reports a nonexistent name as `kDNSServiceErr_NoSuchRecord`, measured on macOS, in the plugin and the Swift reader alike.
+  The Linux, Android and Windows backends see NXDOMAIN and fold it into the same answer, so every platform reports one kind, and the copy names both causes: no IPv4 address was found, check the link, and IPv6-only sites cannot be reached.
 - **Connection:** connect only to the validated address, so a second resolution cannot rebind it.
   TLS 1.2 or later, verified against the original host name, with no certificate-related network fetches and no proxy.
 - **Request:** a plain `GET` with no cookies, credentials, or auth headers, and `Accept-Encoding: identity`.

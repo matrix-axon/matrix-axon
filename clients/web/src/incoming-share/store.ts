@@ -3,7 +3,7 @@ import type { ApiClient } from '../api/client'
 import type { TimelineStoreCache } from '../stores/timeline-cache'
 import type { SendProgress } from '../stores/timeline'
 import { matchUrls } from '../html/linkify'
-import { nativePreviewLinks } from './urls'
+import { nativePreviewLinks } from '../preview-links'
 import { previewPreflight, type PreviewInput } from './contract'
 import {
   canonicalShare,
@@ -182,7 +182,9 @@ export function createIncomingShareStore(
       devicePreview_noMetadata:
         'The device found no usable preview metadata. The original link remains sendable.',
       devicePreview_publicIPv4Required:
-        'On-device previews require a public IPv4 destination. IPv6-only sites are not supported. The link remains sendable; you can explicitly choose Use homeserver instead.',
+        // Also a name that does not exist, which no resolver tells apart
+        // from an IPv6-only site (issue 1059), so the copy names both.
+        'No IPv4 address was found for this site. Check the link; on-device previews also cannot reach sites that only have IPv6 addresses. The link remains sendable; you can explicitly choose Use homeserver instead.',
       invalid:
         'The share contains invalid or over-limit data. Review and edit it before sending.',
       busy: 'Another share operation is active. Close other Share → Axon composers, wait up to five minutes, then retry.',

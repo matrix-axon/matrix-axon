@@ -1,5 +1,18 @@
 import { useEffect, useMemo, useState } from 'preact/hooks'
-import type { ComposerAutocompleteOption } from './Composer'
+import type { ApiClient } from '../api/client'
+import type {
+  ComposerAutocompleteOption,
+  ComposerLinkPreviewOptions,
+  SubmittedPreviews,
+} from './Composer'
+import {
+  homeserverLinkPreview,
+  linkPreviewsEnabled,
+  type LinkPreviewCache,
+  type PreviewSources,
+} from '../composer-link-previews'
+import { planLinkPreviews, type PreviewDraft } from '../link-preview-send'
+import type { LinkPreviewSetting } from '../stores/settings'
 import {
   inlineEmojiFromEvent,
   type InlineEmojiReference,
@@ -62,6 +75,17 @@ export interface MessageComposerOptions {
    * graph so this hook keeps taking everything it needs explicitly.
    */
   nativeDrops?: Platform['onNativeFileDrop']
+  /**
+   * Composer link previews (ADR 0132): the setting, this device's fetcher
+   * where the platform has one, the API for the homeserver, and the shared
+   * result cache. Absent for none.
+   */
+  linkPreviews?: {
+    setting: LinkPreviewSetting
+    device?: Platform['linkPreview']
+    api: ApiClient
+    cache: LinkPreviewCache
+  }
 }
 
 /**
@@ -99,7 +123,10 @@ export function useMessageComposer(options: MessageComposerOptions): {
   submitMessage: (
     body: string,
     inlineEmoji?: readonly InlineEmojiReference[],
+    previews?: SubmittedPreviews,
   ) => Promise<boolean>
+  /** The Composer's `linkPreviews`; absent in edit mode or without them. */
+  composerLinkPreviews: ComposerLinkPreviewOptions | undefined
 } {
   const {
     timeline,
@@ -186,9 +213,70 @@ export function useMessageComposer(options: MessageComposerOptions): {
   const emojiCompletions = (query: string): ComposerAutocompleteOption[] =>
     emojiShortcodeSuggestions(emojiEntries, query)
 
+  /** The `url_previews` decision for this exact request (ADR 0132 § 6). The
+   *  thread root comes from the store, which is how a thread send gets it. */
+  const planPreviews = (
+    formatted: FormattedMessageParts,
+    replyTo: string | undefined,
+    draft: PreviewDraft | undefined,
+    allowUnmarked = false,
+  ) =>
+    planLinkPreviews(
+      {
+        body: formatted.body,
+        ...(formatted.formatted_body != null && {
+          format: 'org.matrix.custom.html' as const,
+          formatted_body: formatted.formatted_body,
+        }),
+        reply_to: replyTo ?? null,
+        thread_root: timeline.threadRoot ?? null,
+      },
+      draft,
+      allowUnmarked,
+    )
+
+  const previewApi = options.linkPreviews?.api
+  const homeserver = useMemo(
+    () =>
+      previewApi === undefined
+        ? undefined
+        : homeserverLinkPreview(previewApi, accountId),
+    [previewApi, accountId],
+  )
+  const sources: PreviewSources | undefined =
+    options.linkPreviews === undefined
+      ? undefined
+      : {
+          setting: options.linkPreviews.setting,
+          device: options.linkPreviews.device,
+          homeserver,
+        }
+  // Off, an edit, or no source for the setting: the composer authors no
+  // previews, so a send leaves the field out exactly as before (§ 6 rule 1).
+  const composerLinkPreviews: ComposerLinkPreviewOptions | undefined =
+    sources === undefined ||
+    options.linkPreviews === undefined ||
+    action?.kind === 'edit' ||
+    !linkPreviewsEnabled(sources)
+      ? undefined
+      : {
+          sources,
+          cache: options.linkPreviews.cache,
+          markerFits: async (body, inlineEmoji, draft) => {
+            const replyTo =
+              action?.kind === 'reply' ? action.event.event_id : undefined
+            const formatted = await formatComposerBody(body, inlineEmoji)
+            return (
+              planPreviews(formatted, replyTo, draft).kind !==
+              'too-long-for-marker'
+            )
+          },
+        }
+
   const submitMessage = async (
     body: string,
     inlineEmoji?: readonly InlineEmojiReference[],
+    previews?: SubmittedPreviews,
   ): Promise<boolean> => {
     // Dismiss the reply/edit mode immediately — don't hold the banner hostage
     // to the network round trip; the timeline renders the pending/failed
@@ -231,10 +319,22 @@ export function useMessageComposer(options: MessageComposerOptions): {
       if (ok) onMutation?.()
       return ok
     }
+    // Previews are authored only for a plain send or a reply: an edit and a
+    // media batch have returned above, and leave the field out (§ 6 rule 1).
+    const plan = planPreviews(
+      formatted,
+      replyTo,
+      previews?.draft,
+      previews?.allowUnmarked,
+    )
     const ok = await timeline.send(formatted.body, {
       replyTo,
       senderId,
       formattedBody: formatted.formatted_body ?? null,
+      ...(plan.kind === 'send' && { linkPreviews: plan.previews }),
+      // The composer asked before sending, so this is a race with the
+      // formatter. Keep the marker: never expose a discarded link unasked.
+      ...(plan.kind === 'too-long-for-marker' && { linkPreviews: [] }),
     })
     if (ok) onMutation?.()
     return ok
@@ -259,5 +359,6 @@ export function useMessageComposer(options: MessageComposerOptions): {
     roomReferenceCompletions,
     emojiCompletions,
     submitMessage,
+    composerLinkPreviews,
   }
 }

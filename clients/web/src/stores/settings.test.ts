@@ -42,6 +42,7 @@ describe('createSettingsStore', () => {
       cacheRoomList: true,
       messageNotifications: false,
       pushDisclosure: 'activity',
+      linkPreviews: 'off',
     })
   })
 
@@ -289,6 +290,40 @@ describe('room-list settings (ADRs 0038/0042)', () => {
         }),
       ).previewRoom.value,
     ).toBe(true)
+  })
+
+  it('linkPreviews takes the platform default until the user chooses (ADR 0132)', () => {
+    // A browser, which has no device source.
+    expect(createSettingsStore(memoryStorage()).linkPreviews.value).toBe('off')
+    // The shell. An envelope from before the setting existed gets it too.
+    const storage = memoryStorage({
+      'axon.settings': JSON.stringify({ version: 1, theme: 'dark' }),
+    })
+    const shell = createSettingsStore(storage, {
+      linkPreviewsDefault: 'device',
+    })
+    expect(shell.linkPreviews.value).toBe('device')
+    expect(shell.theme.value).toBe('dark')
+
+    shell.linkPreviews.value = 'off'
+    expect(
+      createSettingsStore(storage, { linkPreviewsDefault: 'device' })
+        .linkPreviews.value,
+    ).toBe('off')
+    shell.linkPreviews.value = 'device+homeserver'
+    expect(createSettingsStore(storage).linkPreviews.value).toBe(
+      'device+homeserver',
+    )
+
+    // An unknown value falls back to the platform default.
+    expect(
+      createSettingsStore(
+        memoryStorage({
+          'axon.settings': JSON.stringify({ version: 1, linkPreviews: 'yes' }),
+        }),
+        { linkPreviewsDefault: 'device' },
+      ).linkPreviews.value,
+    ).toBe('device')
   })
 
   it('appBadgeEnabled defaults to on and round-trips explicit off (ADR 0080)', () => {

@@ -19,6 +19,13 @@ import { useImagePackCompletions } from './use-image-pack-completions'
 import { ReactionContent } from './ReactionContent'
 import { ComposerEmojiButton, type StickerPickerOptions } from './StickerPicker'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import {
+  createComposerLinkPreviews,
+  type LinkPreviewCache,
+  type PreviewSources,
+} from '../composer-link-previews'
+import type { PreviewDraft } from '../link-preview-send'
+import { ComposerLinkPreviews } from './ComposerLinkPreviews'
 import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { needsCameraCaptureButtons } from '../platform'
@@ -157,6 +164,32 @@ function pickFiles(
   input.value = ''
 }
 
+/** The previews a submitted message carries (ADR 0132 § 6). */
+export interface SubmittedPreviews {
+  draft: PreviewDraft
+  /**
+   * The user chose to send a message too long for its "no previews" marker,
+   * though a link they discarded is in it.
+   */
+  allowUnmarked: boolean
+}
+
+/** What the composer needs to author link previews (ADR 0132). */
+export interface ComposerLinkPreviewOptions {
+  sources: PreviewSources
+  cache: LinkPreviewCache
+  /**
+   * Whether this message, sent now, can carry its "no previews" marker. Asked
+   * only when it holds a link the user discarded, which is the one case where
+   * leaving the field out would expose a link without the user's choice.
+   */
+  markerFits(
+    body: string,
+    inlineEmoji: readonly InlineEmojiReference[] | undefined,
+    draft: PreviewDraft,
+  ): Promise<boolean>
+}
+
 /**
  * The message composer (ADR 0046, M-W7): a plain textarea with
  * markdown-on-send (conversion happens in the timeline store). Enter sends,
@@ -196,6 +229,7 @@ export function Composer({
   focusRequest,
   height,
   onHeightChange,
+  linkPreviews,
 }: {
   placeholder: string
   ariaLabel?: string
@@ -206,6 +240,7 @@ export function Composer({
   onSubmit(
     body: string,
     inlineEmoji?: readonly InlineEmojiReference[],
+    previews?: SubmittedPreviews,
   ): Promise<boolean>
   /**
    * Intercepts submitted slash commands. Return true when the command was
@@ -263,8 +298,36 @@ export function Composer({
   /** Persisted textarea height in CSS pixels; undefined keeps local-only state. */
   height?: number | null
   onHeightChange?(height: number | null): void
+  /**
+   * Link previews for this draft (ADR 0132), or absent for none, as in edit
+   * mode. The composer owns the draft's cards; the parent plans the send.
+   */
+  linkPreviews?: ComposerLinkPreviewOptions
 }) {
   const [draft, setDraft] = useState(initialValue)
+  // The shared result cache, as the latest props name it: previews can be
+  // turned on after this composer mounted, and their results still belong in
+  // the graph's cache, which sign-out wipes.
+  const previewCache = useRef(linkPreviews?.cache)
+  useEffect(() => {
+    previewCache.current = linkPreviews?.cache
+  })
+  // One draft's cards. Created with the draft it starts from, whose links
+  // are restored rather than added (ADR 0132 § 5).
+  const [previews] = useState(() => {
+    const created = createComposerLinkPreviews({
+      get: (identity) => previewCache.current?.get(identity),
+      set: (identity, result) => previewCache.current?.set(identity, result),
+      clear: () => previewCache.current?.clear(),
+    })
+    created.reset(initialValue)
+    return created
+  })
+  useEffect(() => () => previews.dispose(), [previews])
+  /** The next `change` came from a paste or a drop. */
+  const insertedEdit = useRef(false)
+  const [markerQuestion, setMarkerQuestion] = useState(false)
+  const markerCheck = useRef(false)
   const inline = useRef(parseInlineEmoji(initialValue, initialInlineEmoji))
   const pendingInline = useRef<InlineEmojiReference[] | null>(null)
   const convertedEmoji = useRef<{
@@ -376,6 +439,8 @@ export function Composer({
     synced.current = initialValue
     syncedEmoji.current = initialEmojiKey
     setDraft(initialValue)
+    previews.reset(initialValue)
+    setMarkerQuestion(false)
     setCaret(initialValue.length)
     setEmojiSelection(null)
     setStickerProblem(null)
@@ -385,6 +450,7 @@ export function Composer({
     emojiScope?.roomId,
     initialValue,
     initialEmojiKey,
+    previews,
   ])
 
   useEffect(() => {
@@ -421,6 +487,17 @@ export function Composer({
   const singlePane = useMediaQuery(SINGLE_PANE_QUERY)
   /** Only a composer with a command handler treats a leading `/` as a command. */
   const commandsEnabled = onCommand !== undefined
+  // No cards beside a staged attachment or for a slash command (ADR 0132
+  // § 5). `configure` only acts when one of these actually changes.
+  const previewsSuspended =
+    (attachments?.items.length ?? 0) > 0 ||
+    (commandsEnabled && isSlashCommandDraft(draft))
+  useEffect(() => {
+    previews.configure(
+      linkPreviews?.sources ?? { setting: 'off' },
+      previewsSuspended,
+    )
+  })
   const commandQuery = commandsEnabled ? slashCommandQuery(draft) : null
   const roomQuery = commandsEnabled ? roomCommandQuery(draft) : null
   const referenceQuery = referenceTokenQuery(draft, caret)
@@ -611,8 +688,10 @@ export function Composer({
       )
       emojiHistory.current = initialEmojiHistory(initialValue, inline.current)
       setDraft(initialValue)
+      // A draft from elsewhere is restored, not typed (ADR 0132 § 5).
+      previews.reset(initialValue)
     }
-  }, [initialValue, initialEmojiKey, draft])
+  }, [initialValue, initialEmojiKey, draft, previews])
 
   // Focus when entering a reply/edit so typing can start immediately.
   useEffect(() => {
@@ -740,6 +819,9 @@ export function Composer({
       history.cursor = history.entries.length - 1
     }
     setDraft(value)
+    previews.edit(value, insertedEdit.current)
+    insertedEdit.current = false
+    setMarkerQuestion(false)
     setCaret(nextCaret)
     setAutocompleteDismissedFor(null)
     if (!commandsEnabled || !isSlashCommandDraft(value)) {
@@ -925,7 +1007,8 @@ export function Composer({
     }
   }
 
-  const submit = () => {
+  const submit = (allowUnmarked = false) => {
+    if (markerCheck.current) return
     convertedEmoji.current = null
     if (stickerLookup.current !== null) {
       setStickerProblem(
@@ -954,12 +1037,14 @@ export function Composer({
           .then((handled) => {
             if (handled && textarea.current?.value === submittedDraft) {
               setDraft('')
+              previews.reset('')
               onDraftChange?.('')
             }
           })
           .catch(() => {})
       } else if (result === true) {
         setDraft('')
+        previews.reset('')
         onDraftChange?.('')
       }
       return
@@ -1023,6 +1108,7 @@ export function Composer({
           void Promise.resolve(sent).catch(sendProblem)
           if (currentScope() && textarea.current?.value === submittedDraft) {
             setDraft('')
+            previews.reset('')
             onDraftChange?.('')
           }
         } catch {
@@ -1061,12 +1147,57 @@ export function Composer({
         })
       return
     }
-    setDraft('')
-    inline.current = []
-    emojiHistory.current = initialEmojiHistory('', [])
-    onDraftChange?.('')
-    if (references.length) void onSubmit(message, references)
-    else void onSubmit(message)
+    const dispatch = (unmarked: boolean) => {
+      const submitted =
+        linkPreviews === undefined
+          ? undefined
+          : { draft: previews.take(), allowUnmarked: unmarked }
+      setDraft('')
+      setMarkerQuestion(false)
+      inline.current = []
+      emojiHistory.current = initialEmojiHistory('', [])
+      onDraftChange?.('')
+      if (submitted !== undefined)
+        void onSubmit(
+          message,
+          references.length ? references : undefined,
+          submitted,
+        )
+      else if (references.length) void onSubmit(message, references)
+      else void onSubmit(message)
+    }
+    if (
+      linkPreviews !== undefined &&
+      !allowUnmarked &&
+      previews.hasDiscardedLink(message)
+    ) {
+      // The one use of the discard record at send time (ADR 0132 § 6): a
+      // message too long for even `[]` would expose a discarded link if the
+      // field were left out, so the user is asked first. The draft stays put
+      // until the check answers; an edit meanwhile belongs to the user.
+      const submittedDraft = draft
+      const scope = stickerScope.current
+      markerCheck.current = true
+      const settle = (fits: boolean) => {
+        markerCheck.current = false
+        if (
+          stickerScope.current !== scope ||
+          textarea.current?.value !== submittedDraft
+        )
+          return
+        if (fits) dispatch(false)
+        else setMarkerQuestion(true)
+      }
+      void linkPreviews
+        .markerFits(
+          message,
+          references.length ? references : undefined,
+          previews.snapshot(),
+        )
+        .then(settle, () => settle(true))
+      return
+    }
+    dispatch(allowUnmarked)
   }
 
   const clampComposerHeight = (height: number): number =>
@@ -1128,6 +1259,21 @@ export function Composer({
           </span>
           <button type="button" class="ghost" onClick={banner.onCancel}>
             Cancel
+          </button>
+        </div>
+      )}
+      <ComposerLinkPreviews
+        cards={previews.cards.value}
+        onDiscard={(identity) => previews.discard(identity)}
+        onAskHomeserver={(identity) => previews.askHomeserver(identity)}
+      />
+      {markerQuestion && (
+        <div class="composer-link-preview-marker" role="alert">
+          This message is too long to carry its “no previews” marker, so other
+          apps could preview a link you removed the preview of. Shorten it, or
+          send it anyway.{' '}
+          <button type="button" onClick={() => submit(true)}>
+            Send anyway
           </button>
         </div>
       )}
@@ -1422,6 +1568,9 @@ export function Composer({
             onInput={(event) => {
               const saved = beforeInput.current
               beforeInput.current = null
+              // A pasted or dropped link is complete at once (ADR 0132 § 5).
+              // (jsdom's synthetic input events may carry no `inputType`.)
+              insertedEdit.current = /^insertFrom/.test(event.inputType ?? '')
               let edit =
                 saved?.text === draft
                   ? { start: saved.start, end: saved.end }
@@ -1511,6 +1660,7 @@ export function Composer({
               event.preventDefault()
               const next = `${event.currentTarget.value.slice(0, start)}${link}${event.currentTarget.value.slice(end)}`
               const nextCaret = start + link.length
+              insertedEdit.current = true
               change(next, nextCaret)
               requestAnimationFrame(() => {
                 textarea.current?.setSelectionRange(nextCaret, nextCaret)

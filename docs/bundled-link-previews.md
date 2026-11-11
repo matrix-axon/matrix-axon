@@ -4,6 +4,7 @@ The server accepts optional `url_previews` on text and media-caption sends, foll
 Native share intake follows the server prerequisites and web image-card renderer in [the approved plan](https://github.com/matrix-axon/matrix-axon/blob/a09f547ce18b333c87fcfbc6a1ce1b437f16669c/docs/mobile-incoming-sharing.md).
 Sending never fetches the linked webpage or an external preview image.
 The explicit [generation helper](#opt-in-homeserver-generation) delegates acquisition to the homeserver.
+The web client's room and thread composers author previews under [ADR 0132](adr/0132-composer-link-previews.md); see [Composer authoring](#composer-authoring).
 
 ## Request shape
 
@@ -103,14 +104,13 @@ No extra image message should appear in the timeline.
 ## Optional manual interoperability check before publication
 
 Run the branch's server against a test homeserver and use dedicated test rooms, one encrypted and one unencrypted.
-Use the API request above to supply preview metadata; the current Axon composer does not yet expose the new send fields.
+Use the API request above to supply preview metadata, or the web composer as [Composer authoring](#composer-authoring) describes.
 Open both rooms in Axon and a second Matrix client.
 
 1. Send a text link with title/description and a staged thumbnail, then send a file with the same preview in its caption.
    Confirm the fallback text and attachment appear once, and that the thumbnail is attached to its parent rather than appearing as another message.
    If the second client renders bundled preview images, confirm its card loads the thumbnail in both rooms.
    Axon's web room/thread cards render eligible plain and encrypted preview images through authenticated media, with text fallback when an image is unavailable.
-   The web composer does not yet author previews or invoke generation.
 2. Reply to a message authored by the second account using `send-media`, with `reply_to` set and either a preview array or `url_previews: []`.
    Confirm the reply targets the right message and the second account receives the expected mention, subject to its notification settings.
    Also reply to your own message and check that it does not self-mention.
@@ -219,6 +219,7 @@ A timeout or lost response after a POST is outcome-unknown: inspect the timeline
 
 `POST /v1/accounts/{account_id}/link-previews/generate` accepts `{"url":"https://example.org/page"}` under the existing Axon bearer authentication.
 Invoke it only after the user requests or has enabled generation, explaining that it discloses the URL to the selected account's homeserver, including for an encrypted destination room.
+The web composer asks per link, from a card's button ([Composer authoring](#composer-authoring)).
 Receiving a share, rendering a timeline, and sending a message never invoke generation automatically.
 Prefer valid source-supplied metadata when available.
 This server capability does not add a client preference or UI.
@@ -268,6 +269,31 @@ SDK refresh runs in an owned task bounded to 30 seconds, so a shorter preview de
 The preview transport retains streaming byte caps and disables redirects; the normal SDK send/media helpers buffer the full response before exposing it.
 Its TLS minimum, user agent and system proxy behavior match the active production SDK defaults; Axon exposes no separate per-account proxy or custom TLS configuration.
 Logs contain account IDs, request phases, HTTP status and stable outcome categories, without URLs, metadata, credentials or free-form upstream errors.
+
+### Composer authoring
+
+The web client's room and thread composers ([ADR 0132](adr/0132-composer-link-previews.md)) are one client of this contract, and follow it as follows.
+Settings → Link previews is per device: `off`, `device` or `device+homeserver`.
+The shell builds cards on the device with its restricted fetcher; a browser cannot, so it offers only `off` and the homeserver on request.
+The composer calls generation only from a card's **Try homeserver** button, once per link, never automatically.
+It reads a generated thumbnail at once through the [recovery endpoint](#durable-thumbnail-recovery), keeps the bytes, and forgets the handle, which then expires; a failed read costs the card its image, never its text.
+
+What a send carries is decided against the formatted body being sent:
+
+- previews off, an edit, a message with attachments, or one containing a spoiler: the field is omitted;
+- at least one card the user kept and that is ready: those cards, in text order, at most three;
+- any other link that passes the static eligibility check: `url_previews: []`;
+- otherwise the field is omitted.
+
+Before any upload, the composer runs `previewPreflight` on the exact request with a placeholder image id, and drops images from the last card first, then cards from the end, until it fits.
+If even `[]` does not fit, the field is omitted, unless the body holds a link whose card the user discarded: then the composer asks before sending it without the marker.
+Each attempt uploads the kept thumbnails afresh, in parallel, and sends the new ids; a thumbnail that fails to upload is sent as a card without an image.
+A rejection with 413 `preview_too_large`, `event_too_large` or `payload_too_large`, 400 `bad_request` or 404 `not_found` leaves a failed message whose Retry sends the text with `[]`.
+Any other failure keeps the cards, and Retry uploads their thumbnails again.
+The client waits for a `/send` carrying `url_previews` as long as for an upload (the five-second slot wait plus the upstream upload timeout), because that is how the server bounds it.
+
+Link identity is the WHATWG URL serialization in the composer and the `url` crate's on the server.
+`clients/web/src/fixtures/link-identity.json` lists the cases, such as host case, default ports, empty paths, fragments and percent-encoding, and the web tests check `new URL(...).href` against it.
 
 ### Durable thumbnail recovery
 

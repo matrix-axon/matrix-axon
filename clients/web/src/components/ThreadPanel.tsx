@@ -25,7 +25,11 @@ import {
   viewMayClaimReadState,
 } from '../timeline/arrival-order'
 import { hiddenByRedaction } from '../timeline/visibility'
-import { Composer, type ComposerAutocompleteOption } from './Composer'
+import {
+  Composer,
+  type ComposerAutocompleteOption,
+  type SubmittedPreviews,
+} from './Composer'
 import { ErrorBanner } from './ErrorBanner'
 import { Fragment } from 'preact'
 import { MediaViewerProvider } from '../media/media-viewer'
@@ -179,6 +183,7 @@ export function ThreadPanel({
     settings,
     messageGestures,
     attachments: staging,
+    linkPreviews: linkPreviewCache,
     platform,
   } = useServices()
   const location = useLocation()
@@ -274,6 +279,7 @@ export function ThreadPanel({
     roomReferenceCompletions,
     emojiCompletions,
     submitMessage,
+    composerLinkPreviews,
     action,
   } = useMessageComposer({
     timeline: thread,
@@ -286,6 +292,12 @@ export function ThreadPanel({
     onMutation: search.clear,
     staging,
     nativeDrops: platform.onNativeFileDrop,
+    linkPreviews: {
+      setting: settings.linkPreviews.value,
+      device: platform.linkPreview,
+      api,
+      cache: linkPreviewCache,
+    },
   })
 
   /**
@@ -296,10 +308,11 @@ export function ThreadPanel({
   const submitThreadMessage = async (
     body: string,
     inlineEmoji?: readonly InlineEmojiReference[],
+    previews?: SubmittedPreviews,
   ): Promise<boolean> => {
     const editingRoot =
       action?.kind === 'edit' && action.event.event_id === rootId
-    const ok = await submitMessage(body, inlineEmoji)
+    const ok = await submitMessage(body, inlineEmoji, previews)
     if (ok && editingRoot) {
       refetchRoot()
     }
@@ -837,6 +850,7 @@ export function ThreadPanel({
         attachments={{ ...attachments, onRemove: removeAttachment }}
         // The store is thread-scoped, so `thread_root` is already implied.
         onSubmit={submitThreadMessage}
+        linkPreviews={composerLinkPreviews}
       />
     </aside>
   )
