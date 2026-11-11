@@ -12,10 +12,12 @@ use crate::error::{Failure, Result};
 use crate::Cancel;
 use std::ffi::c_void;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::ptr::NonNull;
 use tokio::time::Instant;
 
 /// `DNS_RECORDW`, up to the first 16 bytes of its data union, which is as far
-/// as an A or AAAA record reaches. The union holds pointers, so it starts at
+/// as an AAAA record reaches. Only ever read through a pointer, field by
+/// field; see [`first_address`]. The union holds pointers, so it starts at
 /// an 8-byte boundary, which is where `data` falls. Every field is declared
 /// so the layout matches, though not every one is read.
 #[repr(C)]
@@ -65,38 +67,64 @@ fn lookup(name: &str, record: RecordType) -> Result<Answer> {
             std::ptr::null_mut(),
         )
     };
-    if status == DNS_ERROR_RCODE_NAME_ERROR || status == DNS_INFO_NO_RECORDS {
-        return Ok(Answer::NoRecord);
+    let list = NonNull::new(results);
+    let found = match (status, list) {
+        // SAFETY: the head of the list the call returned, not yet freed.
+        (0, Some(list)) => unsafe { first_address(list, record) },
+        _ => None,
+    };
+    // Freed whatever the status: a failed or negative answer can still come
+    // with records, such as the zone's SOA.
+    if let Some(list) = list {
+        // SAFETY: the list the call returned, freed once.
+        unsafe { DnsFree(list.as_ptr().cast(), DNS_FREE_RECORD_LIST) };
     }
-    if status != 0 {
-        return Err(Failure::Unavailable);
+    match status {
+        0 => Ok(found.map_or(Answer::NoRecord, Answer::Address)),
+        DNS_ERROR_RCODE_NAME_ERROR | DNS_INFO_NO_RECORDS => Ok(Answer::NoRecord),
+        _ => Err(Failure::Unavailable),
     }
-    let mut found = None;
-    let mut cursor = results;
-    while !cursor.is_null() {
-        // SAFETY: a record in the list the call returned.
-        let entry = unsafe { &*cursor };
+}
+
+/// The first `record` address in the list starting at `list`.
+///
+/// Fields are read through the pointer, never through a `&DnsRecord`: Windows
+/// allocates a record only as long as its data, so an A record ends twelve
+/// bytes before `DnsRecord::data` does, and only `data_length` bytes of the
+/// data are read.
+///
+/// # Safety
+///
+/// `list` is the head of a list `DnsQuery_W` returned, not yet freed.
+unsafe fn first_address(list: NonNull<DnsRecord>, record: RecordType) -> Option<IpAddr> {
+    let mut cursor = Some(list);
+    while let Some(entry) = cursor {
+        let entry = entry.as_ptr();
+        // SAFETY: the header fields lie inside every record's allocation.
+        let (kind, length, next) = unsafe { ((*entry).kind, (*entry).data_length, (*entry).next) };
         // A CNAME chain comes first; its records are skipped.
-        if entry.kind == record.code() {
-            found = match record {
-                RecordType::A if entry.data_length >= 4 => {
-                    let b = entry.data;
-                    Some(IpAddr::V4(Ipv4Addr::new(b[0], b[1], b[2], b[3])))
+        if kind == record.code() {
+            // SAFETY: the data starts inside the allocation.
+            let data = unsafe { std::ptr::addr_of!((*entry).data) }.cast::<u8>();
+            return match (record, length) {
+                (RecordType::A, 4..) => {
+                    let mut octets = [0u8; 4];
+                    // SAFETY: `data_length` says at least four bytes follow.
+                    unsafe { std::ptr::copy_nonoverlapping(data, octets.as_mut_ptr(), 4) };
+                    Some(IpAddr::V4(Ipv4Addr::from(octets)))
                 }
-                RecordType::Aaaa if entry.data_length >= 16 => {
-                    Some(IpAddr::V6(Ipv6Addr::from(entry.data)))
+                (RecordType::Aaaa, 16..) => {
+                    let mut octets = [0u8; 16];
+                    // SAFETY: `data_length` says at least sixteen bytes follow.
+                    unsafe { std::ptr::copy_nonoverlapping(data, octets.as_mut_ptr(), 16) };
+                    Some(IpAddr::V6(Ipv6Addr::from(octets)))
                 }
                 _ => None,
             };
-            break;
         }
-        cursor = entry.next;
+        cursor = NonNull::new(next);
     }
-    if !results.is_null() {
-        // SAFETY: frees the list the call returned, once.
-        unsafe { DnsFree(results.cast(), DNS_FREE_RECORD_LIST) };
-    }
-    Ok(found.map_or(Answer::NoRecord, Answer::Address))
+    None
 }
 
 impl Dns for WindowsDns {

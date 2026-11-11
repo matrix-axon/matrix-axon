@@ -35,6 +35,7 @@ const PER_SERVER: Duration = Duration::from_millis(1500);
 #[derive(Clone, Debug)]
 enum Servers {
     /// Given once, as the tests give a server on the loopback.
+    #[cfg(test)]
     Fixed(Vec<SocketAddr>),
     /// Read from this file for every query.
     File(PathBuf),
@@ -46,6 +47,7 @@ pub(crate) struct WireDns {
 }
 
 impl WireDns {
+    #[cfg(test)]
     pub(crate) fn new(servers: Vec<SocketAddr>) -> Self {
         WireDns {
             servers: Servers::Fixed(servers),
@@ -71,6 +73,7 @@ impl WireDns {
     /// file names none or cannot be read.
     pub(crate) async fn current(&self) -> Vec<SocketAddr> {
         match &self.servers {
+            #[cfg(test)]
             Servers::Fixed(servers) => servers.clone(),
             Servers::File(path) => {
                 nameservers(&tokio::fs::read_to_string(path).await.unwrap_or_default())
