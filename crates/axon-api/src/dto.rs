@@ -211,7 +211,8 @@ pub struct RoomListResponse {
     /// account no longer active), when `full` is `false`. Always empty when
     /// `full` is `true`. A room removed outright, such as by a purge or by
     /// deleting its account, is not named here;
-    /// `total` is how a client notices it.
+    /// `total` is how a client notices it. May name a room the client does
+    /// not hold; ignore those.
     pub removed: Vec<RoomRefDto>,
     /// How many rooms the list holds at this read, in this request's
     /// `account_id` scope. After merging a delta, a client holding a different
@@ -219,14 +220,9 @@ pub struct RoomListResponse {
     /// full.
     pub total: u64,
     /// Opaque cursor for this read. Pass it as `since` on the next read in the
-    /// same scope to get only what changed.
+    /// same `account_id` scope to get only what changed; in another scope it
+    /// is answered in full.
     pub cursor: String,
-}
-
-impl axum::response::IntoResponse for RoomListResponse {
-    fn into_response(self) -> axum::response::Response {
-        axum::Json(self).into_response()
-    }
 }
 
 /// A room named by its identity in the list: `(account_id, room_id)`.

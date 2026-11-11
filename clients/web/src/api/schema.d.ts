@@ -5717,7 +5717,8 @@ export interface components {
         RoomListResponse: {
             /**
              * @description Opaque cursor for this read. Pass it as `since` on the next read in the
-             *     same scope to get only what changed.
+             *     same `account_id` scope to get only what changed; in another scope it
+             *     is answered in full.
              */
             cursor: string;
             /**
@@ -5737,7 +5738,8 @@ export interface components {
              *     account no longer active), when `full` is `false`. Always empty when
              *     `full` is `true`. A room removed outright, such as by a purge or by
              *     deleting its account, is not named here;
-             *     `total` is how a client notices it.
+             *     `total` is how a client notices it. May name a room the client does
+             *     not hold; ignore those.
              */
             removed: components["schemas"]["RoomRefDto"][];
             /**
@@ -13467,8 +13469,9 @@ export interface operations {
                 /**
                  * @description The `cursor` of an earlier read in the same `account_id` scope. With
                  *     it, the response holds only the rooms that changed since that read
-                 *     (`full: false`); the server may still answer in full (`full: true`).
-                 *     Opaque: pass back exactly what a response gave.
+                 *     (`full: false`); the server may still answer in full (`full: true`),
+                 *     and does for a cursor from another scope. Opaque: pass back exactly
+                 *     what a response gave.
                  */
                 since?: string;
             };

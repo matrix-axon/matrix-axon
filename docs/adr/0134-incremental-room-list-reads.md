@@ -49,6 +49,8 @@ Moving the rooms into an object under `data` would break every existing client, 
 This is additive under [ADR 0099](0099-openapi-compatibility-guard.md).
 
 The cursor has the same form as ADR 0131's: the database clock at the read, in microseconds.
+A read scoped to one `account_id` appends that account, so the cursor names the scope it was read in.
+A cursor passed back in another scope is answered in full: a delta in scope B from a cursor read in scope A would omit B's rooms that changed before the cursor.
 Clients must not parse it, and its format can change.
 A malformed `since` is a `400`.
 A `since` later than the database clock did not come from this clock, so the read is answered in full rather than trusted.
@@ -73,7 +75,8 @@ The trigger compares old and new values, so a rewrite with the same values, a me
 **Unread counts and tags** use their own rows' `updated_at`, which a trigger already maintains.
 Their writers are single statements, and adding a write to `room_summaries` on every unread change would make the hottest write path wait on the summary row's lock.
 Deleting an unread row (`delete_stale_room_unread_counts`) leaves no row to carry a time, so a trigger on that delete bumps the room's `list_changed_at` instead.
-Tag rows are updated in place and never deleted, except with the account.
+Tag rows are updated in place and axon never deletes one, except with the account; a trigger on a tag-row delete bumps the room anyway, so a future or manual delete still reaches a delta.
+These delete triggers, and the `m.direct` one below, bump only rooms the list shows: a hidden room is stamped when it is un-hidden, which sends its whole row.
 
 **`m.direct`** is a single global value per account, and a change to it can flip `is_direct` on many rooms.
 A trigger on its write compares the room ids in the old and new maps and bumps `list_changed_at` on the rooms whose membership in the map changed.
@@ -91,7 +94,7 @@ So a delta is the scoped rows where `GREATEST(list_changed_at, account list_chan
 
 A room leaves the list in one of two ways.
 
-- **Hidden** (left, tombstoned, or its account no longer active): its row stays, and the hidden flag's change bumps `list_changed_at`, or the account's state change bumps the account's. The delta reports it in `removed`.
+- **Hidden** (left, tombstoned, or its account no longer active): its row stays, and the hidden flag's change bumps `list_changed_at`, or the account's state change bumps the account's. The delta reports it in `removed`. An unlisted room is reported only when one of those two stamps moved, since nothing else can take a room out of the list, so unread or tag writes to a room left long ago add nothing to a delta. `removed` can still name a room a client never held, such as one left and renamed within the overlap; the client ignores it.
 - **Gone** (the row was deleted by a purge or a summary rebuild, or with its account): nothing is left to carry a time, so the delta cannot report it.
 
 `total` covers the second case.

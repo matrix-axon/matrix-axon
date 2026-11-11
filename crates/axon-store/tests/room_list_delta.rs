@@ -424,6 +424,98 @@ async fn unread_and_tag_changes_reach_the_delta() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// Deleting a tag row puts the room in the delta with no tags. Axon never
+/// deletes one today; this guards a future or manual delete.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_deleted_tag_row_reaches_the_delta() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "rl-untag").await;
+    let tagged = room("tagged");
+    insert_message(&store, account_id, &tagged, 1_000, "hi").await;
+    store
+        .apply_room_tag(account_id, &tagged, "m.favourite", Some(0.5))
+        .await
+        .unwrap();
+    let since = settled_cursor(&store, &pool, account_id).await;
+
+    sqlx_core::query::query(
+        "DELETE FROM account_data \
+         WHERE account_id = $1 AND room_id = $2 AND event_type = 'm.tag'",
+    )
+    .bind(account_id)
+    .bind(&tagged)
+    .execute(&pool)
+    .await
+    .expect("delete tag row");
+
+    let read = delta(&store, account_id, since).await;
+    assert_eq!(changed_ids(&read), [tagged.as_str()]);
+    assert!(read.rooms[0].tags.is_empty());
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A room left long ago is not reported as removed again when its unread
+/// counts, tags or DM status change, or when its unread or tag row is
+/// deleted: only what can take a room out of the list reports it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn writes_to_a_left_room_do_not_report_it_removed_again() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "rl-left-churn").await;
+    let user_id = store
+        .get_account(account_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .user_id;
+    let (stay, left) = (room("stay"), room("left"));
+    insert_message(&store, account_id, &stay, 1_000, "hi").await;
+    insert_message(&store, account_id, &left, 1_000, "hi").await;
+    set_membership(&store, account_id, &user_id, &left, "leave", 2_000).await;
+    let since = settled_cursor(&store, &pool, account_id).await;
+
+    store
+        .upsert_room_unread_counts(account_id, &left, 5, 1)
+        .await
+        .unwrap();
+    store
+        .apply_room_tag(account_id, &left, "m.favourite", Some(0.5))
+        .await
+        .unwrap();
+    set_direct(
+        &store,
+        account_id,
+        json!({ "@bob:localhost": [left.clone()] }),
+    )
+    .await;
+    let read = delta(&store, account_id, since).await;
+    assert!(read.rooms.is_empty(), "{:?}", changed_ids(&read));
+    assert!(read.removed.is_empty(), "{:?}", removed_ids(&read));
+
+    store
+        .delete_stale_room_unread_counts(account_id, std::slice::from_ref(&stay))
+        .await
+        .unwrap();
+    sqlx_core::query::query(
+        "DELETE FROM account_data \
+         WHERE account_id = $1 AND room_id = $2 AND event_type = 'm.tag'",
+    )
+    .bind(account_id)
+    .bind(&left)
+    .execute(&pool)
+    .await
+    .expect("delete tag row");
+    let read = delta(&store, account_id, since).await;
+    assert!(read.rooms.is_empty() && read.removed.is_empty());
+    assert_eq!(read.total, 1);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// `m.direct` is one value for the account; a write bumps exactly the rooms
 /// whose membership in the map changed, carrying the new `is_direct`.
 #[tokio::test]

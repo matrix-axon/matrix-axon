@@ -37,8 +37,9 @@ pub struct RoomsQuery {
     pub account_id: Option<Uuid>,
     /// The `cursor` of an earlier read in the same `account_id` scope. With
     /// it, the response holds only the rooms that changed since that read
-    /// (`full: false`); the server may still answer in full (`full: true`).
-    /// Opaque: pass back exactly what a response gave.
+    /// (`full: false`); the server may still answer in full (`full: true`),
+    /// and does for a cursor from another scope. Opaque: pass back exactly
+    /// what a response gave.
     pub since: Option<String>,
 }
 
@@ -70,10 +71,13 @@ pub async fn list_rooms(
         .since
         .as_deref()
         .map(|since| {
-            cursor::decode_clock(since)
+            cursor::decode_scoped_clock(since)
                 .ok_or_else(|| ApiError::bad_request("since is not a cursor from this endpoint"))
         })
-        .transpose()?;
+        .transpose()?
+        // A cursor from another `account_id` scope says nothing about this
+        // one's older rooms, so it is answered in full.
+        .and_then(|(since, scope)| (scope == q.account_id).then_some(since));
     let RoomListRead {
         full,
         rooms,
@@ -92,7 +96,7 @@ pub async fn list_rooms(
             })
             .collect(),
         total,
-        cursor: cursor::encode_clock(as_of),
+        cursor: cursor::encode_scoped_clock(as_of, q.account_id),
     })
 }
 

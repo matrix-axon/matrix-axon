@@ -1,7 +1,8 @@
 -- Incremental room-list reads (ADR 0134).
 --
 -- `list_changed_at` is when a value `GET /v1/rooms` shows for this room last
--- changed, as far as the summary row and `m.direct` can tell. A delta read
+-- changed, as far as the summary row, unread and tag deletes, `m.direct` and
+-- the account's state can tell. A delta read
 -- returns the rows whose `list_changed_at`, unread-count `updated_at`, or
 -- `m.tag` `updated_at` is after its cursor, less an overlap.
 --
@@ -39,6 +40,10 @@ CREATE TRIGGER room_summaries_stamp_list_change
            OLD.hidden_left, OLD.hidden_tombstoned))
     EXECUTE FUNCTION stamp_room_list_change();
 
+-- The triggers below stamp only rooms the list shows. A hidden room's row is
+-- stamped when it is un-hidden, which sends it whole, so stamping it while
+-- hidden would only report it as removed again.
+--
 -- A deleted unread-count row leaves nothing to carry a time, and the list then
 -- shows the room's counts as 0. Inserted and updated rows carry their own
 -- `updated_at`, which the delta reads directly, so only deletes write here.
@@ -47,7 +52,8 @@ BEGIN
     UPDATE room_summaries s
     SET list_changed_at = clock_timestamp()
     FROM gone g
-    WHERE s.account_id = g.account_id AND s.room_id = g.room_id;
+    WHERE s.account_id = g.account_id AND s.room_id = g.room_id
+      AND NOT s.hidden_left AND NOT s.hidden_tombstoned;
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
@@ -56,6 +62,28 @@ CREATE TRIGGER room_unread_counts_stamp_list_change
     REFERENCING OLD TABLE AS gone
     FOR EACH STATEMENT
     EXECUTE FUNCTION stamp_room_list_unread_delete();
+
+-- Likewise a deleted `m.tag` row: the list then shows the room with no tags,
+-- and nothing is left to carry a time. Axon never deletes one today (tags are
+-- rewritten in place, and only an account delete removes them, with the
+-- summaries), so this guards a future or manual delete rather than a current
+-- path.
+CREATE FUNCTION stamp_room_list_tag_delete() RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE room_summaries s
+    SET list_changed_at = clock_timestamp()
+    FROM gone g
+    WHERE g.event_type = 'm.tag'
+      AND s.account_id = g.account_id AND s.room_id = g.room_id
+      AND NOT s.hidden_left AND NOT s.hidden_tombstoned;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER account_data_stamp_list_tag_delete
+    AFTER DELETE ON account_data
+    REFERENCING OLD TABLE AS gone
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION stamp_room_list_tag_delete();
 
 -- The room ids in an `m.direct` content object: every string in every array
 -- value of the top-level object, as `room_ids_in_direct_map` reads it in Rust.
@@ -95,6 +123,7 @@ BEGIN
     UPDATE room_summaries s
     SET list_changed_at = clock_timestamp()
     WHERE s.account_id = v_account_id
+      AND NOT s.hidden_left AND NOT s.hidden_tombstoned
       AND s.room_id IN (
           (SELECT direct_map_room_ids(v_new) EXCEPT SELECT direct_map_room_ids(v_old))
           UNION

@@ -368,10 +368,15 @@ impl Store {
     /// A room's account entering or leaving `active` is a change to every one
     /// of its rows, through `accounts.list_changed_at`.
     ///
+    /// An unlisted room is reported as removed only when its own stamp or its
+    /// account's moved, since only those can take a room out of the list. An
+    /// unread or tag write on a room left long ago is not news to a client.
+    ///
     /// One statement, so the rows and `total` share a snapshot: the count
     /// cannot disagree with the rows it is read with. The `LEFT JOIN LATERAL`
     /// keeps the count's row when nothing changed; that row has a `NULL`
-    /// `room_id`.
+    /// `room_id`, which no real row can have, since `room_id` is part of the
+    /// summary's primary key.
     async fn room_list_changes(
         &self,
         account_id: Option<Uuid>,
@@ -397,7 +402,10 @@ impl Store {
                   AND ad_tag.room_id = a.room_id \
                   AND ad_tag.event_type = 'm.tag' \
                  WHERE ($1::uuid IS NULL OR a.account_id = $1) \
-                   AND GREATEST(a.list_changed_at, ac.list_changed_at, ruc.updated_at, ad_tag.updated_at) > $2 \
+                   AND CASE WHEN {listed} \
+                       THEN GREATEST(a.list_changed_at, ac.list_changed_at, \
+                                     ruc.updated_at, ad_tag.updated_at) \
+                       ELSE GREATEST(a.list_changed_at, ac.list_changed_at) END > $2 \
              ) c ON true \
              ORDER BY c.last_activity_ts DESC, c.room_id",
             listed = listed_room_predicate!(),

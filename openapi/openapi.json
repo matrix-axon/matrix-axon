@@ -9940,7 +9940,7 @@
           {
             "name": "since",
             "in": "query",
-            "description": "The `cursor` of an earlier read in the same `account_id` scope. With\nit, the response holds only the rooms that changed since that read\n(`full: false`); the server may still answer in full (`full: true`).\nOpaque: pass back exactly what a response gave.",
+            "description": "The `cursor` of an earlier read in the same `account_id` scope. With\nit, the response holds only the rooms that changed since that read\n(`full: false`); the server may still answer in full (`full: true`),\nand does for a cursor from another scope. Opaque: pass back exactly\nwhat a response gave.",
             "required": false,
             "schema": {
               "type": "string"
@@ -16679,7 +16679,7 @@
         "properties": {
           "cursor": {
             "type": "string",
-            "description": "Opaque cursor for this read. Pass it as `since` on the next read in the\nsame scope to get only what changed."
+            "description": "Opaque cursor for this read. Pass it as `since` on the next read in the\nsame `account_id` scope to get only what changed; in another scope it\nis answered in full."
           },
           "data": {
             "type": "array",
@@ -16697,7 +16697,7 @@
             "items": {
               "$ref": "#/components/schemas/RoomRefDto"
             },
-            "description": "Rooms that were listed and no longer are (left, upgraded, or their\naccount no longer active), when `full` is `false`. Always empty when\n`full` is `true`. A room removed outright, such as by a purge or by\ndeleting its account, is not named here;\n`total` is how a client notices it."
+            "description": "Rooms that were listed and no longer are (left, upgraded, or their\naccount no longer active), when `full` is `false`. Always empty when\n`full` is `true`. A room removed outright, such as by a purge or by\ndeleting its account, is not named here;\n`total` is how a client notices it. May name a room the client does\nnot hold; ignore those."
           },
           "total": {
             "type": "integer",

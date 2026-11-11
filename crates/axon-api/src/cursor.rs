@@ -34,12 +34,45 @@ pub fn encode_clock(as_of: DateTime<Utc>) -> String {
 /// Decode a clock cursor; `None` for anything [`encode_clock`] could not have
 /// written, including non-canonical integers such as `+123` or `00123`.
 pub fn decode_clock(cursor: &str) -> Option<DateTime<Utc>> {
+    if cursor.len() > MAX_ENCODED_LEN {
+        return None;
+    }
     cursor
         .parse::<i64>()
         .ok()
         .filter(|micros| *micros >= 0)
         .and_then(DateTime::from_timestamp_micros)
         .filter(|as_of| encode_clock(*as_of) == cursor)
+}
+
+/// Encode a room-list cursor (ADR 0134): the read's clock, bound to the
+/// `account_id` scope it was read in, so a cursor passed back in another scope
+/// is recognised and answered in full instead of as a delta that would miss
+/// that scope's older rooms. `{micros}` for all accounts,
+/// `{micros}.{account_id}` (simple form) for one.
+pub fn encode_scoped_clock(as_of: DateTime<Utc>, scope: Option<Uuid>) -> String {
+    match scope {
+        None => encode_clock(as_of),
+        Some(account_id) => format!("{}.{}", encode_clock(as_of), account_id.simple()),
+    }
+}
+
+/// Decode a room-list cursor into its clock and scope; `None` for anything
+/// [`encode_scoped_clock`] could not have written.
+pub fn decode_scoped_clock(cursor: &str) -> Option<(DateTime<Utc>, Option<Uuid>)> {
+    if cursor.len() > MAX_ENCODED_LEN {
+        return None;
+    }
+    match cursor.split_once('.') {
+        None => Some((decode_clock(cursor)?, None)),
+        Some((clock, scope)) => {
+            let account_id = Uuid::try_parse(scope).ok()?;
+            // Only the simple form this module writes, so one cursor has one
+            // spelling.
+            (account_id.simple().to_string() == scope)
+                .then_some((decode_clock(clock)?, Some(account_id)))
+        }
+    }
 }
 
 /// Encode a sort key into an opaque cursor string.
@@ -330,5 +363,45 @@ mod tests {
         assert!(!decodes(Some("\t".to_owned()), "!c:x".to_owned()));
         assert!(!decodes(None, "x".repeat(256)));
         assert!(!decodes(None, "!a\0b:x".to_owned()));
+    }
+
+    #[test]
+    fn scoped_clock_cursors_round_trip_and_keep_their_scope() {
+        let as_of = DateTime::from_timestamp_micros(1_762_812_345_678_901).unwrap();
+        let account = Uuid::new_v4();
+        assert_eq!(
+            decode_scoped_clock(&encode_scoped_clock(as_of, None)),
+            Some((as_of, None))
+        );
+        assert_eq!(
+            decode_scoped_clock(&encode_scoped_clock(as_of, Some(account))),
+            Some((as_of, Some(account)))
+        );
+        // An unscoped cursor is the plain clock cursor.
+        assert_eq!(encode_scoped_clock(as_of, None), encode_clock(as_of));
+    }
+
+    #[test]
+    fn scoped_clock_cursors_have_one_spelling() {
+        let as_of = DateTime::from_timestamp_micros(1_762_812_345_678_901).unwrap();
+        let account = Uuid::new_v4();
+        let clock = encode_clock(as_of);
+        for bad in [
+            format!("{clock}.{}", account.hyphenated()),
+            format!("{clock}.{}", account.simple().to_string().to_uppercase()),
+            format!("{clock}."),
+            format!(".{}", account.simple()),
+            format!("0{clock}.{}", account.simple()),
+            format!("{clock}.{}.{}", account.simple(), account.simple()),
+        ] {
+            assert_eq!(decode_scoped_clock(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn clock_decoders_refuse_overlong_input() {
+        let long = "1".repeat(MAX_ENCODED_LEN + 1);
+        assert_eq!(decode_clock(&long), None);
+        assert_eq!(decode_scoped_clock(&long), None);
     }
 }
