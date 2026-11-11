@@ -91,11 +91,21 @@ id = "watershed"
 name = "Cascadia Watershed Council"
 topic = "Monitoring and restoration across the Cascadia watershed."
 avatar = "media/avatars/space-watershed.png"
-children = ["water-quality", "field-notes"]
+# `salmon-count` is the one child the viewer has not joined (ADR 0133): axon
+# learns of it only through this space, so it is what the paged space hierarchy
+# names from the space directory and what the join preview reads `/discovery`
+# for.
+children = ["water-quality", "field-notes", "salmon-count"]
 
 # ---------------------------------------------------------------------------
 # Rooms
 # ---------------------------------------------------------------------------
+# The viewer creates every room it is a member of. A room it is not in names a
+# `creator` (any member) and has to be some space's child, the only way axon
+# can learn of it. `public = true` makes a room joinable by anyone and lists it
+# in the homeserver's directory. Aliases are bare localparts on this
+# homeserver: `canonical_alias` and `alt_aliases` are advertised in
+# m.room.canonical_alias, `unadvertised_aliases` only resolve.
 
 [[room]]
 id = "general"
@@ -104,12 +114,21 @@ topic = "Announcements, scheduling, and everything that doesn't fit elsewhere."
 avatar = "media/avatars/room-general.png"
 members = ["alex", "maya", "dev", "sam", "tomas"]
 
+# The aliases room (ADR 0133 decision 4), and the room the web desktop `rooms`
+# scene opens Room Information for. Three lists that differ on purpose: the
+# canonical alias, the alternatives it advertises beside it, and a leftover
+# alias from last season that still resolves on the homeserver but that the
+# room no longer advertises. Only the homeserver's list
+# ("Aliases on your homeserver") shows the leftover one.
 [[room]]
 id = "trail-work"
 name = "trail-work"
 topic = "Work party planning, trip reports, and tread condition."
 avatar = "media/avatars/room-trail-work.png"
 members = ["alex", "maya", "dev", "sam", "tomas"]
+canonical_alias = "ridgeline-trail-work"
+alt_aliases = ["trail-work", "work-parties"]
+unadvertised_aliases = ["trailwork-2025"]
 
 [[room]]
 id = "trip-photos"
@@ -138,6 +157,20 @@ name = "field-notes"
 topic = "Raw observations. Tidy them into water-quality when they're confirmed."
 avatar = "media/avatars/room-field-notes.png"
 members = ["alex", "priya"]
+
+# The space child the viewer has not joined (ADR 0133). Priya creates it, so
+# Alex is never a member; it is public so the viewer's homeserver returns it
+# from the space hierarchy and from a single-room summary, which is the only
+# way axon can name it. Its messages are there for the moment the viewer joins.
+[[room]]
+id = "salmon-count"
+name = "salmon-count"
+topic = "Spawning survey on Beckett Creek: redd counts, carcass tags, and who walks which reach."
+avatar = "media/avatars/room-salmon-count.png"
+creator = "priya"
+public = true
+members = ["priya", "tomas", "sam"]
+canonical_alias = "salmon-count"
 
 # A DM: no name, no topic. Exercises the DM-title derivation both clients share
 # (web ported it from clients/tui/src/app/rooms.rs), an explicit gap in
@@ -523,6 +556,33 @@ room = "field-notes"
 from = "priya"
 at = "-2d 07:44"
 body = "Post-work-party baseline set. If the switchback rebuild does what we think, the next wet round should show it."
+
+# --- #salmon-count (the viewer is not a member) ---------------------------
+
+[[message]]
+room = "salmon-count"
+from = "priya"
+at = "-18d 07:30"
+body = "Survey season opens Monday. Same reaches as last year: the culvert to the footbridge, then the footbridge to the confluence."
+
+[[message]]
+room = "salmon-count"
+from = "tomas"
+at = "-18d 08:12"
+body = "I'll take the upper reach. I know where the deadfall is and I'd rather nobody new found out the hard way."
+
+[[message]]
+room = "salmon-count"
+from = "sam"
+at = "-8d 17:45"
+body = "Eleven redds below the culvert, two above. Photos are in the shared folder, carcass tags 0412 through 0419."
+reactions = [{ from = "priya", key = "🐟" }]
+
+[[message]]
+room = "salmon-count"
+from = "priya"
+at = "-8d 18:02"
+body = "Two above the culvert is two more than last year. Worth telling the water-quality folks."
 
 # --- DM with Maya ---------------------------------------------------------
 
