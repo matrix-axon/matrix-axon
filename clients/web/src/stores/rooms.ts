@@ -21,7 +21,8 @@ import {
   type MemberDto,
   type RoomDto,
 } from './room-list'
-import type { RoomListCache } from './room-list-cache'
+import type { RoomListCache, RoomListServerView } from './room-list-cache'
+import { mergeRoomListDelta } from './room-list-delta'
 import type { EventDto } from './timeline'
 
 export interface RoomPreview {
@@ -809,6 +810,137 @@ export function createRoomsStore(
     }
   }
 
+  /**
+   * The server's list as of its cursor (ADR 0134), from responses only: never
+   * a live patch or a local write. A delta is merged into this, not into
+   * `rooms`, so a value the server never accepted cannot outlive the next
+   * refresh. `null` until a read with a cursor lands or a persisted copy is
+   * restored; cleared by `resetSession`.
+   */
+  let serverView: RoomListServerView | null = null
+  /** The restore of the persisted server view, once per session generation. */
+  let serverViewRestore: { generation: number; done: Promise<void> } | null =
+    null
+
+  /**
+   * Restore the persisted server view so this session's first refresh can be
+   * a delta. Awaited by every refresh, but only the first per generation
+   * reads the disk; the rest get the settled promise back.
+   */
+  function restoreServerView(): Promise<void> {
+    if (serverViewRestore?.generation === sessionGeneration) {
+      return serverViewRestore.done
+    }
+    const generation = sessionGeneration
+    const done = (async () => {
+      let restored: RoomListServerView | undefined
+      try {
+        restored = await cache?.readServerView()
+      } catch {
+        // Best-effort, like every cache read: a failure is a full read.
+        return
+      }
+      // A refresh that already landed holds a newer view than the disk.
+      if (
+        restored !== undefined &&
+        generation === sessionGeneration &&
+        serverView === null
+      ) {
+        serverView = restored
+      }
+    })()
+    serverViewRestore = { generation, done }
+    return done
+  }
+
+  function forgetServerView(): void {
+    serverView = null
+    cache?.forgetServerView()
+  }
+
+  type ServerListRead =
+    | { ok: true; rooms: readonly RoomDto[]; delta: boolean; changed: number }
+    | { ok: false; error: unknown }
+
+  /**
+   * Read the server's whole list: a delta merged into the held server view
+   * when there is one, else a full read (ADR 0134). `null` when the session
+   * ended while it was out.
+   *
+   * At most one full read follows a failed delta: both fallbacks drop the
+   * view first, so the retry carries no cursor.
+   */
+  async function readServerList(
+    generation: number,
+  ): Promise<ServerListRead | null> {
+    await restoreServerView()
+    if (generation !== sessionGeneration) {
+      return null
+    }
+    const base = serverView
+    const {
+      data,
+      error: apiError,
+      response,
+    } = await api.GET('/v1/rooms', {
+      params: { query: base === null ? {} : { since: base.cursor } },
+    })
+    if (generation !== sessionGeneration) {
+      return null
+    }
+    // `data === undefined` is not redundant with the error check. A non-2xx
+    // response whose body openapi-fetch cannot parse — an empty one, or a
+    // proxy's error page — yields **neither** envelope: `{ data: undefined,
+    // error: undefined }`. Testing only `apiError` then falls through to
+    // `data.data` and throws `undefined is not an object`, which is what a
+    // phone sees when the API is unreachable behind a dev proxy: the raw
+    // TypeError lands in the error banner in place of a usable message.
+    // `apiErrorMessage(undefined)` is already the right words for it.
+    if (apiError !== undefined || data === undefined) {
+      if (base !== null && response.status === 400) {
+        // The server will not take this cursor: its format changed, or the
+        // record is bad. A 5xx or a timeout keeps it, since retrying the same
+        // `since` skips nothing; a 400 would repeat for good.
+        forgetServerView()
+        return readServerList(generation)
+      }
+      return { ok: false, error: apiError }
+    }
+    if (typeof data.cursor !== 'string' || data.cursor === '') {
+      // A server older than ADR 0134: always the whole list, and no cursor.
+      if (base !== null) {
+        forgetServerView()
+      }
+      return { ok: true, rooms: data.data, delta: false, changed: 0 }
+    }
+    if (data.full !== false || base === null) {
+      serverView = { cursor: data.cursor, rooms: data.data }
+      cache?.writeServerView(serverView)
+      return { ok: true, rooms: data.data, delta: false, changed: 0 }
+    }
+    const removed = data.removed ?? []
+    const merged = mergeRoomListDelta(base.rooms, data.data, removed)
+    if (merged.rooms.length !== data.total) {
+      // A room left the list in a way the delta cannot name: purged, or
+      // deleted with its account. Only a full read can say which.
+      forgetServerView()
+      return readServerList(generation)
+    }
+    serverView = { cursor: data.cursor, rooms: merged.rooms }
+    // A delta that only repeats rows already held leaves the disk alone, so
+    // most resumes write nothing. The record keeps its older cursor, which is
+    // still a valid one: the next delta from it is merely a little longer.
+    // That holds only while a record exists: after the cache was off or
+    // cleared, the first delta writes one even if it changed nothing.
+    cache?.writeServerView(serverView, { unlessSaved: !merged.changed })
+    return {
+      ok: true,
+      rooms: merged.rooms,
+      delta: true,
+      changed: data.data.length + removed.length,
+    }
+  }
+
   async function doRefresh(): Promise<void> {
     perfMark('rooms:refresh:start')
     // The auth session this request belongs to. Anything that comes back after
@@ -817,27 +949,23 @@ export function createRoomsStore(
     const generation = sessionGeneration
     // Anything patched after this point is newer than whatever comes back.
     const metadataSeqAtStart = metadataPatchSeq
+    let read: ServerListRead | null = null
     try {
-      const { data, error: apiError } = await api.GET('/v1/rooms')
-      if (generation !== sessionGeneration) {
+      read = await readServerList(generation)
+      if (read === null) {
         return
       }
-      // `data === undefined` is not redundant with the error check. A non-2xx
-      // response whose body openapi-fetch cannot parse — an empty one, or a
-      // proxy's error page — yields **neither** envelope: `{ data: undefined,
-      // error: undefined }`. Testing only `apiError` then falls through to
-      // `data.data` and throws `undefined is not an object`, which is what a
-      // phone sees when the API is unreachable behind a dev proxy: the raw
-      // TypeError lands in the error banner in place of a usable message.
-      // `apiErrorMessage(undefined)` is already the right words for it.
-      if (apiError !== undefined || data === undefined) {
-        error.value = apiErrorMessage(apiError)
+      if (!read.ok) {
+        error.value = apiErrorMessage(read.error)
         return
       }
+      // Copies, so the server view never sees a live patch: the newest row's
+      // activity is patched in place (`noteActivityRoom`).
+      const listed = read.rooms.map((room) => ({ ...room }))
       const visibleRooms = withPendingDisplayNames(
         keepFresherMetadata(
           applyLocalRoomMetadata(
-            data.data.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+            listed.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
           ),
           metadataSeqAtStart,
         ),
@@ -846,8 +974,9 @@ export function createRoomsStore(
       // A pending value for a room this response lists is settled now: one
       // that predates the request is in the response, and a newer one was
       // applied above. One for a room it omits waits for a response that lists
-      // the room.
-      settlePendingDisplayNames(data.data)
+      // the room. A merged delta lists every room, as a full read does: a room
+      // it did not resend has not changed on the server since the cursor.
+      settlePendingDisplayNames(listed)
       // Wholesale replacement, not a merge into the cached set: a room left or
       // forgotten on another client has to disappear (guardrail 5's
       // prune-on-reconcile), and a restored list is exactly the case where
@@ -882,6 +1011,10 @@ export function createRoomsStore(
         perfMark('rooms:refresh:end', {
           ok: error.value === null,
           rooms: rooms.value.length,
+          // ADR 0134: whether this refresh was a merged delta, and how many
+          // rows the delta carried (changed plus removed).
+          delta: read?.ok === true && read.delta,
+          changed: read?.ok === true ? read.changed : 0,
         })
         // The race this phase exists to win is decided the first time the
         // network answers, so the boot summary is emitted here — once per
@@ -912,6 +1045,8 @@ export function createRoomsStore(
     tagsPatchedAt.clear()
     directPatchedAt.clear()
     pendingDisplayNames.clear()
+    // The next reader's first refresh restores their own view, if any.
+    serverView = null
     // Above the pristine-store guard: a leave can time out before the list
     // ever loaded, and its refreshes must not run under the next reader.
     for (const verbs of pendingMemberships.values()) {
@@ -1020,6 +1155,9 @@ export function createRoomsStore(
   }
 
   void hydrate()
+  // Alongside the paint, not after it: the first refresh waits on this to
+  // send its cursor, and both are IndexedDB reads.
+  void restoreServerView()
 
   /** In-flight refresh, shared: concurrent callers (mount + a burst of
    *  unknown-room frames) coalesce onto one request. */

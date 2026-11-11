@@ -11,9 +11,56 @@ export interface RoomListCache {
   read(): Promise<readonly RoomDto[] | undefined>
   /** Persist the rows a settled refresh returned. Fire-and-forget. */
   write(rooms: readonly RoomDto[]): void
+  /**
+   * The server's list as of its cursor (ADR 0134), or `undefined` for none,
+   * a disabled cache, or an unusable record.
+   */
+  readServerView(): Promise<RoomListServerView | undefined>
+  /**
+   * Persist the server's list and its cursor. Fire-and-forget. With
+   * `unlessSaved`, skip the write when this reader's record is already on
+   * disk in this cache generation: a delta that changed nothing need not
+   * rewrite it, but one arriving after the cache was off or cleared must.
+   */
+  writeServerView(
+    view: RoomListServerView,
+    options?: { unlessSaved?: boolean },
+  ): void
+  /** Drop the server-view record, whose cursor is no use. Fire-and-forget. */
+  forgetServerView(): void
+}
+
+/**
+ * The room list as the server last described it (ADR 0134): every listed
+ * room as of `cursor`, from responses only. It never holds a live patch or a
+ * local write, so a delta merged into it is the server's list as of the
+ * delta's cursor.
+ */
+export interface RoomListServerView {
+  cursor: string
+  rooms: readonly RoomDto[]
 }
 
 const AREA: CacheArea = 'rooms'
+
+/**
+ * The server view lives in `meta`, not beside the painted rows in `rooms`:
+ * every painted write prunes the `rooms` area down to its own key.
+ */
+const SERVER_VIEW_AREA: CacheArea = 'meta'
+
+/** Bumped when the server-view record changes shape incompatibly. */
+const SERVER_VIEW_VERSION = 1
+
+/** Every server-view key starts with this; the reader's namespace follows. */
+const SERVER_VIEW_PREFIX = `room-list-server.v${SERVER_VIEW_VERSION}\0`
+
+interface RoomListServerViewRecord {
+  version: number
+  savedAt: number
+  cursor: string
+  rooms: RoomDto[]
+}
 
 /**
  * Bumped when the record below changes shape incompatibly.
@@ -44,7 +91,7 @@ interface RoomListRecord {
  * field at all: it is fetched per room (`fetchPreview`) and it *is* message
  * body text, so caching it belongs to phase 3's opt-in, not here.
  */
-function persistable(room: RoomDto): RoomDto {
+export function persistable(room: RoomDto): RoomDto {
   return {
     account_id: room.account_id,
     account_user_id: room.account_user_id,
@@ -142,6 +189,26 @@ export function createRoomListCache({
   namespace,
   enabled,
 }: RoomListCacheOptions): RoomListCache {
+  /**
+   * Server-view writes and drops, in the order they were asked for. Each
+   * awaits the async namespace digest before it touches the disk, so without
+   * this a drop asked for just before a write (a refused cursor, then the
+   * full read that replaces it) could land after the write and delete it.
+   */
+  let serverViewQueue: Promise<void> = Promise.resolve()
+  function enqueueServerView(op: () => Promise<void>): void {
+    serverViewQueue = serverViewQueue.then(op, op).catch(() => {})
+  }
+
+  /**
+   * The generation and key of the server-view record known to be on disk, or
+   * `null`. A wipe bumps the generation, and a disabled cache never sets it,
+   * so a mismatch means the record has to be written again.
+   */
+  let savedServerView: string | null = null
+  const savedAs = (generation: number, ownKey: string) =>
+    `${generation}\0${ownKey}`
+
   async function key(): Promise<string | null> {
     if (!enabled()) {
       return null
@@ -205,6 +272,87 @@ export function createRoomListCache({
           }
         }
       })()
+    },
+
+    async readServerView() {
+      // After any write or drop already asked for, so a read sees it.
+      await serverViewQueue
+      const generation = cache.generation
+      const cacheKey = await key()
+      if (cacheKey === null) {
+        return undefined
+      }
+      const ownKey = `${SERVER_VIEW_PREFIX}${cacheKey}`
+      const record = await cache.read<RoomListServerViewRecord>(
+        SERVER_VIEW_AREA,
+        ownKey,
+      )
+      if (
+        typeof record !== 'object' ||
+        record === null ||
+        record.version !== SERVER_VIEW_VERSION ||
+        typeof record.cursor !== 'string' ||
+        record.cursor === '' ||
+        !Array.isArray(record.rooms)
+      ) {
+        return undefined
+      }
+      // All or nothing, unlike the painted rows. A delta is merged into this
+      // list, and a list missing a row would fail the merge's count check
+      // and cost a full read anyway; saying so here is clearer.
+      if (!record.rooms.every(validRoom)) {
+        return undefined
+      }
+      if (cache.generation === generation) {
+        savedServerView = savedAs(generation, ownKey)
+      }
+      return { cursor: record.cursor, rooms: record.rooms }
+    },
+
+    writeServerView(view, options = {}) {
+      const generation = cache.generation
+      enqueueServerView(async () => {
+        const cacheKey = await key()
+        if (cacheKey === null || cache.generation !== generation) {
+          return
+        }
+        const ownKey = `${SERVER_VIEW_PREFIX}${cacheKey}`
+        if (
+          options.unlessSaved === true &&
+          savedServerView === savedAs(generation, ownKey)
+        ) {
+          return
+        }
+        const record: RoomListServerViewRecord = {
+          version: SERVER_VIEW_VERSION,
+          savedAt: Date.now(),
+          cursor: view.cursor,
+          rooms: view.rooms.map(persistable),
+        }
+        await cache.write(SERVER_VIEW_AREA, ownKey, record)
+        if (cache.generation !== generation) {
+          await cache.drop(SERVER_VIEW_AREA, ownKey)
+          return
+        }
+        savedServerView = savedAs(generation, ownKey)
+        // As for the painted rows: one reader, one record. Only this module's
+        // keys, since `meta` is shared.
+        for (const stale of await cache.keys(SERVER_VIEW_AREA)) {
+          if (stale.startsWith(SERVER_VIEW_PREFIX) && stale !== ownKey) {
+            await cache.drop(SERVER_VIEW_AREA, stale)
+          }
+        }
+      })
+    },
+
+    forgetServerView() {
+      enqueueServerView(async () => {
+        savedServerView = null
+        const cacheKey = await key()
+        if (cacheKey !== null) {
+          await cache.drop(SERVER_VIEW_AREA, `${SERVER_VIEW_PREFIX}${cacheKey}`)
+        }
+      })
     },
   }
 }

@@ -406,6 +406,9 @@ describe('room-list cache', () => {
         }
       },
       write: (rooms) => inner.write(rooms),
+      readServerView: () => inner.readServerView(),
+      writeServerView: (view, options) => inner.writeServerView(view, options),
+      forgetServerView: () => inner.forgetServerView(),
     })
     // Sign-out lands while the boot read is still in flight. It leaves exactly
     // the pristine state the hydrate guard treats as safe to write into —
@@ -564,6 +567,10 @@ describe('room-list cache', () => {
         writes.push(rows)
         roomList.write(rows)
       },
+      readServerView: () => roomList.readServerView(),
+      writeServerView: (view, options) =>
+        roomList.writeServerView(view, options),
+      forgetServerView: () => roomList.forgetServerView(),
     }
     const store = createRoomsStore(api(), memoryStorage(), spy, {
       cacheWriteDelayMs: 20,
@@ -592,6 +599,10 @@ describe('room-list cache', () => {
         writes.push(rows)
         roomList.write(rows)
       },
+      readServerView: () => roomList.readServerView(),
+      writeServerView: (view, options) =>
+        roomList.writeServerView(view, options),
+      forgetServerView: () => roomList.forgetServerView(),
     }
     const store = createRoomsStore(api(), memoryStorage(), spy, {
       cacheWriteDelayMs: 60_000,

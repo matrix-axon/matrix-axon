@@ -466,9 +466,13 @@ describe('InvitesPage', () => {
         HttpResponse.json({ data: { room_id: '!a:hs' } }),
       ),
     )
-    const { findByRole } = renderInbox()
+    const { findByRole, services } = renderInbox()
+    const accept = await findByRole('button', { name: 'Accept all' })
+    // Count from after the mount's own refresh, which waits on the cached
+    // server view's restore (ADR 0134) and can otherwise land after `before`.
+    await services.rooms.ensureLoaded()
     const before = roomGets
-    fireEvent.click(await findByRole('button', { name: 'Accept all' }))
+    fireEvent.click(accept)
     await waitFor(() => {
       expect(roomGets).toBeGreaterThan(before)
     })

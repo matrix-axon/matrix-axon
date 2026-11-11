@@ -11,12 +11,12 @@ It is whether the request is **stalled** or **starved**.
 
 `RoomPage`'s mount effect (`clients/web/src/pages/RoomPage.tsx`) fires four requests in one synchronous burst, unordered and unprioritized:
 
-| Request                     | Size                                          | Gates the paint? |
-| --------------------------- | --------------------------------------------- | ---------------- |
-| `GET /v1/rooms`             | the whole room list                           | no               |
-| `GET .../members`           | the whole member list — no `limit`, no cursor | no               |
-| `GET .../threads`           | thread summaries                              | no               |
-| `GET .../timeline?limit=50` | ~17 KB                                        | **yes, alone**   |
+| Request                     | Size                                                                                                | Gates the paint? |
+| --------------------------- | --------------------------------------------------------------------------------------------------- | ---------------- |
+| `GET /v1/rooms`             | the whole room list on a first launch; after that, the rooms changed since the last read (ADR 0134) | no               |
+| `GET .../members`           | the whole member list — no `limit`, no cursor                                                       | no               |
+| `GET .../threads`           | thread summaries                                                                                    | no               |
+| `GET .../timeline?limit=50` | ~17 KB                                                                                              | **yes, alone**   |
 
 The pane shows "Loading messages…" until the fourth settles.
 So the request that gates the paint is the smallest of the four, launched into contention with the largest two.
