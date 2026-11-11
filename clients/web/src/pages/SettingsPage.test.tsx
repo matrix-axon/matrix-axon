@@ -612,6 +612,28 @@ describe('SettingsPage', () => {
     expect((await findByRole('status')).textContent).toBe('Copied')
   })
 
+  it('shows and copies the install ID that device-state requests carry', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const services = testServices()
+    const { getByRole, getByText, findByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    const id = services.deviceState.deviceId
+    // The whole id, not a prefix: it is read off the screen and matched
+    // against log lines when the clipboard is not an option.
+    expect(getByText(id).textContent).toBe(id)
+    fireEvent.click(getByRole('button', { name: 'Copy install ID' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(id))
+    expect((await findByRole('status')).textContent).toBe('Copied')
+  })
+
   it('hides the server panel in a browser, where the server is not a choice', () => {
     // `browserPlatform().defaultApiBaseUrl` is `'/'`, so offering to "change"
     // the server would be offering to break a same-origin deployment.
