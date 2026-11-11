@@ -752,13 +752,6 @@ fn validate(corpus: &Corpus, now: chrono::DateTime<Utc>) -> anyhow::Result<()> {
                 bail!("room {} has unknown member {member}", room.id);
             }
         }
-        if !room.joined_by(room.creator(viewer)) {
-            bail!(
-                "room {} is created by {}, who is not among its members",
-                room.id,
-                room.creator(viewer)
-            );
-        }
         for localpart in room.alias_localparts() {
             if localpart.is_empty()
                 || !localpart
@@ -799,6 +792,24 @@ fn validate(corpus: &Corpus, now: chrono::DateTime<Utc>) -> anyhow::Result<()> {
                  axon would never see it",
                 room.id
             );
+        }
+        // After the space-child check, so a room missing both the viewer and
+        // a space hears about the space first: that is the rule it broke
+        // first, and this message would otherwise blame a `creator` the
+        // author never wrote.
+        if !room.joined_by(room.creator(viewer)) {
+            match &room.creator {
+                Some(creator) => bail!(
+                    "room {} is created by {creator}, who is not among its members",
+                    room.id
+                ),
+                None => bail!(
+                    "room {} sets no `creator`, so the viewer {viewer} is assumed, but \
+                     {viewer} is not among its members; a room without the viewer \
+                     needs a `creator` who is",
+                    room.id
+                ),
+            }
         }
     }
 
@@ -1156,7 +1167,7 @@ async fn create_alias(
     alias: &str,
     room_id: &str,
 ) -> anyhow::Result<()> {
-    client
+    let resp = client
         .put(format!(
             "{hs}/_matrix/client/v3/directory/room/{}",
             url_path(alias)
@@ -1165,9 +1176,16 @@ async fn create_alias(
         .query(&[("user_id", actor)])
         .json(&serde_json::json!({ "room_id": room_id }))
         .send()
-        .await?
-        .error_for_status()
-        .with_context(|| format!("create alias {alias}"))?;
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        // The status alone cannot tell the likely refusals apart — an alias
+        // already taken (M_ROOM_IN_USE), one outside the appservice namespace
+        // (M_EXCLUSIVE), or a homeserver alias-creation rule (M_FORBIDDEN) —
+        // so the error carries Synapse's own `errcode` and `error`.
+        let body = resp.text().await.unwrap_or_default();
+        bail!("create alias {alias} as {actor}: {status}: {body}");
+    }
     Ok(())
 }
 
@@ -1241,6 +1259,45 @@ mod tests {
         let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
         assert!(
             err.to_string().contains("axon would never see it"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_viewerless_room_without_a_creator_names_the_default() {
+        // Still a space child, so the space check passes and the creator
+        // check is the one that fires — and it has to say the viewer was
+        // assumed, since the author wrote no `creator` at all.
+        let mut corpus = corpus();
+        let room = corpus
+            .room
+            .iter_mut()
+            .find(|r| r.id == "salmon-count")
+            .expect("committed corpus has salmon-count");
+        room.creator = None;
+        let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
+        assert!(
+            err.to_string()
+                .contains("sets no `creator`, so the viewer alex is assumed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_viewerless_orphan_hears_about_the_space_first() {
+        let mut corpus = corpus();
+        corpus
+            .room
+            .iter_mut()
+            .find(|r| r.id == "salmon-count")
+            .expect("committed corpus has salmon-count")
+            .creator = None;
+        for space in &mut corpus.space {
+            space.children.retain(|c| c != "salmon-count");
+        }
+        let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
+        assert!(
+            err.to_string().contains("is no space's child"),
             "unexpected error: {err}"
         );
     }

@@ -19,7 +19,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
-use axon_smoke_tui::local_stack::Demo;
+use axon_smoke_tui::local_stack::{Demo, DemoRoom};
 
 /// One scripted action.
 pub enum Step {
@@ -468,11 +468,22 @@ fn end() -> Step {
 
 // ── corpus lookups ──────────────────────────────────────────────────────────
 
-fn room_name(demo: &Demo, id: &str) -> anyhow::Result<String> {
+/// A corpus room the viewer is in. Every scene drives the viewer's own
+/// client, so a room it has not joined is a mistake in the scene, reported
+/// here rather than as a 30 s wait for a row that never appears.
+fn joined_room<'a>(demo: &'a Demo, id: &str) -> anyhow::Result<&'a DemoRoom> {
     let room = demo
         .rooms
         .get(id)
         .ok_or_else(|| missing("room", id, demo.rooms.keys()))?;
+    if !room.joined {
+        bail!("corpus room {id:?} is one the viewer has not joined; no TUI scene can open it");
+    }
+    Ok(room)
+}
+
+fn room_name(demo: &Demo, id: &str) -> anyhow::Result<String> {
+    let room = joined_room(demo, id)?;
     room.name
         .clone()
         .ok_or_else(|| anyhow!("corpus room {id:?} has no name; address it by member instead"))
@@ -481,12 +492,7 @@ fn room_name(demo: &Demo, id: &str) -> anyhow::Result<String> {
 /// The per-run Matrix id. Needed only where a room cannot be addressed by
 /// name, which today means the DM.
 fn room_id(demo: &Demo, id: &str) -> anyhow::Result<String> {
-    Ok(demo
-        .rooms
-        .get(id)
-        .ok_or_else(|| missing("room", id, demo.rooms.keys()))?
-        .room_id
-        .clone())
+    Ok(joined_room(demo, id)?.room_id.clone())
 }
 
 fn persona_name(demo: &Demo, id: &str) -> anyhow::Result<String> {
@@ -509,6 +515,28 @@ fn missing<'a>(kind: &str, id: &str, known: impl Iterator<Item = &'a String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unjoined_room_is_refused_by_name_and_by_id() {
+        let mut demo = demo_seeded_at("2026-08-01T09:00:00Z");
+        assert_eq!(
+            room_name(&demo, "trail-work").expect("joined"),
+            "Trail Work"
+        );
+        demo.rooms
+            .get_mut("trail-work")
+            .expect("fixture room")
+            .joined = false;
+        for err in [
+            room_name(&demo, "trail-work").expect_err("unjoined by name"),
+            room_id(&demo, "trail-work").expect_err("unjoined by id"),
+        ] {
+            assert!(
+                err.to_string().contains("has not joined"),
+                "unexpected error: {err}"
+            );
+        }
+    }
 
     /// A manifest with one room, seeded at a fixed instant well in the past.
     fn demo_seeded_at(seeded_at: &str) -> Demo {
