@@ -522,3 +522,21 @@ export function memberCountsShown(info: RoomInfoDto): Shown {
   }
   return shownValue(`${counts.joined} joined · ${counts.invited} invited`)
 }
+
+/**
+ * Why the member list is shorter than the Members count, or `null` when it is
+ * not (or the count is unknown). `GET …/members` returns only the members sync
+ * has delivered — Matrix loads them lazily — so a large room lists a handful
+ * while `member_counts` reports hundreds. The complete list is issue 659's
+ * server work; until then the panel says the list is partial rather than let
+ * it pass for everyone.
+ */
+export function memberListCoverage(
+  loadedJoined: number,
+  info: RoomInfoDto | null,
+): string | null {
+  const joined = info?.member_counts?.joined
+  if (typeof joined !== 'number' || loadedJoined >= joined) return null
+  const noun = joined === 1 ? 'member' : 'members'
+  return `Showing ${loadedJoined} of ${joined} joined ${noun}: Axon lists only the members your homeserver has sent it so far.`
+}

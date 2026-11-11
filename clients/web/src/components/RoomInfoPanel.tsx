@@ -46,6 +46,7 @@ import {
   historyVisibilityShown,
   localAliasesShown,
   memberCountsShown,
+  memberListCoverage,
   predecessorShown,
   roomVersionShown,
   serverAclShown,
@@ -294,6 +295,18 @@ export function RoomInfoPanel({
     () => filteredMembers([...members.members.value.values()], filter),
     [members.members.value, filter],
   )
+  // Counted over every loaded member, not the filtered roster: the note is
+  // about what Axon has, not about what the filter shows.
+  const loadedJoined = useMemo(
+    () =>
+      [...members.members.value.values()].filter(
+        (member) => member.membership === 'join',
+      ).length,
+    [members.members.value],
+  )
+  const memberCoverage = members.loading.value
+    ? null
+    : memberListCoverage(loadedJoined, details.info.value)
   const onlyJoinedMember =
     ownUserId !== null &&
     isOnlyJoinedMember(members.members.value.values(), ownUserId)
@@ -1010,6 +1023,9 @@ export function RoomInfoPanel({
           >
             {cancelInviteStatus}
           </p>
+        )}
+        {memberCoverage !== null && (
+          <p class="room-info-member-coverage muted">{memberCoverage}</p>
         )}
         {members.loading.value && members.members.value.size === 0 ? (
           <p class="muted">Loading members…</p>

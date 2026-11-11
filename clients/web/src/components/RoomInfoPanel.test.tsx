@@ -181,7 +181,7 @@ function renderPanel(
         </LocationProvider>
       </ServicesContext.Provider>,
     )
-  return { ...view, showRoom, services }
+  return { ...view, showRoom, services, members }
 }
 
 const detail = (label: string): string => {
@@ -1508,4 +1508,53 @@ it('never renders details the store holds for a different room', () => {
   )
   expect(detail('Encryption')).toBe('Loading…')
   expect(detail('Members')).toBe('Loading…')
+})
+
+it('says when the member list is shorter than the joined count (issue 659)', async () => {
+  const memberRow = (userId: string, membership: string) => ({
+    user_id: userId,
+    membership,
+    display_name: userId.slice(1, userId.indexOf(':')),
+    avatar_url: null,
+  })
+  let loaded = [
+    memberRow('@me:example.org', 'join'),
+    memberRow('@alice:hs', 'join'),
+    // Invites do not count toward the joined total.
+    memberRow('@carol:hs', 'invite'),
+  ]
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+      () => HttpResponse.json({ data: loaded }),
+    ),
+    ...handlers(),
+  )
+  const { container, getByLabelText, members } = renderPanel(FIRST)
+  // `RoomPage` loads the roster; the panel only renders it.
+  await members.refresh()
+  const coverage = () =>
+    container.querySelector('.room-info-member-coverage')?.textContent ?? null
+  await waitFor(() =>
+    expect(coverage()).toBe(
+      'Showing 2 of 3 joined members: Axon lists only the members your homeserver has sent it so far.',
+    ),
+  )
+  // The note is about what Axon has, so filtering the list does not change it.
+  fireEvent.input(getByLabelText('Filter members'), {
+    target: { value: 'alice' },
+  })
+  expect(coverage()).toContain('Showing 2 of 3')
+
+  cleanup()
+  loaded = [...loaded, memberRow('@bob:hs', 'join')]
+  const complete = renderPanel(FIRST)
+  await complete.members.refresh()
+  await waitFor(() =>
+    expect(complete.container.querySelectorAll('.member-row').length).toBe(4),
+  )
+  await waitFor(() => expect(detail('Members')).toBe('3 joined · 1 invited'))
+  expect(
+    complete.container.querySelector('.room-info-member-coverage'),
+  ).toBeNull()
 })

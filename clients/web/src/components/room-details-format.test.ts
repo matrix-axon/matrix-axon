@@ -17,6 +17,7 @@ import {
   historyVisibilityShown,
   localAliasesShown,
   memberCountsShown,
+  memberListCoverage,
   predecessorShown,
   roomVersionShown,
   serverAclShown,
@@ -445,5 +446,28 @@ describe('homeserver details (decision 3, value and note tables)', () => {
     ).toBe(
       "Your homeserver didn't allow this lookup · may be out of date · couldn't refresh",
     )
+  })
+})
+
+describe('memberListCoverage', () => {
+  const counts = (joined: number) => ({
+    member_counts: { joined, invited: 0, observed_at: 1 },
+  })
+
+  it('explains a list shorter than the joined count', () => {
+    expect(memberListCoverage(12, counts(340))).toBe(
+      'Showing 12 of 340 joined members: Axon lists only the members your homeserver has sent it so far.',
+    )
+    expect(memberListCoverage(0, counts(1))).toBe(
+      'Showing 0 of 1 joined member: Axon lists only the members your homeserver has sent it so far.',
+    )
+  })
+
+  it('says nothing when the list is complete or the count unknown', () => {
+    expect(memberListCoverage(3, counts(3))).toBeNull()
+    // A stale count below the loaded list is not a gap either.
+    expect(memberListCoverage(4, counts(3))).toBeNull()
+    expect(memberListCoverage(3, { member_counts: null })).toBeNull()
+    expect(memberListCoverage(3, null)).toBeNull()
   })
 })
