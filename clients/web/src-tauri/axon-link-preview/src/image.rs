@@ -7,8 +7,11 @@
 //! other embedded metadata survives. PNG, JPEG, GIF and WebP are read; SVG and
 //! everything else are refused. An animated image contributes its first frame.
 //!
-//! The dimensions are read and checked before any pixel is allocated, and the
-//! decoder runs with an allocation limit as well.
+//! The dimensions are read and checked before any pixel is allocated, and
+//! every pass over the bytes, the dimension read included, runs with an
+//! allocation limit. A WebP file's chunk lengths are checked against the
+//! bytes actually present first, because image-webp allocates a chunk's
+//! declared length when it reads metadata, outside `image`'s limits.
 
 use crate::error::{Failure, Result};
 use crate::http::THUMBNAIL_BYTES;
@@ -33,35 +36,73 @@ pub(crate) struct Thumbnail {
     pub(crate) height: u32,
 }
 
-fn reader(data: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>> {
-    let reader = ImageReader::new(Cursor::new(data))
+fn limits(width: u32, height: u32) -> Limits {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(width);
+    limits.max_image_height = Some(height);
+    limits.max_alloc = Some(MAX_ALLOC);
+    limits
+}
+
+fn reader(data: &[u8], limits: Limits) -> Result<ImageReader<Cursor<&[u8]>>> {
+    let mut reader = ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .map_err(|_| Failure::Invalid)?;
     match reader.format() {
-        Some(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP) => {
-            Ok(reader)
-        }
-        _ => Err(Failure::Invalid),
+        Some(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif) => {}
+        Some(ImageFormat::WebP) => webp_chunks_fit(data)?,
+        _ => return Err(Failure::Invalid),
     }
+    reader.limits(limits);
+    Ok(reader)
+}
+
+/// Every chunk of a WebP file lies inside the bytes received: the RIFF
+/// length, then each chunk's declared length and its padding byte. So no
+/// chunk image-webp reads can ask for more than the input's own size, which
+/// is at most 2 MiB.
+fn webp_chunks_fit(data: &[u8]) -> Result<()> {
+    let word = |at: usize| -> Result<usize> {
+        let bytes = data.get(at..at + 4).ok_or(Failure::Invalid)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
+    };
+    if data.get(..4) != Some(b"RIFF") || data.get(8..12) != Some(b"WEBP") {
+        return Err(Failure::Invalid);
+    }
+    let end = word(4)?.checked_add(8).ok_or(Failure::Invalid)?;
+    if end > data.len() {
+        return Err(Failure::Invalid);
+    }
+    let mut at = 12;
+    while at < end {
+        let size = word(at + 4)?;
+        let next = at
+            .checked_add(8)
+            .and_then(|start| start.checked_add(size))
+            .ok_or(Failure::Invalid)?;
+        if next > end {
+            return Err(Failure::Invalid);
+        }
+        at = next + (size & 1);
+    }
+    Ok(())
 }
 
 pub(crate) fn normalize(data: &[u8]) -> Result<Thumbnail> {
     if data.len() > THUMBNAIL_BYTES {
         return Err(Failure::Quota);
     }
-    let (width, height) = reader(data)?
+    // The contract's 4,000,000 pixels bound either side before the real
+    // dimensions are known.
+    let (width, height) = reader(data, limits(MAX_PIXELS as u32, MAX_PIXELS as u32))?
         .into_dimensions()
         .map_err(|_| Failure::Invalid)?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
         return Err(Failure::Invalid);
     }
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(width);
-    limits.max_image_height = Some(height);
-    limits.max_alloc = Some(MAX_ALLOC);
-    let mut reader = reader(data)?;
-    reader.limits(limits);
-    let mut decoder = reader.into_decoder().map_err(|_| Failure::Invalid)?;
+    let mut decoder = reader(data, limits(width, height))?
+        .into_decoder()
+        .map_err(|_| Failure::Invalid)?;
     let orientation = decoder.orientation().map_err(|_| Failure::Invalid)?;
     let mut decoded = DynamicImage::from_decoder(decoder).map_err(|_| Failure::Invalid)?;
     decoded.apply_orientation(orientation);
@@ -186,6 +227,52 @@ pub(crate) mod tests {
             normalize(&encoded(&wide, ImageFormat::Png)),
             Err(Failure::Invalid)
         );
+    }
+
+    /// The reviewer's probe: a 1x1 lossless WebP whose EXIF chunk declares
+    /// 65 MiB, in 52 bytes.
+    fn webp_with_oversized_exif() -> Vec<u8> {
+        let mut data = b"RIFF".to_vec();
+        data.extend_from_slice(&50u32.to_le_bytes());
+        data.extend_from_slice(b"WEBPVP8X");
+        data.extend_from_slice(&10u32.to_le_bytes());
+        data.extend_from_slice(&[8, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        data.extend_from_slice(b"VP8L");
+        data.extend_from_slice(&5u32.to_le_bytes());
+        data.extend_from_slice(&[0x2f, 0, 0, 0, 0, 0]);
+        data.extend_from_slice(b"EXIF");
+        data.extend_from_slice(&(65u32 * 1024 * 1024).to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn a_webp_chunk_cannot_claim_more_than_the_input() {
+        let data = webp_with_oversized_exif();
+        assert_eq!(data.len(), 52);
+        let (result, largest) = crate::tests::largest_allocation(|| normalize(&data));
+        assert_eq!(result, Err(Failure::Invalid));
+        assert!(largest < 1024 * 1024, "allocated {largest} bytes");
+        // A RIFF length past the end, and a chunk past the RIFF length.
+        let mut riff = data.clone();
+        riff[4..8].copy_from_slice(&1000u32.to_le_bytes());
+        assert_eq!(webp_chunks_fit(&riff), Err(Failure::Invalid));
+        let mut chunk = data[..44].to_vec();
+        chunk[4..8].copy_from_slice(&36u32.to_le_bytes());
+        chunk[32..36].copy_from_slice(&9u32.to_le_bytes());
+        assert_eq!(webp_chunks_fit(&chunk), Err(Failure::Invalid));
+    }
+
+    #[test]
+    fn a_well_formed_webp_still_decodes() {
+        let photo = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            6,
+            3,
+            image::Rgba([50, 60, 70, 255]),
+        ));
+        let webp = encoded(&photo, ImageFormat::WebP);
+        assert_eq!(webp_chunks_fit(&webp), Ok(()));
+        let thumbnail = normalize(&webp).unwrap();
+        assert_eq!((thumbnail.width, thumbnail.height), (6, 3));
     }
 
     #[test]

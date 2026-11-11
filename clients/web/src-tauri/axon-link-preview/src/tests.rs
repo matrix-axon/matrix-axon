@@ -25,6 +25,57 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs
 use tokio_rustls::rustls::{self, RootCertStore};
 
 // ---------------------------------------------------------------------------
+// Allocation measurement, for the decoder's limits. Only the thread that asks
+// is measured, so tests running in parallel do not disturb the reading.
+
+struct Counting;
+
+thread_local! {
+    static MEASURING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LARGEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note(size: usize) {
+    // `try_with`: the allocator can run while thread-locals are torn down.
+    let _ = MEASURING.try_with(|measuring| {
+        if measuring.get() {
+            let _ = LARGEST.try_with(|largest| largest.set(largest.get().max(size)));
+        }
+    });
+}
+
+// SAFETY: every call is forwarded to the system allocator unchanged.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        note(layout.size());
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        note(layout.size());
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        note(size);
+        unsafe { std::alloc::System.realloc(ptr, layout, size) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// `work`'s result, and the largest single allocation it made on this thread.
+pub(crate) fn largest_allocation<T>(work: impl FnOnce() -> T) -> (T, usize) {
+    LARGEST.with(|largest| largest.set(0));
+    MEASURING.with(|measuring| measuring.set(true));
+    let result = work();
+    MEASURING.with(|measuring| measuring.set(false));
+    (result, LARGEST.with(std::cell::Cell::get))
+}
+
+// ---------------------------------------------------------------------------
 // The shared fixtures.
 
 fn fixtures() -> PathBuf {
@@ -511,6 +562,37 @@ async fn a_silent_server_runs_into_the_deadline() {
     );
 }
 
+/// A `resolv.conf` can only name port 53, so this checks the list each query
+/// would use rather than sending to it; the tests above cover sending.
+#[tokio::test]
+async fn the_wire_client_rereads_resolv_conf_for_each_query() {
+    let path = std::env::temp_dir().join(format!(
+        "axon-link-preview-resolv-{}.conf",
+        std::process::id()
+    ));
+    let dns = WireDns::from_file(&path);
+    std::fs::write(&path, "nameserver 192.0.2.1\n").unwrap();
+    assert_eq!(
+        dns.current().await,
+        vec!["192.0.2.1:53".parse::<SocketAddr>().unwrap()]
+    );
+    // The network changed, and NetworkManager rewrote the file.
+    std::fs::write(&path, "nameserver 198.51.100.1\nnameserver 192.0.2.2\n").unwrap();
+    assert_eq!(
+        dns.current().await,
+        vec![
+            "198.51.100.1:53".parse::<SocketAddr>().unwrap(),
+            "192.0.2.2:53".parse::<SocketAddr>().unwrap(),
+        ]
+    );
+    // And when the file is gone, glibc's default.
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        dns.current().await,
+        vec!["127.0.0.1:53".parse::<SocketAddr>().unwrap()]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The fetch loop, with stand-ins for both steps of a hop, as
 // `RestrictedPreviewTests` and `PreviewResolutionTests` have it.
@@ -823,7 +905,7 @@ async fn a_lookup_reports_the_kinds_the_page_sees() {
     let failure = |url: &'static str| {
         let hop = &hop;
         async move {
-            preview::lookup(hop, url, &Cancel::new())
+            preview::lookup(hop, url, &Cancel::new(), &preview::Normalizer::new())
                 .await
                 .unwrap_err()
                 .kind
@@ -847,11 +929,158 @@ async fn a_lookup_reports_the_kinds_the_page_sees() {
     );
     // An image-only page whose image fails to decode has nothing to show,
     // except the title Foundation gives the root path.
-    let preview = preview::lookup(&empty, "https://example.org/", &Cancel::new())
-        .await
-        .unwrap();
+    let preview = preview::lookup(
+        &empty,
+        "https://example.org/",
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(preview.title.as_deref(), Some("/"));
     assert!(preview.image_unavailable);
+}
+
+// ---------------------------------------------------------------------------
+// Decoding stays inside the lookup's deadline and cancellation, and within a
+// budget of its own when a lookup stops waiting for it.
+
+/// A decoder that blocks until released, and counts how many decodes began.
+struct HeldDecoder {
+    started: Arc<AtomicUsize>,
+    begun: Arc<tokio::sync::Notify>,
+    release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl HeldDecoder {
+    fn new() -> Self {
+        HeldDecoder {
+            started: Arc::new(AtomicUsize::new(0)),
+            begun: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+        }
+    }
+
+    fn normalizer(&self) -> preview::Normalizer {
+        let (started, begun, release) = (
+            self.started.clone(),
+            self.begun.clone(),
+            self.release.clone(),
+        );
+        preview::Normalizer::with(Arc::new(move |_bytes: &[u8]| {
+            started.fetch_add(1, Ordering::SeqCst);
+            begun.notify_one();
+            let (released, wake) = &*release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            Err(Failure::Invalid)
+        }))
+    }
+
+    fn release(&self) {
+        let (released, wake) = &*self.release;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+    }
+}
+
+fn page_with_image() -> Arc<Scripted> {
+    Arc::new(Scripted::new(
+        Box::new(public),
+        Box::new(|checked, _, kind| {
+            Ok(match kind {
+                Resource::Page => response(
+                    200,
+                    &[("content-type", "text/html")],
+                    b"<title>Kept</title><meta property='og:image' content='/i.png'>",
+                    &checked.url,
+                ),
+                Resource::Image => {
+                    response(200, &[("content-type", "image/png")], &[1], &checked.url)
+                }
+            })
+        }),
+    ))
+}
+
+fn spawn_lookup(
+    hop: Arc<Scripted>,
+    normalizer: Arc<preview::Normalizer>,
+    cancel: Cancel,
+) -> tokio::task::JoinHandle<Result<preview::Preview, crate::LookupError>> {
+    tokio::spawn(async move {
+        preview::lookup(&*hop, "https://example.org/a", &cancel, &normalizer).await
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_lookup_stops_waiting_for_its_image() {
+    let decoder = HeldDecoder::new();
+    let normalizer = Arc::new(decoder.normalizer());
+    let cancel = Cancel::new();
+    let lookup = spawn_lookup(page_with_image(), normalizer, cancel.clone());
+    decoder.begun.notified().await;
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(5), lookup).await;
+    // Released before asserting, so a failure fails instead of leaving a
+    // blocked thread the runtime waits for at shutdown.
+    decoder.release();
+    assert_eq!(result.unwrap().unwrap().unwrap_err().kind, Kind::Cancelled);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_deadline_covers_decoding_and_abandoned_decodes_stay_within_budget() {
+    let decoder = HeldDecoder::new();
+    let normalizer = Arc::new(decoder.normalizer());
+    // Two lookups stop waiting for their decodes, which keep running.
+    for _ in 0..2 {
+        let cancel = Cancel::new();
+        let lookup = spawn_lookup(page_with_image(), normalizer.clone(), cancel.clone());
+        decoder.begun.notified().await;
+        cancel.cancel();
+        assert_eq!(lookup.await.unwrap().unwrap_err().kind, Kind::Cancelled);
+    }
+    // A third waits for a decoding slot only until its deadline, and keeps
+    // its text.
+    let begun = Instant::now();
+    let lookup = spawn_lookup(page_with_image(), normalizer.clone(), Cancel::new());
+    tokio::task::yield_now().await;
+    tokio::time::advance(preview::DEADLINE + Duration::from_secs(1)).await;
+    let result = tokio::time::timeout(Duration::from_secs(60), lookup).await;
+    let started = decoder.started.load(Ordering::SeqCst);
+    decoder.release();
+    let preview = result.unwrap().unwrap().unwrap();
+    assert_eq!(preview.title.as_deref(), Some("Kept"));
+    assert!(preview.image.is_none());
+    assert!(preview.image_unavailable);
+    assert!(Instant::now() - begun >= preview::DEADLINE);
+    // No third decode was started while two were still held.
+    assert_eq!(started, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Registrations, as the commands make them.
+
+#[test]
+fn an_old_command_finishing_keeps_a_new_registration_under_the_same_key() {
+    let lookups = crate::Lookups::new();
+    let key = ("main".to_owned(), 1);
+    let (old, old_cancel) = lookups.register(key.clone()).unwrap();
+    // A reload: the old page's lookup is cancelled, and the new page starts
+    // its ids from 1 again.
+    lookups.forget_webview("main");
+    assert!(old_cancel.is_cancelled());
+    let (_new, new_cancel) = lookups.register(key.clone()).unwrap();
+    // The old command unwinds after the new one registered.
+    lookups.finish(&key, old);
+    lookups.cancel(&key);
+    assert!(
+        new_cancel.is_cancelled(),
+        "the new lookup can still be cancelled"
+    );
+    assert!(lookups.registered.lock().unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,6 +1304,7 @@ async fn a_lookup_end_to_end_over_tls() {
         &network,
         "https://page.example.org/start?x=1#frag",
         &Cancel::new(),
+        &preview::Normalizer::new(),
     )
     .await
     .unwrap();
@@ -1113,14 +1343,26 @@ async fn tls_is_verified_against_the_original_host_name() {
         https_server(HashMap::from([("/", ok("text/html", b"<title>T</title>"))])).await;
     let (network, dialed) = network(port);
     // The certificate names page.example.org and images.example.org only.
-    let result = preview::lookup(&network, "https://other.example.org/", &Cancel::new()).await;
+    let result = preview::lookup(
+        &network,
+        "https://other.example.org/",
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await;
     assert_eq!(result.unwrap_err().kind, Kind::Unavailable);
     assert_eq!(dialed.lock().unwrap().len(), 1);
     assert!(requests.lock().unwrap().is_empty());
     // And against roots it was given: Mozilla's do not include the test root.
     let (mut network, _) = self::network(port);
     network.tls = net::tls_config(net::mozilla_roots());
-    let result = preview::lookup(&network, "https://page.example.org/", &Cancel::new()).await;
+    let result = preview::lookup(
+        &network,
+        "https://page.example.org/",
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await;
     assert_eq!(result.unwrap_err().kind, Kind::Unavailable);
 }
 
@@ -1143,7 +1385,13 @@ async fn a_cancelled_lookup_stops_waiting() {
         canceller.cancel();
     });
     let begun = std::time::Instant::now();
-    let result = preview::lookup(&network, "https://page.example.org/", &cancel).await;
+    let result = preview::lookup(
+        &network,
+        "https://page.example.org/",
+        &cancel,
+        &preview::Normalizer::new(),
+    )
+    .await;
     assert_eq!(result.unwrap_err().kind, Kind::Cancelled);
     assert!(begun.elapsed() < Duration::from_secs(5));
 }
@@ -1220,7 +1468,7 @@ async fn live_public_https_metadata() {
         return;
     };
     let url = std::env::var("AXON_PREVIEW_URL").unwrap_or_else(|_| "https://example.com/".into());
-    let preview = preview::lookup(&network, &url, &Cancel::new())
+    let preview = preview::lookup(&network, &url, &Cancel::new(), &preview::Normalizer::new())
         .await
         .unwrap();
     assert!(preview.title.is_some());
@@ -1237,6 +1485,12 @@ async fn live_ipv6_only_origin_reports_public_ipv4_requirement() {
     let Some(network) = live() else {
         return;
     };
-    let result = preview::lookup(&network, "https://ipv6.google.com/", &Cancel::new()).await;
+    let result = preview::lookup(
+        &network,
+        "https://ipv6.google.com/",
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await;
     assert_eq!(result.unwrap_err().kind, Kind::PublicIpv4Required);
 }

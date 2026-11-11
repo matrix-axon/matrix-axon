@@ -77,22 +77,39 @@ own answer, a single-question client is about 200 lines and adds no crate.
 
 ### Capturing the queries
 
-Build a debug shell, start a capture, type a link to a dual-stack site such as
-`https://www.wikipedia.org/` into the composer, and stop the capture. Expect an
-`A` query for the site and an `AAAA` query for `ipv4only.arpa`, and no `AAAA`
-query for the site. Other parts of the app, and the webview, make queries of
-their own; filter on the site's name.
+Until the composer calls the plugin (ADR 0132's web PR), ask it directly. In a
+debug shell, open the webview's devtools (Ctrl+Shift+I, or the context menu's
+Inspect) and run, with a new `id` each time:
 
-- **macOS:** `sudo tcpdump -i any -n port 53`. With encrypted DNS configured the
-  queries are not visible; turn it off for the capture.
-- **iOS:** on a Mac, `rvictl -s <udid>` and `sudo tcpdump -i rvi0 -n port 53`.
-- **Android:** an emulator, `adb shell` then `tcpdump -i any -n port 53` on a
-  rooted image; or set Private DNS to Off and capture on the host. On
-  Android 9 or earlier, expect no query at all.
-- **Windows:** `pktmon start --capture --pkt-size 0 -f dns.etl`, then
-  `pktmon stop` and `pktmon etl2pcap dns.etl`; or Wireshark with `dns`.
-- **Linux:** `sudo tcpdump -i any -n port 53`. With systemd-resolved, also
-  `resolvectl monitor`, which shows the question the stub was asked.
+```js
+const frame = await window.__TAURI_INTERNALS__.invoke(
+  'plugin:axon-link-preview|lookup',
+  { id: 9001, url: 'https://www.wikipedia.org/' },
+)
+const length = new DataView(frame).getUint32(0)
+console.log(new TextDecoder().decode(new Uint8Array(frame, 4, length)))
+```
+
+Capture while it runs. Expect an `A` query for the site, an `AAAA` query for
+`ipv4only.arpa`, and no `AAAA` query for the site. Other parts of the app, and
+the webview, make queries of their own; filter on the two names. Two things
+hide queries that were made:
+
+- **The platform's DNS cache.** A name resolved recently is answered without a
+  packet. Flush it first (`ipconfig /flushdns` on Windows,
+  `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder` on macOS,
+  `resolvectl flush-caches` with systemd-resolved), or use a site this machine
+  has not visited.
+- **Encrypted DNS** (DNS over HTTPS or TLS, Private DNS, an iCloud Private Relay
+  or VPN profile): the questions are not visible as DNS. Turn it off for the
+  capture.
+
+The `device_preview_dns64` log line says what discovery found: `prefix`,
+`no_record`, `unusable` or `failed`. If the `ipv4only.arpa` query does not
+appear in a capture, that line tells an answer the platform gave without a
+packet (`no_record` or `prefix`) from a query that failed. Either way the
+lookup goes on with the IPv4 address alone, which is correct on a network
+without NAT64.
 
 ## Logging
 

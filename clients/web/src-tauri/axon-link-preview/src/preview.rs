@@ -10,11 +10,74 @@ use crate::page::{self, preview_field, DESCRIPTION_LIMIT, SITE_NAME_LIMIT, TITLE
 use crate::url_check;
 use crate::Cancel;
 use percent_encoding::percent_decode_str;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 /// One deadline covers the page, its redirects and its image.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(25);
+
+/// At most this many images are decoded at once, counting decodes a
+/// cancelled or expired lookup stopped waiting for.
+const NORMALIZING: usize = 2;
+
+type Normalize = dyn Fn(&[u8]) -> Result<Thumbnail, Failure> + Send + Sync;
+
+/// Decodes preview images on blocking threads, within a budget of its own.
+///
+/// A lookup waits for its image only until its deadline or its cancellation,
+/// but a decode already running cannot be stopped. Each decode holds a slot
+/// until it really ends, so abandoned decodes can never occupy more than
+/// [`NORMALIZING`] threads, and a lookup never holds its `running` permit
+/// while waiting for one.
+pub(crate) struct Normalizer {
+    slots: Arc<Semaphore>,
+    run: Arc<Normalize>,
+}
+
+impl Normalizer {
+    pub(crate) fn new() -> Self {
+        Normalizer::with(Arc::new(image::normalize))
+    }
+
+    pub(crate) fn with(run: Arc<Normalize>) -> Self {
+        Normalizer {
+            slots: Arc::new(Semaphore::new(NORMALIZING)),
+            run,
+        }
+    }
+
+    /// The thumbnail, or why there is none. `Expired` and `Cancelled` mean
+    /// this stopped waiting; the decode may still finish on its own.
+    async fn normalize(
+        &self,
+        bytes: Vec<u8>,
+        deadline: Instant,
+        cancel: &Cancel,
+    ) -> Result<Thumbnail, Failure> {
+        let slots = self.slots.clone();
+        let run = self.run.clone();
+        let work = async move {
+            let slot = slots
+                .acquire_owned()
+                .await
+                .map_err(|_| Failure::Unavailable)?;
+            tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                run(&bytes)
+            })
+            .await
+            .unwrap_or(Err(Failure::Invalid))
+        };
+        tokio::select! {
+            result = tokio::time::timeout_at(deadline, work) => {
+                result.unwrap_or(Err(Failure::Expired))
+            }
+            () = cancel.cancelled() => Err(Failure::Cancelled),
+        }
+    }
+}
 
 /// What a lookup found, every text field already checked against the send
 /// contract.
@@ -127,10 +190,16 @@ pub(crate) async fn fetch<H: Hop>(
 /// A whole lookup, from the link the user wrote to what the page receives:
 /// the static check first, then [`fetch`], then the image is normalized and
 /// every field checked again, as `DevicePreview.include` does.
+///
+/// The image is decoded inside the same deadline and cancellation as the
+/// fetch. A deadline that passes while it decodes leaves a card with its text
+/// and no image, as an image fetch that runs out of time does; with no text
+/// either, the lookup has timed out.
 pub(crate) async fn lookup<H: Hop>(
     hop: &H,
     url: &str,
     cancel: &Cancel,
+    normalizer: &Normalizer,
 ) -> Result<Preview, LookupError> {
     if url_check::validate(url).is_err() {
         return Err(Kind::UnsupportedUrl.into());
@@ -152,19 +221,22 @@ pub(crate) async fn lookup<H: Hop>(
         image: None,
         image_unavailable: fetched.image_unavailable,
     };
+    let mut expired = false;
     if let Some(bytes) = fetched.image {
-        // Decoding is CPU work, not I/O, so it leaves the async workers free.
-        let normalized = tokio::task::spawn_blocking(move || image::normalize(&bytes)).await;
-        match normalized {
-            Ok(Ok(thumbnail)) => {
+        match normalizer.normalize(bytes, deadline, cancel).await {
+            Ok(thumbnail) => {
                 crate::log::event(&format!(
                     "device_preview_image retained_bytes={}",
                     thumbnail.bytes.len()
                 ));
                 preview.image = Some(thumbnail);
             }
-            _ => {
-                crate::log::event("device_preview_image_unavailable");
+            Err(Failure::Cancelled) => return Err(Failure::Cancelled.into()),
+            Err(failure) => {
+                expired = failure == Failure::Expired;
+                crate::log::event(&format!(
+                    "device_preview_image_unavailable category={failure:?}"
+                ));
                 preview.image_unavailable = true;
             }
         }
@@ -177,7 +249,12 @@ pub(crate) async fn lookup<H: Hop>(
         && preview.description.is_none()
         && preview.site_name.is_none()
     {
-        return Err(Kind::NoMetadata.into());
+        return Err(if expired {
+            Kind::Timeout
+        } else {
+            Kind::NoMetadata
+        }
+        .into());
     }
     crate::log::event(&format!(
         "device_preview_included image={}",

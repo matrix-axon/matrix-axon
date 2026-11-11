@@ -59,10 +59,20 @@ const REGISTERED: usize = 16;
 
 type Key = (String, u64);
 
+/// One command's claim on a key. A reloaded page numbers its lookups from 1
+/// again, so a key can be registered anew while the old page's command is
+/// still unwinding; the generation tells the two registrations apart.
+struct Registration {
+    generation: u64,
+    cancel: Cancel,
+}
+
 struct Lookups {
     network: Arc<net::Network<dns::System, net::Direct>>,
     running: Arc<Semaphore>,
-    registered: Mutex<HashMap<Key, Cancel>>,
+    normalizer: preview::Normalizer,
+    registered: Mutex<HashMap<Key, Registration>>,
+    generations: std::sync::atomic::AtomicU64,
 }
 
 impl Lookups {
@@ -75,35 +85,52 @@ impl Lookups {
                 race_delay: net::RACE_DELAY,
             }),
             running: Arc::new(Semaphore::new(RUNNING)),
+            normalizer: preview::Normalizer::new(),
             registered: Mutex::new(HashMap::new()),
+            generations: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    fn register(&self, key: Key) -> Result<Cancel, LookupError> {
+    /// The registration's generation and its cancellation.
+    fn register(&self, key: Key) -> Result<(u64, Cancel), LookupError> {
         let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
         if registered.len() >= REGISTERED || registered.contains_key(&key) {
             return Err(Kind::Busy.into());
         }
+        let generation = self
+            .generations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let cancel = Cancel::new();
-        registered.insert(key, cancel.clone());
-        Ok(cancel)
+        registered.insert(
+            key,
+            Registration {
+                generation,
+                cancel: cancel.clone(),
+            },
+        );
+        Ok((generation, cancel))
     }
 
-    fn finish(&self, key: &Key) {
-        self.registered
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(key);
+    /// Forget `key` only if it is still this command's registration, so an
+    /// old command finishing cannot unregister a new one under the same key.
+    fn finish(&self, key: &Key, generation: u64) {
+        let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
+        if registered
+            .get(key)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            registered.remove(key);
+        }
     }
 
     fn cancel(&self, key: &Key) {
-        if let Some(cancel) = self
+        if let Some(entry) = self
             .registered
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(key)
         {
-            cancel.cancel();
+            entry.cancel.cancel();
         }
     }
 
@@ -111,9 +138,9 @@ impl Lookups {
     /// asked for.
     fn forget_webview(&self, label: &str) {
         let mut registered = self.registered.lock().unwrap_or_else(|e| e.into_inner());
-        registered.retain(|(owner, _), cancel| {
+        registered.retain(|(owner, _), entry| {
             if owner == label {
-                cancel.cancel();
+                entry.cancel.cancel();
             }
             owner != label
         });
@@ -176,7 +203,7 @@ async fn lookup<R: Runtime>(
     url: String,
 ) -> Result<Response, LookupError> {
     let key = (webview.label().to_owned(), id);
-    let cancel = lookups.register(key.clone())?;
+    let (generation, cancel) = lookups.register(key.clone())?;
     let network = lookups.network.clone();
     let running = lookups.running.clone();
     let result = async {
@@ -190,10 +217,10 @@ async fn lookup<R: Runtime>(
             },
             () = cancel.cancelled() => return Err(Kind::Cancelled.into()),
         };
-        preview::lookup(&*network, &url, &cancel).await
+        preview::lookup(&*network, &url, &cancel, &lookups.normalizer).await
     }
     .await;
-    lookups.finish(&key);
+    lookups.finish(&key, generation);
     if let Err(error) = &result {
         log::event(&format!("device_preview_failed kind={:?}", error.kind));
     }

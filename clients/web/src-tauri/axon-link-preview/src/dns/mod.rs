@@ -149,18 +149,28 @@ pub(crate) async fn resolve<D: Dns>(
             () = tokio::time::sleep_until(deadline) => Err(Failure::Expired),
         },
     };
-    match probed {
+    // Optional discovery cannot invalidate a usable public IPv4 target, but
+    // what it found is logged: on a network that should have NAT64, the
+    // difference between "no record", "failed" and "no usable prefix" is the
+    // whole diagnosis. No address is logged.
+    let discovery = match probed {
         Err(Failure::Cancelled) => return Err(Failure::Cancelled),
         Ok(Answer::Address(ip @ IpAddr::V6(_))) => {
-            if let Some(translated) = Nat64Prefix::discover(&Address::from(ip))
+            match Nat64Prefix::discover(&Address::from(ip))
                 .and_then(|prefix| Address::translated(&ipv4, &prefix))
             {
-                addresses.insert(0, translated);
+                Some(translated) => {
+                    addresses.insert(0, translated);
+                    "prefix".to_owned()
+                }
+                None => "unusable".to_owned(),
             }
         }
-        // Optional discovery cannot invalidate a usable public IPv4 target.
-        Ok(_) | Err(_) => {}
-    }
+        Ok(Answer::Address(IpAddr::V4(_))) => "unusable".to_owned(),
+        Ok(Answer::NoRecord) => "no_record".to_owned(),
+        Err(failure) => format!("failed category={failure:?}"),
+    };
+    crate::log::event(&format!("device_preview_dns64 result={discovery}"));
     if cancel.is_cancelled() {
         return Err(Failure::Cancelled);
     }

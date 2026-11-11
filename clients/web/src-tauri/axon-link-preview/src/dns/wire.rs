@@ -20,6 +20,7 @@ use super::{Answer, Dns, RecordType};
 use crate::error::{Failure, Result};
 use crate::Cancel;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
@@ -30,21 +31,51 @@ const MAX_SERVERS: usize = 3;
 /// How long one server gets before the next is tried.
 const PER_SERVER: Duration = Duration::from_millis(1500);
 
+/// Where the servers come from.
+#[derive(Clone, Debug)]
+enum Servers {
+    /// Given once, as the tests give a server on the loopback.
+    Fixed(Vec<SocketAddr>),
+    /// Read from this file for every query.
+    File(PathBuf),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct WireDns {
-    servers: Vec<SocketAddr>,
+    servers: Servers,
 }
 
 impl WireDns {
     pub(crate) fn new(servers: Vec<SocketAddr>) -> Self {
-        WireDns { servers }
+        WireDns {
+            servers: Servers::Fixed(servers),
+        }
     }
 
-    /// The servers `/etc/resolv.conf` names, or glibc's default, the local
-    /// host, when it names none or cannot be read.
+    /// The servers `/etc/resolv.conf` names when each query is made.
     pub(crate) fn from_system() -> Self {
-        let text = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
-        WireDns::new(nameservers(&text))
+        WireDns::from_file("/etc/resolv.conf")
+    }
+
+    /// The servers `path` names when each query is made. NetworkManager, a
+    /// DHCP client or a VPN rewrites the file when the network changes, and
+    /// glibc rereads it then, so a list read once at launch would keep asking
+    /// the previous network's resolver. The file is a few hundred bytes.
+    pub(crate) fn from_file(path: impl Into<PathBuf>) -> Self {
+        WireDns {
+            servers: Servers::File(path.into()),
+        }
+    }
+
+    /// The servers to ask now, or glibc's default, the local host, when the
+    /// file names none or cannot be read.
+    pub(crate) async fn current(&self) -> Vec<SocketAddr> {
+        match &self.servers {
+            Servers::Fixed(servers) => servers.clone(),
+            Servers::File(path) => {
+                nameservers(&tokio::fs::read_to_string(path).await.unwrap_or_default())
+            }
+        }
     }
 }
 
@@ -110,7 +141,7 @@ impl Dns for WireDns {
     ) -> Result<Answer> {
         let work = async {
             let mut last = Failure::Unavailable;
-            for server in &self.servers {
+            for server in &self.current().await {
                 let slot = (Instant::now() + PER_SERVER).min(deadline);
                 match tokio::time::timeout_at(slot, ask(*server, name, record)).await {
                     Ok(Ok(answer)) => return Ok(answer),
