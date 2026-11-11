@@ -944,8 +944,11 @@ describe('RoomsIndex discovery', () => {
     await findByText('example.org')
     fireEvent.click(await findByRole('button', { name: 'Search directory' }))
     const card = (await findByText('Ops')).closest('.card')!
+    // The card offers "Open" once the room list says the room is joined. The
+    // list's first refresh waits on the cached server view's restore (ADR
+    // 0134), so it can land just after the directory answers.
     fireEvent.click(
-      within(card as HTMLElement).getByRole('button', { name: 'Open' }),
+      await within(card as HTMLElement).findByRole('button', { name: 'Open' }),
     )
 
     await waitFor(() =>

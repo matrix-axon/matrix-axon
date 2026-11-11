@@ -122,6 +122,23 @@ before starting a milestone.
   would make two tabs delete each other's record on every write, so neither
   reader ever gets a hit and the cache degrades to "off" without erroring.
 
+  The room list keeps a **second record**, the server's list as of its cursor
+  (ADR 0134, `readServerView`/`writeServerView` in `room-list-cache.ts`), in the
+  `meta` area so the painted record's prune leaves it alone. Every refresh sends
+  that cursor as `since` and merges the delta into this record, never into the
+  painted rows, and the merged list then goes through the ordinary refresh path
+  as though it were a full response. So the record must only ever hold what a
+  response said: the painted rows carry live patches (one of them in place, in
+  `noteActivityRoom`), which is why `doRefresh` hands the pipeline copies. A
+  merged list whose length is not the response's `total`, or a `400` to a
+  cursor, drops the record and reads in full once. The restore of this record
+  is off the critical path in two ways: a refresh waits on it for at most
+  `SERVER_VIEW_RESTORE_DEADLINE_MS` and then reads in full, and a restore that
+  found nothing is retried by the next refresh rather than memoised. Reads,
+  writes and drops of the record all run through one queue in the cache module,
+  because the "already saved" mark that lets an unchanged delta skip its write
+  is only true in the order those operations happened.
+
   Two rules the cache needs that a wipe alone cannot give it, both found in
   review:
 
