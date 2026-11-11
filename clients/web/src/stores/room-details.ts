@@ -65,7 +65,6 @@ type RoomHomeserverDetailsDto =
   components['schemas']['RoomHomeserverDetailsDto']
 type RoomInfoDto = components['schemas']['RoomInfoDto']
 type RoomDiscoveryDto = components['schemas']['RoomDiscoveryDto']
-type DiscoveredRoomDto = components['schemas']['DiscoveredRoomDto']
 
 /** The three reads this store owns. */
 export type RoomDetailsRead = 'metadata' | 'homeserverDetails' | 'info'
@@ -128,17 +127,11 @@ export interface RoomDetailsTarget {
 export interface RoomPreviewTarget {
   accountId: string
   roomId: string
-  /**
-   * The summary the prompt was opened from, such as a hierarchy row's
-   * `discovered`, shown until `/discovery` answers.
-   */
-  seed?: DiscoveredRoomDto | null
 }
 
 export interface RoomPreviewState {
   /** `roomDetailsKey` of the previewed room, or `null` for none. */
   key: string | null
-  seed: DiscoveredRoomDto | null
   discovery: RoomDetailsSlot<RoomDiscoveryDto>
 }
 
@@ -165,14 +158,16 @@ export interface RoomDetailsStore {
    */
   retry(): void
   /**
-   * Preview `target` with one `/discovery` read, replacing any other preview:
-   * no surface previews more than one room at a time (decision 8). The same
-   * room again keeps its answer and only updates the seed.
+   * Preview `target` with one `/discovery` read, replacing any other room's
+   * preview: no surface previews more than one room at a time (decision 8).
+   * The same room again adds a holder and keeps the answer, so two prompts
+   * for one room (the panel's join dialog under a Matrix-link prompt) share it.
    */
   showPreview(target: RoomPreviewTarget): void
   /**
-   * Stop previewing `target`, aborting its read. A no-op when another room
-   * has since taken the preview, so one prompt closing never clears another's.
+   * Release one holder of `target`'s preview; the last one aborts its read and
+   * clears it. A no-op when another room has since taken the preview, so one
+   * prompt closing never clears another's.
    */
   closePreview(target: RoomPreviewTarget): void
   /**
@@ -203,7 +198,7 @@ function emptyHierarchy(): HierarchySlot {
 }
 
 export function emptyRoomPreview(key: string | null = null): RoomPreviewState {
-  return { key, seed: null, discovery: emptySlot() }
+  return { key, discovery: emptySlot() }
 }
 
 export function emptyRoomDetails(
@@ -276,17 +271,31 @@ export function nextLabelDeadline(
  * reconnect, without `enrich`, resumes a paused crawl, and only the retry
  * timer's own read doubles the timer.
  */
-type RereadOrigin =
+export type RereadOrigin =
   'open' | 'frame' | 'reconnect' | 'resume' | 'timer' | 'retry'
 
-interface Reread {
+export interface Reread {
   mode: RereadMode
   enrich: boolean
-  origin: RereadOrigin
+  /**
+   * Every reason the read was asked for. Requests that wait behind a read in
+   * flight fold into one, and the folded read must still do what each would
+   * have: resume a paused crawl if a frame or reconnect asked, double the
+   * timer if the timer asked.
+   */
+  origins: ReadonlySet<RereadOrigin>
+}
+
+export function rereadFor(
+  origin: RereadOrigin,
+  mode: RereadMode,
+  enrich: boolean,
+): Reread {
+  return { mode, enrich, origins: new Set([origin]) }
 }
 
 /** Fold a second re-read request into one already waiting. */
-function mergeRereads(waiting: Reread | null, next: Reread): Reread {
+export function mergeRereads(waiting: Reread | null, next: Reread): Reread {
   if (waiting === null) return next
   return {
     mode:
@@ -294,8 +303,13 @@ function mergeRereads(waiting: Reread | null, next: Reread): Reread {
         ? 'reconnect'
         : 'frame',
     enrich: waiting.enrich || next.enrich,
-    origin: next.origin === 'timer' ? 'timer' : waiting.origin,
+    origins: new Set([...waiting.origins, ...next.origins]),
   }
+}
+
+/** Whether a frame or a reconnect asked for `request`: the reads a paused crawl resumes from. */
+export function rereadPrompted(request: Reread): boolean {
+  return request.origins.has('frame') || request.origins.has('reconnect')
 }
 
 /** The shown space's hierarchy reads: one at a time, re-reads before "Load more". */
@@ -345,6 +359,8 @@ interface PreviewSession {
    * publish its only frame, before the first answer reaches the browser.
    */
   hierarchyDuringRead: boolean
+  /** Prompts showing this room's preview; the last to close ends it. */
+  holders: number
 }
 
 type ReadResult<T> = { ok: true; value: T } | { ok: false; message: string }
@@ -541,7 +557,7 @@ export function createRoomDetailsStore(
   function afterCrawlStatus(
     owner: Session,
     list: HierarchyList,
-    origin: RereadOrigin | 'more',
+    fromTimer: boolean,
   ): void {
     const h = owner.hierarchy
     const discovery = list.discovery
@@ -553,19 +569,28 @@ export function createRoomDetailsStore(
     }
     if (h.retryTimer !== null) return
     const target = discovery.next_attempt_at ?? null
-    const declined =
-      origin === 'timer' && target !== null && target === h.retryTarget
-    const delay = declined
-      ? Math.max(CRAWL_RETRY_REARM_MIN_MS, h.retryDelay * 2)
-      : (target ?? 0) - Date.now()
+    const declined = fromTimer && target !== null && target === h.retryTarget
+    h.retryTarget = target
+    armCrawlRetry(
+      owner,
+      declined ? doubledRetryDelay(h) : (target ?? 0) - Date.now(),
+    )
+  }
+
+  /** Twice the last retry delay, at least 10 s: the server, or the network, declined the last one. */
+  function doubledRetryDelay(h: HierarchySession): number {
+    return Math.max(CRAWL_RETRY_REARM_MIN_MS, h.retryDelay * 2)
+  }
+
+  function armCrawlRetry(owner: Session, delay: number): void {
+    const h = owner.hierarchy
     h.retryDelay = Math.min(
       CRAWL_RETRY_MAX_MS,
       Math.max(CRAWL_RETRY_MIN_MS, delay),
     )
-    h.retryTarget = target
     h.retryTimer = setTimeout(() => {
       h.retryTimer = null
-      reread(owner, { mode: 'frame', enrich: true, origin: 'timer' })
+      reread(owner, rereadFor('timer', 'frame', true))
     }, h.retryDelay)
   }
 
@@ -617,6 +642,16 @@ export function createRoomDetailsStore(
     if (!result.ok) {
       h.failed = request
       setHierarchy({ error: result.message })
+      // The timer's own read failing (offline, a 5xx) must not end the
+      // chain: the progress line still promises a retry. Back off and try
+      // again, as for a read the server declined.
+      if (
+        request.origins.has('timer') &&
+        enrichable(owner.target) &&
+        h.retryTimer === null
+      ) {
+        armCrawlRetry(owner, doubledRetryDelay(h))
+      }
       drainHierarchy(owner)
       return
     }
@@ -628,18 +663,18 @@ export function createRoomDetailsStore(
       request.mode,
     )
     setHierarchy({ value: list, error: null, requested: true })
-    afterCrawlStatus(owner, list, request.origin)
+    afterCrawlStatus(owner, list, request.origins.has('timer'))
     // A paused crawl stays `in_progress` with nothing running until an
     // `enrich` read resumes it (decision 7). Only a plain re-read a frame or
     // a reconnect prompted sends that read, so its response never prompts
     // another.
     if (
       !enrich &&
-      (request.origin === 'frame' || request.origin === 'reconnect') &&
+      rereadPrompted(request) &&
       enrichable(owner.target) &&
       crawlPaused(list.discovery)
     ) {
-      reread(owner, { mode: 'frame', enrich: true, origin: 'resume' })
+      reread(owner, rereadFor('resume', 'frame', true))
     }
     drainHierarchy(owner)
   }
@@ -675,7 +710,7 @@ export function createRoomDetailsStore(
         ? listFromPage(result.value)
         : appendPage(current, result.value)
     setHierarchy({ value: next, error: null, loadingMore: false })
-    afterCrawlStatus(owner, next, 'more')
+    afterCrawlStatus(owner, next, false)
     drainHierarchy(owner)
   }
 
@@ -712,9 +747,9 @@ export function createRoomDetailsStore(
         stopCrawlRetry(session)
       }
       if (becameSpace) {
-        reread(session, { mode: 'reconnect', enrich: false, origin: 'open' })
+        reread(session, rereadFor('open', 'reconnect', false))
       } else if (!wasEnrichable && enrichable(target)) {
-        reread(session, { mode: 'frame', enrich: true, origin: 'open' })
+        reread(session, rereadFor('open', 'frame', true))
       }
       if (left) {
         // Frames for it are ignored from now on, so a held answer would sit
@@ -758,7 +793,7 @@ export function createRoomDetailsStore(
     read(owner, 'metadata')
     read(owner, 'info')
     if (target.joined) read(owner, 'homeserverDetails')
-    reread(owner, { mode: 'reconnect', enrich: false, origin: 'open' })
+    reread(owner, rereadFor('open', 'reconnect', false))
   }
 
   const preview = signal<RoomPreviewState>(emptyRoomPreview())
@@ -851,12 +886,11 @@ export function createRoomDetailsStore(
   function showPreview(target: RoomPreviewTarget): void {
     const key = roomDetailsKey(target.accountId, target.roomId)
     if (previewSession !== null && previewSession.key === key) {
-      previewSession.target = target
-      preview.value = { ...preview.value, seed: target.seed ?? null }
+      previewSession.holders += 1
       return
     }
     previewSession?.controller.abort()
-    preview.value = { ...emptyRoomPreview(key), seed: target.seed ?? null }
+    preview.value = emptyRoomPreview(key)
     const owner: PreviewSession = {
       key,
       target,
@@ -864,6 +898,7 @@ export function createRoomDetailsStore(
       inFlight: false,
       dirty: false,
       hierarchyDuringRead: false,
+      holders: 1,
     }
     previewSession = owner
     readPreview(owner)
@@ -872,6 +907,8 @@ export function createRoomDetailsStore(
   function closePreview(target: RoomPreviewTarget): void {
     const key = roomDetailsKey(target.accountId, target.roomId)
     if (previewSession === null || previewSession.key !== key) return
+    previewSession.holders -= 1
+    if (previewSession.holders > 0) return
     previewSession.controller.abort()
     previewSession = null
     preview.value = emptyRoomPreview()
@@ -889,7 +926,7 @@ export function createRoomDetailsStore(
         event.account_id === owner.target.accountId &&
         event.room_id === owner.target.roomId
       ) {
-        reread(owner, { mode: 'frame', enrich: false, origin: 'frame' })
+        reread(owner, rereadFor('frame', 'frame', false))
       }
       return
     }
@@ -919,7 +956,7 @@ export function createRoomDetailsStore(
     }
     for (const source of change.sources) {
       if (source === 'space_hierarchy') {
-        reread(owner, { mode: 'frame', enrich: false, origin: 'frame' })
+        reread(owner, rereadFor('frame', 'frame', false))
         continue
       }
       const which = READ_FOR_SOURCE[source]
@@ -948,11 +985,7 @@ export function createRoomDetailsStore(
           if (state.value[which].requested) read(owner, which)
         }
         if (state.value.hierarchy.requested) {
-          reread(owner, {
-            mode: 'reconnect',
-            enrich: false,
-            origin: 'reconnect',
-          })
+          reread(owner, rereadFor('reconnect', 'reconnect', false))
         }
       }
       if (previewSession !== null && preview.value.discovery.requested) {
@@ -971,7 +1004,7 @@ export function createRoomDetailsStore(
     const failed = owner.hierarchy.failed
     if (state.value.hierarchy.error !== null && failed !== null) {
       if (failed === 'more') loadMore()
-      else reread(owner, { ...failed, origin: 'retry' })
+      else reread(owner, { ...failed, origins: new Set(['retry']) })
     }
   }
 

@@ -10,25 +10,20 @@ import {
 /**
  * Preview one unjoined room while the calling prompt is mounted and `enabled`
  * (decision 8): the store reads its `/discovery`, keeps it fresh under
- * decision 2, and aborts the read when the prompt closes. `seed` is read once,
- * when the preview opens: a later copy of the same summary changes nothing
- * the read will not.
+ * decision 2, and aborts the read when the last prompt for the room closes.
+ * The seed a prompt shows until then is its own (`RoomPreview`'s `seed`).
  */
 export function useRoomPreview(
   accountId: string,
   roomId: string,
-  seed: DiscoveredRoomDto | null,
   enabled: boolean,
 ): void {
   const { roomDetails } = useServices()
   useEffect(() => {
     if (!enabled) return
-    const target = { accountId, roomId, seed }
+    const target = { accountId, roomId }
     roomDetails.showPreview(target)
     return () => roomDetails.closePreview(target)
-    // `seed` only seeds: a new object for the same room must not abort and
-    // repeat the read.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomDetails, accountId, roomId, enabled])
 }
 

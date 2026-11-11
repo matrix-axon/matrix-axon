@@ -1376,7 +1376,7 @@ function RoomStateLinks({
 }) {
   const list = hierarchy.value
   const childLinks = (list?.children ?? []).map((child) => {
-    const display = spaceChildDisplay(child)
+    const display = spaceChildDisplay(child, list?.discovery ?? null)
     return {
       label: `Child: ${display.name}`,
       roomId: child.room_id,
@@ -1599,7 +1599,7 @@ function JoinLinkedRoomDialog({
   const { containerRef } = useModalFocus<HTMLDivElement>()
   const previewed = child !== undefined
   const seed = child?.discovered ?? null
-  useRoomPreview(accountId, roomId, seed, previewed)
+  useRoomPreview(accountId, roomId, previewed)
   useShortcuts(
     {
       Escape: (event) => {

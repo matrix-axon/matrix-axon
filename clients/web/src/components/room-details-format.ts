@@ -569,7 +569,14 @@ export type DiscoveredRoomDto = Schemas['DiscoveredRoomDto']
 export type SpaceDiscoveryDto = Schemas['SpaceDiscoveryDto']
 export type SpaceHierarchyChildDto = Schemas['SpaceHierarchyChildDto']
 
-export const NOT_LOOKED_UP = 'Retrieving'
+/** No summary yet, while the space's lookup is queued or running. */
+export const RETRIEVING = 'Retrieving'
+/**
+ * No summary, and no lookup running: it never ran (a space the account has
+ * not joined), or it failed, is paused or is unsupported, which the progress
+ * line says. Not "not found": nothing was searched.
+ */
+export const NOT_LOOKED_UP = 'Not looked up'
 export const NOT_VISIBLE = 'Not in space directory'
 export const FROM_SPACE_DIRECTORY = 'From space directory'
 
@@ -601,7 +608,8 @@ export function discoveredPreview(
   | { rows: ReadonlyArray<{ label: string; shown: Shown }>; note: string }
   | { rows: null; label: string } {
   if (discovered === null || discovered === undefined) {
-    return { rows: null, label: NOT_LOOKED_UP }
+    // The preview's own `/discovery` read is asking for it.
+    return { rows: null, label: RETRIEVING }
   }
   if (discovered.status !== 'available') {
     return { rows: null, label: NOT_VISIBLE }
@@ -652,19 +660,21 @@ function nonEmpty(value: string | null | undefined): string | null {
 }
 
 /**
- * Which source a space child's name, avatar and topic come from (ADR 0128
+ * Which source a space child's name and topic come from (ADR 0128
  * precedence, decision 6): synced fields when the account has joined it;
  * otherwise an `available` discovered summary; otherwise synced fields.
  * The two sources are never merged, so a field the chosen source lacks
- * falls back to the room ID, not to the other source.
+ * falls back to the room ID, not to the other source. A child with no
+ * summary reads "Retrieving" only while the space's lookup is queued or
+ * running (`crawl`), and "Not looked up" otherwise.
  */
 export function spaceChildDisplay(
   child: SpaceHierarchyChildDto,
+  crawl: SpaceDiscoveryDto | null,
   now: number = Date.now(),
 ): {
   name: string
   topic: string | null
-  avatarUrl: string | null
   /** Joined state, then where the fields came from or why there are none. */
   notes: readonly string[]
 } {
@@ -673,7 +683,6 @@ export function spaceChildDisplay(
     return {
       name: nonEmpty(child.name) ?? child.room_id,
       topic: null,
-      avatarUrl: nonEmpty(child.avatar_url),
       notes: ['Joined'],
     }
   }
@@ -681,15 +690,20 @@ export function spaceChildDisplay(
     return {
       name: nonEmpty(discovered.name) ?? child.room_id,
       topic: nonEmpty(discovered.topic),
-      avatarUrl: nonEmpty(discovered.avatar_url),
       notes: ['Not joined', discoveredProvenance(discovered, now)],
     }
   }
   return {
     name: nonEmpty(child.name) ?? child.room_id,
     topic: null,
-    avatarUrl: nonEmpty(child.avatar_url),
-    notes: ['Not joined', discovered === null ? NOT_LOOKED_UP : NOT_VISIBLE],
+    notes: [
+      'Not joined',
+      discovered !== null
+        ? NOT_VISIBLE
+        : crawl?.state === 'queued' || crawl?.state === 'running'
+          ? RETRIEVING
+          : NOT_LOOKED_UP,
+    ],
   }
 }
 

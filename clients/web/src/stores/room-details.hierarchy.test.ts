@@ -30,6 +30,9 @@ import {
   CRAWL_RETRY_MAX_MS,
   CRAWL_RETRY_MIN_MS,
   createRoomDetailsStore,
+  mergeRereads,
+  rereadFor,
+  rereadPrompted,
 } from './room-details'
 
 const BASE_URL = 'http://axon.test'
@@ -694,11 +697,9 @@ const preview = (h: Harness, roomId = CHILD) => {
   return target
 }
 
-it('previews one room, seeded, then from /discovery', async () => {
+it('previews one room from /discovery', async () => {
   const h = harness()
-  const seed = discoveredRoom({ name: 'Seed' })
-  h.store.showPreview({ accountId: ACCOUNT, roomId: CHILD, seed })
-  expect(h.store.preview.value.seed).toBe(seed)
+  h.store.showPreview({ accountId: ACCOUNT, roomId: CHILD })
   await vi.waitFor(() =>
     expect(h.store.preview.value.discovery.value?.room_id).toBe(CHILD),
   )
@@ -927,4 +928,84 @@ it('retries a failed preview read on request, and only after a failure', async (
   h.store.retryPreview()
   await new Promise((resolve) => setTimeout(resolve, 20))
   expect(h.discoveryRequests).toHaveLength(2)
+})
+
+it('keeps the retry chain going when the timer’s own read fails', async () => {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'Date'],
+    shouldAdvanceTime: true,
+  })
+  const failing = { now: false }
+  const { h } = crawlHarness({
+    outcome: 'failed',
+    failure: 'timeout',
+    next_attempt_at: Date.now() + 1_000,
+  })
+  server.use(
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/hierarchy`,
+      ({ request }) => {
+        if (!failing.now) return undefined
+        h.hierarchyRequests.push({
+          roomId: SPACE,
+          limit: 50,
+          cursor: null,
+          enrich: new URL(request.url).searchParams.get('enrich') === 'true',
+        })
+        return HttpResponse.json(
+          { error: { code: 'unavailable', message: 'offline' } },
+          { status: 503 },
+        )
+      },
+    ),
+  )
+  showSpace(h)
+  await settle(h, 1)
+  failing.now = true
+  // The first timer (5 s) fires, and its read fails.
+  vi.advanceTimersByTime(CRAWL_RETRY_MIN_MS + 1_000)
+  await settle(h, 2)
+  expect(h.store.state.value.hierarchy.error).toBe('offline')
+  // Re-armed with backoff (10 s), not abandoned.
+  vi.advanceTimersByTime(8_000)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(h.hierarchyRequests).toHaveLength(2)
+  vi.advanceTimersByTime(3_000)
+  await settle(h, 3)
+  expect(h.hierarchyRequests[2].enrich).toBe(true)
+})
+
+it('folded re-reads keep every reason they were asked for', () => {
+  const retry = rereadFor('retry', 'frame', false)
+  const frame = rereadFor('frame', 'frame', false)
+  const timer = rereadFor('timer', 'frame', true)
+  // A waiting Retry that absorbs a frame must still resume a paused crawl.
+  expect(rereadPrompted(retry)).toBe(false)
+  expect(rereadPrompted(mergeRereads(retry, frame))).toBe(true)
+  expect(rereadPrompted(mergeRereads(frame, retry))).toBe(true)
+  // And a frame that absorbs the timer's read still doubles the timer.
+  const folded = mergeRereads(frame, timer)
+  expect(folded.origins.has('timer')).toBe(true)
+  expect(folded.enrich).toBe(true)
+  expect(mergeRereads(rereadFor('open', 'reconnect', false), frame).mode).toBe(
+    'reconnect',
+  )
+})
+
+it('two prompts for one room share its preview until the last closes', async () => {
+  const h = harness()
+  const dialog = preview(h)
+  const prompt = preview(h)
+  await vi.waitFor(() =>
+    expect(h.store.preview.value.discovery.value).not.toBeNull(),
+  )
+  // Opening the second prompt for the same room asks nothing more.
+  expect(h.discoveryRequests).toHaveLength(1)
+  h.store.closePreview(dialog)
+  expect(h.store.preview.value.key).not.toBeNull()
+  // The prompt still open keeps its frame refresh.
+  h.frame(['discovery'], CHILD)
+  await vi.waitFor(() => expect(h.discoveryRequests).toHaveLength(2))
+  h.store.closePreview(prompt)
+  expect(h.store.preview.value.key).toBeNull()
 })

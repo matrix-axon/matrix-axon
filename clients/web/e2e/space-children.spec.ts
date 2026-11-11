@@ -76,7 +76,7 @@ test('a space pages its children and names unjoined ones from the directory', as
     'Child: !not-looked-up:e2e.test',
   )
   await expect(last.locator('.room-state-child-note')).toHaveText(
-    'Not joined · Retrieving',
+    'Not joined · Not looked up',
   )
 
   // Only opening the panel asks for enrichment (decision 7).

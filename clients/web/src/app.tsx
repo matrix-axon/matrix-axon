@@ -1744,7 +1744,7 @@ function MatrixJoinPrompt({
   // 8); an alias cannot, and the server refuses rooms no joined space links.
   const roomId = pending.reference.roomIdOrAlias
   const previewable = roomId.startsWith('!')
-  useRoomPreview(pending.accountId, roomId, null, previewable)
+  useRoomPreview(pending.accountId, roomId, previewable)
 
   return (
     <div

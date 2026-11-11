@@ -590,6 +590,7 @@ describe('space children display precedence (decision 6)', () => {
           name: 'Synced',
           discovered: discoveredRoom({ name: 'Directory' }),
         }),
+        null,
         SEEN_NOW,
       ),
     ).toMatchObject({ name: 'Synced', notes: ['Joined'] })
@@ -606,12 +607,12 @@ describe('space children display precedence (decision 6)', () => {
             observed_at: SEEN_NOW - 3 * 3_600_000,
           }),
         }),
+        null,
         SEEN_NOW,
       ),
     ).toEqual({
       name: '!a:hs',
       topic: 'T',
-      avatarUrl: null,
       notes: ['Not joined', 'From space directory · updated 3h'],
     })
   })
@@ -623,16 +624,36 @@ describe('space children display precedence (decision 6)', () => {
           name: 'Synced',
           discovered: discoveredRoom({ status: 'forbidden' }),
         }),
+        null,
         SEEN_NOW,
       ),
     ).toMatchObject({
       name: 'Synced',
       notes: ['Not joined', 'Not in space directory'],
     })
-    expect(spaceChildDisplay(hierarchyChild('!a:hs'), SEEN_NOW)).toMatchObject({
-      name: '!a:hs',
-      notes: ['Not joined', 'Retrieving'],
-    })
+    expect(
+      spaceChildDisplay(hierarchyChild('!a:hs'), null, SEEN_NOW),
+    ).toMatchObject({ name: '!a:hs', notes: ['Not joined', 'Not looked up'] })
+  })
+
+  it('says Retrieving only while the space lookup is queued or running', () => {
+    const note = (crawl: Parameters<typeof spaceChildDisplay>[1]) =>
+      spaceChildDisplay(hierarchyChild('!a:hs'), crawl, SEEN_NOW).notes[1]
+    expect(note(spaceDiscovery({ state: 'queued' }))).toBe('Retrieving')
+    expect(note(spaceDiscovery({ state: 'running' }))).toBe('Retrieving')
+    // Nothing running: a finished, failed, paused or unsupported lookup, or
+    // none at all (a space the account has not joined).
+    for (const crawl of [
+      spaceDiscovery({ outcome: 'complete' }),
+      spaceDiscovery({ outcome: 'failed', failure: 'forbidden' }),
+      spaceDiscovery({ outcome: 'failed', failure: 'timeout' }),
+      spaceDiscovery({ outcome: 'in_progress' }),
+      spaceDiscovery({ outcome: null, support: 'unsupported' }),
+      spaceDiscovery({ outcome: null }),
+      null,
+    ]) {
+      expect(note(crawl)).toBe('Not looked up')
+    }
   })
 })
 

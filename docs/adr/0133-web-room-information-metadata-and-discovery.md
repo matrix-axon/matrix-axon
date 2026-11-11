@@ -151,7 +151,7 @@ So a stale value stays visible next to a failed refresh ("Public · may be out o
 |---|---|
 | `status: available` | its fields, noted "From space directory · updated 10m" (the age of `observed_at`) |
 | `not_returned`, `forbidden`, `not_found` | "Not in space directory" |
-| `discovered: null` on an unjoined room | "Retrieving" |
+| `discovered: null` on an unjoined room | "Retrieving" while the space's lookup is `queued` or `running` (or the preview's `/discovery` read is), otherwise "Not looked up" (amended in #1055 review) |
 
 `discovered.encryption: null` is "Unknown", never unencrypted.
 Withheld fields (`withheld`) are left out, not shown as empty.
@@ -263,7 +263,7 @@ That is the bound ADR 0128 sets ("cannot drive upstream traffic past `CRAWL_TTL`
   The progress label shows `next_attempt_at` as given, so skew moves the displayed time by the same amount.
 
 The resume sends at most one `enrich` read per frame or reconnect that prompted it, and its response never prompts another.
-The timer sends one per firing, and only the re-arming above follows from its response.
+The timer sends one per firing, and only the re-arming above follows from its response; a timer read that fails outright (offline, a server error) re-arms the same way, so the progress line's "trying again" stays true (amended in #1055 review).
 The server applies its own due check to every such read, so one it declines costs a local read and nothing upstream.
 Closing the panel or switching rooms cancels the timer.
 

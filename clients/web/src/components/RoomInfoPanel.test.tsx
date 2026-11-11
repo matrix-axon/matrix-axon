@@ -455,7 +455,7 @@ it('names space children by ADR 0128 precedence, never merging sources', async (
       /^Child: !found:hs \| Fish \| Not joined · From space directory · updated \S+$/,
     ),
     'Child: Left long ago | Not joined · Not in space directory',
-    'Child: !bare:hs | Not joined · Retrieving',
+    'Child: !bare:hs | Not joined · Not looked up',
   ])
   expect(countLine()).toBe('Showing 4 of 9')
   // Opening a joined space's information is the user asking (decision 7).
