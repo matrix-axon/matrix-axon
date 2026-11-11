@@ -1142,7 +1142,6 @@ export function RoomInfoPanel({
           accountId={accountId}
           roomId={joinLink.roomId}
           child={joinLink.child}
-          formatTime={formatTime}
           busy={joinLinkBusy}
           onCancel={() => {
             if (!joinLinkBusy) setJoinLink(null)
@@ -1377,7 +1376,7 @@ function RoomStateLinks({
 }) {
   const list = hierarchy.value
   const childLinks = (list?.children ?? []).map((child) => {
-    const display = spaceChildDisplay(child, formatTime)
+    const display = spaceChildDisplay(child)
     return {
       label: `Child: ${display.name}`,
       roomId: child.room_id,
@@ -1469,7 +1468,7 @@ function RoomStateLinks({
                 {link.label}
               </button>
               {link.topic !== null && (
-                <span class="room-state-child-topic muted">{link.topic}</span>
+                <span class="room-state-child-topic">{link.topic}</span>
               )}
               <span class="room-state-child-note muted">
                 {link.notes.join(' · ')}
@@ -1585,7 +1584,6 @@ function JoinLinkedRoomDialog({
   accountId,
   roomId,
   child,
-  formatTime,
   busy,
   onCancel,
   onConfirm,
@@ -1594,7 +1592,6 @@ function JoinLinkedRoomDialog({
   accountId: string
   roomId: string
   child: SpaceHierarchyChildDto | undefined
-  formatTime: (ts: number) => string
   busy: boolean
   onCancel: () => void
   onConfirm: () => void
@@ -1629,12 +1626,7 @@ function JoinLinkedRoomDialog({
             can see.
           </p>
           {previewed && (
-            <RoomPreview
-              accountId={accountId}
-              roomId={roomId}
-              seed={seed}
-              formatTime={formatTime}
-            />
+            <RoomPreview accountId={accountId} roomId={roomId} seed={seed} />
           )}
           <div class="dialog-actions">
             <button

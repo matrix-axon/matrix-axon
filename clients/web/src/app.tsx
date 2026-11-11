@@ -1778,7 +1778,6 @@ function MatrixJoinPrompt({
             accountId={pending.accountId}
             roomId={roomId}
             seed={null}
-            formatTime={(ts) => new Date(ts).toLocaleString()}
             requireAvailable
           />
         )}

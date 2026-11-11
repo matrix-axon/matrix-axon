@@ -202,7 +202,7 @@ test('discovery — a space names the room the viewer has not joined, and previe
     info.locator('.room-state-child').filter({
       has: page.getByRole('button', { name: 'Child: salmon-count' }),
     }),
-  ).toContainText('Not joined · From the space directory')
+  ).toContainText('Not joined · From space directory · updated')
   await dwell(page, LONG)
 
   // Opening it is a join, so it asks first, and shows what the directory

@@ -518,25 +518,27 @@ describe('the canonical alias with a room-summary alias to fall back on', () => 
 })
 
 const at = (ts: number) => `t${ts}`
+/** Ten minutes after the fixtures' `observed_at`. */
+const SEEN_NOW = 1_700_000_000_000 + 10 * 60_000
 
 describe('discovered summaries (decision 3)', () => {
   it('says when a room has not been looked up, or was not visible', () => {
-    expect(discoveredPreview(null, at)).toEqual({
+    expect(discoveredPreview(null, SEEN_NOW)).toEqual({
       rows: null,
-      label: 'Not looked up yet',
+      label: 'Retrieving',
     })
     for (const status of ['not_returned', 'forbidden', 'not_found'] as const) {
-      expect(discoveredPreview(discoveredRoom({ status }), at)).toEqual({
+      expect(discoveredPreview(discoveredRoom({ status }), SEEN_NOW)).toEqual({
         rows: null,
-        label: 'Not visible in the space directory',
+        label: 'Not in space directory',
       })
     }
   })
 
   it('shows an available summary with its provenance', () => {
     const shown = discoveredPreview(
-      discoveredRoom({ observed_at: 5, encryption: 'm.megolm.v1.aes-sha2' }),
-      at,
+      discoveredRoom({ encryption: 'm.megolm.v1.aes-sha2' }),
+      SEEN_NOW,
     )
     if (shown.rows === null) throw new Error('expected rows')
     expect(
@@ -550,7 +552,7 @@ describe('discovered summaries (decision 3)', () => {
       ['Room version', '11'],
       ['Canonical alias', '#salmon-count:hs'],
     ])
-    expect(shown.note).toBe('From the space directory, as of t5')
+    expect(shown.note).toBe('From space directory · updated 10m')
   })
 
   it('never reads a missing encryption as unencrypted, and leaves withheld fields out', () => {
@@ -562,7 +564,7 @@ describe('discovered summaries (decision 3)', () => {
         name: null,
         withheld: ['name'],
       }),
-      at,
+      SEEN_NOW,
     )
     if (shown.rows === null) throw new Error('expected rows')
     const byLabel = new Map(
@@ -588,7 +590,7 @@ describe('space children display precedence (decision 6)', () => {
           name: 'Synced',
           discovered: discoveredRoom({ name: 'Directory' }),
         }),
-        at,
+        SEEN_NOW,
       ),
     ).toMatchObject({ name: 'Synced', notes: ['Joined'] })
   })
@@ -601,16 +603,16 @@ describe('space children display precedence (decision 6)', () => {
           discovered: discoveredRoom({
             name: null,
             topic: 'T',
-            observed_at: 7,
+            observed_at: SEEN_NOW - 3 * 3_600_000,
           }),
         }),
-        at,
+        SEEN_NOW,
       ),
     ).toEqual({
       name: '!a:hs',
       topic: 'T',
       avatarUrl: null,
-      notes: ['Not joined', 'From the space directory, as of t7'],
+      notes: ['Not joined', 'From space directory · updated 3h'],
     })
   })
 
@@ -621,15 +623,15 @@ describe('space children display precedence (decision 6)', () => {
           name: 'Synced',
           discovered: discoveredRoom({ status: 'forbidden' }),
         }),
-        at,
+        SEEN_NOW,
       ),
     ).toMatchObject({
       name: 'Synced',
-      notes: ['Not joined', 'Not visible in the space directory'],
+      notes: ['Not joined', 'Not in space directory'],
     })
-    expect(spaceChildDisplay(hierarchyChild('!a:hs'), at)).toMatchObject({
+    expect(spaceChildDisplay(hierarchyChild('!a:hs'), SEEN_NOW)).toMatchObject({
       name: '!a:hs',
-      notes: ['Not joined', 'Not looked up yet'],
+      notes: ['Not joined', 'Retrieving'],
     })
   })
 })

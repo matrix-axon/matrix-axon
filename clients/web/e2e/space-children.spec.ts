@@ -63,7 +63,7 @@ test('a space pages its children and names unjoined ones from the directory', as
     }),
   })
   await expect(discovered.locator('.room-state-child-note')).toContainText(
-    'Not joined · From the space directory, as of',
+    'Not joined · From space directory · updated',
   )
 
   await panel.getByRole('button', { name: 'Load more' }).click()
@@ -76,7 +76,7 @@ test('a space pages its children and names unjoined ones from the directory', as
     'Child: !not-looked-up:e2e.test',
   )
   await expect(last.locator('.room-state-child-note')).toHaveText(
-    'Not joined · Not looked up yet',
+    'Not joined · Retrieving',
   )
 
   // Only opening the panel asks for enrichment (decision 7).
@@ -121,7 +121,7 @@ test('opening an unjoined child previews it before joining', async ({
   // The homeserver did not say: unknown, never "not encrypted".
   await expect(detail('Encryption')).toHaveText('Unknown')
   await expect(detail('Canonical alias')).toHaveText('#discovered-2:e2e.test')
-  await expect(preview).toContainText('From the space directory, as of')
+  await expect(preview).toContainText('From space directory · updated')
   await expect.poll(() => discoveryReads).toEqual(['!discovered-2:e2e.test'])
 
   await dialog.getByRole('button', { name: 'Cancel' }).click()

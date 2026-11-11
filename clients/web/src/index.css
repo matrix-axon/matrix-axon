@@ -4401,16 +4401,23 @@ span.composer-attachment-thumb {
 
 .room-state-child-topic,
 .room-state-child-note {
-  font-size: 0.85em;
   overflow-wrap: anywhere;
   padding-inline-start: 0.5rem;
 }
 
+/* The room's own words, in the regular text colour and a little weightier
+   than the muted status line under it (joined, where the name came from). */
 .room-state-child-topic {
+  font-size: 0.875em;
+  font-weight: 500;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
+}
+
+.room-state-child-note {
+  font-size: 0.8em;
 }
 
 .room-state-children-status {

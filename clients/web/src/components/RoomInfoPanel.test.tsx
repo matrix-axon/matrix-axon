@@ -448,12 +448,13 @@ it('names space children by ADR 0128 precedence, never merging sources', async (
   )
   renderPanel(FIRST, { room_type: 'm.space' })
   await waitFor(() => expect(childRows()).toHaveLength(4))
-  const asOf = new Date(1_700_000_000_000).toLocaleString()
   expect(childRows()).toEqual([
     'Child: Synced name | Joined',
-    `Child: !found:hs | Fish | Not joined · From the space directory, as of ${asOf}`,
-    'Child: Left long ago | Not joined · Not visible in the space directory',
-    'Child: !bare:hs | Not joined · Not looked up yet',
+    expect.stringMatching(
+      /^Child: !found:hs \| Fish \| Not joined · From space directory · updated \S+$/,
+    ),
+    'Child: Left long ago | Not joined · Not in space directory',
+    'Child: !bare:hs | Not joined · Retrieving',
   ])
   expect(countLine()).toBe('Showing 4 of 9')
   // Opening a joined space's information is the user asking (decision 7).

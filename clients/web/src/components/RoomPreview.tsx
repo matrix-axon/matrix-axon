@@ -43,13 +43,11 @@ export function RoomPreview({
   accountId,
   roomId,
   seed,
-  formatTime,
   requireAvailable = false,
 }: {
   accountId: string
   roomId: string
   seed: DiscoveredRoomDto | null
-  formatTime: (ts: number) => string
   requireAvailable?: boolean
 }) {
   const { roomDetails } = useServices()
@@ -67,7 +65,7 @@ export function RoomPreview({
   ) {
     return null
   }
-  const shown = discoveredPreview(discovered, formatTime)
+  const shown = discoveredPreview(discovered)
   return (
     <section class="room-preview" aria-label="Room preview">
       {shown.rows === null ? (

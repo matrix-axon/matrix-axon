@@ -8,6 +8,7 @@
  * `redaction_note`, `scalar`), capitalized for the web panel.
  */
 import type { components } from '../api/schema'
+import { relativeTime } from '../relative-time'
 
 type Schemas = components['schemas']
 export type RoomMetadataDto = Schemas['RoomMetadataDto']
@@ -568,19 +569,20 @@ export type DiscoveredRoomDto = Schemas['DiscoveredRoomDto']
 export type SpaceDiscoveryDto = Schemas['SpaceDiscoveryDto']
 export type SpaceHierarchyChildDto = Schemas['SpaceHierarchyChildDto']
 
-export const NOT_LOOKED_UP = 'Not looked up yet'
-export const NOT_VISIBLE = 'Not visible in the space directory'
-export const FROM_SPACE_DIRECTORY = 'From the space directory'
+export const NOT_LOOKED_UP = 'Retrieving'
+export const NOT_VISIBLE = 'Not in space directory'
+export const FROM_SPACE_DIRECTORY = 'From space directory'
 
 /**
  * The provenance note for a discovered summary (decision 3): where it came
- * from, and the `observed_at` time it describes.
+ * from, and how long ago it was observed ("updated 10m"). Coarse on purpose:
+ * minutes, hours or days are all a reader needs to judge it.
  */
 export function discoveredProvenance(
   discovered: DiscoveredRoomDto,
-  formatTime: (ts: number) => string,
+  now: number = Date.now(),
 ): string {
-  return `${FROM_SPACE_DIRECTORY}, as of ${formatTime(discovered.observed_at)}`
+  return `${FROM_SPACE_DIRECTORY} · updated ${relativeTime(discovered.observed_at, now)}`
 }
 
 /**
@@ -594,7 +596,7 @@ export function discoveredProvenance(
  */
 export function discoveredPreview(
   discovered: DiscoveredRoomDto | null | undefined,
-  formatTime: (ts: number) => string,
+  now: number = Date.now(),
 ):
   | { rows: ReadonlyArray<{ label: string; shown: Shown }>; note: string }
   | { rows: null; label: string } {
@@ -642,7 +644,7 @@ export function discoveredPreview(
     nonEmpty(discovered.canonical_alias),
     'None',
   )
-  return { rows, note: discoveredProvenance(discovered, formatTime) }
+  return { rows, note: discoveredProvenance(discovered, now) }
 }
 
 function nonEmpty(value: string | null | undefined): string | null {
@@ -658,7 +660,7 @@ function nonEmpty(value: string | null | undefined): string | null {
  */
 export function spaceChildDisplay(
   child: SpaceHierarchyChildDto,
-  formatTime: (ts: number) => string,
+  now: number = Date.now(),
 ): {
   name: string
   topic: string | null
@@ -680,7 +682,7 @@ export function spaceChildDisplay(
       name: nonEmpty(discovered.name) ?? child.room_id,
       topic: nonEmpty(discovered.topic),
       avatarUrl: nonEmpty(discovered.avatar_url),
-      notes: ['Not joined', discoveredProvenance(discovered, formatTime)],
+      notes: ['Not joined', discoveredProvenance(discovered, now)],
     }
   }
   return {

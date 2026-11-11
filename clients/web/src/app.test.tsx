@@ -835,7 +835,7 @@ describe('App', () => {
       name: 'Room preview',
     })
     expect(preview.textContent).toContain('Salmon count')
-    expect(preview.textContent).toContain('From the space directory')
+    expect(preview.textContent).toContain('From space directory · updated')
     expect(reads).toEqual(['!unjoined:hs'])
   })
 
