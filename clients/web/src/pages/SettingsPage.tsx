@@ -378,7 +378,7 @@ function SettingsPageContents() {
             server or proxy log line back to one phone, tablet or browser. */}
         install{' '}
         <CopyableText text={deviceState.deviceId} label="install ID">
-          <code>{deviceState.deviceId.slice(0, 8)}</code>
+          <code>{deviceState.deviceId}</code>
         </CopyableText>
         {' · '}
         <a href="/licenses">Open-source licenses</a>

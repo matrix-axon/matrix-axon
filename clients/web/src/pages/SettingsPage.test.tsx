@@ -626,7 +626,9 @@ describe('SettingsPage', () => {
     )
 
     const id = services.deviceState.deviceId
-    expect(getByText(id.slice(0, 8))).toBeTruthy()
+    // The whole id, not a prefix: it is read off the screen and matched
+    // against log lines when the clipboard is not an option.
+    expect(getByText(id).textContent).toBe(id)
     fireEvent.click(getByRole('button', { name: 'Copy install ID' }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(id))
     expect((await findByRole('status')).textContent).toBe('Copied')
