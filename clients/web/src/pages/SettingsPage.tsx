@@ -371,16 +371,18 @@ function SettingsPageContents() {
         </CopyableText>{' '}
         · built{' '}
         <time dateTime={BUILD_INFO.builtAt}>{BUILD_INFO.builtAtLabel}</time>
-        {' · '}
+        <br />
         {/* The id this install's device-state requests carry
             (`/v1/devices/{id}/state/…`, ADR 0048). Not the Matrix device id the
             Accounts page shows: it is minted per install, so it is what ties a
-            server or proxy log line back to one phone, tablet or browser. */}
-        install{' '}
+            server or proxy log line back to one phone, tablet or browser. On a
+            line of its own, because 36 characters inline in the sentence above
+            split mid-id at phone widths (review of #1051). */}
+        Install ID{' '}
         <CopyableText text={deviceState.deviceId} label="install ID">
           <code>{deviceState.deviceId}</code>
         </CopyableText>
-        {' · '}
+        <br />
         <a href="/licenses">Open-source licenses</a>
         {' · '}
         <a href="/privacy">Privacy policy</a>
