@@ -171,6 +171,17 @@ export async function roomUrl(name: string): Promise<string> {
   return `/${await accountId()}/rooms/${encodeURIComponent(roomId(name))}`
 }
 
+/** The in-app URL of a corpus space, which opens like any joined room. */
+export async function spaceUrl(id: string): Promise<string> {
+  const space = demo().spaces[id]
+  if (space === undefined) {
+    throw new Error(
+      `no corpus space ${id}; have: ${Object.keys(demo().spaces).join(', ')}`,
+    )
+  }
+  return `/${await accountId()}/rooms/${encodeURIComponent(space.room_id)}`
+}
+
 /**
  * Redact anything the corpus viewer previously left in `room` whose body
  * contains `needle`, over the API and before the browser opens.

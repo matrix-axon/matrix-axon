@@ -3,6 +3,7 @@ import {
   fireEvent,
   render,
   waitFor,
+  within,
   type RenderResult,
 } from '@testing-library/preact'
 import { HttpResponse, delay, http } from 'msw'
@@ -14,14 +15,20 @@ import { ServicesContext } from '../services'
 import { createMembersStore } from '../stores/members'
 import {
   emptyRoomDetails,
+  emptyRoomPreview,
   roomDetailsKey,
   type RoomDetailsStore,
 } from '../stores/room-details'
 import type { RoomDto } from '../stores/room-list'
 import {
+  discoveredRoom,
+  hierarchyChild,
+  hierarchyPage,
   homeserverDetailsDto,
   metadataDto,
+  roomDiscovery,
   snapshot,
+  spaceDiscovery,
   unknownSnapshot,
 } from '../test/room-details'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -107,6 +114,9 @@ function handlers(
     ),
     http.get(`${base}/pinned`, () => HttpResponse.json({ data: [] })),
     http.get(`${base}/space/children`, () => HttpResponse.json({ data: [] })),
+    http.get(`${base}/space/hierarchy`, () =>
+      HttpResponse.json({ data: hierarchyPage([]) }),
+    ),
     http.get(`${base}/space/parents`, () => HttpResponse.json({ data: [] })),
     http.get(`${base}/upgrade`, () =>
       HttpResponse.json({
@@ -311,9 +321,14 @@ it('confirms before joining a relationship link, and reports a failed join', asy
   const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
   let joins = 0
   server.use(
-    http.get(`${base}/space/children`, () =>
+    http.get(`${base}/space/hierarchy`, () =>
       HttpResponse.json({
-        data: [{ room_id: '!child:hs', name: 'General', via: ['hs'] }],
+        data: hierarchyPage([hierarchyChild('!child:hs', { name: 'General' })]),
+      }),
+    ),
+    http.get(`${base}/discovery`, () =>
+      HttpResponse.json({
+        data: roomDiscovery('!child:hs', { discovered: null }),
       }),
     ),
     http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`, () => {
@@ -325,7 +340,9 @@ it('confirms before joining a relationship link, and reports a failed join', asy
     }),
     ...handlers(),
   )
-  const { findByRole, getByRole, findByText } = renderPanel(FIRST)
+  const { findByRole, getByRole, findByText } = renderPanel(FIRST, {
+    room_type: 'm.space',
+  })
 
   // The label reads like navigation, but the room is not joined: opening it is
   // a membership change and must be confirmed.
@@ -345,7 +362,7 @@ it('surfaces relationship errors rather than a permanent loading line', async ()
   server.use(
     // Every relationship read fails, as when the server is unreachable. These
     // come first: msw resolves with the first matching handler.
-    http.get(`${base}/space/children`, () =>
+    http.get(`${base}/space/hierarchy`, () =>
       HttpResponse.json(
         { error: { code: 'unavailable', message: 'offline' } },
         { status: 503 },
@@ -365,13 +382,229 @@ it('surfaces relationship errors rather than a permanent loading line', async ()
     ),
     ...handlers(),
   )
-  const { queryAllByText, queryByText } = renderPanel(FIRST)
+  const { queryAllByText, queryByText, findByText } = renderPanel(FIRST, {
+    room_type: 'm.space',
+  })
 
-  // One per failed read: children, parents and upgrade.
+  // One per failed read: parents and upgrade, and the space's children.
   await waitFor(() =>
-    expect(queryAllByText('Could not load this section.').length).toBe(3),
+    expect(queryAllByText('Could not load this section.').length).toBe(2),
   )
+  expect(
+    await findByText('Could not load rooms in this space: offline'),
+  ).toBeTruthy()
   expect(queryByText('Loading room relationships…')).toBeNull()
+})
+
+/** The rows under "Spaces and upgrades", as button label plus notes. */
+function childRows(): string[] {
+  return [...document.querySelectorAll('.room-state-child')].map((row) =>
+    [...row.querySelectorAll('button, span')]
+      .map((part) => part.textContent ?? '')
+      .join(' | '),
+  )
+}
+
+function countLine(): string | null {
+  return (
+    document.querySelector('.room-state-children-count')?.textContent ?? null
+  )
+}
+
+it('names space children by ADR 0128 precedence, never merging sources', async () => {
+  const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
+  const requests: URL[] = []
+  server.use(
+    http.get(`${base}/space/hierarchy`, ({ request }) => {
+      requests.push(new URL(request.url))
+      return HttpResponse.json({
+        data: hierarchyPage(
+          [
+            // Joined: synced fields, even with a summary on hand.
+            hierarchyChild('!joined:hs', {
+              joined: true,
+              name: 'Synced name',
+              discovered: discoveredRoom({ name: 'Directory name' }),
+            }),
+            // Unjoined with an available summary: the summary, even its
+            // missing name, which falls to the room ID rather than the
+            // synced name.
+            hierarchyChild('!found:hs', {
+              name: 'Stale synced',
+              discovered: discoveredRoom({ name: null, topic: 'Fish' }),
+            }),
+            // A denial is not a summary: synced fields.
+            hierarchyChild('!hidden:hs', {
+              name: 'Left long ago',
+              discovered: discoveredRoom({ status: 'not_returned' }),
+            }),
+            // Nothing at all: the room ID.
+            hierarchyChild('!bare:hs'),
+          ],
+          { total_children: 9, next_cursor: 'c1' },
+        ),
+      })
+    }),
+    ...handlers(),
+  )
+  renderPanel(FIRST, { room_type: 'm.space' })
+  await waitFor(() => expect(childRows()).toHaveLength(4))
+  expect(childRows()).toEqual([
+    'Child: Synced name | Joined',
+    expect.stringMatching(
+      /^Child: !found:hs \| Fish \| Not joined · From space directory · updated \S+$/,
+    ),
+    'Child: Left long ago | Not joined · Not in space directory',
+    'Child: !bare:hs | Not joined · Not looked up',
+  ])
+  expect(countLine()).toBe('Showing 4 of 9')
+  // Opening a joined space's information is the user asking (decision 7).
+  expect(requests[0].searchParams.get('enrich')).toBe('true')
+  expect(requests[0].searchParams.get('limit')).toBe('50')
+})
+
+it.each([
+  [
+    { state: 'running' as const, rooms_cached: 12 },
+    'Looking up rooms… (12 found)',
+  ],
+  [
+    { support: 'unsupported' as const, outcome: 'failed' as const },
+    "Your homeserver can't list this space's rooms",
+  ],
+  [
+    { outcome: 'failed' as const, failure: 'forbidden' as const },
+    "Your homeserver didn't allow listing this space's rooms",
+  ],
+  [
+    { outcome: 'truncated' as const },
+    'The space directory listed only part of this space',
+  ],
+])('shows the crawl progress row for %o', async (discovery, line) => {
+  const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
+  server.use(
+    http.get(`${base}/space/hierarchy`, () =>
+      HttpResponse.json({
+        data: hierarchyPage([hierarchyChild('!a:hs')], {
+          discovery: spaceDiscovery(discovery),
+        }),
+      }),
+    ),
+    ...handlers(),
+  )
+  renderPanel(FIRST, { room_type: 'm.space' })
+  await waitFor(() => expect(countLine()).toBe(`Showing 1 of 1 · ${line}`))
+})
+
+it('pages a space with Load more, without enrich', async () => {
+  const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
+  const requests: URL[] = []
+  server.use(
+    http.get(`${base}/space/hierarchy`, ({ request }) => {
+      const url = new URL(request.url)
+      requests.push(url)
+      const cursor = url.searchParams.get('cursor')
+      return HttpResponse.json({
+        data:
+          cursor === null
+            ? hierarchyPage([hierarchyChild('!a:hs')], {
+                total_children: 2,
+                next_cursor: 'c1',
+              })
+            : // A link whose order moved mid-walk repeats a row.
+              hierarchyPage(
+                [hierarchyChild('!a:hs'), hierarchyChild('!b:hs')],
+                {
+                  total_children: 2,
+                },
+              ),
+      })
+    }),
+    ...handlers(),
+  )
+  const { findByRole, queryByRole } = renderPanel(FIRST, {
+    room_type: 'm.space',
+  })
+  fireEvent.click(await findByRole('button', { name: 'Load more' }))
+  await waitFor(() => expect(countLine()).toBe('Showing 2 of 2'))
+  expect(childRows()).toHaveLength(2)
+  expect(queryByRole('button', { name: 'Load more' })).toBeNull()
+  expect(requests).toHaveLength(2)
+  expect(requests[1].searchParams.get('cursor')).toBe('c1')
+  expect(requests[1].searchParams.has('enrich')).toBe(false)
+})
+
+it('never reads a hierarchy for a room that is not a space', async () => {
+  const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
+  let reads = 0
+  server.use(
+    http.get(`${base}/space/hierarchy`, () => {
+      reads += 1
+      return HttpResponse.json({ data: hierarchyPage([]) })
+    }),
+    ...handlers(),
+  )
+  const { findByText } = renderPanel(FIRST)
+  expect(await findByText('No related spaces or upgrade links.')).toBeTruthy()
+  expect(reads).toBe(0)
+  expect(countLine()).toBeNull()
+})
+
+it('previews an unjoined child from its summary, then from /discovery', async () => {
+  const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
+  let discoveryReads = 0
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => (release = resolve))
+  server.use(
+    http.get(`${base}/space/hierarchy`, () =>
+      HttpResponse.json({
+        data: hierarchyPage([
+          hierarchyChild('!salmon:hs', {
+            discovered: discoveredRoom({ name: 'Salmon count', topic: 'Old' }),
+          }),
+        ]),
+      }),
+    ),
+    http.get(`${base}/discovery`, async ({ params }) => {
+      discoveryReads += 1
+      expect(decodeURIComponent(String(params.roomId))).toBe('!salmon:hs')
+      await held
+      return HttpResponse.json({
+        data: roomDiscovery('!salmon:hs', {
+          discovered: discoveredRoom({
+            source: 'summary',
+            topic: 'Counting fish',
+            encryption: null,
+            withheld: ['canonical_alias'],
+          }),
+        }),
+      })
+    }),
+    ...handlers(),
+  )
+  const { findByRole, findByText, getByRole, queryByRole } = renderPanel(
+    FIRST,
+    { room_type: 'm.space' },
+  )
+  fireEvent.click(await findByRole('button', { name: 'Child: Salmon count' }))
+  // The row's summary seeds the preview while `/discovery` is in flight.
+  const preview = await findByRole('region', { name: 'Room preview' })
+  expect(preview.textContent).toContain('Old')
+  release()
+  expect(await findByText('Counting fish')).toBeTruthy()
+  const rows = [...preview.querySelectorAll('dt')].map((dt) => [
+    dt.textContent,
+    dt.nextElementSibling?.textContent,
+  ])
+  expect(rows).toContainEqual(['Encryption', 'Unknown'])
+  expect(rows).toContainEqual(['Members', '4 joined'])
+  // A withheld field is left out, not shown as empty.
+  expect(rows.map(([label]) => label)).not.toContain('Canonical alias')
+  expect(discoveryReads).toBe(1)
+  getByRole('button', { name: 'Cancel' }).click()
+  await waitFor(() =>
+    expect(queryByRole('region', { name: 'Room preview' })).toBeNull(),
+  )
 })
 
 /**
@@ -1565,8 +1798,13 @@ it('never renders details the store holds for a different room', () => {
   }
   const stuck: RoomDetailsStore = {
     state: signal(firstRoomDetails),
+    preview: signal(emptyRoomPreview()),
     show: () => {},
+    loadMore: () => {},
     retry: () => {},
+    showPreview: () => {},
+    closePreview: () => {},
+    retryPreview: () => {},
     dispose: () => {},
   }
   render(
@@ -1635,3 +1873,65 @@ it('says when the member list is shorter than the joined count (issue 659)', asy
     complete.container.querySelector('.room-info-member-coverage'),
   ).toBeNull()
 })
+
+it.each([
+  ['an unseeded child', null],
+  ['a seeded child', discoveredRoom({ name: 'Seeded', topic: 'Seed topic' })],
+])(
+  'reports a failed preview read for %s, with a Retry that recovers',
+  async (_name, seed) => {
+    const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
+    let fail = true
+    server.use(
+      http.get(`${base}/space/hierarchy`, () =>
+        HttpResponse.json({
+          data: hierarchyPage([
+            hierarchyChild('!salmon:hs', { name: 'Salmon', discovered: seed }),
+          ]),
+        }),
+      ),
+      http.get(`${base}/discovery`, () =>
+        fail
+          ? HttpResponse.json(
+              {
+                error: {
+                  code: 'unavailable',
+                  message: 'preview temporarily unavailable',
+                },
+              },
+              { status: 503 },
+            )
+          : HttpResponse.json({
+              data: roomDiscovery('!salmon:hs', {
+                discovered: discoveredRoom({ topic: 'Counting fish' }),
+              }),
+            }),
+      ),
+      ...handlers(),
+    )
+    const { findByRole, findByText } = renderPanel(FIRST, {
+      room_type: 'm.space',
+    })
+    const name = seed === null ? 'Child: Salmon' : 'Child: Seeded'
+    fireEvent.click(await findByRole('button', { name }))
+    const preview = await findByRole('region', { name: 'Room preview' })
+    const alert = await within(preview).findByRole('alert')
+    expect(alert.textContent).toContain(
+      "Couldn't look up this room: preview temporarily unavailable",
+    )
+    if (seed === null) {
+      // Settled and failed: never the "Retrieving" of a read in flight.
+      expect(preview.textContent).not.toContain('Retrieving')
+    } else {
+      // What the row already knew stays, marked as not refreshed.
+      expect(preview.textContent).toContain('Seed topic')
+      expect(
+        preview.querySelector('.room-join-preview-note')?.textContent,
+      ).toMatch(/· couldn't refresh$/)
+    }
+    fail = false
+    fireEvent.click(within(preview).getByRole('button', { name: 'Retry' }))
+    expect(await findByText('Counting fish')).toBeTruthy()
+    expect(within(preview).queryByRole('alert')).toBeNull()
+  },
+)

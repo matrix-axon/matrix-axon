@@ -4381,6 +4381,78 @@ span.composer-attachment-thumb {
   overflow-wrap: anywhere;
 }
 
+/* A space's children from the paged hierarchy (ADR 0133 decision 6): the link,
+   then its topic and provenance, each on its own line so a long room ID or
+   topic wraps instead of widening the panel. */
+.room-state-child {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  min-width: 0;
+  margin-bottom: 0.35rem;
+}
+
+.room-state-child > button {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.room-state-child-topic,
+.room-state-child-note {
+  overflow-wrap: anywhere;
+  padding-inline-start: 0.5rem;
+}
+
+/* The room's own words, in the regular text colour and a little weightier
+   than the muted status line under it (joined, where the name came from). */
+.room-state-child-topic {
+  font-size: 0.875em;
+  font-weight: 500;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.room-state-child-note {
+  font-size: 0.8em;
+}
+
+.room-state-children-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+/* One unjoined room's summary in a join prompt (decision 8). Not
+   `.room-preview`: that is the room list's latest-message line. */
+.room-join-preview {
+  margin-block: 0.5rem;
+  min-width: 0;
+}
+
+.room-join-preview-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.75rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.room-join-preview-error > .error {
+  margin: 0;
+}
+
+.room-join-preview-note {
+  font-size: 0.85em;
+  margin-block: 0.35rem 0;
+}
+
 .room-info-details-error > p {
   margin: 0;
 }

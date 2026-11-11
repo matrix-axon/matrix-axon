@@ -37,6 +37,7 @@ import {
   type RoomDto,
 } from '../stores/room-list'
 import { flowKey, flowStageLabel, flowTitle } from '../stores/verification'
+import { relativeTime } from '../relative-time'
 import {
   nextIn,
   ROOM_FILTERS,
@@ -1545,24 +1546,6 @@ function RoomRow({
       </button>
     </li>
   )
-}
-
-/** Compact relative timestamp for the activity column. */
-function relativeTime(ts: number): string {
-  const seconds = Math.round((Date.now() - ts) / 1000)
-  if (seconds < 60) {
-    return 'now'
-  }
-  if (seconds < 3600) {
-    return `${Math.floor(seconds / 60)}m`
-  }
-  if (seconds < 86400) {
-    return `${Math.floor(seconds / 3600)}h`
-  }
-  if (seconds < 7 * 86400) {
-    return `${Math.floor(seconds / 86400)}d`
-  }
-  return new Date(ts).toISOString().slice(0, 10)
 }
 
 /**

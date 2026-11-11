@@ -48,8 +48,8 @@ out_mobile="$artifacts_dir/web-demo-mobile.mp4"
 # The tour order from demo.html's <ul> under each of #web-desktop and
 # #web-mobile — not an independent choice. If a scene is added, renamed, or
 # reordered, update demo.html first and mirror the change here.
-DESKTOP_SCENES=(rooms spaces timeline threads media search send shortcuts)
-MOBILE_SCENES=(rooms timeline threads media search send)
+DESKTOP_SCENES=(rooms spaces discovery timeline threads media search send shortcuts)
+MOBILE_SCENES=(rooms timeline discovery threads media search send)
 
 usage() {
   cat >&2 <<'EOF'

@@ -10,6 +10,7 @@ import {
 import { ConnectionIndicator } from './components/ConnectionIndicator'
 import { PerfOverlay } from './components/PerfOverlay'
 import { RoomList } from './components/RoomList'
+import { RoomPreview, useRoomPreview } from './components/RoomPreview'
 import { SpaceList } from './components/SpaceList'
 import { SearchOverlay } from './components/SearchOverlay'
 import { ShortcutsHelp } from './components/ShortcutsHelp'
@@ -1739,6 +1740,11 @@ function MatrixJoinPrompt({
     },
     { whileTyping: true, capture: true },
   )
+  // A room ID can be previewed with one `/discovery` read (ADR 0133 decision
+  // 8); an alias cannot, and the server refuses rooms no joined space links.
+  const roomId = pending.reference.roomIdOrAlias
+  const previewable = roomId.startsWith('!')
+  useRoomPreview(pending.accountId, roomId, previewable)
 
   return (
     <div
@@ -1766,6 +1772,14 @@ function MatrixJoinPrompt({
         </p>
         {pending.accountUserId !== null && (
           <p class="muted">Account: {pending.accountUserId}</p>
+        )}
+        {previewable && (
+          <RoomPreview
+            accountId={pending.accountId}
+            roomId={roomId}
+            seed={null}
+            requireAvailable
+          />
         )}
         {pending.error !== null && <p class="error">{pending.error}</p>}
         <div class="dialog-actions">

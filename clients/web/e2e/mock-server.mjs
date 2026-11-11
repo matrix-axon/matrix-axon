@@ -30,6 +30,62 @@ const INSTANCE_ACCOUNT_ID = '00000000-0000-0000-0000-000000000000'
 const ACCOUNT_ID_2 = '22222222-2222-4222-8222-222222222222'
 const USER_ID_2 = '@other:hs'
 const LONG_ROOM_ID = '!vQZGkFhTnLxWpRdCmYbA:hs'
+
+/** A discovered summary as the hierarchy and `/discovery` report one. */
+function discoveredSummary(roomId, name, source = 'hierarchy') {
+  const n = Number(roomId.match(/\d+/)?.[0] ?? 0)
+  return {
+    status: 'available',
+    source,
+    observed_at: 1_700_000_000_000,
+    expires_at: Date.now() + 6 * 3_600_000,
+    withheld: [],
+    name,
+    topic: `Topic for ${name}, long enough to wrap on a phone-width panel`,
+    canonical_alias: `#discovered-${n}:e2e.test`,
+    num_joined_members: 3 + n,
+    join_rule: 'public',
+    encryption: null,
+    room_version: '11',
+  }
+}
+
+/** Space One's children: 1 joined, 118 named by the directory, 1 not looked up. */
+const SPACE_ONE_HIERARCHY = [
+  {
+    room_id: ROOM_ID,
+    name: 'E2E Room',
+    room_type: null,
+    suggested: false,
+    via: ['hs'],
+    parent_room_id: '!space-one:hs',
+    joined: true,
+    discovered: null,
+  },
+  ...Array.from({ length: 118 }, (_, i) => {
+    const roomId = `!discovered-${i + 1}:e2e.test`
+    return {
+      room_id: roomId,
+      name: null,
+      room_type: null,
+      suggested: false,
+      via: ['e2e.test'],
+      parent_room_id: '!space-one:hs',
+      joined: false,
+      discovered: discoveredSummary(roomId, `Discovered room ${i + 1}`),
+    }
+  }),
+  {
+    room_id: '!not-looked-up:e2e.test',
+    name: null,
+    room_type: null,
+    suggested: false,
+    via: ['e2e.test'],
+    parent_room_id: '!space-one:hs',
+    joined: false,
+    discovered: null,
+  },
+]
 const QR_FLOW_ID = '33333333-3333-4333-8333-333333333333'
 const QR_BINARY_BASE64 = Buffer.from([0, 1, 2, 3, 127, 128, 254, 255])
   .toString('base64')
@@ -1061,6 +1117,63 @@ async function handleApi(req, res, url) {
   }
   if (method === 'GET' && /\/space\/parents$/.test(pathname)) {
     return json(res, { data: [] })
+  }
+  // The paged hierarchy behind Room Information's children (ADR 0133 decision
+  // 6). Space One is large enough to page: the joined seeded room first, then
+  // unjoined rooms the space directory has named, then one it has not looked
+  // up yet, so every display-precedence branch renders. Cursors are the
+  // offset after the page; `limit` is honoured.
+  if (method === 'GET' && /\/space\/hierarchy$/.test(pathname)) {
+    const spaceId = decodeURIComponent(pathname.split('/').at(-3))
+    const children = spaceId === '!space-one:hs' ? SPACE_ONE_HIERARCHY : []
+    const cursor = url.searchParams.get('cursor')
+    const from = cursor === null ? 0 : Number(cursor.slice('at-'.length))
+    const limit = Number(url.searchParams.get('limit') ?? 100)
+    const page = children.slice(from, from + limit)
+    const end = from + page.length
+    return json(res, {
+      data: {
+        room_id: spaceId,
+        children: page,
+        total_children: children.length,
+        next_cursor: end < children.length ? `at-${end}` : null,
+        discovery: {
+          state: 'idle',
+          support: 'supported',
+          outcome: 'complete',
+          failure: null,
+          next_attempt_at: null,
+          completed_at: 1_700_000_000_000,
+          expires_at: Date.now() + 6 * 3_600_000,
+          started_at: 1_700_000_000_000,
+          page_limit: 50,
+          pages: 3,
+          rooms_cached: children.length - 2,
+        },
+      },
+    })
+  }
+  // One unjoined room's summary (decision 8): whatever the hierarchy row for
+  // it says, refreshed from the room-summary endpoint.
+  if (method === 'GET' && /\/rooms\/[^/]+\/discovery$/.test(pathname)) {
+    const roomId = decodeURIComponent(pathname.split('/').at(-2))
+    const row = SPACE_ONE_HIERARCHY.find((child) => child.room_id === roomId)
+    const eligible = row !== undefined && !row.joined
+    return json(res, {
+      data: {
+        room_id: roomId,
+        eligible,
+        support: 'supported',
+        refresh: { state: 'idle' },
+        discovered: eligible
+          ? discoveredSummary(
+              roomId,
+              row.discovered?.name ?? 'Unnamed room',
+              'summary',
+            )
+          : null,
+      },
+    })
   }
   // The Room Information panel's state reads (ADR 0084). Unhandled, each one
   // rendered its section as "Could not load this section." in every run, so

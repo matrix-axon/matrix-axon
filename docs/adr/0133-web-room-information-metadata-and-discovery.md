@@ -65,7 +65,7 @@ The server already coalesces frames per account (100 ms quiet, 1 s at most), so 
 When the homeserver has no room-summary endpoint, the `/discovery` read schedules a crawl of one joined space that links the room instead (ADR 0128 decision 5).
 The server picks that space (the first linking space, by room ID, whose crawl is due), and the response does not say which one, so its summary arrives as a `space_hierarchy` frame for a space the client cannot predict: often not the space the row was opened from, and never a known space for a Matrix-link preview, which has none.
 So while `support` is `unsupported`, a `space_hierarchy` frame for any space re-reads the one previewed room's `/discovery`, but only while the preview is still waiting for an answer: `discovered` is `null`, or its `expires_at` has passed.
-Every `discovered` status is a conclusive answer with its own expiry (ADR 0128): `available`, and the denials `not_returned`, `forbidden` and `not_found`, which decision 3 shows as "Not visible in the space directory".
+Every `discovered` status is a conclusive answer with its own expiry (ADR 0128): `available`, and the denials `not_returned`, `forbidden` and `not_found`, which decision 3 shows as "Not in space directory".
 So once a read returns an unexpired `discovered` of any status, frames no longer re-read it; a reconnect or reopen still does.
 
 Each of those reads can itself schedule a crawl.
@@ -149,9 +149,9 @@ So a stale value stays visible next to a failed refresh ("Public · may be out o
 
 | Server state | Shown |
 |---|---|
-| `status: available` | its fields, noted "From the space directory" with the `observed_at` time |
-| `not_returned`, `forbidden`, `not_found` | "Not visible in the space directory" |
-| `discovered: null` on an unjoined room | "Not looked up yet" |
+| `status: available` | its fields, noted "From space directory · updated 10m" (the age of `observed_at`) |
+| `not_returned`, `forbidden`, `not_found` | "Not in space directory" |
+| `discovered: null` on an unjoined room | "Retrieving" while the space's lookup is `queued` or `running` (or the preview's `/discovery` read is), otherwise "Not looked up" (amended in #1055 review) |
 
 `discovered.encryption: null` is "Unknown", never unencrypted.
 Withheld fields (`withheld`) are left out, not shown as empty.
@@ -263,7 +263,7 @@ That is the bound ADR 0128 sets ("cannot drive upstream traffic past `CRAWL_TTL`
   The progress label shows `next_attempt_at` as given, so skew moves the displayed time by the same amount.
 
 The resume sends at most one `enrich` read per frame or reconnect that prompted it, and its response never prompts another.
-The timer sends one per firing, and only the re-arming above follows from its response.
+The timer sends one per firing, and only the re-arming above follows from its response; a timer read that fails outright (offline, a server error) re-arms the same way, so the progress line's "trying again" stays true (amended in #1055 review).
 The server applies its own due check to every such read, so one it declines costs a local read and nothing upstream.
 Closing the panel or switching rooms cancels the timer.
 

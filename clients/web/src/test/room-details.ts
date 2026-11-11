@@ -76,3 +76,95 @@ export function homeserverDetailsDto(
     ...overrides,
   } as unknown as RoomHomeserverDetailsDto
 }
+
+export type SpaceHierarchyPage = Schemas['SpaceHierarchyPage']
+export type SpaceHierarchyChildDto = Schemas['SpaceHierarchyChildDto']
+export type SpaceDiscoveryDto = Schemas['SpaceDiscoveryDto']
+export type DiscoveredRoomDto = Schemas['DiscoveredRoomDto']
+export type RoomDiscoveryDto = Schemas['RoomDiscoveryDto']
+
+/** A space's crawl that has ended `complete`: nothing beyond "Showing N of T". */
+export function spaceDiscovery(
+  overrides: Partial<SpaceDiscoveryDto> = {},
+): SpaceDiscoveryDto {
+  return {
+    state: 'idle',
+    support: 'supported',
+    outcome: 'complete',
+    failure: null,
+    next_attempt_at: null,
+    completed_at: 1_700_000_000_000,
+    expires_at: Date.now() + 6 * 3_600_000,
+    started_at: 1_700_000_000_000,
+    page_limit: 50,
+    pages: 1,
+    rooms_cached: 0,
+    ...overrides,
+  }
+}
+
+/** An `available` summary from the space directory. */
+export function discoveredRoom(
+  overrides: Partial<DiscoveredRoomDto> = {},
+): DiscoveredRoomDto {
+  return {
+    status: 'available',
+    source: 'hierarchy',
+    observed_at: 1_700_000_000_000,
+    expires_at: Date.now() + 6 * 3_600_000,
+    withheld: [],
+    name: 'Salmon count',
+    topic: 'Counting fish',
+    canonical_alias: '#salmon-count:hs',
+    num_joined_members: 4,
+    join_rule: 'public',
+    encryption: null,
+    room_version: '11',
+    ...overrides,
+  }
+}
+
+/** One hierarchy row: an unjoined child with no synced fields and no summary. */
+export function hierarchyChild(
+  roomId: string,
+  overrides: Partial<SpaceHierarchyChildDto> = {},
+): SpaceHierarchyChildDto {
+  return {
+    room_id: roomId,
+    parent_room_id: '!space:hs',
+    via: ['hs'],
+    suggested: false,
+    joined: false,
+    discovered: null,
+    ...overrides,
+  } as SpaceHierarchyChildDto
+}
+
+export function hierarchyPage(
+  children: readonly SpaceHierarchyChildDto[],
+  overrides: Partial<SpaceHierarchyPage> = {},
+): SpaceHierarchyPage {
+  return {
+    room_id: '!space:hs',
+    children: [...children],
+    total_children: children.length,
+    next_cursor: null,
+    discovery: spaceDiscovery(),
+    ...overrides,
+  }
+}
+
+/** `/discovery` for an eligible room the server can summarise. */
+export function roomDiscovery(
+  roomId: string,
+  overrides: Partial<RoomDiscoveryDto> = {},
+): RoomDiscoveryDto {
+  return {
+    room_id: roomId,
+    eligible: true,
+    support: 'supported',
+    refresh: { state: 'idle' },
+    discovered: discoveredRoom({ source: 'summary' }),
+    ...overrides,
+  }
+}

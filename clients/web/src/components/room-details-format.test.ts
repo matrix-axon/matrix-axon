@@ -1,23 +1,30 @@
 import { describe, expect, it } from 'vitest'
 import {
+  discoveredRoom,
+  hierarchyChild,
   homeserverDetailsDto,
   metadataDto,
   snapshot,
+  spaceDiscovery,
   unknownSnapshot,
 } from '../test/room-details'
 import {
   accessShown,
   advertisedAliasesShown,
   canonicalAliasShown,
+  crawlProgressShown,
   createdShown,
   creatorShown,
   directoryVisibilityShown,
+  discoveredPreview,
   encryptionShown,
   guestAccessShown,
+  hierarchyCountShown,
   historyVisibilityShown,
   localAliasesShown,
   memberCountsShown,
   memberListCoverage,
+  spaceChildDisplay,
   predecessorShown,
   roomVersionShown,
   serverAclShown,
@@ -506,6 +513,204 @@ describe('the canonical alias with a room-summary alias to fall back on', () => 
     )
     expect(shown(unknownSnapshot({ status: 'too_large' }))).toBe(
       'Unavailable (state too large)',
+    )
+  })
+})
+
+const at = (ts: number) => `t${ts}`
+/** Ten minutes after the fixtures' `observed_at`. */
+const SEEN_NOW = 1_700_000_000_000 + 10 * 60_000
+
+describe('discovered summaries (decision 3)', () => {
+  it('says when a room has not been looked up, or was not visible', () => {
+    expect(discoveredPreview(null, SEEN_NOW)).toEqual({
+      rows: null,
+      label: 'Retrieving',
+    })
+    for (const status of ['not_returned', 'forbidden', 'not_found'] as const) {
+      expect(discoveredPreview(discoveredRoom({ status }), SEEN_NOW)).toEqual({
+        rows: null,
+        label: 'Not in space directory',
+      })
+    }
+  })
+
+  it('shows an available summary with its provenance', () => {
+    const shown = discoveredPreview(
+      discoveredRoom({ encryption: 'm.megolm.v1.aes-sha2' }),
+      SEEN_NOW,
+    )
+    if (shown.rows === null) throw new Error('expected rows')
+    expect(
+      shown.rows.map((row) => [row.label, row.shown.value ?? row.shown.label]),
+    ).toEqual([
+      ['Name', 'Salmon count'],
+      ['Topic', 'Counting fish'],
+      ['Members', '4 joined'],
+      ['Join rule', 'public'],
+      ['Encryption', 'm.megolm.v1.aes-sha2'],
+      ['Room version', '11'],
+      ['Canonical alias', '#salmon-count:hs'],
+    ])
+    expect(shown.note).toBe('From space directory · updated 10m')
+  })
+
+  it('never reads a missing encryption as unencrypted, and leaves withheld fields out', () => {
+    const shown = discoveredPreview(
+      discoveredRoom({
+        encryption: null,
+        topic: null,
+        num_joined_members: null,
+        name: null,
+        withheld: ['name'],
+      }),
+      SEEN_NOW,
+    )
+    if (shown.rows === null) throw new Error('expected rows')
+    const byLabel = new Map(
+      shown.rows.map((row) => [row.label, row.shown.label ?? row.shown.value]),
+    )
+    expect(byLabel.get('Encryption')).toBe('Unknown')
+    expect(byLabel.get('Members')).toBe('Unknown')
+    expect(byLabel.get('Topic')).toBe('None')
+    expect(byLabel.has('Name')).toBe(false)
+    // State labels are never copyable data.
+    expect(
+      shown.rows.find((row) => row.label === 'Encryption')?.shown.value,
+    ).toBe(null)
+  })
+})
+
+describe('space children display precedence (decision 6)', () => {
+  it('uses synced fields for a joined child', () => {
+    expect(
+      spaceChildDisplay(
+        hierarchyChild('!a:hs', {
+          joined: true,
+          name: 'Synced',
+          discovered: discoveredRoom({ name: 'Directory' }),
+        }),
+        null,
+        SEEN_NOW,
+      ),
+    ).toMatchObject({ name: 'Synced', notes: ['Joined'] })
+  })
+
+  it('uses an available summary for an unjoined child, never merging', () => {
+    expect(
+      spaceChildDisplay(
+        hierarchyChild('!a:hs', {
+          name: 'Synced',
+          discovered: discoveredRoom({
+            name: null,
+            topic: 'T',
+            observed_at: SEEN_NOW - 3 * 3_600_000,
+          }),
+        }),
+        null,
+        SEEN_NOW,
+      ),
+    ).toEqual({
+      name: '!a:hs',
+      topic: 'T',
+      notes: ['Not joined', 'From space directory · updated 3h'],
+    })
+  })
+
+  it('falls back to synced fields, then the room ID', () => {
+    expect(
+      spaceChildDisplay(
+        hierarchyChild('!a:hs', {
+          name: 'Synced',
+          discovered: discoveredRoom({ status: 'forbidden' }),
+        }),
+        null,
+        SEEN_NOW,
+      ),
+    ).toMatchObject({
+      name: 'Synced',
+      notes: ['Not joined', 'Not in space directory'],
+    })
+    expect(
+      spaceChildDisplay(hierarchyChild('!a:hs'), null, SEEN_NOW),
+    ).toMatchObject({ name: '!a:hs', notes: ['Not joined', 'Not looked up'] })
+  })
+
+  it('says Retrieving only while the space lookup is queued or running', () => {
+    const note = (crawl: Parameters<typeof spaceChildDisplay>[1]) =>
+      spaceChildDisplay(hierarchyChild('!a:hs'), crawl, SEEN_NOW).notes[1]
+    expect(note(spaceDiscovery({ state: 'queued' }))).toBe('Retrieving')
+    expect(note(spaceDiscovery({ state: 'running' }))).toBe('Retrieving')
+    // Nothing running: a finished, failed, paused or unsupported lookup, or
+    // none at all (a space the account has not joined).
+    for (const crawl of [
+      spaceDiscovery({ outcome: 'complete' }),
+      spaceDiscovery({ outcome: 'failed', failure: 'forbidden' }),
+      spaceDiscovery({ outcome: 'failed', failure: 'timeout' }),
+      spaceDiscovery({ outcome: 'in_progress' }),
+      spaceDiscovery({ outcome: null, support: 'unsupported' }),
+      spaceDiscovery({ outcome: null }),
+      null,
+    ]) {
+      expect(note(crawl)).toBe('Not looked up')
+    }
+  })
+})
+
+describe('crawl progress (decision 6)', () => {
+  const failed = (extra: object) =>
+    spaceDiscovery({ outcome: 'failed', ...extra })
+
+  it.each([
+    [
+      'row 1: queued or running, whatever else it says',
+      spaceDiscovery({
+        state: 'queued',
+        rooms_cached: 3,
+        outcome: 'failed',
+        support: 'unsupported',
+      }),
+      'Looking up rooms… (3 found)',
+    ],
+    [
+      'row 2: unsupported, ahead of its failed outcome',
+      failed({ support: 'unsupported', failure: 'not_found' }),
+      "Your homeserver can't list this space's rooms",
+    ],
+    [
+      'row 3: forbidden',
+      failed({ failure: 'forbidden', next_attempt_at: 9 }),
+      "Your homeserver didn't allow listing this space's rooms",
+    ],
+    [
+      'row 4: not found',
+      failed({ failure: 'not_found', next_attempt_at: 9 }),
+      "Your homeserver couldn't find this space's room list",
+    ],
+    [
+      'row 5: a transient failure',
+      failed({ failure: 'rate_limited', next_attempt_at: 9 }),
+      "Couldn't look up rooms; trying again at t9",
+    ],
+    [
+      'row 6: paused',
+      spaceDiscovery({ outcome: 'in_progress' }),
+      'Room lookup paused; resuming…',
+    ],
+    [
+      'row 7: truncated',
+      spaceDiscovery({ outcome: 'truncated' }),
+      'The space directory listed only part of this space',
+    ],
+    ['row 8: complete', spaceDiscovery({ outcome: 'complete' }), null],
+    ['row 8: never crawled', spaceDiscovery({ outcome: null }), null],
+  ])('%s', (_name, discovery, line) => {
+    expect(crawlProgressShown(discovery, at)).toBe(line)
+  })
+
+  it('counts the rows actually loaded', () => {
+    expect(hierarchyCountShown(50, 4864)).toBe(
+      `Showing 50 of ${(4864).toLocaleString()}`,
     )
   })
 })
