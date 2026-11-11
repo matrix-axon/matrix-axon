@@ -4428,13 +4428,27 @@ span.composer-attachment-thumb {
   min-width: 0;
 }
 
-/* One unjoined room's summary in a join prompt (decision 8). */
-.room-preview {
+/* One unjoined room's summary in a join prompt (decision 8). Not
+   `.room-preview`: that is the room list's latest-message line. */
+.room-join-preview {
   margin-block: 0.5rem;
   min-width: 0;
 }
 
-.room-preview-note {
+.room-join-preview-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.75rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.room-join-preview-error > .error {
+  margin: 0;
+}
+
+.room-join-preview-note {
   font-size: 0.85em;
   margin-block: 0.35rem 0;
 }

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { ACCOUNT_ID, signIn } from './helpers'
+import { ACCOUNT_ID, ROOM_ID, ROOM_URL, signIn } from './helpers'
 
 /**
  * Room Information for a space (ADR 0133 decisions 6–8): children page from
@@ -151,9 +151,20 @@ test('narrow: a space’s children and the join preview fit a phone', async ({
   const dialog = page.getByRole('dialog', {
     name: 'Join Child: Discovered room 3',
   })
-  await expect(
-    dialog.getByRole('region', { name: 'Room preview' }),
-  ).toContainText('Discovered room 3')
+  const preview = dialog.getByRole('region', { name: 'Room preview' })
+  await expect(preview).toContainText('Discovered room 3')
+  // Every value wraps inside its row rather than running on, clipped, in a
+  // single line: the card fitting the screen says nothing about its text.
+  const clipped = await preview.evaluate((section) =>
+    [...section.querySelectorAll<HTMLElement>('dd, p')]
+      .filter(
+        (node) =>
+          getComputedStyle(node).whiteSpace === 'nowrap' ||
+          node.scrollWidth > node.clientWidth + 1,
+      )
+      .map((node) => node.textContent),
+  )
+  expect(clipped).toEqual([])
   const card = dialog.locator('.overlay-panel')
   const box = await card.boundingBox()
   expect(box).not.toBeNull()
@@ -167,4 +178,33 @@ test('narrow: a space’s children and the join preview fit a phone', async ({
   await expect(
     dialog.getByRole('button', { name: 'Join and open' }),
   ).toBeInViewport()
+})
+
+test('the join preview’s styles leave the room list’s preview line alone', async ({
+  page,
+}) => {
+  // `.room-preview` is the room list's latest-message line; the join dialog's
+  // preview once shared the class name, and its margin spread every row.
+  // The mock's rooms carry no `last_event_id`, so the list shows no preview
+  // lines until one does.
+  await page.route('**/v1/rooms', async (route) => {
+    const response = await route.fetch()
+    const body = (await response.json()) as {
+      data: Array<{ room_id: string; last_event_id?: string }>
+    }
+    for (const room of body.data) {
+      if (room.room_id === ROOM_ID) room.last_event_id = '$latest'
+    }
+    await route.fulfill({ response, json: body })
+  })
+  await signIn(page)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(ROOM_URL)
+  const line = page.locator('.room-list-pane .room-preview').first()
+  await expect(line).toBeVisible()
+  const margins = await line.evaluate((node) => {
+    const style = getComputedStyle(node)
+    return [style.marginTop, style.marginBottom]
+  })
+  expect(margins).toEqual(['0px', '0px'])
 })

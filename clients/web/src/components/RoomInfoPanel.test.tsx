@@ -3,6 +3,7 @@ import {
   fireEvent,
   render,
   waitFor,
+  within,
   type RenderResult,
 } from '@testing-library/preact'
 import { HttpResponse, delay, http } from 'msw'
@@ -1803,6 +1804,7 @@ it('never renders details the store holds for a different room', () => {
     retry: () => {},
     showPreview: () => {},
     closePreview: () => {},
+    retryPreview: () => {},
     dispose: () => {},
   }
   render(
@@ -1871,3 +1873,65 @@ it('says when the member list is shorter than the joined count (issue 659)', asy
     complete.container.querySelector('.room-info-member-coverage'),
   ).toBeNull()
 })
+
+it.each([
+  ['an unseeded child', null],
+  ['a seeded child', discoveredRoom({ name: 'Seeded', topic: 'Seed topic' })],
+])(
+  'reports a failed preview read for %s, with a Retry that recovers',
+  async (_name, seed) => {
+    const base = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId`
+    let fail = true
+    server.use(
+      http.get(`${base}/space/hierarchy`, () =>
+        HttpResponse.json({
+          data: hierarchyPage([
+            hierarchyChild('!salmon:hs', { name: 'Salmon', discovered: seed }),
+          ]),
+        }),
+      ),
+      http.get(`${base}/discovery`, () =>
+        fail
+          ? HttpResponse.json(
+              {
+                error: {
+                  code: 'unavailable',
+                  message: 'preview temporarily unavailable',
+                },
+              },
+              { status: 503 },
+            )
+          : HttpResponse.json({
+              data: roomDiscovery('!salmon:hs', {
+                discovered: discoveredRoom({ topic: 'Counting fish' }),
+              }),
+            }),
+      ),
+      ...handlers(),
+    )
+    const { findByRole, findByText } = renderPanel(FIRST, {
+      room_type: 'm.space',
+    })
+    const name = seed === null ? 'Child: Salmon' : 'Child: Seeded'
+    fireEvent.click(await findByRole('button', { name }))
+    const preview = await findByRole('region', { name: 'Room preview' })
+    const alert = await within(preview).findByRole('alert')
+    expect(alert.textContent).toContain(
+      "Couldn't look up this room: preview temporarily unavailable",
+    )
+    if (seed === null) {
+      // Settled and failed: never the "Retrieving" of a read in flight.
+      expect(preview.textContent).not.toContain('Retrieving')
+    } else {
+      // What the row already knew stays, marked as not refreshed.
+      expect(preview.textContent).toContain('Seed topic')
+      expect(
+        preview.querySelector('.room-join-preview-note')?.textContent,
+      ).toMatch(/· couldn't refresh$/)
+    }
+    fail = false
+    fireEvent.click(within(preview).getByRole('button', { name: 'Retry' }))
+    expect(await findByText('Counting fish')).toBeTruthy()
+    expect(within(preview).queryByRole('alert')).toBeNull()
+  },
+)

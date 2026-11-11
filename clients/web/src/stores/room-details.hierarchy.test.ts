@@ -826,3 +826,105 @@ it('drops a late /discovery answer after the preview closed', async () => {
   expect(h.store.preview.value.discovery.value).toBeNull()
   expect(h.store.preview.value.key).toBeNull()
 })
+
+/**
+ * A `/discovery` handler whose answers the test sets and can hold open, so a
+ * frame can be delivered while a read is in flight.
+ */
+function heldDiscovery(h: Harness) {
+  let answer: RoomDiscoveryDto | 'fail' = roomDiscovery(CHILD)
+  const held: Array<() => void> = []
+  let holding = false
+  server.use(
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/discovery`,
+      async () => {
+        h.discoveryRequests.push(CHILD)
+        // The answer as of the request: the server's snapshot is taken then.
+        const current = answer
+        if (holding) await new Promise<void>((resolve) => held.push(resolve))
+        return current === 'fail'
+          ? HttpResponse.json(
+              { error: { code: 'unavailable', message: 'try later' } },
+              { status: 503 },
+            )
+          : HttpResponse.json({ data: current })
+      },
+    ),
+  )
+  return {
+    answer: (next: RoomDiscoveryDto | 'fail') => {
+      answer = next
+    },
+    hold: () => {
+      holding = true
+    },
+    release: () => {
+      holding = false
+      for (const resolve of held.splice(0)) resolve()
+    },
+    heldCount: () => held.length,
+  }
+}
+
+it('judges a hierarchy frame that lands during the first read against its answer', async () => {
+  const h = harness()
+  const d = heldDiscovery(h)
+  // The server takes its snapshot, schedules the fallback crawl, and the
+  // crawl ends and publishes before this first answer reaches the browser.
+  d.answer(roomDiscovery(CHILD, { support: 'unsupported', discovered: null }))
+  d.hold()
+  preview(h)
+  await vi.waitFor(() => expect(d.heldCount()).toBe(1))
+  h.frame(['space_hierarchy'], '!some-other-space:hs')
+  d.answer(roomDiscovery(CHILD, { support: 'unsupported' }))
+  d.release()
+  await vi.waitFor(() =>
+    expect(h.store.preview.value.discovery.value?.discovered?.status).toBe(
+      'available',
+    ),
+  )
+  expect(h.discoveryRequests).toHaveLength(2)
+})
+
+it('a mid-read hierarchy frame prompts nothing once the answer is conclusive', async () => {
+  const h = harness()
+  const d = heldDiscovery(h)
+  d.answer(
+    roomDiscovery(CHILD, {
+      support: 'unsupported',
+      discovered: discoveredRoom({ status: 'not_found', name: null }),
+    }),
+  )
+  d.hold()
+  preview(h)
+  await vi.waitFor(() => expect(d.heldCount()).toBe(1))
+  h.frame(['space_hierarchy'], SPACE)
+  d.release()
+  await vi.waitFor(() =>
+    expect(h.store.preview.value.discovery.value).not.toBeNull(),
+  )
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  expect(h.discoveryRequests).toHaveLength(1)
+})
+
+it('retries a failed preview read on request, and only after a failure', async () => {
+  const h = harness()
+  const d = heldDiscovery(h)
+  d.answer('fail')
+  preview(h)
+  await vi.waitFor(() =>
+    expect(h.store.preview.value.discovery.error).toBe('try later'),
+  )
+  d.answer(roomDiscovery(CHILD))
+  h.store.retryPreview()
+  // Pending again at once, not still failed.
+  expect(h.store.preview.value.discovery.error).toBeNull()
+  await vi.waitFor(() =>
+    expect(h.store.preview.value.discovery.value).not.toBeNull(),
+  )
+  expect(h.discoveryRequests).toHaveLength(2)
+  h.store.retryPreview()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(h.discoveryRequests).toHaveLength(2)
+})

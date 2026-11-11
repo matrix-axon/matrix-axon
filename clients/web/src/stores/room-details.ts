@@ -176,6 +176,11 @@ export interface RoomDetailsStore {
    */
   closePreview(target: RoomPreviewTarget): void
   /**
+   * Repeat the preview's `/discovery` read after it failed: the prompt's
+   * Retry. A failure otherwise waits for a frame, a reconnect or a reopen.
+   */
+  retryPreview(): void
+  /**
    * Stop listening: the frame subscription, the reconnect effect, the
    * `visibilitychange` listener and the clock timer, and abort the shown
    * room's reads. The app graph keeps the store for the page's life; tests
@@ -330,7 +335,16 @@ interface PreviewSession {
   target: RoomPreviewTarget
   controller: AbortController
   inFlight: boolean
+  /** A `discovery` frame arrived mid-read: exactly one more read follows. */
   dirty: boolean
+  /**
+   * A `space_hierarchy` frame arrived mid-read. Whether it calls for a
+   * fallback re-read depends on `support` and `discovered`, which the read in
+   * flight is about to answer, so it is judged against that answer rather
+   * than the one held when the frame came: the fallback crawl can end, and
+   * publish its only frame, before the first answer reaches the browser.
+   */
+  hierarchyDuringRead: boolean
 }
 
 type ReadResult<T> = { ok: true; value: T } | { ok: false; message: string }
@@ -800,12 +814,25 @@ export function createRoomDetailsStore(
             ? { value: result.value, error: null, requested: true }
             : { ...slot, error: result.message },
         }
-        if (owner.dirty) {
-          owner.dirty = false
-          readPreview(owner)
-        }
+        const again =
+          owner.dirty || (owner.hierarchyDuringRead && previewAwaitsFallback())
+        owner.dirty = false
+        owner.hierarchyDuringRead = false
+        if (again) readPreview(owner)
       },
     )
+  }
+
+  function retryPreview(): void {
+    const owner = previewSession
+    if (owner === null || preview.value.discovery.error === null) return
+    // Back to "pending" at once, so the prompt does not offer Retry again
+    // while this one is in flight.
+    preview.value = {
+      ...preview.value,
+      discovery: { ...preview.value.discovery, error: null },
+    }
+    readPreview(owner)
   }
 
   /**
@@ -836,6 +863,7 @@ export function createRoomDetailsStore(
       controller: new AbortController(),
       inFlight: false,
       dirty: false,
+      hierarchyDuringRead: false,
     }
     previewSession = owner
     readPreview(owner)
@@ -870,12 +898,17 @@ export function createRoomDetailsStore(
     const previewOwner = previewSession
     if (
       previewOwner !== null &&
-      frame.accountId === previewOwner.target.accountId &&
-      ((change.roomId === previewOwner.target.roomId &&
-        change.sources.has('discovery')) ||
-        (change.sources.has('space_hierarchy') && previewAwaitsFallback()))
+      frame.accountId === previewOwner.target.accountId
     ) {
-      readPreview(previewOwner)
+      if (
+        change.roomId === previewOwner.target.roomId &&
+        change.sources.has('discovery')
+      ) {
+        readPreview(previewOwner)
+      } else if (change.sources.has('space_hierarchy')) {
+        if (previewOwner.inFlight) previewOwner.hierarchyDuringRead = true
+        else if (previewAwaitsFallback()) readPreview(previewOwner)
+      }
     }
     if (
       owner === null ||
@@ -961,6 +994,7 @@ export function createRoomDetailsStore(
     retry,
     showPreview,
     closePreview,
+    retryPreview,
     dispose,
   }
 }
