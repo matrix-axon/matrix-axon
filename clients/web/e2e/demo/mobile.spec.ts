@@ -7,6 +7,7 @@ import {
   roomUrl,
   spaceButton,
   spaceName,
+  spaceUrl,
   stage,
   tap,
   tapType,
@@ -105,6 +106,35 @@ test('timeline — reading a room on a phone', async ({ page }) => {
 
   await page.keyboard.press('Escape')
   await expect(info).toBeHidden()
+  await dwell(page, BEAT)
+})
+
+test('discovery — a space’s rooms, and a preview before joining', async ({
+  page,
+}) => {
+  await stage(page, await spaceUrl('watershed'))
+  await expectTimelinePane(page)
+  await dwell(page, BEAT)
+
+  await tap(page, page.getByRole('button', { name: 'Open room information' }))
+  const info = page.getByRole('complementary', { name: 'Room information' })
+  await expect(info).toBeVisible()
+  // Named from the space directory once the crawl the open asked for lands
+  // (ADR 0133 decisions 6 and 7).
+  const salmon = info.getByRole('button', { name: 'Child: salmon-count' })
+  await expect(salmon).toBeVisible({ timeout: 30_000 })
+  await salmon.scrollIntoViewIfNeeded()
+  await dwell(page, LONG)
+
+  await tap(page, salmon)
+  const dialog = page.getByRole('dialog', { name: 'Join Child: salmon-count' })
+  await expect(
+    dialog.getByRole('region', { name: 'Room preview' }),
+  ).toContainText('Spawning survey on Beckett Creek')
+  await dwell(page, LONG)
+
+  await tap(page, dialog.getByRole('button', { name: 'Cancel' }))
+  await expect(dialog).toBeHidden()
   await dwell(page, BEAT)
 })
 

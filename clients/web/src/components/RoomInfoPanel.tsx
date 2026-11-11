@@ -26,6 +26,7 @@ import {
 import {
   emptyRoomDetails,
   roomDetailsKey,
+  type HierarchySlot,
   type RoomDetailsSlot,
 } from '../stores/room-details'
 import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
@@ -38,11 +39,13 @@ import {
   accessShown,
   advertisedAliasesShown,
   canonicalAliasShown,
+  crawlProgressShown,
   createdShown,
   creatorShown,
   directoryVisibilityShown,
   encryptionShown,
   guestAccessShown,
+  hierarchyCountShown,
   historyVisibilityShown,
   localAliasesShown,
   memberCountsShown,
@@ -52,11 +55,14 @@ import {
   serverAclShown,
   shownLabel,
   shownValue,
+  spaceChildDisplay,
   UNKNOWN_NOT_CACHED,
   type Shown,
+  type SpaceHierarchyChildDto,
 } from './room-details-format'
 import { Lightbox, LightboxImage } from './Lightbox'
 import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
+import { RoomPreview, useRoomPreview } from './RoomPreview'
 import { RoomSettingsForm } from './RoomSettingsForm'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
@@ -69,14 +75,12 @@ type SpaceParentDto = components['schemas']['SpaceParentDto']
 type PowerLevelsDto = components['schemas']['PowerLevelsDto']
 type EventDto = components['schemas']['EventDto']
 
-type RoomStateKey =
-  'pinned' | 'children' | 'parents' | 'upgrade' | 'powerLevels'
+type RoomStateKey = 'pinned' | 'parents' | 'upgrade' | 'powerLevels'
 
 interface RoomStateSlice {
   /** `accountId/roomId` the rest of this slice was loaded for. */
   key: string
   pinned: readonly EventDto[] | null
-  children: readonly SpaceChildDto[] | null
   parents: readonly SpaceParentDto[] | null
   upgrade: RoomUpgradeDto | null
   powerLevels: PowerLevelsDto | null
@@ -87,7 +91,6 @@ function emptyRoomState(key: string): RoomStateSlice {
   return {
     key,
     pinned: null,
-    children: null,
     parents: null,
     upgrade: null,
     powerLevels: null,
@@ -144,11 +147,7 @@ export function RoomInfoPanel({
   const [cancelInviteStatus, setCancelInviteStatus] = useState<string | null>(
     null,
   )
-  const [joinLink, setJoinLink] = useState<{
-    roomId: string
-    via: readonly string[]
-    label: string
-  } | null>(null)
+  const [joinLink, setJoinLink] = useState<JoinLinkTarget | null>(null)
   const [joinLinkBusy, setJoinLinkBusy] = useState(false)
   const [joinLinkStatus, setJoinLinkStatus] = useState<string | null>(null)
   const [leaveStatus, setLeaveStatus] = useState<string | null>(null)
@@ -173,6 +172,8 @@ export function RoomInfoPanel({
   // answers: compare the key during render, as for `RoomStateSlice` above.
   // A room in the room list is one the account has joined.
   const joined = room !== undefined
+  // Its children come from the paged hierarchy (decision 6).
+  const space = room?.room_type === 'm.space'
   const detailsKey = roomDetailsKey(accountId, roomId)
   const storedDetails = roomDetails.state.value
   const details =
@@ -411,13 +412,6 @@ export function RoomInfoPanel({
       api.GET('/v1/accounts/{account_id}/rooms/{room_id}/pinned', params),
     )
     load(
-      'children',
-      api.GET(
-        '/v1/accounts/{account_id}/rooms/{room_id}/space/children',
-        params,
-      ),
-    )
-    load(
       'parents',
       api.GET(
         '/v1/accounts/{account_id}/rooms/{room_id}/space/parents',
@@ -447,10 +441,10 @@ export function RoomInfoPanel({
         event.room_id === roomId &&
         // Join rules, history visibility, guest access and encryption are the
         // room-details store's: the server publishes `room_details.changed`
-        // naming `metadata` when the stored tuple changes (ADR 0133).
+        // naming `metadata` when the stored tuple changes (ADR 0133). So are
+        // a space's children, which it re-reads on `m.space.child` itself.
         [
           'm.room.pinned_events',
-          'm.space.child',
           'm.space.parent',
           'm.room.tombstone',
           'm.room.create',
@@ -465,8 +459,8 @@ export function RoomInfoPanel({
   // Closing the panel stops showing the room, so opening it again re-reads.
   useEffect(() => () => roomDetails.show(null), [roomDetails])
   useEffect(() => {
-    roomDetails.show({ accountId, roomId, joined })
-  }, [roomDetails, accountId, roomId, joined])
+    roomDetails.show({ accountId, roomId, joined, space })
+  }, [roomDetails, accountId, roomId, joined, space])
   useEffect(() => {
     if (live.reconnects.value > 0) {
       setRoomStateVersion((version) => version + 1)
@@ -595,11 +589,7 @@ export function RoomInfoPanel({
     )
   }
 
-  const joinLinkedRoom = async (target: {
-    roomId: string
-    via: readonly string[]
-    label: string
-  }) => {
+  const joinLinkedRoom = async (target: JoinLinkTarget) => {
     setJoinLinkBusy(true)
     const result = await rooms.joinRoom(accountId, target.roomId, target.via)
     setJoinLinkBusy(false)
@@ -875,12 +865,16 @@ export function RoomInfoPanel({
       </section>
 
       <RoomStateLinks
-        children={roomState.children}
+        space={space}
+        hierarchy={details.hierarchy}
         parents={parents}
         upgrade={roomState.upgrade}
         errors={roomState.errors}
         status={joinLinkStatus}
-        onOpen={(target, via, label) =>
+        formatTime={formatTime}
+        onLoadMore={() => roomDetails.loadMore()}
+        onRetry={() => roomDetails.retry()}
+        onOpen={(target, via, label, child) =>
           // Both branches leave this room behind — one by navigating, one by
           // opening the join dialog that ends in navigation — so the guard
           // wraps the whole handler rather than each exit inside it.
@@ -899,7 +893,7 @@ export function RoomInfoPanel({
             // change the button label does not imply, so it is confirmed
             // first.
             setJoinLinkStatus(null)
-            setJoinLink({ roomId: target, via, label })
+            setJoinLink({ roomId: target, via, label, child })
           })
         }
       />
@@ -1145,7 +1139,10 @@ export function RoomInfoPanel({
       {joinLink !== null && (
         <JoinLinkedRoomDialog
           label={joinLink.label}
+          accountId={accountId}
           roomId={joinLink.roomId}
+          child={joinLink.child}
+          formatTime={formatTime}
           busy={joinLinkBusy}
           onCancel={() => {
             if (!joinLinkBusy) setJoinLink(null)
@@ -1338,31 +1335,63 @@ function relatedSpaceParents(
     : [...parents.values()]
 }
 
+interface JoinLinkTarget {
+  roomId: string
+  via: readonly string[]
+  label: string
+  /**
+   * The space child the link was opened from, whose `/discovery` the dialog
+   * previews (decision 8); `undefined` for a parent or upgrade link.
+   */
+  child?: SpaceHierarchyChildDto
+}
+
 function RoomStateLinks({
-  children,
+  space,
+  hierarchy,
   parents,
   upgrade,
   errors,
   status,
+  formatTime,
+  onLoadMore,
+  onRetry,
   onOpen,
 }: {
-  children: readonly SpaceChildDto[] | null
+  /** Whether the room is a space, whose children `hierarchy` holds. */
+  space: boolean
+  hierarchy: HierarchySlot
   parents: readonly SpaceParentDto[] | null
   upgrade: RoomUpgradeDto | null
   errors: Partial<Record<RoomStateKey, string>>
   status: string | null
-  onOpen: (roomId: string, via: readonly string[], label: string) => void
+  formatTime: (ts: number) => string
+  onLoadMore: () => void
+  onRetry: () => void
+  onOpen: (
+    roomId: string,
+    via: readonly string[],
+    label: string,
+    child?: SpaceHierarchyChildDto,
+  ) => void
 }) {
+  const list = hierarchy.value
+  const childLinks = (list?.children ?? []).map((child) => {
+    const display = spaceChildDisplay(child, formatTime)
+    return {
+      label: `Child: ${display.name}`,
+      roomId: child.room_id,
+      via: child.via,
+      child,
+      topic: display.topic,
+      notes: display.notes,
+    }
+  })
   const links = [
     ...(parents ?? []).map((parent) => ({
       label: `Parent: ${parent.name ?? parent.room_id}`,
       roomId: parent.room_id,
       via: parent.via,
-    })),
-    ...(children ?? []).map((child) => ({
-      label: `Child: ${child.name ?? child.room_id}`,
-      roomId: child.room_id,
-      via: child.via,
     })),
     ...(upgrade?.upgraded_from === null || upgrade?.upgraded_from === undefined
       ? []
@@ -1377,15 +1406,17 @@ function RoomStateLinks({
           },
         ]),
   ]
-  const failed = (['children', 'parents', 'upgrade'] as const).filter(
+  const failed = (['parents', 'upgrade'] as const).filter(
     (key) => errors[key] !== undefined,
   )
+  // A space's first page has neither arrived nor failed yet.
+  const childrenPending = space && list === null && hierarchy.error === null
   // Nothing loaded *and* nothing failed is the only genuinely pending case. If
   // every read failed — the offline case — this used to take the same branch
   // and sit at "Loading…" forever with the errors suppressed.
   if (
     links.length === 0 &&
-    children === null &&
+    (!space || childrenPending) &&
     parents === null &&
     upgrade === null &&
     failed.length === 0
@@ -1397,6 +1428,8 @@ function RoomStateLinks({
       </section>
     )
   }
+  const progress =
+    list === null ? null : crawlProgressShown(list.discovery, formatTime)
   return (
     <section class="room-info-section" aria-labelledby="room-info-links">
       <h3 id="room-info-links">Spaces and upgrades</h3>
@@ -1405,9 +1438,13 @@ function RoomStateLinks({
           {errors[key]}
         </p>
       ))}
-      {links.length === 0 && failed.length === 0 ? (
+      {links.length === 0 &&
+      childLinks.length === 0 &&
+      failed.length === 0 &&
+      !childrenPending &&
+      hierarchy.error === null ? (
         <p class="muted">No related spaces or upgrade links.</p>
-      ) : links.length === 0 ? null : (
+      ) : links.length === 0 && childLinks.length === 0 ? null : (
         <ul class="room-state-links">
           {links.map((link) => (
             <li key={`${link.label}:${link.roomId}`}>
@@ -1420,7 +1457,57 @@ function RoomStateLinks({
               </button>
             </li>
           ))}
+          {childLinks.map((link) => (
+            <li key={`child:${link.roomId}`} class="room-state-child">
+              <button
+                type="button"
+                class="ghost"
+                onClick={() =>
+                  onOpen(link.roomId, link.via, link.label, link.child)
+                }
+              >
+                {link.label}
+              </button>
+              {link.topic !== null && (
+                <span class="room-state-child-topic muted">{link.topic}</span>
+              )}
+              <span class="room-state-child-note muted">
+                {link.notes.join(' · ')}
+              </span>
+            </li>
+          ))}
         </ul>
+      )}
+      {space && (
+        <div class="room-state-children-status">
+          {childrenPending && <p class="muted">Loading rooms in this space…</p>}
+          {list !== null && (
+            <p class="muted room-state-children-count" role="status">
+              {hierarchyCountShown(list.children.length, list.totalChildren)}
+              {progress !== null && ` · ${progress}`}
+            </p>
+          )}
+          {hierarchy.error !== null && (
+            <div role="alert">
+              <p class="error">
+                Could not load rooms in this space: {hierarchy.error}
+              </p>
+              <button type="button" class="ghost" onClick={onRetry}>
+                Retry
+              </button>
+            </div>
+          )}
+          {list !== null && list.nextCursor !== null && (
+            <button
+              type="button"
+              class="ghost room-state-load-more"
+              disabled={hierarchy.loadingMore}
+              onClick={onLoadMore}
+            >
+              {hierarchy.loadingMore ? 'Loading…' : 'Load more'}
+            </button>
+          )}
+        </div>
       )}
       {status !== null && (
         <p class="error" role="alert">
@@ -1488,21 +1575,34 @@ function eventSummary(event: EventDto): string {
 /**
  * A relationship link to a room this account has not joined can only be opened
  * by joining it, which is a membership change the link's label does not imply.
+ *
+ * Opened from a space child, it previews the room (decision 8): seeded from
+ * the row's `discovered` summary, then from one `/discovery` read, which the
+ * store keeps fresh while the dialog is open and aborts when it closes.
  */
 function JoinLinkedRoomDialog({
   label,
+  accountId,
   roomId,
+  child,
+  formatTime,
   busy,
   onCancel,
   onConfirm,
 }: {
   label: string
+  accountId: string
   roomId: string
+  child: SpaceHierarchyChildDto | undefined
+  formatTime: (ts: number) => string
   busy: boolean
   onCancel: () => void
   onConfirm: () => void
 }) {
   const { containerRef } = useModalFocus<HTMLDivElement>()
+  const previewed = child !== undefined
+  const seed = child?.discovered ?? null
+  useRoomPreview(accountId, roomId, seed, previewed)
   useShortcuts(
     {
       Escape: (event) => {
@@ -1528,6 +1628,14 @@ function JoinLinkedRoomDialog({
             ). Opening it joins the room with this account, which other members
             can see.
           </p>
+          {previewed && (
+            <RoomPreview
+              accountId={accountId}
+              roomId={roomId}
+              seed={seed}
+              formatTime={formatTime}
+            />
+          )}
           <div class="dialog-actions">
             <button
               type="button"

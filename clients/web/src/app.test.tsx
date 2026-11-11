@@ -24,6 +24,7 @@ import { layoutMode, SINGLE_PANE_QUERY } from './layout'
 import type { NotificationClick } from './platform'
 import type { Account } from './stores/accounts'
 import type { EventDto } from './stores/timeline'
+import { discoveredRoom, roomDiscovery } from './test/room-details'
 import { memoryStorage } from './test/memory-storage'
 import { TEST_BASE_URL, UNKNOWN_BACKUP, testServices } from './test/services'
 import { createIncomingShareStore } from './incoming-share/store'
@@ -805,6 +806,77 @@ describe('App', () => {
       server_names: ['hs'],
     })
     expect(window.location.search).toBe('')
+  })
+
+  it('previews a room-ID link from /discovery once it is eligible and available', async () => {
+    installRoomPageHandlers()
+    const reads: string[] = []
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/discovery`,
+        ({ params }) => {
+          reads.push(decodeURIComponent(String(params.roomId)))
+          return HttpResponse.json({
+            data: roomDiscovery('!unjoined:hs', {
+              discovered: discoveredRoom({ name: 'Salmon count' }),
+            }),
+          })
+        },
+      ),
+    )
+    history.replaceState(
+      null,
+      '',
+      `/?matrixLink=${encodeURIComponent('https://matrix.to/#/%21unjoined%3Ahs?via=hs')}`,
+    )
+    const { findByRole } = render(<App services={testServices()} />)
+    const dialog = await findByRole('dialog', { name: 'Join room?' })
+    const preview = await within(dialog).findByRole('region', {
+      name: 'Room preview',
+    })
+    expect(preview.textContent).toContain('Salmon count')
+    expect(preview.textContent).toContain('From the space directory')
+    expect(reads).toEqual(['!unjoined:hs'])
+  })
+
+  it('keeps the plain prompt for an ineligible room ID and never probes an alias', async () => {
+    installRoomPageHandlers()
+    const reads: string[] = []
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/discovery`,
+        ({ params }) => {
+          reads.push(decodeURIComponent(String(params.roomId)))
+          return HttpResponse.json({
+            data: roomDiscovery('!stranger:hs', {
+              eligible: false,
+              discovered: null,
+            }),
+          })
+        },
+      ),
+    )
+    history.replaceState(
+      null,
+      '',
+      `/?matrixLink=${encodeURIComponent('https://matrix.to/#/%21stranger%3Ahs?via=hs')}`,
+    )
+    const first = render(<App services={testServices()} />)
+    const dialog = await first.findByRole('dialog', { name: 'Join room?' })
+    await waitFor(() => expect(reads).toEqual(['!stranger:hs']))
+    expect(
+      within(dialog).queryByRole('region', { name: 'Room preview' }),
+    ).toBeNull()
+    first.unmount()
+
+    history.replaceState(
+      null,
+      '',
+      '/?matrix=matrix%3Ar%2Fjoined%253Ahs%3Fvia%3Dhs',
+    )
+    const second = render(<App services={testServices()} />)
+    await second.findByRole('dialog', { name: 'Join room?' })
+    expect(reads).toEqual(['!stranger:hs'])
   })
 
   it('opens an already-joined matrix protocol-handler callback room without confirmation', async () => {

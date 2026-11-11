@@ -10,6 +10,7 @@ import {
   roomUrl,
   spaceButton,
   spaceName,
+  spaceUrl,
   stage,
   typeInto,
 } from './demo'
@@ -169,6 +170,56 @@ test('spaces — the rail filters the room list by space hierarchy', async ({
   await point(page, spaceButton(page, 'All rooms'))
   await expect(list).toContainText('trail-work')
   await expect(list).toContainText('water-quality')
+  await dwell(page, BEAT)
+})
+
+/**
+ * How long a crawl of the watershed space takes to name `salmon-count`. The
+ * open asks the server to look the space up (ADR 0133 decision 7); the answer
+ * arrives as a `room_details.changed` frame within a few seconds on the local
+ * stack, but a cold homeserver can be slower, and the scene must not race it.
+ */
+const CRAWL_TIMEOUT_MS = 30_000
+
+test('discovery — a space names the room the viewer has not joined, and previews it', async ({
+  page,
+}) => {
+  await stage(page, await spaceUrl('watershed'))
+
+  // The space's own information lists its children from the paged hierarchy
+  // (ADR 0133 decision 6). `salmon-count` is the one the viewer has never been
+  // in: axon knows it only as a room ID until the space directory names it.
+  await point(page, page.getByRole('button', { name: 'Open room information' }))
+  const info = page.getByRole('complementary', { name: 'Room information' })
+  await expect(info).toBeVisible()
+  await expect(info.locator('.room-state-children-count')).toContainText(
+    'Showing 3 of 3',
+  )
+  const salmon = info.getByRole('button', { name: 'Child: salmon-count' })
+  await expect(salmon).toBeVisible({ timeout: CRAWL_TIMEOUT_MS })
+  // `has` resolves relative to each row, so it takes a page-rooted locator.
+  await expect(
+    info.locator('.room-state-child').filter({
+      has: page.getByRole('button', { name: 'Child: salmon-count' }),
+    }),
+  ).toContainText('Not joined · From the space directory')
+  await dwell(page, LONG)
+
+  // Opening it is a join, so it asks first, and shows what the directory
+  // says about the room before the viewer commits (decision 8).
+  await point(page, salmon)
+  const dialog = page.getByRole('dialog', { name: 'Join Child: salmon-count' })
+  const preview = dialog.getByRole('region', { name: 'Room preview' })
+  await expect(preview).toContainText('Spawning survey on Beckett Creek')
+  await expect(preview).toContainText('3 joined')
+  await expect(preview).toContainText('#salmon-count:')
+  await dwell(page, LONG)
+
+  // Leave everything as the scene found it: not joined, panel closed.
+  await point(page, dialog.getByRole('button', { name: 'Cancel' }))
+  await expect(dialog).toBeHidden()
+  await page.keyboard.press('Escape')
+  await expect(info).toBeHidden()
   await dwell(page, BEAT)
 })
 

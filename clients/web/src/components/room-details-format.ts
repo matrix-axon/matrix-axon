@@ -563,3 +563,170 @@ export function memberListCoverage(
   const noun = joined === 1 ? 'member' : 'members'
   return `Showing ${loadedJoined} of ${joined} joined ${noun}: Axon lists only the members your homeserver has sent it so far.`
 }
+
+export type DiscoveredRoomDto = Schemas['DiscoveredRoomDto']
+export type SpaceDiscoveryDto = Schemas['SpaceDiscoveryDto']
+export type SpaceHierarchyChildDto = Schemas['SpaceHierarchyChildDto']
+
+export const NOT_LOOKED_UP = 'Not looked up yet'
+export const NOT_VISIBLE = 'Not visible in the space directory'
+export const FROM_SPACE_DIRECTORY = 'From the space directory'
+
+/**
+ * The provenance note for a discovered summary (decision 3): where it came
+ * from, and the `observed_at` time it describes.
+ */
+export function discoveredProvenance(
+  discovered: DiscoveredRoomDto,
+  formatTime: (ts: number) => string,
+): string {
+  return `${FROM_SPACE_DIRECTORY}, as of ${formatTime(discovered.observed_at)}`
+}
+
+/**
+ * One unjoined room's preview rows (decisions 3 and 8), or one label for the
+ * whole preview when there is no summary to show. A withheld field is left
+ * out rather than shown as empty; a field the answer did not carry reads
+ * "None" where Matrix has no such state (no name, topic or alias), and
+ * "Unknown" where the homeserver simply did not say: `encryption: null` in
+ * particular is never "not encrypted" (homeservers before Matrix v1.15 do not
+ * report it).
+ */
+export function discoveredPreview(
+  discovered: DiscoveredRoomDto | null | undefined,
+  formatTime: (ts: number) => string,
+):
+  | { rows: ReadonlyArray<{ label: string; shown: Shown }>; note: string }
+  | { rows: null; label: string } {
+  if (discovered === null || discovered === undefined) {
+    return { rows: null, label: NOT_LOOKED_UP }
+  }
+  if (discovered.status !== 'available') {
+    return { rows: null, label: NOT_VISIBLE }
+  }
+  const withheldFields = new Set(discovered.withheld)
+  const rows: Array<{ label: string; shown: Shown }> = []
+  const add = (
+    label: string,
+    field: keyof DiscoveredRoomDto & string,
+    value: string | null,
+    missing: string,
+  ) => {
+    if (withheldFields.has(field)) return
+    rows.push({
+      label,
+      shown: value === null ? shownLabel(missing) : shownValue(value),
+    })
+  }
+  add('Name', 'name', nonEmpty(discovered.name), 'None')
+  add('Topic', 'topic', nonEmpty(discovered.topic), 'None')
+  add(
+    'Members',
+    'num_joined_members',
+    typeof discovered.num_joined_members === 'number'
+      ? `${discovered.num_joined_members} joined`
+      : null,
+    'Unknown',
+  )
+  add('Join rule', 'join_rule', nonEmpty(discovered.join_rule), 'Unknown')
+  add('Encryption', 'encryption', nonEmpty(discovered.encryption), 'Unknown')
+  add(
+    'Room version',
+    'room_version',
+    nonEmpty(discovered.room_version),
+    'Unknown',
+  )
+  add(
+    'Canonical alias',
+    'canonical_alias',
+    nonEmpty(discovered.canonical_alias),
+    'None',
+  )
+  return { rows, note: discoveredProvenance(discovered, formatTime) }
+}
+
+function nonEmpty(value: string | null | undefined): string | null {
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/**
+ * Which source a space child's name, avatar and topic come from (ADR 0128
+ * precedence, decision 6): synced fields when the account has joined it;
+ * otherwise an `available` discovered summary; otherwise synced fields.
+ * The two sources are never merged, so a field the chosen source lacks
+ * falls back to the room ID, not to the other source.
+ */
+export function spaceChildDisplay(
+  child: SpaceHierarchyChildDto,
+  formatTime: (ts: number) => string,
+): {
+  name: string
+  topic: string | null
+  avatarUrl: string | null
+  /** Joined state, then where the fields came from or why there are none. */
+  notes: readonly string[]
+} {
+  const discovered = child.discovered ?? null
+  if (child.joined) {
+    return {
+      name: nonEmpty(child.name) ?? child.room_id,
+      topic: null,
+      avatarUrl: nonEmpty(child.avatar_url),
+      notes: ['Joined'],
+    }
+  }
+  if (discovered !== null && discovered.status === 'available') {
+    return {
+      name: nonEmpty(discovered.name) ?? child.room_id,
+      topic: nonEmpty(discovered.topic),
+      avatarUrl: nonEmpty(discovered.avatar_url),
+      notes: ['Not joined', discoveredProvenance(discovered, formatTime)],
+    }
+  }
+  return {
+    name: nonEmpty(child.name) ?? child.room_id,
+    topic: null,
+    avatarUrl: nonEmpty(child.avatar_url),
+    notes: ['Not joined', discovered === null ? NOT_LOOKED_UP : NOT_VISIBLE],
+  }
+}
+
+/** "Showing N of T", counting the rows actually loaded (decision 6). */
+export function hierarchyCountShown(loaded: number, total: number): string {
+  return `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}`
+}
+
+/**
+ * Decision 6's progress table, tested in order (every unsuccessful crawl is
+ * `outcome: failed`, so the conclusive failures come before the transient
+ * one). `null` is row 8: nothing beyond "Showing N of T".
+ */
+export function crawlProgressShown(
+  discovery: SpaceDiscoveryDto,
+  formatTime: (ts: number) => string,
+): string | null {
+  if (discovery.state === 'queued' || discovery.state === 'running') {
+    return `Looking up rooms… (${discovery.rooms_cached} found)`
+  }
+  if (discovery.support === 'unsupported') {
+    return "Your homeserver can't list this space's rooms"
+  }
+  if (discovery.outcome === 'failed') {
+    if (discovery.failure === 'forbidden') {
+      return "Your homeserver didn't allow listing this space's rooms"
+    }
+    if (discovery.failure === 'not_found') {
+      return "Your homeserver couldn't find this space's room list"
+    }
+    return typeof discovery.next_attempt_at === 'number'
+      ? `Couldn't look up rooms; trying again at ${formatTime(discovery.next_attempt_at)}`
+      : "Couldn't look up rooms"
+  }
+  if (discovery.outcome === 'in_progress') {
+    return 'Room lookup paused; resuming…'
+  }
+  if (discovery.outcome === 'truncated') {
+    return 'The space directory listed only part of this space'
+  }
+  return null
+}

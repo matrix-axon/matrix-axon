@@ -63,7 +63,9 @@ metadata per ADR 0133 — encryption, access, history and guest access with
 honest unknown/checking/confirmed-absent states, advertised and
 homeserver-local aliases as separate rows, member counts, and a collapsed
 Advanced group — plus pinned messages, space relationships, and upgrade
-links), editing
+links; a space's children page in from the server's space hierarchy, with
+unjoined rooms named from the space directory and previewed before joining),
+editing
 the room's name, topic and avatar (M19-W6/ADR 0100: an Edit button beside
 Close, offered only when your power level allows it, with avatar images staged
 through the existing upload flow), and a

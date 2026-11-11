@@ -376,6 +376,7 @@ A join committed before the result wins, and joining the room deletes its row an
 The older `GET …/space/children` is unchanged: a bare array capped at 1,000 children, with no way to tell a truncated response from a complete one.
 Because it is unchanged, it still returns the link's raw `order` string, so the two routes can report a different `order` for the same link when MSC1772 treats that `order` as invalid.
 It stays for existing clients and will be marked deprecated once the web client, the TUI, and the oversized-space work ([issue 553](https://github.com/matrix-axon/matrix-axon/issues/553)) have moved to `space/hierarchy`.
+The web client's Room Information panel has ([ADR 0133](adr/0133-web-room-information-metadata-and-discovery.md) decision 6); its spaces store, which feeds the space rail and room-list grouping, is the web client's last caller ([issue 1054](https://github.com/matrix-axon/matrix-axon/issues/1054)).
 
 ## Homeserver details
 
@@ -526,7 +527,9 @@ Instead the homeserver confirms absence in the background (see [Known absence](#
 Authoritative member counts are cached separately as described above; the lazily loaded member list is not an authoritative count.
 Unjoined-room discovery ([issue 622](https://github.com/matrix-axon/matrix-axon/issues/622)) is in place: the paged read, hierarchy crawls, and room summaries of a selected room (see [Unjoined-room discovery](#unjoined-room-discovery)).
 The discovery cache, progressive updates, and acquisition budgets follow ADR 0111 and are not implemented by the cached state endpoint.
-The web client's Room Information panel reads `/metadata`, `/homeserver_details`, and member counts, and re-reads each on the `room_details.changed` source that names it ([ADR 0133](adr/0133-web-room-information-metadata-and-discovery.md) decisions 1–5); its move to the paged hierarchy and `/discovery` is the second half of [issue 623](https://github.com/matrix-axon/matrix-axon/issues/623).
+The web client's Room Information panel reads `/metadata`, `/homeserver_details`, and member counts, and re-reads each on the `room_details.changed` source that names it ([ADR 0133](adr/0133-web-room-information-metadata-and-discovery.md) decisions 1–5).
+For a space it pages the children from `space/hierarchy`, sending `enrich=true` only on the read that opening the panel makes for a joined space (plus one read to resume a paused crawl and a timer read after a transient failure), and its join dialog and Matrix-link prompt preview one unjoined room from `/discovery` (decisions 6–8).
+The web spaces store still reads `space/children` ([issue 1054](https://github.com/matrix-axon/matrix-axon/issues/1054)).
 TUI consumption is [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
 
 ## Verification
