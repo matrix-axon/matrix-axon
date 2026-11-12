@@ -164,7 +164,8 @@ The settings page explains that a device lookup shows the site your address when
   A link is added when an edit makes it appear in the text, by typing, pasting, or changing an existing link.
   Links already present in a restored draft are not added: they get no card and no lookup, even after the user edits other text, until the user retypes or re-pastes them.
   Opening a room or editing unrelated words therefore never causes a fetch.
-- No cards in edit mode, for a message with attachments, or for a message containing a spoiler, which the renderer would hide anyway.
+- No cards for a message with attachments, or for a message containing a spoiler, which the renderer would hide anyway.
+  Edit mode has its own rules (section 8).
   The thread composer behaves the same as the room composer.
 
 ### 6. What is sent
@@ -177,7 +178,8 @@ An omitted field leaves recipients' clients free to scan the body and build thei
 The body being sent is authoritative: this is the body after composer formatting, the same one the server matches against, and only cards whose link appears in it as a complete bare link count.
 The first rule that matches decides the field:
 
-1. **Setting `off`, or a send the composer does not author previews for** (an edit, a message with attachments, or one containing a spoiler; section 5): omit the field, exactly as today.
+1. **Setting `off`, or a send the composer does not author previews for** (a message with attachments, or one containing a spoiler; section 5): omit the field, exactly as today.
+   An edit follows section 8 instead.
 2. **At least one card kept and ready** after the size check below: send those cards, in text order.
 3. **The body contains any eligible link** (section 1): send `url_previews: []`.
    This covers a link whose card was discarded, is still loading or failed, a link past the third, a discarded link the user deleted and typed again, and a link from a restored draft.
@@ -243,6 +245,72 @@ So a card holds its thumbnail as bytes, and a handle exists only for the length 
 Because Retry rebuilds the uploads, a handle that was consumed or has expired is never sent.
 Whether to retry a send whose outcome is unknown stays the user's choice, as it is for every send today.
 
+### 8. Editing a message with previews
+
+_Added 2026-11-12._
+Until this section, saving any edit erased the message's cards.
+The server builds the replacement's `m.new_content` from the new text alone, and the store shows an edited message from its latest `m.new_content` (`TIMELINE_SELECT` in `axon-store`), so the cards disappeared for Axon readers, and for every client that applies edits.
+There was also no way to remove one card and keep the rest.
+MSC4095 says nothing about edits, `m.new_content`, or reusing a preview's image in another event, so the rules below are Axon's.
+
+**Where an edit's previews go.**
+In `m.new_content`, which is what the store and edit-aware clients show.
+Whenever `m.new_content` carries the field, the top-level fallback carries `m.url_previews: []` and the `com.beeper.linkpreviews: []` alias, so a client that shows the `* ` fallback does not build a preview the sender never chose.
+The 40 KiB content check covers the whole replacement event, which carries the body twice.
+
+**The edit request.**
+`PUT /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}` gains `url_previews`, with the meanings it has on a send and one more entry form:
+
+- **Omitted or null: carry forward.**
+  The server reads the message as it stands, with its latest edit applied, from the store.
+  If that has no preview field, neither does the replacement.
+  Otherwise the replacement keeps, in order, the entries whose matched link is still a complete bare link in the new body, copied with their images.
+  If none remain, it sends `[]`, so a message that opted out stays opted out.
+  If the new formatted body contains a spoiler, it sends `[]` instead of any carried entries.
+  This is what the TUI, and any client that does not know about the field, gets.
+  If the store does not have the message yet, the replacement gets no preview field, as before this section.
+- **`[]`:** no previews.
+- **A list:** the whole set, at most eight entries as on a send.
+  Each entry is either a new preview, in the send shape, with an optional `image_upload_id` uploaded for this attempt, or `{"matched_url": …, "keep": true}`.
+  A kept entry copies the message's current entry for that link, image included, without uploading anything.
+  A kept link that has no current entry is a `400 bad_request`.
+  As on a send, every entry's link must be a complete bare link in the new body.
+
+Copying an image reference into the replacement discloses nothing new: the room, the sender and the media are the same as in the event being replaced.
+A kept plaintext thumbnail in a room that has turned on encryption since stays plaintext, since it was readable already.
+A removed card's thumbnail is not deleted from the homeserver.
+It goes on being referenced by the event history, as an image removed by an edit is, until the message is redacted.
+
+**The edit composer.**
+
+- Opening edit mode shows the message's current cards, parsed as the timeline renders them, each with its X.
+  They appear under any setting, because removing a card fetches nothing.
+- Links that the edit adds follow section 5 under the setting, as in a new message: they get lookups and new cards, up to three cards counting the kept ones.
+  Links already in the message are not added, so opening edit mode never fetches anything.
+- Removing a link from the text removes its card, whether it is new or was already on the message.
+- Editing a media caption shows its current cards for removal, and adds no new ones, as a send with attachments adds none.
+- A message containing a spoiler shows no cards.
+
+**What an edit sends.**
+The first rule that matches decides the field:
+
+1. **The new text contains a spoiler:** `[]` if the message has a preview field now or the new body has an eligible link, otherwise omit the field.
+2. **At least one card kept and ready**, kept from the message or new, after the size check: send those cards, in text order, the kept ones as `keep` entries.
+3. **The user removed a card in this edit, or, with previews on, the edit added an eligible link:** send `[]`.
+4. **Otherwise:** omit the field, and the server carries the message's previews forward.
+
+Rule 4 means an edit that does not touch the cards leaves them as they were: a message sent with previews off, or before previews existed, does not gain a `[]` from an unrelated edit.
+
+The size check is section 6's, applied to the replacement's shape.
+It degrades in this order: new cards' images, last first; then new cards, last first; then kept cards, last first.
+A kept card's image is not dropped on its own, because a kept entry is copied whole.
+When even `[]` does not fit and a removed or discarded link is in the body, the composer asks the same question as on a send.
+
+A failed edit has no echo: the composer reopens edit mode with the text, as it does today, and now with its cards too.
+New cards' thumbnails are still bytes and are uploaded again on the next save.
+After a preview rejection (section 6's table), edit mode reopens without the new cards, says that the server refused them, and keeps the cards kept from the message.
+An edit that carries previews uses the same 70-second client deadline as a send that does.
+
 ## Consequences
 
 - Every platform shares one composer flow, and the shell's five platforms share one fetcher.
@@ -271,7 +339,8 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
     What the Apple, Android and Windows calls send is checked by packet capture, with the steps in `clients/web/src-tauri/axon-link-preview/README.md`.
   - No TLS crate: `rustls` 0.23 with the ring provider, `tokio-rustls` and `webpki-roots` were already present, and rustls takes the server name separately from the socket.
 - Two implementations of the fetch boundary exist, held together by a shared fixture.
-- Edits keep their current behavior; editing a message with previews is left for a later decision.
+- An edit keeps a message's cards unless the editor removes them (section 8), in every client, because the server carries them forward.
+  The TUI cannot remove or add a card in an edit.
 - The TUI remains a gap in `docs/client-parity.md`.
 - Telegram-style controls (media size, card above the text) are not included.
 
@@ -285,5 +354,8 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
    This PR also updates `docs/bundled-link-previews.md` and `docs/client-parity.md`.
 4. **Server:** a test in `axon-core` that reads the same link-identity fixture and checks it against the `url` crate, so a difference between the two parsers fails a test instead of a send.
    Internationalized host names cannot differ, because the static check in section 1 rejects them.
+5. **Server:** the edit request's `url_previews`, carry-forward, `keep` entries and the replacement's placement of previews (section 8), with their tests, the OpenAPI schema, and `docs/bundled-link-previews.md`.
+6. **Web:** the edit composer's cards and the edit send rules (section 8), stacked on 3 and needing 5.
+   Against a server without 5, the edit request's extra field is ignored and an edit erases the cards, as before.
 
-The shell and web PRs are in the `clients/web` silo, the fixture test is in the server silo, and each carries its own tests.
+The shell and web PRs are in the `clients/web` silo, the fixture test and the edit request are in the server silo, and each carries its own tests.
