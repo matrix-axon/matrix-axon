@@ -153,8 +153,13 @@ impl Lookups {
             return;
         }
         // Either the lookup has not registered yet, or it already finished.
-        // Remembering a finished one is harmless: a page never reuses an id,
-        // and a reload forgets its window's ids.
+        // A finished one is remembered too, which costs a slot: enough of
+        // them between an early cancel and its registration would evict it,
+        // and that lookup would run on, holding a running slot until its
+        // deadline. The page's binding makes them rare: it never cancels a
+        // lookup it has seen settle, so one is recorded only when a cancel
+        // crosses a result still on its way back. A page never reuses an
+        // id, and a reload forgets its window's ids.
         if book.early_cancels.len() == EARLY_CANCELS {
             book.early_cancels.pop_front();
         }
