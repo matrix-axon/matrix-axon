@@ -34,13 +34,14 @@ This page indexes everything else.
 
 ## Why it works this way
 
-| Document                                                              | What it covers                       |
-| --------------------------------------------------------------------- | ------------------------------------ |
-| [Product requirements](mvp/prd.md)                                    | What we are building and why         |
-| [Tech spec](mvp/tech-spec.md)                                         | Architecture decisions and tradeoffs |
-| [Implementation plan](mvp/implementation.md)                          | Milestone-by-milestone build plan    |
-| [ADRs](https://github.com/matrix-axon/matrix-axon/tree/main/docs/adr) | Decisions made during implementation |
-| [RFC 0001](rfc/0001-postgres-vs-sqlite-store.md)                      | Postgres versus SQLite for the store |
+| Document                                                                     | What it covers                                                      |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| [Product requirements](mvp/prd.md)                                           | What we are building and why                                        |
+| [Tech spec](mvp/tech-spec.md)                                                | Architecture decisions and tradeoffs                                |
+| [Implementation plan](mvp/implementation.md)                                 | Milestone-by-milestone build plan                                   |
+| [ADRs](https://github.com/matrix-axon/matrix-axon/tree/main/docs/adr)        | Decisions made during implementation                                |
+| [TUI room details and discovery](adr/0135-tui-room-details-and-discovery.md) | Room information freshness, alias scope, and staged space discovery |
+| [RFC 0001](rfc/0001-postgres-vs-sqlite-store.md)                             | Postgres versus SQLite for the store                                |
 
 ## Operator and platform notes
 

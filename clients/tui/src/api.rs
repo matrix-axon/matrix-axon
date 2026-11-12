@@ -373,6 +373,17 @@ impl AxonClient {
             .await
     }
 
+    /// Cached aliases maintained by this account's homeserver and directory
+    /// publication. The server acquires due values in the background.
+    pub async fn room_homeserver_details(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<RoomHomeserverDetailsDto, ApiError> {
+        self.room_read(account_id, room_id, "homeserver_details", 128 * 1024)
+            .await
+    }
+
     pub async fn room_upgrade(
         &self,
         account_id: Uuid,
@@ -1253,6 +1264,16 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
                 payload,
             })
         }
+        "room_details.changed" => {
+            let payload = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::RoomDetails {
+                account_id: envelope.account_id,
+                payload,
+            })
+        }
         "unread_counts.changed" => {
             let payload: UnreadCountsChangedDto = match serde_json::from_value(envelope.payload) {
                 Ok(payload) => payload,
@@ -1301,6 +1322,10 @@ fn next_live_reconnect_backoff(current: Duration) -> Duration {
 
 #[derive(Debug)]
 pub enum LiveFrame {
+    RoomDetails {
+        account_id: Uuid,
+        payload: RoomDetailsChangedDto,
+    },
     RoomDisplayName {
         account_id: Uuid,
         payload: RoomDisplayNameChangedDto,
@@ -1366,6 +1391,104 @@ pub struct SpaceChildDto {
     /// Empty/missing routing servers mean the relationship has been removed.
     #[serde(default)]
     pub via: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoomDetailsChangedDto {
+    pub room_id: String,
+    pub sources: Vec<RoomDetailSource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomDetailSource {
+    Metadata,
+    MemberCounts,
+    HomeserverDetails,
+    #[serde(other)]
+    Unrecognized,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetailRefreshState {
+    #[default]
+    Idle,
+    Queued,
+    Running,
+    #[serde(other)]
+    Unrecognized,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct DetailRefreshDto {
+    #[serde(default)]
+    pub state: DetailRefreshState,
+    #[serde(default)]
+    pub failure: Option<String>,
+    /// Unix milliseconds before which acquisition will not retry.
+    #[serde(default)]
+    pub next_attempt_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeserverDetailStatus {
+    #[default]
+    Unknown,
+    Available,
+    Partial,
+    TooLarge,
+    Forbidden,
+    NotFound,
+    Unsupported,
+    #[serde(other)]
+    Unrecognized,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct HomeserverDetailDto<T> {
+    #[serde(default)]
+    pub status: HomeserverDetailStatus,
+    #[serde(flatten)]
+    pub content: T,
+    /// Unix milliseconds from the server's clock.
+    #[serde(default)]
+    pub fetched_at: Option<i64>,
+    /// Unix milliseconds at which the last answer expires.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub refresh: DetailRefreshDto,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct LocalAliasesContent {
+    #[serde(default)]
+    pub aliases: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryVisibility {
+    Public,
+    Private,
+    #[serde(other)]
+    Unrecognized,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct DirectoryVisibilityContent {
+    #[serde(default)]
+    pub visibility: Option<DirectoryVisibility>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomHomeserverDetailsDto {
+    #[serde(default)]
+    pub local_aliases: HomeserverDetailDto<LocalAliasesContent>,
+    #[serde(default)]
+    pub directory_visibility: HomeserverDetailDto<DirectoryVisibilityContent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1730,6 +1853,10 @@ pub enum SnapshotStatus {
 pub struct MetadataSnapshot<T> {
     #[serde(default)]
     pub status: SnapshotStatus,
+    #[serde(default)]
+    pub absence_confirmed_at: Option<i64>,
+    #[serde(default)]
+    pub absence_check: Option<DetailRefreshDto>,
     /// The state event's sender; the creator for versions whose create content
     /// omits `creator`.
     #[serde(default)]
@@ -1753,6 +1880,8 @@ impl<T> Default for MetadataSnapshot<T> {
     fn default() -> Self {
         Self {
             status: SnapshotStatus::Unknown,
+            absence_confirmed_at: None,
+            absence_check: None,
             sender: None,
             origin_ts: None,
             redacted: None,
@@ -2659,6 +2788,67 @@ impl fmt::Display for Escaped<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_detail_frames_use_the_envelope_account_and_accept_future_sources() {
+        let account_id = Uuid::new_v4();
+        let frame = serde_json::json!({
+            "type": "room_details.changed", "account_id": account_id,
+            "payload": {
+                "room_id": "!room:example.com", "account_id": Uuid::new_v4(),
+                "sources": ["metadata", "member_counts", "homeserver_details", "future_source"]
+            }
+        });
+        let Some(LiveFrame::RoomDetails {
+            account_id: decoded_account,
+            payload,
+        }) = decode_ws_frame(&frame.to_string())
+        else {
+            panic!("expected detail frame")
+        };
+        assert_eq!(decoded_account, account_id);
+        assert_eq!(payload.room_id, "!room:example.com");
+        assert_eq!(
+            payload.sources,
+            [
+                RoomDetailSource::Metadata,
+                RoomDetailSource::MemberCounts,
+                RoomDetailSource::HomeserverDetails,
+                RoomDetailSource::Unrecognized
+            ]
+        );
+        for payload in [
+            serde_json::json!({"sources": ["metadata"]}),
+            serde_json::json!({"room_id": "!room:example.com", "sources": [123]}),
+        ] {
+            let malformed = serde_json::json!({
+                "type": "room_details.changed", "account_id": account_id, "payload": payload
+            });
+            assert!(matches!(
+                decode_ws_frame(&malformed.to_string()),
+                Some(LiveFrame::ProtocolError(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn metadata_absence_and_future_refresh_values_decode_without_losing_other_snapshots() {
+        let metadata: RoomMetadataDto = serde_json::from_value(serde_json::json!({
+            "encryption": {"status": "unknown", "absence_confirmed_at": 12,
+                "absence_check": {"state": "future_state", "failure": "future_failure"}},
+            "aliases": {"status": "available", "content": {"alias": "#a:example.com"}}
+        }))
+        .unwrap();
+        assert_eq!(metadata.encryption.absence_confirmed_at, Some(12));
+        assert_eq!(
+            metadata.encryption.absence_check.unwrap().state,
+            DetailRefreshState::Unrecognized
+        );
+        assert_eq!(
+            metadata.aliases.content.unwrap().alias.as_deref(),
+            Some("#a:example.com")
+        );
+    }
 
     #[tokio::test]
     async fn room_snapshot_is_stamped_before_the_http_response() {

@@ -2981,6 +2981,7 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
         room,
         info,
         app.display.time_format,
+        &app.rooms.rooms,
     ));
     lines.push(String::new());
     lines.extend(match info {
