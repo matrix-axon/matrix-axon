@@ -149,6 +149,7 @@ Clients prompt the user to verify Axon again or enter the recovery key.
 ### 5. Phase 1: one setting per Axon account, off by default
 
 The setting is a column on `accounts`, `exclude_insecure_devices BOOLEAN NOT NULL DEFAULT false`, read and written through an account-scoped route.
+This ADR does not fix the route's path, body or response; the Phase 1 server PR pins them in OpenAPI.
 It belongs to the `accounts` row, which is Axon's own device for one Matrix ID:
 
 - It does not affect the user's other clients of the same Matrix account, just as Element keeps its own setting per device.
@@ -161,13 +162,20 @@ Following Element, one setting turns on both rules together: `CollectStrategy::I
 There are no separate sending and receiving settings.
 `OnlyTrustedDevices` and strict `CrossSigned` are not offered, because they also cut off users who are cross-signed but whom we have not verified, and sessions received before trust data existed.
 
-Both values are builder settings in matrix-sdk.
-`configure_client_builder` takes the account's value, and every production client path applies it, including the restore path and the OAuth staging client.
+Both values are builder settings in matrix-sdk, separate from `EncryptionSettings`.
+`configure_client_builder` keeps its `with_encryption_settings(production_encryption_settings())` call, which carries the backup download strategy, and adds `with_room_key_recipient_strategy` and `with_decryption_settings` beside it.
+The new calls compose with the existing one and do not replace it.
+`configure_client_builder` takes the account's value, every production client path applies it (including the restore path and the OAuth staging client), and its tests cover both values.
 Changing the setting rebuilds that account's client through the same stop-and-restart path the lifecycle verbs use, so a change never applies to half a sync cycle.
 
-Any valid bearer may change the setting.
+Any valid bearer may turn the setting off.
 [ADR 0109](0109-management-api.md) reserves step-up for credential changes, and argues that a bearer can already read every message.
 Turning this setting off exposes no more than that.
+
+Turning it on is a different risk.
+It can stop the account from exchanging messages in every room with a member whose devices are not cross-signed, including every encrypted bridged room.
+So turning it on also needs a valid bearer, but the server additionally requires an acknowledgement of the impact read (decision 6), so a stray or scripted call cannot turn it on unseen.
+It does not need step-up, because it changes no credential.
 
 ### 6. Phase 1: turning it on is checked first
 
@@ -176,8 +184,14 @@ With it on, every encrypted send would otherwise fail with `SendingFromUnverifie
 
 Before the user confirms, an impact read lists, from the account's crypto store, the encrypted rooms that have members with devices that are not cross-signed, and those members.
 Bots and bridges, which make up most of production's list, are named in it.
-Clients show this list before the switch is turned on.
 It is the only way a user would find out that bridged rooms are about to stop working.
+
+The impact read also returns an acknowledgement token: a digest of the affected rooms and members it listed.
+The request that turns the setting on must carry that token.
+The server recomputes the impact and answers 409 if the token is missing or no longer matches, with the current impact in the response so the client can show it again.
+So the server, not only a client's UI, ensures that whoever turns the setting on was shown what it breaks.
+An account with no affected rooms still sends the token, which then names an empty impact.
+Turning the setting off needs no token.
 
 ### 7. Phase 1: sends fail with typed errors
 
@@ -197,6 +211,16 @@ It is retried when its reason may have gone away:
 
 - When the sender's device or identity changes (the SDK's `devices_stream` and `user_identities_stream`), Axon retries the stored events from that sender.
 - When the setting is turned off, Axon retries every trust-refused event of the account.
+
+Both retries go through the existing redecryption queue ([ADR 0014](0014-redecryption-queue.md)) and follow its rules: per-event failures are logged and skipped, and the `content IS NULL` guard keeps the backfill idempotent.
+What they add:
+
+- **Bounded batches.** Trust-refused rows are selected by `utd_reason` in key order, a bounded batch at a time, never as one account-wide result set.
+  The account-wide retry runs on the bulk-maintenance connection, not the hot pools, under the `[database.timeouts]` deadlines.
+- **Resumable.** The account-wide retry keeps a durable cursor, in the manner of the startup sweep's `utd_startup_redecrypt_attempted_at` marker, so a crash or restart continues where it stopped instead of starting over or losing the work.
+  Turning the setting on again cancels a retry that has not finished, since its rows would only be refused again.
+- **Debounced per sender.** Device and identity updates arrive in bursts, and a bridge-heavy account sees many of them.
+  Axon collects the affected senders over a short window and retries each sender at most once per window, and only senders with trust-refused rows.
 
 Implementation must check that a trust refusal does not trigger the backup download that `BackupDownloadStrategy::AfterDecryptionFailure` runs for missing keys.
 The key is present, so fetching it from backup would be wasted.
@@ -222,10 +246,12 @@ It starts with two steps:
   For other bots, it means giving them cross-signing keys or cross-signing their device from another session.
   This also helps the account's Element sessions, whose "exclude insecure devices" mode has the same problem.
 - **A spike** on accepting bridged messages under the MSC's bridge provision: a `MismatchedSender` message whose session was created by a cross-signed bridge bot's device, shown with the MSC's warning.
-  The candidates are a patched `matrix-sdk-crypto` (Axon already vendors `matrix-sdk-base`), a contribution upstream, or enforcing the read rule in Axon on top of the decrypted event's verification state instead of in the SDK.
-  The last one would keep untrusted plaintext in Axon's database, which decision 8 avoids, and it would lose the SDK's legacy-session exemption, which the SDK does not expose.
+  The candidates are a patched `matrix-sdk-crypto`, a contribution upstream, or enforcing the read rule in Axon on top of the decrypted event's verification state instead of in the SDK.
+  Axon already vendors `matrix-sdk-base`, but only for a narrow provenance fix; carrying a patch to `matrix-sdk-crypto`'s trust logic would be a larger and different maintenance commitment, and the spike sizes it.
+  Enforcing the rule in Axon would keep untrusted plaintext in Axon's database, which decision 8 avoids, and it would lose the SDK's legacy-session exemption, which the SDK does not expose.
 
-Until that ADR lands, an account that uses encrypted bridges keeps the setting off, and decision 6's impact read says why.
+[Issue 1066](https://github.com/matrix-axon/matrix-axon/issues/1066) tracks this phase.
+Until its ADR lands, an account that uses encrypted bridges keeps the setting off, and decision 6's impact read says why.
 
 ### 12. Phase 3, deferred: creating and resetting cross-signing in Axon
 
@@ -233,7 +259,24 @@ Axon will create cross-signing keys and Secret Storage for an account that has n
 matrix-sdk has the parts: `bootstrap_cross_signing_if_needed`, `Recovery::enable` and `Recovery::reset_identity`.
 A reset needs user-interactive authentication, which is a password for a classic homeserver or an approval URL from the OAuth server.
 How Axon carries that through its API, next to the sign-in flows of [ADR 0097](0097-matrix-oauth-qr-login-and-device-authorization.md) and [ADR 0117](0117-matrix-oauth-browser-sign-in.md), is that ADR's decision.
+[Issue 1067](https://github.com/matrix-axon/matrix-axon/issues/1067) tracks this phase.
 Until then, an account without cross-signing sets it up in another client first.
+
+### 13. Logging and diagnostics
+
+Every phase logs its trust decisions with `tracing` structured fields, and never logs key material, recovery keys or tokens:
+
+- **A decryption failure with a recorded reason** logs `account_id`, `room_id`, `event_id`, `utd_reason`, the withheld code or the SDK's verification level, and the sender's user and device id.
+  It logs at debug, because on a busy account these are routine, as other undecryptable events are today.
+- **A send refused under the setting** logs `account_id`, `room_id`, the 409 code and, for `verified_user_changed_identity`, the affected user ids, at info.
+- **A change of the setting** logs `account_id`, the old and new value, and the number of affected rooms the acknowledged impact named, at info.
+  A refused attempt to turn it on logs why: no cross-signing, Axon's device not cross-signed, or a missing or stale token.
+- **An identity change or acceptance** logs `account_id`, the user id and the kind (pin or verification violation), at info.
+- **The trust-refused retry** logs a summary per batch and per finished run (selected, decrypted, still refused), as the redecryption sweep does.
+
+No new developer-mode switch is added.
+These logs sit under Axon's own targets, which the default `[log]` filter keeps at info.
+The SDK's own crypto detail is muted by that default filter, and the existing documented way to restore it, adding `matrix_sdk_crypto=debug` to `[log] level`, is enough for debugging trust decisions.
 
 ## Consequences
 
@@ -241,6 +284,7 @@ Until then, an account without cross-signing sets it up in another client first.
   It gives every account explanations it lacks today, and production already needs them: other users' clients can withhold keys from Axon's device now.
 - With Phase 1 on, a device the user or a server admin adds without cross-signing it gets no room keys from Axon, and its messages are not shown.
 - An account with the setting on cannot send encrypted messages from a device that is not cross-signed.
+- A script or client that turns the setting on must first read the impact and send back its token; an unacknowledged request is refused.
   Decision 6 prevents that at the switch, and decisions 4 and 7 cover the identity changing afterwards.
 - Users of clients without cross-signing cannot exchange encrypted messages with an account that has the setting on, as the MSC accepts.
 - An account in encrypted bridged rooms cannot use the setting until Phase 2.
@@ -257,7 +301,7 @@ Until then, an account without cross-signing sets it up in another client first.
 - **Separate settings for sending and receiving.**
   Element ties them together, and either rule alone leaves half the protection off while still breaking some rooms.
 - **Blocking every send on an identity change until it is accepted**, as the MSC recommends.
-  Rejected for now in favour of a warning the user can accept, except where the SDK enforces it.
+  Rejected for now in favor of a warning the user can accept, except where the SDK enforces it.
 - **Enforcing the read rule in Axon instead of the SDK in Phase 1.**
   It is the only route to bridge support without patching the SDK, but it stores untrusted plaintext and loses the legacy-session exemption.
   It stays a candidate for decision 11's spike.
