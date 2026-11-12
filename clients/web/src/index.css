@@ -3836,13 +3836,33 @@ span.composer-attachment-thumb {
      sender's baseline (and the avatar next to it) down by a few pixels. */
   .event-head {
     align-items: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     min-height: 1.75rem;
+  }
+
+  /* The header is one line. Wrapping let the action bar drop to a second line
+     whenever name + time + "(edited)" + bar overflowed (an edited message, a
+     long display name), leaving a blank gap above the body. Instead nothing but
+     the name is allowed to shrink, and it gives way with its ellipsis. (The
+     time is already "flex: none" further up.) */
+  .event-head > .edited-marker,
+  .event-head > .event-actions {
+    flex: none;
+    white-space: nowrap;
+  }
+
+  /* The open bar takes priority over the edit marker, at every phone width
+     (a deliberate trade-off, not a narrow-phone fallback): name, time,
+     "(edited)" and five buttons do not fit on a 375px phone without truncating
+     the name to a couple of letters. Edit history is not reachable while the
+     bar is open; the marker returns when it closes. */
+  .event-row.actions-open .event-head > .edited-marker {
+    display: none;
   }
 
   .event-actions {
     max-width: 100%;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 0.1rem;
   }
 
@@ -3855,6 +3875,19 @@ span.composer-attachment-thumb {
   .event-row.actions-open .event-actions {
     display: inline-flex;
     opacity: 1;
+  }
+
+  /* Last resort for the narrowest phones. At 320px, with the delete
+     confirmation open, the time plus six buttons are wider than the row even
+     with the name collapsed to nothing. The time's width is not predictable (it
+     follows the timezone and the 12h/24h setting), so rather than reserve room
+     for it, drop it while the bar is open, as "(edited)" is dropped above. It
+     comes back when the bar closes. */
+  @media (max-width: 22rem) {
+    .event-row.actions-open .event-head > .event-time-copy,
+    .event-row.actions-open .event-head > time {
+      display: none;
+    }
   }
 
   .event-actions .event-action-button {
