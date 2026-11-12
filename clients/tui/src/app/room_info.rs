@@ -181,8 +181,15 @@ impl RoomInfoCache {
             read.abort();
         }
         if let Some(state) = self.state.as_mut() {
+            let members_loading =
+                state.members.value.is_none() && state.members.refresh.request.is_some();
             for source in Source::ALL {
-                *state.refresh(source) = ReadState::default();
+                let read = state.refresh(source);
+                read.request = None;
+                read.dirty = false;
+            }
+            if members_loading {
+                store_member_lines(state);
             }
         }
     }
@@ -270,6 +277,7 @@ impl App {
         let Some(state) = self.room_info.state.as_mut() else {
             return;
         };
+        let mut members_started = false;
         for source in Source::ALL {
             if !state.refresh(source).ready(now) {
                 continue;
@@ -325,8 +333,12 @@ impl App {
                 });
             });
             self.room_info.reads.insert(source, task.abort_handle());
+            members_started |= source == Source::Members;
         }
-        if state.member_lines.is_empty() {
+        // Starting a member read changes an empty projection's visible state,
+        // even if its cached lines already say "not loaded". Loaded rosters
+        // stay visible and need no sorting until their data changes.
+        if members_started && state.members.value.is_none() {
             store_member_lines(state);
         }
     }
@@ -335,17 +347,32 @@ impl App {
     /// whose previous HTTP request failed. Values and errors stay until settled.
     pub(crate) fn open_room_info(&mut self, key: RoomKey) {
         self.room_info.abort_reads();
+        if let Some(state) = self
+            .room_info
+            .state
+            .as_mut()
+            .filter(|state| state.key == key)
+        {
+            for source in Source::ALL {
+                let read = state.refresh(source);
+                read.retry_at = None;
+                read.reconnect_bypassed = false;
+            }
+        }
         self.request_room_info(key);
     }
 
     /// The tick handles delayed membership reads and failed-read retries only.
     /// There is no periodic read after a source succeeds.
     pub(crate) fn poll_open_room_info(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() || self.selected_room_key().is_none() {
+        if !self.room_info_popup_is_open() {
             self.cancel_room_info_refresh();
             return;
         }
-        let key = self.selected_room_key().expect("checked selection");
+        let Some(key) = self.selected_room_key() else {
+            self.cancel_room_info_refresh();
+            return;
+        };
         if self
             .room_info
             .state
@@ -457,7 +484,7 @@ impl App {
     }
 
     /// Cancel HTTP reads and retry intents; late outcomes no longer match an
-    /// active request. Keep last values, errors, and the local member filter.
+    /// active request. Keep last values, errors, retry history, and the local member filter.
     pub(crate) fn cancel_room_info_refresh(&mut self) {
         self.room_info.abort_reads();
         self.clear_member_refresh();
@@ -486,9 +513,6 @@ impl App {
     }
 
     pub(crate) fn apply_room_info_outcome_at(&mut self, outcome: RoomInfoOutcome, now: Instant) {
-        if self.selected_room_key().as_ref() != Some(&outcome.key) {
-            return;
-        }
         let source = outcome.part.source();
         let failure = outcome.part.failure();
         let Some(state) = self.room_info.state.as_mut() else {
@@ -521,7 +545,7 @@ impl App {
         }
         // Follow up after all hints received during this source's request. A
         // different source need not settle first. Failed reads wait for retry_at.
-        if self.room_info_popup_is_open() {
+        if self.room_info_popup_is_open() && self.room_info_for_selected().is_some() {
             self.start_room_info_reads(now);
         }
     }
@@ -755,14 +779,22 @@ fn confirmed_absent<T>(snapshot: &MetadataSnapshot<T>) -> bool {
 }
 
 fn no_content_phrase<T>(snapshot: &MetadataSnapshot<T>) -> String {
+    snapshot_gap_phrase(
+        snapshot,
+        "unknown (not cached)",
+        "not set (confirmed absent by homeserver)",
+    )
+}
+
+fn snapshot_gap_phrase<T>(snapshot: &MetadataSnapshot<T>, unknown: &str, absent: &str) -> String {
     if snapshot.redacted == Some(true) {
         return "redacted".to_owned();
     }
     let phrase = if confirmed_absent(snapshot) {
-        "not set (confirmed absent by homeserver)"
+        absent
     } else {
         match snapshot.status {
-            SnapshotStatus::Unknown => "unknown (not cached)",
+            SnapshotStatus::Unknown => unknown,
             SnapshotStatus::Unavailable => "unavailable (content not retained)",
             SnapshotStatus::Invalid => "unavailable (malformed state)",
             SnapshotStatus::TooLarge => "unavailable (state too large)",
@@ -942,27 +974,11 @@ fn member_count_line(info: &View<'_, RoomInfoDto>, time_format: TimeFormat) -> S
 fn encryption_line(metadata: &RoomMetadataDto) -> String {
     let snapshot = &metadata.encryption;
     let Some(content) = &snapshot.content else {
-        let phrase = if confirmed_absent(snapshot) {
-            format!(
-                "not encrypted (absence confirmed by homeserver){}",
-                snapshot
-                    .absence_check
-                    .as_ref()
-                    .map(refresh_note)
-                    .unwrap_or_default()
-            )
-        } else if snapshot.status == SnapshotStatus::Unknown && snapshot.redacted != Some(true) {
-            format!(
-                "no encryption state cached{}",
-                snapshot
-                    .absence_check
-                    .as_ref()
-                    .map(refresh_note)
-                    .unwrap_or_default()
-            )
-        } else {
-            no_content_phrase(snapshot)
-        };
+        let phrase = snapshot_gap_phrase(
+            snapshot,
+            "no encryption state cached",
+            "not encrypted (absence confirmed by homeserver)",
+        );
         return format!("Encryption: {phrase}");
     };
     let mut line = format!(
@@ -1223,12 +1239,15 @@ fn power_level_lines(metadata: &RoomMetadataDto) -> Vec<String> {
 
 fn server_acl_lines(metadata: &RoomMetadataDto) -> Vec<String> {
     let snapshot = &metadata.server_acl;
-    // Not in the sync defaults, so usually unknown; say nothing until a tuple
-    // exists rather than adding a permanent "unknown" line to every room.
+    // An empty idle check adds no information to unknown state. Show an
+    // actual snapshot, confirmation, active check, or refresh failure.
     if snapshot.status == SnapshotStatus::Unknown
         && snapshot.redacted != Some(true)
         && snapshot.absence_confirmed_at.is_none()
-        && snapshot.absence_check.is_none()
+        && !snapshot
+            .absence_check
+            .as_ref()
+            .is_some_and(|check| check.state != DetailRefreshState::Idle || check.failure.is_some())
     {
         return Vec::new();
     }
@@ -4071,11 +4090,12 @@ mod tests {
 
     #[test]
     fn homeserver_details_keep_scope_value_freshness_and_refresh_separate() {
+        const BASE_MS: i64 = 1_762_200_000_000;
         let details: RoomHomeserverDetailsDto = serde_json::from_value(json!({
             "local_aliases": {
                 "status": "partial", "aliases": ["#local:example.com"],
-                "fetched_at": 10, "expires_at": 20,
-                "refresh": {"state": "running", "failure": "timeout", "next_attempt_at": 40}
+                "fetched_at": BASE_MS + 10_000, "expires_at": BASE_MS + 20_000,
+                "refresh": {"state": "running", "failure": "timeout", "next_attempt_at": BASE_MS + 40_000}
             },
             "directory_visibility": {"status": "available", "visibility": "private"}
         }))
@@ -4090,7 +4110,7 @@ mod tests {
                 .as_ref()
                 .map(|aliases| aliases.join(", ")),
             TimeFormat::H24,
-            30,
+            BASE_MS + 30_000,
         );
         for phrase in [
             "#local:example.com",
@@ -4099,6 +4119,7 @@ mod tests {
             "couldn't refresh: timed out",
             "refreshing…",
             "retry no earlier than",
+            "last answered 2025-11-",
         ] {
             assert!(rendered.contains(phrase), "{rendered}");
         }
@@ -4108,6 +4129,104 @@ mod tests {
             "Directory publication on your homeserver: private"
         );
         assert!(!lines.iter().any(|line| line.contains("Advertised aliases")));
+    }
+
+    #[test]
+    fn homeserver_expiry_and_retry_use_unix_milliseconds_at_their_boundaries() {
+        // These timestamps are the wire units documented by the API. Exercise
+        // both the formatter's supplied clock and homeserver_lines' real clock.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut details: RoomHomeserverDetailsDto = serde_json::from_value(json!({
+            "local_aliases": {
+                "status": "available", "aliases": [],
+                "fetched_at": 1_762_200_000_000_i64, "expires_at": now_ms + 900_000,
+                "refresh": {"state": "idle", "next_attempt_at": now_ms + 60_000}
+            },
+            "directory_visibility": {"status": "available", "visibility": "private"}
+        }))
+        .unwrap();
+        let fresh = homeserver_lines(&View::Loaded(&details), TimeFormat::H24)[0].clone();
+        assert!(!fresh.contains("may be out of date"), "{fresh}");
+        assert!(fresh.contains("retry no earlier than"), "{fresh}");
+        assert!(fresh.contains("last answered 2025-11-"), "{fresh}");
+
+        details.local_aliases.expires_at = Some(now_ms - 900_000);
+        details.local_aliases.refresh.next_attempt_at = Some(now_ms - 60_000);
+        let stale = homeserver_lines(&View::Loaded(&details), TimeFormat::H24)[0].clone();
+        assert!(stale.contains("may be out of date"), "{stale}");
+        assert!(!stale.contains("retry no earlier than"), "{stale}");
+
+        details.local_aliases.expires_at = Some(now_ms);
+        details.local_aliases.refresh.next_attempt_at = Some(now_ms);
+        let boundary = homeserver_detail_line(
+            "Aliases",
+            &details.local_aliases,
+            Some("none".to_owned()),
+            TimeFormat::H24,
+            now_ms,
+        );
+        assert!(boundary.contains("may be out of date"), "{boundary}");
+        assert!(!boundary.contains("retry no earlier than"), "{boundary}");
+    }
+
+    #[test]
+    fn unknown_acl_hides_empty_idle_checks_but_shows_progress_failure_and_confirmation() {
+        let mut metadata = all_unknown();
+        assert!(server_acl_lines(&metadata).is_empty());
+        metadata.server_acl.absence_check = Some(DetailRefreshDto::default());
+        assert!(server_acl_lines(&metadata).is_empty());
+        for state in [
+            DetailRefreshState::Queued,
+            DetailRefreshState::Running,
+            DetailRefreshState::Unrecognized,
+        ] {
+            metadata.server_acl.absence_check.as_mut().unwrap().state = state;
+            assert!(!server_acl_lines(&metadata).is_empty());
+        }
+        let check = metadata.server_acl.absence_check.as_mut().unwrap();
+        check.state = DetailRefreshState::Idle;
+        check.failure = Some("timeout".to_owned());
+        assert!(server_acl_lines(&metadata)[0].contains("couldn't refresh: timed out"));
+        metadata.server_acl.absence_check = Some(DetailRefreshDto::default());
+        metadata.server_acl.absence_confirmed_at = Some(1_762_200_000_000);
+        assert!(server_acl_lines(&metadata)[0].contains("confirmed absent"));
+        metadata.server_acl.absence_confirmed_at = None;
+        metadata.server_acl.redacted = Some(true);
+        assert_eq!(server_acl_lines(&metadata), ["Server ACL: redacted"]);
+    }
+
+    #[tokio::test]
+    async fn partial_homeserver_responses_preserve_the_available_half() {
+        let (client, server) = stub_axon(1, |_| {
+            json!({"data": {
+                "local_aliases": {"status": "available", "aliases": ["#local:example.com"]}
+            }})
+            .to_string()
+        })
+        .await;
+        let details = client
+            .room_homeserver_details(Uuid::nil(), &key().room_id)
+            .await
+            .unwrap();
+        let rendered = homeserver_lines(&View::Loaded(&details), TimeFormat::H24);
+        assert_eq!(
+            rendered[0],
+            "Aliases on your homeserver: #local:example.com"
+        );
+        assert!(rendered[1].contains("unknown"));
+        // The converse omission and an empty object also degrade to unknown.
+        let details: RoomHomeserverDetailsDto = serde_json::from_value(json!({
+            "directory_visibility": {"status": "available", "visibility": "private"}
+        }))
+        .unwrap();
+        let rendered = homeserver_lines(&View::Loaded(&details), TimeFormat::H24);
+        assert!(rendered[0].contains("unknown"));
+        assert!(rendered[1].ends_with("private"));
+        assert_eq!(
+            serde_json::from_value::<RoomHomeserverDetailsDto>(json!({})).unwrap(),
+            RoomHomeserverDetailsDto::default()
+        );
+        server.await.unwrap();
     }
 
     #[test]
@@ -4262,6 +4381,96 @@ mod tests {
                 sources,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn a_result_settles_while_selection_temporarily_moves_away() {
+        let mut app = opened();
+        let now = Instant::now();
+        let mut other = room();
+        other.room_id = "!other:example.com".to_owned();
+        app.rooms.rooms.push(other);
+        app.handle_live_frame(frame(
+            Uuid::nil(),
+            &key().room_id,
+            vec![RoomDetailSource::Metadata],
+        ));
+        app.rooms.selected = Some(1);
+        // An invalidation during the original request must not start a follow-up
+        // for an off-screen room when that request completes.
+        let generation = app.room_info.generation;
+        settle(&mut app, success(Source::Metadata), now);
+        let state = app.room_info.state.as_ref().unwrap();
+        assert!(state.metadata.refresh.request.is_none());
+        assert!(state.metadata.value.is_some());
+        assert_eq!(app.room_info.generation, generation);
+
+        app.rooms.selected = Some(0);
+        app.poll_open_room_info(now);
+        assert_eq!(app.room_info.generation, generation + 1);
+        settle(&mut app, success(Source::Metadata), now);
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .metadata
+            .refresh
+            .request
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn closed_ticks_preserve_failure_history_but_do_not_retry() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle(
+            &mut app,
+            RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
+            now,
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        let generation = app.room_info.generation;
+        for seconds in [1, 60, 10000] {
+            app.poll_open_room_info(now + Duration::from_secs(seconds));
+        }
+        let read = &app.room_info.state.as_ref().unwrap().metadata.refresh;
+        assert_eq!(read.failures, 1);
+        assert_eq!(read.retry_at, Some(now + Duration::from_secs(30)));
+        assert!(!read.dirty);
+        assert_eq!(app.room_info.generation, generation);
+
+        // Explicit reopen may read immediately without forgetting earlier
+        // failures; a repeated failure advances to the next backoff step.
+        app.open_room_info(key());
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        assert!(app.room_info.reads.contains_key(&Source::Metadata));
+        settle(
+            &mut app,
+            RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
+            now,
+        );
+        let read = &app.room_info.state.as_ref().unwrap().metadata.refresh;
+        assert_eq!(read.failures, 2);
+        assert_eq!(read.retry_at, Some(now + Duration::from_secs(60)));
+    }
+
+    #[tokio::test]
+    async fn starting_members_updates_cached_not_loaded_lines() {
+        let mut app = app();
+        wire_room_info(&mut app);
+        let mut state = loaded(None, None, None);
+        store_member_lines(&mut state);
+        assert_eq!(state.member_lines, ["Member list: not loaded"]);
+        app.room_info.state = Some(state);
+        app.request_room_info(key());
+        assert!(
+            crate::ui::popup_room_info_lines(&app).contains(&"Member list: loading…".to_owned())
+        );
+        app.cancel_room_info_refresh();
+        assert!(
+            crate::ui::popup_room_info_lines(&app).contains(&"Member list: not loaded".to_owned())
+        );
     }
 
     #[tokio::test]

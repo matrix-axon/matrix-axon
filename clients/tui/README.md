@@ -225,6 +225,7 @@ An open popup refreshes metadata, member counts, and homeserver details on their
 Membership changes refresh the loaded roster after a short debounce; tombstones and redactions refresh the upgrade links.
 Successful reads do not poll.
 Failed HTTP reads retry independently with a delay of 30 seconds, doubling to four minutes; closing the popup cancels the reads and retries.
+Closing preserves the failure history, so a repeated failure after reopening keeps its longer retry delay; reopening itself retries immediately.
 Servers without detail notifications update these snapshots on reopen, reconnect, or explicit refresh.
 
 When the **Search Results** popup is open:

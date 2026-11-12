@@ -63,6 +63,8 @@
   Metadata timeline events do not duplicate the persisted metadata notification.
   A refresh leaves each source's last value and error in place until its own new result arrives.
   Closing the popup cancels every source and its retry intents.
+  Closing preserves each source's failure history; reopening retries immediately but a repeated failure keeps escalating its backoff.
+  Changing the cached room resets that history.
   If the selected room changes under the open popup, the next tick fetches that room and resets the scroll.
   Paste is accepted only while that prompt is open inside the room-info popup.
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.

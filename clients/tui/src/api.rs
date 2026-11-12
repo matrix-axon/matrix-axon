@@ -1426,6 +1426,7 @@ pub struct DetailRefreshDto {
     pub state: DetailRefreshState,
     #[serde(default)]
     pub failure: Option<String>,
+    /// Unix milliseconds before which acquisition will not retry.
     #[serde(default)]
     pub next_attempt_at: Option<i64>,
 }
@@ -1451,8 +1452,10 @@ pub struct HomeserverDetailDto<T> {
     pub status: HomeserverDetailStatus,
     #[serde(flatten)]
     pub content: T,
+    /// Unix milliseconds from the server's clock.
     #[serde(default)]
     pub fetched_at: Option<i64>,
+    /// Unix milliseconds at which the last answer expires.
     #[serde(default)]
     pub expires_at: Option<i64>,
     #[serde(default)]
@@ -1482,7 +1485,9 @@ pub struct DirectoryVisibilityContent {
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct RoomHomeserverDetailsDto {
+    #[serde(default)]
     pub local_aliases: HomeserverDetailDto<LocalAliasesContent>,
+    #[serde(default)]
     pub directory_visibility: HomeserverDetailDto<DirectoryVisibilityContent>,
 }
 

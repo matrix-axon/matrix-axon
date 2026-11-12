@@ -23,6 +23,7 @@ The one-room cache carries its account and room key.
 Each source has its own request generation, abort handle, invalidation flag, and retry schedule.
 A running source retains one pending invalidation and starts at most one follow-up when it settles.
 A key change or popup close cancels all reads and retries; unmatched or canceled outcomes cannot apply.
+A response for the cached room still settles if selection temporarily moves away before the tick replaces that cache; it can launch follow-up reads only when that room is selected again.
 Last values and errors stay visible until that source answers again.
 A same-room refresh preserves the local member filter and scroll position.
 
@@ -44,6 +45,8 @@ Successful sources do not poll.
 An HTTP transport, timeout, size, status other than 404, or decoding failure retries only that source after 30 seconds, doubling to four minutes.
 A notification cannot bypass failure backoff.
 Each source permits one early reconnect retry until its scheduled retry runs; reopening or explicit refresh retries immediately.
+Closing disables pending retry work while retaining the failure count and deadline; reopening bypasses the deadline without forgetting the failure count.
+A different cached room starts with a fresh failure history.
 An endpoint 404 is displayed as unavailable from this Axon server and does not schedule automatic retries.
 On servers without notifications, snapshots still refresh on reopen, reconnect, and explicit refresh; the TUI does not infer notification support from a quiet socket.
 
@@ -54,12 +57,14 @@ A confirmed absence overrides a canonical alias from an older room summary.
 Only confirmed absence of encryption permits the label "not encrypted"; redacted or malformed state never does.
 Other absent state is labeled as confirmed absent without manufacturing configured values or permissions.
 `absence_check` reports refresh progress or failure independently of the previous confirmation.
+An otherwise unknown server ACL does not add a row for an empty idle check; a confirmation, active check, or failure makes the row useful.
 
 "Advertised aliases" remains the alternative aliases from room state beside the canonical alias.
 "Aliases on your homeserver" and "Directory publication on your homeserver" are separate cached homeserver answers, never a federation-wide alias list.
 Show each answer's last-answer time, expiration, refresh activity, failure, and future retry deadline when available.
 An HTTP failure retains the old value with a stale-data notice; a conclusive denial or a newer answer with a field removed replaces it.
 Malformed, oversized, forbidden, missing, unsupported, and future statuses remain explicit.
+If either homeserver component is omitted, the other still renders and the missing component reads as unknown.
 All server-supplied text uses the existing terminal sanitization and wrapping.
 Visible source errors and server acquisition diagnostics remain the debugging surfaces; no private metadata bodies or credentials are logged.
 
