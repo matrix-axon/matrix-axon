@@ -19,6 +19,7 @@ pub mod push;
 pub mod room_details;
 pub mod room_entry;
 pub mod secret;
+pub mod utd_reason;
 
 pub use account_actions::{MatrixProfile, PublicRoomSummary, PublicRoomsPage, PublicRoomsQuery};
 pub use config::{
@@ -42,3 +43,4 @@ pub use push::{
 pub use room_details::{JobActivity, RoomDetailJob, RoomDetailSource};
 pub use room_entry::{CreateRoomRequest, RoomPreset};
 pub use secret::{generate_opaque_secret, hash_secret};
+pub use utd_reason::{UtdReason, UtdReasonKind};

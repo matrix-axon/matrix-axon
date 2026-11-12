@@ -20,8 +20,8 @@ use axon_core::{
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{
-    Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, NewEvent, PendingUtd,
-    RoomInviteSnapshot, RoomStateRedaction, RoomStateUpsert, Store,
+    Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, NewEvent, RoomInviteSnapshot,
+    RoomStateRedaction, RoomStateUpsert, Store,
 };
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::deserialized_responses::EncryptionInfo;
@@ -777,31 +777,17 @@ async fn persist_timeline_event(
         == Some("m.room.redaction"))
     .then(|| crate::meta::redacts(&raw_val).map(str::to_owned))
     .flatten();
-    // The live sync path: persist and emit the fresh event to `/v1/ws`.
-    let pending_utd = persist_event_core(
+    // The live sync path: persist and emit the fresh event to `/v1/ws`. A UTD
+    // gets one local decryption retry first (see `UtdCheck::Recheck`).
+    persist_event_core(
         &ctx,
         &ev,
         raw_val,
         room.room_id().as_str(),
         enc_info.as_ref(),
-        true,
+        UtdCheck::Recheck(&room),
     )
     .await;
-    // The SDK decrypted this event before the row was written. If its megolm key
-    // landed in between (a backup download or a to-device key racing the event),
-    // the key-arrival drain in `redecrypt::run` ran against a table that did not
-    // have the row yet and will not run again, so the row would stay a UTD until
-    // the next restart. One local attempt closes that window (#938).
-    if let Some(row) = pending_utd {
-        redecrypt::recheck_persisted_utd(
-            &room,
-            &ctx.store,
-            ctx.account_id,
-            &row,
-            ctx.index.as_ref(),
-        )
-        .await;
-    }
     if let Some(target) = redaction_target {
         crate::state_redaction::queue_redaction_hint(&ctx, room.room_id(), &target).await;
     }
@@ -839,20 +825,40 @@ pub(crate) async fn persist_backfilled_event(
     };
     // No re-check here, unlike the live path: a backfill can store thousands of
     // permanently undecryptable rows, and each re-check would be another SDK
-    // decrypt attempt (and warning) for a row that cannot succeed.
-    let _ = persist_event_core(
+    // decrypt attempt (and warning) for a row that cannot succeed. The paged
+    // event already carries the SDK's failure reason.
+    persist_event_core(
         ctx,
         &ev,
         raw_val,
         room.room_id().as_str(),
         tev.encryption_info().map(|info| info.as_ref()),
-        false,
+        UtdCheck::Known(redecrypt::utd_reason(tev)),
     )
     .await;
 }
 
-/// Persist one timeline event — live (`emit_live = true`) or backfilled
-/// (`emit_live = false`) — through the shared ingestion path: the hot columns,
+/// How [`persist_event_core`] learns why a UTD could not be decrypted (ADR 0136
+/// decision 2), which also selects the live or the backfill path.
+enum UtdCheck<'a> {
+    /// The live path. The SDK's event handler passes no failure reason, so a
+    /// UTD gets one local decryption retry in `room` after its row is written,
+    /// and the retry's reason is recorded and carried on the live frame.
+    ///
+    /// The retry also closes a race: the SDK tried to decrypt this event before
+    /// the row was written. If its megolm key landed in between (a backup
+    /// download or a to-device key racing the event), the key-arrival drain in
+    /// `redecrypt::run` ran against a table that did not have the row yet and
+    /// will not run again, so the row would stay a UTD until the next restart
+    /// (#938).
+    Recheck(&'a Room),
+    /// The backfill path: the SDK's reason for a paged UTD, recorded as is.
+    /// Nothing is emitted live.
+    Known(Option<axon_core::UtdReason>),
+}
+
+/// Persist one timeline event — live ([`UtdCheck::Recheck`]) or backfilled
+/// ([`UtdCheck::Known`]) — through the shared ingestion path: the hot columns,
 /// `upsert_event` (which transactionally appends the M8/M9 search-outbox
 /// obligation), and the crypto sibling rows. Only the live path emits a `/v1/ws`
 /// frame: replaying deep history through the live bus would flood subscribers
@@ -860,17 +866,16 @@ pub(crate) async fn persist_backfilled_event(
 /// clients through timeline reads (M8) and search (M9) instead — both driven by
 /// `upsert_event`, not the emit.
 ///
-/// Returns the stored row when the event was persisted as a UTD, so a caller
-/// that can reach the crypto store may re-check whether its key arrived while
-/// the row was being written (see [`redecrypt::recheck_persisted_utd`]).
+/// A UTD's failure reason is recorded per `utd` before the live emit, so the
+/// frame carries it.
 async fn persist_event_core(
     ctx: &PersistContext,
     ev: &AnySyncTimelineEvent,
     raw_val: serde_json::Value,
     room_id: &str,
     enc_info: Option<&EncryptionInfo>,
-    emit_live: bool,
-) -> Option<PendingUtd> {
+    utd: UtdCheck<'_>,
+) {
     // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
     let event_type: String = raw_val
         .get("type")
@@ -957,7 +962,7 @@ async fn persist_event_core(
                 error = %err,
                 "failed to persist event"
             );
-            return None;
+            return;
         }
     };
     tracing::debug!(
@@ -986,6 +991,32 @@ async fn persist_event_core(
     // same immutable snapshot a later timeline read returns (ADR 0031).
     let stored_trust = persist_event_siblings(ctx, &event_id, &room_id, ciphertext, enc_info).await;
 
+    let emit_live = matches!(utd, UtdCheck::Recheck(_));
+    let utd_reason = match (pending_utd, utd) {
+        (Some(row), UtdCheck::Recheck(room)) => {
+            match redecrypt::recheck_persisted_utd(
+                room,
+                &ctx.store,
+                ctx.account_id,
+                &row,
+                ctx.index.as_ref(),
+            )
+            .await
+            {
+                redecrypt::Attempt::StillUtd(reason) => Some(reason),
+                // Back-filled: the frame below still describes the UTD that
+                // arrived, as it did before reasons were kept; a timeline read
+                // returns the content (ADR 0014).
+                redecrypt::Attempt::Decrypted | redecrypt::Attempt::Failed => None,
+            }
+        }
+        (Some(row), UtdCheck::Known(Some(reason))) => {
+            redecrypt::record_utd_reason(&ctx.store, ctx.account_id, &row, &reason).await;
+            Some(reason)
+        }
+        _ => None,
+    };
+
     // Fan the event out to any live `/v1/ws` subscribers. Skip the work entirely
     // when nobody is listening (the common case for a headless server) so we
     // don't clone the content needlessly. `send` errors only when there are no
@@ -1009,9 +1040,9 @@ async fn persist_event_core(
             body: decrypted_body_text.clone(),
             relates_to: new_ev.relates_to.clone(),
             sender_trust: stored_trust,
+            utd_reason,
         }));
     }
-    pending_utd
 }
 
 /// Write the crypto sibling rows for an event already persisted to `events`.

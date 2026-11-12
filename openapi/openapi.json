@@ -10797,6 +10797,17 @@
               "type": {
                 "type": "string",
                 "description": "Matrix event type, e.g. `m.room.message`."
+              },
+              "utd_reason": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/UtdReasonDto",
+                    "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent, and for a UTD stored before reasons were kept, until its next\ndecryption attempt. On `/v1/ws`, set when the ingest path's local retry\nrecorded one."
+                  }
+                ]
               }
             }
           }
@@ -12254,6 +12265,17 @@
                 "type": {
                   "type": "string",
                   "description": "Matrix event type, e.g. `m.room.message`."
+                },
+                "utd_reason": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UtdReasonDto",
+                      "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent, and for a UTD stored before reasons were kept, until its next\ndecryption attempt. On `/v1/ws`, set when the ingest path's local retry\nrecorded one."
+                    }
+                  ]
                 }
               }
             }
@@ -14880,6 +14902,17 @@
           "type": {
             "type": "string",
             "description": "Matrix event type, e.g. `m.room.message`."
+          },
+          "utd_reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UtdReasonDto",
+                "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent, and for a UTD stored before reasons were kept, until its next\ndecryption attempt. On `/v1/ws`, set when the ingest path's local retry\nrecorded one."
+              }
+            ]
           }
         }
       },
@@ -18084,6 +18117,47 @@
           }
         }
       },
+      "UtdReasonDto": {
+        "type": "object",
+        "description": "Why an event could not be decrypted (ADR 0136 decision 2).\n\nA client that sees `kind: \"withheld\"` with `withheld_code: \"m.unverified\"`\nwhile the account's `verified` is `false` can explain that the sender's app\ndoes not share keys with unverified devices, and offer the verify and\nrecovery-key flows.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/UtdReasonKindDto",
+            "description": "The failure class."
+          },
+          "verification_level": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VerificationLevelDto",
+                "description": "For `sender_not_trusted`, what the SDK found about the sender. `null`\nfor other kinds."
+              }
+            ]
+          },
+          "withheld_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `withheld`, the code the sender's device gave: `m.unverified`,\n`m.blacklisted`, `m.unauthorised`, `m.unavailable`, `m.no_olm`,\n`m.history_not_shared`, or a custom code (printable ASCII, at most 64\nbytes; a code that is not is dropped). `null` for other kinds."
+          }
+        }
+      },
+      "UtdReasonKindDto": {
+        "type": "string",
+        "description": "The class of a decryption failure (ADR 0136 decision 2).",
+        "enum": [
+          "missing_key",
+          "withheld",
+          "sender_not_trusted",
+          "other"
+        ]
+      },
       "VerificationBundleDto": {
         "type": "object",
         "description": "The per-event verification bundle (M7c): the durable at-decrypt trust\nsnapshot plus live cross-signing evidence. The two are deliberately separate\n(ADR 0031) — the snapshot is what Matrix's evidence said when the event\narrived; `current` is read live and can differ.",
@@ -18117,6 +18191,18 @@
             ]
           }
         }
+      },
+      "VerificationLevelDto": {
+        "type": "string",
+        "description": "The SDK's verification level of a sender whose message was refused\n(ADR 0136 decision 2).",
+        "enum": [
+          "unverified_identity",
+          "verification_violation",
+          "unsigned_device",
+          "missing_device",
+          "insecure_source",
+          "mismatched_sender"
+        ]
       }
     },
     "securitySchemes": {

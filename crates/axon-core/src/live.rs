@@ -432,4 +432,8 @@ pub struct LiveEvent {
     /// re-decryption does not re-emit a live frame, so clients re-read the
     /// timeline for the back-filled value).
     pub sender_trust: Option<String>,
+    /// Why the event could not be decrypted (ADR 0136 decision 2), when it is a
+    /// UTD and the ingest path's local decryption retry recorded a reason.
+    /// `None` for decrypted and unencrypted events.
+    pub utd_reason: Option<crate::UtdReason>,
 }

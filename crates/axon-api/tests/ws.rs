@@ -130,6 +130,7 @@ async fn ws_streams_live_events() {
             body: None,
             relates_to: None,
             sender_trust: None,
+            utd_reason: None,
         }))
         .expect("a connected subscriber");
     assert_eq!(receivers, 1, "exactly the connected socket subscribed");
@@ -359,6 +360,7 @@ async fn ws_negotiates_axon_subprotocol_for_browser_auth() {
             body: Some("hello".to_owned()),
             relates_to: None,
             sender_trust: None,
+            utd_reason: None,
         }))
         .expect("a connected subscriber");
     assert_eq!(receivers, 1, "exactly the connected socket subscribed");
@@ -397,6 +399,7 @@ fn sample_frame(account_id: Uuid) -> LiveFrame {
         body: Some("hi".to_owned()),
         relates_to: None,
         sender_trust: None,
+        utd_reason: None,
     })
 }
 
