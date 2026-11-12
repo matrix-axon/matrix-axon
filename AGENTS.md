@@ -424,6 +424,10 @@ They apply across crates and clients.
   `lint-and-clippy.yml` triggers automatically on pull requests and pushes to `main`, while `cross-build.yml` and `publish-images.yml` trigger on release tags;
   workflows stay `workflow_dispatch`-only only where that's the right call for other reasons (e.g. expensive/manual smoke or integration runs), not because of a minutes budget.
   The pre-push hook remains the earliest safety net, while the required `lint-and-test` job repeats the full Rust suite on the pull-request commit.
+  The job always runs and reports, because a required check that never reports blocks the merge, so never put a `paths:` filter on its workflow.
+  On a pull request that changes none of the pre-push hooks' Rust inputs (the `files` filter of the `rust-clippy` hook), it skips the cache restore, rustfmt, clippy and the test suite, and the repo-wide checks still run.
+  `scripts/ci/changed-by-hook.py` makes that decision from the same filter the hooks use, and any doubt about the diff runs everything.
+  Pushes to `main` and manual runs always run the full suite.
   Before pushing, either install the hook once per clone with `./scripts/setup-hooks.sh` (git) or the `jj-hooks` alias above (jj), or, if you haven't, run it by hand:
 
 ```bash
@@ -432,7 +436,7 @@ cargo clippy --all-features --all-targets -- -D warnings
 cargo test --all
 ```
 
-The `tui` smoke lane runs in CI on every pull request (`smoke.yml`): it needs no Docker and takes about 90 seconds.
+The `tui` smoke lane runs in CI on every pull request (`smoke.yml`), unless the pull request changes no Rust input (the same filter and mechanism as `lint-and-test` above, plus the lane's own workflow and scripts): it needs no Docker and takes about 90 seconds.
 The Docker-backed lanes stay out of the PR path — they need a true-local Synapse stack — and run on push to `main` and nightly instead.
 Use `scripts/smoke-gate.sh <mode>` before pushing component changes that cross process/network boundaries, so a Docker-lane break is caught before it lands rather than after:
 
