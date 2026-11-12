@@ -226,12 +226,68 @@ pub struct RoomListResponse {
 }
 
 /// A room named by its identity in the list: `(account_id, room_id)`.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize, ToSchema)]
 pub struct RoomRefDto {
     /// Axon account the room belongs to.
     pub account_id: Uuid,
     /// Matrix room ID.
     pub room_id: String,
+}
+
+/// Body of `POST /v1/rooms/previews`: the rooms whose previews to read.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoomPreviewsRequest {
+    /// The rooms, at most 50. Repeats are answered once.
+    #[schema(max_items = 50)]
+    pub rooms: Vec<RoomRefDto>,
+}
+
+/// One room's latest message, as its room-list row previews it
+/// (`POST /v1/rooms/previews`).
+///
+/// It is the newest non-state, unredacted `m.room.message` with a non-blank
+/// body among the newest 150 events the room's timeline shows, after edits.
+/// That is not always the room list's `last_event_id`, which can name an
+/// event with nothing to show.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RoomPreviewDto {
+    /// Axon account the room belongs to.
+    pub account_id: Uuid,
+    /// Matrix room ID.
+    pub room_id: String,
+    /// The message shown.
+    pub event_id: String,
+    /// The message's sender.
+    pub sender: String,
+    /// The sender's display name in this room, from their current
+    /// `m.room.member` state. `null` when they have none; fall back to the
+    /// user id as the member list does.
+    pub sender_display_name: Option<String>,
+    /// When the message was sent: Unix milliseconds.
+    pub origin_ts: i64,
+    /// `content.msgtype` after the latest edit (`m.text`, `m.image`, …).
+    pub msgtype: Option<String>,
+    /// The plain-text `body` after the latest edit, at most 500 characters.
+    pub body: String,
+    /// `true` when `body` was cut to fit.
+    pub truncated: bool,
+}
+
+impl From<axon_store::RoomPreview> for RoomPreviewDto {
+    fn from(p: axon_store::RoomPreview) -> Self {
+        RoomPreviewDto {
+            account_id: p.account_id,
+            room_id: p.room_id,
+            event_id: p.event_id,
+            sender: p.sender,
+            sender_display_name: p.sender_display_name,
+            origin_ts: p.origin_ts,
+            msgtype: p.msgtype,
+            body: p.body,
+            truncated: p.truncated,
+        }
+    }
 }
 
 /// One tag on a room (`GET /v1/rooms`, ADR 0103). `name` is the Matrix wire

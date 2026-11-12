@@ -292,6 +292,14 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(routes::push::delete_registration),
         )
         .route("/v1/rooms", get(routes::rooms::list_rooms))
+        // Room-list previews (#278): one read for every visible row's latest
+        // message, instead of a timeline and member-list read per row.
+        .route(
+            "/v1/rooms/previews",
+            post(routes::rooms::room_previews).layer(DefaultBodyLimit::max(
+                routes::rooms::PREVIEWS_MAX_BODY_BYTES,
+            )),
+        )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs",
             get(routes::image_packs::room_emoji_packs),

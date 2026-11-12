@@ -13,11 +13,11 @@ use uuid::Uuid;
 
 use crate::cursor;
 use crate::dto::{
-    EventDto, MemberDto, RoomDto, RoomInfoDto, RoomListResponse, RoomRefDto, RoomUpgradeDto,
-    SpaceChildDto, SpaceHierarchyChildDto, SpaceHierarchyPage, SpaceParentDto, ThreadSummaryDto,
-    TimelinePage,
+    EventDto, MemberDto, RoomDto, RoomInfoDto, RoomListResponse, RoomPreviewDto,
+    RoomPreviewsRequest, RoomRefDto, RoomUpgradeDto, SpaceChildDto, SpaceHierarchyChildDto,
+    SpaceHierarchyPage, SpaceParentDto, ThreadSummaryDto, TimelinePage,
 };
-use crate::extract::{Path, Query};
+use crate::extract::{Json, Path, Query};
 use crate::member_profiles::{MemberProfile, MemberProfileService};
 use crate::response::{ApiError, ApiResponse};
 use crate::room_details::RoomDetailAcquirer;
@@ -98,6 +98,75 @@ pub async fn list_rooms(
         total,
         cursor: cursor::encode_scoped_clock(as_of, q.account_id),
     })
+}
+
+/// Most rooms one `POST /v1/rooms/previews` may name. About two phone
+/// screens of room-list rows; a client with more visible splits them.
+pub const MAX_PREVIEW_ROOMS: usize = 50;
+
+/// Body cap for `POST /v1/rooms/previews`: fifty refs with room ids well past
+/// any real one's length. The auth layer runs first, so a missing bearer is
+/// still 401 before the body is read.
+pub(crate) const PREVIEWS_MAX_BODY_BYTES: usize = 32 * 1024;
+
+/// Read room-list previews
+///
+/// Read the latest-message preview of up to 50 rooms in one request, for the
+/// rows of a room list.
+///
+/// Each preview is the newest non-state, unredacted `m.room.message` with a
+/// non-blank body among the newest 150 events the room's timeline shows,
+/// after edits, with the sender's display name in that room. A room with no
+/// such message, or unknown to this server, is left out of `data`, as the
+/// timeline answers an unknown room with an empty page. Previews come back in
+/// request order, and a room named twice is answered once.
+///
+/// Previews are message text, so a client caching the room list on disk
+/// should keep them out of it unless the user has agreed to cache messages.
+#[utoipa::path(
+    post,
+    path = "/v1/rooms/previews",
+    request_body = RoomPreviewsRequest,
+    responses(
+        (status = 200, description = "The previews found, in request order", body = ApiResponse<Vec<RoomPreviewDto>>),
+        (status = 400, description = "More than 50 rooms, or a malformed body", body = crate::response::ErrorResponse),
+        (status = 413, description = "The body is larger than 32 KiB", body = crate::response::ErrorResponse),
+    ),
+    tag = "rooms",
+)]
+pub async fn room_previews(
+    State(store): State<Store>,
+    Json(req): Json<RoomPreviewsRequest>,
+) -> Result<ApiResponse<Vec<RoomPreviewDto>>, ApiError> {
+    let rooms = dedupe_preview_rooms(req.rooms)?;
+    let started = std::time::Instant::now();
+    let previews = store.room_previews(&rooms).await?;
+    tracing::debug!(
+        requested = rooms.len(),
+        found = previews.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "room previews read"
+    );
+    Ok(ApiResponse::new(
+        previews.into_iter().map(RoomPreviewDto::from).collect(),
+    ))
+}
+
+/// The requested rooms in first-seen order without repeats, or a 400 when
+/// there are more than [`MAX_PREVIEW_ROOMS`] of them. The cap counts what
+/// was sent, so a client cannot pass it by repeating rooms.
+fn dedupe_preview_rooms(rooms: Vec<RoomRefDto>) -> Result<Vec<(Uuid, String)>, ApiError> {
+    if rooms.len() > MAX_PREVIEW_ROOMS {
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_PREVIEW_ROOMS} rooms per request"
+        )));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(rooms.len());
+    Ok(rooms
+        .into_iter()
+        .filter(|room| seen.insert(room.clone()))
+        .map(|room| (room.account_id, room.room_id))
+        .collect())
 }
 
 /// Query parameters for the timeline read.
