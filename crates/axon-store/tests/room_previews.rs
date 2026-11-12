@@ -554,3 +554,34 @@ async fn folded_rows_do_not_use_up_the_scan() {
 
     common::cleanup_account(&pool, account_id).await;
 }
+
+/// Previews read on the hot-read pool (ADR 0112), as the timeline reads they
+/// replace do: with the ordinary pool's only connection taken, as a burst of
+/// auth checks or sync writes could take it, a preview read still completes.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn previews_read_on_the_read_pool_not_the_ordinary_pool() {
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let store = Store::connect(&url, 1).await.expect("connect + migrate");
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "preview-pool").await;
+    let room_id = new_room();
+    insert_message(&store, account_id, &room_id, BASE, "still readable").await;
+
+    let held = store
+        .pool()
+        .acquire()
+        .await
+        .expect("hold the ordinary pool");
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.room_previews(&[(account_id, room_id.clone())]),
+    )
+    .await
+    .expect("a preview read must not wait on the ordinary pool")
+    .expect("previews");
+    assert_eq!(read.len(), 1);
+    drop(held);
+
+    common::cleanup_account(&pool, account_id).await;
+}

@@ -137,6 +137,10 @@ impl Store {
     /// left out rather than reported as an error, as the timeline read answers
     /// an unknown room with an empty page. The caller bounds and dedupes
     /// `rooms`; a duplicate is answered twice.
+    ///
+    /// Runs on the hot-read pool, as the timeline reads it replaces do
+    /// (ADR 0112): a burst of cold preview batches must not take the
+    /// connections bearer-token checks and sync ingestion use.
     pub async fn room_previews(
         &self,
         rooms: &[(Uuid, String)],
@@ -150,7 +154,7 @@ impl Store {
             .bind(room_ids)
             .bind(ROOM_PREVIEW_SCAN_LIMIT)
             .bind(ROOM_PREVIEW_BODY_CHARS)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
