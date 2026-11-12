@@ -19,16 +19,24 @@
 //! Every per-row failure (a row that still won't decrypt, a malformed envelope,
 //! a missing room) is logged and skipped — re-decryption is best-effort
 //! back-fill and must never take down the sync task. See ADR 0014.
+//!
+//! A row that still won't decrypt has the SDK's reason recorded on it
+//! (`events.utd_reason`, ADR 0136 decision 2), so every attempt — the live
+//! ingest retry, a key arrival, a sweep — keeps the stored reason current.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axon_core::{UtdReason, UtdReasonKind};
 use axon_search::IndexHandle;
 use axon_store::{PendingUtd, Store};
 use futures_util::StreamExt;
-use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent, TimelineEventKind};
+use matrix_sdk::deserialized_responses::{
+    DeviceLinkProblem, EncryptionInfo, TimelineEvent, TimelineEventKind, UnableToDecryptReason,
+    VerificationLevel,
+};
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::AnyTimelineEvent;
 use matrix_sdk::ruma::serde::Raw;
@@ -119,6 +127,58 @@ fn decrypted_encryption_info(ev: &TimelineEvent) -> Option<&EncryptionInfo> {
     match &ev.kind {
         TimelineEventKind::Decrypted(decrypted) => Some(decrypted.encryption_info.as_ref()),
         _ => None,
+    }
+}
+
+/// Why the SDK could not decrypt `ev`, or `None` when it did (or the event was
+/// never encrypted). Pure.
+pub(crate) fn utd_reason(ev: &TimelineEvent) -> Option<UtdReason> {
+    match &ev.kind {
+        TimelineEventKind::UnableToDecrypt { utd_info, .. } => {
+            Some(utd_reason_from_sdk(&utd_info.reason))
+        }
+        _ => None,
+    }
+}
+
+/// Map matrix-sdk's decryption failure to Axon's stored reason (ADR 0136
+/// decision 2). Pure.
+///
+/// `UnknownMegolmMessageIndex` counts as a missing key, as the SDK's own
+/// `is_missing_room_key` does: an earlier export of the same session can still
+/// arrive. A withheld notice wins over that, because the sender said the key
+/// will not come.
+pub(crate) fn utd_reason_from_sdk(reason: &UnableToDecryptReason) -> UtdReason {
+    match reason {
+        UnableToDecryptReason::MissingMegolmSession {
+            withheld_code: Some(code),
+        } => UtdReason::withheld(code.as_str()),
+        UnableToDecryptReason::MissingMegolmSession {
+            withheld_code: None,
+        }
+        | UnableToDecryptReason::UnknownMegolmMessageIndex => {
+            UtdReason::new(UtdReasonKind::MissingKey)
+        }
+        UnableToDecryptReason::SenderIdentityNotTrusted(level) => {
+            UtdReason::sender_not_trusted(verification_level_str(level))
+        }
+        // Unknown, MalformedEncryptedEvent, MegolmDecryptionFailure,
+        // PayloadDeserializationFailure, MismatchedIdentityKeys, and any variant
+        // a feature flag adds.
+        _ => UtdReason::new(UtdReasonKind::Other),
+    }
+}
+
+/// The stored spelling of an SDK verification level; one of
+/// [`axon_core::utd_reason::VERIFICATION_LEVELS`]. Pure.
+fn verification_level_str(level: &VerificationLevel) -> &'static str {
+    match level {
+        VerificationLevel::UnverifiedIdentity => "unverified_identity",
+        VerificationLevel::VerificationViolation => "verification_violation",
+        VerificationLevel::UnsignedDevice => "unsigned_device",
+        VerificationLevel::None(DeviceLinkProblem::MissingDevice) => "missing_device",
+        VerificationLevel::None(DeviceLinkProblem::InsecureSource) => "insecure_source",
+        VerificationLevel::MismatchedSender => "mismatched_sender",
     }
 }
 
@@ -469,7 +529,10 @@ async fn redecrypt_rows(
             }
             summary.attempted += 1;
             summary.attempted_event_ids.push(row.event_id.clone());
-            if redecrypt_one(&room, store, account_id, row, index).await {
+            if redecrypt_one(&room, store, account_id, row, index)
+                .await
+                .is_decrypted()
+            {
                 summary.decrypted += 1;
             }
         }
@@ -480,16 +543,35 @@ async fn redecrypt_rows(
     summary
 }
 
-/// Re-decrypt a single stored UTD and back-fill it on success. Every failure
-/// path — a malformed envelope, a still-missing key, a write error — is logged
-/// and swallowed.
+/// What one decryption attempt of a stored UTD did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Attempt {
+    /// The row was back-filled.
+    Decrypted,
+    /// The SDK still could not decrypt it, and said why. The reason was
+    /// recorded on the row (best-effort).
+    StillUtd(UtdReason),
+    /// The attempt itself failed — a malformed envelope, an SDK error, a write
+    /// error — so nothing new is known about the row.
+    Failed,
+}
+
+impl Attempt {
+    fn is_decrypted(&self) -> bool {
+        matches!(self, Self::Decrypted)
+    }
+}
+
+/// Re-decrypt a single stored UTD and back-fill it on success, or record why it
+/// still failed. Every failure path — a malformed envelope, a still-missing
+/// key, a write error — is logged and swallowed.
 async fn redecrypt_one(
     room: &Room,
     store: &Store,
     account_id: Uuid,
     row: &PendingUtd,
     index: Option<&IndexHandle>,
-) -> bool {
+) -> Attempt {
     let raw: Raw<OriginalSyncRoomEncryptedEvent> =
         match serde_json::from_value(row.raw_event.clone()) {
             Ok(raw) => raw,
@@ -501,7 +583,7 @@ async fn redecrypt_one(
                     error = %err,
                     "malformed encrypted envelope; skipping re-decryption"
                 );
-                return false;
+                return Attempt::Failed;
             }
         };
 
@@ -515,14 +597,20 @@ async fn redecrypt_one(
                 error = %err,
                 "re-decryption failed; leaving as UTD"
             );
-            return false;
+            return Attempt::Failed;
         }
     };
 
     // `decrypt_event` returns a UTD `TimelineEvent` (not an error) when the key
     // still isn't available; only a genuine `Decrypted` kind yields content.
     let Some((content, event_type)) = extract_decrypted(&decrypted) else {
-        return false;
+        return match utd_reason(&decrypted) {
+            Some(reason) => {
+                record_utd_reason(store, account_id, row, &reason).await;
+                Attempt::StillUtd(reason)
+            }
+            None => Attempt::Failed,
+        };
     };
 
     // Plaintext-derived hot columns, now available post-decryption.
@@ -568,7 +656,7 @@ async fn redecrypt_one(
                 error = %err,
                 "failed to back-fill re-decrypted event"
             );
-            return false;
+            return Attempt::Failed;
         }
     }
 
@@ -589,7 +677,54 @@ async fn redecrypt_one(
             );
         }
     }
-    true
+    Attempt::Decrypted
+}
+
+/// Store why `row` is still undecryptable, and log it at debug (ADR 0136
+/// decision 13). Best-effort: a write failure is logged and the row keeps its
+/// previous reason.
+pub(crate) async fn record_utd_reason(
+    store: &Store,
+    account_id: Uuid,
+    row: &PendingUtd,
+    reason: &UtdReason,
+) {
+    let sender = row.raw_event.get("sender").and_then(Value::as_str);
+    // The envelope's `device_id` is deprecated but still sent by most clients;
+    // it is only a log hint, never trusted for anything.
+    let sender_device = row
+        .raw_event
+        .get("content")
+        .and_then(|c| c.get("device_id"))
+        .and_then(Value::as_str);
+    match store
+        .record_utd_reason(account_id, &row.event_id, reason)
+        .await
+    {
+        Ok(changed) => {
+            tracing::debug!(
+                %account_id,
+                room_id = row.room_id,
+                event_id = row.event_id,
+                utd_reason = reason.kind.as_str(),
+                withheld_code = reason.withheld_code.as_deref(),
+                verification_level = reason.verification_level.as_deref(),
+                sender,
+                sender_device,
+                changed,
+                "event still undecryptable"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                %account_id,
+                room_id = row.room_id,
+                event_id = row.event_id,
+                error = %err,
+                "failed to record UTD reason"
+            );
+        }
+    }
 }
 
 /// The pending row for an event that was just persisted, or `None` when it was
@@ -623,8 +758,9 @@ pub(crate) fn pending_utd_for_persisted(
 /// second now sees the other.
 ///
 /// Local only: no backup download, no homeserver traffic. A key that has not
-/// arrived leaves the row pending for [`run`] to find when it does. Returns
-/// whether the row was back-filled.
+/// arrived leaves the row pending for [`run`] to find when it does. The live
+/// path learns no failure reason from the SDK's event handler, so this attempt
+/// is also where a live UTD's reason is recorded (ADR 0136 decision 2).
 ///
 /// Safe on a duplicate delivery of an event that is already decrypted. The row
 /// is built from the incoming envelope, so this can run for it, but
@@ -640,7 +776,7 @@ pub(crate) async fn recheck_persisted_utd(
     account_id: Uuid,
     row: &PendingUtd,
     index: Option<&IndexHandle>,
-) -> bool {
+) -> Attempt {
     redecrypt_one(room, store, account_id, row, index).await
 }
 
@@ -1073,6 +1209,110 @@ mod backup_gate_tests {
 mod tests {
     use super::*;
     use matrix_sdk::deserialized_responses::{DecryptedRoomEvent, UnableToDecryptInfo};
+
+    /// ADR 0136 decision 2: every SDK failure maps to one of the four stored
+    /// kinds, with the withheld code or verification level kept as detail.
+    #[test]
+    fn sdk_failure_reasons_map_to_stored_reasons() {
+        use matrix_sdk::deserialized_responses::WithheldCode;
+        let cases = [
+            (
+                UnableToDecryptReason::MissingMegolmSession {
+                    withheld_code: None,
+                },
+                UtdReason::new(UtdReasonKind::MissingKey),
+            ),
+            (
+                UnableToDecryptReason::UnknownMegolmMessageIndex,
+                UtdReason::new(UtdReasonKind::MissingKey),
+            ),
+            (
+                UnableToDecryptReason::MissingMegolmSession {
+                    withheld_code: Some(WithheldCode::Unverified),
+                },
+                UtdReason::withheld("m.unverified"),
+            ),
+            (
+                UnableToDecryptReason::MissingMegolmSession {
+                    withheld_code: Some(WithheldCode::HistoryNotShared),
+                },
+                UtdReason::withheld("m.history_not_shared"),
+            ),
+            (
+                UnableToDecryptReason::MissingMegolmSession {
+                    withheld_code: Some(WithheldCode::from("com.example.custom")),
+                },
+                UtdReason::withheld("com.example.custom"),
+            ),
+            (
+                UnableToDecryptReason::SenderIdentityNotTrusted(VerificationLevel::UnsignedDevice),
+                UtdReason::sender_not_trusted("unsigned_device"),
+            ),
+            (
+                UnableToDecryptReason::SenderIdentityNotTrusted(
+                    VerificationLevel::MismatchedSender,
+                ),
+                UtdReason::sender_not_trusted("mismatched_sender"),
+            ),
+            (
+                UnableToDecryptReason::SenderIdentityNotTrusted(VerificationLevel::None(
+                    DeviceLinkProblem::InsecureSource,
+                )),
+                UtdReason::sender_not_trusted("insecure_source"),
+            ),
+            (
+                UnableToDecryptReason::MegolmDecryptionFailure,
+                UtdReason::new(UtdReasonKind::Other),
+            ),
+            (
+                UnableToDecryptReason::MismatchedIdentityKeys,
+                UtdReason::new(UtdReasonKind::Other),
+            ),
+            (
+                UnableToDecryptReason::MalformedEncryptedEvent,
+                UtdReason::new(UtdReasonKind::Other),
+            ),
+        ];
+        for (sdk, expected) in cases {
+            assert_eq!(utd_reason_from_sdk(&sdk), expected, "{sdk:?}");
+        }
+        // Every level the mapper emits is one the store accepts.
+        for level in [
+            VerificationLevel::UnverifiedIdentity,
+            VerificationLevel::VerificationViolation,
+            VerificationLevel::UnsignedDevice,
+            VerificationLevel::None(DeviceLinkProblem::MissingDevice),
+            VerificationLevel::None(DeviceLinkProblem::InsecureSource),
+            VerificationLevel::MismatchedSender,
+        ] {
+            assert!(
+                axon_core::utd_reason::VERIFICATION_LEVELS
+                    .contains(&verification_level_str(&level)),
+                "{level:?}"
+            );
+        }
+    }
+
+    /// A UTD `TimelineEvent`, as `decrypt_event` and a backfill page return it,
+    /// yields its reason; a decrypted one yields none.
+    #[test]
+    fn utd_reason_reads_the_timeline_event_kind() {
+        let raw: Raw<AnySyncTimelineEvent> = serde_json::from_str(UTD_ENCRYPTED).unwrap();
+        let ev = TimelineEvent::from_utd(
+            raw,
+            UnableToDecryptInfo {
+                session_id: None,
+                reason: UnableToDecryptReason::MissingMegolmSession {
+                    withheld_code: Some(
+                        matrix_sdk::deserialized_responses::WithheldCode::Unverified,
+                    ),
+                },
+            },
+        );
+        assert_eq!(utd_reason(&ev), Some(UtdReason::withheld("m.unverified")));
+        let plain: Raw<AnySyncTimelineEvent> = serde_json::from_str(DECRYPTED_MESSAGE).unwrap();
+        assert_eq!(utd_reason(&TimelineEvent::from_plaintext(plain)), None);
+    }
     use matrix_sdk::ruma::events::AnySyncTimelineEvent;
     use serde_json::json;
 

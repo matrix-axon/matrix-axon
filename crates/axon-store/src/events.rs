@@ -196,6 +196,10 @@ pub struct TimelineRow {
     /// `verification_violation`. `None` for unencrypted events and rows decrypted
     /// before the snapshot existed.
     pub sender_trust: Option<String>,
+    /// Why the event could not be decrypted (ADR 0136 decision 2). `None` for
+    /// an event with content, a redacted event, and a UTD with no recorded
+    /// reason (one stored before reasons were kept, until its next attempt).
+    pub utd_reason: Option<axon_core::UtdReason>,
     /// Relation aggregation (M8), resolved at read time. `true` when at least one
     /// *valid* `m.replace` edit (authored by the original sender, not redacted)
     /// targets this event; the row's [`content`](Self::content) /
@@ -243,6 +247,11 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
             redacts: row.try_get("redacts")?,
             redaction_event_id: row.try_get("redaction_event_id")?,
             sender_trust: row.try_get("sender_trust")?,
+            utd_reason: axon_core::UtdReason::from_columns(
+                row.try_get::<Option<String>, _>("utd_reason")?.as_deref(),
+                row.try_get::<Option<String>, _>("utd_reason_detail")?
+                    .as_deref(),
+            ),
             edited: row.try_get("edited")?,
             edit_count: row.try_get("edit_count")?,
             latest_edit_ts: row.try_get("latest_edit_ts")?,
@@ -366,6 +375,10 @@ pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
                  ELSE e.decrypted_body_text END AS decrypted_body_text, \
             e.relates_to, e.redacts, r.event_id AS redaction_event_id, \
             sd.sender_trust, \
+            CASE WHEN r.event_id IS NULL AND e.content IS NULL THEN e.utd_reason END \
+                AS utd_reason, \
+            CASE WHEN r.event_id IS NULL AND e.content IS NULL THEN e.utd_reason_detail END \
+                AS utd_reason_detail, \
             (r.event_id IS NULL AND edit.new_content IS NOT NULL) AS edited, \
             CASE WHEN r.event_id IS NULL THEN COALESCE(edit.edit_count, 0) ELSE 0 END \
                 AS edit_count, \
@@ -810,7 +823,8 @@ impl Store {
         let sql = format!(
             "WITH ins AS ( \
                UPDATE events \
-               SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6, inline_media_urls = $7 \
+               SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6, inline_media_urls = $7, \
+                   utd_reason = NULL, utd_reason_detail = NULL \
                WHERE account_id = $1 AND event_id = $2 AND room_id = $8 AND content IS NULL \
                RETURNING account_id, event_id, room_id, origin_ts, id, \
                          relates_to, redacts, decrypted_body_text, sender, event_type, raw_event \
@@ -833,6 +847,33 @@ impl Store {
             .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Record why a stored UTD could not be decrypted (ADR 0136 decision 2).
+    ///
+    /// Writes only while the row is still a UTD (`content IS NULL`), so a
+    /// failed attempt that races a successful back-fill cannot stamp a reason
+    /// on a decrypted row, and only when the reason changed, so the routine
+    /// retry of a permanently undecryptable row writes nothing. Returns whether
+    /// a row was updated.
+    pub async fn record_utd_reason(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+        reason: &axon_core::UtdReason,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx_core::query::query(
+            "UPDATE events SET utd_reason = $3, utd_reason_detail = $4 \
+             WHERE account_id = $1 AND event_id = $2 AND content IS NULL \
+               AND (utd_reason IS DISTINCT FROM $3 OR utd_reason_detail IS DISTINCT FROM $4)",
+        )
+        .bind(account_id)
+        .bind(event_id)
+        .bind(reason.kind.as_str())
+        .bind(reason.detail())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Read a room's timeline, newest first, with redaction masking.

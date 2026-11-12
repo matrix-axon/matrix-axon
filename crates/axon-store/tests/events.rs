@@ -1470,3 +1470,184 @@ async fn get_event_by_mxc_url_finds_bundled_preview_images_per_account() {
         }
     }
 }
+
+/// ADR 0136 decision 2: a UTD's recorded reason is written only while the row
+/// has no content and only when it changed, reads back through the timeline
+/// projection, is hidden on a redacted row, and is cleared by the back-fill.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn utd_reason_is_recorded_read_and_cleared() {
+    use axon_core::{UtdReason, UtdReasonKind};
+
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let user = format!("@utdreason-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    let insert_utd = |event_id: String, origin_ts: i64| {
+        let store = store.clone();
+        let room_id = room_id.clone();
+        async move {
+            store
+                .upsert_event(&NewEvent {
+                    event_id: &event_id,
+                    room_id: &room_id,
+                    account_id,
+                    sender: "@alice:localhost",
+                    origin_ts,
+                    event_type: "m.room.encrypted",
+                    content: None,
+                    raw_event: json!({
+                        "type": "m.room.encrypted",
+                        "event_id": event_id,
+                        "sender": "@alice:localhost",
+                        "content": { "algorithm": "m.megolm.v1.aes-sha2", "session_id": "s" }
+                    }),
+                    megolm_session_id: Some("s"),
+                    redacts: None,
+                    relates_to: None,
+                    decrypted_body_text: None,
+                })
+                .await
+                .expect("insert UTD");
+            event_id
+        }
+    };
+    let utd = insert_utd(
+        format!("$utd-{}:localhost", Uuid::new_v4()),
+        1_700_000_000_000,
+    )
+    .await;
+
+    let read = |event_id: String| {
+        let store = store.clone();
+        async move {
+            store
+                .get_event(account_id, &event_id)
+                .await
+                .expect("get event")
+                .expect("event present")
+                .utd_reason
+        }
+    };
+
+    // A row stored before any attempt has no reason.
+    assert_eq!(read(utd.clone()).await, None);
+
+    let missing = UtdReason::new(UtdReasonKind::MissingKey);
+    assert!(store
+        .record_utd_reason(account_id, &utd, &missing)
+        .await
+        .expect("record"));
+    assert_eq!(read(utd.clone()).await, Some(missing.clone()));
+    // The same reason again writes nothing.
+    assert!(!store
+        .record_utd_reason(account_id, &utd, &missing)
+        .await
+        .expect("record again"));
+
+    // A withheld notice replaces it, detail included.
+    let withheld = UtdReason::withheld("m.unverified");
+    assert!(store
+        .record_utd_reason(account_id, &utd, &withheld)
+        .await
+        .expect("record withheld"));
+    assert_eq!(read(utd.clone()).await, Some(withheld.clone()));
+    let timeline = store
+        .room_timeline(account_id, &room_id, None, 10)
+        .await
+        .expect("timeline");
+    assert_eq!(
+        timeline
+            .iter()
+            .find(|r| r.event_id == utd)
+            .expect("utd in timeline")
+            .utd_reason,
+        Some(withheld.clone())
+    );
+
+    // The back-fill clears it, and a late failed attempt cannot stamp a reason
+    // on the decrypted row.
+    store
+        .update_decrypted_event(
+            account_id,
+            &utd,
+            &json!({ "msgtype": "m.text", "body": "hi" }),
+            "m.room.message",
+            Some("hi"),
+            None,
+        )
+        .await
+        .expect("back-fill");
+    assert_eq!(read(utd.clone()).await, None);
+    assert!(!store
+        .record_utd_reason(account_id, &utd, &missing)
+        .await
+        .expect("record after back-fill"));
+    let (columns_kind, columns_detail): (Option<String>, Option<String>) = {
+        let row = sqlx_core::query::query(
+            "SELECT utd_reason, utd_reason_detail FROM events \
+             WHERE account_id = $1 AND event_id = $2",
+        )
+        .bind(account_id)
+        .bind(&utd)
+        .fetch_one(&pool)
+        .await
+        .expect("read columns");
+        (
+            row.try_get("utd_reason").expect("utd_reason"),
+            row.try_get("utd_reason_detail").expect("utd_reason_detail"),
+        )
+    };
+    assert_eq!((columns_kind, columns_detail), (None, None));
+
+    // A redacted UTD reads without a reason.
+    let redacted = insert_utd(
+        format!("$utd2-{}:localhost", Uuid::new_v4()),
+        1_700_000_000_100,
+    )
+    .await;
+    store
+        .record_utd_reason(account_id, &redacted, &withheld)
+        .await
+        .expect("record on second UTD");
+    let redaction_id = format!("$red-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &redaction_id,
+            room_id: &room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_200,
+            event_type: "m.room.redaction",
+            content: Some(json!({})),
+            raw_event: json!({ "type": "m.room.redaction", "redacts": redacted }),
+            megolm_session_id: None,
+            redacts: Some(&redacted),
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert redaction");
+    assert_eq!(read(redacted.clone()).await, None);
+
+    // The database refuses a kind outside the vocabulary.
+    let bogus = sqlx_core::query::query(
+        "UPDATE events SET utd_reason = 'bogus' WHERE account_id = $1 AND event_id = $2",
+    )
+    .bind(account_id)
+    .bind(&redacted)
+    .execute(&pool)
+    .await;
+    assert!(
+        bogus.is_err(),
+        "the CHECK constraint must refuse an unknown kind"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}

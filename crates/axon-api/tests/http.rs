@@ -1647,6 +1647,86 @@ async fn read_api_end_to_end() {
         .expect("cleanup");
 }
 
+/// ADR 0136 decision 2: a UTD's recorded reason is on the event read shape as
+/// `{kind, withheld_code, verification_level}`, and `null` for a decrypted
+/// event and for a UTD with no recorded reason.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn event_read_carries_utd_reason() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@utdr-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!utdr-{}:localhost", Uuid::new_v4());
+    let plain = insert_message(&store, account_id, &room_id, 1_000, "hello").await;
+    let mut utds = Vec::new();
+    for ts in [2_000, 3_000] {
+        let event_id = format!("$utd-{}:localhost", Uuid::new_v4());
+        store
+            .upsert_event(&NewEvent {
+                event_id: &event_id,
+                room_id: &room_id,
+                account_id,
+                sender: "@alice:localhost",
+                origin_ts: ts,
+                event_type: "m.room.encrypted",
+                content: None,
+                raw_event: json!({
+                    "type": "m.room.encrypted",
+                    "content": { "algorithm": "m.megolm.v1.aes-sha2", "session_id": "s" }
+                }),
+                megolm_session_id: Some("s"),
+                redacts: None,
+                relates_to: None,
+                decrypted_body_text: None,
+            })
+            .await
+            .expect("insert UTD");
+        utds.push(event_id);
+    }
+    store
+        .record_utd_reason(
+            account_id,
+            &utds[0],
+            &axon_core::UtdReason::withheld("m.unverified"),
+        )
+        .await
+        .expect("record reason");
+
+    let app = read_app(store);
+    let (status, ev) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/events/{}", utds[0]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        ev["data"]["utd_reason"],
+        json!({ "kind": "withheld", "withheld_code": "m.unverified", "verification_level": null })
+    );
+    for event_id in [&utds[1], &plain] {
+        let (status, ev) = get(
+            &app,
+            &format!("/v1/accounts/{account_id}/events/{event_id}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ev["data"]["utd_reason"], Value::Null, "{event_id}");
+    }
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 /// The five room-state read endpoints added for issue #404 / ADR 0084: spaces
 /// hierarchy (both directions), pinned messages, room info, and the upgrade
 /// chain. Uses the plain [`read_app`] (no member-profile enrichment needed
