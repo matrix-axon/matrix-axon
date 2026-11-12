@@ -3851,8 +3851,11 @@ span.composer-attachment-thumb {
     white-space: nowrap;
   }
 
-  /* Fallback for very narrow phones, where even a truncated name cannot make
-     room: the open bar takes priority over the edit marker. */
+  /* The open bar takes priority over the edit marker, at every phone width
+     (a deliberate trade-off, not a narrow-phone fallback): name, time,
+     "(edited)" and five buttons do not fit on a 375px phone without truncating
+     the name to a couple of letters. Edit history is not reachable while the
+     bar is open; the marker returns when it closes. */
   .event-row.actions-open .event-head > .edited-marker {
     display: none;
   }

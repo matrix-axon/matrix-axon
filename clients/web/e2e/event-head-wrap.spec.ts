@@ -29,6 +29,7 @@ for (const width of [320, 375]) {
       const head = row.querySelector<HTMLElement>('.event-head')!
       const sender = head.querySelector<HTMLElement>('.event-sender')!
       const actions = head.querySelector<HTMLElement>('.event-actions')!
+      const time = head.querySelector<HTMLElement>('.event-time-copy')!
       const edited = document.createElement('button')
       edited.className = 'ghost edited-marker'
       edited.textContent = '(edited)'
@@ -40,6 +41,7 @@ for (const width of [320, 375]) {
         actionsRight: actions.getBoundingClientRect().right,
         headRight: head.getBoundingClientRect().right,
         editedDisplay: getComputedStyle(edited).display,
+        timeDisplay: getComputedStyle(time).display,
       })
       row.classList.add('actions-open')
       return measure()
@@ -51,5 +53,8 @@ for (const width of [320, 375]) {
     expect(result!.actionsRight).toBeLessThanOrEqual(result!.headRight + 1)
     // The edit marker yields while the bar is open.
     expect(result!.editedDisplay).toBe('none')
+    // The time yields too, but only on the narrowest phones (22rem and below,
+    // so 320px here); at 375px it stays.
+    expect(result!.timeDisplay).toBe(width <= 352 ? 'none' : 'block')
   })
 }
