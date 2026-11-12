@@ -3,6 +3,31 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.28 - 2026-11-12
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(web): Room Information shows typed metadata, homeserver aliases and member counts (ADR 0133 PR A) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1044
+* feat(web): show this install's device-state ID in the Settings footer by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1051
+* feat(web): Room Information pages a space's children, names unjoined ones and previews them (ADR 0133 PR B) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1055
+* feat(web): build link previews on the device in the shell (ADR 0132) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1045
+* feat(tui): refresh room information from detail notifications by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1061
+#### Bug Fixes
+* fix(web): handle unread space labels in demo recordings by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1053
+* fix(web): keep the message action bar on one line with (edited) and long names by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1062
+#### Performance
+* feat(api): incremental room-list reads with a since cursor (ADR 0134) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1046
+* feat(web): incremental room-list refreshes with a persisted cursor (ADR 0134) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1047
+#### Documentation
+* docs(adr): ADR 0136 — exclude non-cross-signed devices (MSC4153) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1063
+#### Other Changes
+* feat(smoke): demo corpus gains an unjoined space child and advertised aliases (ADR 0133) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1052
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.27...v0.1.28
+
 ## v0.1.27 - 2026-11-10
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
