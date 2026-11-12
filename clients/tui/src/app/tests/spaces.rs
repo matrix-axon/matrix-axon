@@ -6,16 +6,17 @@ use uuid::Uuid;
 #[tokio::test]
 async fn space_http_reads_and_writes_consume_the_actual_api_envelopes() {
     let url = spawn_api_stub(vec![
-        serde_json::json!({ "data": [{ "room_id": "!a:srv", "via": ["srv"], "suggested": false, "order": "a", "name": "A", "room_type": null }] }).to_string(),
+        serde_json::json!({ "data": { "room_id": "!space/with-path:srv", "children": [{ "room_id": "!a:srv", "parent_room_id": "!space/with-path:srv", "via": ["srv"], "suggested": false, "order": "a", "name": "A", "room_type": null }], "next_cursor": null, "total_children": 1 } }).to_string(),
         serde_json::json!({ "data": { "key": "space_order", "value": { "spaces": [] }, "updated_at": "2026-09-30T00:00:00Z" } }).to_string(),
         serde_json::json!({ "data": { "updated_at": "2026-09-30T00:00:00Z" } }).to_string(),
     ]).await;
     let client = AxonClient::new(url, None);
-    let children = client
-        .space_children(Uuid::nil(), "!space/with-path:srv")
+    let (page, bytes) = client
+        .space_hierarchy(Uuid::nil(), "!space/with-path:srv", None, 16 * 1024 * 1024)
         .await
         .unwrap();
-    assert_eq!(children[0].room_id, "!a:srv");
+    assert_eq!(page.children[0].room_id, "!a:srv");
+    assert!(bytes > 0);
     assert_eq!(
         client.space_order().await.unwrap().value,
         serde_json::json!({ "spaces": [] })
@@ -27,23 +28,10 @@ async fn space_http_reads_and_writes_consume_the_actual_api_envelopes() {
 }
 
 #[tokio::test]
-async fn space_child_count_and_response_bytes_are_bounded() {
-    let url = spawn_api_stub(vec![
-        serde_json::json!({ "data": vec![serde_json::json!({ "room_id": "!a:srv" }); 1001] })
-            .to_string(),
-    ])
-    .await;
+async fn space_hierarchy_respects_remaining_walk_bytes_before_decoding() {
+    let url = spawn_api_stub(vec!["x".repeat(1025)]).await;
     let error = AxonClient::new(url, None)
-        .space_children(Uuid::nil(), "!space:srv")
-        .await
-        .unwrap_err();
-    assert!(matches!(error, ApiError::Request(message) if message.contains("1000 children")));
-    let url = spawn_api_stub(vec![
-        serde_json::json!({ "data": [{ "room_id": "x".repeat(1024 * 1024) }] }).to_string(),
-    ])
-    .await;
-    let error = AxonClient::new(url, None)
-        .space_children(Uuid::nil(), "!space:srv")
+        .space_hierarchy(Uuid::nil(), "!space:srv", None, 1024)
         .await
         .unwrap_err();
     assert!(matches!(error, ApiError::Request(message) if message.contains("size limit")));

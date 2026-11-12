@@ -45,10 +45,10 @@ const ROOM_SUMMARY_READ_LIMIT: usize = 64 * 1024;
 /// the lazily loaded projection, the same size as `/metadata`. A larger body
 /// fails the read instead of being decoded.
 pub(crate) const ROOM_MEMBERS_LIMIT: usize = 2 * 1024 * 1024;
-/// `GET /v1/invites` is one row per pending invite. 1 MiB is the same cap the
-/// space-children read uses, and it fails the read instead of allocating from
-/// a peer-chosen length.
+/// `GET /v1/invites` is one row per pending invite. Larger bodies fail
+/// instead of allocating from a peer-chosen length.
 const INVITE_LIST_LIMIT: usize = 1024 * 1024;
+pub(crate) const HIERARCHY_PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -130,26 +130,32 @@ impl AxonClient {
         self.send(read_request(request)).await
     }
 
-    pub async fn space_children(
+    /// Local membership only: sidebar reads must never trigger discovery.
+    /// Return the consumed byte count so the owner can budget the entire walk.
+    pub(crate) async fn space_hierarchy(
         &self,
         account_id: Uuid,
         room_id: &str,
-    ) -> Result<Vec<SpaceChildDto>, ApiError> {
-        let request = self.http.get(format!(
-            "{}/v1/accounts/{}/rooms/{}/space/children",
-            self.base_url,
-            account_id,
-            path_segment(room_id)
-        ));
-        let children: Vec<SpaceChildDto> = self
-            .send_bounded(read_request(request), 1024 * 1024)
-            .await?;
-        if children.len() > 1000 {
-            return Err(ApiError::Request(
-                "space has more than 1000 children".to_owned(),
-            ));
+        cursor: Option<&str>,
+        remaining_bytes: usize,
+    ) -> Result<(SpaceHierarchyPage, usize), ApiError> {
+        let mut request = self
+            .http
+            .get(format!(
+                "{}/v1/accounts/{}/rooms/{}/space/hierarchy",
+                self.base_url,
+                account_id,
+                path_segment(room_id)
+            ))
+            .query(&[
+                ("limit", HIERARCHY_PAGE_SIZE.to_string()),
+                ("enrich", "false".to_owned()),
+            ]);
+        if let Some(cursor) = cursor {
+            request = request.query(&[("cursor", cursor)]);
         }
-        Ok(children)
+        self.send_bounded_counted(read_request(request), remaining_bytes.min(2 * 1024 * 1024))
+            .await
     }
 
     pub async fn space_order(&self) -> Result<PreferenceDto, ApiError> {
@@ -1014,6 +1020,16 @@ impl AxonClient {
         request: reqwest::RequestBuilder,
         limit: usize,
     ) -> Result<T, ApiError> {
+        self.send_bounded_counted(request, limit)
+            .await
+            .map(|(data, _)| data)
+    }
+
+    async fn send_bounded_counted<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        limit: usize,
+    ) -> Result<(T, usize), ApiError> {
         let response = request.send().await?;
         let status = response.status();
         let mut stream = response.bytes_stream();
@@ -1028,6 +1044,7 @@ impl AxonClient {
             bytes.extend_from_slice(&chunk);
         }
         Self::decode_response(status, &bytes, || "invalid API error response".to_owned())
+            .map(|data| (data, bytes.len()))
     }
 
     fn decode_response<T: DeserializeOwned>(
@@ -1385,8 +1402,20 @@ pub enum LiveFrame {
     },
 }
 
+/// Only grouping fields are decoded; discovered summaries do not own membership.
 #[derive(Debug, Deserialize)]
-pub struct SpaceChildDto {
+pub(crate) struct SpaceHierarchyPage {
+    pub room_id: String,
+    pub children: Vec<SpaceHierarchyChild>,
+    // Missing is malformed, rather than an implicit last page.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub next_cursor: Option<String>,
+    pub total_children: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SpaceHierarchyChild {
+    pub parent_room_id: String,
     pub room_id: String,
     /// Empty/missing routing servers mean the relationship has been removed.
     #[serde(default)]
