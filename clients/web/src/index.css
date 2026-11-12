@@ -3874,18 +3874,16 @@ span.composer-attachment-thumb {
     opacity: 1;
   }
 
-  /* Last resort, once the name has collapsed to nothing: at 320px, with the
-     delete confirmation open, the time plus six buttons are wider than the row.
-     Cap the bar at what is left after the time and the gaps (about 4.75rem) so
-     it wraps its own buttons, right aligned, instead of overflowing the
-     viewport. A shrinkable bar is no use here: flex shrinks in proportion to
-     size, so it wraps while the name still has room. Only at this width, where
-     five buttons still fit on one line. */
+  /* Last resort for the narrowest phones. At 320px, with the delete
+     confirmation open, the time plus six buttons are wider than the row even
+     with the name collapsed to nothing. The time's width is not predictable (it
+     follows the timezone and the 12h/24h setting), so rather than reserve room
+     for it, drop it while the bar is open, as "(edited)" is dropped above. It
+     comes back when the bar closes. */
   @media (max-width: 22rem) {
-    .event-head > .event-actions {
-      flex-wrap: wrap;
-      justify-content: flex-end;
-      max-width: calc(100% - 4.75rem);
+    .event-row.actions-open .event-head > .event-time-copy,
+    .event-row.actions-open .event-head > time {
+      display: none;
     }
   }
 
