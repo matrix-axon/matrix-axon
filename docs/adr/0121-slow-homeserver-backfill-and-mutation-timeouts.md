@@ -2,6 +2,7 @@
 
 **Status:** Proposed; tracked in [issue 741](https://github.com/matrix-axon/matrix-axon/issues/741), [issue 742](https://github.com/matrix-axon/matrix-axon/issues/742) and [issue 743](https://github.com/matrix-axon/matrix-axon/issues/743).
 Amends ADR 0043's "Resume token and exhaustion" section.
+Decisions 2 and 3 are amended for timed-out pages by ADR 0122's amendment of 2026-11-12, "one slow room does not shut the gate" (#1037).
 
 ## Context
 

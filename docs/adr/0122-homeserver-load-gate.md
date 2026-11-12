@@ -510,3 +510,138 @@ an abandoned request keeps the homeserver busy for minutes, was measured on
   probes are spaced by the doubling cooldown and not by the hold, so a probe
   can come as soon as 2 minutes after a failed one. Decision 4's hold remains
   for every other caller.
+
+## Amendment — one slow room does not shut the gate (2026-11-12)
+
+This amendment changes how backfill backs off a room whose pages time out,
+which amends ADR 0121 decisions 2 and 3, and how the gate treats a timeout that
+nothing else corroborates, which amends decisions 2 and 4 above. The two
+changes are designed together, because neither alone keeps one slow room from
+stopping an account's background work. Tracked in #1037.
+
+### What happened on 2026-11-06
+
+On Adam's production instance, from 15:11 to 20:00 UTC, one room's
+`/messages` pages shut the gate 15 times. The room was `#synapse:matrix.org`, a
+version 12 room with 1,717 members on 1,157 servers, and Synapse still had 100
+gaps in its copy of the room's history. Each page made Synapse fetch history
+over federation.
+
+- Most pages succeeded, slowly. The room's resume token moved between almost
+  every pair of failures, so several pages landed between each timeout. The
+  room finished at 20:00:50 with 5,253 events, which is what ended the loop.
+- 16 pages ran out the 30 s page timeout, about one every 16 minutes. Most were
+  the SDK's own request timeout, which the gate already reads as a timeout. They
+  were the only decreases in that day's log. Other gate shutdowns that fortnight
+  (one on 2026-11-02, two on 2026-11-10) were 502s from Synapse during sync:
+  real trouble, which the gate is meant to catch.
+- It was the only room still backfilling, so what waited was every other
+  background caller of every account in the process: the upstream probe, the
+  re-decryption sweep, room-detail acquisition and the image-pack long-poll.
+  Interactive traffic was served normally throughout.
+
+Synapse's logs for that day had rotated away, so how long it kept working on
+each abandoned page cannot be measured.
+
+### Why the gate could not recover
+
+- **The limit stuck at 1.** A slow success is neutral (decision 2), and the slow
+  room was the only background traffic, so nothing grew the limit back after the
+  first halving. Every later timeout came at a limit of 1, halved it to 0 and
+  opened the breaker, with its slot held for `TIMEOUT_HOLD`.
+- **Backfill's own backoff did not hold the room back.** A retryable failure
+  waits 60 s, and any successful page reset the failure count (ADR 0121), so
+  the log shows `failures=1` sixteen times. By the time the hold ended, the room
+  was due again and already waiting at the gate, so it was the request admitted.
+
+Options considered and not taken:
+
+- **Corroboration before opening the breaker, alone.** At a limit of 1 a held
+  slot blocks admission whether the breaker opens or not, so this changes
+  nothing that 2026-11-06 shows.
+- **A per-room gate key.** The 2026-10-17 incident this ADR exists for was also
+  one room's pages. Keying the gate by room removes the protection in exactly
+  that case.
+- **Smaller pages for a slow room.** Whether Synapse's cost scales with
+  `limit` could not be measured, and this room's cost was federation backfill,
+  which smaller pages may trigger more often, not less.
+
+### Decision
+
+#### Backfill (amends ADR 0121 decisions 2 and 3)
+
+1. **A timed-out page is its own failure class, `timed_out`.** That covers the
+   page timeout and an HTTP timeout from the SDK: whatever the gate reads as
+   `TimedOut`, decided by the gate's own rule so the two cannot disagree. Any
+   other retryable failure (5xx, 429, transport error) is unchanged.
+2. **A timeout waits out at least the hold.** Its retry delay is `TIMEOUT_HOLD`
+   doubled for each timeout since the room's last fast page, capped at ADR
+   0121's `RETRY_MAX`: 15, 30, then 60 minutes. The room is therefore not the
+   request waiting at the gate when its hold ends.
+3. **Only a fast page clears the timeout streak.** A page is fast by the gate's
+   rule: under half the page timeout. A page that succeeds slowly still clears
+   the failure count, backoff and parking, as before, but keeps the streak,
+   so a room that alternates slow pages with timeouts keeps backing off further.
+   The streak is a new `room_backfill.timeout_streak` column, so it survives a
+   restart.
+4. **Parking is unchanged.** A room parks after `PARK_AFTER` consecutive
+   failures with no page between them. A room that keeps timing out but pages
+   in between is still making progress, so it never parks. It settles at one
+   attempt an hour.
+5. **A room with a timeout streak is paged last in each sweep,** behind the
+   rooms that page normally.
+
+#### Gate (amends decisions 2 and 4)
+
+6. **An isolated timeout keeps its slot but does not block admission.** A
+   background request's timeout is isolated when all of these hold:
+   - the request was not the breaker's probe, and the breaker is closed;
+   - the gate holds no slot at all when it times out;
+   - the homeserver answered something else while the request was in flight:
+     a background request's fast success, or a long-poll that returned
+     successfully, finished after the timed-out request started.
+
+   The slot is still held for `TIMEOUT_HOLD`, since the homeserver may still be
+   working on the request, but it is excused: it does not count toward the
+   slots in use when admitting a request. The limit halves as for any timeout,
+   but no lower than 1, so an isolated timeout never opens the breaker.
+
+7. **At most one excused slot at a time.** Any held slot, excused or not,
+   makes the next timeout an ordinary one, which counts in full and can open
+   the breaker. A probe still waits for every held slot to clear, the excused
+   one included, and `GET /v1/status` counts it in `held`, so `active + held`
+   can exceed the limit by one.
+
+Interactive successes are not counted as answers. The gateway's helper does
+not know whether a call was fast, and many calls include local work.
+
+### Why this keeps decision 4's protection
+
+The worst case is one more abandoned request per `TIMEOUT_HOLD` per gate than
+before. Replaying 2026-10-17, one instance's first timed-out page of the space
+would be isolated if a long-poll returned meanwhile. Its slot is excused, the
+limit halves to 1, and backfill holds that room back for 15 minutes. The next
+request is admitted at once. If the homeserver really is overloaded, that
+request times out too, and with a held slot already present it counts in full.
+The limit reaches 0, the breaker opens, and from there the gate behaves as
+decision 3 describes. Meanwhile the space room is retried at most every 15,
+then 30, then 60 minutes, where before it was retried as soon as the gate let
+it.
+
+### Consequences
+
+- **Replaying 2026-11-06:** each account's image-pack long-poll returns about
+  every 30 s while the breaker is closed, so one almost always lands while a
+  30 s page is in flight, and each of the room's timeouts is isolated. Each one
+  excuses its slot, and its hold has expired by the room's next attempt, so the
+  gate never shuts. The room retries after 15, 30,
+  then 60 minutes, so it takes longer to finish than the 4.5 hours it did.
+- **With no answer to corroborate it** (no long-poll running, and no other
+  background request in flight), a timeout counts in full as before. Backfill's
+  longer delays alone then cut the shut time from about 4 of those 4.5 hours to
+  15 minutes per timeout, at 15, 30 and then 60-minute intervals.
+- A room that times out for good, with no page in between, still parks after
+  `PARK_AFTER` failures, about 2.75 hours in.
+- `timeout_streak` is an additive migration with a default of 0.
+- One PR in the `crates/` silo: the store column, backfill's failure class and
+  ordering, and the gate's isolated timeout.
