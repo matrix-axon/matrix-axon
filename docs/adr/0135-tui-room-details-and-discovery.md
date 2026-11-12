@@ -64,6 +64,10 @@ An otherwise unknown server ACL does not add a row for an empty idle check; a co
 "Advertised aliases" remains the alternative aliases from room state beside the canonical alias.
 "Aliases on your homeserver" and "Directory publication on your homeserver" are separate cached homeserver answers, never a federation-wide alias list.
 Show each answer's last-answer time, expiration, refresh activity, failure, and future retry deadline when available.
+Freshness and retry-deadline notes compare the server/database's Unix-millisecond timestamps with the TUI host's wall clock.
+They assume synchronized clocks; a client clock ahead of or behind the server can show or hide these advisory notes incorrectly.
+Server acquisition still enforces its own backoff, and the TUI's HTTP retry schedule uses monotonic `Instant` deadlines, so this limitation affects presentation rather than request scheduling.
+[Issue 1049](https://github.com/matrix-axon/matrix-axon/issues/1049) tracks a server-relative time basis for the web and TUI labels.
 An HTTP failure retains the old value with a stale-data notice; a conclusive denial or a newer answer with a field removed replaces it.
 Malformed, oversized, forbidden, missing, unsupported, and future statuses remain explicit.
 If either homeserver component is omitted, the other still renders and the missing component reads as unknown.
