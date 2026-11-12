@@ -4,18 +4,25 @@
 //! only. `kDNSServiceFlagsReturnIntermediates` reports a negative answer at
 //! once instead of letting the budget run out.
 //!
-//! The lookup's socket is polled on a blocking thread in 100 ms slices, so a
-//! cancellation or the deadline releases it promptly. The reference is
-//! deallocated on that thread, after the last callback can run.
+//! Answers are delivered on a serial dispatch queue
+//! (`DNSServiceSetDispatchQueue`), as the Swift reader receives them. The
+//! first version polled `DNSServiceRefSockFD` on a blocking thread instead,
+//! which works on macOS and never delivered on iOS 27: mDNSResponder logged
+//! both answers within 2 ms, the callback never ran, and every lookup spent
+//! its DNS budget and failed as a timeout. The reference is deallocated on
+//! its queue, so no callback runs after it, and the callback's state is freed
+//! only then.
 
 use super::{Answer, Dns, RecordType};
 use crate::error::{Failure, Result};
 use crate::Cancel;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 type DnsServiceRef = *mut c_void;
+type DispatchQueue = *mut c_void;
 type DnsServiceGetAddrInfoReply = extern "C" fn(
     sd_ref: DnsServiceRef,
     flags: u32,
@@ -27,7 +34,8 @@ type DnsServiceGetAddrInfoReply = extern "C" fn(
     context: *mut c_void,
 );
 
-// In libSystem on both platforms (`<dns_sd.h>`), so nothing extra is linked.
+// In libSystem on both platforms (`<dns_sd.h>`, `<dispatch/dispatch.h>`), so
+// nothing extra is linked.
 extern "C" {
     fn DNSServiceGetAddrInfo(
         sd_ref: *mut DnsServiceRef,
@@ -38,9 +46,15 @@ extern "C" {
         callback: DnsServiceGetAddrInfoReply,
         context: *mut c_void,
     ) -> i32;
-    fn DNSServiceRefSockFD(sd_ref: DnsServiceRef) -> c_int;
-    fn DNSServiceProcessResult(sd_ref: DnsServiceRef) -> i32;
+    fn DNSServiceSetDispatchQueue(sd_ref: DnsServiceRef, queue: DispatchQueue) -> i32;
     fn DNSServiceRefDeallocate(sd_ref: DnsServiceRef);
+    fn dispatch_queue_create(label: *const c_char, attr: *mut c_void) -> DispatchQueue;
+    fn dispatch_sync_f(
+        queue: DispatchQueue,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+    fn dispatch_release(object: *mut c_void);
 }
 
 const FLAGS_ADD: u32 = 0x2;
@@ -51,11 +65,12 @@ const ERR_NO_SUCH_RECORD: i32 = -65554;
 
 pub(crate) struct AppleDns;
 
-/// What the callback found. Written only by the callback, which runs inside
-/// `DNSServiceProcessResult` on the thread that owns this.
+/// What the callback reports to. Touched only by the callback, on the queue,
+/// from `DNSServiceSetDispatchQueue` until `Lookup::drop` deallocates the
+/// reference on that same queue.
 struct State {
     family: RecordType,
-    result: Option<Result<Answer>>,
+    sender: Option<oneshot::Sender<Result<Answer>>>,
 }
 
 extern "C" fn reply(
@@ -71,23 +86,30 @@ extern "C" fn reply(
     if context.is_null() {
         return;
     }
-    // SAFETY: `context` is the `State` `lookup` passed, which outlives the
-    // reference, and this runs on the thread that owns it.
+    // SAFETY: `context` is the `State` the `Lookup` owns, which outlives the
+    // reference, and only this callback touches it while the reference lives.
     let state = unsafe { &mut *context.cast::<State>() };
-    if state.result.is_some() {
-        return;
+    // The first answer decides, as the Swift reader's callback does.
+    if let Some(sender) = state.sender.take() {
+        let _ = sender.send(answer(state.family, flags, error_code, address));
     }
+}
+
+fn answer(
+    family: RecordType,
+    flags: u32,
+    error_code: i32,
+    address: *const libc::sockaddr,
+) -> Result<Answer> {
     if error_code == ERR_NO_SUCH_RECORD {
-        state.result = Some(Ok(Answer::NoRecord));
-        return;
+        return Ok(Answer::NoRecord);
     }
     if error_code != 0 || flags & FLAGS_ADD == 0 || address.is_null() {
-        state.result = Some(Err(Failure::Unavailable));
-        return;
+        return Err(Failure::Unavailable);
     }
     // SAFETY: mDNSResponder passes a valid sockaddr of the family it names.
     let ip = unsafe {
-        match i32::from((*address).sa_family) {
+        match c_int::from((*address).sa_family) {
             libc::AF_INET => {
                 let v4 = &*address.cast::<libc::sockaddr_in>();
                 Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(v4.sin_addr.s_addr))))
@@ -99,31 +121,76 @@ extern "C" fn reply(
             _ => None,
         }
     };
-    let expected = match (ip, state.family) {
+    match (ip, family) {
         (Some(ip @ IpAddr::V4(_)), RecordType::A)
-        | (Some(ip @ IpAddr::V6(_)), RecordType::Aaaa) => Some(ip),
-        _ => None,
-    };
-    state.result = Some(
-        expected
-            .map(Answer::Address)
-            .ok_or(Failure::PreviewUnavailable),
-    );
+        | (Some(ip @ IpAddr::V6(_)), RecordType::Aaaa) => Ok(Answer::Address(ip)),
+        _ => Err(Failure::PreviewUnavailable),
+    }
 }
 
-fn lookup(name: &str, record: RecordType, deadline: Instant, cancel: &Cancel) -> Result<Answer> {
+/// One query's queue, reference and callback state, released in the order
+/// that keeps the callback sound however the lookup ends: answered, expired,
+/// cancelled, or its future dropped mid-wait.
+struct Lookup {
+    queue: DispatchQueue,
+    /// Null until the query starts, and after it is released.
+    reference: DnsServiceRef,
+    state: *mut State,
+}
+
+// SAFETY: the pointers are only handed to libdispatch and dns_sd, which take
+// them from any thread for these calls; `state` is freed in `drop`, after the
+// reference that could reach it is gone.
+unsafe impl Send for Lookup {}
+
+extern "C" fn deallocate(reference: *mut c_void) {
+    // SAFETY: a live reference, deallocated once, on its queue.
+    unsafe { DNSServiceRefDeallocate(reference) };
+}
+
+impl Drop for Lookup {
+    fn drop(&mut self) {
+        // SAFETY: each pointer was created in `start` and is released once.
+        // Deallocating on the serial queue waits out a callback in progress,
+        // and none runs after it, so `state` is unused from here on.
+        unsafe {
+            if !self.reference.is_null() {
+                dispatch_sync_f(self.queue, self.reference, deallocate);
+            }
+            dispatch_release(self.queue);
+            drop(Box::from_raw(self.state));
+        }
+    }
+}
+
+fn start(name: &str, record: RecordType) -> Result<(Lookup, oneshot::Receiver<Result<Answer>>)> {
     let host = CString::new(format!("{name}.")).map_err(|_| Failure::PreviewUnavailable)?;
     let protocol = match record {
         RecordType::A => PROTOCOL_IPV4,
         RecordType::Aaaa => PROTOCOL_IPV6,
     };
-    let mut state = Box::new(State {
-        family: record,
-        result: None,
-    });
+    // SAFETY: a serial queue (null attributes) with a static label.
+    let queue = unsafe {
+        dispatch_queue_create(
+            c"org.matrixaxon.axon.link-preview-dns".as_ptr(),
+            std::ptr::null_mut(),
+        )
+    };
+    if queue.is_null() {
+        return Err(Failure::Unavailable);
+    }
+    let (sender, receiver) = oneshot::channel();
+    let mut lookup = Lookup {
+        queue,
+        reference: std::ptr::null_mut(),
+        state: Box::into_raw(Box::new(State {
+            family: record,
+            sender: Some(sender),
+        })),
+    };
     let mut reference: DnsServiceRef = std::ptr::null_mut();
-    // SAFETY: every pointer is valid for the call; `state` outlives
-    // `reference`, which is deallocated below on this thread.
+    // SAFETY: every pointer is valid for the call. No callback can run until
+    // the reference is scheduled on the queue below.
     let status = unsafe {
         DNSServiceGetAddrInfo(
             &mut reference,
@@ -132,62 +199,22 @@ fn lookup(name: &str, record: RecordType, deadline: Instant, cancel: &Cancel) ->
             protocol,
             host.as_ptr(),
             reply,
-            (&mut *state as *mut State).cast(),
+            lookup.state.cast(),
         )
     };
     if status != 0 || reference.is_null() {
         return Err(Failure::Unavailable);
     }
-    let result = poll(reference, &mut state, deadline, cancel);
-    // SAFETY: allocated above and not used again.
-    unsafe { DNSServiceRefDeallocate(reference) };
-    result
-}
-
-fn poll(
-    reference: DnsServiceRef,
-    state: &mut State,
-    deadline: Instant,
-    cancel: &Cancel,
-) -> Result<Answer> {
-    // SAFETY: `reference` is live.
-    let fd = unsafe { DNSServiceRefSockFD(reference) };
-    if fd < 0 {
+    // SAFETY: a live reference and queue.
+    if unsafe { DNSServiceSetDispatchQueue(reference, queue) } != 0 {
+        // Never scheduled, so no callback can run: it is released here, off
+        // any queue.
+        // SAFETY: a live reference, deallocated once.
+        unsafe { DNSServiceRefDeallocate(reference) };
         return Err(Failure::Unavailable);
     }
-    loop {
-        if cancel.is_cancelled() {
-            return Err(Failure::Cancelled);
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(Failure::Expired);
-        }
-        let slice = (deadline - now).as_millis().min(100) as c_int;
-        let mut pollfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one valid pollfd.
-        let ready = unsafe { libc::poll(&mut pollfd, 1, slice) };
-        if ready < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(Failure::Unavailable);
-        }
-        if ready == 0 {
-            continue;
-        }
-        // SAFETY: `reference` is live; the callback writes into `state`.
-        if unsafe { DNSServiceProcessResult(reference) } != 0 {
-            return Err(Failure::Unavailable);
-        }
-        if let Some(result) = state.result.take() {
-            return result;
-        }
-    }
+    lookup.reference = reference;
+    Ok((lookup, receiver))
 }
 
 impl Dns for AppleDns {
@@ -198,10 +225,80 @@ impl Dns for AppleDns {
         deadline: Instant,
         cancel: &Cancel,
     ) -> Result<Answer> {
-        let name = name.to_owned();
-        let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || lookup(&name, record, deadline, &cancel))
-            .await
-            .unwrap_or(Err(Failure::Unavailable))
+        if cancel.is_cancelled() {
+            return Err(Failure::Cancelled);
+        }
+        let (lookup, receiver) = start(name, record)?;
+        let result = tokio::select! {
+            answer = receiver => answer.unwrap_or(Err(Failure::Unavailable)),
+            () = tokio::time::sleep_until(deadline) => Err(Failure::Expired),
+            () = cancel.cancelled() => Err(Failure::Cancelled),
+        };
+        // Released before returning, not at some later drop, so the
+        // reference ends with the query (mDNSResponder logs it as `STOP`).
+        drop(lookup);
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The real resolver, on the paths where the release order matters. A
+    //! lookup that ends before its answer arrives must deallocate on the
+    //! queue and free the callback's state without a late callback touching
+    //! it; a use-after-free here would crash the test process.
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn an_expired_deadline_releases_the_query() {
+        for _ in 0..50 {
+            let result = AppleDns
+                .query("example.com", RecordType::A, Instant::now(), &Cancel::new())
+                .await;
+            assert!(
+                matches!(result, Err(Failure::Expired) | Ok(_)),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_query_is_released_at_once() {
+        let cancel = Cancel::new();
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            canceller.cancel();
+        });
+        let started = std::time::Instant::now();
+        let result = AppleDns
+            .query(
+                "unanswered-axon-preview-test.invalid",
+                RecordType::A,
+                Instant::now() + Duration::from_secs(10),
+                &cancel,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(Failure::Cancelled) | Ok(Answer::NoRecord)),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_query_releases_its_reference() {
+        let cancel = Cancel::new();
+        for _ in 0..50 {
+            let query = AppleDns.query(
+                "example.com",
+                RecordType::Aaaa,
+                Instant::now() + Duration::from_secs(10),
+                &cancel,
+            );
+            // Dropped part-way: started, and abandoned before any answer.
+            let _ = tokio::time::timeout(Duration::from_micros(1), query).await;
+        }
     }
 }

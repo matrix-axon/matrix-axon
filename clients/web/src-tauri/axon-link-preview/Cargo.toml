@@ -56,8 +56,9 @@ tokio-util = "0.7"
 url = "2"
 
 [target.'cfg(unix)'.dependencies]
-# `poll` for the Apple and Android resolver sockets, `dlopen` for Android's
-# resolver, and `if_nametoindex` for a scoped Linux nameserver.
+# The Apple resolver's `sockaddr` types, `poll` for the Android resolver
+# socket, `dlopen` for Android's resolver, and `if_nametoindex` for a scoped
+# Linux nameserver.
 libc = "0.2"
 
 [dev-dependencies]
