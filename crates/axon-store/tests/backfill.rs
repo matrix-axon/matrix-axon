@@ -102,7 +102,7 @@ async fn save_room_backfill_roundtrips_and_accumulates() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok-1"), false, 40)
+        .save_room_backfill(account_id, &room_id, Some("tok-1"), false, 40, true)
         .await
         .expect("first save");
     let first = store
@@ -115,7 +115,7 @@ async fn save_room_backfill_roundtrips_and_accumulates() {
     assert_eq!(first.events_backfilled, 40);
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok-2"), false, 35)
+        .save_room_backfill(account_id, &room_id, Some("tok-2"), false, 35, true)
         .await
         .expect("second save");
     let second = store
@@ -131,7 +131,7 @@ async fn save_room_backfill_roundtrips_and_accumulates() {
 
     // Exhaustion: end came back NULL -> complete, no further token.
     store
-        .save_room_backfill(account_id, &room_id, None, true, 5)
+        .save_room_backfill(account_id, &room_id, None, true, 5, true)
         .await
         .expect("final save");
     let done = store
@@ -152,6 +152,7 @@ fn retryable(retry_after: Duration, parked: bool) -> RoomBackfillFailure<'static
         retry_after,
         parked,
         clear_token: false,
+        timed_out: false,
     }
 }
 
@@ -179,7 +180,7 @@ async fn a_retryable_failure_defers_the_room_and_keeps_its_token() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("deep-token"), false, 100)
+        .save_room_backfill(account_id, &room_id, Some("deep-token"), false, 100, true)
         .await
         .expect("save");
     let fresh = store
@@ -235,7 +236,7 @@ async fn a_rejected_token_is_cleared_and_the_room_stays_due() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("stale-token"), false, 10)
+        .save_room_backfill(account_id, &room_id, Some("stale-token"), false, 10, true)
         .await
         .expect("save");
     store
@@ -247,6 +248,7 @@ async fn a_rejected_token_is_cleared_and_the_room_stays_due() {
                 retry_after: Duration::ZERO,
                 parked: false,
                 clear_token: true,
+                timed_out: false,
             },
         )
         .await
@@ -269,7 +271,7 @@ async fn a_rejected_token_is_cleared_and_the_room_stays_due() {
     // count but not the rejection count, which is what lets a second rejection
     // at the same depth park the room.
     store
-        .save_room_backfill(account_id, &room_id, Some("walked-back"), false, 20)
+        .save_room_backfill(account_id, &room_id, Some("walked-back"), false, 20, true)
         .await
         .expect("save");
     let state = store
@@ -312,7 +314,7 @@ async fn clearing_failures_unparks_the_room_and_keeps_its_cursor() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 300)
+        .save_room_backfill(account_id, &room_id, Some("tok"), false, 300, true)
         .await
         .expect("save");
     store
@@ -324,6 +326,7 @@ async fn clearing_failures_unparks_the_room_and_keeps_its_cursor() {
                 retry_after: Duration::from_secs(86_400),
                 parked: true,
                 clear_token: true,
+                timed_out: false,
             },
         )
         .await
@@ -405,7 +408,7 @@ async fn a_successful_page_clears_failure_state() {
     assert!(parked.parked && !parked.retry_due);
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 50)
+        .save_room_backfill(account_id, &room_id, Some("tok"), false, 50, true)
         .await
         .expect("save after the park expired");
     let state = store
@@ -422,6 +425,107 @@ async fn a_successful_page_clears_failure_state() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// ADR 0122's amendment of 2026-11-12 (#1037): a timed-out page extends the
+/// room's timeout streak. A slow success clears the failure count, backoff and
+/// parking but keeps the streak; only a fast page, or clearing the room's
+/// failures, resets it. Other failures leave it alone.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn only_a_fast_page_resets_the_timeout_streak() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "bf-streak").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let timed_out = RoomBackfillFailure {
+        kind: "timed_out",
+        retry_after: Duration::from_secs(900),
+        parked: false,
+        clear_token: false,
+        timed_out: true,
+    };
+    let streak = |store: &axon_store::Store| {
+        let store = store.clone();
+        let room_id = room_id.clone();
+        async move {
+            store
+                .get_room_backfill(account_id, &room_id)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+
+    // A room whose very first page times out gets a row with a streak of 1.
+    store
+        .record_room_backfill_failure(account_id, &room_id, timed_out)
+        .await
+        .expect("first timeout");
+    assert_eq!(streak(&store).await.timeout_streak, 1);
+
+    // A slow success clears the backoff but keeps the streak.
+    store
+        .save_room_backfill(account_id, &room_id, Some("tok"), false, 100, false)
+        .await
+        .expect("slow page");
+    let state = streak(&store).await;
+    assert_eq!(state.consecutive_failures, 0);
+    assert!(state.retry_due && !state.parked);
+    assert_eq!(last_failure(&pool, account_id, &room_id).await, None);
+    assert_eq!(state.timeout_streak, 1, "a slow page keeps the streak");
+
+    store
+        .record_room_backfill_failure(account_id, &room_id, timed_out)
+        .await
+        .expect("second timeout");
+    let state = streak(&store).await;
+    assert_eq!(state.consecutive_failures, 1);
+    assert_eq!(state.timeout_streak, 2);
+    assert_eq!(
+        last_failure(&pool, account_id, &room_id).await.as_deref(),
+        Some("timed_out")
+    );
+
+    // Another retryable failure counts against the room but not the streak.
+    store
+        .record_room_backfill_failure(
+            account_id,
+            &room_id,
+            retryable(Duration::from_secs(60), false),
+        )
+        .await
+        .expect("a 5xx");
+    let state = streak(&store).await;
+    assert_eq!(state.consecutive_failures, 2);
+    assert_eq!(state.timeout_streak, 2);
+
+    // The sweep's list query reads the streak too.
+    let listed = store.list_room_backfill(account_id).await.expect("list");
+    assert_eq!(listed[&room_id].timeout_streak, 2);
+
+    // A fast page resets it.
+    store
+        .save_room_backfill(account_id, &room_id, Some("tok-2"), false, 100, true)
+        .await
+        .expect("fast page");
+    assert_eq!(streak(&store).await.timeout_streak, 0);
+
+    // So does clearing the room's failures, for a room backfill stops paging.
+    store
+        .record_room_backfill_failure(account_id, &room_id, timed_out)
+        .await
+        .expect("third timeout");
+    assert_eq!(streak(&store).await.timeout_streak, 1);
+    store
+        .clear_room_backfill_failures(account_id, &room_id)
+        .await
+        .expect("clear");
+    let state = streak(&store).await;
+    assert_eq!(state.timeout_streak, 0);
+    assert_eq!(state.consecutive_failures, 0);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// Deleting the cursor removes the row so a re-join backfills afresh.
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -432,7 +536,7 @@ async fn delete_room_backfill_removes_the_cursor() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 10)
+        .save_room_backfill(account_id, &room_id, Some("tok"), false, 10, true)
         .await
         .expect("save");
     store
@@ -463,7 +567,7 @@ async fn purge_room_clears_stored_state_and_enqueues_search_purge() {
     seed_room_state(&pool, account_id, &room_id).await;
     seed_room_account_data(&pool, account_id, &room_id).await;
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 2)
+        .save_room_backfill(account_id, &room_id, Some("tok"), false, 2, true)
         .await
         .expect("save backfill");
 
@@ -764,11 +868,11 @@ async fn list_room_backfill_returns_all_cursors() {
     let room_b = format!("!b-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_a, Some("tok-a"), false, 10)
+        .save_room_backfill(account_id, &room_a, Some("tok-a"), false, 10, true)
         .await
         .expect("save a");
     store
-        .save_room_backfill(account_id, &room_b, None, true, 20)
+        .save_room_backfill(account_id, &room_b, None, true, 20, true)
         .await
         .expect("save b");
 
@@ -817,13 +921,13 @@ async fn backfill_progress_counts_joined_rooms_and_completion() {
         .expect("remove empty room event");
     // Room A fully backfilled; B still ongoing (no row); left/banned rooms excluded.
     store
-        .save_room_backfill(account_id, &room_a, None, true, 2)
+        .save_room_backfill(account_id, &room_a, None, true, 2, true)
         .await
         .expect("complete a");
     set_membership(&pool, account_id, &room_left, &user_id, "leave").await;
     set_membership(&pool, account_id, &room_banned, &user_id, "ban").await;
     store
-        .save_room_backfill(account_id, &room_banned, None, true, 1)
+        .save_room_backfill(account_id, &room_banned, None, true, 1, true)
         .await
         .expect("complete banned room");
     let empty_account = test_account(&store, "empty-progress").await;
@@ -850,6 +954,7 @@ async fn backfill_progress_counts_joined_rooms_and_completion() {
                 retry_after: Duration::from_secs(86_400),
                 parked: true,
                 clear_token: false,
+                timed_out: false,
             },
         )
         .await

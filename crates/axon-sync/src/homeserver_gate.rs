@@ -64,7 +64,7 @@ pub(crate) const COOLDOWN_MAX: Duration = Duration::from_secs(30 * 60);
 
 /// A success counts toward growth when it took under this fraction of the
 /// request's own timeout (`FAST_FRACTION` = ½ in ADR 0122 decision 5).
-fn is_fast(elapsed: Duration, timeout: Duration) -> bool {
+pub(crate) fn is_fast(elapsed: Duration, timeout: Duration) -> bool {
     elapsed < timeout / 2
 }
 

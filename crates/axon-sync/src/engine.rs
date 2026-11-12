@@ -4998,6 +4998,7 @@ mod purge_ingestion_tests {
                         Some("old-token"),
                         true,
                         1,
+                        true,
                     )
                     .await
                     .unwrap();
