@@ -92,8 +92,12 @@ It enforces the same boundary as the Swift reader in `incoming-share/Sources/Axo
 - **Redirects:** followed by hand, at most six hops, each one validated as a new request.
 - **Responses:** only status 200 is used.
   Headers are capped at 32 KiB and an image at 2 MiB.
-  A page is read only until the end of its `<head>` or 256 KiB, whichever comes first, and is not parsed if those bytes hold more than 512 `<` characters.
-- **Time:** one 25-second deadline covers the page, its redirects and its image, and the caller can cancel at any point.
+  A page is read only until the end of its `<head>` or 256 KiB, whichever comes first.
+  The head ends at `</head` or `<body` followed by whitespace, `/` or `>`; neither reader tokenizes, so one inside a script still ends it.
+  Only the bytes before the 513th `<` are parsed, which bounds the tree.
+  A heavier head keeps the metadata that came before the cut instead of losing its card; on 36 measured pages none passed 292 `<`, and every preview tag came within the first 160.
+- **Time:** one 25-second deadline covers the wait for a slot, the page, its redirects and its image, and the caller can cancel at any point.
+  An image that misses it is unavailable, and the page's text is kept.
 - **Concurrency:** at most two lookups at once across the app.
 
 Metadata uses the same fields in the same order as the Swift reader:
@@ -106,9 +110,13 @@ Metadata uses the same fields in the same order as the Swift reader:
 Each text field is normalized as `TextShare.previewField` does: whitespace is trimmed, and a value that is empty or longer than the send contract's limit (300, 1,000 and 120 UTF-16 code units for title, description and site name) is dropped, not truncated.
 The composer applies the same rule again to every card, from either source, before it can be sent, so an out-of-range field can never reach the server.
 
-The page is parsed with the [`webpage`](https://crates.io/crates/webpage) crate (MIT), built without its `curl` feature so it only parses what the plugin fetched.
-It builds on html5ever and never runs scripts.
-`webpage` 2.1.0 requires `html5ever` ^0.39 and `markup5ever_rcdom` ^0.39; the shell's lockfile already has `html5ever` and `markup5ever` 0.39.0, so only `markup5ever_rcdom` is new and the parser is not duplicated.
+The page is parsed by html5ever into `markup5ever_rcdom`'s tree, and the plugin selects the fields from that tree itself; nothing runs scripts.
+The shell's lockfile already has `html5ever` and `markup5ever` 0.39.0, so the parser is not duplicated.
+This paragraph first named the [`webpage`](https://crates.io/crates/webpage) crate, and the plugin PR set it aside because it cannot follow the Swift reader's rules.
+It keys `<meta>` tags in a `HashMap`, so a repeated tag's last value wins where the Swift reader takes the first.
+It also trims a value before the length check, which the Swift reader makes first.
+The shared fixture's metadata cases pin those rules, along with what was measured from Foundation and SwiftSoup.
+Foundation's trim includes U+200B, and SwiftSoup collapses neither a no-break space nor a vertical tab inside a title.
 The image is decoded with the `image` crate, whose 0.25 release is already in the lockfile, with decoder limits set before allocation.
 The lockfile builds it only with its PNG and TIFF codecs, so the plugin enables JPEG, GIF and WebP decoding and JPEG encoding, which adds those codec crates.
 It is scaled to at most 1200 pixels on its longest side and re-encoded as JPEG, or PNG when it has transparency, so it always fits the upload contract (2 MiB, 4,000,000 pixels).
@@ -240,15 +248,25 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
   The setting can turn it off, and nothing is fetched until the user writes a link.
 - Recipients see what the sender's device saw.
   Bundled metadata is the sender's claim, which is why the card leads with the link's real host name.
-- The shell gains dependencies, each to be checked against `deny.toml` and recorded in `THIRDPARTY.md` in the plugin PR:
-  - `webpage` and `markup5ever_rcdom`; `html5ever` 0.39 is already present.
-  - The `image` crate's JPEG, GIF and WebP codecs; the crate itself is already present.
-  - A resolver that, on every one of the five platforms, sends only A queries for the origin and a separate AAAA query for `ipv4only.arpa`, never an AAAA query for the origin.
-    Rust's standard `ToSocketAddrs` cannot.
-    The plugin PR chooses the implementation by that requirement and proves it on each platform with a test, rather than relying on an address-family hint being honored.
-    The candidates are a platform lookup restricted to IPv4, which is what the Swift reader uses (`DNSServiceGetAddrInfo` with `kDNSServiceProtocol_IPv4`), and a DNS client such as `hickory-resolver`, which sends the queries itself but must discover the platform's nameservers, which is harder on Android and iOS.
-  - TLS pinned to the validated address while verifying the original host name.
-    `rustls` 0.23 and `tokio-rustls` are already present, and rustls takes the server name separately from the socket, so this should need no new crate.
+- The shell gains five crates, settled in the plugin PR.
+  No RustSec advisory names any of them, so `deny.toml`, which holds only advisory exceptions, needs no entry, and CI's advisories job checks the shell's lockfile on every pull request.
+  All five are MIT or MIT/Apache-2.0, inside `build/about-desktop.toml`'s accepted list, and are recorded in `THIRDPARTY.md`:
+  - `markup5ever_rcdom` 0.39, and the `xml5ever` 0.39 it depends on; `html5ever` 0.39 was already present.
+    Not `webpage` (section 3).
+  - `gif` 0.14 with `color_quant`, and `image-webp` 0.2, for the `image` crate's GIF and WebP codecs.
+    Its JPEG codec, `zune-jpeg`, was already present.
+  - No resolver crate.
+    The origin must be asked for A records only, and `ipv4only.arpa` for AAAA only, on all five platforms, which `ToSocketAddrs` cannot promise and `getaddrinfo` with `AF_INET` only hints at.
+    So each platform is asked for a record type, not for addresses with a family hint:
+    - macOS and iOS: `DNSServiceGetAddrInfo` with `kDNSServiceProtocol_IPv4` or `_IPv6`, as the Swift reader calls it.
+    - Android 10 and later: `android_res_nquery` with `ns_t_a` or `ns_t_aaaa`.
+      Android 7 to 9 have no typed query in the NDK, so device previews there fail as unavailable.
+    - Windows: `DnsQuery_W` with `DNS_TYPE_A` or `DNS_TYPE_AAAA`.
+    - Linux: a single-question DNS client in the plugin, sending to the servers in `/etc/resolv.conf`.
+    `hickory-resolver` was set aside: on Android and iOS it would bypass Private DNS, VPN resolvers and encrypted-DNS profiles, and it would have to find nameservers those platforms do not expose.
+    The tests prove the rule for the resolver logic every backend shares, on every platform, and for the Linux client on the wire, against a DNS server on the loopback that records each question.
+    What the Apple, Android and Windows calls send is checked by packet capture, with the steps in `clients/web/src-tauri/axon-link-preview/README.md`.
+  - No TLS crate: `rustls` 0.23 with the ring provider, `tokio-rustls` and `webpki-roots` were already present, and rustls takes the server name separately from the socket.
 - Two implementations of the fetch boundary exist, held together by a shared fixture.
 - Edits keep their current behavior; editing a message with previews is left for a later decision.
 - The TUI remains a gap in `docs/client-parity.md`.

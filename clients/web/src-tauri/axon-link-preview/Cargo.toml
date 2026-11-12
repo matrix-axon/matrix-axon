@@ -1,0 +1,68 @@
+# The shell's link-preview fetcher (ADR 0132 § 3): one restricted reader for
+# the composer on macOS, Windows, Linux, iOS and Android.
+#
+# A plugin of its own rather than a use of `axon-http`, so it neither depends on
+# that transport's any-URL reach nor blocks narrowing it (issue 893). It
+# enforces the boundary of the iOS Share Extension's Swift reader
+# (`incoming-share/Sources/AxonIncomingShare/PreviewNetwork.swift`), and the two
+# are held together by `src/incoming-share/fixtures/preview-boundary.json`,
+# which both test suites read.
+#
+# Lives inside the shell's workspace directory, so it is a member of that
+# workspace implicitly and shares its lockfile. Never published.
+[package]
+name = "tauri-plugin-axon-link-preview"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+publish = false
+# Required by `tauri-plugin`: the app's build script finds this plugin's
+# permission manifests through the `DEP_TAURI_PLUGIN_AXON_LINK_PREVIEW_*`
+# variables that `links` makes Cargo export.
+links = "tauri-plugin-axon-link-preview"
+
+[dependencies]
+# The HTML tree builder `tauri` already links (through `dom_query`), and the
+# reference DOM it builds into. Only `markup5ever_rcdom` is new. Not the
+# `webpage` crate the ADR first named: it keys `<meta>` tags in a `HashMap`, so
+# a repeated tag's last value wins where the Swift reader takes the first, and
+# it trims a value before the length check the Swift reader makes first.
+# `page.rs` is the 100 lines that keep those rules.
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
+# Only to parse the response head; body framing is `http.rs`, ported from
+# `PreviewHTTPParser.swift`. Already in the lockfile through hyper.
+httparse = "1"
+# PNG is already built for Tauri's icons; JPEG, GIF and WebP decoding and the
+# JPEG encoder are what a preview image needs (ADR 0132 § 3). No default
+# features: those add AVIF, EXR, HDR and more, none of which is accepted.
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+percent-encoding = "2"
+# Random DNS message ids for the Linux wire client. Already in the lockfile.
+getrandom = "0.3"
+# The same rustls, ring provider and TLS 1.2 support reqwest already builds for
+# `axon-http`, so none of these compiles anything new. Mozilla's roots, bundled:
+# verifying a chain never makes a network request, which is the rule the Swift
+# reader sets with `SecTrustSetNetworkFetchAllowed(false)`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-util = "0.7"
+url = "2"
+
+[target.'cfg(unix)'.dependencies]
+# The Apple resolver's `sockaddr` types, `poll` for the Android resolver
+# socket, `dlopen` for Android's resolver, and `if_nametoindex` for a scoped
+# Linux nameserver.
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

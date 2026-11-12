@@ -1,0 +1,355 @@
+{
+  "comment": "The device-preview fetch boundary (ADR 0132 section 3), read by both implementations: the Share Extension's Swift reader (incoming-share/Tests/AxonIncomingShareTests/BoundaryFixtureTests.swift) and the shell's Rust plugin (axon-link-preview/src/tests.rs). A change to either reader that disagrees with a case here fails that reader's tests. headEnds are the byte sequences that end a page's head when they arrive (the script case is accepted: neither reader tokenizes). Static URL eligibility, which the composer shares too, is device-preview-urls.json beside this file.",
+  "rejectedBeforeDNS": [
+    "http://example.org/",
+    "https://127.0.0.1/",
+    "https://[::1]/",
+    "https://router.lan/",
+    "https://service.corp/",
+    "https://router.home/",
+    "https://router.local./",
+    "https://user:pass@example.org/",
+    "https://example.org:65536/",
+    "https://example.org%0d%0aHeader:value/",
+    "https://-bad.example.org/",
+    "https://example.123/",
+    "https://localhost./",
+    "https://a.onion/",
+    "https://xn--bcher-kva.de/",
+    "file:///tmp/a"
+  ],
+  "addresses": {
+    "public": [
+      "1.1.1.1",
+      "8.8.8.8",
+      "100.63.255.255",
+      "100.128.0.1",
+      "172.15.255.255",
+      "172.32.0.1",
+      "192.0.1.1",
+      "192.88.98.1",
+      "198.17.255.255",
+      "198.20.0.1",
+      "203.0.112.1",
+      "223.255.255.255",
+      "2001:4860:4860::8888",
+      "2606:4700:4700::1111",
+      "2001:200::1",
+      "3fff:1000::1",
+      "64:ff9b::808:808"
+    ],
+    "nonPublic": [
+      "0.1.2.3",
+      "10.0.0.1",
+      "100.64.0.1",
+      "100.127.255.255",
+      "127.1.2.3",
+      "169.254.169.254",
+      "172.16.0.1",
+      "172.31.255.255",
+      "192.0.0.1",
+      "192.0.2.1",
+      "192.88.99.1",
+      "192.168.1.1",
+      "198.18.0.1",
+      "198.19.255.255",
+      "198.51.100.1",
+      "203.0.113.1",
+      "224.0.0.1",
+      "255.255.255.255",
+      "::",
+      "::1",
+      "::ffff:127.0.0.1",
+      "::ffff:8.8.8.8",
+      "fe80::1",
+      "fc00::1",
+      "ff02::1",
+      "2001:db8::1",
+      "2001::1",
+      "2001:1ff::1",
+      "2002:7f00:1::",
+      "3ffe::1",
+      "3fff::1",
+      "4000::1",
+      "64:ff9b::7f00:1",
+      "64:ff9b::a00:1"
+    ]
+  },
+  "operatorMappings": [
+    "2606:4700:1234:5678::a00:1",
+    "2606:4700:1234:5678::7f00:1",
+    "2606:4700:1234:5678::a9fe:a9fe",
+    "2606:4700:1234:5678::808:404"
+  ],
+  "nat64": {
+    "comment": "Independent RFC 6052 wire vectors: the prefix length an RFC 7050 probe encodes, and translationTarget embedded in that prefix.",
+    "translationTarget": "8.8.4.4",
+    "vectors": [
+      {
+        "length": 32,
+        "probe": "2606:4700:c000:aa::",
+        "translated": "2606:4700:808:404::"
+      },
+      {
+        "length": 40,
+        "probe": "2606:4700:12c0:0:aa::",
+        "translated": "2606:4700:1208:804:4::"
+      },
+      {
+        "length": 48,
+        "probe": "2606:4700:1234:c000:0:aa00::",
+        "translated": "2606:4700:1234:808:4:400::"
+      },
+      {
+        "length": 56,
+        "probe": "2606:4700:1234:56c0:0:aa::",
+        "translated": "2606:4700:1234:5608:8:404::"
+      },
+      {
+        "length": 64,
+        "probe": "2606:4700:1234:5678:c0:0:aa00:0",
+        "translated": "2606:4700:1234:5678:8:804:400:0"
+      },
+      {
+        "length": 96,
+        "probe": "2606:4700:1234:5678:0:abcd:c000:aa",
+        "translated": "2606:4700:1234:5678:0:abcd:808:404"
+      },
+      {
+        "length": 96,
+        "probe": "64:ff9b::c000:aa",
+        "translated": "64:ff9b::808:404"
+      },
+      {
+        "length": 96,
+        "probe": "64:ff9b::c000:ab",
+        "translated": "64:ff9b::808:404"
+      }
+    ],
+    "malformedProbes": [
+      "1.1.1.1",
+      "::1",
+      "fc00::c000:aa",
+      "2001:db8::c000:aa",
+      "2606:4700::1111",
+      "2606:4700:1234:5678:100::c000:aa",
+      "2606:4700:c000:aa::1"
+    ],
+    "untranslatable": [
+      "10.0.0.1",
+      "127.0.0.1",
+      "169.254.169.254",
+      "192.168.1.1",
+      "::1"
+    ]
+  },
+  "resolution": [
+    {
+      "name": "public A, no DNS64",
+      "a": "8.8.4.4",
+      "probe": null,
+      "addresses": ["8.8.4.4"]
+    },
+    {
+      "name": "public A, well-known prefix",
+      "a": "8.8.4.4",
+      "probe": "64:ff9b::c000:aa",
+      "addresses": ["64:ff9b::808:404", "8.8.4.4"]
+    },
+    {
+      "name": "public A, network-specific prefix",
+      "a": "8.8.4.4",
+      "probe": "2606:4700:1234:5678::c000:aa",
+      "addresses": ["2606:4700:1234:5678::808:404", "8.8.4.4"]
+    },
+    {
+      "name": "malformed discovery adds nothing",
+      "a": "8.8.4.4",
+      "probe": "2606:4700:1234:5678:100::c000:aa",
+      "addresses": ["8.8.4.4"]
+    },
+    {
+      "name": "no A record",
+      "a": null,
+      "probe": "64:ff9b::c000:aa",
+      "failure": "publicIPv4Required"
+    },
+    {
+      "name": "private A record",
+      "a": "10.0.0.1",
+      "probe": null,
+      "failure": "previewUnavailable"
+    },
+    {
+      "name": "IPv6 in an A answer",
+      "a": "2606:4700:4700::1111",
+      "probe": null,
+      "failure": "previewUnavailable"
+    }
+  ],
+  "metadata": [
+    {
+      "name": "every field, entities decoded, subresources ignored",
+      "html": "<html><head><title>Fallback</title><meta property='og:title' content='A &amp; B'><meta name=description content='Details &quot;quoted&quot;'><meta property='og:site_name' content='Example'><meta property='og:image' content='/photo.png'><script src='https://127.0.0.1/script'></script><link rel=stylesheet href='https://127.0.0.1/style'></head></html>",
+      "title": "A & B",
+      "description": "Details \"quoted\"",
+      "siteName": "Example",
+      "image": "/photo.png"
+    },
+    {
+      "name": "the first of repeated tags wins",
+      "html": "<meta property=og:title content=First><meta property=og:title content=Second><meta name=description content=One><meta name=description content=Two>",
+      "title": "First",
+      "description": "One"
+    },
+    {
+      "name": "an unusable first tag moves on to the next selector, not the next tag",
+      "html": "<meta property=og:title content='   '><meta property=og:title content=Second><meta name=twitter:title content=Tweet>",
+      "title": "Tweet"
+    },
+    {
+      "name": "selector values match trimmed and ignoring case",
+      "html": "<META PROPERTY=' OG:Title ' CONTENT='Padded'><meta name='DESCRIPTION' content='Shouting'>",
+      "title": "Padded",
+      "description": "Shouting"
+    },
+    {
+      "name": "og:title is read from property, description from name",
+      "html": "<title>Real</title><meta name=og:title content=Wrong><meta property=x name=description content=Desc>",
+      "title": "Real",
+      "description": "Desc"
+    },
+    {
+      "name": "a value over the limit before trimming is dropped",
+      "html": "<title>Fallback</title><meta property=og:title content=' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'>",
+      "title": "Fallback"
+    },
+    {
+      "name": "a value at the limit is kept",
+      "html": "<meta property=og:site_name content='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'>",
+      "siteName": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "the limit counts UTF-16 code units",
+      "html": "<meta property=og:site_name content='😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀a'><meta property=og:title content='😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀'>",
+      "title": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    },
+    {
+      "name": "a missing content attribute is no value",
+      "html": "<meta property=og:site_name><meta property=og:description content=''><meta name=twitter:description content=Tweeted>",
+      "description": "Tweeted"
+    },
+    {
+      "name": "the title's whitespace is collapsed",
+      "html": "<title>\n  Hello\t\tWorld \r\n again  </title>",
+      "title": "Hello World again"
+    },
+    {
+      "name": "a vertical tab in a title is kept, and a form feed is not",
+      "html": "<title>a\u000b\u000bb\f</title>",
+      "title": "a\u000b\u000bb"
+    },
+    {
+      "name": "the title's no-break spaces are trimmed at the ends and kept inside",
+      "html": "<title>&nbsp;Tom&nbsp;&nbsp;Jerry&nbsp;</title>",
+      "title": "Tom  Jerry"
+    },
+    {
+      "name": "content is trimmed of Foundation's whitespace, which includes U+200B",
+      "html": "<meta property=og:title content=' Em '><meta name=description content='​Zero​'>",
+      "title": "Em",
+      "description": "Zero"
+    },
+    {
+      "name": "image selectors in order, not document order",
+      "html": "<meta property=og:image content=/plain.png><meta name=twitter:image content=/tweet.png><meta property=og:image:secure_url content=https://example.org/secure.png>",
+      "image": "https://example.org/secure.png"
+    },
+    {
+      "name": "twitter:image:src is the last resort",
+      "html": "<meta name=twitter:image:src content=/last.png><title>T</title>",
+      "title": "T",
+      "image": "/last.png"
+    },
+    {
+      "name": "tags in the body still count",
+      "html": "<head></head><body><meta property=og:title content=InBody><title>Late</title>",
+      "title": "InBody"
+    },
+    {
+      "name": "a title in the body is still the title",
+      "html": "<body><p>x</p><title>Late &amp; Found</title>",
+      "title": "Late & Found"
+    },
+    {
+      "name": "entities in attributes",
+      "html": "<meta property=og:title content='caf&eacute; &lt;3 &#x1F600;'>",
+      "title": "café <3 😀"
+    },
+    {
+      "name": "Windows-1252 bytes when declared",
+      "latin1": true,
+      "contentType": "text/html; charset=windows-1252",
+      "html": "<title>Café </title>",
+      "title": "Café €"
+    },
+    {
+      "name": "Latin-1 bytes undeclared are replaced",
+      "latin1": true,
+      "contentType": "text/html",
+      "html": "<title>Café</title>",
+      "title": "Caf�"
+    },
+    {
+      "name": "only the bytes before the 513th < are parsed",
+      "html": "<meta property=og:title content=Early><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><x><meta name=description content=Late><title>T</title>",
+      "title": "Early"
+    }
+  ],
+  "headEnds": [
+    {
+      "text": "<title>T</title></head>",
+      "ends": true
+    },
+    {
+      "text": "</HEAD >",
+      "ends": true
+    },
+    {
+      "text": "<body class=x>",
+      "ends": true
+    },
+    {
+      "text": "<BODY>",
+      "ends": true
+    },
+    {
+      "text": "<body/>",
+      "ends": true
+    },
+    {
+      "text": "<body\n",
+      "ends": true
+    },
+    {
+      "text": "<bodyguard>",
+      "ends": false
+    },
+    {
+      "text": "</header>",
+      "ends": false
+    },
+    {
+      "text": "</headline>",
+      "ends": false
+    },
+    {
+      "text": "<body",
+      "ends": false
+    },
+    {
+      "text": "<script>var t='<body class=x>'</script>",
+      "ends": true
+    }
+  ]
+}

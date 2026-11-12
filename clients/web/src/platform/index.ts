@@ -125,8 +125,74 @@ export interface SecureStorage extends Storage {
   settled(): Promise<void>
 }
 
+/** Why a lookup produced no preview (`Kind` in `axon-link-preview/src/error.rs`). */
+export type LinkPreviewFailure =
+  | 'unsupported_url'
+  | 'public_ipv4_required'
+  | 'timeout'
+  | 'no_metadata'
+  | 'unavailable'
+  | 'busy'
+  /**
+   * The plugin stopped the lookup itself: the page reloaded, or its window
+   * closed. Not a property of the link, so never a reason to show an error
+   * or to remember the link as having no preview. A caller's own abort
+   * rejects with the signal's reason instead.
+   */
+  | 'cancelled'
+
+/**
+ * Thrown by `Platform.linkPreview` when this device built no preview. A
+ * closed set with no free text, so nothing that names the link reaches a
+ * trace.
+ */
+export class LinkPreviewError extends Error {
+  readonly name = 'LinkPreviewError'
+  readonly kind: LinkPreviewFailure
+  constructor(kind: LinkPreviewFailure) {
+    super(`Link preview: ${kind}`)
+    this.kind = kind
+  }
+}
+
+/** A preview this device built. Text fields are already within the send contract's limits. */
+export interface DeviceLinkPreview {
+  /** Where the page was read from, after redirects. */
+  url: string
+  title?: string
+  description?: string
+  siteName?: string
+  /** Re-encoded by the plugin: at most 1200 px on its longest side, no metadata. */
+  image?: {
+    bytes: Uint8Array
+    mimeType: 'image/jpeg' | 'image/png'
+    width: number
+    height: number
+  }
+  /** The page named an image, and it could not be fetched or decoded. */
+  imageUnavailable: boolean
+}
+
 export interface Platform {
   incomingShare?: import('../incoming-share/types').IncomingSharePort | null
+
+  /**
+   * Build a link preview on this device (ADR 0132 § 3), or absent where the
+   * page cannot read another site.
+   *
+   * Absent in a browser: CORS hides another origin's response from the page,
+   * and Axon's server does not crawl websites, so the composer's only source
+   * there is the homeserver, asked per link. The shell supplies it on every
+   * platform, through its own restricted fetcher (`src-tauri/axon-link-preview/`),
+   * never through `fetch`, whose reach is the user's Axon server.
+   *
+   * Rejects with a `LinkPreviewError` when there is no preview to show, and
+   * with the signal's reason, at once, when `signal` aborts.
+   */
+  linkPreview?: (
+    url: string,
+    signal?: AbortSignal,
+  ) => Promise<DeviceLinkPreview>
   /**
    * The HTTP transport. Signature-compatible with the global, because
    * `openapi-fetch` takes it as its `fetch` option and the media service calls

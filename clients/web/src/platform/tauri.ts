@@ -31,6 +31,7 @@ import {
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
 import { nativeIncomingShare } from './incoming-share'
+import { shellLinkPreview } from './link-preview'
 import {
   deliverNotificationClick,
   notificationClickFromPayload,
@@ -402,6 +403,8 @@ export function tauriPlatform(
   return {
     secureStorage: native.secureStorage,
     incomingShare: native.secureStorage === null ? null : nativeIncomingShare(),
+    // Every shell platform: the plugin carries its own resolver per OS.
+    linkPreview: shellLinkPreview,
     appleSignIn: native.appleSignIn,
     // The shell's transport has no whole-request timeout of its own; see
     // `REQUEST_TIMEOUT_MS`. It takes the bounded signal as an argument.

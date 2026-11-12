@@ -60,6 +60,8 @@ tauri-plugin-native-auth = { path = "native-auth" }
 tauri-plugin-remote-push = { path = "remote-push" }
 # In-repo: one pooled HTTP client for `/v1` and media (ADR 0127).
 tauri-plugin-axon-http = { path = "axon-http" }
+# In-repo: link previews built on this device for the composer (ADR 0132).
+tauri-plugin-axon-link-preview = { path = "axon-link-preview" }
 tauri-plugin-opener = "2"
 # Writes text without the web user-activation rule, which WKWebView applies to
 # `navigator.clipboard` and fails about a third of iPad timestamp holds. Pinned

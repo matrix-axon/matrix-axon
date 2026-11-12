@@ -36,6 +36,9 @@ on:
   pull_request:
     paths:
       - 'clients/web/src-tauri/**'
+      # The link-preview plugin's tests read the boundary fixtures the Swift
+      # reader and the composer share (ADR 0132).
+      - 'clients/web/src/incoming-share/fixtures/**'
       - '.github/workflows/desktop-build.yml'
       - '.github/actions/tauri-build/**'
       # `checks` compiles the frontend the crate embeds, so the JS half of the
@@ -149,8 +152,9 @@ jobs:
         working-directory: clients/web/src-tauri
 
       # `--workspace`: a bare run at a package root reaches only that package,
-      # and the in-repo plugins (`axon-http`, `native-auth`, `remote-push`) are
-      # members of their own. rustfmt already walks every member.
+      # and the in-repo plugins (`axon-http`, `axon-link-preview`, `native-auth`,
+      # `remote-push`) are members of their own. rustfmt already walks every
+      # member.
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: clients/web/src-tauri

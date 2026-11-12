@@ -12,6 +12,10 @@ describe('browserPlatform', () => {
     expect(browserPlatform().setIconBadge).toBeNull()
   })
 
+  it('has no device link preview, because a page cannot read another site', () => {
+    expect(browserPlatform().linkPreview).toBeUndefined()
+  })
+
   it('calls the global fetch, with the right receiver', async () => {
     // An unbound `globalThis.fetch` reference throws "Illegal invocation" in a
     // browser once it is passed around as a value — which is exactly what this

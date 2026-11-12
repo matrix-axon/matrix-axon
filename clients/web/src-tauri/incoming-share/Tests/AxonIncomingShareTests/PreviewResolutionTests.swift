@@ -4,46 +4,10 @@ import XCTest
 @testable import AxonIncomingShare
 
 final class PreviewResolutionTests: XCTestCase {
-  func testUntrustedOperatorNAT64AnswersNeverReachTheTransport() throws {
-    // These globally scoped operator addresses encode private IPv4 targets.
-    // The old scope-only check admitted them to the connection boundary.
-    for text in [
-      "2606:4700:1234:5678::a00:1", "2606:4700:1234:5678::7f00:1",
-      "2606:4700:1234:5678::a9fe:a9fe",
-    ] {
-      let address = try XCTUnwrap(PreviewNetwork.Address.parse(text))
-      XCTAssertTrue(address.isPublic, "Global IPv6 scope alone is not authorization")
-      for kind: PreviewNetwork.Kind in [.page, .image] {
-        var connected = false
-        XCTAssertThrowsError(
-          try PreviewNetwork.fetch(
-            URL(string: "https://example.org/")!, kind: kind, deadline: .now() + 1,
-            cancellation: ShareCancellation(), resolve: { _, _, _ in [address] },
-            exchange: { url, _, _, _, _, _ in
-              connected = true
-              return .init(status: 200, headers: [:], body: Data(), url: url)
-            }))
-        XCTAssertFalse(connected)
-      }
-    }
-  }
   private func answer(_ text: String?) -> ShareIntakeResult<PreviewNetwork.Address?> {
     let result = ShareIntakeResult<PreviewNetwork.Address?>()
     result.finish(.success(text.flatMap(PreviewNetwork.Address.parse)))
     return result
-  }
-
-  func testPublicAWithOptionalNAT64RemainsSupported() throws {
-    for (probe, expected) in [
-      (nil, ["8.8.4.4"]),
-      ("64:ff9b::c000:aa", ["64:ff9b::808:404", "8.8.4.4"]),
-      ("2606:4700:1234:5678::c000:aa", ["2606:4700:1234:5678::808:404", "8.8.4.4"]),
-    ] {
-      let addresses = try PreviewNetwork.resolvedAddresses(
-        [answer("8.8.4.4"), answer(probe)], deadline: .now() + 1, cancellation: ShareCancellation())
-      XCTAssertEqual(addresses.map(\.text), expected)
-      XCTAssertTrue(addresses.allSatisfy(\.approvedForConnection))
-    }
   }
 
   func testSlowDiscoveryKeepsPublicAWithinSharedBudget() throws {

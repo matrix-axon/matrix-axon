@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-lookup"
+description = "Enables the lookup command without any pre-configured scope."
+commands.allow = ["lookup"]
+
+[[permission]]
+identifier = "deny-lookup"
+description = "Denies the lookup command without any pre-configured scope."
+commands.deny = ["lookup"]
