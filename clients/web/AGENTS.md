@@ -268,7 +268,8 @@ before starting a milestone.
   It is created with the draft it starts from, and `reset` adopts a restored or pushed draft, whose links are never looked up until retyped; `take` hands the send its kept cards and starts the next draft.
   A link holds a card slot only once whitespace follows it, or once it was pasted or dropped (`inputType` `insertFrom…`), so partial links typed on the way are never fetched.
   The homeserver is asked only from a card's button.
-  The result cache (20 links) lives in the service graph and is wiped on sign-out.
+  The result cache (20 links) lives in the service graph and is wiped on sign-out; a lookup stores through `cache.writer()`, taken when it starts, so a result in flight across the wipe is dropped rather than carried into the next session.
+  Suspension (a staged attachment, a slash command) is applied from the new text inside `change()`, before `previews.edit`, so a pasted `/spoiler <link>` never starts a lookup.
   `planLinkPreviews` decides the field against the _formatted_ body the server matches: off or an edit omits it, kept cards are sent after `previewPreflight` degradation, any other eligible link sends `[]`.
   "Off" includes a stored `device` with no device source; `linkPreviewsEnabled` is the one predicate, and `useMessageComposer` passes no `linkPreviews` to the composer then, which is what keeps the field out.
   A message holding a discarded link waits for `markerFits` before the draft clears, because only then could omitting the field expose that link.

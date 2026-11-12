@@ -266,14 +266,37 @@ describe('results and failures', () => {
 
   it('evicts the least recently used result past the limit', () => {
     const cache = createLinkPreviewCache(2)
-    cache.set('a', result('a'))
-    cache.set('b', result('b'))
+    cache.writer()('a', result('a'))
+    cache.writer()('b', result('b'))
     cache.get('a')
-    cache.set('c', result('c'))
+    cache.writer()('c', result('c'))
     expect(cache.get('b')).toBeUndefined()
     expect(cache.get('a')).toEqual(result('a'))
     cache.clear()
     expect(cache.get('a')).toBeUndefined()
+  })
+
+  it('drops a write from a writer taken before a clear', () => {
+    const cache = createLinkPreviewCache()
+    const before = cache.writer()
+    cache.clear()
+    before('a', result('a'))
+    expect(cache.get('a')).toBeUndefined()
+    cache.writer()('a', result('a'))
+    expect(cache.get('a')).toEqual(result('a'))
+  })
+
+  it('does not cache a result that was in flight when the cache was cleared', async () => {
+    // A sign-out clears the cache while a lookup is still out (review of PR 3).
+    const cache = createLinkPreviewCache()
+    const { device, calls } = deviceSource()
+    controller = createComposerLinkPreviews(cache)
+    controller.configure({ setting: 'device', device }, false)
+    controller.edit(`${A} `, true)
+    cache.clear()
+    calls[0].resolve(devicePreview(A))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cache.get(A)).toBeUndefined()
   })
 
   it('shows a device failure, and offers the homeserver only when allowed', async () => {

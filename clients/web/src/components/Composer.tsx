@@ -317,7 +317,7 @@ export function Composer({
   const [previews] = useState(() => {
     const created = createComposerLinkPreviews({
       get: (identity) => previewCache.current?.get(identity),
-      set: (identity, result) => previewCache.current?.set(identity, result),
+      writer: () => previewCache.current?.writer() ?? (() => {}),
       clear: () => previewCache.current?.clear(),
     })
     created.reset(initialValue)
@@ -489,14 +489,16 @@ export function Composer({
   const commandsEnabled = onCommand !== undefined
   // No cards beside a staged attachment or for a slash command (ADR 0132
   // § 5). `configure` only acts when one of these actually changes.
-  const previewsSuspended =
+  const previewsSuspendedFor = (value: string) =>
     (attachments?.items.length ?? 0) > 0 ||
-    (commandsEnabled && isSlashCommandDraft(draft))
-  useEffect(() => {
+    (commandsEnabled && isSlashCommandDraft(value))
+  const configurePreviews = (value: string) =>
     previews.configure(
       linkPreviews?.sources ?? { setting: 'off' },
-      previewsSuspended,
+      previewsSuspendedFor(value),
     )
+  useEffect(() => {
+    configurePreviews(draft)
   })
   const commandQuery = commandsEnabled ? slashCommandQuery(draft) : null
   const roomQuery = commandsEnabled ? roomCommandQuery(draft) : null
@@ -819,6 +821,10 @@ export function Composer({
       history.cursor = history.entries.length - 1
     }
     setDraft(value)
+    // Suspension follows the new text, before its links are reconciled: a
+    // pasted `/spoiler <link>` must not start a lookup that a later effect
+    // would only cancel, after the site had seen the request.
+    configurePreviews(value)
     previews.edit(value, insertedEdit.current)
     insertedEdit.current = false
     setMarkerQuestion(false)

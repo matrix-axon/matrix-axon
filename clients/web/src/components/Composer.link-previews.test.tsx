@@ -5,7 +5,10 @@ import {
   screen,
   waitFor,
 } from '@testing-library/preact'
+import { signal } from '@preact/signals'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CompositeAuthProvider } from '../auth/composite'
+import { connectLinkPreviewCacheReset } from '../services'
 import { Composer, type ComposerLinkPreviewOptions } from './Composer'
 import {
   createLinkPreviewCache,
@@ -41,11 +44,13 @@ function setup({
   initialValue = '',
   markerFits = vi.fn(async () => true),
   attachments,
+  onCommand,
 }: {
   sources: PreviewSources
   initialValue?: string
   markerFits?: ComposerLinkPreviewOptions['markerFits']
   attachments?: Parameters<typeof Composer>[0]['attachments']
+  onCommand?: Parameters<typeof Composer>[0]['onCommand']
 }) {
   const onSubmit = vi.fn(async () => true)
   const linkPreviews: ComposerLinkPreviewOptions = {
@@ -60,6 +65,7 @@ function setup({
       onSubmit={onSubmit}
       linkPreviews={linkPreviews}
       attachments={attachments}
+      onCommand={onCommand}
     />,
   )
   const textarea = utils.getByRole('textbox') as HTMLTextAreaElement
@@ -185,6 +191,64 @@ describe('Composer link previews', () => {
     paste(A)
     expect(device).not.toHaveBeenCalled()
     expect(cards()).toBeNull()
+  })
+
+  it('never looks up a link in a pasted slash command', () => {
+    // `/spoiler <link>` must not reach the site, not even for a lookup that
+    // is cancelled a moment later (review of PR 3).
+    const { device } = deferredDevice()
+    const { paste, type } = setup({
+      sources: { setting: 'device', device },
+      onCommand: () => true,
+    })
+    paste(`/spoiler ${A}`)
+    type(`/spoiler ${A} more `)
+    expect(device).not.toHaveBeenCalled()
+    expect(cards()).toBeNull()
+    // Leaving the command behind makes the link an ordinary added one.
+    type(`spoiler ${A} more `)
+    expect(cards()).not.toBeNull()
+  })
+
+  it('keeps a result that lands during sign-out out of the shared cache', async () => {
+    const signedIn = signal(true)
+    const cache = createLinkPreviewCache()
+    const stop = connectLinkPreviewCacheReset(
+      { signedIn } as unknown as CompositeAuthProvider,
+      cache,
+    )
+    const { device, pending } = deferredDevice()
+    const Host = () =>
+      signedIn.value ? (
+        <Composer
+          placeholder="Message"
+          onSubmit={async () => true}
+          linkPreviews={{
+            sources: { setting: 'device', device },
+            cache,
+            markerFits: async () => true,
+          }}
+        />
+      ) : (
+        <p>Signed out</p>
+      )
+    render(<Host />)
+    fireEvent.input(screen.getByRole('textbox'), {
+      target: { value: A },
+      inputType: 'insertFromPaste',
+    })
+    pending[0].resolve({
+      url: A,
+      title: 'Previous session',
+      imageUnavailable: false,
+    })
+    await Promise.resolve()
+    signedIn.value = false
+    await Promise.resolve()
+    await Promise.resolve()
+    await waitFor(() => expect(screen.getByText('Signed out')).toBeTruthy())
+    stop()
+    expect(cache.get(A)).toBeUndefined()
   })
 
   it('explains a failed lookup and offers the homeserver only on request', async () => {

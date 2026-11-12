@@ -123,7 +123,14 @@ export function linkPreviewsEnabled(sources: PreviewSources): boolean {
  */
 export interface LinkPreviewCache {
   get(identity: string): PreviewResult | undefined
-  set(identity: string, result: PreviewResult): void
+  /**
+   * How one lookup stores its result, taken when the lookup starts. A clear
+   * since then makes it a no-op, so a result that was in flight across a
+   * sign-out cannot land in the cache the next session reads. There is no
+   * unfenced write.
+   */
+  writer(): (identity: string, result: PreviewResult) => void
+  /** Forget every result, and every writer taken before now. */
   clear(): void
 }
 
@@ -131,6 +138,7 @@ export function createLinkPreviewCache(
   limit = PREVIEW_CACHE_LIMIT,
 ): LinkPreviewCache {
   const entries = new Map<string, PreviewResult>()
+  let generation = 0
   return {
     get(identity) {
       const result = entries.get(identity)
@@ -140,12 +148,20 @@ export function createLinkPreviewCache(
       }
       return result
     },
-    set(identity, result) {
-      entries.delete(identity)
-      entries.set(identity, result)
-      while (entries.size > limit) entries.delete(entries.keys().next().value!)
+    writer() {
+      const taken = generation
+      return (identity, result) => {
+        if (taken !== generation) return
+        entries.delete(identity)
+        entries.set(identity, result)
+        while (entries.size > limit)
+          entries.delete(entries.keys().next().value!)
+      }
     },
     clear() {
+      // Synchronous, and writes no signal: it runs inside the sign-out
+      // effect, and must be a barrier for writers already in flight.
+      generation += 1
       entries.clear()
     },
   }
@@ -165,8 +181,12 @@ export interface ComposerLinkPreviews {
    * follows it.
    */
   edit(text: string, inserted?: boolean): void
-  /** The current setting and sources, and whether cards are suspended: a
-   *  staged attachment or a slash command (§ 5). */
+  /**
+   * The current setting and sources, and whether cards are suspended: a
+   * staged attachment or a slash command (§ 5). Call it before `edit` when
+   * an edit changes suspension, so the edit never starts a lookup the
+   * suspension would forbid.
+   */
   configure(sources: PreviewSources, suspended: boolean): void
   /** Remove a card, and remember its link for the rest of the draft. */
   discard(identity: string): void
@@ -296,6 +316,8 @@ export function createComposerLinkPreviews(
     const abort = new AbortController()
     entry.abort = abort
     entry.state = { status: 'loading', source }
+    // Taken now, so a sign-out while this is in flight discards its result.
+    const store = cache.writer()
     const run =
       source === 'device'
         ? sources.device!(entry.matchedUrl, abort.signal).then(fromDevice)
@@ -303,7 +325,7 @@ export function createComposerLinkPreviews(
     run.then(
       (result) => {
         if (abort.signal.aborted) return
-        cache.set(identity, result)
+        store(identity, result)
         settle(identity, entry, { status: 'ready', result })
       },
       (error: unknown) => {
