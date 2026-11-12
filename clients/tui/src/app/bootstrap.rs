@@ -175,6 +175,7 @@ impl App {
     /// `/refresh` and the refresh shortcut both call this, so one of them
     /// cannot grow a list the other forgets.
     pub(crate) fn refresh_lists(&mut self) {
+        self.refresh_open_room_info(std::time::Instant::now());
         self.refresh_spaces();
         self.request_rooms_refresh();
         self.request_invites_refresh();

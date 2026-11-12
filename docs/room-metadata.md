@@ -135,6 +135,8 @@ The nullable evidence columns are added by a forward-only migration; older rows 
 
 A client should re-read when reopening the panel, on reconnect, and on a `room_details.changed` frame naming `metadata` (see [Change notification](#change-notification)).
 That frame follows every change to a stored snapshot, from either sync connection and from redaction repair, so an open panel needs no polling.
+Both the web Room Information panel (ADR 0133) and TUI `/whereami` (ADR 0135) consume these frames, known-absence confirmations, and the separate homeserver details.
+The TUI refreshes each named source independently and re-reads all visible sources on reconnect, reopen, and explicit refresh; failed HTTP reads retry with bounded backoff while the popup is open.
 Unknown account/room IDs return unknown snapshots with HTTP 200, matching existing cached state-read conventions.
 Cached state from a room the account has left remains historical cached state according to the existing retention policy; this endpoint does not assert current membership or upstream access.
 

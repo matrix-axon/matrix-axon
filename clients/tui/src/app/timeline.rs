@@ -188,9 +188,7 @@ impl App {
                 // "stopped typing" frame may have been missed while down, so
                 // drop stale typing rather than leave a peer "typing" forever.
                 self.clear_typing_overlays();
-                // Required-state updates have no live frame. An open
-                // `/whereami` re-reads on every connect, including the first.
-                // One reconnect may skip a failure backoff; the next waits.
+                // Repair missed detail frames for the currently visible popup.
                 self.note_room_info_reconnect(Instant::now());
                 LiveFrameAction::None
             }
@@ -260,6 +258,20 @@ impl App {
                 super::rooms::TitleField::DisplayName,
                 Some(payload.display_name),
             ),
+            LiveFrame::RoomDetails {
+                account_id,
+                payload,
+            } => {
+                self.note_room_details_changed(
+                    &RoomKey {
+                        account_id,
+                        room_id: payload.room_id,
+                    },
+                    &payload.sources,
+                    Instant::now(),
+                );
+                LiveFrameAction::None
+            }
             LiveFrame::UnreadCounts {
                 account_id,
                 payload,

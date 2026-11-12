@@ -33,8 +33,11 @@
   Device names drop control characters and bidi overrides before they are drawn.
 - Bracketed paste (`crossterm::EnableBracketedPaste`, pushed alongside raw mode in `TerminalGuard`) delivers a terminal drag-and-drop or clipboard paste as one atomic `Event::Paste(String)` rather than a burst of key events; `App::handle_paste` bulk-inserts it via `insert_str` in the modes that accept free text (the same set `insert_char`'s callers gate on), so dropping a file onto the terminal window fills in its path directly. Never unquote a paste generically — only `/send`'s path-token parsing strips quotes/backslash-escapes, since a plain pasted message may contain intentional quote characters.
 - Login credentials are transient. Normalize `user:domain` and `user@domain` to canonical `@user:domain`, validate with `ruma`, mask prompted and inline passwords, and clear password state on submission, failure, cancellation, or focus changes. Use the same normalization for logout targeting. Never send the password anywhere except Axon's login endpoint, and never talk to a homeserver directly: homeserver discovery is Axon's job (ADR 0023) — login forwards the Matrix ID and password, and `homeserver_url` only when the user supplies the optional `/login` third argument to override resolution (a bare host is given `https://`; an explicit scheme is preserved for loopback). A space-bearing password can't be given inline (the inline password is a single token); such users reach the hidden prompt via `/login` or `/login <user> [homeserver]`, where the username step also accepts an optional homeserver. Axon rejects an MXID written with the homeserver's hostname (`@user:matrix.domain`) with a 400 whose message suggests the canonical Matrix ID; the TUI shows API error messages verbatim, so no client-side handling is needed.
-- `/whereami` paints the room summary immediately, then fills in Axon's cached `/metadata`, `/info` member counts, `/upgrade`, and `/members` reads off the event loop (ADR 0114, `app/room_info.rs`).
-  Keep the wording honest: an `unknown` snapshot is never rendered as unset or unencrypted, null counts are never zero, power levels are labelled as configured values (not permissions), and aliases are "advertised", never a "full alias list".
+- `/whereami` paints the room summary immediately, then fills in Axon's cached `/metadata`, `/homeserver_details`, `/info` member counts, `/upgrade`, and `/members` reads off the event loop (ADR 0114, `app/room_info.rs`).
+  Keep the wording honest: an unknown snapshot without `absence_confirmed_at` is never rendered as unset or unencrypted, null counts are never zero, and power levels are labeled as configured values (not permissions).
+  A confirmed absence overrides a stale canonical-alias summary; redacted or invalid state never acquires an absence default.
+  Keep "Advertised aliases" separate from "Aliases on your homeserver" and "Directory publication on your homeserver".
+  Homeserver details retain stale values beside refresh progress, failures, and the next retry time; a conclusive denial removes the old value.
   The member list comes from the loaded `/members` projection, grouped by membership, with each person's configured power level rather than a resolved role.
   Say when the joined count exceeds that list, and never present the list as complete (#659).
   Cap only that popup read. Timeline display-name seeding and space timeline reads of `/members` stay uncapped, so a large roster can still resolve sender names.
@@ -48,16 +51,18 @@
   The prompt ends when the popup closes or the selected room changes, so a later paste reaches the composer.
   Alt and Ctrl-Alt characters are typed into the prompt. Plain Ctrl stays a shortcut.
   A later refresh of the same room must keep the filter text and must not jump the scroll on its own.
-  While the popup is open it re-reads on reconnect, when a redaction or a metadata or tombstone state event arrives for the selected room, and every 30 seconds from the tick.
-  That wait starts when the previous batch settles, so a slow read does not start the next one immediately.
-  Membership changes wait until they pause for two seconds, and no later than ten seconds after the first change in the burst.
-  One batch is in flight at a time.
-  One transport failure doubles the wait for the whole batch, up to four minutes, and a 404 does not.
-  A metadata event does not skip that backoff.
-  One reconnect during the backoff may start a batch. The next reconnect waits for the schedule.
-  A refresh leaves each part's last value and last error in place until that part's new result arrives.
-  Closing the popup cancels the batch.
-  The poll stays until the server publishes required-state changes (#621).
+  While the popup is open, `room_details.changed` for its account and room re-reads only the named source: `metadata`, `member_counts` (`/info`), or `homeserver_details`.
+  Ignore unknown sources.
+  Reopen, reconnect, and explicit refresh re-read all five sources; successful reads do not poll.
+  Each source has at most one request in flight and one pending invalidation.
+  A slow member list must not block metadata.
+  Failed HTTP reads retry after 30, 60, 120, then 240 seconds while visible; notifications respect that source's backoff and a 404 does not schedule retries.
+  Each source allows one reconnect to bypass its backoff until the scheduled retry; explicit refresh and reopening retry immediately.
+  Membership changes re-read only `/members` after a two-second pause, no later than ten seconds into a burst.
+  Tombstones and creation events re-read `/upgrade`; redactions re-read `/upgrade` and debounce `/members`.
+  Metadata timeline events do not duplicate the persisted metadata notification.
+  A refresh leaves each source's last value and error in place until its own new result arrives.
+  Closing the popup cancels every source and its retry intents.
   If the selected room changes under the open popup, the next tick fetches that room and resets the scroll.
   Paste is accepted only while that prompt is open inside the room-info popup.
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.

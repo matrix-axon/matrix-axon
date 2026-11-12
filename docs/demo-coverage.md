@@ -174,9 +174,11 @@ shows it.
   The reaction case is worth distinguishing from the two rows above it:
   `timeline` covers badges that were already in the aggregate at load, and `react` covers this client reacting to itself.
   Neither exercises an `m.reaction` frame arriving over the WS for someone else's reaction, which is a different code path — the frame patches the target message's aggregate rather than being rendered as a row of its own.
-- **Room information in the TUI.** `/whereami` renders cached room metadata, authoritative member counts, and the loaded `/members` projection (ADR 0114).
+- **Room information in the TUI.** `/whereami` renders cached room metadata, authoritative member counts, the loaded `/members` projection, and separately scoped homeserver aliases and directory publication (ADRs 0114 and 0135).
   The popup can filter that loaded list from the keyboard (#656).
-  An open popup re-reads on reconnect, after a metadata or tombstone change or a redaction, and on a 30-second poll measured from when the previous read settled (#657).
+  An open popup refreshes each metadata/count/homeserver source on its `room_details.changed` notification, and all five reads on reconnect or explicit refresh.
+  Membership and upgrade reads retain timeline triggers; successful sources no longer poll.
+  Homeserver refresh failures retain stale answers, and known-absence confirmations are distinguished from unknown state.
   The list is not a complete roster (#659), and no pilot scene opens the popup, so the row, the filter, and the refresh stay not covered.
 - **User information on the web.** Tapping a timeline sender opens the panel.
   No demo scene does that, so both web columns stay not covered.

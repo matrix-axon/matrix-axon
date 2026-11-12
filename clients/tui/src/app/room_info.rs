@@ -2,6 +2,7 @@
 //! reads Axon already serves, fetched off the event loop and rendered without
 //! turning "Axon does not know" into "the room does not have one".
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::{Local, TimeZone};
@@ -14,29 +15,61 @@ use unicode_width::UnicodeWidthChar;
 use super::render::format_time;
 use super::{App, Mode, PopupKind, RoomKey};
 use crate::api::{
-    ApiError, AxonClient, MemberDto, MetadataSnapshot, RoomCreationContent, RoomDto, RoomInfoDto,
-    RoomJoinRulesContent, RoomMetadataDto, RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
+    ApiError, DetailRefreshDto, DetailRefreshState, DirectoryVisibility, HomeserverDetailDto,
+    HomeserverDetailStatus, MemberDto, MetadataSnapshot, RoomCreationContent, RoomDetailSource,
+    RoomDto, RoomHomeserverDetailsDto, RoomInfoDto, RoomJoinRulesContent, RoomMetadataDto,
+    RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
 };
 use crate::config::{ColorScheme, TimeFormat};
 
-/// The four reads behind one `/whereami`: metadata, counts, upgrade, members.
-const ROOM_INFO_READS: u8 = 4;
+/// Retry failed HTTP reads after 30 seconds, doubling up to four minutes.
+/// Successful reads have no periodic refresh; frames and reconnects invalidate them.
+const ROOM_INFO_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const ROOM_INFO_MAX_FAILURES: u8 = 4;
 
-/// Steady poll while `/whereami` is open.
-/// Required-state updates have no live frame (ADR 0114).
-/// This stays until #621 publishes `room_details.changed`.
-const ROOM_INFO_POLL_INTERVAL: Duration = Duration::from_secs(30);
-
-/// `failures` stops here, so the wait is 30s, 60s, 120s, then 240s.
-const ROOM_INFO_MAX_FAILURES: u8 = 3;
-
-/// How long membership changes must pause before they refresh the popup.
-/// A burst becomes one read.
+/// Debounce the loaded member projection, independently of the count snapshot.
 const ROOM_INFO_MEMBER_DEBOUNCE: Duration = Duration::from_secs(2);
-
-/// A burst cannot push the membership refresh later than this after its first event.
-/// Constant churn still refreshes, instead of waiting for the 30-second poll.
 const ROOM_INFO_MEMBER_DEBOUNCE_CAP: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Source {
+    Metadata,
+    Info,
+    Homeserver,
+    Upgrade,
+    Members,
+}
+
+impl Source {
+    const ALL: [Self; 5] = [
+        Self::Metadata,
+        Self::Info,
+        Self::Homeserver,
+        Self::Upgrade,
+        Self::Members,
+    ];
+}
+
+/// Scheduling belongs to a source, so a slow or failing roster cannot block
+/// metadata. A running request retains at most one invalidation.
+#[derive(Debug, Default)]
+struct ReadState {
+    request: Option<u64>,
+    dirty: bool,
+    retry_at: Option<Instant>,
+    failures: u8,
+    reconnect_bypassed: bool,
+}
+
+impl ReadState {
+    fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.request.is_none() && self.dirty && self.retry_at.is_none_or(|at| now >= at)
+    }
+}
 
 /// A pasted Matrix ID or display name fits. Anything longer cannot be a
 /// substring of a field this short, and a huge paste must not be stored.
@@ -47,7 +80,8 @@ const MEMBER_FILTER_MAX_CHARS: usize = 1024;
 #[derive(Debug)]
 pub(crate) struct Part<T> {
     pub(crate) value: Option<T>,
-    /// How the newest read failed; cleared while a retry is in flight.
+    refresh: ReadState,
+    /// Last failure, retained until this source succeeds.
     pub(crate) failure: Option<ReadFailure>,
 }
 
@@ -74,6 +108,7 @@ impl<T> Default for Part<T> {
     fn default() -> Self {
         Self {
             value: None,
+            refresh: ReadState::default(),
             failure: None,
         }
     }
@@ -94,17 +129,16 @@ impl<T> Part<T> {
 #[derive(Debug)]
 pub(crate) struct RoomInfoState {
     pub(crate) key: RoomKey,
-    generation: u64,
-    in_flight: u8,
     pub(crate) metadata: Part<RoomMetadataDto>,
     pub(crate) info: Part<RoomInfoDto>,
+    pub(crate) homeserver: Part<RoomHomeserverDetailsDto>,
     pub(crate) upgrade: Part<RoomUpgradeDto>,
     pub(crate) members: Part<Vec<MemberDto>>,
     /// Member section rendered when a read settles. The frame wraps these
     /// lines; it does not sort or format the roster again.
     pub(crate) member_lines: Vec<String>,
     /// Local substring filter over loaded members. Empty shows the full list.
-    /// Kept across a same-room refresh so a later poll does not drop it.
+    /// Kept across a same-room refresh so live updates do not drop it.
     pub(crate) member_filter: String,
     /// The filter prompt is taking keystrokes. Scroll keys still move the popup.
     pub(crate) member_filter_editing: bool,
@@ -117,26 +151,10 @@ pub(crate) struct RoomInfoState {
 pub(crate) struct RoomInfoCache {
     pub(crate) state: Option<RoomInfoState>,
     generation: u64,
-    /// The newest batch of reads. Aborted before another batch starts, so
-    /// moving between rooms on a slow axon cannot pile up open requests: the
-    /// generation check alone would drop their results but leave them running.
-    reads: Vec<AbortHandle>,
+    /// One abort handle per source; a key change or close drains them all.
+    reads: HashMap<Source, AbortHandle>,
     /// `None` until the main loop wires the channel (and in unit tests).
     pub(crate) tx: Option<mpsc::UnboundedSender<RoomInfoOutcome>>,
-    /// When the open popup may poll again, measured from when the previous
-    /// batch settled. `None` while it is closed.
-    next_poll: Option<Instant>,
-    /// Transport failures in a row. The poll wait is `30s * 2^failures`.
-    /// One failed part backs off the whole batch: the four reads share this clock.
-    failures: u8,
-    /// A metadata invalidation arrived during the current batch.
-    /// After a successful batch, the next poll starts one follow-up.
-    /// A failure backoff keeps this from starting a batch early.
-    refresh_again: bool,
-    /// A reconnect may start one batch during the current failure backoff.
-    reconnect_bypass: bool,
-    /// That one reconnect bypass has already been used in this backoff window.
-    backoff_bypassed: bool,
     /// When a paused membership burst may refresh the popup.
     /// Each new member event pushes this forward, but not past
     /// `member_refresh_not_after`.
@@ -145,47 +163,29 @@ pub(crate) struct RoomInfoCache {
     member_refresh_not_after: Option<Instant>,
 }
 
-impl RoomInfoCache {
-    fn abort_reads(&mut self) {
-        for read in self.reads.drain(..) {
-            read.abort();
+impl RoomInfoState {
+    fn refresh(&mut self, source: Source) -> &mut ReadState {
+        match source {
+            Source::Metadata => &mut self.metadata.refresh,
+            Source::Info => &mut self.info.refresh,
+            Source::Homeserver => &mut self.homeserver.refresh,
+            Source::Upgrade => &mut self.upgrade.refresh,
+            Source::Members => &mut self.members.refresh,
         }
     }
 }
 
-fn room_info_poll_delay(failures: u8) -> Duration {
-    ROOM_INFO_POLL_INTERVAL.saturating_mul(1_u32 << u32::from(failures.min(ROOM_INFO_MAX_FAILURES)))
-}
-
-/// One transport failure backs off every read in the next poll.
-/// Metadata, counts, upgrade, and members share one in-flight batch, so a
-/// members timeout also delays the next metadata read. A second clock would
-/// let one kind of read run while another is still failing.
-fn batch_transport_failed(state: &RoomInfoState) -> bool {
-    part_transport_failed(&state.metadata)
-        || part_transport_failed(&state.info)
-        || part_transport_failed(&state.upgrade)
-        || part_transport_failed(&state.members)
-}
-
-fn room_info_event_refreshes(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "m.room.redaction"
-            | "m.room.canonical_alias"
-            | "m.room.create"
-            | "m.room.join_rules"
-            | "m.room.encryption"
-            | "m.room.power_levels"
-            | "m.room.server_acl"
-            | "m.room.history_visibility"
-            | "m.room.guest_access"
-            | "m.room.tombstone"
-    )
-}
-
-fn part_transport_failed<T>(part: &Part<T>) -> bool {
-    part.failure == Some(ReadFailure::Failed)
+impl RoomInfoCache {
+    fn abort_reads(&mut self) {
+        for (_, read) in self.reads.drain() {
+            read.abort();
+        }
+        if let Some(state) = self.state.as_mut() {
+            for source in Source::ALL {
+                *state.refresh(source) = ReadState::default();
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -193,8 +193,31 @@ pub(crate) enum RoomInfoPart {
     /// Boxed: eight snapshots dwarf the other reads.
     Metadata(Result<Box<RoomMetadataDto>, ReadFailure>),
     Info(Result<RoomInfoDto, ReadFailure>),
+    Homeserver(Result<RoomHomeserverDetailsDto, ReadFailure>),
     Upgrade(Result<RoomUpgradeDto, ReadFailure>),
     Members(Result<Vec<MemberDto>, ReadFailure>),
+}
+
+impl RoomInfoPart {
+    fn source(&self) -> Source {
+        match self {
+            Self::Metadata(_) => Source::Metadata,
+            Self::Info(_) => Source::Info,
+            Self::Homeserver(_) => Source::Homeserver,
+            Self::Upgrade(_) => Source::Upgrade,
+            Self::Members(_) => Source::Members,
+        }
+    }
+
+    fn failure(&self) -> Option<ReadFailure> {
+        match self {
+            Self::Metadata(result) => result.as_ref().err().copied(),
+            Self::Info(result) => result.as_ref().err().copied(),
+            Self::Homeserver(result) => result.as_ref().err().copied(),
+            Self::Upgrade(result) => result.as_ref().err().copied(),
+            Self::Members(result) => result.as_ref().err().copied(),
+        }
+    }
 }
 
 /// One completed read.
@@ -206,243 +229,238 @@ pub(crate) struct RoomInfoOutcome {
 }
 
 impl App {
-    /// Start the room-information reads for `key` unless they are already in
-    /// flight. Returns immediately; results land through
-    /// [`App::apply_room_info_outcome`].
+    /// Fetch each idle source for one room. Changing the key cancels all old
+    /// requests before allocating the next room's state.
     pub(crate) fn request_room_info(&mut self, key: RoomKey) {
+        if self
+            .room_info
+            .state
+            .as_ref()
+            .is_none_or(|state| state.key != key)
+        {
+            self.room_info.abort_reads();
+            self.clear_member_refresh();
+            self.room_info.state = Some(RoomInfoState {
+                key,
+                metadata: Part::default(),
+                info: Part::default(),
+                homeserver: Part::default(),
+                upgrade: Part::default(),
+                members: Part::default(),
+                member_lines: Vec::new(),
+                member_filter: String::new(),
+                member_filter_editing: false,
+            });
+        }
+        if let Some(state) = self.room_info.state.as_mut() {
+            for source in Source::ALL {
+                let read = state.refresh(source);
+                if read.request.is_none() {
+                    read.invalidate();
+                }
+            }
+        }
+        self.start_room_info_reads(Instant::now());
+    }
+
+    fn start_room_info_reads(&mut self, now: Instant) {
         let Some(tx) = self.room_info.tx.clone() else {
             return;
         };
-        let cache = &mut self.room_info;
-        if cache
-            .state
-            .as_ref()
-            .is_some_and(|state| state.key == key && state.in_flight > 0)
-        {
+        let Some(state) = self.room_info.state.as_mut() else {
             return;
-        }
-        cache.abort_reads();
-        cache.generation += 1;
-        let generation = cache.generation;
-        match cache.state.as_mut().filter(|state| state.key == key) {
-            Some(state) => {
-                state.generation = generation;
-                state.in_flight = ROOM_INFO_READS;
-                // Leave each part's value and failure until its own result
-                // arrives. Clearing them here would flash "loading" over the
-                // last error, and a cancel mid-batch would drop both.
+        };
+        for source in Source::ALL {
+            if !state.refresh(source).ready(now) {
+                continue;
             }
-            None => {
-                cache.state = Some(RoomInfoState {
-                    key: key.clone(),
-                    generation,
-                    in_flight: ROOM_INFO_READS,
-                    metadata: Part::default(),
-                    info: Part::default(),
-                    upgrade: Part::default(),
-                    members: Part::default(),
-                    member_lines: Vec::new(),
-                    member_filter: String::new(),
-                    member_filter_editing: false,
-                });
+            self.room_info.generation += 1;
+            let generation = self.room_info.generation;
+            let read = state.refresh(source);
+            if read.retry_at.is_some_and(|at| now >= at) {
+                read.reconnect_bypassed = false;
             }
-        }
-
-        // One task per read, so a slow one does not hold back the others.
-        let mut reads = Vec::with_capacity(usize::from(ROOM_INFO_READS));
-        let mut spawn_read = |read: fn(AxonClient, RoomKey) -> ReadFuture| {
-            let (client, tx, key) = (self.client.clone(), tx.clone(), key.clone());
+            read.request = Some(generation);
+            read.dirty = false;
+            read.retry_at = None;
+            let (client, tx, key) = (self.client.clone(), tx.clone(), state.key.clone());
             let task = tokio::spawn(async move {
-                let part = read(client, key.clone()).await;
+                let part = match source {
+                    Source::Metadata => RoomInfoPart::Metadata(
+                        client
+                            .room_metadata(key.account_id, &key.room_id)
+                            .await
+                            .map(Box::new)
+                            .map_err(ReadFailure::from),
+                    ),
+                    Source::Info => RoomInfoPart::Info(
+                        client
+                            .room_info(key.account_id, &key.room_id)
+                            .await
+                            .map_err(ReadFailure::from),
+                    ),
+                    Source::Homeserver => RoomInfoPart::Homeserver(
+                        client
+                            .room_homeserver_details(key.account_id, &key.room_id)
+                            .await
+                            .map_err(ReadFailure::from),
+                    ),
+                    Source::Upgrade => RoomInfoPart::Upgrade(
+                        client
+                            .room_upgrade(key.account_id, &key.room_id)
+                            .await
+                            .map_err(ReadFailure::from),
+                    ),
+                    Source::Members => RoomInfoPart::Members(
+                        client
+                            .room_members_bounded(key.account_id, &key.room_id)
+                            .await
+                            .map_err(ReadFailure::from),
+                    ),
+                };
                 let _ = tx.send(RoomInfoOutcome {
                     key,
                     generation,
                     part,
                 });
             });
-            reads.push(task.abort_handle());
-        };
-        spawn_read(|client, key| {
-            Box::pin(async move {
-                let read = client.room_metadata(key.account_id, &key.room_id).await;
-                RoomInfoPart::Metadata(read.map(Box::new).map_err(ReadFailure::from))
-            })
-        });
-        spawn_read(|client, key| {
-            Box::pin(async move {
-                let read = client.room_info(key.account_id, &key.room_id).await;
-                RoomInfoPart::Info(read.map_err(ReadFailure::from))
-            })
-        });
-        spawn_read(|client, key| {
-            Box::pin(async move {
-                let read = client.room_upgrade(key.account_id, &key.room_id).await;
-                RoomInfoPart::Upgrade(read.map_err(ReadFailure::from))
-            })
-        });
-        spawn_read(|client, key| {
-            Box::pin(async move {
-                let read = client
-                    .room_members_bounded(key.account_id, &key.room_id)
-                    .await;
-                RoomInfoPart::Members(read.map_err(ReadFailure::from))
-            })
-        });
-        self.room_info.reads = reads;
-        if let Some(state) = self.room_info.state.as_mut() {
+            self.room_info.reads.insert(source, task.abort_handle());
+        }
+        if state.member_lines.is_empty() {
             store_member_lines(state);
         }
     }
 
-    /// Open `/whereami` for `key` and arm a fresh 30-second cadence.
-    /// A manual reopen does not inherit a failure backoff.
-    pub(crate) fn open_room_info(&mut self, key: RoomKey, now: Instant) {
-        self.room_info.failures = 0;
-        self.room_info.refresh_again = false;
-        self.room_info.reconnect_bypass = false;
-        self.room_info.backoff_bypassed = false;
-        self.clear_member_refresh();
+    /// Opening explicitly permits a retry of every source, including those
+    /// whose previous HTTP request failed. Values and errors stay until settled.
+    pub(crate) fn open_room_info(&mut self, key: RoomKey) {
+        self.room_info.abort_reads();
         self.request_room_info(key);
-        self.room_info.next_poll = Some(now + ROOM_INFO_POLL_INTERVAL);
     }
 
-    /// Keep an open popup fresh. `now` is the caller's clock, so tests can
-    /// pause it. The main loop passes `Instant::now` from its existing tick.
+    /// The tick handles delayed membership reads and failed-read retries only.
+    /// There is no periodic read after a source succeeds.
     pub(crate) fn poll_open_room_info(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() {
-            if !self.room_info_refresh_is_idle() {
-                self.cancel_room_info_refresh();
-            }
+        if !self.room_info_popup_is_open() || self.selected_room_key().is_none() {
+            self.cancel_room_info_refresh();
             return;
         }
-        let Some(key) = self.selected_room_key() else {
-            if !self.room_info_refresh_is_idle() {
-                self.cancel_room_info_refresh();
-            }
-            return;
-        };
-        let cached = self.room_info.state.as_ref().map(|state| state.key.clone());
-        if cached.as_ref() != Some(&key) {
-            // The room on screen changed under the popup. Fetch that room
-            // instead of leaving the body on "not loaded".
-            self.room_info.failures = 0;
-            self.room_info.refresh_again = false;
-            self.room_info.reconnect_bypass = false;
-            self.room_info.backoff_bypassed = false;
-            self.clear_member_refresh();
-            self.popup_scroll = 0;
-            self.reveal_room_info_members = false;
-            self.begin_room_info_batch(key, now);
-            return;
-        }
+        let key = self.selected_room_key().expect("checked selection");
         if self
             .room_info
             .state
             .as_ref()
-            .is_some_and(|state| state.in_flight > 0)
+            .is_none_or(|state| state.key != key)
         {
+            self.popup_scroll = 0;
+            self.reveal_room_info_members = false;
+            self.request_room_info(key);
             return;
         }
-        let due = self.room_info.next_poll.is_some_and(|due| now >= due);
-        // Failure backoff is the schedule for metadata events and membership.
-        // One reconnect in that window may start a batch early.
-        let member_due = self.room_info.member_refresh_at.is_some_and(|at| now >= at);
-        let early = self.room_info.reconnect_bypass
-            || (self.room_info.failures == 0 && (self.room_info.refresh_again || member_due));
-        if due || early {
-            if due {
-                self.room_info.backoff_bypassed = false;
-            } else if self.room_info.reconnect_bypass && self.room_info.failures > 0 {
-                self.room_info.backoff_bypassed = true;
-            }
-            self.room_info.reconnect_bypass = false;
+        if self.room_info.member_refresh_at.is_some_and(|at| now >= at) {
             self.clear_member_refresh();
-            self.begin_room_info_batch(key, now);
+            if let Some(state) = self.room_info.state.as_mut() {
+                state.members.refresh.invalidate();
+            }
         }
+        self.start_room_info_reads(now);
     }
 
-    /// The socket reconnected. One such event may skip a failure backoff.
-    /// Another reconnect in the same window waits for the schedule.
+    /// Reconnect repairs missed frames for the sources the popup currently holds.
+    /// Each failing source permits one early reconnect retry per backoff window.
     pub(crate) fn note_room_info_reconnect(&mut self, now: Instant) {
-        if self.room_info_popup_is_open() {
-            if self.room_info.failures == 0 {
-                self.room_info.refresh_again = true;
-            } else if !self.room_info.backoff_bypassed {
-                self.room_info.reconnect_bypass = true;
+        if !self.room_info_popup_is_open() {
+            return;
+        }
+        if let Some(state) = self.room_info.state.as_mut() {
+            for source in Source::ALL {
+                let read = state.refresh(source);
+                if read.retry_at.is_some() && !read.reconnect_bypassed {
+                    read.retry_at = None;
+                    read.reconnect_bypassed = true;
+                }
+                read.invalidate();
             }
         }
         self.poll_open_room_info(now);
     }
 
-    /// Re-read because the socket reconnected or a metadata event or redaction
-    /// arrived. A batch that is already running records one follow-up, which
-    /// waits out a failure backoff.
-    pub(crate) fn invalidate_open_room_info(&mut self, now: Instant) {
-        if self.room_info_popup_is_open() {
-            self.room_info.refresh_again = true;
+    /// The explicit refresh shortcut bypasses failure backoff while retaining
+    /// the visible values, filter, and scroll position.
+    pub(crate) fn refresh_open_room_info(&mut self, now: Instant) {
+        if !self.room_info_popup_is_open() {
+            return;
+        }
+        if let Some(state) = self.room_info.state.as_mut() {
+            for source in Source::ALL {
+                let read = state.refresh(source);
+                read.retry_at = None;
+                read.reconnect_bypassed = false;
+                read.invalidate();
+            }
         }
         self.poll_open_room_info(now);
     }
 
-    /// A live timeline event for `key`.
-    /// Redactions and the state the popup reads refresh it.
-    /// Membership changes debounce into one later read.
-    /// Messages, names, topics, and other state do not.
+    pub(crate) fn note_room_details_changed(
+        &mut self,
+        key: &RoomKey,
+        sources: &[RoomDetailSource],
+        now: Instant,
+    ) {
+        if !self.room_info_popup_is_open() || self.selected_room_key().as_ref() != Some(key) {
+            return;
+        }
+        if let Some(state) = self
+            .room_info
+            .state
+            .as_mut()
+            .filter(|state| &state.key == key)
+        {
+            for source in sources {
+                let source = match source {
+                    RoomDetailSource::Metadata => Source::Metadata,
+                    RoomDetailSource::MemberCounts => Source::Info,
+                    RoomDetailSource::HomeserverDetails => Source::Homeserver,
+                    RoomDetailSource::Unrecognized => continue,
+                };
+                state.refresh(source).invalidate();
+            }
+        }
+        self.poll_open_room_info(now);
+    }
+
+    /// Metadata and counts use their persisted-state notifications. The two
+    /// older reads still need timeline hints: members debounce; tombstones and
+    /// redactions refresh the upgrade chain (redactions also refresh members).
     pub(crate) fn note_room_info_timeline_event(
         &mut self,
         key: &RoomKey,
         event_type: &str,
         now: Instant,
     ) {
-        if self.selected_room_key().as_ref() != Some(key) {
+        if !self.room_info_popup_is_open() || self.selected_room_key().as_ref() != Some(key) {
             return;
         }
-        if event_type == "m.room.member" {
+        if event_type == "m.room.member" || event_type == "m.room.redaction" {
             self.schedule_member_refresh(now);
-            return;
         }
-        if room_info_event_refreshes(event_type) {
-            self.invalidate_open_room_info(now);
-        }
-    }
-
-    /// Abort the in-flight batch and drop a late outcome.
-    /// Last-good values, the member filter, and the scroll position stay.
-    pub(crate) fn cancel_room_info_refresh(&mut self) {
-        let in_flight = self
-            .room_info
-            .state
-            .as_ref()
-            .is_some_and(|state| state.in_flight > 0);
-        self.room_info.abort_reads();
-        if let Some(state) = self.room_info.state.as_mut() {
-            state.in_flight = 0;
-        }
-        if in_flight {
-            self.room_info.generation += 1;
+        if matches!(
+            event_type,
+            "m.room.tombstone" | "m.room.redaction" | "m.room.create"
+        ) {
             if let Some(state) = self.room_info.state.as_mut() {
-                state.generation = self.room_info.generation;
+                state.upgrade.refresh.invalidate();
             }
         }
-        self.room_info.next_poll = None;
-        self.room_info.refresh_again = false;
-        self.room_info.reconnect_bypass = false;
-        self.room_info.backoff_bypassed = false;
-        self.clear_member_refresh();
+        self.poll_open_room_info(now);
     }
 
-    fn room_info_refresh_is_idle(&self) -> bool {
-        let in_flight = self
-            .room_info
-            .state
-            .as_ref()
-            .is_some_and(|state| state.in_flight > 0);
-        !in_flight
-            && self.room_info.reads.is_empty()
-            && self.room_info.next_poll.is_none()
-            && !self.room_info.refresh_again
-            && !self.room_info.reconnect_bypass
-            && self.room_info.member_refresh_at.is_none()
+    /// Cancel HTTP reads and retry intents; late outcomes no longer match an
+    /// active request. Keep last values, errors, and the local member filter.
+    pub(crate) fn cancel_room_info_refresh(&mut self) {
+        self.room_info.abort_reads();
+        self.clear_member_refresh();
     }
 
     fn clear_member_refresh(&mut self) {
@@ -451,9 +469,6 @@ impl App {
     }
 
     fn schedule_member_refresh(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() {
-            return;
-        }
         let not_after = self
             .room_info
             .member_refresh_not_after
@@ -462,82 +477,53 @@ impl App {
         self.room_info.member_refresh_at = Some((now + ROOM_INFO_MEMBER_DEBOUNCE).min(not_after));
     }
 
-    fn begin_room_info_batch(&mut self, key: RoomKey, now: Instant) {
-        let before = self.room_info.generation;
-        self.request_room_info(key);
-        if self.room_info.generation != before {
-            self.room_info.next_poll = Some(now + room_info_poll_delay(self.room_info.failures));
-            self.room_info.refresh_again = false;
-        }
-    }
-
     fn room_info_popup_is_open(&self) -> bool {
         matches!(self.mode, Mode::Popup(PopupKind::RoomInfo))
     }
 
-    /// Apply one completed read. A result for a room the popup has moved on
-    /// from, or from a superseded request, is dropped.
-    /// The clock is read here, when the batch settles on the event loop.
     pub(crate) fn apply_room_info_outcome(&mut self, outcome: RoomInfoOutcome) {
         self.apply_room_info_outcome_at(outcome, Instant::now());
     }
 
-    /// [`apply_room_info_outcome`] at `now`, so a test can pause the clock.
     pub(crate) fn apply_room_info_outcome_at(&mut self, outcome: RoomInfoOutcome, now: Instant) {
-        let just_settled = {
-            let Some(state) = self.room_info.state.as_mut() else {
-                return;
-            };
-            if state.key != outcome.key || state.generation != outcome.generation {
-                return;
-            }
-            let was_in_flight = state.in_flight > 0;
-            if was_in_flight {
-                state.in_flight -= 1;
-            }
-            match outcome.part {
-                RoomInfoPart::Metadata(result) => {
-                    state.metadata.settle(result.map(|metadata| *metadata))
-                }
-                RoomInfoPart::Info(result) => state.info.settle(result),
-                RoomInfoPart::Upgrade(result) => state.upgrade.settle(result),
-                RoomInfoPart::Members(result) => state.members.settle(result),
-            }
-            store_member_lines(state);
-            was_in_flight && state.in_flight == 0
-        };
-        if just_settled {
-            let failed = self
-                .room_info
-                .state
-                .as_ref()
-                .is_some_and(batch_transport_failed);
-            self.note_room_info_batch_settled(failed, now);
-        }
-    }
-
-    fn note_room_info_batch_settled(&mut self, failed: bool, now: Instant) {
-        if failed {
-            self.room_info.failures = self
-                .room_info
-                .failures
-                .saturating_add(1)
-                .min(ROOM_INFO_MAX_FAILURES);
-        } else {
-            self.room_info.failures = 0;
-            self.room_info.backoff_bypassed = false;
-        }
-        if !self.room_info_popup_is_open() {
+        if self.selected_room_key().as_ref() != Some(&outcome.key) {
             return;
         }
-        let delay = if failed {
-            room_info_poll_delay(self.room_info.failures)
-        } else {
-            ROOM_INFO_POLL_INTERVAL
+        let source = outcome.part.source();
+        let failure = outcome.part.failure();
+        let Some(state) = self.room_info.state.as_mut() else {
+            return;
         };
-        // From settle, not from start. A read that outruns its interval must
-        // not leave the next poll already due.
-        self.room_info.next_poll = Some(now + delay);
+        if state.key != outcome.key || state.refresh(source).request != Some(outcome.generation) {
+            return;
+        }
+        self.room_info.reads.remove(&source);
+        let read = state.refresh(source);
+        read.request = None;
+        if failure == Some(ReadFailure::Failed) {
+            read.failures = read.failures.saturating_add(1).min(ROOM_INFO_MAX_FAILURES);
+            read.retry_at = Some(now + ROOM_INFO_RETRY_INTERVAL * (1 << (read.failures - 1)));
+            read.dirty = true;
+        } else {
+            read.failures = 0;
+            read.retry_at = None;
+            read.reconnect_bypassed = false;
+        }
+        match outcome.part {
+            RoomInfoPart::Metadata(result) => state.metadata.settle(result.map(|value| *value)),
+            RoomInfoPart::Info(result) => state.info.settle(result),
+            RoomInfoPart::Homeserver(result) => state.homeserver.settle(result),
+            RoomInfoPart::Upgrade(result) => state.upgrade.settle(result),
+            RoomInfoPart::Members(result) => state.members.settle(result),
+        }
+        if matches!(source, Source::Metadata | Source::Info | Source::Members) {
+            store_member_lines(state);
+        }
+        // Follow up after all hints received during this source's request. A
+        // different source need not settle first. Failed reads wait for retry_at.
+        if self.room_info_popup_is_open() {
+            self.start_room_info_reads(now);
+        }
     }
 
     fn selected_room_key(&self) -> Option<RoomKey> {
@@ -722,8 +708,6 @@ impl App {
     }
 }
 
-type ReadFuture = std::pin::Pin<Box<dyn std::future::Future<Output = RoomInfoPart> + Send>>;
-
 /// What the popup can say about one read.
 enum View<'a, T> {
     Loaded(&'a T),
@@ -757,24 +741,70 @@ fn view<'a, T>(
         Some(value) => View::Loaded(value),
         None if part.failure == Some(ReadFailure::Unsupported) => View::Unsupported,
         None if part.failure.is_some() => View::Failed,
-        None if state.in_flight > 0 => View::Loading,
+        None if part.refresh.request.is_some() => View::Loading,
         None => View::NotRequested,
     }
 }
 
 /// Wording for a snapshot that carries no content. `unknown` is never an
 /// "unset": Axon simply has no cached tuple (ADR 0111).
-fn no_content_phrase<T>(snapshot: &MetadataSnapshot<T>) -> &'static str {
+fn confirmed_absent<T>(snapshot: &MetadataSnapshot<T>) -> bool {
+    snapshot.status == SnapshotStatus::Unknown
+        && snapshot.redacted != Some(true)
+        && snapshot.absence_confirmed_at.is_some()
+}
+
+fn no_content_phrase<T>(snapshot: &MetadataSnapshot<T>) -> String {
     if snapshot.redacted == Some(true) {
-        return "redacted";
+        return "redacted".to_owned();
     }
-    match snapshot.status {
-        SnapshotStatus::Unknown => "unknown (not cached)",
-        SnapshotStatus::Unavailable => "unavailable (content not retained)",
-        SnapshotStatus::Invalid => "unavailable (malformed state)",
-        SnapshotStatus::TooLarge => "unavailable (state too large)",
-        SnapshotStatus::Unrecognized => "unavailable (unrecognized status)",
-        SnapshotStatus::Available | SnapshotStatus::Partial => "unavailable",
+    let phrase = if confirmed_absent(snapshot) {
+        "not set (confirmed absent by homeserver)"
+    } else {
+        match snapshot.status {
+            SnapshotStatus::Unknown => "unknown (not cached)",
+            SnapshotStatus::Unavailable => "unavailable (content not retained)",
+            SnapshotStatus::Invalid => "unavailable (malformed state)",
+            SnapshotStatus::TooLarge => "unavailable (state too large)",
+            SnapshotStatus::Unrecognized => "unavailable (unrecognized status)",
+            SnapshotStatus::Available | SnapshotStatus::Partial => "unavailable",
+        }
+    };
+    let mut result = phrase.to_owned();
+    if snapshot.status == SnapshotStatus::Unknown {
+        if let Some(refresh) = &snapshot.absence_check {
+            result.push_str(&refresh_note(refresh));
+        }
+    }
+    result
+}
+
+/// Refresh failures never replace a conclusive value. Only allowlisted labels
+/// reach the terminal; an unknown category is still an unsuccessful refresh.
+fn refresh_note(refresh: &DetailRefreshDto) -> String {
+    let mut notes = Vec::new();
+    if let Some(failure) = &refresh.failure {
+        let category = match failure.as_str() {
+            "timeout" => "timed out",
+            "server_error" => "server error",
+            "rate_limited" => "rate limited",
+            "transport" => "connection failed",
+            "unauthorized" => "authentication failed",
+            "invalid_response" => "invalid response",
+            _ => "unrecognized error",
+        };
+        notes.push(format!("couldn't refresh: {category}"));
+    }
+    match refresh.state {
+        DetailRefreshState::Queued => notes.push("refresh queued".to_owned()),
+        DetailRefreshState::Running => notes.push("refreshing…".to_owned()),
+        DetailRefreshState::Unrecognized => notes.push("unrecognized refresh state".to_owned()),
+        DetailRefreshState::Idle => {}
+    }
+    if notes.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", notes.join("; "))
     }
 }
 
@@ -862,7 +892,14 @@ fn alias_lines(room: &RoomDto, metadata: &View<'_, RoomMetadataDto>) -> Vec<Stri
     let Some(content) = &snapshot.content else {
         let phrase = no_content_phrase(snapshot);
         return vec![
-            format!("Canonical alias: {}", summary_alias.unwrap_or(phrase)),
+            format!(
+                "Canonical alias: {}",
+                if confirmed_absent(snapshot) || snapshot.redacted == Some(true) {
+                    phrase.as_str()
+                } else {
+                    summary_alias.unwrap_or(&phrase)
+                }
+            ),
             format!("Advertised aliases: {phrase}"),
         ];
     };
@@ -905,12 +942,26 @@ fn member_count_line(info: &View<'_, RoomInfoDto>, time_format: TimeFormat) -> S
 fn encryption_line(metadata: &RoomMetadataDto) -> String {
     let snapshot = &metadata.encryption;
     let Some(content) = &snapshot.content else {
-        // An absent tuple does not establish an unencrypted room.
-        let phrase = match snapshot.status {
-            SnapshotStatus::Unknown if snapshot.redacted != Some(true) => {
-                "no encryption state cached"
-            }
-            _ => no_content_phrase(snapshot),
+        let phrase = if confirmed_absent(snapshot) {
+            format!(
+                "not encrypted (absence confirmed by homeserver){}",
+                snapshot
+                    .absence_check
+                    .as_ref()
+                    .map(refresh_note)
+                    .unwrap_or_default()
+            )
+        } else if snapshot.status == SnapshotStatus::Unknown && snapshot.redacted != Some(true) {
+            format!(
+                "no encryption state cached{}",
+                snapshot
+                    .absence_check
+                    .as_ref()
+                    .map(refresh_note)
+                    .unwrap_or_default()
+            )
+        } else {
+            no_content_phrase(snapshot)
         };
         return format!("Encryption: {phrase}");
     };
@@ -1174,7 +1225,11 @@ fn server_acl_lines(metadata: &RoomMetadataDto) -> Vec<String> {
     let snapshot = &metadata.server_acl;
     // Not in the sync defaults, so usually unknown; say nothing until a tuple
     // exists rather than adding a permanent "unknown" line to every room.
-    if snapshot.status == SnapshotStatus::Unknown && snapshot.redacted != Some(true) {
+    if snapshot.status == SnapshotStatus::Unknown
+        && snapshot.redacted != Some(true)
+        && snapshot.absence_confirmed_at.is_none()
+        && snapshot.absence_check.is_none()
+    {
         return Vec::new();
     }
     let Some(content) = &snapshot.content else {
@@ -1200,6 +1255,100 @@ fn server_acl_lines(metadata: &RoomMetadataDto) -> Vec<String> {
     )]
 }
 
+fn homeserver_detail_line<T>(
+    label: &str,
+    detail: &HomeserverDetailDto<T>,
+    value: Option<String>,
+    time_format: TimeFormat,
+    now_ms: i64,
+) -> String {
+    let value = match detail.status {
+        HomeserverDetailStatus::Available | HomeserverDetailStatus::Partial => {
+            value.unwrap_or_else(|| "unavailable (value not supplied)".to_owned())
+        }
+        HomeserverDetailStatus::Unknown => "unknown (not yet acquired or not eligible)".to_owned(),
+        HomeserverDetailStatus::TooLarge => "unavailable (answer too large)".to_owned(),
+        HomeserverDetailStatus::Forbidden => "unavailable (homeserver refused access)".to_owned(),
+        HomeserverDetailStatus::NotFound => "unavailable (not found on homeserver)".to_owned(),
+        HomeserverDetailStatus::Unsupported => {
+            "unavailable (homeserver does not support this read)".to_owned()
+        }
+        HomeserverDetailStatus::Unrecognized => "unavailable (unrecognized status)".to_owned(),
+    };
+    let mut line = format!("{label}: {value}");
+    if detail.status == HomeserverDetailStatus::Partial {
+        line.push_str(" (some entries withheld)");
+    }
+    if let Some(fetched_at) = detail.fetched_at {
+        line.push_str(&format!(
+            " (last answered {})",
+            format_datetime(fetched_at, time_format)
+        ));
+    }
+    if detail.expires_at.is_some_and(|at| at <= now_ms) {
+        line.push_str(" (may be out of date)");
+    }
+    line.push_str(&refresh_note(&detail.refresh));
+    if let Some(at) = detail.refresh.next_attempt_at.filter(|at| *at > now_ms) {
+        line.push_str(&format!(
+            " (retry no earlier than {})",
+            format_datetime(at, time_format)
+        ));
+    }
+    line
+}
+
+fn homeserver_lines(
+    details: &View<'_, RoomHomeserverDetailsDto>,
+    time_format: TimeFormat,
+) -> Vec<String> {
+    const ALIASES: &str = "Aliases on your homeserver";
+    const DIRECTORY: &str = "Directory publication on your homeserver";
+    let View::Loaded(details) = details else {
+        return [ALIASES, DIRECTORY]
+            .map(|label| format!("{label}: {}", details.pending_phrase()))
+            .to_vec();
+    };
+    let aliases = details
+        .local_aliases
+        .content
+        .aliases
+        .as_ref()
+        .map(|aliases| {
+            if aliases.is_empty() {
+                "none".to_owned()
+            } else {
+                aliases.join(", ")
+            }
+        });
+    let visibility = details
+        .directory_visibility
+        .content
+        .visibility
+        .map(|visibility| match visibility {
+            DirectoryVisibility::Public => "public".to_owned(),
+            DirectoryVisibility::Private => "private".to_owned(),
+            DirectoryVisibility::Unrecognized => "unrecognized visibility".to_owned(),
+        });
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    vec![
+        homeserver_detail_line(
+            ALIASES,
+            &details.local_aliases,
+            aliases,
+            time_format,
+            now_ms,
+        ),
+        homeserver_detail_line(
+            DIRECTORY,
+            &details.directory_visibility,
+            visibility,
+            time_format,
+            now_ms,
+        ),
+    ]
+}
+
 /// The lines `/whereami` adds below the room summary: everything read from
 /// `/metadata`, `/info`, and `/upgrade`. The member projection is
 /// [`member_list_lines`]; a failed refresh is flagged by
@@ -1216,6 +1365,10 @@ pub(crate) fn detail_lines(
     let upgrade = view(state, |state| &state.upgrade);
 
     let mut lines = alias_lines(room, &metadata);
+    lines.extend(homeserver_lines(
+        &view(state, |state| &state.homeserver),
+        time_format,
+    ));
     lines.push(member_count_line(&info, time_format));
     match &metadata {
         View::Loaded(metadata) => {
@@ -1262,7 +1415,8 @@ pub(crate) fn refresh_failed_with_stale_data(state: Option<&RoomInfoState>) -> b
     let Some(state) = state else {
         return false;
     };
-    part_holds_stale(&state.metadata)
+    part_holds_stale(&state.homeserver)
+        || part_holds_stale(&state.metadata)
         || part_holds_stale(&state.info)
         || part_holds_stale(&state.upgrade)
         || part_holds_stale(&state.members)
@@ -1732,12 +1886,13 @@ pub(crate) fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'s
 
 #[cfg(test)]
 mod tests {
+    use crate::api::AxonClient;
     use std::time::{Duration, Instant};
 
     use super::*;
     use crate::api::{
-        EventDto, LiveFrame, RoomInfoDto, RoomMemberCountsDto, RoomMetadataDto,
-        RoomPredecessorContent, RoomUpgradeDto,
+        LiveFrame, RoomInfoDto, RoomMemberCountsDto, RoomMetadataDto, RoomPredecessorContent,
+        RoomUpgradeDto,
     };
     use crate::app::{Mode, PopupKind};
     use crate::config::{KeyBinding, TuiConfig};
@@ -1791,21 +1946,23 @@ mod tests {
     ) -> RoomInfoState {
         RoomInfoState {
             key: key(),
-            generation: 0,
-            in_flight: 0,
             metadata: Part {
                 value: metadata,
                 failure: None,
+                refresh: ReadState::default(),
             },
             info: Part {
                 value: info,
                 failure: None,
+                refresh: ReadState::default(),
             },
             upgrade: Part {
                 value: upgrade,
                 failure: None,
+                refresh: ReadState::default(),
             },
             members: Part::default(),
+            homeserver: Part::default(),
             member_lines: Vec::new(),
             member_filter: String::new(),
             member_filter_editing: false,
@@ -2133,7 +2290,7 @@ mod tests {
     #[test]
     fn pending_reads_say_so_instead_of_guessing() {
         let mut state = loaded(None, None, None);
-        state.in_flight = ROOM_INFO_READS;
+        pending(&mut state, 0);
         let loading = lines(&state);
         assert_eq!(line(&loading, "Members:"), "Members: loading…");
         assert_eq!(
@@ -2199,7 +2356,7 @@ mod tests {
         app.request_room_info(key());
         assert_eq!(app.room_info.generation, generation);
 
-        for _ in 0..ROOM_INFO_READS {
+        for _ in 0..Source::ALL.len() {
             let outcome = rx.recv().await.expect("each read reports back");
             app.apply_room_info_outcome(outcome);
         }
@@ -2254,8 +2411,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn whereami_reads_all_four_endpoints_over_http() {
-        let (client, server) = stub_axon(usize::from(ROOM_INFO_READS), |endpoint| {
+    async fn whereami_reads_all_five_endpoints_over_http() {
+        let (client, server) = stub_axon(Source::ALL.len(), |endpoint| {
             match endpoint {
                 "metadata" => json!({ "data": {
                     "encryption": snapshot("available", json!({ "algorithm": "m.megolm.v1.aes-sha2" })),
@@ -2267,6 +2424,10 @@ mod tests {
                     "guest_access": null, "encryption_algorithm": null,
                 }}),
                 "upgrade" => json!({ "data": { "tombstoned_to": null, "upgraded_from": null } }),
+                "homeserver_details" => json!({ "data": {
+                    "local_aliases": { "status": "available", "aliases": ["#local:example.com"] },
+                    "directory_visibility": { "status": "available", "visibility": "private" }
+                }}),
                 "members" => json!({ "data": [{
                     "user_id": "@ada:example.com",
                     "membership": "join",
@@ -2283,7 +2444,7 @@ mod tests {
         app.room_info.tx = Some(tx);
 
         app.handle_command(crate::command::Command::Whereami).await;
-        for _ in 0..ROOM_INFO_READS {
+        for _ in 0..Source::ALL.len() {
             let outcome = rx.recv().await.expect("each read reports back");
             app.apply_room_info_outcome(outcome);
         }
@@ -2293,7 +2454,14 @@ mod tests {
         let base = format!("/v1/accounts/{}/rooms/%21room%3Aexample.com", Uuid::nil());
         assert_eq!(
             targets,
-            ["info", "members", "metadata", "upgrade"].map(|endpoint| format!("{base}/{endpoint}"))
+            [
+                "homeserver_details",
+                "info",
+                "members",
+                "metadata",
+                "upgrade"
+            ]
+            .map(|endpoint| format!("{base}/{endpoint}"))
         );
         let lines = crate::ui::popup_room_info_lines(&app);
         assert_eq!(
@@ -2301,6 +2469,14 @@ mod tests {
             "Encryption: m.megolm.v1.aes-sha2"
         );
         assert_eq!(line(&lines, "Room version:"), "Room version: 11");
+        assert_eq!(
+            line(&lines, "Aliases on your homeserver:"),
+            "Aliases on your homeserver: #local:example.com"
+        );
+        assert_eq!(
+            line(&lines, "Directory publication"),
+            "Directory publication on your homeserver: private"
+        );
         assert!(line(&lines, "Members:").starts_with("Members: 412 joined, 3 invited"));
         assert_eq!(
             line(&lines, "Members ("),
@@ -2525,7 +2701,7 @@ mod tests {
         // `/upgrade` answered; `/metadata` has not, or failed.
         for failure in [None, Some(ReadFailure::Failed)] {
             let mut state = loaded(None, None, Some(RoomUpgradeDto::default()));
-            state.in_flight = 1;
+            state.metadata.refresh.request = Some(0);
             state.metadata.failure = failure;
             let lines = lines(&state);
 
@@ -2600,7 +2776,7 @@ mod tests {
         app.room_info.tx = Some(tx);
 
         app.request_room_info(key());
-        for _ in 0..ROOM_INFO_READS {
+        for _ in 0..Source::ALL.len() {
             let outcome = rx.recv().await.expect("each read reports back");
             app.apply_room_info_outcome(outcome);
         }
@@ -2708,7 +2884,7 @@ mod tests {
         app.client = client;
         let (tx, _rx) = mpsc::unbounded_channel();
         app.room_info.tx = Some(tx);
-        let reads = usize::from(ROOM_INFO_READS);
+        let reads = Source::ALL.len();
         let mut other = key();
         other.room_id = "!other:example.com".to_owned();
         let settle = |target: usize, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>| async move {
@@ -2740,8 +2916,7 @@ mod tests {
     fn stale_and_superseded_results_are_dropped() {
         let mut app = app();
         let mut state = loaded(None, None, None);
-        state.generation = 2;
-        state.in_flight = ROOM_INFO_READS;
+        pending(&mut state, 2);
         app.room_info.state = Some(state);
         let info = || RoomInfoPart::Info(Ok(RoomInfoDto::default()));
 
@@ -2769,7 +2944,7 @@ mod tests {
         let state = app.room_info.state.as_ref().unwrap();
         assert!(state.info.value.is_none());
         assert!(state.members.value.is_none());
-        assert_eq!(state.in_flight, ROOM_INFO_READS);
+        assert_eq!(state.info.refresh.request, Some(2));
 
         app.apply_room_info_outcome(RoomInfoOutcome {
             key: key(),
@@ -2782,7 +2957,9 @@ mod tests {
     #[test]
     fn failed_refresh_keeps_last_good_data_and_flags_it() {
         let mut app = app();
-        app.room_info.state = Some(loaded(Some(full_metadata()), None, None));
+        let mut state = loaded(Some(full_metadata()), None, None);
+        pending(&mut state, 0);
+        app.room_info.state = Some(state);
 
         app.apply_room_info_outcome(RoomInfoOutcome {
             key: key(),
@@ -3083,7 +3260,7 @@ mod tests {
             vec![listed_member("join", "@alice:example.com", Some("Alice"))],
             Some(counts(1)),
         );
-        state.generation = 1;
+        pending(&mut state, 1);
         app.room_info.state = Some(state);
 
         app.apply_room_info_outcome(RoomInfoOutcome {
@@ -3282,7 +3459,7 @@ mod tests {
             vec![listed_member("join", "@ada:example.com", Some("Ada"))],
             Some(counts(1)),
         );
-        state.generation = 1;
+        pending(&mut state, 1);
         state.member_filter = "ada".to_owned();
         state.member_filter_editing = true;
         store_member_lines(&mut state);
@@ -3313,7 +3490,7 @@ mod tests {
             vec![listed_member("join", "@ada:example.com", Some("Ada"))],
             Some(counts(1)),
         );
-        state.generation = 1;
+        pending(&mut state, 1);
         state.member_filter = "ada".to_owned();
         store_member_lines(&mut state);
         app.room_info.state = Some(state);
@@ -3842,509 +4019,607 @@ mod tests {
             .is_empty());
     }
 
-    /// Drop the receiver so spawned reads cannot deliver a second outcome.
+    #[test]
+    fn confirmed_absence_overrides_summary_and_never_applies_to_redacted_or_invalid_state() {
+        let mut metadata = all_unknown();
+        metadata.aliases.absence_confirmed_at = Some(10);
+        metadata.encryption.absence_confirmed_at = Some(10);
+        metadata.server_acl.absence_confirmed_at = Some(10);
+        let rendered = lines(&loaded(Some(metadata.clone()), None, None));
+        assert!(line(&rendered, "Canonical alias:").contains("confirmed absent"));
+        assert!(!line(&rendered, "Canonical alias:").contains("#summary"));
+        assert!(line(&rendered, "Encryption:").starts_with("Encryption: not encrypted"));
+        assert!(line(&rendered, "Server ACL:").contains("confirmed absent"));
+
+        metadata.encryption.redacted = Some(true);
+        assert_eq!(encryption_line(&metadata), "Encryption: redacted");
+        metadata.encryption.redacted = None;
+        metadata.encryption.status = SnapshotStatus::Invalid;
+        assert_eq!(
+            encryption_line(&metadata),
+            "Encryption: unavailable (malformed state)"
+        );
+        metadata.encryption.status = SnapshotStatus::Unknown;
+        metadata.encryption.absence_confirmed_at = None;
+        assert_eq!(
+            encryption_line(&metadata),
+            "Encryption: no encryption state cached"
+        );
+    }
+
+    #[test]
+    fn absence_checks_report_progress_and_failure_without_inventing_defaults() {
+        let mut metadata = all_unknown();
+        metadata.encryption.absence_check = Some(DetailRefreshDto {
+            state: DetailRefreshState::Queued,
+            ..Default::default()
+        });
+        let queued = encryption_line(&metadata);
+        assert!(queued.contains("no encryption state cached"));
+        assert!(queued.contains("refresh queued"));
+        let refresh = metadata.encryption.absence_check.as_mut().unwrap();
+        refresh.state = DetailRefreshState::Idle;
+        refresh.failure = Some("rate_limited".to_owned());
+        let failed = encryption_line(&metadata);
+        assert!(failed.contains("no encryption state cached"));
+        assert!(failed.contains("couldn't refresh: rate limited"));
+        metadata.encryption.absence_confirmed_at = Some(10);
+        let confirmed = encryption_line(&metadata);
+        assert!(confirmed.contains("not encrypted"));
+        assert!(confirmed.contains("couldn't refresh"));
+    }
+
+    #[test]
+    fn homeserver_details_keep_scope_value_freshness_and_refresh_separate() {
+        let details: RoomHomeserverDetailsDto = serde_json::from_value(json!({
+            "local_aliases": {
+                "status": "partial", "aliases": ["#local:example.com"],
+                "fetched_at": 10, "expires_at": 20,
+                "refresh": {"state": "running", "failure": "timeout", "next_attempt_at": 40}
+            },
+            "directory_visibility": {"status": "available", "visibility": "private"}
+        }))
+        .unwrap();
+        let rendered = homeserver_detail_line(
+            "Aliases on your homeserver",
+            &details.local_aliases,
+            details
+                .local_aliases
+                .content
+                .aliases
+                .as_ref()
+                .map(|aliases| aliases.join(", ")),
+            TimeFormat::H24,
+            30,
+        );
+        for phrase in [
+            "#local:example.com",
+            "some entries withheld",
+            "may be out of date",
+            "couldn't refresh: timed out",
+            "refreshing…",
+            "retry no earlier than",
+        ] {
+            assert!(rendered.contains(phrase), "{rendered}");
+        }
+        let lines = homeserver_lines(&View::Loaded(&details), TimeFormat::H24);
+        assert_eq!(
+            line(&lines, "Directory publication"),
+            "Directory publication on your homeserver: private"
+        );
+        assert!(!lines.iter().any(|line| line.contains("Advertised aliases")));
+    }
+
+    #[test]
+    fn every_homeserver_status_has_explicit_wording_and_only_values_show_aliases() {
+        for (status, phrase) in [
+            ("unknown", "unknown"),
+            ("available", "#local:example.com"),
+            ("partial", "some entries withheld"),
+            ("too_large", "answer too large"),
+            ("forbidden", "refused access"),
+            ("not_found", "not found"),
+            ("unsupported", "does not support"),
+            ("future_status", "unrecognized status"),
+        ] {
+            let detail: HomeserverDetailDto<crate::api::LocalAliasesContent> =
+                serde_json::from_value(
+                    json!({"status": status, "aliases": ["#local:example.com"]}),
+                )
+                .unwrap();
+            let text = homeserver_detail_line(
+                "Aliases",
+                &detail,
+                Some("#local:example.com".to_owned()),
+                TimeFormat::H24,
+                0,
+            );
+            assert!(text.contains(phrase), "{status}: {text}");
+            assert_eq!(
+                text.contains("#local:example.com"),
+                matches!(status, "available" | "partial")
+            );
+        }
+        let empty: HomeserverDetailDto<crate::api::LocalAliasesContent> =
+            serde_json::from_value(json!({"status": "available", "aliases": []})).unwrap();
+        let details = RoomHomeserverDetailsDto {
+            local_aliases: empty,
+            ..Default::default()
+        };
+        assert_eq!(
+            homeserver_lines(&View::Loaded(&details), TimeFormat::H24)[0],
+            "Aliases on your homeserver: none"
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_homeserver_denials_remove_old_values_but_http_failures_retain_them() {
+        let mut app = opened();
+        let now = Instant::now();
+        let details: RoomHomeserverDetailsDto = serde_json::from_value(json!({
+            "local_aliases": {"status": "available", "aliases": ["#secret:example.com"]},
+            "directory_visibility": {"status": "available", "visibility": "public"}
+        }))
+        .unwrap();
+        settle(&mut app, RoomInfoPart::Homeserver(Ok(details)), now);
+        app.note_room_details_changed(&key(), &[RoomDetailSource::HomeserverDetails], now);
+        settle(
+            &mut app,
+            RoomInfoPart::Homeserver(Err(ReadFailure::Failed)),
+            now,
+        );
+        let text = crate::ui::popup_room_info_lines(&app).join("\n");
+        assert!(text.contains("#secret:example.com"));
+        assert!(text.contains("Latest refresh failed"));
+        app.refresh_open_room_info(now);
+        let denied: RoomHomeserverDetailsDto = serde_json::from_value(json!({
+            "local_aliases": {"status": "forbidden", "aliases": null},
+            "directory_visibility": {"status": "not_found", "visibility": null}
+        }))
+        .unwrap();
+        settle(&mut app, RoomInfoPart::Homeserver(Ok(denied)), now);
+        let text = crate::ui::popup_room_info_lines(&app).join("\n");
+        assert!(!text.contains("#secret:example.com"));
+        assert!(text.contains("homeserver refused access"));
+    }
+
+    #[tokio::test]
+    async fn oversized_homeserver_details_are_refused_before_decoding() {
+        let (client, _server) = stub_axon(1, |_| {
+            format!(r#"{{"data":{{"padding":"{}"}}}}"#, "x".repeat(256 * 1024))
+        })
+        .await;
+        let result = client
+            .room_homeserver_details(Uuid::nil(), "!room:example.com")
+            .await;
+        assert!(
+            matches!(&result, Err(err) if err.to_string().contains("size limit")),
+            "{result:?}"
+        );
+    }
+
+    /// Unit tests drive real request/outcome state without depending on the
+    /// scheduler delivering loopback connection failures in a particular order.
     fn wire_room_info(app: &mut App) {
         let (tx, rx) = mpsc::unbounded_channel();
         app.room_info.tx = Some(tx);
         drop(rx);
     }
 
-    fn settle_room_info(app: &mut App, failure: Option<ReadFailure>, now: Instant) {
-        let state = app.room_info.state.as_ref().expect("a batch is open");
+    fn pending(state: &mut RoomInfoState, generation: u64) {
+        for source in Source::ALL {
+            state.refresh(source).request = Some(generation);
+        }
+    }
+
+    fn success(source: Source) -> RoomInfoPart {
+        match source {
+            Source::Metadata => RoomInfoPart::Metadata(Ok(Box::default())),
+            Source::Info => RoomInfoPart::Info(Ok(RoomInfoDto::default())),
+            Source::Homeserver => RoomInfoPart::Homeserver(Ok(RoomHomeserverDetailsDto::default())),
+            Source::Upgrade => RoomInfoPart::Upgrade(Ok(RoomUpgradeDto::default())),
+            Source::Members => RoomInfoPart::Members(Ok(Vec::new())),
+        }
+    }
+
+    fn settle(app: &mut App, part: RoomInfoPart, now: Instant) {
+        let source = part.source();
+        let state = app.room_info.state.as_mut().unwrap();
+        let generation = state
+            .refresh(source)
+            .request
+            .expect("source has an active read");
         let key = state.key.clone();
-        let generation = state.generation;
-        let metadata = match failure {
-            Some(failure) => RoomInfoPart::Metadata(Err(failure)),
-            None => RoomInfoPart::Metadata(Ok(Box::new(RoomMetadataDto::default()))),
-        };
-        for part in [
-            metadata,
-            RoomInfoPart::Info(Ok(RoomInfoDto::default())),
-            RoomInfoPart::Upgrade(Ok(RoomUpgradeDto::default())),
-            RoomInfoPart::Members(Ok(Vec::new())),
-        ] {
-            app.apply_room_info_outcome_at(
-                RoomInfoOutcome {
-                    key: key.clone(),
-                    generation,
-                    part,
-                },
+        app.apply_room_info_outcome_at(
+            RoomInfoOutcome {
+                key,
+                generation,
+                part,
+            },
+            now,
+        );
+    }
+
+    fn opened() -> App {
+        let mut app = app();
+        wire_room_info(&mut app);
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.request_room_info(key());
+        app
+    }
+
+    fn settle_all(app: &mut App, now: Instant) {
+        for source in Source::ALL {
+            settle(app, success(source), now);
+        }
+    }
+
+    fn frame(account_id: Uuid, room_id: &str, sources: Vec<RoomDetailSource>) -> LiveFrame {
+        LiveFrame::RoomDetails {
+            account_id,
+            payload: crate::api::RoomDetailsChangedDto {
+                room_id: room_id.to_owned(),
+                sources,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_sources_do_not_poll() {
+        let mut app = opened();
+        assert!(
+            crate::ui::popup_room_info_lines(&app).contains(&"Member list: loading…".to_owned())
+        );
+        let now = Instant::now();
+        settle_all(&mut app, now);
+        let generation = app.room_info.generation;
+        app.poll_open_room_info(now + Duration::from_secs(10000));
+        assert_eq!(app.room_info.generation, generation);
+        assert!(app.room_info.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn detail_frames_refresh_only_the_named_sources() {
+        let mut app = opened();
+        settle_all(&mut app, Instant::now());
+        app.handle_live_frame(frame(
+            Uuid::nil(),
+            &key().room_id,
+            vec![RoomDetailSource::Metadata, RoomDetailSource::Unrecognized],
+        ));
+        assert_eq!(app.room_info.reads.len(), 1);
+        assert!(app.room_info.reads.contains_key(&Source::Metadata));
+        app.handle_live_frame(frame(
+            Uuid::nil(),
+            &key().room_id,
+            vec![
+                RoomDetailSource::MemberCounts,
+                RoomDetailSource::HomeserverDetails,
+            ],
+        ));
+        assert_eq!(app.room_info.reads.len(), 3);
+        assert!(!app.room_info.reads.contains_key(&Source::Members));
+        assert!(!app.room_info.reads.contains_key(&Source::Upgrade));
+    }
+
+    #[tokio::test]
+    async fn other_accounts_rooms_unknown_sources_and_closed_views_do_not_fetch() {
+        let mut app = opened();
+        settle_all(&mut app, Instant::now());
+        let generation = app.room_info.generation;
+        app.handle_live_frame(frame(
+            Uuid::new_v4(),
+            &key().room_id,
+            vec![RoomDetailSource::Metadata],
+        ));
+        app.handle_live_frame(frame(
+            Uuid::nil(),
+            "!other:example.com",
+            vec![RoomDetailSource::Metadata],
+        ));
+        app.handle_live_frame(frame(
+            Uuid::nil(),
+            &key().room_id,
+            vec![RoomDetailSource::Unrecognized],
+        ));
+        app.mode = Mode::Compose;
+        app.handle_live_frame(frame(
+            Uuid::nil(),
+            &key().room_id,
+            vec![RoomDetailSource::Metadata],
+        ));
+        assert_eq!(app.room_info.generation, generation);
+    }
+
+    #[tokio::test]
+    async fn invalidations_coalesce_per_source_without_waiting_for_other_reads() {
+        let mut app = opened();
+        let now = Instant::now();
+        let initial = app.room_info.generation;
+        for _ in 0..20 {
+            app.handle_live_frame(frame(
+                Uuid::nil(),
+                &key().room_id,
+                vec![RoomDetailSource::Metadata],
+            ));
+        }
+        assert_eq!(app.room_info.generation, initial);
+        settle(&mut app, success(Source::Metadata), now);
+        assert_eq!(app.room_info.generation, initial + 1);
+        assert!(app.room_info.reads.contains_key(&Source::Members));
+        settle(&mut app, success(Source::Metadata), now);
+        assert_eq!(app.room_info.generation, initial + 1);
+        assert!(!app.room_info.reads.contains_key(&Source::Metadata));
+    }
+
+    #[tokio::test]
+    async fn failure_backoff_is_per_source_and_frames_cannot_bypass_it() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle(
+            &mut app,
+            RoomInfoPart::Members(Err(ReadFailure::Failed)),
+            now,
+        );
+        settle(&mut app, success(Source::Metadata), now);
+        app.note_room_details_changed(&key(), &[RoomDetailSource::Metadata], now);
+        assert!(app.room_info.reads.contains_key(&Source::Metadata));
+        assert!(!app.room_info.reads.contains_key(&Source::Members));
+        let mut now = now;
+        for gap in [30, 60, 120, 240, 240] {
+            let due = now + Duration::from_secs(gap);
+            assert_eq!(
+                app.room_info
+                    .state
+                    .as_ref()
+                    .unwrap()
+                    .members
+                    .refresh
+                    .retry_at,
+                Some(due)
+            );
+            app.poll_open_room_info(due - Duration::from_millis(1));
+            assert!(!app.room_info.reads.contains_key(&Source::Members));
+            app.poll_open_room_info(due);
+            assert!(app.room_info.reads.contains_key(&Source::Members));
+            now = due;
+            settle(
+                &mut app,
+                RoomInfoPart::Members(Err(ReadFailure::Failed)),
                 now,
             );
         }
     }
 
-    fn live_event(
-        room_id: &str,
-        event_type: &str,
-        state_key: Option<&str>,
-        redacted: bool,
-    ) -> EventDto {
-        EventDto {
-            account_id: Uuid::nil(),
-            event_id: format!("${event_type}:{room_id}"),
-            room_id: room_id.to_owned(),
-            sender: "@ada:example.com".to_owned(),
-            state_key: state_key.map(str::to_owned),
-            arrival_order: 1,
-            origin_ts: 1,
-            event_type: event_type.to_owned(),
-            content: None,
-            body: None,
-            relates_to: None,
-            redacted,
-            redaction_event_id: None,
-            reactions: None,
-            sender_trust: None,
+    #[tokio::test]
+    async fn metadata_notifications_respect_backoff_and_success_stops_retries() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle_all(&mut app, now);
+        app.note_room_details_changed(&key(), &[RoomDetailSource::Metadata], now);
+        settle(
+            &mut app,
+            RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
+            now,
+        );
+        for _ in 0..10 {
+            app.note_room_details_changed(&key(), &[RoomDetailSource::Metadata], now);
         }
-    }
-
-    #[tokio::test]
-    async fn open_room_info_polls_every_30_seconds() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
+        assert!(app.room_info.reads.is_empty());
+        app.poll_open_room_info(now + Duration::from_secs(30));
+        assert!(app.room_info.reads.contains_key(&Source::Metadata));
+        settle(
+            &mut app,
+            success(Source::Metadata),
+            now + Duration::from_secs(30),
+        );
         let generation = app.room_info.generation;
-        settle_room_info(&mut app, None, t0);
-        assert_eq!(app.room_info.failures, 0);
-        assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(30)));
-
-        app.poll_open_room_info(t0 + Duration::from_secs(29));
+        app.poll_open_room_info(now + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, generation);
-        app.poll_open_room_info(t0 + Duration::from_secs(30));
-        assert_eq!(app.room_info.generation, generation + 1);
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .metadata
+            .failure
+            .is_none());
     }
 
     #[tokio::test]
-    async fn a_due_poll_does_not_overlap_an_in_flight_batch() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
+    async fn unsupported_http_reads_wait_for_invalidation_or_reopen() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle(
+            &mut app,
+            RoomInfoPart::Homeserver(Err(ReadFailure::Unsupported)),
+            now,
+        );
         let generation = app.room_info.generation;
-        assert!(app.room_info.state.as_ref().unwrap().in_flight > 0);
-
-        app.poll_open_room_info(t0 + Duration::from_secs(30));
-        app.invalidate_open_room_info(t0 + Duration::from_secs(30));
-
+        app.poll_open_room_info(now + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, generation);
-        assert!(app.room_info.refresh_again);
-        assert_eq!(app.room_info.reads.len(), usize::from(ROOM_INFO_READS));
-    }
-
-    #[tokio::test]
-    async fn an_invalidation_during_a_batch_refreshes_once_when_it_settles() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        let generation = app.room_info.generation;
-        app.invalidate_open_room_info(t0 + Duration::from_secs(1));
-        assert_eq!(app.room_info.generation, generation);
-        assert!(app.room_info.refresh_again);
-
-        settle_room_info(&mut app, None, t0);
-        assert!(app.room_info.refresh_again);
-        app.poll_open_room_info(t0 + Duration::from_secs(1));
-
-        assert_eq!(app.room_info.generation, generation + 1);
-        assert!(!app.room_info.refresh_again);
-    }
-
-    #[tokio::test]
-    async fn transport_failures_back_off_and_a_clean_batch_restores_30_seconds() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        let mut started = t0;
-        for (nth, gap) in [60_u64, 120, 240, 240].into_iter().enumerate() {
-            settle_room_info(&mut app, Some(ReadFailure::Failed), started);
-            assert_eq!(
-                app.room_info.failures,
-                u8::try_from(nth + 1).unwrap().min(3)
-            );
-            assert_eq!(
-                app.room_info.next_poll,
-                Some(started + Duration::from_secs(gap))
-            );
-            let generation = app.room_info.generation;
-            app.poll_open_room_info(started + Duration::from_secs(gap) - Duration::from_secs(1));
-            assert_eq!(app.room_info.generation, generation);
-            app.poll_open_room_info(started + Duration::from_secs(gap));
-            assert_eq!(app.room_info.generation, generation + 1);
-            started += Duration::from_secs(gap);
-        }
-
-        settle_room_info(&mut app, None, started);
-        assert_eq!(app.room_info.failures, 0);
         assert_eq!(
-            app.room_info.next_poll,
-            Some(started + Duration::from_secs(30))
+            app.room_info.state.as_ref().unwrap().homeserver.failure,
+            Some(ReadFailure::Unsupported)
         );
     }
 
     #[tokio::test]
-    async fn an_unsupported_read_does_not_lengthen_the_poll() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, Some(ReadFailure::Unsupported), t0);
-
-        assert_eq!(app.room_info.failures, 0);
-        assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(30)));
-        let generation = app.room_info.generation;
-        app.poll_open_room_info(t0 + Duration::from_secs(30));
-        assert_eq!(app.room_info.generation, generation + 1);
+    async fn closing_cancels_all_sources_and_rejects_late_outcomes() {
+        let mut app = opened();
+        let generation = app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .metadata
+            .refresh
+            .request
+            .unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        assert!(app.room_info.reads.is_empty());
+        app.apply_room_info_outcome(RoomInfoOutcome {
+            key: key(),
+            generation,
+            part: success(Source::Metadata),
+        });
+        assert!(app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .metadata
+            .value
+            .is_none());
+        let previous = app.room_info.generation;
+        app.poll_open_room_info(Instant::now() + Duration::from_secs(10000));
+        assert_eq!(app.room_info.generation, previous);
     }
 
     #[tokio::test]
-    async fn closing_the_popup_cancels_the_in_flight_batch() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        let generation = app.room_info.generation;
-        let key = app.room_info.state.as_ref().unwrap().key.clone();
-
-        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
-
-        assert_eq!(app.mode, Mode::Compose);
-        assert!(app.room_info.reads.is_empty());
-        assert!(app.room_info.generation > generation);
-        assert!(app.room_info.next_poll.is_none());
-        let cancelled = app.room_info.generation;
+    async fn switching_rooms_under_an_open_popup_drops_old_requests_and_filters() {
+        let mut app = opened();
+        let generation = app
+            .room_info
+            .state
+            .as_ref()
+            .unwrap()
+            .metadata
+            .refresh
+            .request
+            .unwrap();
+        app.room_info.state.as_mut().unwrap().member_filter = "ada".to_owned();
+        app.popup_scroll = 10;
+        let mut other = room();
+        other.account_id = Uuid::new_v4();
+        app.rooms.rooms.push(other.clone());
+        app.rooms.selected = Some(1);
+        app.poll_open_room_info(Instant::now());
         app.apply_room_info_outcome(RoomInfoOutcome {
-            key,
+            key: key(),
             generation,
-            part: RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
+            part: success(Source::Metadata),
         });
         let state = app.room_info.state.as_ref().unwrap();
+        assert_eq!(state.key, RoomKey::from(&other));
         assert!(state.metadata.value.is_none());
-        assert!(state.metadata.failure.is_none());
-        app.poll_open_room_info(t0 + Duration::from_secs(60));
-        assert_eq!(app.room_info.generation, cancelled);
-    }
-
-    #[tokio::test]
-    async fn leaving_the_popup_without_esc_cancels_on_the_next_poll() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        let generation = app.room_info.generation;
-        app.mode = Mode::MessageList;
-
-        app.poll_open_room_info(t0);
-
-        assert!(app.room_info.reads.is_empty());
-        assert!(app.room_info.generation > generation);
-        let cancelled = app.room_info.generation;
-        app.poll_open_room_info(t0 + Duration::from_secs(60));
-        assert_eq!(app.room_info.generation, cancelled);
-    }
-
-    #[tokio::test]
-    async fn reconnect_and_live_state_refresh_the_open_popup() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, None, t0);
-        let far = Some(t0 + Duration::from_secs(10_000));
-        app.room_info.next_poll = far;
-        let idle = app.room_info.generation;
-
-        app.handle_live_frame(LiveFrame::Connected);
-        assert_eq!(app.room_info.generation, idle + 1);
-        settle_room_info(&mut app, None, t0);
-
-        app.mode = Mode::Compose;
-        let idle = app.room_info.generation;
-        app.handle_live_frame(LiveFrame::Connected);
-        assert_eq!(app.room_info.generation, idle);
-
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        app.room_info.next_poll = far;
-        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
-            "!room:example.com",
-            "m.room.message",
-            None,
-            false,
-        ))));
-        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
-            "!room:example.com",
-            "m.room.message",
-            None,
-            true,
-        ))));
-        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
-            "!other:example.com",
-            "m.room.encryption",
-            Some(""),
-            false,
-        ))));
-        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
-            "!room:example.com",
-            "m.room.name",
-            Some(""),
-            false,
-        ))));
-        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
-            "!room:example.com",
-            "m.room.topic",
-            Some(""),
-            false,
-        ))));
-        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
-            "!room:example.com",
-            "m.room.member",
-            Some("@ada:example.com"),
-            false,
-        ))));
-        assert_eq!(app.room_info.generation, idle);
-        assert!(app.room_info.member_refresh_at.is_some());
-
-        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
-            "!room:example.com",
-            "m.room.encryption",
-            Some(""),
-            false,
-        ))));
-        assert_eq!(app.room_info.generation, idle + 1);
-        settle_room_info(&mut app, None, t0);
-        app.room_info.next_poll = far;
-        let idle = app.room_info.generation;
-
-        app.handle_live_frame(LiveFrame::Timeline(Box::new(live_event(
-            "!room:example.com",
-            "m.room.redaction",
-            None,
-            false,
-        ))));
-        assert_eq!(app.room_info.generation, idle + 1);
-    }
-
-    #[tokio::test]
-    async fn a_same_room_refresh_keeps_the_filter_and_the_scroll() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, None, t0);
-        {
-            let state = app.room_info.state.as_mut().unwrap();
-            state.member_filter = "ada".to_owned();
-            state.member_filter_editing = true;
-            store_member_lines(state);
-        }
-        app.popup_scroll = 12;
-
-        app.poll_open_room_info(t0 + Duration::from_secs(30));
-        settle_room_info(&mut app, None, t0 + Duration::from_secs(30));
-
-        let state = app.room_info.state.as_ref().unwrap();
-        assert_eq!(state.member_filter, "ada");
-        assert!(state.member_filter_editing);
-        assert_eq!(app.popup_scroll, 12);
-        assert!(!app.reveal_room_info_members);
-    }
-
-    #[tokio::test]
-    async fn a_selected_room_change_fetches_the_new_room() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, None, t0);
-        {
-            let state = app.room_info.state.as_mut().unwrap();
-            state.metadata.value = Some(full_metadata());
-            state.member_filter = "ada".to_owned();
-            state.member_filter_editing = true;
-        }
-        app.popup_scroll = 9;
-        let mut other = room();
-        other.room_id = "!other:example.com".to_owned();
-        other.name = Some("Other".to_owned());
-        app.rooms.rooms.push(other);
-        app.rooms.selected = Some(1);
-        let generation = app.room_info.generation;
-
-        app.poll_open_room_info(t0 + Duration::from_secs(1));
-
-        let state = app.room_info.state.as_ref().unwrap();
-        assert_eq!(state.key.room_id, "!other:example.com");
         assert!(state.member_filter.is_empty());
-        assert!(!state.member_filter_editing);
-        assert!(state.in_flight > 0);
-        assert!(app.room_info.generation > generation);
         assert_eq!(app.popup_scroll, 0);
-        assert!(!app.reveal_room_info_members);
-        let lines = crate::ui::popup_room_info_lines(&app);
-        assert!(lines.iter().any(|line| line.contains("loading")));
-        assert!(!lines.iter().any(|line| line.contains("Room version:")));
+        assert_eq!(app.room_info.reads.len(), Source::ALL.len());
     }
 
     #[tokio::test]
-    async fn a_slow_batch_polls_from_when_it_settles() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        let generation = app.room_info.generation;
-        let settled = t0 + Duration::from_secs(40);
-
-        settle_room_info(&mut app, None, settled);
-
-        assert_eq!(
-            app.room_info.next_poll,
-            Some(settled + Duration::from_secs(30))
-        );
-        app.poll_open_room_info(settled + Duration::from_secs(29));
-        assert_eq!(app.room_info.generation, generation);
-        app.poll_open_room_info(settled + Duration::from_secs(30));
-        assert_eq!(app.room_info.generation, generation + 1);
+    async fn leaving_the_popup_without_esc_cancels_on_tick() {
+        let mut app = opened();
+        app.mode = Mode::MessageList;
+        app.poll_open_room_info(Instant::now());
+        assert!(app.room_info.reads.is_empty());
+        assert!(app
+            .room_info
+            .state
+            .as_mut()
+            .unwrap()
+            .metadata
+            .refresh
+            .request
+            .is_none());
     }
 
     #[tokio::test]
-    async fn a_slow_failure_still_backs_off_from_when_it_settles() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        let settled = t0 + Duration::from_secs(60);
-        let generation = app.room_info.generation;
-
-        settle_room_info(&mut app, Some(ReadFailure::Failed), settled);
-
-        assert_eq!(app.room_info.failures, 1);
-        assert_eq!(
-            app.room_info.next_poll,
-            Some(settled + Duration::from_secs(60))
-        );
-        app.poll_open_room_info(settled + Duration::from_secs(59));
-        assert_eq!(app.room_info.generation, generation);
-        app.poll_open_room_info(settled + Duration::from_secs(60));
-        assert_eq!(app.room_info.generation, generation + 1);
-    }
-
-    #[tokio::test]
-    async fn a_live_invalidation_waits_out_a_failure_backoff() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        app.invalidate_open_room_info(t0 + Duration::from_secs(1));
-        settle_room_info(&mut app, Some(ReadFailure::Failed), t0);
-        assert!(app.room_info.refresh_again);
-        assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(60)));
-        let generation = app.room_info.generation;
-
-        app.poll_open_room_info(t0 + Duration::from_secs(1));
-        app.invalidate_open_room_info(t0 + Duration::from_secs(10));
-        app.poll_open_room_info(t0 + Duration::from_secs(10));
-        assert_eq!(app.room_info.generation, generation);
-
-        app.poll_open_room_info(t0 + Duration::from_secs(60));
-        assert_eq!(app.room_info.generation, generation + 1);
-    }
-
-    #[tokio::test]
-    async fn membership_changes_refresh_once_after_they_pause() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, None, t0);
-        let generation = app.room_info.generation;
-        let room_key = key();
-
-        app.note_room_info_timeline_event(&room_key, "m.room.member", t0 + Duration::from_secs(1));
-        app.note_room_info_timeline_event(&room_key, "m.room.name", t0 + Duration::from_secs(1));
-        app.note_room_info_timeline_event(&room_key, "m.room.topic", t0 + Duration::from_secs(1));
-        assert_eq!(app.room_info.generation, generation);
-        app.note_room_info_timeline_event(&room_key, "m.room.member", t0 + Duration::from_secs(2));
-        assert_eq!(
-            app.room_info.member_refresh_at,
-            Some(t0 + Duration::from_secs(4))
-        );
-
-        app.poll_open_room_info(t0 + Duration::from_secs(3));
-        assert_eq!(app.room_info.generation, generation);
-        app.poll_open_room_info(t0 + Duration::from_secs(4));
-        assert_eq!(app.room_info.generation, generation + 1);
-    }
-
-    #[tokio::test]
-    async fn a_membership_burst_cannot_defer_its_refresh_past_the_cap() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, None, t0);
-        let generation = app.room_info.generation;
-        let room_key = key();
-
-        app.note_room_info_timeline_event(&room_key, "m.room.member", t0);
-        app.note_room_info_timeline_event(
-            &room_key,
-            "m.room.member",
-            t0 + ROOM_INFO_MEMBER_DEBOUNCE_CAP + Duration::from_secs(5),
-        );
-
-        assert_eq!(
-            app.room_info.member_refresh_at,
-            Some(t0 + ROOM_INFO_MEMBER_DEBOUNCE_CAP)
-        );
-        app.poll_open_room_info(t0 + ROOM_INFO_MEMBER_DEBOUNCE_CAP - Duration::from_secs(1));
-        assert_eq!(app.room_info.generation, generation);
-        app.poll_open_room_info(t0 + ROOM_INFO_MEMBER_DEBOUNCE_CAP);
-        assert_eq!(app.room_info.generation, generation + 1);
-    }
-
-    #[tokio::test]
-    async fn one_reconnect_skips_a_failure_backoff_and_the_next_waits() {
-        let mut app = app();
-        wire_room_info(&mut app);
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
-        let t0 = Instant::now();
-        app.invalidate_open_room_info(t0);
-        settle_room_info(&mut app, Some(ReadFailure::Failed), t0);
-        let generation = app.room_info.generation;
-        assert_eq!(app.room_info.next_poll, Some(t0 + Duration::from_secs(60)));
-
-        app.note_room_info_reconnect(t0 + Duration::from_secs(5));
-        assert_eq!(app.room_info.generation, generation + 1);
-        settle_room_info(
+    async fn reconnect_refreshes_all_sources_and_only_once_bypasses_each_failure_window() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle_all(&mut app, now);
+        app.handle_live_frame(LiveFrame::Connected);
+        assert_eq!(app.room_info.reads.len(), Source::ALL.len());
+        settle_all(&mut app, now);
+        app.note_room_details_changed(&key(), &[RoomDetailSource::Metadata], now);
+        settle(
             &mut app,
-            Some(ReadFailure::Failed),
-            t0 + Duration::from_secs(5),
+            RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
+            now,
         );
-        let generation = app.room_info.generation;
+        app.note_room_info_reconnect(now + Duration::from_secs(1));
+        assert!(app.room_info.reads.contains_key(&Source::Metadata));
+        settle(
+            &mut app,
+            RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
+            now + Duration::from_secs(1),
+        );
+        app.note_room_info_reconnect(now + Duration::from_secs(2));
+        assert!(!app.room_info.reads.contains_key(&Source::Metadata));
+        assert!(app.room_info.reads.contains_key(&Source::Info));
+    }
 
-        app.note_room_info_reconnect(t0 + Duration::from_secs(6));
-        app.invalidate_open_room_info(t0 + Duration::from_secs(7));
-        assert_eq!(app.room_info.generation, generation);
+    #[tokio::test]
+    async fn explicit_refresh_bypasses_backoff_and_retains_filter_and_scroll() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle_all(&mut app, now);
+        app.room_info.state.as_mut().unwrap().member_filter = "ada".to_owned();
+        app.popup_scroll = 4;
+        app.note_room_details_changed(&key(), &[RoomDetailSource::Metadata], now);
+        settle(
+            &mut app,
+            RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
+            now,
+        );
+        app.refresh_lists();
+        assert!(app.room_info.reads.contains_key(&Source::Metadata));
+        assert_eq!(app.room_info.state.as_ref().unwrap().member_filter, "ada");
+        assert_eq!(app.popup_scroll, 4);
+    }
 
-        app.poll_open_room_info(t0 + Duration::from_secs(5) + Duration::from_secs(120));
-        assert_eq!(app.room_info.generation, generation + 1);
+    #[tokio::test]
+    async fn member_changes_debounce_without_refreshing_metadata_or_counts() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle_all(&mut app, now);
+        app.note_room_info_timeline_event(&key(), "m.room.member", now);
+        app.note_room_info_timeline_event(&key(), "m.room.member", now + Duration::from_secs(1));
+        app.poll_open_room_info(now + Duration::from_secs(2));
+        assert!(app.room_info.reads.is_empty());
+        app.poll_open_room_info(now + Duration::from_secs(3));
+        assert_eq!(app.room_info.reads.len(), 1);
+        assert!(app.room_info.reads.contains_key(&Source::Members));
+    }
+
+    #[tokio::test]
+    async fn continuous_membership_changes_cannot_defer_the_read_past_ten_seconds() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle_all(&mut app, now);
+        for second in 0..10 {
+            app.note_room_info_timeline_event(
+                &key(),
+                "m.room.member",
+                now + Duration::from_secs(second),
+            );
+        }
+        app.poll_open_room_info(now + Duration::from_secs(10));
+        assert!(app.room_info.reads.contains_key(&Source::Members));
+    }
+
+    #[tokio::test]
+    async fn timeline_state_does_not_duplicate_metadata_or_count_notifications() {
+        let mut app = opened();
+        let now = Instant::now();
+        settle_all(&mut app, now);
+        for event in [
+            "m.room.encryption",
+            "m.room.power_levels",
+            "m.room.canonical_alias",
+            "m.room.message",
+        ] {
+            app.note_room_info_timeline_event(&key(), event, now);
+        }
+        assert!(app.room_info.reads.is_empty());
+        app.note_room_info_timeline_event(&key(), "m.room.tombstone", now);
+        assert_eq!(app.room_info.reads.len(), 1);
+        assert!(app.room_info.reads.contains_key(&Source::Upgrade));
+        app.note_room_info_timeline_event(&key(), "m.room.redaction", now);
+        app.poll_open_room_info(now + Duration::from_secs(2));
+        assert!(app.room_info.reads.contains_key(&Source::Members));
+        assert!(!app.room_info.reads.contains_key(&Source::Metadata));
     }
 }
