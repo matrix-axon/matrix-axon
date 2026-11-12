@@ -3836,13 +3836,29 @@ span.composer-attachment-thumb {
      sender's baseline (and the avatar next to it) down by a few pixels. */
   .event-head {
     align-items: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     min-height: 1.75rem;
+  }
+
+  /* The header is one line. Wrapping let the action bar drop to a second line
+     whenever name + time + "(edited)" + bar overflowed (an edited message, a
+     long display name), leaving a blank gap above the body. Everything but the
+     name keeps its width and the name gives way with its ellipsis. */
+  .event-head > .edited-marker,
+  .event-head > .event-actions {
+    flex: none;
+    white-space: nowrap;
+  }
+
+  /* Fallback for very narrow phones, where even a truncated name cannot make
+     room: the open bar takes priority over the edit marker. */
+  .event-row.actions-open .event-head > .edited-marker {
+    display: none;
   }
 
   .event-actions {
     max-width: 100%;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 0.1rem;
   }
 
