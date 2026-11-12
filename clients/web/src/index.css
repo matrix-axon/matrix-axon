@@ -3842,8 +3842,9 @@ span.composer-attachment-thumb {
 
   /* The header is one line. Wrapping let the action bar drop to a second line
      whenever name + time + "(edited)" + bar overflowed (an edited message, a
-     long display name), leaving a blank gap above the body. Everything but the
-     name keeps its width and the name gives way with its ellipsis. */
+     long display name), leaving a blank gap above the body. Instead nothing but
+     the name is allowed to shrink, and it gives way with its ellipsis. (The
+     time is already "flex: none" further up.) */
   .event-head > .edited-marker,
   .event-head > .event-actions {
     flex: none;
@@ -3871,6 +3872,21 @@ span.composer-attachment-thumb {
   .event-row.actions-open .event-actions {
     display: inline-flex;
     opacity: 1;
+  }
+
+  /* Last resort, once the name has collapsed to nothing: at 320px, with the
+     delete confirmation open, the time plus six buttons are wider than the row.
+     Cap the bar at what is left after the time and the gaps (about 4.75rem) so
+     it wraps its own buttons, right aligned, instead of overflowing the
+     viewport. A shrinkable bar is no use here: flex shrinks in proportion to
+     size, so it wraps while the name still has room. Only at this width, where
+     five buttons still fit on one line. */
+  @media (max-width: 22rem) {
+    .event-head > .event-actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      max-width: calc(100% - 4.75rem);
+    }
   }
 
   .event-actions .event-action-button {
