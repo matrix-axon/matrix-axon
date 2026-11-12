@@ -179,6 +179,7 @@ shows it.
   An open popup refreshes each metadata/count/homeserver source on its `room_details.changed` notification, and all five reads on reconnect or explicit refresh.
   Membership and upgrade reads retain timeline triggers; successful sources no longer poll.
   Homeserver refresh failures retain stale answers, and known-absence confirmations are distinguished from unknown state.
+  Restricted join conditions prefer the same account's known canonical aliases over room IDs.
   The list is not a complete roster (#659), and no pilot scene opens the popup, so the row, the filter, and the refresh stay not covered.
 - **User information on the web.** Tapping a timeline sender opens the panel.
   No demo scene does that, so both web columns stay not covered.

@@ -56,6 +56,8 @@ On servers without notifications, snapshots still refresh on reopen, reconnect, 
 A confirmed absence overrides a canonical alias from an older room summary.
 Only confirmed absence of encryption permits the label "not encrypted"; redacted or malformed state never does.
 Other absent state is labeled as confirmed absent without manufacturing configured values or permissions.
+Restricted join-rule membership conditions use the same account's known canonical aliases, including rooms hidden by sidebar filters, and retain room IDs when no nonblank alias is known.
+The formatter reads current room summaries so alias changes and removals apply without another metadata read; it performs no extra discovery requests.
 `absence_check` reports refresh progress or failure independently of the previous confirmation.
 An otherwise unknown server ACL does not add a row for an empty idle check; a confirmation, active check, or failure makes the row useful.
 

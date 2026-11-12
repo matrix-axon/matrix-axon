@@ -221,6 +221,7 @@ Room information opens immediately, and its five reads fill in independently.
 Directory publication is scoped to that same homeserver.
 A stale homeserver answer stays visible with its last-answer time, refresh progress, and any failure or retry deadline.
 An unknown encryption snapshot stays unknown; only a homeserver-confirmed absence reads "not encrypted".
+Restricted join rules name their required rooms by canonical alias when known for the same account, falling back to room IDs otherwise.
 An open popup refreshes metadata, member counts, and homeserver details on their `room_details.changed` notifications, and all sources on reconnect or the configured refresh shortcut.
 Membership changes refresh the loaded roster after a short debounce; tombstones and redactions refresh the upgrade links.
 Successful reads do not poll.

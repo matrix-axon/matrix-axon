@@ -1007,7 +1007,11 @@ fn encryption_line(metadata: &RoomMetadataDto) -> String {
     line
 }
 
-fn join_rule_line(snapshot: &MetadataSnapshot<RoomJoinRulesContent>) -> String {
+fn join_rule_line(
+    snapshot: &MetadataSnapshot<RoomJoinRulesContent>,
+    account_id: uuid::Uuid,
+    rooms: &[RoomDto],
+) -> String {
     let Some(content) = &snapshot.content else {
         return format!("Join rule: {}", no_content_phrase(snapshot));
     };
@@ -1021,7 +1025,13 @@ fn join_rule_line(snapshot: &MetadataSnapshot<RoomJoinRulesContent>) -> String {
         .flatten()
         .map(|condition| match &condition.room_id {
             Some(room_id) if condition.condition_type == "m.room_membership" => {
-                format!("members of {room_id}")
+                let label = rooms
+                    .iter()
+                    .find(|room| room.account_id == account_id && room.room_id == *room_id)
+                    .and_then(|room| room.canonical_alias.as_deref())
+                    .filter(|alias| !alias.trim().is_empty())
+                    .unwrap_or(room_id);
+                format!("members of {label}")
             }
             _ => condition.condition_type.clone(),
         })
@@ -1376,6 +1386,7 @@ pub(crate) fn detail_lines(
     room: &RoomDto,
     state: Option<&RoomInfoState>,
     time_format: TimeFormat,
+    rooms: &[RoomDto],
 ) -> Vec<String> {
     // The cache holds one room; ignore it if the selection has moved on.
     let state = state.filter(|state| state.key == RoomKey::from(room));
@@ -1392,7 +1403,7 @@ pub(crate) fn detail_lines(
     match &metadata {
         View::Loaded(metadata) => {
             lines.push(encryption_line(metadata));
-            lines.push(join_rule_line(&metadata.join_rules));
+            lines.push(join_rule_line(&metadata.join_rules, room.account_id, rooms));
             lines.push(format!(
                 "History visibility: {}",
                 single_field(
@@ -1913,7 +1924,7 @@ mod tests {
         LiveFrame, RoomInfoDto, RoomMemberCountsDto, RoomMetadataDto, RoomPredecessorContent,
         RoomUpgradeDto,
     };
-    use crate::app::{Mode, PopupKind};
+    use crate::app::{Mode, PopupKind, RoomFilter};
     use crate::config::{KeyBinding, TuiConfig};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
@@ -2059,7 +2070,7 @@ mod tests {
     }
 
     fn lines(state: &RoomInfoState) -> Vec<String> {
-        detail_lines(&room(), Some(state), TimeFormat::H24)
+        detail_lines(&room(), Some(state), TimeFormat::H24, &[])
     }
 
     fn line<'a>(lines: &'a [String], prefix: &str) -> &'a str {
@@ -2067,6 +2078,77 @@ mod tests {
             .iter()
             .find(|line| line.starts_with(prefix))
             .unwrap_or_else(|| panic!("no line starting {prefix:?} in {lines:#?}"))
+    }
+
+    #[test]
+    fn restricted_join_conditions_use_same_account_aliases_and_follow_changes() {
+        let mut app = app();
+        app.room_info.state = Some(loaded(Some(full_metadata()), None, None));
+        let mut parent = room();
+        parent.room_id = "!space:example.com".to_owned();
+        parent.name = Some("A friendly space name".to_owned());
+        parent.canonical_alias = Some("#access:example.com".to_owned());
+        let mut foreign = parent.clone();
+        foreign.account_id = Uuid::new_v4();
+        foreign.canonical_alias = Some("#other-account:example.com".to_owned());
+        // The other account's row comes first, and the parent need not be
+        // visible under the current room filter to supply its alias.
+        app.rooms.rooms.extend([foreign, parent]);
+        app.room_filter = RoomFilter::Name("ops".to_owned());
+        assert_eq!(app.visible_room_indices(), vec![0]);
+        let rendered = crate::ui::popup_room_info_lines(&app);
+        assert_eq!(
+            line(&rendered, "Join rule:"),
+            "Join rule: restricted (members of #access:example.com; org.example.custom)"
+        );
+
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(serde_json::from_value(json!({
+            "account_id": Uuid::nil(), "room_id": "!space:example.com", "event_id": "$alias:example.com",
+            "sender": "@me:example.com", "type": "m.room.canonical_alias", "state_key": "",
+            "arrival_order": 1, "origin_ts": 1, "redacted": false,
+            "content": {"alias": "#renamed:example.com"}
+        })).unwrap())));
+        let rendered = crate::ui::popup_room_info_lines(&app);
+        assert_eq!(
+            line(&rendered, "Join rule:"),
+            "Join rule: restricted (members of #renamed:example.com; org.example.custom)"
+        );
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(serde_json::from_value(json!({
+            "account_id": Uuid::nil(), "room_id": "!space:example.com", "event_id": "$remove-alias:example.com",
+            "sender": "@me:example.com", "type": "m.room.canonical_alias", "state_key": "",
+            "arrival_order": 2, "origin_ts": 2, "redacted": false, "content": {}
+        })).unwrap())));
+        let rendered = crate::ui::popup_room_info_lines(&app);
+        assert_eq!(
+            line(&rendered, "Join rule:"),
+            "Join rule: restricted (members of !space:example.com; org.example.custom)"
+        );
+    }
+
+    #[test]
+    fn restricted_join_conditions_keep_ids_when_the_alias_is_missing_or_blank() {
+        let mut app = app();
+        app.room_info.state = Some(loaded(Some(full_metadata()), None, None));
+        let mut parent = room();
+        parent.room_id = "!space:example.com".to_owned();
+        app.rooms.rooms.push(parent);
+        for alias in [None, Some(""), Some(" \t")] {
+            app.rooms.rooms.last_mut().unwrap().canonical_alias = alias.map(str::to_owned);
+            let rendered = crate::ui::popup_room_info_lines(&app);
+            assert_eq!(
+                line(&rendered, "Join rule:"),
+                "Join rule: restricted (members of !space:example.com; org.example.custom)"
+            );
+        }
+        // A canonical alias known only to a different account is not used.
+        let parent = app.rooms.rooms.last_mut().unwrap();
+        parent.account_id = Uuid::new_v4();
+        parent.canonical_alias = Some("#foreign:example.com".to_owned());
+        let rendered = crate::ui::popup_room_info_lines(&app);
+        assert_eq!(
+            line(&rendered, "Join rule:"),
+            "Join rule: restricted (members of !space:example.com; org.example.custom)"
+        );
     }
 
     #[test]
@@ -2321,7 +2403,7 @@ mod tests {
             "Canonical alias: #summary:example.com"
         );
 
-        let never = detail_lines(&room(), None, TimeFormat::H24);
+        let never = detail_lines(&room(), None, TimeFormat::H24, &[]);
         assert_eq!(line(&never, "Members:"), "Members: not loaded");
     }
 

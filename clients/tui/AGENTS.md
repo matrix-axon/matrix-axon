@@ -37,6 +37,8 @@
   Keep the wording honest: an unknown snapshot without `absence_confirmed_at` is never rendered as unset or unencrypted, null counts are never zero, and power levels are labeled as configured values (not permissions).
   A confirmed absence overrides a stale canonical-alias summary; redacted or invalid state never acquires an absence default.
   Keep "Advertised aliases" separate from "Aliases on your homeserver" and "Directory publication on your homeserver".
+  Restricted join-rule membership conditions use the referenced room's canonical alias from the same account's room list when nonblank, falling back to its room ID.
+  Resolve against all known rooms for that account, including ones hidden by the current filter; do not use another account's alias or issue extra discovery reads.
   Homeserver details retain stale values beside refresh progress, failures, and the next retry time; a conclusive denial removes the old value.
   The member list comes from the loaded `/members` projection, grouped by membership, with each person's configured power level rather than a resolved role.
   Say when the joined count exceeds that list, and never present the list as complete (#659).
