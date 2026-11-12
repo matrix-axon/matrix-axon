@@ -23,19 +23,31 @@ fn new_room() -> String {
     format!("!preview-{}:localhost", Uuid::new_v4())
 }
 
+/// The parts of an event that vary between tests; the sender is always
+/// [`SENDER`]. Unset fields are absent from the event.
+#[derive(Default)]
+struct TestEvent<'a> {
+    event_type: &'a str,
+    content: Value,
+    state_key: Option<&'a str>,
+    relates_to: Option<Value>,
+    redacts: Option<&'a str>,
+}
+
 /// Insert any event. `body` goes to `decrypted_body_text`, as ingestion lifts
 /// `content.body`; `state_key` lands in `raw_event`, where the timeline reads it.
-#[allow(clippy::too_many_arguments)]
 async fn insert_event(
     store: &Store,
     account_id: Uuid,
     room_id: &str,
     origin_ts: i64,
-    event_type: &str,
-    content: Value,
-    state_key: Option<&str>,
-    relates_to: Option<Value>,
-    redacts: Option<&str>,
+    TestEvent {
+        event_type,
+        content,
+        state_key,
+        relates_to,
+        redacts,
+    }: TestEvent<'_>,
 ) -> String {
     let event_id = format!("$evt-{}:localhost", Uuid::new_v4());
     let body = content
@@ -171,11 +183,14 @@ async fn skips_events_without_a_previewable_body() {
         account_id,
         &room_id,
         next(),
-        "m.reaction",
-        json!({}),
-        None,
-        Some(json!({ "rel_type": "m.annotation", "event_id": message, "key": "👍" })),
-        None,
+        TestEvent {
+            event_type: "m.reaction",
+            content: json!({}),
+            relates_to: Some(
+                json!({ "rel_type": "m.annotation", "event_id": message, "key": "👍" }),
+            ),
+            ..TestEvent::default()
+        },
     )
     .await;
     // A membership change: a state event.
@@ -184,11 +199,12 @@ async fn skips_events_without_a_previewable_body() {
         account_id,
         &room_id,
         next(),
-        "m.room.member",
-        json!({ "membership": "join" }),
-        Some("@bob:localhost"),
-        None,
-        None,
+        TestEvent {
+            event_type: "m.room.member",
+            content: json!({ "membership": "join" }),
+            state_key: Some("@bob:localhost"),
+            ..TestEvent::default()
+        },
     )
     .await;
     // An undecryptable event: no content, no body.
@@ -217,11 +233,12 @@ async fn skips_events_without_a_previewable_body() {
         account_id,
         &room_id,
         next(),
-        "m.room.message",
-        json!({ "msgtype": "m.text", "body": "state, not a message" }),
-        Some(""),
-        None,
-        None,
+        TestEvent {
+            event_type: "m.room.message",
+            content: json!({ "msgtype": "m.text", "body": "state, not a message" }),
+            state_key: Some(""),
+            ..TestEvent::default()
+        },
     )
     .await;
     // A sticker: not an `m.room.message`.
@@ -230,11 +247,11 @@ async fn skips_events_without_a_previewable_body() {
         account_id,
         &room_id,
         next(),
-        "m.sticker",
-        json!({ "body": "a sticker" }),
-        None,
-        None,
-        None,
+        TestEvent {
+            event_type: "m.sticker",
+            content: json!({ "body": "a sticker" }),
+            ..TestEvent::default()
+        },
     )
     .await;
 
@@ -262,16 +279,17 @@ async fn shows_the_latest_edit() {
             account_id,
             &room_id,
             ts,
-            "m.room.message",
-            json!({
-                "msgtype": "m.text",
-                "body": format!("* {body}"),
-                "m.new_content": { "msgtype": "m.text", "body": body },
-                "m.relates_to": { "rel_type": "m.replace", "event_id": original },
-            }),
-            None,
-            Some(json!({ "rel_type": "m.replace", "event_id": original })),
-            None,
+            TestEvent {
+                event_type: "m.room.message",
+                content: json!({
+                    "msgtype": "m.text",
+                    "body": format!("* {body}"),
+                    "m.new_content": { "msgtype": "m.text", "body": body },
+                    "m.relates_to": { "rel_type": "m.replace", "event_id": original },
+                }),
+                relates_to: Some(json!({ "rel_type": "m.replace", "event_id": original })),
+                ..TestEvent::default()
+            },
         )
         .await;
     }
@@ -303,11 +321,12 @@ async fn a_redacted_message_falls_back_to_the_one_before() {
         account_id,
         &room_id,
         BASE + 2,
-        "m.room.redaction",
-        json!({}),
-        None,
-        None,
-        Some(&doomed),
+        TestEvent {
+            event_type: "m.room.redaction",
+            content: json!({}),
+            redacts: Some(&doomed),
+            ..TestEvent::default()
+        },
     )
     .await;
 
@@ -335,11 +354,12 @@ async fn a_thread_reply_is_previewed() {
         account_id,
         &room_id,
         BASE + 1,
-        "m.room.message",
-        json!({ "msgtype": "m.text", "body": "in the thread" }),
-        None,
-        Some(json!({ "rel_type": "m.thread", "event_id": root })),
-        None,
+        TestEvent {
+            event_type: "m.room.message",
+            content: json!({ "msgtype": "m.text", "body": "in the thread" }),
+            relates_to: Some(json!({ "rel_type": "m.thread", "event_id": root })),
+            ..TestEvent::default()
+        },
     )
     .await;
 
@@ -373,11 +393,12 @@ async fn looks_back_exactly_the_scan_limit() {
                 account_id,
                 room,
                 BASE + 1 + i,
-                "m.room.member",
-                json!({ "membership": "join" }),
-                Some(&format!("@user{i}:localhost")),
-                None,
-                None,
+                TestEvent {
+                    event_type: "m.room.member",
+                    content: json!({ "membership": "join" }),
+                    state_key: Some(&format!("@user{i}:localhost")),
+                    ..TestEvent::default()
+                },
             )
             .await;
         }
@@ -440,11 +461,12 @@ async fn many_rooms_across_accounts_in_request_order() {
         first,
         &empty,
         BASE,
-        "m.room.create",
-        json!({ "room_version": "12" }),
-        Some(""),
-        None,
-        None,
+        TestEvent {
+            event_type: "m.room.create",
+            content: json!({ "room_version": "12" }),
+            state_key: Some(""),
+            ..TestEvent::default()
+        },
     )
     .await;
 
@@ -504,11 +526,12 @@ async fn folded_rows_do_not_use_up_the_scan() {
                         account_id,
                         &room_id,
                         ts,
-                        "m.reaction",
-                        json!({}),
-                        None,
-                        Some(relation),
-                        None,
+                        TestEvent {
+                            event_type: "m.reaction",
+                            content: json!({}),
+                            relates_to: Some(relation),
+                            ..TestEvent::default()
+                        },
                     )
                     .await
                 }
@@ -518,11 +541,12 @@ async fn folded_rows_do_not_use_up_the_scan() {
                         account_id,
                         &room_id,
                         ts,
-                        "m.room.redaction",
-                        json!({}),
-                        None,
-                        None,
-                        Some(&gone),
+                        TestEvent {
+                            event_type: "m.room.redaction",
+                            content: json!({}),
+                            redacts: Some(&gone),
+                            ..TestEvent::default()
+                        },
                     )
                     .await
                 }
@@ -538,11 +562,12 @@ async fn folded_rows_do_not_use_up_the_scan() {
                         account_id,
                         &room_id,
                         ts,
-                        "m.room.message",
-                        content,
-                        None,
-                        Some(relation),
-                        None,
+                        TestEvent {
+                            event_type: "m.room.message",
+                            content,
+                            relates_to: Some(relation),
+                            ..TestEvent::default()
+                        },
                     )
                     .await
                 }
