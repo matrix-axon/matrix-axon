@@ -2,7 +2,7 @@ import { computed, signal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
 import type { TimelineStoreCache } from '../stores/timeline-cache'
 import type { SendProgress } from '../stores/timeline'
-import { matchUrls } from '../html/linkify'
+import { serverBodyUrls } from '../html/linkify'
 import { nativePreviewLinks } from '../preview-links'
 import { previewPreflight, type PreviewInput } from './contract'
 import {
@@ -102,7 +102,7 @@ export function createIncomingShareStore(
       return flushingEdit.promise
     const promise = change((record) => {
       const text = draft.text ?? record.text
-      const urls = new Set(matchUrls(text).map((match) => match.url))
+      const urls = serverBodyUrls(text)
       return {
         ...record,
         version: 4,

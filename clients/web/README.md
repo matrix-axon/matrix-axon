@@ -108,6 +108,7 @@ A typed link is looked up about 400 ms after you finish it with a space or a new
 The ✕ on a card sends the message without that preview, and the link is not looked up again in that draft.
 Links in a restored draft get no card until you type or paste them again.
 With previews on, a link sent without a card carries the "no previews" marker (`m.url_previews: []`), so other apps do not preview it either.
+Links are recognized whatever the case of their `http://` or `https://`, so a capitalized first word such as `Https://…` still gets a card; the composer sends the scheme in lowercase, except inside code.
 The iOS extension also accepts single/multiple photos with an optional first-photo caption, bounded HEIC previews, and per-photo delivery recovery; signed-device photo acceptance remains pending.
 Formatted messages containing spoilers omit preview cards, even after the spoiler is revealed.
 Malformed or oversized preview metadata is ignored.

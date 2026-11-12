@@ -5,8 +5,15 @@
  * text even inside `formatted_body` and rely on the receiver to linkify.
  */
 
-/** A bare http(s) or matrix: URL; trailing sentence punctuation is trimmed after. */
-const URL_PATTERN = /(?:https?:\/\/|matrix:)[^\s<>"]+/g
+/**
+ * A bare http(s) or matrix: URL; trailing sentence punctuation is trimmed
+ * after. The http(s) scheme matches in any case, as RFC 3986 defines it,
+ * because a keyboard that capitalizes a sentence's first letter turns
+ * `https://` into `Https://`. `matrix:` stays lowercase.
+ */
+const URL_PATTERN = /(?:[hH][tT][tT][pP][sS]?:\/\/|matrix:)[^\s<>"]+/g
+/** A scheme only, as `URL_PATTERN` matched it. */
+const HTTP_SCHEME = /^https?:/i
 /** Punctuation that reads as sentence structure, not part of the URL. */
 const TRAILING_PUNCTUATION = /[.,;:!?)\]'"]+$/
 
@@ -26,12 +33,56 @@ export function matchUrls(text: string): UrlMatch[] {
     if (trimmed !== null) {
       url = url.slice(0, -trimmed[0].length)
     }
-    if (url === 'http://' || url === 'https://' || url === 'matrix:') {
+    const bare = url.toLowerCase()
+    if (bare === 'http://' || bare === 'https://' || url === 'matrix:') {
       continue
     }
     matches.push({ url, start: match.index, end: match.index + url.length })
   }
   return matches
+}
+
+/**
+ * The bare URLs axon's server finds in a body (`body_urls` in
+ * `crates/axon-core/src/link_preview.rs`), which a preview's `matched_url`
+ * must be one of: only lowercase `http://` and `https://` schemes. The
+ * composer lowercases schemes before sending (`lowercaseLinkSchemes`), so its
+ * links always qualify; this is for the checks that mirror the server.
+ */
+export function serverBodyUrls(text: string): Set<string> {
+  return new Set(
+    matchUrls(text)
+      .map(({ url }) => url)
+      .filter((url) => url.startsWith('http://') || url.startsWith('https://')),
+  )
+}
+
+/**
+ * `text` with the scheme of each bare http(s) link lowercased, and nothing
+ * else changed: the same length, so offsets into it (inline emoji, mentions)
+ * still hold. Links inside `code` are left as written. Applied to what the
+ * composer sends, so the server matches the links it previews, and every
+ * recipient's client linkifies them.
+ */
+export function lowercaseLinkSchemes(
+  text: string,
+  code: readonly { start: number; end: number }[] = [],
+): string {
+  let result = text
+  for (const { url, start } of matchUrls(text)) {
+    const scheme = HTTP_SCHEME.exec(url)?.[0]
+    if (
+      scheme === undefined ||
+      scheme === scheme.toLowerCase() ||
+      code.some((range) => start >= range.start && start < range.end)
+    )
+      continue
+    result =
+      result.slice(0, start) +
+      scheme.toLowerCase() +
+      result.slice(start + scheme.length)
+  }
+  return result
 }
 
 /**

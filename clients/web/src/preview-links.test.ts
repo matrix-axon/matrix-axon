@@ -25,6 +25,9 @@ describe('portable native preview URLs', () => {
     'https://example.org/a^b',
     'https://u:p@example.org/',
     'https://example.org/%XX',
+    // The server matches lowercase schemes only; the composer lowercases first.
+    'Https://example.org/article',
+    'HTTPS://example.org/article',
   ])('keeps unsupported URL %s as ordinary text', (url) => {
     expect(nativePreviewLinks(`Keep this link ${url}`)).toEqual([])
   })

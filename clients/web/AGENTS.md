@@ -277,6 +277,9 @@ before starting a milestone.
   A rejection in ADR 0132 § 6's table sets `localEcho.previewsRejected`, and Retry then sends `[]`.
   A `/send` carrying `url_previews` gets `AXON_PREVIEW_SEND_MS` (the client reads the body), because axon runs it under its upload timeout.
   jsdom sends a `File` body as the text "undefined": assert upload bytes on the `File` handed to `media.upload`, not on the wire.
+- **Link schemes are matched in any case and sent lowercase** (`html/linkify.ts`): `matchUrls` accepts `Http://` and `HTTPS://` (a keyboard capitalizes a message's first word), and the composer rewrites each bare link's scheme to lowercase outside code before sending (`lowercaseLinkSchemes`, code from `markdownCodeRanges`), keeping the length so inline-emoji offsets hold.
+  The server matches a preview's `matched_url` against lowercase schemes only, so the checks that mirror it use `serverBodyUrls`, and `isPreviewLink` requires `https://` as written; the card controller scans the lowercased form, so a card's `matched_url` is what the server will find.
+  `matrix:` stays lowercase-only.
 - **Routing**: history mode (signed off). The deep-link contract is
   `/:accountId/rooms/:roomId` + `?thread=<root_id>` + `?event=<event_id>` —
   search (M-W10) and the mobile clients build on it; do not change it.

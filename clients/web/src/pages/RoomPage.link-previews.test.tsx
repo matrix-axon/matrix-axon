@@ -213,6 +213,21 @@ describe('room composer previews on the wire', () => {
     ])
   })
 
+  it('sends a capitalized link lowercased, with its card', async () => {
+    const sends = captureSends()
+    const linkPreview = vi.fn(async (url: string) => withImage(url))
+    renderRoom({ setting: 'device', linkPreview })
+    const field = await screen.findByLabelText('Message Ops')
+    await paste(field, `Https://a.example.org/x is good`)
+    await screen.findByText('An article')
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => expect(sends).toHaveLength(1))
+    expect(sends[0].body).toBe(`${A} is good`)
+    expect(sends[0].url_previews).toEqual([
+      { matched_url: A, title: 'An article', image_upload_id: UPLOAD_ID },
+    ])
+  })
+
   it('sends the "no previews" marker for a link whose card is still loading', async () => {
     const sends = captureSends()
     const linkPreview = vi.fn(() => new Promise<DeviceLinkPreview>(() => {}))

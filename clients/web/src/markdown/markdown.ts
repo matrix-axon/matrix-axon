@@ -66,6 +66,28 @@ export function markdownToHtmlIfFormatted(text: string): string | null {
   return sanitizeOutgoingHtml((md.parser(tokens) as string).trim())
 }
 
+/**
+ * Where `text`'s Markdown code is: fenced and indented blocks, and code
+ * spans, as ranges of `text`. Found from the same lexer the send uses, so it
+ * agrees with what renders as code. A block whose source was rewritten for
+ * its container (inside a quote or a list item) is not located and so is
+ * not reported; callers use this to leave code alone, never to find it.
+ */
+export function markdownCodeRanges(
+  text: string,
+): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = []
+  let cursor = 0
+  md.walkTokens(md.lexer(text), (token) => {
+    if (token.type !== 'code' && token.type !== 'codespan') return
+    const start = text.indexOf(token.raw, cursor)
+    if (start === -1) return
+    ranges.push({ start, end: start + token.raw.length })
+    cursor = start + token.raw.length
+  })
+  return ranges
+}
+
 /** Convert Markdown input to compact, display-only text for one-line previews. */
 export function markdownToPlainText(text: string): string {
   const html = md.parser(md.lexer(text)) as string

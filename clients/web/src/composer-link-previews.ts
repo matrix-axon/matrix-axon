@@ -217,7 +217,11 @@ interface Entry {
 /** Distinct eligible links in text order, with completeness. */
 function scan(text: string, pasted: ReadonlySet<string>): Link[] {
   const links = new Map<string, Link>()
-  for (const { url, end } of matchUrls(text)) {
+  for (const match of matchUrls(text)) {
+    // As the composer will send it (`lowercaseLinkSchemes`), so a card's
+    // `matched_url` is the text the server finds in the body.
+    const url = match.url.replace(/^https?:/i, (scheme) => scheme.toLowerCase())
+    const { end } = match
     if (!isPreviewLink(url)) continue
     const identity = linkIdentity(url)
     if (identity === null) continue

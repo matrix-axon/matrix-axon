@@ -125,6 +125,37 @@ describe('Composer link previews', () => {
     expect(cards()).toBeNull()
   })
 
+  it('previews a capitalized link and sends it with a lowercase scheme', async () => {
+    // A keyboard capitalizes a message's first word: `Https://…`.
+    const { device, pending } = deferredDevice()
+    const { type, send, onSubmit } = setup({
+      sources: { setting: 'device', device },
+    })
+    type(`Https://a.example.org/x`)
+    type(`Https://a.example.org/x `)
+    await waitFor(() =>
+      expect(device).toHaveBeenCalledWith(A, expect.any(AbortSignal)),
+    )
+    pending[0].resolve({ url: A, title: 'An article', imageUnavailable: false })
+    await screen.findByText('An article')
+    send()
+    expect(onSubmit).toHaveBeenCalledWith(A, undefined, {
+      draft: {
+        cards: [
+          {
+            matchedUrl: A,
+            title: 'An article',
+            description: null,
+            siteName: null,
+            image: null,
+          },
+        ],
+        discarded: new Set(),
+      },
+      allowUnmarked: false,
+    })
+  })
+
   it('looks a pasted link up at once', () => {
     const { device } = deferredDevice()
     const { paste } = setup({ sources: { setting: 'device', device } })

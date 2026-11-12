@@ -292,6 +292,8 @@ A rejection with 413 `preview_too_large`, `event_too_large` or `payload_too_larg
 Any other failure keeps the cards, and Retry uploads their thumbnails again.
 The client waits for a `/send` carrying `url_previews` as long as for an upload (the five-second slot wait plus the upstream upload timeout), because that is how the server bounds it.
 
+The server finds a `matched_url` only behind a lowercase `http://` or `https://`, so the composer lowercases each bare link's scheme before sending (`Https://` from a capitalized first word becomes `https://`), leaving code spans and blocks as written.
+
 Link identity is the WHATWG URL serialization in the composer and the `url` crate's on the server.
 `clients/web/src/fixtures/link-identity.json` lists the cases, such as host case, default ports, empty paths, fragments and percent-encoding, and the web tests check `new URL(...).href` against it.
 

@@ -26,6 +26,8 @@ import {
 } from '../composer-link-previews'
 import type { PreviewDraft } from '../link-preview-send'
 import { ComposerLinkPreviews } from './ComposerLinkPreviews'
+import { lowercaseLinkSchemes } from '../html/linkify'
+import { markdownCodeRanges } from '../markdown/markdown'
 import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { needsCameraCaptureButtons } from '../platform'
@@ -1057,10 +1059,18 @@ export function Composer({
     }
     // `//` escapes a literal leading slash — but only where a bare `/` would
     // have meant a command. A composer without commands sends both verbatim.
-    const message =
+    const unescaped =
       commandsEnabled && body.startsWith('//') ? body.slice(1) : body
+    // `Https://` (a capitalized first word) becomes `https://`, outside
+    // code: the server only matches lowercase schemes for previews, and not
+    // every recipient's client linkifies the other. Same length, so the
+    // inline-emoji offsets below still hold.
+    const message = lowercaseLinkSchemes(
+      unescaped,
+      markdownCodeRanges(unescaped),
+    )
     const offset =
-      draft.length - draft.trimStart().length + (message === body ? 0 : 1)
+      draft.length - draft.trimStart().length + (unescaped === body ? 0 : 1)
     const references = parseInlineEmoji(
       message,
       inline.current.map((ref) => ({

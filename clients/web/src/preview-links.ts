@@ -34,6 +34,10 @@ const RESERVED_SUFFIXES: ReadonlySet<string> = new Set([
  * Other URLs remain ordinary message text; ineligible metadata is optional. */
 export function isPreviewLink(raw: string): boolean {
   if (
+    // The server matches a preview's link in the body with a lowercase
+    // scheme only (`serverBodyUrls`); the composer lowercases schemes before
+    // it asks, so this only turns away text nothing has normalized.
+    !raw.startsWith('https://') ||
     raw.length > 4096 ||
     /%(?![0-9a-f]{2})/i.test(raw) ||
     !/^[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+$/.test(raw)
