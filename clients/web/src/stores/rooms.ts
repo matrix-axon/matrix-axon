@@ -78,6 +78,21 @@ export type RoomEntryResult =
   | { ok: true; roomId: string }
   | { ok: false; message: string; code: string | null }
 export type CreateRoomRequest = components['schemas']['CreateRoomRequestDto']
+type RoomPreviewDto = components['schemas']['RoomPreviewDto']
+
+/** One row's wait for its preview (`enqueuePreview`). */
+interface PreviewRequest {
+  room: RoomDto
+  /** The `last_event_id` this answers, and the stored preview's `eventId`. */
+  eventId: string
+  /** Its `requestedPreviews` key. */
+  key: string
+  queuedAt: number
+  /** Batches this request has been part of that failed. */
+  failures: number
+  /** `sessionGeneration` when queued; another session's rows are dropped. */
+  generation: number
+}
 
 export interface RoomsStore {
   rooms: ReadonlySignal<RoomDto[]>
@@ -239,8 +254,17 @@ export interface RoomsStore {
    * `@localpart` until then, the same fallback `memberDisplay` uses.
    */
   senderDisplay(accountId: string, roomId: string, userId: string): string
-  /** Fetch the latest-message preview for one room, if it is not cached. */
+  /**
+   * Queue the latest-message preview for one room, if it has not been asked
+   * for. Rows are read in batches (`POST /v1/rooms/previews`, issue #278).
+   */
   hydratePreview(room: RoomDto): void
+  /**
+   * Hold preview reads while a room's first page loads, so they do not share
+   * the link with it. Call the returned function when the page has loaded;
+   * reads resume anyway after `PREVIEW_HOLD_MAX_MS`.
+   */
+  holdPreviews(): () => void
   /**
    * A live `timeline.event` for `(accountId, roomId)` at `ts` (M-W6 follow-up,
    * WCR-08): advance the room's `last_activity_ts` so the default "recent"
@@ -266,6 +290,23 @@ export interface RoomsStore {
 
 /** How many member-list fetches run at once when resolving DM avatars. */
 const DM_AVATAR_FETCH_CONCURRENCY = 4
+/** Rooms per `POST /v1/rooms/previews`: the server's cap. */
+const PREVIEW_BATCH_ROOMS = 50
+/**
+ * How long a queued preview waits for others to join its batch. The rows a
+ * render mounts all queue within one effect pass, so a short wait is enough.
+ */
+const PREVIEW_BATCH_DELAY_MS = 30
+/**
+ * The longest a room's first page holds preview reads back (`holdPreviews`).
+ * On a link where that page takes longer, the previews go out anyway: a batch
+ * is a few kilobytes, and the room list is worth showing.
+ */
+const PREVIEW_HOLD_MAX_MS = 2_000
+/** Delays before a failed batch is sent again; after the last, it is dropped. */
+const PREVIEW_RETRY_DELAYS_MS: readonly number[] = [2_000, 10_000]
+/** Per-room preview reads in flight at once, against a server without batches. */
+const PREVIEW_PER_ROOM_CONCURRENCY = 4
 const PREVIEW_PAGE_LIMIT = 50
 const PREVIEW_MAX_PAGES = 3
 const ROOM_TITLE_CACHE_KEY = 'axon.room_titles.v1'
@@ -291,6 +332,18 @@ export interface RoomsStoreOptions {
   cacheWriteDelayMs?: number
   /** Overrides `SERVER_VIEW_RESTORE_DEADLINE_MS`. */
   serverViewRestoreDeadlineMs?: number
+  /**
+   * Hold preview reads from the start, for a launch straight into a room:
+   * cached rows paint and queue their previews before that room's page has
+   * mounted to take its own hold (`holdPreviews`), which then replaces this.
+   */
+  holdPreviewsAtStart?: boolean
+  /** Overrides `PREVIEW_BATCH_DELAY_MS`. */
+  previewBatchDelayMs?: number
+  /** Overrides `PREVIEW_HOLD_MAX_MS`. */
+  previewHoldMaxMs?: number
+  /** Overrides `PREVIEW_RETRY_DELAYS_MS`. */
+  previewRetryDelaysMs?: readonly number[]
 }
 
 /**
@@ -311,6 +364,11 @@ export function createRoomsStore(
     options.cacheWriteDelayMs ?? LIVE_PATCH_CACHE_WRITE_DELAY_MS
   const serverViewRestoreDeadlineMs =
     options.serverViewRestoreDeadlineMs ?? SERVER_VIEW_RESTORE_DEADLINE_MS
+  const previewBatchDelayMs =
+    options.previewBatchDelayMs ?? PREVIEW_BATCH_DELAY_MS
+  const previewHoldMaxMs = options.previewHoldMaxMs ?? PREVIEW_HOLD_MAX_MS
+  const previewRetryDelaysMs =
+    options.previewRetryDelaysMs ?? PREVIEW_RETRY_DELAYS_MS
   const rooms = signal<RoomDto[]>([])
   const unreadKeys = signal<ReadonlySet<string>>(new Set())
   /** Sum of every room's `notificationCount` (ADR 0080's app-icon badge). */
@@ -327,9 +385,31 @@ export function createRoomsStore(
   const requestedPreviews = new Set<string>()
   /** One preview signal per room, so a live event wakes only its row. */
   const previewSlots = new Map<string, Signal<RoomPreview | undefined>>()
+  /** Previews waiting for the next batch. */
+  const previewQueue: PreviewRequest[] = []
+  let previewFlushTimer: ReturnType<typeof setTimeout> | null = null
+  let previewBatchInFlight = false
+  const previewRetryTimers = new Set<ReturnType<typeof setTimeout>>()
+  /** Set when the server has no batch route; see `pumpPerRoomPreviews`. */
+  let previewsPerRoom = false
+  const perRoomQueue: PreviewRequest[] = []
+  let perRoomActive = 0
+  /** Outstanding `holdPreviews` holds, and the timer that caps them. */
+  let previewHolds = 0
+  let previewHoldTimer: ReturnType<typeof setTimeout> | null = null
+  /** The `holdPreviewsAtStart` hold, until a room page replaces it. */
+  let startPreviewRelease: (() => void) | null = null
+  /**
+   * Sender display names by room key and user id, as previews reported them
+   * (`null`: none set). Names a live message's sender without a member list.
+   */
+  const senderNames = new Map<string, Map<string, string | null>>()
   /** One unread-count signal per room, so a count update wakes only its row. */
   const unreadSlots = new Map<string, Signal<RoomUnreadCounts>>()
-  /** Member lists by `roomKey(room)`, shared by every preview for that room. */
+  /**
+   * Member lists by `roomKey(room)`: DM avatars, the existing-DM lookup, and
+   * previews from a server without the batch route.
+   */
   const members = new Map<string, Promise<MemberDto[]>>()
   /** Rosters that have already resolved, so a notification can name the sender. */
   const resolvedMembers = new Map<string, readonly MemberDto[]>()
@@ -714,7 +794,260 @@ export function createRoomsStore(
     slot.value = preview
   }
 
-  async function fetchPreview(room: RoomDto, eventId: string): Promise<void> {
+  /**
+   * Queue one room's preview for the next batch read. Each `last_event_id` is
+   * asked for once: a row that re-renders, or a live event the row then
+   * hydrates for, does not ask twice.
+   */
+  function enqueuePreview(room: RoomDto, eventId: string): void {
+    const key = `${roomKey(room)}\0${eventId}`
+    if (requestedPreviews.has(key)) {
+      return
+    }
+    requestedPreviews.add(key)
+    const request: PreviewRequest = {
+      room,
+      eventId,
+      key,
+      queuedAt: performance.now(),
+      failures: 0,
+      generation: sessionGeneration,
+    }
+    if (previewsPerRoom) {
+      perRoomQueue.push(request)
+      pumpPerRoomPreviews()
+      return
+    }
+    previewQueue.push(request)
+    schedulePreviewFlush()
+  }
+
+  /**
+   * Flush on a short timer rather than per row: the rows a render mounts all
+   * run their effects in one pass, so one timer collects them into one batch.
+   */
+  function schedulePreviewFlush(): void {
+    if (previewFlushTimer !== null) {
+      return
+    }
+    previewFlushTimer = setTimeout(() => {
+      previewFlushTimer = null
+      void flushPreviews()
+    }, previewBatchDelayMs)
+  }
+
+  /** One batch at a time; the next goes out when this one settles. */
+  async function flushPreviews(): Promise<void> {
+    if (previewBatchInFlight || previewsHeld() || previewQueue.length === 0) {
+      return
+    }
+    if (previewsPerRoom) {
+      // A retry that came due after the fallback, or rows a batch queued
+      // while the one that found the route missing was out.
+      perRoomQueue.push(...previewQueue.splice(0))
+      pumpPerRoomPreviews()
+      return
+    }
+    const batch = previewQueue.splice(0, PREVIEW_BATCH_ROOMS)
+    previewBatchInFlight = true
+    try {
+      await sendPreviewBatch(batch)
+    } finally {
+      previewBatchInFlight = false
+    }
+    if (previewQueue.length > 0) {
+      schedulePreviewFlush()
+    }
+  }
+
+  /**
+   * Still worth answering: the room is listed and its newest message is still
+   * the one this request was for. A newer one has a request of its own.
+   */
+  function isCurrentPreviewRequest(request: PreviewRequest): boolean {
+    if (request.generation !== sessionGeneration) {
+      return false
+    }
+    const index = findRoomIndex(request.room.account_id, request.room.room_id)
+    return index !== -1 && rooms.value[index].last_event_id === request.eventId
+  }
+
+  async function sendPreviewBatch(batch: PreviewRequest[]): Promise<void> {
+    const generation = sessionGeneration
+    const current = batch.filter(isCurrentPreviewRequest)
+    if (current.length === 0) {
+      return
+    }
+    const refs = new Map<string, { account_id: string; room_id: string }>()
+    for (const request of current) {
+      refs.set(roomKey(request.room), {
+        account_id: request.room.account_id,
+        room_id: request.room.room_id,
+      })
+    }
+    const sentAt = performance.now()
+    let status: number | null = null
+    let previews: RoomPreviewDto[] | undefined
+    try {
+      const result = await api.POST('/v1/rooms/previews', {
+        body: { rooms: [...refs.values()] },
+      })
+      status = result.response.status
+      previews = result.data?.data
+    } catch {
+      // A deadline or a dropped connection: retried below like a 5xx.
+    }
+    if (generation !== sessionGeneration) {
+      return
+    }
+    const outcome =
+      status === 404 || status === 405
+        ? 'unsupported'
+        : previews === undefined
+          ? 'failed'
+          : 'ok'
+    perfMark('room-list:previews', {
+      rooms: refs.size,
+      found: previews?.length ?? null,
+      // How long the oldest row in the batch waited to be sent: the hold
+      // behind the open room's first page, plus the flush timer.
+      wait: Math.round(
+        sentAt - Math.min(...current.map((request) => request.queuedAt)),
+      ),
+      ms: Math.round(performance.now() - sentAt),
+      outcome,
+      status,
+      attempt: Math.max(...current.map((request) => request.failures)) + 1,
+    })
+    if (outcome === 'unsupported') {
+      // A server older than the batch route: POST to an unknown `/v1/` path
+      // is a 405 (the catch-all is GET-only), or a 404 behind a proxy. Read
+      // this session's previews the old way from here on.
+      previewsPerRoom = true
+      perRoomQueue.push(...current, ...previewQueue.splice(0))
+      pumpPerRoomPreviews()
+      return
+    }
+    if (previews === undefined) {
+      retryPreviews(current)
+      return
+    }
+    const byRoom = new Map(
+      previews.map((preview) => [roomKey(preview), preview]),
+    )
+    for (const request of current) {
+      const preview = byRoom.get(roomKey(request.room))
+      // Absent: the room has nothing to preview, which is an answer too.
+      if (preview !== undefined && isCurrentPreviewRequest(request)) {
+        applyServerPreview(request, preview)
+      }
+    }
+  }
+
+  /**
+   * Put a failed batch back at the front of the queue after a delay, and give
+   * up after the last one. A room given up on drops its `requestedPreviews`
+   * key, so the next time its row mounts it asks again.
+   */
+  function retryPreviews(failed: PreviewRequest[]): void {
+    const again: PreviewRequest[] = []
+    for (const request of failed) {
+      request.failures += 1
+      if (request.failures > previewRetryDelaysMs.length) {
+        requestedPreviews.delete(request.key)
+      } else {
+        again.push(request)
+      }
+    }
+    if (again.length === 0) {
+      return
+    }
+    const delay = previewRetryDelaysMs[again[0].failures - 1]
+    const timer = setTimeout(() => {
+      previewRetryTimers.delete(timer)
+      previewQueue.unshift(...again)
+      schedulePreviewFlush()
+    }, delay)
+    previewRetryTimers.add(timer)
+  }
+
+  function applyServerPreview(
+    request: PreviewRequest,
+    preview: RoomPreviewDto,
+  ): void {
+    const key = roomKey(request.room)
+    const name = preview.sender_display_name?.trim()
+    const displayName = name === undefined || name === '' ? null : name
+    learnSenderName(key, preview.sender, displayName)
+    // The server cuts the raw body; markdown is stripped here, as for a live
+    // event, and a body that is only markup previews as nothing.
+    const body = previewBody(preview.body)
+    if (body === undefined) {
+      return
+    }
+    setPreview(key, {
+      eventId: request.eventId,
+      senderDisplay: displayName ?? userIdDisplay(preview.sender),
+      body,
+    })
+  }
+
+  function learnSenderName(
+    key: string,
+    userId: string,
+    displayName: string | null,
+  ): void {
+    let names = senderNames.get(key)
+    if (names === undefined) {
+      names = new Map()
+      senderNames.set(key, names)
+    }
+    names.set(userId, displayName)
+  }
+
+  /**
+   * The sender's name in this room if this store already knows it, from a
+   * loaded member list or an earlier preview; `undefined` when it does not.
+   */
+  function knownSenderDisplay(key: string, userId: string): string | undefined {
+    const member = resolvedMembers
+      .get(key)
+      ?.find((candidate) => candidate.user_id === userId)
+    if (member !== undefined) {
+      return memberDisplay(member)
+    }
+    const names = senderNames.get(key)
+    if (names?.has(userId) === true) {
+      return names.get(userId) ?? userIdDisplay(userId)
+    }
+    return undefined
+  }
+
+  /**
+   * The read for a server without `POST /v1/rooms/previews`: up to three
+   * timeline pages scanned for the newest previewable message, plus the
+   * room's member list for the sender's name, a few rooms at a time.
+   */
+  function pumpPerRoomPreviews(): void {
+    while (
+      !previewsHeld() &&
+      perRoomActive < PREVIEW_PER_ROOM_CONCURRENCY &&
+      perRoomQueue.length > 0
+    ) {
+      const request = perRoomQueue.shift()!
+      perRoomActive += 1
+      void fetchPreviewPerRoom(request).finally(() => {
+        perRoomActive -= 1
+        pumpPerRoomPreviews()
+      })
+    }
+  }
+
+  async function fetchPreviewPerRoom(request: PreviewRequest): Promise<void> {
+    if (!isCurrentPreviewRequest(request)) {
+      return
+    }
+    const { room } = request
     let event: EventDto | undefined
     let roster: MemberDto[]
     try {
@@ -726,42 +1059,20 @@ export function createRoomsStore(
       return
     }
     const body = previewBody(event?.body)
-    if (event === undefined || body === undefined || body === '') {
+    if (
+      event === undefined ||
+      body === undefined ||
+      !isCurrentPreviewRequest(request)
+    ) {
       return
     }
     const sender = event.sender
     const member = roster.find((candidate) => candidate.user_id === sender)
-    const preview: RoomPreview = {
-      eventId,
-      senderDisplay: member === undefined ? sender : memberDisplay(member),
+    setPreview(roomKey(room), {
+      eventId: request.eventId,
+      senderDisplay:
+        member === undefined ? userIdDisplay(sender) : memberDisplay(member),
       body,
-    }
-    setPreview(roomKey(room), preview)
-  }
-
-  function setLivePreview(room: RoomDto, event: EventDto): void {
-    const body = previewBody(event.body)
-    if (!isPreviewEvent(event) || body === undefined || body === '') {
-      return
-    }
-    const key = roomKey(room)
-    setPreview(key, {
-      eventId: event.event_id,
-      senderDisplay: event.sender,
-      body,
-    })
-    void roomMembers(room).then((roster) => {
-      const member = roster.find(
-        (candidate) => candidate.user_id === event.sender,
-      )
-      if (member === undefined) {
-        return
-      }
-      setPreview(key, {
-        eventId: event.event_id,
-        senderDisplay: memberDisplay(member),
-        body,
-      })
     })
   }
 
@@ -794,17 +1105,117 @@ export function createRoomsStore(
     return undefined
   }
 
+  function setLivePreview(room: RoomDto, event: EventDto): void {
+    const body = previewBody(event.body)
+    if (!isPreviewEvent(event) || body === undefined) {
+      return
+    }
+    const key = roomKey(room)
+    const known = knownSenderDisplay(key, event.sender)
+    setPreview(key, {
+      eventId: event.event_id,
+      senderDisplay: known ?? userIdDisplay(event.sender),
+      body,
+    })
+    if (known !== undefined) {
+      return
+    }
+    if (!previewsPerRoom) {
+      // The batch read names the sender, and costs one small request for
+      // however many rooms are waiting, where a member list is every member
+      // of the room.
+      enqueuePreview(room, event.event_id)
+      return
+    }
+    void roomMembers(room).then((roster) => {
+      const member = roster.find(
+        (candidate) => candidate.user_id === event.sender,
+      )
+      if (member === undefined) {
+        return
+      }
+      setPreview(key, {
+        eventId: event.event_id,
+        senderDisplay: memberDisplay(member),
+        body,
+      })
+    })
+  }
+
   function hydratePreview(room: RoomDto): void {
     const eventId = room.last_event_id
     if (eventId === null || eventId === undefined || eventId === '') {
       return
     }
-    const key = `${roomKey(room)}\0${eventId}`
-    if (requestedPreviews.has(key)) {
-      return
+    enqueuePreview(room, eventId)
+  }
+
+  /** True while a room's first page has the link to itself (`holdPreviews`). */
+  function previewsHeld(): boolean {
+    return previewHoldTimer !== null
+  }
+
+  /**
+   * Hold preview reads until the returned release is called, or until
+   * `previewHoldMaxMs` after the first outstanding hold, whichever is sooner.
+   * Holds stack: reads resume when the last is released.
+   */
+  function acquirePreviewHold(): () => void {
+    previewHolds += 1
+    if (previewHolds === 1) {
+      previewHoldTimer = setTimeout(() => {
+        previewHoldTimer = null
+        resumePreviews()
+      }, previewHoldMaxMs)
     }
-    requestedPreviews.add(key)
-    void fetchPreview(room, eventId)
+    let released = false
+    return () => {
+      if (released) {
+        return
+      }
+      released = true
+      previewHolds -= 1
+      if (previewHolds === 0) {
+        if (previewHoldTimer !== null) {
+          clearTimeout(previewHoldTimer)
+          previewHoldTimer = null
+        }
+        resumePreviews()
+      }
+    }
+  }
+
+  function holdPreviews(): () => void {
+    const release = acquirePreviewHold()
+    // The page has its own hold now; the one taken at start on its behalf,
+    // before it mounted, has done its job.
+    if (startPreviewRelease !== null) {
+      startPreviewRelease()
+      startPreviewRelease = null
+    }
+    return release
+  }
+
+  function resumePreviews(): void {
+    if (previewQueue.length > 0) {
+      schedulePreviewFlush()
+    }
+    pumpPerRoomPreviews()
+  }
+
+  function clearPreviewQueues(): void {
+    previewQueue.length = 0
+    perRoomQueue.length = 0
+    if (previewFlushTimer !== null) {
+      clearTimeout(previewFlushTimer)
+      previewFlushTimer = null
+    }
+    for (const timer of previewRetryTimers) {
+      clearTimeout(timer)
+    }
+    previewRetryTimers.clear()
+    senderNames.clear()
+    previewsPerRoom = false
   }
 
   /** The freshest row, so `noteActivity` can skip the common burst case. */
@@ -1101,6 +1512,9 @@ export function createRoomsStore(
     }
     pendingMemberships.clear()
     publishPendingMemberships()
+    // Above the pristine-store guard: a batch can be queued, or waiting out a
+    // retry, before the first refresh lands.
+    clearPreviewQueues()
     // A second guard: the timer also skips a write once the generation moves
     // or the rows are cleared, so the previous reader's rows never land under
     // the next one's key.
@@ -1943,6 +2357,10 @@ export function createRoomsStore(
     rooms.value = next
   }
 
+  if (options.holdPreviewsAtStart === true) {
+    startPreviewRelease = acquirePreviewHold()
+  }
+
   return {
     rooms: computed(() => rooms.value),
     unreadKeys: computed(() => unreadKeys.value),
@@ -1970,14 +2388,15 @@ export function createRoomsStore(
     preview: (key) => previewSlot(key).value,
     unreadCount: (key) => unreadSlot(key).value.notificationCount,
     senderDisplay(accountId, roomId, userId) {
-      const member = resolvedMembers
-        .get(roomKey({ account_id: accountId, room_id: roomId }))
-        ?.find((candidate) => candidate.user_id === userId)
-      return member === undefined
-        ? userIdDisplay(userId)
-        : memberDisplay(member)
+      return (
+        knownSenderDisplay(
+          roomKey({ account_id: accountId, room_id: roomId }),
+          userId,
+        ) ?? userIdDisplay(userId)
+      )
     },
     hydratePreview,
+    holdPreviews,
     noteActivity,
     noteTimelineEvent,
     noteUnreadCounts,

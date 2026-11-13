@@ -10,6 +10,7 @@ import {
   describe,
   expect,
   it,
+  onTestFinished,
   vi,
 } from 'vitest'
 import { ServicesContext } from '../services'
@@ -111,6 +112,11 @@ function renderPage(
     spaceChildrenFail?: string[]
     withSpaces?: boolean
     members?: unknown[]
+    /**
+     * What `POST /v1/rooms/previews` answers: these previews (none by
+     * default), or a 405 as a server without the route does.
+     */
+    previews?: unknown[] | 'unsupported'
   } = {},
 ) {
   const activeAccounts = options.activeAccounts ?? activeAccountsForRooms(rooms)
@@ -164,6 +170,11 @@ function renderPage(
     http.delete(
       `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/tags/:tag`,
       () => HttpResponse.json({ data: {} }),
+    ),
+    http.post(`${TEST_BASE_URL}/v1/rooms/previews`, () =>
+      options.previews === 'unsupported'
+        ? new HttpResponse(null, { status: 405 })
+        : HttpResponse.json({ data: options.previews ?? [] }),
     ),
     // DM title resolution for the unnamed room.
     http.get(
@@ -1250,46 +1261,43 @@ describe('RoomList account labels', () => {
       last_event_id: '$latest',
       last_activity_ts: Date.now() - 60_000,
     }
-    server.use(
-      http.get(
-        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/timeline`,
-        () =>
-          HttpResponse.json({
-            data: {
-              events: [
-                {
-                  account_id: ACCOUNT,
-                  room_id: '!ops:hs',
-                  event_id: '$latest',
-                  sender: '@bob:example.org',
-                  origin_ts: previewRoom.last_activity_ts,
-                  arrival_order: previewRoom.last_activity_ts,
-                  type: 'm.room.message',
-                  body: '**this** is the [start](https://example.org) of the message',
-                  content: {
-                    msgtype: 'm.text',
-                    body: '**this** is the [start](https://example.org) of the message',
-                  },
-                  redacted: false,
-                  edited: false,
-                  edit_count: 0,
-                },
-              ],
-              next_cursor: null,
-            },
-          }),
-      ),
-    )
-    const { findByText, container } = renderPage([previewRoom])
+    const paths: string[] = []
+    const record = ({ request }: { request: Request }) => {
+      paths.push(new URL(request.url).pathname)
+    }
+    server.events.on('request:start', record)
+    onTestFinished(() => server.events.removeListener('request:start', record))
+    const { findByText, container } = renderPage([previewRoom], undefined, {
+      previews: [
+        {
+          account_id: ACCOUNT,
+          room_id: '!ops:hs',
+          event_id: '$latest',
+          sender: '@bob:example.org',
+          sender_display_name: 'Bob',
+          origin_ts: previewRoom.last_activity_ts,
+          msgtype: 'm.text',
+          body: '**this** is the [start](https://example.org) of the message',
+          truncated: false,
+        },
+      ],
+    })
 
     expect(
       await findByText('Bob: this is the start of the message'),
     ).toBeTruthy()
     expect(container.querySelector('.room-title-meta')?.textContent).toBe('1m')
     expect(container.querySelector('.room-meta')).toBeNull()
+    // One batch read: no timeline pages, and no member list for the name.
+    expect(paths.filter((path) => path === '/v1/rooms/previews')).toHaveLength(
+      1,
+    )
+    expect(paths.filter((path) => /\/(timeline|members)$/.test(path))).toEqual(
+      [],
+    )
   })
 
-  it('previews the latest text message when newer events are non-text', async () => {
+  it('against a server without batch previews, previews the latest text message when newer events are non-text', async () => {
     const previewRoom = {
       ...OPS,
       last_event_id: '$reaction',
@@ -1359,14 +1367,18 @@ describe('RoomList account labels', () => {
           }),
       ),
     )
-    const { findByText } = renderPage([previewRoom], (services) => {
-      services.settings.previewRoom.value = true
-    })
+    const { findByText } = renderPage(
+      [previewRoom],
+      (services) => {
+        services.settings.previewRoom.value = true
+      },
+      { previews: 'unsupported' },
+    )
 
     expect(await findByText('Bob: the previous text message')).toBeTruthy()
   })
 
-  it('skips a redacted latest message and previews the one before it', async () => {
+  it('against a server without batch previews, skips a redacted latest message and previews the one before it', async () => {
     const previewRoom = {
       ...OPS,
       last_event_id: '$redacted',
@@ -1415,9 +1427,13 @@ describe('RoomList account labels', () => {
           }),
       ),
     )
-    const { findByText } = renderPage([previewRoom], (services) => {
-      services.settings.previewRoom.value = true
-    })
+    const { findByText } = renderPage(
+      [previewRoom],
+      (services) => {
+        services.settings.previewRoom.value = true
+      },
+      { previews: 'unsupported' },
+    )
 
     expect(await findByText('Bob: still here')).toBeTruthy()
   })
