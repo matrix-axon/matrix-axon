@@ -137,9 +137,13 @@ body,
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  /* iOS WebKit re-applies text autosizing after a landscape -> portrait
-     rotation, enlarging the font. 100% (not `none`) disables that while
-     still honouring Dynamic Type and user zoom. */
+}
+
+/* iOS WebKit re-applies text autosizing after a landscape -> portrait
+   rotation, enlarging the font. 100% (not `none`) disables that while
+   still honouring Dynamic Type and user zoom. The property is inherited, so
+   `html` alone is enough. */
+html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }
