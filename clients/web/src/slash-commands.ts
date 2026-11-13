@@ -2,6 +2,8 @@ export const SLASH_COMMAND = {
   help: '/help',
   html: '/html',
   cancel: '/cancel',
+  collapse: '/collapse',
+  expand: '/expand',
   create: '/create',
   dm: '/dm',
   find: '/find',
@@ -40,6 +42,18 @@ export interface SlashCommandSpec {
 }
 
 export const SLASH_COMMANDS: SlashCommandSpec[] = [
+  {
+    name: SLASH_COMMAND.collapse,
+    usage: '/collapse',
+    description:
+      'Hide timeline images and preview cards across rooms and threads',
+  },
+  {
+    name: SLASH_COMMAND.expand,
+    usage: '/expand',
+    description:
+      'Show timeline images and preview cards across rooms and threads',
+  },
   {
     name: SLASH_COMMAND.html,
     usage: '/html <html>',

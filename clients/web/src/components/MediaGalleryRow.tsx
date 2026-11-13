@@ -9,6 +9,8 @@ import type {
   MessageGesturePreferences,
 } from '../stores/message-gestures'
 import { useGalleryExpansion } from '../timeline/gallery-expansion'
+import { useServices } from '../services'
+import { MediaAttachment } from './MediaAttachment'
 import { MediaCaption } from './MediaCaption'
 import { GALLERY_EAGER_BYTES, MediaGalleryCell } from './MediaGalleryCell'
 import { ReadReceiptsSummary } from './MessageEventRow'
@@ -84,6 +86,8 @@ export function MediaGalleryRow({
    */
   renderEvent: (event: TimelineEvent) => preact.ComponentChildren
 }) {
+  const { timelineMediaExpanded } = useServices()
+  const imagesExpanded = timelineMediaExpanded.value
   // Session-scoped, so leaving the room and coming back keeps the choice.
   const eventIds = useMemo(() => events.map((e) => e.event_id), [events])
   const [expanded, setExpanded] = useGalleryExpansion(eventIds)
@@ -291,7 +295,7 @@ export function MediaGalleryRow({
   return (
     <li
       class="event-row gallery-row"
-      data-event-id={events[0].event_id}
+      data-event-id={imagesExpanded ? events[0].event_id : undefined}
       data-gallery="true"
     >
       <UserAvatar
@@ -312,68 +316,97 @@ export function MediaGalleryRow({
             Ungroup images
           </button>
         </div>
-        <ul
-          ref={gridRef}
-          class="gallery-grid"
-          // The one place the column count is written down. `ArrowUp` and
-          // `ArrowDown` move by `GALLERY_COLUMNS`, so a CSS literal that
-          // drifted from it would move focus to a cell the reader is not
-          // looking at.
-          style={{ '--gallery-columns': GALLERY_COLUMNS }}
-          aria-label={`${events.length} images from ${senderDisplay}`}
-        >
-          {events.map((event, index) => {
-            const resolved = eventMedia(event)
-            if (resolved === null) {
-              return null
-            }
-            return (
-              <MediaGalleryCell
-                key={event.event_id}
-                accountId={accountId}
-                eventId={event.event_id}
-                highlighted={event.event_id === highlighted}
-                resolved={resolved}
-                position={index + 1}
-                total={events.length}
-                focusable={event.event_id === tabStopId}
-                withinBudget={withinBudget[index]}
-                onOpen={() => {
-                  setFocusedId(event.event_id)
-                  viewer?.open(event.event_id)
-                }}
-                onCellKeyDown={onCellKeyDown(event.event_id)}
-                gestures={
-                  messageGestures !== null && isMessageActionable(event)
-                    ? {
-                        preferences: messageGestures,
-                        onAction: (action) => runGestureAction(event, action),
-                        feedback:
-                          gestureFeedbacks.feedback?.eventId === event.event_id
-                            ? gestureFeedbacks.feedback.message
-                            : null,
-                        reactionBurst:
-                          gestureReactions.bursts.get(event.event_id) ?? null,
-                        confirmingDelete: confirmingDeleteId === event.event_id,
-                        onConfirmDelete: () => {
-                          void timeline.redact(event.event_id).then((ok) => {
-                            if (ok) onMutation?.()
-                            else
-                              showGestureFeedback(
-                                event.event_id,
-                                'Message could not be deleted',
-                              )
-                            setConfirmingDeleteId(null)
-                          })
-                        },
-                        onCancelDelete: () => setConfirmingDeleteId(null),
-                      }
-                    : null
-                }
-              />
-            )
-          })}
-        </ul>
+        {!imagesExpanded ? (
+          <ul
+            class="collapsed-gallery"
+            aria-label={`Attachments from ${senderDisplay}`}
+          >
+            {events.map((event) => {
+              const resolved = eventMedia(event)
+              return resolved === null ? null : (
+                <li
+                  key={event.event_id}
+                  data-event-id={event.event_id}
+                  class={
+                    event.event_id === highlighted ? 'highlighted' : undefined
+                  }
+                >
+                  <MediaAttachment
+                    accountId={accountId}
+                    media={{ ...resolved.media, caption: null }}
+                    content={event.content}
+                    compact
+                  />
+                </li>
+              )
+            })}
+          </ul>
+        ) : (
+          <ul
+            ref={gridRef}
+            class="gallery-grid"
+            // The one place the column count is written down. `ArrowUp` and
+            // `ArrowDown` move by `GALLERY_COLUMNS`, so a CSS literal that
+            // drifted from it would move focus to a cell the reader is not
+            // looking at.
+            style={{ '--gallery-columns': GALLERY_COLUMNS }}
+            aria-label={`${events.length} images from ${senderDisplay}`}
+          >
+            {events.map((event, index) => {
+              const resolved = eventMedia(event)
+              if (resolved === null) {
+                return null
+              }
+              return (
+                <MediaGalleryCell
+                  key={event.event_id}
+                  accountId={accountId}
+                  eventId={event.event_id}
+                  highlighted={event.event_id === highlighted}
+                  resolved={resolved}
+                  position={index + 1}
+                  total={events.length}
+                  focusable={event.event_id === tabStopId}
+                  withinBudget={withinBudget[index]}
+                  onOpen={() => {
+                    setFocusedId(event.event_id)
+                    viewer?.open(event.event_id)
+                  }}
+                  onCellKeyDown={onCellKeyDown(event.event_id)}
+                  gestures={
+                    messageGestures !== null && isMessageActionable(event)
+                      ? {
+                          preferences: messageGestures,
+                          onAction: (action) => runGestureAction(event, action),
+                          feedback:
+                            gestureFeedbacks.feedback?.eventId ===
+                            event.event_id
+                              ? gestureFeedbacks.feedback.message
+                              : null,
+                          reactionBurst:
+                            gestureReactions.bursts.get(event.event_id) ?? null,
+                          confirmingDelete:
+                            confirmingDeleteId === event.event_id,
+                          onConfirmDelete: () => {
+                            void timeline.redact(event.event_id).then((ok) => {
+                              if (ok) onMutation?.()
+                              else
+                                showGestureFeedback(
+                                  event.event_id,
+                                  'Message could not be deleted',
+                                )
+                              setConfirmingDeleteId(null)
+                            })
+                          },
+                          onCancelDelete: () => setConfirmingDeleteId(null),
+                        }
+                      : null
+                  }
+                />
+              )
+            })}
+          </ul>
+        )}
         {visibleCaptions.length > 0 && (
           /*
            * Captions live beneath the grid rather than on the cells: a square
@@ -398,6 +431,7 @@ export function MediaGalleryRow({
                     accountId={accountId}
                     caption={caption}
                     content={event.content}
+                    hideImages={!imagesExpanded}
                   />
                 </span>
               </li>

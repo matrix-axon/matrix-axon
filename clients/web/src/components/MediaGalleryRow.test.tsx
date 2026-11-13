@@ -131,9 +131,13 @@ const timeline = {
   redact: vi.fn(async () => true),
 } as unknown as TimelineStore
 
-function renderRow(events: TimelineEvent[], highlighted: string | null = null) {
+function renderRow(
+  events: TimelineEvent[],
+  highlighted: string | null = null,
+  services = testServices(),
+) {
   return render(
-    <ServicesContext.Provider value={testServices()}>
+    <ServicesContext.Provider value={services}>
       <ol>
         <MediaGalleryRow
           events={events}
@@ -174,6 +178,26 @@ function pointer(
 }
 
 describe('MediaGalleryRow', () => {
+  it('shows a shared caption once when collapsed and after expanding', async () => {
+    serveBytes()
+    const services = testServices()
+    services.timelineMediaExpanded.value = false
+    const { container } = renderRow(
+      [
+        image('$1', { filename: 'a.png', body: 'Shared caption' }),
+        image('$2', { filename: 'b.png', body: 'Shared caption' }),
+      ],
+      null,
+      services,
+    )
+    expect(container.textContent?.match(/Shared caption/g)).toHaveLength(1)
+    expect(container.querySelectorAll('.media-collapsed')).toHaveLength(2)
+    await act(() => {
+      services.timelineMediaExpanded.value = true
+    })
+    expect(container.textContent?.match(/Shared caption/g)).toHaveLength(1)
+  })
+
   it('targets a loaded tile with the configured swipe action', async () => {
     serveBytes()
     const onReply = vi.fn()

@@ -223,6 +223,18 @@ export const KEYS = {
   strike: { label: 'Ctrl-Shift-X', aria: 'Control+Shift+X' },
   code: { label: 'Ctrl-E', aria: 'Control+E' },
   link: { label: 'Ctrl-Shift-K', aria: 'Control+Shift+K' },
+  collapseMedia: {
+    label: 'Ctrl-Alt-C',
+    aria: 'Control+Alt+C',
+    appleLabel: '⌘-Option-C',
+    appleAria: 'Meta+Alt+C',
+  },
+  expandMedia: {
+    label: 'Ctrl-Alt-E',
+    aria: 'Control+Alt+E',
+    appleLabel: '⌘-Option-E',
+    appleAria: 'Meta+Alt+E',
+  },
   toggleSpaces: {
     label: 'Ctrl-Alt-S',
     aria: 'Control+Alt+S',
@@ -447,6 +459,14 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
   {
     group: 'Messages',
     rows: [
+      {
+        keys: KEYS.collapseMedia,
+        description: 'Hide timeline images and preview cards',
+      },
+      {
+        keys: KEYS.expandMedia,
+        description: 'Show timeline images and preview cards',
+      },
       { keys: 'Shift-Enter', description: 'Insert a line break' },
       { keys: ':emoji-shortcode:', description: 'Insert an emoji' },
       {

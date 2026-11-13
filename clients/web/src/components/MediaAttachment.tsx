@@ -23,11 +23,14 @@ export function MediaAttachment({
   accountId,
   media,
   content,
+  compact = false,
 }: {
   accountId: string
   media: ParsedMedia
   /** Event `content`, so a caption with `formatted_body` can use it. */
   content?: unknown
+  /** Keep filenames, captions, and downloads without a preview card. */
+  compact?: boolean
 }) {
   const { media: service, platform } = useServices()
   const [downloading, setDownloading] = useState(false)
@@ -37,7 +40,7 @@ export function MediaAttachment({
   const plan = previewPlan(media)
   // A lightbox preview is not a disclosure: it takes over the viewport and is
   // dismissed from there, so the button opens it and never reads "Hide".
-  const tiled = plan?.kind === 'video' || plan?.kind === 'pdf'
+  const tiled = !compact && (plan?.kind === 'video' || plan?.kind === 'pdf')
   const size = humanSize(media.size)
   const downloadable = isDownloadable(media)
 
@@ -81,7 +84,11 @@ export function MediaAttachment({
         </MediaTile>
       ) : (
         <div
-          class={`media-attachment${plan !== null ? ' media-attachment-previewable' : ''}`}
+          class={
+            compact
+              ? 'media-collapsed'
+              : `media-attachment${plan !== null ? ' media-attachment-previewable' : ''}`
+          }
           data-media-preview-card={plan !== null ? '' : undefined}
           onClick={
             plan === null ? undefined : (event) => openMediaCard(event, open)
@@ -114,6 +121,7 @@ export function MediaAttachment({
                 accountId={accountId}
                 caption={media.caption}
                 content={content}
+                hideImages={compact}
               />
             </div>
           )}
