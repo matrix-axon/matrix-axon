@@ -53,10 +53,15 @@ import subprocess
 import sys
 
 
-def emit(changed: bool, why: str) -> int:
+def emit(changed: bool, why: str, *, undecided: bool = False) -> int:
     line = f"changed={'true' if changed else 'false'}"
     print(line)
     print(f"changed-by-hook: {why}", file=sys.stderr)
+    if undecided and os.environ.get("GITHUB_ACTIONS") == "true":
+        # The fail-safe is correct but invisible: the gate runs in full and the
+        # saving silently disappears. An annotation on the run makes a broken
+        # dependency or a bad ref show up in the PR instead of in a bill.
+        print(f"::warning title=changed-by-hook::cannot decide ({why}); ran the full gate")
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
         with open(out, "a", encoding="utf-8") as fh:
@@ -101,13 +106,14 @@ def main() -> int:
     try:
         files, exclude = hook_filters(args.config, args.hook_id)
         paths = changed_files(args.base)
+        includes = [files, *args.also]
+        # Matching is inside the try: a malformed regex is as much a doubt as a
+        # missing ref, and must run everything rather than fail the step.
+        for path in paths:
+            if any(re.search(rx, path) for rx in includes) and not re.search(exclude, path):
+                return emit(True, f"{path} is an input")
     except Exception as exc:  # noqa: BLE001 -- every failure must fail safe
-        return emit(True, f"cannot decide ({exc}): running everything")
-
-    includes = [files, *args.also]
-    for path in paths:
-        if any(re.search(rx, path) for rx in includes) and not re.search(exclude, path):
-            return emit(True, f"{path} is an input")
+        return emit(True, f"cannot decide ({exc}): running everything", undecided=True)
     return emit(False, f"none of {len(paths)} changed file(s) is an input")
 
 

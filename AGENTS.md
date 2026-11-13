@@ -427,6 +427,7 @@ They apply across crates and clients.
   The job always runs and reports, because a required check that never reports blocks the merge, so never put a `paths:` filter on its workflow.
   On a pull request that changes none of the pre-push hooks' Rust inputs (the `files` filter of the `rust-clippy` hook), it skips the cache restore, rustfmt, clippy and the test suite, and the repo-wide checks still run.
   `scripts/ci/changed-by-hook.py` makes that decision from the same filter the hooks use, and any doubt about the diff runs everything.
+  `scripts/ci/test-changed-by-hook.py` tests it and runs in that job, so change the two together.
   Pushes to `main` and manual runs always run the full suite.
   Before pushing, either install the hook once per clone with `./scripts/setup-hooks.sh` (git) or the `jj-hooks` alias above (jj), or, if you haven't, run it by hand:
 
