@@ -585,12 +585,13 @@ interface RoomOpen {
   /**
    * Room-list rows that asked for their message preview during this open.
    *
-   * Every rendered row fires one (`RoomList`'s `hydratePreview` effect), and
-   * the list paints its *cached* rows during startup — so a warm cache turns
-   * a room open into a burst of per-row fetches competing with the timeline
-   * page, while a cold one defers them past it entirely. Counted separately
-   * from `reqs` because that is the discrimination: 8 requests and 68 are the
-   * same room on the same link, differing only in whether rows had painted.
+   * Every rendered row asks (`RoomList`'s `hydratePreview` effect). Until
+   * issue #278 each ask was its own timeline and member-list reads, so a warm
+   * cache turned a room open into a burst of per-row fetches competing with
+   * the timeline page. Rows now queue into batch reads, each logged as a
+   * `room-list:previews` line, so this counts asks, not requests. Rows that
+   * painted from the cache before the open began ask before this window and
+   * are not counted here at all.
    */
   previews: number
   /** When messages first painted. The user-visible number. */

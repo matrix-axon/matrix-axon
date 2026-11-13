@@ -47,6 +47,10 @@ export const PERSISTED_MARKS: readonly string[] = [
   'api:deadline',
   'api:failed',
   'api:late',
+  // One per room-list preview batch (issue #278): how many rooms it asked
+  // for and got, how long it waited and took, its outcome and HTTP status.
+  // Counts and timings only; the rooms themselves stay out.
+  'room-list:previews',
   // Clipboard writes, successes included: a log of failures alone cannot say
   // which source wins or how often. Source, reason, error name, the page's
   // activation/focus state and hold timing. No text, no ids.
