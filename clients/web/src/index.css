@@ -5907,6 +5907,12 @@ input[type='checkbox'] {
   flex-direction: column;
   gap: 0.5rem;
 }
+.collapsed-gallery > li.highlighted {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
 
 /* Non-image attachment card: a compact header and full-width caption. */
 .media-attachment {

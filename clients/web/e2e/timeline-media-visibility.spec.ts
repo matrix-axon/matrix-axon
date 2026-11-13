@@ -318,3 +318,163 @@ test('collapsing and expanding media above a scrolled-back row preserves its pos
       .toBeLessThan(3)
   }
 })
+
+for (const target of ['$gallery-a', '$gallery-b']) {
+  test(`collapsed gallery jump visibly highlights ${target}`, async ({
+    page,
+  }, testInfo) => {
+    await setup(page)
+    await command(roomComposer(page), '/collapse')
+    const next = `${ROOM_URL}?event=${encodeURIComponent(target)}`
+    await page.evaluate((url) => {
+      history.pushState(null, '', url)
+      dispatchEvent(new PopStateEvent('popstate'))
+    }, next)
+    const item = page.locator(
+      `.collapsed-gallery > li[data-event-id="${target}"]`,
+    )
+    await expect(
+      page.locator(`.room-stream [data-event-id="${target}"]`),
+    ).toHaveCount(1)
+    await expect(item).toHaveClass('highlighted')
+    await expect
+      .poll(() => item.evaluate((el) => getComputedStyle(el).outlineWidth))
+      .toBe('2px')
+    const centered = await item.evaluate((el) => {
+      const view = el.closest('.timeline')!.getBoundingClientRect()
+      const rect = el.getBoundingClientRect()
+      return rect.bottom > view.top && rect.top < view.bottom
+    })
+    expect(centered).toBe(true)
+    await page.screenshot({
+      path: testInfo.outputPath('collapsed-highlight.png'),
+    })
+  })
+}
+
+test('collapsed media reply quotes keep caption text without covered attachment controls', async ({
+  page,
+}) => {
+  await signIn(page)
+  const target = event('$quoted', 10, {
+    msgtype: 'm.video',
+    filename: 'quoted.mp4',
+    body: 'Quoted video caption',
+    url: 'mxc://hs/e2eimg',
+    info: { mimetype: 'video/mp4' },
+    format: 'org.matrix.custom.html',
+    formatted_body: '<b>Quoted video caption</b>',
+  })
+  const reply = {
+    ...event('$reply', 11, { body: 'Reply body' }),
+    relates_to: { 'm.in_reply_to': { event_id: '$quoted' } },
+  }
+  await page.route('**/timeline*', (route) =>
+    route.fulfill({
+      json: { data: { events: [reply, target], next_cursor: null } },
+    }),
+  )
+  await page.goto(ROOM_URL)
+  await command(roomComposer(page), '/collapse')
+  const quote = page.locator('.reply-context-body')
+  await expect(quote).toContainText('Quoted video caption')
+  await expect(quote.getByRole('button')).toHaveCount(0)
+  await expect(quote.locator('.media-collapsed')).toHaveCount(0)
+})
+
+for (const position of ['history', 'bottom'] as const) {
+  test(`thread media visibility preserves ${position} scroll position`, async ({
+    page,
+  }, testInfo) => {
+    await signIn(page)
+    const replies = [
+      ...fixture(true),
+      ...Array.from({ length: 40 }, (_, i) => ({
+        ...event(`$thread-after-${i}`, 30 + i, {
+          body: `Thread text after media ${i}`,
+        }),
+        relates_to: { rel_type: 'm.thread', event_id: '$root' },
+      })),
+    ].sort((a, b) => b.origin_ts - a.origin_ts)
+    await page.route(
+      /\/rooms\/[^/]+\/(?:threads\/[^/]+\/)?timeline(\?|$)/,
+      (route) =>
+        route.fulfill({
+          json: {
+            data: {
+              events: route.request().url().includes('/threads/')
+                ? replies
+                : fixture(),
+              next_cursor: null,
+            },
+          },
+        }),
+    )
+    await page.goto(ROOM_URL)
+    await command(roomComposer(page), '/thread')
+    const scroller = page.locator('.thread-timeline')
+    const anchor = page.locator(
+      '.thread-panel [data-event-id="$thread-after-6"]',
+    )
+    await expect(anchor).toBeAttached()
+    // Capture the reader's position through actual scroll events before changing row heights.
+    await anchor.evaluate((row, position) => {
+      const el = row.closest('.thread-timeline') as HTMLElement
+      el.scrollTop =
+        position === 'bottom'
+          ? el.scrollHeight
+          : el.scrollTop +
+            row.getBoundingClientRect().top -
+            el.getBoundingClientRect().top -
+            80
+    }, position)
+    await expect
+      .poll(() => scroller.evaluate((el) => el.scrollTop))
+      .toBeGreaterThan(0)
+    const top = await anchor.evaluate((el) => el.getBoundingClientRect().top)
+    const readings = []
+    for (const key of ['c', 'e']) {
+      await page.keyboard.press(
+        shortcutForProject(
+          testInfo.project.name,
+          `Control+Alt+${key}`,
+          `Meta+Alt+${key}`,
+        ),
+      )
+      await expect(page.locator('.thread-panel .gallery-grid')).toHaveCount(
+        key === 'c' ? 0 : 1,
+      )
+      // Two frames let ResizeObserver and the sticky thread header settle.
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      )
+      const reading = await scroller.evaluate((el) => ({
+        scrollTop: el.scrollTop,
+        height: el.scrollHeight,
+        viewport: el.clientHeight,
+      }))
+      const shift =
+        (await anchor.evaluate((el) => el.getBoundingClientRect().top)) - top
+      readings.push({ key, shift, ...reading })
+      console.info(
+        JSON.stringify({
+          engine: testInfo.project.name,
+          position,
+          readings,
+          capability: await page.evaluate(() => ({
+            ua: navigator.userAgent,
+            overflowAnchor: CSS.supports('overflow-anchor', 'auto'),
+          })),
+        }),
+      )
+      if (position === 'history') expect(Math.abs(shift)).toBeLessThan(3)
+      else
+        expect(
+          Math.abs(reading.height - reading.viewport - reading.scrollTop),
+        ).toBeLessThan(3)
+    }
+  })
+}

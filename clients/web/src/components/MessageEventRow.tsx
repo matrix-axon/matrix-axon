@@ -11,6 +11,7 @@ import { isGestureControlTarget, MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { parseMedia } from '../media/parse-media'
 import { localRoomHref, localThreadEventHref } from '../matrix-to'
 import { useShortcuts } from '../shortcuts'
+import { useServices } from '../services'
 import type { SettingsStore } from '../stores/settings'
 import type {
   MessageGestureAction,
@@ -1260,6 +1261,14 @@ function ReplyContextBody({
   event: EventDto
   senderDisplay: string
 }) {
+  const { timelineMediaExpanded } = useServices()
+  // The quote's jump link covers its body. Collapsed media stays a text
+  // excerpt here so preview/download buttons cannot sit beneath that link.
+  if (!timelineMediaExpanded.value && parseMedia(event) !== null) {
+    return (
+      <>{event.redacted ? 'message deleted' : clip(event.body ?? '…', 200)}</>
+    )
+  }
   const formattedBody = (
     event.content as { formatted_body?: unknown } | null | undefined
   )?.formatted_body
