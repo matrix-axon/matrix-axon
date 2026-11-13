@@ -21,6 +21,8 @@ mod common;
 mod image_packs;
 #[path = "http/room_details.rs"]
 mod room_details;
+#[path = "http/room_previews.rs"]
+mod room_previews;
 
 use std::sync::{Arc, Mutex};
 

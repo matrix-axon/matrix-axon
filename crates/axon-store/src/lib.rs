@@ -28,6 +28,7 @@ mod oauth_native;
 mod oauth_refresh_tokens;
 mod push;
 mod room_detail_acquisition;
+mod room_previews;
 mod room_summary_discovery;
 mod rooms;
 mod search;
@@ -72,6 +73,7 @@ pub use push::{
 pub use room_detail_acquisition::{
     DetailKind, DetailOutcome, DetailRow, DetailSnapshot, DetailWrite,
 };
+pub use room_previews::{RoomPreview, ROOM_PREVIEW_BODY_CHARS, ROOM_PREVIEW_SCAN_LIMIT};
 pub use room_summary_discovery::{
     RoomSummarySnapshot, SummaryBegin, SummaryLimits, SummaryRefreshRow, SummaryStep, SummaryWrite,
 };

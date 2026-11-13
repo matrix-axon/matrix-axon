@@ -2307,6 +2307,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/rooms/previews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read room-list previews
+         * @description Read the latest-message preview of up to 50 rooms in one request, for the
+         *     rows of a room list.
+         *
+         *     Each preview is the newest non-state, unredacted `m.room.message` with a
+         *     non-blank body among the newest 150 events the room's timeline shows,
+         *     after edits, with the sender's display name in that room. A room with no
+         *     such message, or unknown to this server, is left out of `data`, as the
+         *     timeline answers an unknown room with an empty page. Previews come back in
+         *     request order, and a room named twice is answered once.
+         *
+         *     Previews are message text, so a client caching the room list on disk
+         *     should keep them out of it unless the user has agreed to cache messages.
+         */
+        post: operations["room_previews"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/search": {
         parameters: {
             query?: never;
@@ -3638,6 +3669,39 @@ export interface components {
                  *     bound but cannot produce a session.
                  */
                 sign_in_available: boolean;
+            }[];
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_Vec_RoomPreviewDto: {
+            data: {
+                /**
+                 * Format: uuid
+                 * @description Axon account the room belongs to.
+                 */
+                account_id: string;
+                /** @description The plain-text `body` after the latest edit, at most 500 characters. */
+                body: string;
+                /** @description The message shown. */
+                event_id: string;
+                /** @description `content.msgtype` after the latest edit (`m.text`, `m.image`, …). */
+                msgtype?: string | null;
+                /**
+                 * Format: int64
+                 * @description When the message was sent: Unix milliseconds.
+                 */
+                origin_ts: number;
+                /** @description Matrix room ID. */
+                room_id: string;
+                /** @description The message's sender. */
+                sender: string;
+                /**
+                 * @description The sender's display name in this room, from their current
+                 *     `m.room.member` state. `null` when they have none; fall back to the
+                 *     user id as the member list does.
+                 */
+                sender_display_name?: string | null;
+                /** @description `true` when `body` was cut to fit. */
+                truncated: boolean;
             }[];
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -5798,6 +5862,50 @@ export interface components {
          * @enum {string}
          */
         RoomPresetDto: "private_chat" | "public_chat" | "trusted_private_chat";
+        /**
+         * @description One room's latest message, as its room-list row previews it
+         *     (`POST /v1/rooms/previews`).
+         *
+         *     It is the newest non-state, unredacted `m.room.message` with a non-blank
+         *     body among the newest 150 events the room's timeline shows, after edits.
+         *     That is not always the room list's `last_event_id`, which can name an
+         *     event with nothing to show.
+         */
+        RoomPreviewDto: {
+            /**
+             * Format: uuid
+             * @description Axon account the room belongs to.
+             */
+            account_id: string;
+            /** @description The plain-text `body` after the latest edit, at most 500 characters. */
+            body: string;
+            /** @description The message shown. */
+            event_id: string;
+            /** @description `content.msgtype` after the latest edit (`m.text`, `m.image`, …). */
+            msgtype?: string | null;
+            /**
+             * Format: int64
+             * @description When the message was sent: Unix milliseconds.
+             */
+            origin_ts: number;
+            /** @description Matrix room ID. */
+            room_id: string;
+            /** @description The message's sender. */
+            sender: string;
+            /**
+             * @description The sender's display name in this room, from their current
+             *     `m.room.member` state. `null` when they have none; fall back to the
+             *     user id as the member list does.
+             */
+            sender_display_name?: string | null;
+            /** @description `true` when `body` was cut to fit. */
+            truncated: boolean;
+        };
+        /** @description Body of `POST /v1/rooms/previews`: the rooms whose previews to read. */
+        RoomPreviewsRequest: {
+            /** @description The rooms, at most 50. Repeats are answered once. */
+            rooms: components["schemas"]["RoomRefDto"][];
+        };
         /** @description A room named by its identity in the list: `(account_id, room_id)`. */
         RoomRefDto: {
             /**
@@ -13504,6 +13612,59 @@ export interface operations {
                 headers: {
                     /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
                     "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    room_previews: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RoomPreviewsRequest"];
+            };
+        };
+        responses: {
+            /** @description The previews found, in request order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Vec_RoomPreviewDto"];
+                };
+            };
+            /** @description More than 50 rooms, or a malformed body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The body is larger than 32 KiB */
+            413: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {

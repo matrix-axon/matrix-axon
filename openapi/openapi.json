@@ -9989,6 +9989,76 @@
         }
       }
     },
+    "/v1/rooms/previews": {
+      "post": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Read room-list previews",
+        "description": "Read the latest-message preview of up to 50 rooms in one request, for the\nrows of a room list.\n\nEach preview is the newest non-state, unredacted `m.room.message` with a\nnon-blank body among the newest 150 events the room's timeline shows,\nafter edits, with the sender's display name in that room. A room with no\nsuch message, or unknown to this server, is left out of `data`, as the\ntimeline answers an unknown room with an empty page. Previews come back in\nrequest order, and a room named twice is answered once.\n\nPreviews are message text, so a client caching the room list on disk\nshould keep them out of it unless the user has agreed to cache messages.",
+        "operationId": "room_previews",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomPreviewsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The previews found, in request order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_RoomPreviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "More than 50 rooms, or a malformed body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is larger than 32 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/search": {
       "get": {
         "tags": [
@@ -12575,6 +12645,77 @@
                 "sign_in_available": {
                   "type": "boolean",
                   "description": "Whether a sign-in with this identity is currently possible: OAuth is\nenabled and so is this identity's provider. False means the identity is\nbound but cannot produce a session."
+                }
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_Vec_RoomPreviewDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One room's latest message, as its room-list row previews it\n(`POST /v1/rooms/previews`).\n\nIt is the newest non-state, unredacted `m.room.message` with a non-blank\nbody among the newest 150 events the room's timeline shows, after edits.\nThat is not always the room list's `last_event_id`, which can name an\nevent with nothing to show.",
+              "required": [
+                "account_id",
+                "room_id",
+                "event_id",
+                "sender",
+                "origin_ts",
+                "body",
+                "truncated"
+              ],
+              "properties": {
+                "account_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Axon account the room belongs to."
+                },
+                "body": {
+                  "type": "string",
+                  "description": "The plain-text `body` after the latest edit, at most 500 characters."
+                },
+                "event_id": {
+                  "type": "string",
+                  "description": "The message shown."
+                },
+                "msgtype": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "`content.msgtype` after the latest edit (`m.text`, `m.image`, …)."
+                },
+                "origin_ts": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the message was sent: Unix milliseconds."
+                },
+                "room_id": {
+                  "type": "string",
+                  "description": "Matrix room ID."
+                },
+                "sender": {
+                  "type": "string",
+                  "description": "The message's sender."
+                },
+                "sender_display_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The sender's display name in this room, from their current\n`m.room.member` state. `null` when they have none; fall back to the\nuser id as the member list does."
+                },
+                "truncated": {
+                  "type": "boolean",
+                  "description": "`true` when `body` was cut to fit."
                 }
               }
             }
@@ -16821,6 +16962,83 @@
           "public_chat",
           "trusted_private_chat"
         ]
+      },
+      "RoomPreviewDto": {
+        "type": "object",
+        "description": "One room's latest message, as its room-list row previews it\n(`POST /v1/rooms/previews`).\n\nIt is the newest non-state, unredacted `m.room.message` with a non-blank\nbody among the newest 150 events the room's timeline shows, after edits.\nThat is not always the room list's `last_event_id`, which can name an\nevent with nothing to show.",
+        "required": [
+          "account_id",
+          "room_id",
+          "event_id",
+          "sender",
+          "origin_ts",
+          "body",
+          "truncated"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Axon account the room belongs to."
+          },
+          "body": {
+            "type": "string",
+            "description": "The plain-text `body` after the latest edit, at most 500 characters."
+          },
+          "event_id": {
+            "type": "string",
+            "description": "The message shown."
+          },
+          "msgtype": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`content.msgtype` after the latest edit (`m.text`, `m.image`, …)."
+          },
+          "origin_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the message was sent: Unix milliseconds."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "Matrix room ID."
+          },
+          "sender": {
+            "type": "string",
+            "description": "The message's sender."
+          },
+          "sender_display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sender's display name in this room, from their current\n`m.room.member` state. `null` when they have none; fall back to the\nuser id as the member list does."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "`true` when `body` was cut to fit."
+          }
+        }
+      },
+      "RoomPreviewsRequest": {
+        "type": "object",
+        "description": "Body of `POST /v1/rooms/previews`: the rooms whose previews to read.",
+        "required": [
+          "rooms"
+        ],
+        "properties": {
+          "rooms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomRefDto"
+            },
+            "description": "The rooms, at most 50. Repeats are answered once.",
+            "maxItems": 50
+          }
+        },
+        "additionalProperties": false
       },
       "RoomRefDto": {
         "type": "object",
