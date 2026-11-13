@@ -88,6 +88,12 @@ A failed download remains visible on the card after closing the viewer; opening 
 A single tap opens the preview; configured double-tap, touch-and-hold, and swipe actions still work over the card, while links and the download icon keep their own actions.
 Unsupported or oversized attachments remain download-only, and preview bytes load only after opening the card.
 
+Use `/collapse` or **Ctrl+Alt+C** (**⌘+Option+C** on macOS) to hide timeline images, stickers, and preview cards, including grouped images and video/file cards.
+Use `/expand` or **Ctrl+Alt+E** (**⌘+Option+E** on macOS) to show them again.
+Captions, filenames, download controls, and message links remain available; avatars and inline emoji stay visible.
+The choice applies to existing and incoming messages in every room and thread, survives room changes, and resets to expanded on reload or restart.
+Composer attachment and link previews are unaffected.
+
 Messages with bundled URL previews (`m.url_previews` or Beeper's `com.beeper.linkpreviews`) show cards beneath the body in room and thread timelines, including attachment captions.
 Compact pinned thread headers omit the cards; the full root message retains them.
 Cards show the destination hostname, site name, title, and description when supplied; the destination is the matched URL in the message body, rather than the preview's canonical URL.

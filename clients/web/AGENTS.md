@@ -206,6 +206,12 @@ before starting a milestone.
   otherwise; the gates built on that assumption (withholding Download for
   unidentifiable bytes) have been removed, so any bytes that arrive are
   offered for Download.
+- **Timeline media visibility** (`AppServices.timelineMediaExpanded`): an in-memory signal, shared by rooms and threads, starts expanded on each app load.
+  `/collapse` and `/expand`, plus Ctrl+Alt+C/E (Command+Option+C/E on macOS), set it explicitly rather than toggling it.
+  Collapsed messages retain captions, filenames, links, and downloads; avatars and inline custom emoji stay visible.
+  `EventBody` controls ordinary media and URL cards; `MediaGalleryRow` swaps its grid for compact attachment metadata while retaining the outer row for scroll anchoring.
+  Non-emoji images in formatted text and collapsed captions become alt text before media acquisition.
+  Keep composer previews independent of this timeline-only choice.
 - **Attachment cards** (`components/MediaAttachment.tsx`, `MediaTile.tsx`): captions span the card width and the shared `MediaDownloadButton` occupies the top-right header/tile corner.
   `openMediaCard` delegates clicks once from `data-media-preview-card`, excluding nested controls except the real filename/tile opener.
   The message touch recognizer resolves the card to that opener, preserving configured double-tap, hold, and swipe actions while leaving nested links and download controls independent.

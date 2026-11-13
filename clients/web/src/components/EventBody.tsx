@@ -3,6 +3,7 @@ import type { EventMedia } from '../media/event-media'
 import { hasEmojiCandidate } from '../emoji'
 import { stateEventNotice } from '../state-event-notice'
 import type { TimelineEvent } from '../stores/timeline'
+import { useServices } from '../services'
 import { FormattedBody } from './FormattedBody'
 import { MediaAttachment } from './MediaAttachment'
 import { MediaImage } from './MediaImage'
@@ -16,7 +17,9 @@ function MediaBody({
   resolved: EventMedia
 }) {
   const { media, previewUrl, pending } = resolved
-  return isImageMedia(media) ? (
+  const { timelineMediaExpanded } = useServices()
+  const expanded = timelineMediaExpanded.value
+  return expanded && isImageMedia(media) ? (
     <MediaImage
       accountId={event.account_id}
       media={media}
@@ -31,6 +34,7 @@ function MediaBody({
       accountId={event.account_id}
       media={media}
       content={event.content}
+      compact={!expanded}
     />
   )
 }
@@ -111,6 +115,8 @@ export function EventBody({
   /** Compact thread-root headers show only the existing message body. */
   showLinkPreviews?: boolean
 }) {
+  const { timelineMediaExpanded } = useServices()
+  const expanded = timelineMediaExpanded.value
   // Resolved up front, but rendered in two places: a still-uploading send
   // outranks the placeholders below (it can be neither redacted nor a UTD),
   // while confirmed media must lose to them.
@@ -144,7 +150,7 @@ export function EventBody({
   }
 
   const previews =
-    showLinkPreviews && event.type === 'm.room.message' ? (
+    expanded && showLinkPreviews && event.type === 'm.room.message' ? (
       <LinkPreviews
         accountId={event.account_id}
         content={event.content}
@@ -169,6 +175,7 @@ export function EventBody({
           * {senderDisplay ?? event.sender}{' '}
           <FormattedBody
             accountId={event.account_id}
+            hideImages={!expanded}
             body={event.body}
             content={event.content}
           />
@@ -183,6 +190,7 @@ export function EventBody({
   const body = (
     <FormattedBody
       accountId={event.account_id}
+      hideImages={!expanded}
       body={event.body}
       content={event.content}
       className={bodyClassName}
