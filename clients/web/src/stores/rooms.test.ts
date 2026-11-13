@@ -50,6 +50,18 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
+/**
+ * Every store a test made, signed out after it: a preview batch that failed
+ * against a test without a handler for it is retried seconds later, and must
+ * not land in whichever test is running by then.
+ */
+const madeStores: ReturnType<typeof createRoomsStore>[] = []
+afterEach(() => {
+  for (const store of madeStores.splice(0)) {
+    store.resetSession()
+  }
+})
+
 function makeStore(storage = memoryStorage(), options: RoomsStoreOptions = {}) {
   const api = createApiClient(
     {
@@ -59,7 +71,9 @@ function makeStore(storage = memoryStorage(), options: RoomsStoreOptions = {}) {
     },
     BASE_URL,
   )
-  return createRoomsStore(api, storage, null, options)
+  const store = createRoomsStore(api, storage, null, options)
+  madeStores.push(store)
+  return store
 }
 
 interface RoomRef {
@@ -1949,18 +1963,8 @@ it('keeps only the live-patched field when a stale refresh lands', async () => {
 })
 
 describe('room-list previews (issue #278)', () => {
-  /** Every store a test made, signed out after it so no retry outlives it. */
-  const made: ReturnType<typeof makeStore>[] = []
-  afterEach(() => {
-    for (const store of made.splice(0)) {
-      store.resetSession()
-    }
-  })
-  const previewStore = (options: RoomsStoreOptions) => {
-    const store = makeStore(undefined, options)
-    made.push(store)
-    return store
-  }
+  const previewStore = (options: RoomsStoreOptions) =>
+    makeStore(undefined, options)
 
   /** A listed room whose newest message is `$e<n>`. */
   const listed = (n: number) => ({
@@ -2297,5 +2301,227 @@ describe('room-list previews (issue #278)', () => {
     await sleep(60)
 
     expect(asked).toHaveLength(0)
+  })
+
+  it('holds for a room page that mounts after the start hold ran out', async () => {
+    const rooms = [listed(0)]
+    const { asked } = serve(rooms, () => HttpResponse.json({ data: [] }))
+    const store = previewStore({
+      previewBatchDelayMs: 0,
+      holdPreviewsAtStart: true,
+      previewHoldMaxMs: 100,
+    })
+    await store.refresh()
+    // Nothing waited behind the start hold before it ran out.
+    await sleep(150)
+
+    const release = store.holdPreviews()
+    store.hydratePreview(store.rooms.value[0])
+    await sleep(50)
+    expect(asked).toHaveLength(0)
+
+    release()
+    await vi.waitFor(() => expect(asked).toHaveLength(1))
+  })
+
+  it("gives the room page a cap of its own, not what is left of the start hold's", async () => {
+    const rooms = [listed(0)]
+    const { asked } = serve(rooms, () => HttpResponse.json({ data: [] }))
+    const store = previewStore({
+      previewBatchDelayMs: 0,
+      holdPreviewsAtStart: true,
+      previewHoldMaxMs: 200,
+    })
+    await store.refresh()
+    await sleep(120)
+
+    const release = store.holdPreviews()
+    store.hydratePreview(store.rooms.value[0])
+    // Past the start hold's cap, well inside the page's.
+    await sleep(130)
+    expect(asked).toHaveLength(0)
+
+    await vi.waitFor(() => expect(asked).toHaveLength(1))
+    release()
+  })
+
+  it('a sign-out drops the hold taken at start', async () => {
+    const rooms = [listed(0)]
+    const { asked } = serve(rooms, () => HttpResponse.json({ data: [] }))
+    const store = previewStore({
+      previewBatchDelayMs: 0,
+      holdPreviewsAtStart: true,
+      previewHoldMaxMs: 60_000,
+    })
+    // Launched into a room URL while signed out: the sign-in screen, not the
+    // room page, is what shows, and that page takes its own hold later.
+    store.resetSession()
+    await store.refresh()
+
+    store.hydratePreview(store.rooms.value[0])
+    await vi.waitFor(() => expect(asked).toHaveLength(1))
+  })
+
+  it('asks again for a room that left the list while its read was out', async () => {
+    const rooms: unknown[] = [listed(0)]
+    let store: ReturnType<typeof makeStore> | null = null
+    const { asked } = serve(rooms, async (_, call) => {
+      if (call === 1) {
+        // Left, or dropped by a refresh, while the batch was out.
+        rooms.length = 0
+        await store!.refresh()
+      }
+      return HttpResponse.json({
+        data: [previewDto(listed(0), { event_id: '$e0' })],
+      })
+    })
+    store = previewStore({ previewBatchDelayMs: 0 })
+    await store.refresh()
+
+    store.hydratePreview(store.rooms.value[0])
+    await vi.waitFor(() => expect(asked).toHaveLength(1))
+    await sleep(20)
+    expect(store.rooms.value).toHaveLength(0)
+    expect(store.preview(roomKey(listed(0)))).toBeUndefined()
+
+    // Back, with the same newest message: its row asks again.
+    rooms.push(listed(0))
+    await store.refresh()
+    store.hydratePreview(store.rooms.value[0])
+    await vi.waitFor(() =>
+      expect(store!.preview(roomKey(listed(0)))?.body).toBe('hello'),
+    )
+    expect(asked).toHaveLength(2)
+  })
+
+  describe('naming a live sender on a server without the route', () => {
+    /**
+     * Serve `rooms`, answer the first batch with a preview of room 0 by Carol
+     * (so the store learns her name) and the second with a 405, and hold room
+     * 0's member list until `releaseRoster`. A third batch, from a later
+     * session, gets Bob's message under the name Robert.
+     */
+    function serveWithoutRoute(rooms: ReturnType<typeof listed>[]) {
+      const { asked } = serve(rooms, (_, call) =>
+        call === 2
+          ? new HttpResponse(null, { status: 405 })
+          : HttpResponse.json({
+              data: [
+                call === 1
+                  ? previewDto(rooms[0], {
+                      event_id: '$e0',
+                      sender: '@carol:hs',
+                      sender_display_name: 'Carol',
+                    })
+                  : previewDto(rooms[0], {
+                      event_id: '$bob',
+                      sender_display_name: 'Robert',
+                      body: 'Hello from live',
+                    }),
+              ],
+            }),
+      )
+      let releaseRoster!: () => void
+      const rosterHeld = new Promise<void>((resolve) => {
+        releaseRoster = resolve
+      })
+      const rosterReads: string[] = []
+      server.use(
+        http.get(
+          `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+          () => HttpResponse.json({ data: { events: [], next_cursor: null } }),
+        ),
+        http.get(
+          `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+          async ({ params }) => {
+            rosterReads.push(String(params.roomId))
+            if (params.roomId === rooms[0].room_id) {
+              await rosterHeld
+            }
+            return HttpResponse.json({
+              data: [
+                {
+                  user_id: '@bob:example.org',
+                  membership: 'join',
+                  display_name: 'Bob',
+                },
+              ],
+            })
+          },
+        ),
+      )
+      return { asked, rosterReads, releaseRoster }
+    }
+
+    /** Learn Carol's name in room 0, then find the route missing via room 1. */
+    async function fallBack(
+      store: ReturnType<typeof makeStore>,
+      rosterReads: string[],
+    ) {
+      await store.refresh()
+      store.hydratePreview(store.rooms.value[0])
+      await vi.waitFor(() =>
+        expect(store.preview(roomKey(listed(0)))).toBeDefined(),
+      )
+      store.hydratePreview(store.rooms.value[1])
+      // Room 1's per-row read: the store has switched over.
+      await vi.waitFor(() => expect(rosterReads).toContain(listed(1).room_id))
+    }
+
+    it('does not name a message a newer one has replaced', async () => {
+      const rooms = [listed(0), listed(1)]
+      const { rosterReads, releaseRoster } = serveWithoutRoute(rooms)
+      const store = previewStore({ previewBatchDelayMs: 0 })
+      await fallBack(store, rosterReads)
+
+      // Bob is not named yet: his message reads the member list.
+      store.noteTimelineEvent(
+        liveMessage('$bob', '@bob:example.org', 20_000, rooms[0].room_id),
+      )
+      await vi.waitFor(() => expect(rosterReads).toContain(rooms[0].room_id))
+      // Carol is: her newer message shows at once.
+      store.noteTimelineEvent(
+        liveMessage('$carol', '@carol:hs', 20_001, rooms[0].room_id),
+      )
+      expect(store.preview(roomKey(rooms[0]))?.eventId).toBe('$carol')
+
+      releaseRoster()
+      await sleep(20)
+      expect(store.preview(roomKey(rooms[0]))).toEqual({
+        eventId: '$carol',
+        senderDisplay: 'Carol',
+        body: 'Hello from live',
+      })
+    })
+
+    it("does not name the next session's preview after a sign-out", async () => {
+      const rooms = [listed(0), listed(1)]
+      const { rosterReads, releaseRoster } = serveWithoutRoute(rooms)
+      const store = previewStore({ previewBatchDelayMs: 0 })
+      await fallBack(store, rosterReads)
+
+      store.noteTimelineEvent(
+        liveMessage('$bob', '@bob:example.org', 20_000, rooms[0].room_id),
+      )
+      await vi.waitFor(() => expect(rosterReads).toContain(rooms[0].room_id))
+      store.resetSession()
+
+      // The next session lists Bob's message and reads its own preview.
+      rooms[0] = { ...rooms[0], last_event_id: '$bob' }
+      await store.refresh()
+      store.hydratePreview(store.rooms.value[0])
+      await vi.waitFor(() =>
+        expect(store.preview(roomKey(rooms[0]))?.senderDisplay).toBe('Robert'),
+      )
+
+      // The previous session's member list lands only now.
+      releaseRoster()
+      await sleep(20)
+      expect(store.preview(roomKey(rooms[0]))).toEqual({
+        eventId: '$bob',
+        senderDisplay: 'Robert',
+        body: 'Hello from live',
+      })
+    })
   })
 })
