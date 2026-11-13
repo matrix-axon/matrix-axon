@@ -4806,7 +4806,10 @@ export interface components {
             /**
              * Format: int32
              * @description Slots held by requests that timed out, which the homeserver may still be
-             *     working on. Each is released 15 minutes after its timeout.
+             *     working on. Each is released 15 minutes after its timeout. At most one
+             *     is excused: its timeout was isolated (the homeserver answered other
+             *     requests meanwhile), so it does not count against `limit`, and
+             *     `active + held` can exceed `limit` by one.
              */
             held: number;
             /**
@@ -4817,7 +4820,7 @@ export interface components {
             /**
              * Format: int32
              * @description How many background requests may be in flight at once, counting held
-             *     slots. `0` while the breaker is open.
+             *     slots other than an excused one. `0` while the breaker is open.
              */
             limit: number;
             /**

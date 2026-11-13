@@ -2334,12 +2334,15 @@ pub struct HomeserverGateDto {
     /// port explicit (`https://matrix.example.org:443`).
     pub homeserver: String,
     /// How many background requests may be in flight at once, counting held
-    /// slots. `0` while the breaker is open.
+    /// slots other than an excused one. `0` while the breaker is open.
     pub limit: u32,
     /// Background requests in flight.
     pub active: u32,
     /// Slots held by requests that timed out, which the homeserver may still be
-    /// working on. Each is released 15 minutes after its timeout.
+    /// working on. Each is released 15 minutes after its timeout. At most one
+    /// is excused: its timeout was isolated (the homeserver answered other
+    /// requests meanwhile), so it does not count against `limit`, and
+    /// `active + held` can exceed `limit` by one.
     pub held: u32,
     /// Requests waiting for the gate.
     pub waiting: u32,

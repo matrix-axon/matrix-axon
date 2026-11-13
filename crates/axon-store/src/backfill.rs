@@ -43,12 +43,15 @@ pub struct RoomBackfillState {
     /// How many times the homeserver has rejected the room's resume token. Unlike
     /// the failure count, a successful page does not reset it (ADR 0121).
     pub token_rejections: i32,
+    /// Timed-out pages since the room's last fast one. A slow success does not
+    /// reset it (ADR 0122's amendment of 2026-11-12).
+    pub timeout_streak: i32,
 }
 
 /// The columns [`RoomBackfillState`] reads, shared by the single-room and
 /// per-account cursor queries so the two cannot drift.
 const CURSOR_COLUMNS: &str = "oldest_seen_token, complete, events_backfilled, \
-     consecutive_failures, parked, token_rejections, \
+     consecutive_failures, parked, token_rejections, timeout_streak, \
      (retry_at IS NULL OR retry_at <= now()) AS retry_due";
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomBackfillState {
@@ -61,8 +64,18 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomBackfillState {
             retry_due: row.try_get("retry_due")?,
             parked: row.try_get("parked")?,
             token_rejections: row.try_get("token_rejections")?,
+            timeout_streak: row.try_get("timeout_streak")?,
         })
     }
+}
+
+/// How fast a successful backfill page came back, by the homeserver gate's rule:
+/// fast is under half the page timeout. Only a fast page clears a room's timeout
+/// streak (ADR 0122's amendment of 2026-11-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSpeed {
+    Fast,
+    Slow,
 }
 
 /// One failed backfill page, as [`Store::record_room_backfill_failure`] stores
@@ -80,6 +93,8 @@ pub struct RoomBackfillFailure<'a> {
     /// timeline end, and count a token rejection. Set only when the homeserver
     /// rejected the token.
     pub clear_token: bool,
+    /// The page timed out: count it in the room's timeout streak.
+    pub timed_out: bool,
 }
 
 /// Account-level backfill progress for `GET /v1/status` — how far the deep-history
@@ -193,7 +208,8 @@ impl Store {
     /// flag, and add `added` to the running `events_backfilled` count. Upsert, so
     /// the first page for a room inserts the row and later pages update it. A
     /// successful page also clears any failure backoff or parking, but not the
-    /// token rejection count (ADR 0121).
+    /// token rejection count (ADR 0121). Only a [`PageSpeed::Fast`] page clears the
+    /// timeout streak (ADR 0122's amendment of 2026-11-12).
     ///
     /// Progress is saved only *after* a page's events are fully persisted, so a
     /// crash mid-page simply re-pages from the previously saved token — idempotent,
@@ -205,6 +221,7 @@ impl Store {
         oldest_seen_token: Option<&str>,
         complete: bool,
         added: i64,
+        speed: PageSpeed,
     ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "INSERT INTO room_backfill \
@@ -217,13 +234,16 @@ impl Store {
                  consecutive_failures = 0, \
                  last_failure = NULL, \
                  retry_at = NULL, \
-                 parked = false",
+                 parked = false, \
+                 timeout_streak = CASE WHEN $6 THEN 0 \
+                                       ELSE room_backfill.timeout_streak END",
         )
         .bind(account_id)
         .bind(room_id)
         .bind(oldest_seen_token)
         .bind(complete)
         .bind(added)
+        .bind(speed == PageSpeed::Fast)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -233,9 +253,10 @@ impl Store {
     /// when the room may be paged again. Upsert, so a room whose very first page
     /// fails still gets a row to carry its backoff. The saved token is kept unless
     /// [`clear_token`](RoomBackfillFailure::clear_token) is set, so a retry resumes
-    /// from the same position; a cleared token also counts a rejection. A later
-    /// successful page ([`save_room_backfill`](Self::save_room_backfill)) clears
-    /// all of it except that count.
+    /// from the same position; a cleared token also counts a rejection, and a
+    /// timed-out page extends the timeout streak. A later successful page
+    /// ([`save_room_backfill`](Self::save_room_backfill)) clears all of it
+    /// except the rejection count, and the streak unless the page was fast.
     pub async fn record_room_backfill_failure(
         &self,
         account_id: Uuid,
@@ -245,15 +266,16 @@ impl Store {
         sqlx_core::query::query(
             "INSERT INTO room_backfill \
                  (account_id, room_id, consecutive_failures, last_failure, retry_at, parked, \
-                  token_rejections) \
+                  token_rejections, timeout_streak) \
              VALUES ($1, $2, 1, $3, now() + make_interval(secs => $4), $5, \
-                     CASE WHEN $6 THEN 1 ELSE 0 END) \
+                     CASE WHEN $6 THEN 1 ELSE 0 END, CASE WHEN $7 THEN 1 ELSE 0 END) \
              ON CONFLICT (account_id, room_id) DO UPDATE SET \
                  consecutive_failures = room_backfill.consecutive_failures + 1, \
                  last_failure = EXCLUDED.last_failure, \
                  retry_at = EXCLUDED.retry_at, \
                  parked = EXCLUDED.parked, \
                  token_rejections = room_backfill.token_rejections + EXCLUDED.token_rejections, \
+                 timeout_streak = room_backfill.timeout_streak + EXCLUDED.timeout_streak, \
                  oldest_seen_token = CASE WHEN $6 THEN NULL \
                                           ELSE room_backfill.oldest_seen_token END",
         )
@@ -263,12 +285,13 @@ impl Store {
         .bind(failure.retry_after.as_secs_f64())
         .bind(failure.parked)
         .bind(failure.clear_token)
+        .bind(failure.timed_out)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Clear a room's failure count, class, backoff and parking without recording
+    /// Clear a room's failure count, class, backoff, parking and timeout streak without recording
     /// a page, for a room backfill has stopped paging (ADR 0121). The token
     /// rejection count is kept, as on a successful page.
     pub async fn clear_room_backfill_failures(
@@ -281,7 +304,8 @@ impl Store {
                  consecutive_failures = 0, \
                  last_failure = NULL, \
                  retry_at = NULL, \
-                 parked = false \
+                 parked = false, \
+                 timeout_streak = 0 \
              WHERE account_id = $1 AND room_id = $2",
         )
         .bind(account_id)

@@ -15056,7 +15056,7 @@
           "held": {
             "type": "integer",
             "format": "int32",
-            "description": "Slots held by requests that timed out, which the homeserver may still be\nworking on. Each is released 15 minutes after its timeout.",
+            "description": "Slots held by requests that timed out, which the homeserver may still be\nworking on. Each is released 15 minutes after its timeout. At most one\nis excused: its timeout was isolated (the homeserver answered other\nrequests meanwhile), so it does not count against `limit`, and\n`active + held` can exceed `limit` by one.",
             "minimum": 0
           },
           "homeserver": {
@@ -15066,7 +15066,7 @@
           "limit": {
             "type": "integer",
             "format": "int32",
-            "description": "How many background requests may be in flight at once, counting held\nslots. `0` while the breaker is open.",
+            "description": "How many background requests may be in flight at once, counting held\nslots other than an excused one. `0` while the breaker is open.",
             "minimum": 0
           },
           "next_probe_at_ms": {

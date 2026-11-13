@@ -36,6 +36,14 @@
 //! shared with axon's other background callers, so a struggling homeserver
 //! slows backfill down as a whole, not one room at a time.
 //!
+//! A timed-out page is its own failure class, because the gate holds a timed-out
+//! request's slot for [`TIMEOUT_HOLD`]. The room waits at least that long before
+//! its next page, longer for each timeout since its last fast page, and is paged
+//! after the other rooms meanwhile. Otherwise a room that is merely expensive
+//! (slow pages, with an occasional timeout) is the request waiting at the gate
+//! every time its hold ends, and keeps the gate shut for every other caller
+//! (ADR 0122's amendment of 2026-11-12, #1037).
+//!
 //! A disk-space safety valve ([`BackfillHealth`]) pauses paging when free space on
 //! the guarded filesystem (`sync.backfill_disk_guard_path`, default the sync data
 //! dir) is low — backfill grows storage unbounded ("to room start"), so it must
@@ -47,7 +55,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axon_core::SyncConfig;
-use axon_store::{RoomBackfillFailure, RoomBackfillState};
+use axon_store::{PageSpeed, RoomBackfillFailure, RoomBackfillState};
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::api::client::message::get_message_events;
@@ -59,7 +67,7 @@ use matrix_sdk::Client;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{persist_backfilled_event, PersistContext};
-use crate::homeserver_gate::HomeserverGate;
+use crate::homeserver_gate::{is_fast, GateError, HomeserverGate, Outcome, TIMEOUT_HOLD};
 
 /// The filesystem the disk-space valve guards: the configured override, else the
 /// sync data dir. Shared by the valve (`disk_ok`) and the live `GET /v1/status`
@@ -107,8 +115,12 @@ enum PageFailure {
     /// A `403` or `404`: the homeserver will not serve this room's history to the
     /// account. Park the room.
     Inaccessible,
-    /// Anything else — axon's page timeout, a transport error, a `5xx`, a `429`.
-    /// Retry the same token after a growing delay, then park.
+    /// What the homeserver gate reads as a timeout: axon's page timeout, or the
+    /// SDK's HTTP timeout. Retry the same token after at least the gate's
+    /// [`TIMEOUT_HOLD`], growing with the room's timeout streak, then park.
+    TimedOut,
+    /// Anything else — a transport error, a `5xx`, a `429`. Retry the same token
+    /// after a growing delay, then park.
     Retryable,
 }
 
@@ -118,13 +130,18 @@ impl PageFailure {
         match self {
             PageFailure::Rejected => "rejected",
             PageFailure::Inaccessible => "inaccessible",
+            PageFailure::TimedOut => "timed_out",
             PageFailure::Retryable => "retryable",
         }
     }
 
     /// Classify a failed `/messages` call. `had_token` is whether the request
     /// carried a `from` token: a `400` without one says nothing about a token.
+    /// A timeout is decided by the gate's own rule, so the two cannot disagree.
     fn of(err: &matrix_sdk::Error, had_token: bool) -> Self {
+        if err.outcome() == Outcome::TimedOut {
+            return PageFailure::TimedOut;
+        }
         Self::of_status(
             err.as_client_api_error().map(|e| e.status_code.as_u16()),
             had_token,
@@ -146,13 +163,28 @@ impl PageFailure {
 /// The backoff before the `failures`th consecutive failure's retry: `RETRY_BASE`
 /// doubled `failures - 1` times, capped at `RETRY_MAX`.
 fn retry_delay(failures: i32) -> Duration {
-    let doublings = failures.saturating_sub(1).clamp(0, 16) as u32;
-    RETRY_BASE.saturating_mul(1 << doublings).min(RETRY_MAX)
+    backoff(RETRY_BASE, failures)
+}
+
+/// The backoff before retrying a room after its `streak`th timeout since its last
+/// fast page: [`TIMEOUT_HOLD`] doubled `streak - 1` times, capped at
+/// [`RETRY_MAX`]. Never shorter than the hold, so the room is not the request
+/// waiting at the gate when the slot its timeout left behind is released.
+fn timeout_retry_delay(streak: i32) -> Duration {
+    backoff(TIMEOUT_HOLD, streak)
+}
+
+/// `base` doubled `n - 1` times, capped at [`RETRY_MAX`]. An `n` below 1 gives
+/// `base`, and the doublings stop at 16 so the multiplier cannot overflow.
+fn backoff(base: Duration, n: i32) -> Duration {
+    let doublings = n.saturating_sub(1).clamp(0, 16) as u32;
+    base.saturating_mul(1 << doublings).min(RETRY_MAX)
 }
 
 /// What a failure does to a room that had already failed `prior` times in a row,
-/// and had its token rejected `prior_rejections` times in all — its delay,
-/// whether it is now parked, and whether its token is dropped.
+/// had its token rejected `prior_rejections` times in all, and had timed out
+/// `prior_timeouts` times since its last fast page — its delay, whether it is
+/// now parked, and whether its token is dropped.
 ///
 /// A first rejection restarts the room from its live end at once. A later one
 /// parks it as well: the pages back down to the same depth succeed and reset
@@ -162,13 +194,21 @@ fn failure_record(
     failure: PageFailure,
     prior: i32,
     prior_rejections: i32,
+    prior_timeouts: i32,
 ) -> RoomBackfillFailure<'static> {
     let failures = prior.saturating_add(1);
     let (retry_after, parked, clear_token) = match failure {
         PageFailure::Rejected if prior_rejections > 0 => (PARK_FOR, true, true),
         PageFailure::Rejected => (Duration::ZERO, false, true),
         PageFailure::Inaccessible => (PARK_FOR, true, false),
-        PageFailure::Retryable if failures >= PARK_AFTER => (PARK_FOR, true, false),
+        PageFailure::TimedOut | PageFailure::Retryable if failures >= PARK_AFTER => {
+            (PARK_FOR, true, false)
+        }
+        PageFailure::TimedOut => (
+            timeout_retry_delay(prior_timeouts.saturating_add(1)),
+            false,
+            false,
+        ),
         PageFailure::Retryable => (retry_delay(failures), false, false),
     };
     RoomBackfillFailure {
@@ -176,6 +216,7 @@ fn failure_record(
         retry_after,
         parked,
         clear_token,
+        timed_out: failure == PageFailure::TimedOut,
     }
 }
 
@@ -191,8 +232,9 @@ async fn record_failure(
     let account_id = ctx.account_id;
     let prior = state.map_or(0, |s| s.consecutive_failures);
     let prior_rejections = state.map_or(0, |s| s.token_rejections);
+    let prior_timeouts = state.map_or(0, |s| s.timeout_streak);
     let was_parked = state.is_some_and(|s| s.parked);
-    let record = failure_record(failure, prior, prior_rejections);
+    let record = failure_record(failure, prior, prior_rejections, prior_timeouts);
     let failures = prior.saturating_add(1);
     let retry_in_secs = record.retry_after.as_secs();
     if record.parked && !was_parked {
@@ -397,7 +439,7 @@ pub(crate) async fn run(
         };
 
         let mut progressed = false;
-        for room in client.joined_rooms() {
+        for room in sweep_order(client.joined_rooms(), &cursors) {
             if cancel.is_cancelled() {
                 return;
             }
@@ -453,6 +495,22 @@ pub(crate) async fn run(
     }
 }
 
+/// The order to page rooms in one sweep: rooms whose pages have been timing out
+/// go last, so the rooms that page normally are not stuck behind them. Stable,
+/// so rooms keep their order otherwise.
+fn sweep_order(
+    mut rooms: Vec<matrix_sdk::Room>,
+    cursors: &std::collections::HashMap<String, RoomBackfillState>,
+) -> Vec<matrix_sdk::Room> {
+    rooms.sort_by_key(|room| timing_out(cursors.get(room.room_id().as_str())));
+    rooms
+}
+
+/// Whether a room has timed out since its last fast page.
+fn timing_out(state: Option<&RoomBackfillState>) -> bool {
+    state.is_some_and(|s| s.timeout_streak > 0)
+}
+
 /// Decrypt one paged event into the [`TimelineEvent`] the ingestion path expects.
 ///
 /// Mirrors the SDK's own `Room::try_decrypt_event`, which `Room::messages` applies
@@ -496,8 +554,19 @@ enum FetchError {
     TimedOut,
 }
 
-/// Fetch and decrypt one `/messages` page, returning the events and the resume
-/// token for the next page (`None` once the room's history is exhausted).
+/// One fetched and decrypted `/messages` page.
+struct Page {
+    events: Vec<TimelineEvent>,
+    /// The resume token for the next page; `None` once the room's history is
+    /// exhausted.
+    end: Option<String>,
+    /// How fast the homeserver answered, by the gate's rule: under half the
+    /// page timeout is fast, counted from when the request was sent, not from
+    /// when it started waiting for a permit.
+    speed: PageSpeed,
+}
+
+/// Fetch and decrypt one `/messages` page.
 ///
 /// This is `Room::messages` minus its event-cache write — see the module docs and
 /// issue #287. Everything else matches except retries: see [`send_page`].
@@ -512,16 +581,21 @@ async fn fetch_page(
     room: &matrix_sdk::Room,
     request: get_message_events::v3::Request,
     timeout: Duration,
-) -> Result<(Vec<TimelineEvent>, Option<String>), FetchError> {
-    // The SDK's own timeout is the same length and also ends in a retryable
+) -> Result<Page, FetchError> {
+    // The SDK's own timeout is the same length and also ends in a timed-out
     // failure, so it does not matter which fires first. The gate's outer one also
     // covers time the SDK spends before the request is on the wire.
     let client = room.client();
-    let response = match gate
-        .call(timeout, send_page(&client, request, timeout))
-        .await
-    {
-        Ok(Ok(response)) => response,
+    // The gate polls the request only once it has a permit, so the clock starts
+    // when the request does.
+    let timed = async {
+        let started = tokio::time::Instant::now();
+        send_page(&client, request, timeout)
+            .await
+            .map(|response| (response, started.elapsed()))
+    };
+    let (response, elapsed) = match gate.call(timeout, timed).await {
+        Ok(Ok(answered)) => answered,
         Ok(Err(err)) => return Err(FetchError::Homeserver(err)),
         Err(_elapsed) => return Err(FetchError::TimedOut),
     };
@@ -533,7 +607,15 @@ async fn fetch_page(
 
     // `state` is ignored: the paged timeline events are what backfill persists, and
     // room state arrives through live sync.
-    Ok((events, response.end))
+    Ok(Page {
+        events,
+        end: response.end,
+        speed: if is_fast(elapsed, timeout) {
+            PageSpeed::Fast
+        } else {
+            PageSpeed::Slow
+        },
+    })
 }
 
 /// Send one `/messages` request with the SDK's internal retry disabled. The SDK
@@ -607,7 +689,7 @@ async fn backfill_room_page(
     // would keep the backfill task parked inside the await, and shutdown / logout /
     // delete — which cancel the token and then await this task's handle — would
     // stall until the request eventually resolved.
-    let (events, end) = tokio::select! {
+    let Page { events, end, speed } = tokio::select! {
         biased;
         _ = cancel.cancelled() => return PageOutcome::Abandoned,
         result = fetch_page(gate, room, request, params.page_timeout) => match result {
@@ -621,7 +703,7 @@ async fn backfill_room_page(
                 // The homeserver may still be working on it: a timeout is never a
                 // token rejection, so the same token is retried after a backoff.
                 tracing::warn!(account_id = %account_id, room_id = %room_id, timeout_secs = params.page_timeout.as_secs(), "backfill: /messages page timed out");
-                return PageOutcome::Failed(PageFailure::Retryable);
+                return PageOutcome::Failed(PageFailure::TimedOut);
             }
         },
     };
@@ -643,6 +725,7 @@ async fn backfill_room_page(
             end.as_deref(),
             complete,
             fetched as i64,
+            speed,
         )
         .await
     {
@@ -776,7 +859,7 @@ mod tests {
     #[test]
     fn slowness_and_server_errors_are_retryable() {
         // `None` is a failure with no response at all: a transport error, or the
-        // SDK's own timeout.
+        // SDK's own timeout (which `of` classifies as a timeout before this).
         for status in [None, Some(401), Some(429), Some(500), Some(502), Some(504)] {
             assert_eq!(
                 PageFailure::of_status(status, true),
@@ -799,12 +882,13 @@ mod tests {
         );
     }
 
-    /// The #741 loop: a page that keeps timing out must never send the room back
-    /// to its live end. It backs off on the same token, then parks.
+    /// The #741 loop: a page that keeps failing must never send the room back to
+    /// its live end. It backs off on the same token, then parks. (A timeout is
+    /// its own class since #1037, and parks by the same count: see below.)
     #[test]
     fn repeated_timeouts_back_off_then_park_without_dropping_the_token() {
         for prior in 0..PARK_AFTER - 1 {
-            let record = failure_record(PageFailure::Retryable, prior, 0);
+            let record = failure_record(PageFailure::Retryable, prior, 0, 0);
             assert!(
                 !record.clear_token,
                 "failure {} dropped the token",
@@ -813,19 +897,53 @@ mod tests {
             assert!(!record.parked, "failure {} parked early", prior + 1);
             assert_eq!(record.retry_after, retry_delay(prior + 1));
         }
-        let fifth = failure_record(PageFailure::Retryable, PARK_AFTER - 1, 0);
+        let fifth = failure_record(PageFailure::Retryable, PARK_AFTER - 1, 0, 0);
         assert!(fifth.parked, "the fifth consecutive failure parks the room");
         assert!(!fifth.clear_token);
         assert_eq!(fifth.retry_after, PARK_FOR);
         // A parked room failing its daily retry stays parked.
-        let again = failure_record(PageFailure::Retryable, PARK_AFTER + 3, 0);
+        let again = failure_record(PageFailure::Retryable, PARK_AFTER + 3, 0, 0);
         assert!(again.parked && !again.clear_token);
         assert_eq!(again.retry_after, PARK_FOR);
     }
 
     #[test]
+    fn a_timeout_waits_out_the_gate_hold_and_doubles_to_an_hour() {
+        let mins = |n| timeout_retry_delay(n).as_secs() / 60;
+        assert_eq!([mins(1), mins(2), mins(3), mins(4)], [15, 30, 60, 60]);
+        assert_eq!(timeout_retry_delay(0), TIMEOUT_HOLD, "never under the hold");
+        assert_eq!(timeout_retry_delay(i32::MAX), RETRY_MAX, "no overflow");
+    }
+
+    /// #1037: the delay follows the timeout streak, which a slow page does not
+    /// reset, not the consecutive failure count, which it does. A room that
+    /// pages slowly between timeouts is never parked; one that only times out
+    /// parks as before.
+    #[test]
+    fn a_timeout_backs_off_by_its_streak_and_parks_only_without_progress() {
+        // The 2026-11-06 shape: a slow page between every timeout, so `prior` is
+        // always 0, but the streak grows.
+        for streak in 0..6 {
+            let record = failure_record(PageFailure::TimedOut, 0, 0, streak);
+            assert_eq!(record.kind, "timed_out");
+            assert!(record.timed_out);
+            assert!(!record.parked, "timeout {} parked", streak + 1);
+            assert!(!record.clear_token);
+            assert_eq!(record.retry_after, timeout_retry_delay(streak + 1));
+        }
+        // With no page in between, the failure count parks it as before.
+        let fifth = failure_record(PageFailure::TimedOut, PARK_AFTER - 1, 0, PARK_AFTER - 1);
+        assert!(fifth.parked && fifth.timed_out && !fifth.clear_token);
+        assert_eq!(fifth.retry_after, PARK_FOR);
+        // Other failures neither extend the streak nor wait out the hold.
+        let other = failure_record(PageFailure::Retryable, 0, 0, 3);
+        assert!(!other.timed_out);
+        assert_eq!(other.retry_after, retry_delay(1));
+    }
+
+    #[test]
     fn a_rejected_token_restarts_from_the_live_end_at_once() {
-        let record = failure_record(PageFailure::Rejected, 0, 0);
+        let record = failure_record(PageFailure::Rejected, 0, 0, 0);
         assert!(record.clear_token);
         assert!(!record.parked);
         assert_eq!(record.retry_after, Duration::ZERO);
@@ -837,7 +955,7 @@ mod tests {
     /// count stops the walk-back from repeating every sweep.
     #[test]
     fn a_second_rejection_parks_the_room_and_still_drops_the_token() {
-        let record = failure_record(PageFailure::Rejected, 0, 1);
+        let record = failure_record(PageFailure::Rejected, 0, 1, 0);
         assert!(record.clear_token, "the rejected token is still worthless");
         assert!(record.parked);
         assert_eq!(record.retry_after, PARK_FOR);
@@ -846,7 +964,7 @@ mod tests {
 
     #[test]
     fn an_inaccessible_room_parks_on_the_first_refusal() {
-        let record = failure_record(PageFailure::Inaccessible, 0, 0);
+        let record = failure_record(PageFailure::Inaccessible, 0, 0, 0);
         assert!(record.parked);
         assert!(!record.clear_token);
         assert_eq!(record.retry_after, PARK_FOR);
@@ -1060,10 +1178,10 @@ mod tests {
         }
 
         /// The #741 trigger: a homeserver that never answers in time. The SDK's
-        /// own timeout fires (no response, so no status) and the page is
-        /// retryable on the same token, not a rejection.
+        /// own timeout fires (no response, so no status) and the page is a
+        /// timeout, retried on the same token, not a rejection.
         #[tokio::test]
-        async fn a_hung_page_is_retryable_even_with_a_token() {
+        async fn a_hung_page_is_a_timeout_even_with_a_token() {
             let router = Router::new().route(
                 MESSAGES,
                 get(|| async {
@@ -1072,7 +1190,8 @@ mod tests {
                 }),
             );
             let failure = classify(router, Some("t1-2_0_0"), Duration::from_millis(200)).await;
-            assert_eq!(failure, PageFailure::Retryable);
+            assert_eq!(failure, PageFailure::TimedOut);
+            assert!(!failure_record(failure, 0, 0, 0).clear_token);
         }
     }
 }

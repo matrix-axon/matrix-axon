@@ -12,6 +12,14 @@
 //! - a timed-out request keeps its slot for [`TIMEOUT_HOLD`], because the
 //!   homeserver is presumably still working on it.
 //!
+//! A timeout nothing corroborates is isolated (ADR 0122's amendment of
+//! 2026-11-12, #1037): the breaker is closed, no slot is held, and the
+//! homeserver answered something else while the request was in flight. Its slot
+//! is still held, but excused: it does not count against admission, and the
+//! limit halves no lower than 1. Any held slot makes the next timeout an
+//! ordinary one, so at most one slot is excused at a time. That keeps one
+//! expensive room's slow page from stopping every other background caller.
+//!
 //! Three other kinds of caller see the gate without taking a slot:
 //!
 //! - **Interactive** requests (a user is waiting) never wait. Their timeouts and
@@ -64,7 +72,7 @@ pub(crate) const COOLDOWN_MAX: Duration = Duration::from_secs(30 * 60);
 
 /// A success counts toward growth when it took under this fraction of the
 /// request's own timeout (`FAST_FRACTION` = ½ in ADR 0122 decision 5).
-fn is_fast(elapsed: Duration, timeout: Duration) -> bool {
+pub(crate) fn is_fast(elapsed: Duration, timeout: Duration) -> bool {
     elapsed < timeout / 2
 }
 
@@ -166,13 +174,30 @@ enum Breaker {
     Probing { opened_at: Instant },
 }
 
+/// A slot kept by a timed-out request (ADR 0122 decision 4).
+#[derive(Debug, Clone, Copy)]
+struct Hold {
+    /// When the slot is released.
+    until: Instant,
+    /// The timeout was isolated, so the slot does not count against
+    /// admission. A probe still waits for it.
+    excused: bool,
+}
+
 #[derive(Debug)]
 struct State {
     limit: u32,
     /// Permits handed out and not yet finished or dropped.
     active: u32,
-    /// When each held slot is released.
-    held: Vec<Instant>,
+    /// Slots kept by timed-out requests.
+    held: Vec<Hold>,
+    /// When the homeserver last answered: a background request's fast
+    /// success, or a long-poll that returned successfully. Only the former is
+    /// checked for speed. A long-poll is meant to run up to its own timeout, so
+    /// its return shows only that the homeserver is still answering (ADR 0122's
+    /// amendment of 2026-11-12). A timeout is isolated only if this is later
+    /// than the timed-out request's start.
+    answered_at: Option<Instant>,
     /// Fast successes since the limit last changed.
     fast: u32,
     /// Bumped on every decrease. A failure halves the limit only if its request
@@ -202,6 +227,7 @@ impl State {
             limit: INITIAL_LIMIT,
             active: 0,
             held: Vec::new(),
+            answered_at: None,
             fast: 0,
             epoch: 0,
             breaker: Breaker::Closed,
@@ -218,15 +244,28 @@ impl State {
     }
 
     fn release_expired_holds(&mut self, now: Instant) {
-        self.held.retain(|&until| until > now);
+        self.held.retain(|hold| hold.until > now);
     }
 
+    /// Slots that count against the limit: active permits, and held slots that
+    /// are not excused.
     fn in_use(&self) -> u32 {
-        self.active + self.held.len() as u32
+        self.active + self.held.iter().filter(|hold| !hold.excused).count() as u32
     }
 
+    /// When the next held slot is released, excused or not. A probe waits for
+    /// all of them.
     fn earliest_hold(&self) -> Option<Instant> {
-        self.held.iter().min().copied()
+        self.held.iter().map(|hold| hold.until).min()
+    }
+
+    /// When the next held slot that counts against the limit is released.
+    fn earliest_counted_hold(&self) -> Option<Instant> {
+        self.held
+            .iter()
+            .filter(|hold| !hold.excused)
+            .map(|hold| hold.until)
+            .min()
     }
 
     /// Whether a background request may be sent now, assuming it is first in
@@ -238,7 +277,7 @@ impl State {
                 epoch: self.epoch,
                 probe: false,
             },
-            Breaker::Closed => Admission::Wait(self.earliest_hold()),
+            Breaker::Closed => Admission::Wait(self.earliest_counted_hold()),
             Breaker::Open { opened_at, until } if now >= until && self.held.is_empty() => {
                 self.breaker = Breaker::Probing { opened_at };
                 Admission::Admit {
@@ -576,14 +615,38 @@ impl HomeserverGate {
         let now = Instant::now();
         let mut state = self.lock();
         state.active -= 1;
+        let fast_success =
+            outcome == Outcome::Success && is_fast(now - permit.started, permit.timeout);
+        if fast_success {
+            state.answered_at = Some(now);
+        }
         if outcome == Outcome::TimedOut {
-            state.held.push(now + TIMEOUT_HOLD);
+            state.release_expired_holds(now);
+            let isolated = !permit.probe
+                && state.breaker == Breaker::Closed
+                && state.held.is_empty()
+                && state.answered_at.is_some_and(|at| at > permit.started);
+            state.held.push(Hold {
+                until: now + TIMEOUT_HOLD,
+                excused: isolated,
+            });
+            if isolated {
+                tracing::info!(
+                    homeserver = %self.key,
+                    hold_secs = TIMEOUT_HOLD.as_secs(),
+                    "homeserver answered other requests meanwhile; timed-out slot held without blocking others"
+                );
+                state.halve(&self.key, now, permit.epoch, 1, outcome);
+                drop(state);
+                self.wake();
+                return;
+            }
         }
         if permit.probe {
             state.finish_probe(&self.key, now, outcome);
         } else if state.breaker == Breaker::Closed {
             match outcome {
-                Outcome::Success if is_fast(now - permit.started, permit.timeout) => {
+                Outcome::Success if fast_success => {
                     state.fast += 1;
                     if state.fast >= GROW_AFTER {
                         state.fast = 0;
@@ -616,8 +679,13 @@ impl HomeserverGate {
     fn finish_long_poll(&self, poll: &LongPoll, outcome: Outcome) {
         let now = Instant::now();
         let mut state = self.lock();
-        if outcome == Outcome::TimedOut {
-            state.held.push(now + TIMEOUT_HOLD);
+        match outcome {
+            Outcome::Success => state.answered_at = Some(now),
+            Outcome::TimedOut => state.held.push(Hold {
+                until: now + TIMEOUT_HOLD,
+                excused: false,
+            }),
+            _ => {}
         }
         if poll.probe {
             state.finish_probe(&self.key, now, outcome);
@@ -658,7 +726,11 @@ impl HomeserverGate {
                 Breaker::Open { opened_at, until } => BreakerSnapshot::Open {
                     opened_at: at(opened_at),
                     // A probe also waits for every held slot to be released.
-                    next_probe_at: at(state.held.iter().copied().fold(until, Instant::max)),
+                    next_probe_at: at(state
+                        .held
+                        .iter()
+                        .map(|hold| hold.until)
+                        .fold(until, Instant::max)),
                 },
                 Breaker::Probing { opened_at } => BreakerSnapshot::Probing {
                     opened_at: at(opened_at),
@@ -863,6 +935,8 @@ pub struct GateSnapshot {
     /// Background requests in flight.
     pub active: u32,
     /// Slots held by timed-out requests the homeserver may still be working on.
+    /// Includes an excused slot (an isolated timeout's), which does not count
+    /// against `limit`, so `active + held` can exceed it by one.
     pub held: u32,
     /// Requests waiting for the gate, background and long-poll.
     pub waiting: u32,
@@ -1096,6 +1170,141 @@ mod tests {
         let start = Instant::now();
         let admitted = waiter.await.unwrap();
         assert_eq!(admitted - start, TIMEOUT_HOLD);
+    }
+
+    /// Bring the gate to a limit of 1, the 2026-11-06 shape: one halving and
+    /// nothing growing the limit back.
+    async fn at_a_limit_of_one(gate: &Arc<HomeserverGate>) {
+        gate.acquire(T).await.finish(Outcome::Overloaded);
+        assert_eq!(state(gate), (1, 0, 0, Breaker::Closed));
+    }
+
+    /// #1037: another request answered fast while this one was in flight, so
+    /// its timeout is isolated. The slot is held but does not block admission.
+    #[tokio::test(start_paused = true)]
+    async fn an_isolated_timeout_holds_its_slot_without_blocking_others() {
+        let gate = HomeserverGate::for_test();
+        let slow = gate.acquire(T).await;
+        let other = gate.acquire(T).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        other.finish(Outcome::Success);
+        tokio::time::advance(T).await;
+        slow.finish(Outcome::TimedOut);
+
+        assert_eq!(state(&gate), (1, 0, 1, Breaker::Closed));
+        let snapshot = gate.snapshot();
+        assert_eq!((snapshot.limit, snapshot.held), (1, 1), "{snapshot:?}");
+        let next = gate.try_acquire(T);
+        assert!(next.is_some(), "the excused slot does not fill the limit");
+        drop(next);
+
+        tokio::time::advance(TIMEOUT_HOLD).await;
+        assert_eq!(state(&gate), (1, 0, 0, Breaker::Closed), "the hold expires");
+    }
+
+    /// The 2026-11-06 replay: at a limit of 1 the slow room's page is the only
+    /// background request, and the image-pack long-poll is what answers. Its
+    /// timeout neither opens the breaker nor stops other callers.
+    #[tokio::test(start_paused = true)]
+    async fn a_long_poll_answering_meanwhile_keeps_a_limit_of_one_open() {
+        let gate = HomeserverGate::for_test();
+        at_a_limit_of_one(&gate).await;
+        let page = gate.acquire(T).await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        gate.long_poll().await.finish(Outcome::Success);
+        tokio::time::advance(T).await;
+        page.finish(Outcome::TimedOut);
+
+        assert_eq!(state(&gate), (1, 0, 1, Breaker::Closed));
+        assert!(gate.try_acquire(T).is_some());
+    }
+
+    /// An answer from before the request started says nothing about what
+    /// happened while it was in flight, and a slow success is not an answer.
+    /// The timeout counts in full, as before #1037.
+    #[tokio::test(start_paused = true)]
+    async fn a_timeout_nothing_corroborates_counts_in_full() {
+        let gate = HomeserverGate::for_test();
+        at_a_limit_of_one(&gate).await;
+        gate.acquire(T).await.finish(Outcome::Success);
+        gate.long_poll().await.finish(Outcome::Success);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let page = gate.acquire(T).await;
+        tokio::time::advance(T).await;
+        page.finish(Outcome::TimedOut);
+        assert!(
+            is_open(&gate),
+            "an uncorroborated timeout at 1 opens the breaker"
+        );
+        assert_eq!(state(&gate).2, 1, "and its slot is held");
+
+        let gate = HomeserverGate::for_test();
+        let page = gate.acquire(T).await;
+        let other = gate.acquire(T).await;
+        tokio::time::advance(T / 2).await;
+        other.finish(Outcome::Success);
+        tokio::time::advance(T).await;
+        page.finish(Outcome::TimedOut);
+        assert_eq!(state(&gate), (1, 0, 1, Breaker::Closed));
+        assert!(
+            gate.try_acquire(T).is_none(),
+            "a slow success corroborates nothing, so the slot counts"
+        );
+    }
+
+    /// At most one excused slot at a time: with any slot held, the next
+    /// timeout is ordinary, opens the breaker at a limit of 1, and the probe
+    /// waits for every held slot, the excused one included.
+    #[tokio::test(start_paused = true)]
+    async fn only_one_slot_is_excused_at_a_time() {
+        let gate = HomeserverGate::for_test();
+        at_a_limit_of_one(&gate).await;
+        let first = gate.acquire(T).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        gate.long_poll().await.finish(Outcome::Success);
+        tokio::time::advance(T).await;
+        first.finish(Outcome::TimedOut);
+        assert_eq!(state(&gate), (1, 0, 1, Breaker::Closed));
+
+        let second = gate.acquire(T).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        gate.long_poll().await.finish(Outcome::Success);
+        tokio::time::advance(T).await;
+        second.finish(Outcome::TimedOut);
+        assert!(is_open(&gate), "the second timeout counts in full");
+        assert_eq!(state(&gate).2, 2);
+
+        // The excused slot expires first; the probe still waits for the other.
+        let excused_until = Instant::now() + TIMEOUT_HOLD - T - Duration::from_secs(1);
+        tokio::time::advance(excused_until - Instant::now()).await;
+        assert_eq!(state(&gate).2, 1);
+        assert!(
+            gate.try_acquire(T).is_none(),
+            "a held slot still blocks the probe"
+        );
+        tokio::time::advance(T + Duration::from_secs(1)).await;
+        let probe = gate.try_acquire(T).expect("every slot released: probe");
+        assert!(probe.probe);
+        probe.finish(Outcome::Success);
+    }
+
+    /// The breaker's probe is never isolated: its timeout reopens the breaker
+    /// and holds its slot as decision 3 says.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_probe_is_never_isolated() {
+        let gate = HomeserverGate::for_test();
+        open_on_overload(&gate).await;
+        tokio::time::advance(COOLDOWN).await;
+        let probe = gate.acquire(T).await;
+        assert!(probe.probe);
+        // Recorded as if a long-poll had answered while the probe was out.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        gate.lock().answered_at = Some(Instant::now());
+        tokio::time::advance(T).await;
+        probe.finish(Outcome::TimedOut);
+        assert!(is_open(&gate));
+        assert_eq!(state(&gate).2, 1);
+        assert!(gate.try_acquire(T).is_none());
     }
 
     #[tokio::test(start_paused = true)]
