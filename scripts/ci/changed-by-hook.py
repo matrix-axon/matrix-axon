@@ -61,7 +61,10 @@ def emit(changed: bool, why: str, *, undecided: bool = False) -> int:
         # The fail-safe is correct but invisible: the gate runs in full and the
         # saving silently disappears. An annotation on the run makes a broken
         # dependency or a bad ref show up in the PR instead of in a bill.
-        print(f"::warning title=changed-by-hook::cannot decide ({why}); ran the full gate")
+        # Workflow commands are one line, and `%`, CR and LF are escaped in
+        # them; a YAML parse error is several lines.
+        msg = why.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::warning title=changed-by-hook::{msg}; ran the full gate")
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
         with open(out, "a", encoding="utf-8") as fh:

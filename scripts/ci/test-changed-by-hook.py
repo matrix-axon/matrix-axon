@@ -84,7 +84,15 @@ class Repo:
         git(self.root, "commit", "-q", "--allow-empty", "-m", msg)
 
     def run(self, *args: str, env: dict[str, str] | None = None) -> tuple[str, str]:
-        full_env = {k: v for k, v in os.environ.items() if k != "GITHUB_OUTPUT"}
+        # Scrub what the script reads from the runner. These tests run on
+        # Actions, where GITHUB_ACTIONS is true and GITHUB_OUTPUT is a real
+        # file, and the script's output must not depend on where it runs.
+        # A case that wants either sets it explicitly through `env`.
+        full_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("GITHUB_OUTPUT", "GITHUB_ACTIONS")
+        }
         full_env.update(env or {})
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), *args],
@@ -216,10 +224,23 @@ class FailSafe(Base):
         actions = {"GITHUB_ACTIONS": "true"}
         out, _ = self.undecided("no-such-hook", "--base", "HEAD^1", env=actions)
         self.assertIn("::warning", out)
+        self.assertEqual(out.count("cannot decide"), 1)
         out, _ = self.undecided("no-such-hook", "--base", "HEAD^1")
         self.assertNotIn("::warning", out)
         out, _ = self.undecided("code", "--base", "HEAD^1", env=actions)
         self.assertEqual(out, "changed=false")
+
+    def test_annotation_stays_on_one_line(self) -> None:
+        """A YAML error is several lines; a workflow command must be one."""
+        (self.repo.root / ".pre-commit-config.yaml").write_text("repos: [unclosed\n")
+        out, _ = self.undecided(
+            "code", "--base", "HEAD^1", env={"GITHUB_ACTIONS": "true"}
+        )
+        first, *rest = out.splitlines()
+        self.assertEqual(first, "changed=true")
+        self.assertEqual(len(rest), 1, out)
+        self.assertTrue(rest[0].startswith("::warning"))
+        self.assertIn("%0A", rest[0])
 
     def test_writes_github_output(self) -> None:
         sink = self.repo.root / "out.txt"
