@@ -394,10 +394,16 @@ export function createRoomsStore(
   let previewsPerRoom = false
   const perRoomQueue: PreviewRequest[] = []
   let perRoomActive = 0
-  /** Outstanding `holdPreviews` holds, and the timer that caps them. */
-  let previewHolds = 0
-  let previewHoldTimer: ReturnType<typeof setTimeout> | null = null
-  /** The `holdPreviewsAtStart` hold, until a room page replaces it. */
+  /**
+   * Outstanding `holdPreviews` holds, each by the timer that caps it. Every
+   * hold has its own cap, so a page that takes one after an earlier hold ran
+   * out still gets the full `previewHoldMaxMs`.
+   */
+  const previewHolds = new Set<ReturnType<typeof setTimeout>>()
+  /**
+   * The `holdPreviewsAtStart` hold, until a room page replaces it or the
+   * session ends.
+   */
   let startPreviewRelease: (() => void) | null = null
   /**
    * Sender display names by room key and user id, as previews reported them
@@ -872,9 +878,29 @@ export function createRoomsStore(
     return index !== -1 && rooms.value[index].last_event_id === request.eventId
   }
 
+  /**
+   * `isCurrentPreviewRequest`, forgetting a request that fails it because its
+   * room is no longer listed: when the room comes back with the same newest
+   * message, its row asks again. A room listed under a newer message keeps
+   * the key, so the old message is never read twice; an earlier session's
+   * keys went with `resetSession`.
+   */
+  function keepPreviewRequest(request: PreviewRequest): boolean {
+    if (isCurrentPreviewRequest(request)) {
+      return true
+    }
+    if (
+      request.generation === sessionGeneration &&
+      findRoomIndex(request.room.account_id, request.room.room_id) === -1
+    ) {
+      requestedPreviews.delete(request.key)
+    }
+    return false
+  }
+
   async function sendPreviewBatch(batch: PreviewRequest[]): Promise<void> {
     const generation = sessionGeneration
-    const current = batch.filter(isCurrentPreviewRequest)
+    const current = batch.filter(keepPreviewRequest)
     if (current.length === 0) {
       return
     }
@@ -938,7 +964,7 @@ export function createRoomsStore(
     for (const request of current) {
       const preview = byRoom.get(roomKey(request.room))
       // Absent: the room has nothing to preview, which is an answer too.
-      if (preview !== undefined && isCurrentPreviewRequest(request)) {
+      if (keepPreviewRequest(request) && preview !== undefined) {
         applyServerPreview(request, preview)
       }
     }
@@ -1044,7 +1070,7 @@ export function createRoomsStore(
   }
 
   async function fetchPreviewPerRoom(request: PreviewRequest): Promise<void> {
-    if (!isCurrentPreviewRequest(request)) {
+    if (!keepPreviewRequest(request)) {
       return
     }
     const { room } = request
@@ -1060,9 +1086,9 @@ export function createRoomsStore(
     }
     const body = previewBody(event?.body)
     if (
+      !keepPreviewRequest(request) ||
       event === undefined ||
-      body === undefined ||
-      !isCurrentPreviewRequest(request)
+      body === undefined
     ) {
       return
     }
@@ -1127,7 +1153,16 @@ export function createRoomsStore(
       enqueuePreview(room, event.event_id)
       return
     }
+    const generation = sessionGeneration
     void roomMembers(room).then((roster) => {
+      // Name only the preview this read was for: not one a newer message has
+      // replaced since, nor any preview after a sign-out.
+      if (
+        generation !== sessionGeneration ||
+        previewSlots.get(key)?.value?.eventId !== event.event_id
+      ) {
+        return
+      }
       const member = roster.find(
         (candidate) => candidate.user_id === event.sender,
       )
@@ -1152,36 +1187,27 @@ export function createRoomsStore(
 
   /** True while a room's first page has the link to itself (`holdPreviews`). */
   function previewsHeld(): boolean {
-    return previewHoldTimer !== null
+    return previewHolds.size > 0
   }
 
   /**
    * Hold preview reads until the returned release is called, or until
-   * `previewHoldMaxMs` after the first outstanding hold, whichever is sooner.
-   * Holds stack: reads resume when the last is released.
+   * `previewHoldMaxMs` after this hold was taken, whichever is sooner. Holds
+   * stack: reads resume when the last one ends.
    */
   function acquirePreviewHold(): () => void {
-    previewHolds += 1
-    if (previewHolds === 1) {
-      previewHoldTimer = setTimeout(() => {
-        previewHoldTimer = null
-        resumePreviews()
-      }, previewHoldMaxMs)
+    const hold = setTimeout(() => endPreviewHold(hold), previewHoldMaxMs)
+    previewHolds.add(hold)
+    return () => endPreviewHold(hold)
+  }
+
+  function endPreviewHold(hold: ReturnType<typeof setTimeout>): void {
+    if (!previewHolds.delete(hold)) {
+      return
     }
-    let released = false
-    return () => {
-      if (released) {
-        return
-      }
-      released = true
-      previewHolds -= 1
-      if (previewHolds === 0) {
-        if (previewHoldTimer !== null) {
-          clearTimeout(previewHoldTimer)
-          previewHoldTimer = null
-        }
-        resumePreviews()
-      }
+    clearTimeout(hold)
+    if (previewHolds.size === 0) {
+      resumePreviews()
     }
   }
 
@@ -1216,6 +1242,16 @@ export function createRoomsStore(
     previewRetryTimers.clear()
     senderNames.clear()
     previewsPerRoom = false
+    // Here rather than below the pristine-store guard with the rest of the
+    // session's rows: these keys belong to the queues just emptied.
+    requestedPreviews.clear()
+    // A launch into a room URL while signed out: the room page that hold was
+    // taken for mounts only after sign-in, and takes a hold of its own then.
+    if (startPreviewRelease !== null) {
+      const release = startPreviewRelease
+      startPreviewRelease = null
+      release()
+    }
   }
 
   /** The freshest row, so `noteActivity` can skip the common burst case. */
@@ -1547,7 +1583,6 @@ export function createRoomsStore(
     syncUnreadCounts([])
     recomputeNewest([])
     requested.clear()
-    requestedPreviews.clear()
     previewSlots.clear()
     // Must stay *below* `syncUnreadCounts([])`: that call walks `unreadSlots`
     // to zero each slot and decrement `unreadTotal`. Dropping the entries first
