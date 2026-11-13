@@ -90,4 +90,23 @@ describe('markdownCodeRanges', () => {
   it('finds none in prose', () => {
     expect(markdownCodeRanges('plain https://a.org text')).toEqual([])
   })
+  it.each([
+    ['a quote', '> ```\n> Https://x.org\n> ```', '```\n> Https://x.org\n> ```'],
+    [
+      'a list item',
+      '- item\n\n  ```\n  Https://x.org\n  ```',
+      '```\n  Https://x.org\n  ```',
+    ],
+    [
+      'a quote in a list item',
+      '1. a\n   > ```\n   > Https://x.org\n   > ```',
+      '```\n   > Https://x.org\n   > ```',
+    ],
+    ['a quote, as a span', '> `Https://x.org`', '`Https://x.org`'],
+  ])('finds a block inside %s', (_, text, code) => {
+    const ranges = markdownCodeRanges(text)
+    expect(ranges.map(({ start, end }) => text.slice(start, end))).toEqual([
+      code,
+    ])
+  })
 })

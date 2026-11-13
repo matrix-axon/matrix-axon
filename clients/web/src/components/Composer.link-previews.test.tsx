@@ -156,6 +156,19 @@ describe('Composer link previews', () => {
     })
   })
 
+  it('leaves a capitalized scheme alone in code inside a quote or list', () => {
+    const { type, send, onSubmit } = setup({ sources: { setting: 'off' } })
+    const text =
+      '> ```\n> Https://a.example.org/x\n> ```\n\n- item\n\n  ```\n  Https://b.example.org/y\n  ```\n\nHttps://c.example.org/z'
+    type(text)
+    send()
+    expect(onSubmit).toHaveBeenCalledWith(
+      text.replace('Https://c.', 'https://c.'),
+      undefined,
+      expect.anything(),
+    )
+  })
+
   it('looks a pasted link up at once', () => {
     const { device } = deferredDevice()
     const { paste } = setup({ sources: { setting: 'device', device } })
