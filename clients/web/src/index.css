@@ -139,6 +139,15 @@ body,
   overflow: hidden;
 }
 
+/* iOS WebKit re-applies text autosizing after a landscape -> portrait
+   rotation, enlarging the font. 100% (not `none`) disables that while
+   still honouring Dynamic Type and user zoom. The property is inherited, so
+   `html` alone is enough. */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   /* No `position: fixed` here. It was tried (and reverted) as a way to stop
      iOS Safari's focused-control-visibility heuristic from scrolling the
