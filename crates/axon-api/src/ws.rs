@@ -788,6 +788,7 @@ mod tests {
             body: Some("hi".to_owned()),
             relates_to: None,
             sender_trust: Some("verified".to_owned()),
+            utd_reason: None,
         }));
         assert_eq!(v["type"], "timeline.event");
         assert_eq!(v["account_id"], account_id.to_string());
@@ -797,6 +798,34 @@ mod tests {
         // choosing a read-receipt target must not have to treat a live event as a
         // special case with no position (ADR 0089).
         assert_eq!(v["payload"]["arrival_order"], 7);
+    }
+
+    #[test]
+    fn timeline_frame_carries_the_utd_reason() {
+        let v = decode(LiveFrame::Timeline(LiveEvent {
+            account_id: Uuid::new_v4(),
+            event_id: "$e:localhost".to_owned(),
+            room_id: "!r:localhost".to_owned(),
+            sender: "@a:localhost".to_owned(),
+            state_key: None,
+            prev_content: None,
+            origin_ts: 42,
+            arrival_order: 7,
+            event_type: "m.room.encrypted".to_owned(),
+            content: None,
+            body: None,
+            relates_to: None,
+            sender_trust: None,
+            utd_reason: Some(axon_core::UtdReason::withheld("m.unverified")),
+        }));
+        assert_eq!(
+            v["payload"]["utd_reason"],
+            serde_json::json!({
+                "kind": "withheld",
+                "withheld_code": "m.unverified",
+                "verification_level": null,
+            })
+        );
     }
 
     #[test]

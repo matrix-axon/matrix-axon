@@ -448,6 +448,13 @@ pub struct EventDto {
     /// re-decrypted). This is the at-receipt snapshot; the sender's *current*
     /// trust is available from the per-event verification bundle.
     pub sender_trust: Option<String>,
+    /// Why this event could not be decrypted (ADR 0136 decision 2). Set only
+    /// on an event without content that is not redacted, and only once Axon has
+    /// recorded a reason: `null` for a decrypted, unencrypted or redacted
+    /// event, and for a UTD stored before reasons were kept, until its next
+    /// decryption attempt. On `/v1/ws`, set when the ingest path's local retry
+    /// recorded one.
+    pub utd_reason: Option<UtdReasonDto>,
     /// Relation aggregation (M8): `true` when at least one valid `m.replace` edit
     /// targets this event, in which case `content`/`body` above are already the
     /// latest edited values (the standalone edit events are stripped from the
@@ -492,6 +499,7 @@ impl From<axon_core::LiveEvent> for EventDto {
             redacted: false,
             redaction_event_id: None,
             sender_trust: e.sender_trust,
+            utd_reason: e.utd_reason.map(UtdReasonDto::from),
             // A live frame is a raw, pre-aggregation event: edits/reactions arrive
             // as their own later events and are resolved by the read API, not here.
             edited: false,
@@ -522,6 +530,7 @@ impl EventDto {
             redacted: row.redaction_event_id.is_some(),
             redaction_event_id: row.redaction_event_id,
             sender_trust: row.sender_trust,
+            utd_reason: row.utd_reason.map(UtdReasonDto::from),
             edited: row.edited,
             edit_count: row.edit_count,
             latest_edit_ts: row.latest_edit_ts,
@@ -529,6 +538,95 @@ impl EventDto {
             // JSON object; deserialize it into the typed map. A malformed/absent
             // tally degrades to `None` rather than failing the whole row.
             reactions: row.reactions.and_then(|v| serde_json::from_value(v).ok()),
+        }
+    }
+}
+
+/// Why an event could not be decrypted (ADR 0136 decision 2).
+///
+/// A client that sees `kind: "withheld"` with `withheld_code: "m.unverified"`
+/// while the account's `verified` is `false` can explain that the sender's app
+/// does not share keys with unverified devices, and offer the verify and
+/// recovery-key flows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct UtdReasonDto {
+    /// The failure class.
+    pub kind: UtdReasonKindDto,
+    /// For `withheld`, the code the sender's device gave: `m.unverified`,
+    /// `m.blacklisted`, `m.unauthorised`, `m.unavailable`, `m.no_olm`,
+    /// `m.history_not_shared`, or a custom code (printable ASCII, at most 64
+    /// bytes; a code that is not is dropped). `null` for other kinds.
+    pub withheld_code: Option<String>,
+    /// For `sender_not_trusted`, what the SDK found about the sender. `null`
+    /// for other kinds.
+    pub verification_level: Option<VerificationLevelDto>,
+}
+
+/// The class of a decryption failure (ADR 0136 decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UtdReasonKindDto {
+    /// The key is unknown and no withheld notice arrived; it may still arrive.
+    MissingKey,
+    /// The sender's device declined to share the key; see `withheld_code`.
+    Withheld,
+    /// The key is present but the sender does not meet the account's trust
+    /// requirement. Only once "exclude insecure devices" is on (ADR 0136
+    /// Phase 1).
+    SenderNotTrusted,
+    /// Any other failure, such as a malformed or corrupt message.
+    Other,
+}
+
+/// The SDK's verification level of a sender whose message was refused
+/// (ADR 0136 decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationLevelDto {
+    /// The sender's identity is cross-signed but not verified by us.
+    UnverifiedIdentity,
+    /// The sender's identity was verified and has since changed.
+    VerificationViolation,
+    /// The sending device is not cross-signed by its owner.
+    UnsignedDevice,
+    /// The sending device is unknown.
+    MissingDevice,
+    /// The key came from a source that cannot vouch for the device.
+    InsecureSource,
+    /// The session's device belongs to a different user than the event's
+    /// sender, as with a bridge encrypting on a bridged user's behalf.
+    MismatchedSender,
+}
+
+impl VerificationLevelDto {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "unverified_identity" => Self::UnverifiedIdentity,
+            "verification_violation" => Self::VerificationViolation,
+            "unsigned_device" => Self::UnsignedDevice,
+            "missing_device" => Self::MissingDevice,
+            "insecure_source" => Self::InsecureSource,
+            "mismatched_sender" => Self::MismatchedSender,
+            _ => return None,
+        })
+    }
+}
+
+impl From<axon_core::UtdReason> for UtdReasonDto {
+    fn from(reason: axon_core::UtdReason) -> Self {
+        use axon_core::UtdReasonKind;
+        UtdReasonDto {
+            kind: match reason.kind {
+                UtdReasonKind::MissingKey => UtdReasonKindDto::MissingKey,
+                UtdReasonKind::Withheld => UtdReasonKindDto::Withheld,
+                UtdReasonKind::SenderNotTrusted => UtdReasonKindDto::SenderNotTrusted,
+                UtdReasonKind::Other => UtdReasonKindDto::Other,
+            },
+            withheld_code: reason.withheld_code,
+            verification_level: reason
+                .verification_level
+                .as_deref()
+                .and_then(VerificationLevelDto::parse),
         }
     }
 }
