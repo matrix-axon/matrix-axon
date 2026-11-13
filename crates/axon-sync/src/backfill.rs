@@ -163,8 +163,7 @@ impl PageFailure {
 /// The backoff before the `failures`th consecutive failure's retry: `RETRY_BASE`
 /// doubled `failures - 1` times, capped at `RETRY_MAX`.
 fn retry_delay(failures: i32) -> Duration {
-    let doublings = failures.saturating_sub(1).clamp(0, 16) as u32;
-    RETRY_BASE.saturating_mul(1 << doublings).min(RETRY_MAX)
+    backoff(RETRY_BASE, failures)
 }
 
 /// The backoff before retrying a room after its `streak`th timeout since its last
@@ -172,8 +171,14 @@ fn retry_delay(failures: i32) -> Duration {
 /// [`RETRY_MAX`]. Never shorter than the hold, so the room is not the request
 /// waiting at the gate when the slot its timeout left behind is released.
 fn timeout_retry_delay(streak: i32) -> Duration {
-    let doublings = streak.saturating_sub(1).clamp(0, 16) as u32;
-    TIMEOUT_HOLD.saturating_mul(1 << doublings).min(RETRY_MAX)
+    backoff(TIMEOUT_HOLD, streak)
+}
+
+/// `base` doubled `n - 1` times, capped at [`RETRY_MAX`]. An `n` below 1 gives
+/// `base`, and the doublings stop at 16 so the multiplier cannot overflow.
+fn backoff(base: Duration, n: i32) -> Duration {
+    let doublings = n.saturating_sub(1).clamp(0, 16) as u32;
+    base.saturating_mul(1 << doublings).min(RETRY_MAX)
 }
 
 /// What a failure does to a room that had already failed `prior` times in a row,
