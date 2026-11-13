@@ -1,11 +1,6 @@
-//! Why a stored event could not be decrypted (ADR 0136 decision 2).
-//!
-//! `axon-sync` derives a [`UtdReason`] from matrix-sdk's
-//! `UnableToDecryptReason` whenever a decryption attempt fails, `axon-store`
-//! keeps it in two columns beside the undecryptable row, and `axon-api` serves
-//! it on the event read shapes. This module is the SDK-free vocabulary the three
-//! share: the kinds, and the bounds on the detail strings that come from other
-//! users' devices.
+//! Why a stored event could not be decrypted: the SDK-free vocabulary that
+//! sync, store and API share, and the bounds on detail strings that come from
+//! other users' devices.
 
 /// The class of a decryption failure. Stored as [`as_str`](Self::as_str) in
 /// `events.utd_reason`.

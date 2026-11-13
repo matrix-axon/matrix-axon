@@ -27,6 +27,7 @@ use matrix_sdk::config::RequestConfig;
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
 use matrix_sdk::ruma::events::room::member::MembershipState;
+use matrix_sdk::ruma::events::room_key::withheld::ToDeviceRoomKeyWithheldEvent;
 use matrix_sdk::ruma::events::{
     AnyGlobalAccountDataEvent, AnyRoomAccountDataEvent, AnySyncEphemeralRoomEvent,
     AnySyncStateEvent, AnySyncTimelineEvent,
@@ -1007,12 +1008,15 @@ async fn persist_event_core(
                 // Back-filled: the frame below still describes the UTD that
                 // arrived, as it did before reasons were kept; a timeline read
                 // returns the content (ADR 0014).
-                redecrypt::Attempt::Decrypted | redecrypt::Attempt::Failed => None,
+                redecrypt::Attempt::Decrypted
+                | redecrypt::Attempt::Failed
+                | redecrypt::Attempt::WriteFailed => None,
             }
         }
+        // Every stored UTD, session id or not: the SDK already classified it.
         (Some(row), UtdCheck::Known(Some(reason))) => {
-            redecrypt::record_utd_reason(&ctx.store, ctx.account_id, &row, &reason).await;
-            Some(reason)
+            redecrypt::record_utd_reasons(&ctx.store, ctx.account_id, &[(&row, reason)]).await;
+            None
         }
         _ => None,
     };
@@ -1960,6 +1964,27 @@ async fn run_account(
     client.add_event_handler(persist_room_account_data);
     client.add_event_handler(persist_global_account_data);
 
+    // A withheld notice for a session whose rows are already stored as
+    // `missing_key` (ADR 0136 decision 2). matrix-sdk does not expose its
+    // withheld-info stream, but it dispatches to-device handlers after the
+    // crypto store has recorded the code, so the re-decryption queue's next
+    // attempt for that session reads it. The handler only queues; `run` drains.
+    let (withheld_tx, withheld_rx) = tokio::sync::mpsc::channel(redecrypt::WITHHELD_QUEUE);
+    let withheld_account = account.account_id;
+    client.add_event_handler(move |raw: Raw<ToDeviceRoomKeyWithheldEvent>| {
+        let tx = withheld_tx.clone();
+        async move {
+            match raw.deserialize_as_unchecked::<serde_json::Value>() {
+                Ok(value) => redecrypt::queue_withheld(&tx, withheld_account, &value),
+                Err(err) => tracing::debug!(
+                    account_id = %withheld_account,
+                    error = %err,
+                    "unreadable m.room_key.withheld notice; ignored"
+                ),
+            }
+        }
+    });
+
     // Generic ephemeral passthrough (ADR 0056): forward an allowlisted raw
     // ephemeral room event (m.typing, m.receipt, …) straight onto the live-event
     // bus. Axon derives nothing from these and persists nothing, so this is a
@@ -2138,6 +2163,7 @@ async fn run_account(
         account.account_id,
         redecrypt_cancel.clone(),
         index.cloned(),
+        withheld_rx,
     ));
     // One sweep now that the service is up and `recover()` (if any) has imported
     // keys: keys already in the crypto store don't fire the arrival stream. By

@@ -849,31 +849,42 @@ impl Store {
         Ok(())
     }
 
-    /// Record why a stored UTD could not be decrypted (ADR 0136 decision 2).
+    /// Record why stored UTDs could not be decrypted (ADR 0136 decision 2), in
+    /// one statement for the whole batch.
     ///
-    /// Writes only while the row is still a UTD (`content IS NULL`), so a
+    /// Writes a row only while it is still a UTD (`content IS NULL`), so a
     /// failed attempt that races a successful back-fill cannot stamp a reason
-    /// on a decrypted row, and only when the reason changed, so the routine
-    /// retry of a permanently undecryptable row writes nothing. Returns whether
-    /// a row was updated.
-    pub async fn record_utd_reason(
+    /// on a decrypted row, and only when its reason changed, so the routine
+    /// retry of a permanently undecryptable row writes nothing. Returns the
+    /// event ids whose row was updated. An event id listed twice keeps one of
+    /// its reasons; callers pass each row once.
+    pub async fn record_utd_reasons(
         &self,
         account_id: Uuid,
-        event_id: &str,
-        reason: &axon_core::UtdReason,
-    ) -> Result<bool, StoreError> {
-        let result = sqlx_core::query::query(
-            "UPDATE events SET utd_reason = $3, utd_reason_detail = $4 \
-             WHERE account_id = $1 AND event_id = $2 AND content IS NULL \
-               AND (utd_reason IS DISTINCT FROM $3 OR utd_reason_detail IS DISTINCT FROM $4)",
+        reasons: &[(&str, &axon_core::UtdReason)],
+    ) -> Result<Vec<String>, StoreError> {
+        if reasons.is_empty() {
+            return Ok(Vec::new());
+        }
+        let event_ids: Vec<&str> = reasons.iter().map(|(id, _)| *id).collect();
+        let kinds: Vec<&str> = reasons.iter().map(|(_, r)| r.kind.as_str()).collect();
+        let details: Vec<Option<&str>> = reasons.iter().map(|(_, r)| r.detail()).collect();
+        let changed = sqlx_core::query_scalar::query_scalar::<Postgres, String>(
+            "UPDATE events AS e \
+             SET utd_reason = v.kind, utd_reason_detail = v.detail \
+             FROM UNNEST($2::text[], $3::text[], $4::text[]) AS v(event_id, kind, detail) \
+             WHERE e.account_id = $1 AND e.event_id = v.event_id AND e.content IS NULL \
+               AND (e.utd_reason IS DISTINCT FROM v.kind \
+                    OR e.utd_reason_detail IS DISTINCT FROM v.detail) \
+             RETURNING e.event_id",
         )
         .bind(account_id)
-        .bind(event_id)
-        .bind(reason.kind.as_str())
-        .bind(reason.detail())
-        .execute(&self.pool)
+        .bind(&event_ids)
+        .bind(&kinds)
+        .bind(&details)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        Ok(changed)
     }
 
     /// Read a room's timeline, newest first, with redaction masking.
