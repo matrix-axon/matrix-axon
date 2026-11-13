@@ -25,6 +25,7 @@ import {
   connectTimelineCacheReset,
   connectUnreadCounts,
   connectUpdateChecks,
+  isRoomRoute,
 } from './services'
 import {
   createThreadUnreadStore,
@@ -89,6 +90,17 @@ const readMarkerFrame = (deviceId: string, entries: Record<string, unknown>) =>
       updated_at: '2026-01-01T00:00:00Z',
     },
   })
+
+describe('isRoomRoute', () => {
+  it('matches a room and nothing else', () => {
+    expect(isRoomRoute('/acct/rooms/!ops%3Ahs')).toBe(true)
+    expect(isRoomRoute('/acct/rooms/!ops:hs/')).toBe(true)
+    expect(isRoomRoute('/')).toBe(false)
+    expect(isRoomRoute('/rooms/discover')).toBe(false)
+    expect(isRoomRoute('/settings')).toBe(false)
+    expect(isRoomRoute('/acct/rooms/!ops:hs/extra')).toBe(false)
+  })
+})
 
 describe('connectReadMarkers', () => {
   it('clears unread when a sibling device reads a room', () => {
@@ -168,6 +180,7 @@ function roomsStub() {
     unreadCount: () => 0,
     senderDisplay: (...ids: string[]) => ids[2] ?? '',
     hydratePreview: () => {},
+    holdPreviews: () => () => {},
     noteActivity: (accountId: string, roomId: string, ts: number) => {
       noted.push([accountId, roomId, ts])
     },
