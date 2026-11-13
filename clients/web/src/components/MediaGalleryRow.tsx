@@ -295,7 +295,7 @@ export function MediaGalleryRow({
   return (
     <li
       class="event-row gallery-row"
-      data-event-id={events[0].event_id}
+      data-event-id={imagesExpanded ? events[0].event_id : undefined}
       data-gallery="true"
     >
       <UserAvatar
@@ -333,7 +333,7 @@ export function MediaGalleryRow({
                 >
                   <MediaAttachment
                     accountId={accountId}
-                    media={resolved.media}
+                    media={{ ...resolved.media, caption: null }}
                     content={event.content}
                     compact
                   />
@@ -407,7 +407,7 @@ export function MediaGalleryRow({
             })}
           </ul>
         )}
-        {imagesExpanded && visibleCaptions.length > 0 && (
+        {visibleCaptions.length > 0 && (
           /*
            * Captions live beneath the grid rather than on the cells: a square
            * thumbnail has no room for text, and overlaying it hides the very
@@ -431,6 +431,7 @@ export function MediaGalleryRow({
                     accountId={accountId}
                     caption={caption}
                     content={event.content}
+                    hideImages={!imagesExpanded}
                   />
                 </span>
               </li>
