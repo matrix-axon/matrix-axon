@@ -1536,27 +1536,55 @@ async fn utd_reason_is_recorded_read_and_cleared() {
         }
     };
 
+    // The event ids the batch write changed.
+    let record = |batch: Vec<(String, UtdReason)>| {
+        let store = store.clone();
+        async move {
+            let refs: Vec<(&str, &UtdReason)> =
+                batch.iter().map(|(id, r)| (id.as_str(), r)).collect();
+            store
+                .record_utd_reasons(account_id, &refs)
+                .await
+                .expect("record reasons")
+        }
+    };
+
     // A row stored before any attempt has no reason.
     assert_eq!(read(utd.clone()).await, None);
 
     let missing = UtdReason::new(UtdReasonKind::MissingKey);
-    assert!(store
-        .record_utd_reason(account_id, &utd, &missing)
-        .await
-        .expect("record"));
+    assert_eq!(
+        record(vec![(utd.clone(), missing.clone())]).await,
+        vec![utd.clone()]
+    );
     assert_eq!(read(utd.clone()).await, Some(missing.clone()));
     // The same reason again writes nothing.
-    assert!(!store
-        .record_utd_reason(account_id, &utd, &missing)
+    assert!(record(vec![(utd.clone(), missing.clone())])
         .await
-        .expect("record again"));
+        .is_empty());
+    assert!(record(Vec::new()).await.is_empty());
 
-    // A withheld notice replaces it, detail included.
+    // A withheld notice replaces it, detail included. In one batch, only the
+    // row whose reason moved is written.
     let withheld = UtdReason::withheld("m.unverified");
-    assert!(store
-        .record_utd_reason(account_id, &utd, &withheld)
-        .await
-        .expect("record withheld"));
+    let other = insert_utd(
+        format!("$utd3-{}:localhost", Uuid::new_v4()),
+        1_700_000_000_050,
+    )
+    .await;
+    assert_eq!(
+        record(vec![(other.clone(), missing.clone())]).await,
+        vec![other.clone()]
+    );
+    assert_eq!(
+        record(vec![
+            (utd.clone(), withheld.clone()),
+            (other.clone(), missing.clone()),
+        ])
+        .await,
+        vec![utd.clone()]
+    );
+    assert_eq!(read(other.clone()).await, Some(missing.clone()));
     assert_eq!(read(utd.clone()).await, Some(withheld.clone()));
     let timeline = store
         .room_timeline(account_id, &room_id, None, 10)
@@ -1585,10 +1613,9 @@ async fn utd_reason_is_recorded_read_and_cleared() {
         .await
         .expect("back-fill");
     assert_eq!(read(utd.clone()).await, None);
-    assert!(!store
-        .record_utd_reason(account_id, &utd, &missing)
+    assert!(record(vec![(utd.clone(), missing.clone())])
         .await
-        .expect("record after back-fill"));
+        .is_empty());
     let (columns_kind, columns_detail): (Option<String>, Option<String>) = {
         let row = sqlx_core::query::query(
             "SELECT utd_reason, utd_reason_detail FROM events \
@@ -1612,10 +1639,7 @@ async fn utd_reason_is_recorded_read_and_cleared() {
         1_700_000_000_100,
     )
     .await;
-    store
-        .record_utd_reason(account_id, &redacted, &withheld)
-        .await
-        .expect("record on second UTD");
+    record(vec![(redacted.clone(), withheld.clone())]).await;
     let redaction_id = format!("$red-{}:localhost", Uuid::new_v4());
     store
         .upsert_event(&NewEvent {

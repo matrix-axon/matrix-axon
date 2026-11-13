@@ -11,7 +11,9 @@
 //!
 //! - [`run`] subscribes to the SDK's `room_keys_received_stream`: every batch of
 //!   arriving keys names a `(room_id, session_id)`, and we drain exactly the
-//!   pending rows waiting on that session.
+//!   pending rows waiting on that session. It drains a session the same way
+//!   when an `m.room_key.withheld` notice names it, so the row's reason moves
+//!   from `missing_key` to `withheld`.
 //! - [`sweep_pending_utds`] runs at startup and on explicit retries. The default
 //!   startup mode attempts each stored UTD once; explicit retries and the legacy
 //!   startup mode retry the full pending backlog.
@@ -22,9 +24,10 @@
 //!
 //! A row that still won't decrypt has the SDK's reason recorded on it
 //! (`events.utd_reason`, ADR 0136 decision 2), so every attempt — the live
-//! ingest retry, a key arrival, a sweep — keeps the stored reason current.
+//! ingest retry, a key arrival, a withheld notice, a sweep — keeps the stored
+//! reason current.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +46,7 @@ use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::RoomId;
 use matrix_sdk::{Client, Room};
 use serde_json::Value;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -86,9 +90,10 @@ pub struct RedecryptSummary {
     pub startup_marked: u64,
     /// Whether the caller stopped waiting before the sweep completed.
     pub timed_out: bool,
-    /// Event IDs that actually reached `redecrypt_one` (i.e. excludes rows
-    /// skipped for a missing room handle). Only these are safe to mark as
-    /// startup-attempted; a skipped row must remain eligible for retry on the
+    /// Event IDs that actually reached `redecrypt_one` and whose outcome was
+    /// stored (i.e. excludes rows skipped for a missing room handle, and rows
+    /// whose back-fill or reason write failed). Only these are safe to mark as
+    /// startup-attempted; any other row must remain eligible for retry on the
     /// next boot.
     attempted_event_ids: Vec<String>,
 }
@@ -200,6 +205,7 @@ pub(crate) async fn run(
     account_id: Uuid,
     cancel: CancellationToken,
     index: Option<IndexHandle>,
+    mut withheld: mpsc::Receiver<WithheldSession>,
 ) {
     let stream = match client.encryption().room_keys_received_stream().await {
         Some(stream) => stream,
@@ -238,7 +244,62 @@ pub(crate) async fn run(
                 }
                 None => return,
             },
+            // A withheld notice: the key will not come, but the SDK now knows
+            // why, so another attempt records `withheld` with its code in place
+            // of `missing_key`. This drain ignores the startup-sweep marker.
+            Some(session) = withheld.recv() => {
+                redecrypt_session(
+                    &client,
+                    &store,
+                    account_id,
+                    &session.room_id,
+                    &session.session_id,
+                    index.as_ref(),
+                )
+                .await;
+            }
         }
+    }
+}
+
+/// The megolm session an `m.room_key.withheld` notice names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WithheldSession {
+    pub(crate) room_id: String,
+    pub(crate) session_id: String,
+}
+
+/// How many withheld notices may wait for [`run`]. A notice that does not fit
+/// is dropped with a warning: its rows keep `missing_key` until their next
+/// attempt.
+pub(crate) const WITHHELD_QUEUE: usize = 1024;
+
+/// The session an `m.room_key.withheld` to-device event names, read from its
+/// raw JSON, or `None` for a notice that names none (`m.no_olm`). Raw rather
+/// than ruma's typed content, which drops the room and session of an
+/// `m.history_not_shared` notice. Pure.
+pub(crate) fn withheld_session(raw: &Value) -> Option<WithheldSession> {
+    let content = raw.get("content")?;
+    Some(WithheldSession {
+        room_id: content.get("room_id")?.as_str()?.to_owned(),
+        session_id: content.get("session_id")?.as_str()?.to_owned(),
+    })
+}
+
+/// Hand a withheld notice to [`run`]. Called from the SDK's to-device handler,
+/// which runs after the crypto store has recorded the code, so it never waits:
+/// a full queue drops the notice.
+pub(crate) fn queue_withheld(tx: &mpsc::Sender<WithheldSession>, account_id: Uuid, raw: &Value) {
+    let Some(session) = withheld_session(raw) else {
+        return;
+    };
+    if let Err(mpsc::error::TrySendError::Full(session)) = tx.try_send(session) {
+        tracing::warn!(
+            %account_id,
+            room_id = session.room_id,
+            session_id = session.session_id,
+            "withheld-notice queue full; its rows keep their reason until the next attempt"
+        );
     }
 }
 
@@ -296,9 +357,9 @@ pub(crate) async fn sweep_pending_utds(
     summary.selected = selected;
     summary.still_pending = summary.selected.saturating_sub(summary.decrypted);
     if matches!(scope, SweepScope::StartupUnattempted) {
-        // Only mark rows that actually reached `redecrypt_one`: a row skipped
-        // because its room hasn't hydrated yet must stay eligible for the next
-        // boot's sweep, or it would be stuck as a permanent UTD (see PR #244
+        // Only mark rows whose attempt was stored: a row skipped because its
+        // room hasn't hydrated yet, or whose write failed, must stay eligible
+        // for the next boot's sweep, or it would be stuck (see PR #244
         // review).
         match store
             .mark_utd_startup_redecrypt_attempted(account_id, &summary.attempted_event_ids)
@@ -522,20 +583,30 @@ async fn redecrypt_rows(
                 }
             }
         }
+        let mut reasons: Vec<(&PendingUtd, UtdReason)> = Vec::new();
         for row in &rows {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
                 summary.timed_out = true;
                 break;
             }
             summary.attempted += 1;
-            summary.attempted_event_ids.push(row.event_id.clone());
-            if redecrypt_one(&room, store, account_id, row, index)
-                .await
-                .is_decrypted()
-            {
-                summary.decrypted += 1;
+            match redecrypt_one(&room, store, account_id, row, index).await {
+                Attempt::Decrypted => {
+                    summary.decrypted += 1;
+                    summary.attempted_event_ids.push(row.event_id.clone());
+                }
+                Attempt::StillUtd(reason) => {
+                    reasons.push((row, reason));
+                    if reasons.len() >= REASON_BATCH {
+                        flush_reasons(store, account_id, &mut reasons, &mut summary).await;
+                    }
+                }
+                Attempt::Failed => summary.attempted_event_ids.push(row.event_id.clone()),
+                // Left unmarked, so the next startup sweep tries it again.
+                Attempt::WriteFailed => {}
             }
         }
+        flush_reasons(store, account_id, &mut reasons, &mut summary).await;
         if summary.timed_out {
             break;
         }
@@ -543,28 +614,49 @@ async fn redecrypt_rows(
     summary
 }
 
+/// Rows per reason write in a sweep or a session drain. One statement per
+/// batch instead of one commit per row: a sweep can classify thousands of rows
+/// in one room.
+const REASON_BATCH: usize = 500;
+
+/// Write the reasons gathered for one room, then clear them. Rows whose write
+/// succeeded count as attempted for the startup marker; on a failed write they
+/// stay unmarked, so the next boot classifies them.
+async fn flush_reasons(
+    store: &Store,
+    account_id: Uuid,
+    reasons: &mut Vec<(&PendingUtd, UtdReason)>,
+    summary: &mut RedecryptSummary,
+) {
+    if reasons.is_empty() {
+        return;
+    }
+    if record_utd_reasons(store, account_id, reasons).await {
+        summary
+            .attempted_event_ids
+            .extend(reasons.iter().map(|(row, _)| row.event_id.clone()));
+    }
+    reasons.clear();
+}
+
 /// What one decryption attempt of a stored UTD did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Attempt {
     /// The row was back-filled.
     Decrypted,
-    /// The SDK still could not decrypt it, and said why. The reason was
-    /// recorded on the row (best-effort).
+    /// The SDK still could not decrypt it, and said why. The caller records
+    /// the reason. A malformed envelope is `Other`.
     StillUtd(UtdReason),
-    /// The attempt itself failed — a malformed envelope, an SDK error, a write
-    /// error — so nothing new is known about the row.
+    /// The SDK call itself failed, so nothing new is known about the row.
     Failed,
+    /// A store write failed: the back-fill, or on the live path the reason.
+    /// The row keeps what it had and stays eligible for the startup sweep.
+    WriteFailed,
 }
 
-impl Attempt {
-    fn is_decrypted(&self) -> bool {
-        matches!(self, Self::Decrypted)
-    }
-}
-
-/// Re-decrypt a single stored UTD and back-fill it on success, or record why it
-/// still failed. Every failure path — a malformed envelope, a still-missing
-/// key, a write error — is logged and swallowed.
+/// Re-decrypt a single stored UTD and back-fill it on success, or return why it
+/// still failed for the caller to record. Every failure path — an SDK error, a
+/// write error — is logged and swallowed.
 async fn redecrypt_one(
     room: &Room,
     store: &Store,
@@ -583,7 +675,8 @@ async fn redecrypt_one(
                     error = %err,
                     "malformed encrypted envelope; skipping re-decryption"
                 );
-                return Attempt::Failed;
+                // No key can fix it, so it is classified, not retried as unknown.
+                return Attempt::StillUtd(UtdReason::new(UtdReasonKind::Other));
             }
         };
 
@@ -604,13 +697,7 @@ async fn redecrypt_one(
     // `decrypt_event` returns a UTD `TimelineEvent` (not an error) when the key
     // still isn't available; only a genuine `Decrypted` kind yields content.
     let Some((content, event_type)) = extract_decrypted(&decrypted) else {
-        return match utd_reason(&decrypted) {
-            Some(reason) => {
-                record_utd_reason(store, account_id, row, &reason).await;
-                Attempt::StillUtd(reason)
-            }
-            None => Attempt::Failed,
-        };
+        return utd_reason(&decrypted).map_or(Attempt::Failed, Attempt::StillUtd);
     };
 
     // Plaintext-derived hot columns, now available post-decryption.
@@ -656,7 +743,7 @@ async fn redecrypt_one(
                 error = %err,
                 "failed to back-fill re-decrypted event"
             );
-            return Attempt::Failed;
+            return Attempt::WriteFailed;
         }
     }
 
@@ -680,70 +767,72 @@ async fn redecrypt_one(
     Attempt::Decrypted
 }
 
-/// Store why `row` is still undecryptable, and log it at debug (ADR 0136
-/// decision 13). Best-effort: a write failure is logged and the row keeps its
-/// previous reason.
-pub(crate) async fn record_utd_reason(
+/// Store why each row is still undecryptable, in one write, and log each at
+/// debug (ADR 0136 decision 13). Returns `false` when the write failed: the
+/// rows keep their previous reasons, and the failure is logged.
+pub(crate) async fn record_utd_reasons(
     store: &Store,
     account_id: Uuid,
-    row: &PendingUtd,
-    reason: &UtdReason,
-) {
-    let sender = row.raw_event.get("sender").and_then(Value::as_str);
-    // The envelope's `device_id` is deprecated but still sent by most clients;
-    // it is only a log hint, never trusted for anything.
-    let sender_device = row
-        .raw_event
-        .get("content")
-        .and_then(|c| c.get("device_id"))
-        .and_then(Value::as_str);
-    match store
-        .record_utd_reason(account_id, &row.event_id, reason)
-        .await
-    {
-        Ok(changed) => {
-            tracing::debug!(
-                %account_id,
-                room_id = row.room_id,
-                event_id = row.event_id,
-                utd_reason = reason.kind.as_str(),
-                withheld_code = reason.withheld_code.as_deref(),
-                verification_level = reason.verification_level.as_deref(),
-                sender,
-                sender_device,
-                changed,
-                "event still undecryptable"
-            );
-        }
+    reasons: &[(&PendingUtd, UtdReason)],
+) -> bool {
+    let batch: Vec<(&str, &UtdReason)> = reasons
+        .iter()
+        .map(|(row, reason)| (row.event_id.as_str(), reason))
+        .collect();
+    let changed = match store.record_utd_reasons(account_id, &batch).await {
+        Ok(changed) => changed,
         Err(err) => {
             tracing::warn!(
                 %account_id,
-                room_id = row.room_id,
-                event_id = row.event_id,
+                rows = reasons.len(),
+                first_event_id = reasons.first().map(|(row, _)| row.event_id.as_str()),
                 error = %err,
-                "failed to record UTD reason"
+                "failed to record UTD reasons"
             );
+            return false;
         }
+    };
+    let changed: HashSet<&str> = changed.iter().map(String::as_str).collect();
+    for (row, reason) in reasons {
+        let sender = row.raw_event.get("sender").and_then(Value::as_str);
+        // The envelope's `device_id` is deprecated but still sent by most
+        // clients; it is only a log hint, never trusted for anything.
+        let sender_device = row
+            .raw_event
+            .get("content")
+            .and_then(|c| c.get("device_id"))
+            .and_then(Value::as_str);
+        tracing::debug!(
+            %account_id,
+            room_id = row.room_id,
+            event_id = row.event_id,
+            utd_reason = reason.kind.as_str(),
+            withheld_code = reason.withheld_code.as_deref(),
+            verification_level = reason.verification_level.as_deref(),
+            sender,
+            sender_device,
+            changed = changed.contains(row.event_id.as_str()),
+            "event still undecryptable"
+        );
     }
+    true
 }
 
 /// The pending row for an event that was just persisted, or `None` when it was
-/// not stored as a UTD. Pure; the live ingest path uses it to hand
-/// [`recheck_persisted_utd`] exactly what the table now holds.
+/// not stored as a UTD. Pure; the ingest path uses it to hand
+/// [`recheck_persisted_utd`] and [`record_utd_reasons`] exactly what the table
+/// now holds. A UTD with no readable session id is included: the key-arrival
+/// drain can never find it, but it still needs a reason.
 pub(crate) fn pending_utd_for_persisted(
     event_type: &str,
     event_id: &str,
     room_id: &str,
     raw_event: &Value,
 ) -> Option<PendingUtd> {
-    // Only a UTD with a readable session id is findable by the key-arrival
-    // drain, so only that one can be missed by it.
-    (event_type == "m.room.encrypted" && megolm_session_id(raw_event).is_some()).then(|| {
-        PendingUtd {
-            event_id: event_id.to_owned(),
-            room_id: room_id.to_owned(),
-            raw_event: raw_event.clone(),
-        }
+    (event_type == "m.room.encrypted").then(|| PendingUtd {
+        event_id: event_id.to_owned(),
+        room_id: room_id.to_owned(),
+        raw_event: raw_event.clone(),
     })
 }
 
@@ -760,7 +849,13 @@ pub(crate) fn pending_utd_for_persisted(
 /// Local only: no backup download, no homeserver traffic. A key that has not
 /// arrived leaves the row pending for [`run`] to find when it does. The live
 /// path learns no failure reason from the SDK's event handler, so this attempt
-/// is also where a live UTD's reason is recorded (ADR 0136 decision 2).
+/// is also where a live UTD's reason is recorded (ADR 0136 decision 2). A row
+/// with no session id gets the attempt too; its envelope will not parse, and it
+/// is recorded as `other`.
+///
+/// Returns [`Attempt::StillUtd`] only once the reason is stored, and
+/// [`Attempt::WriteFailed`] when that write failed, so the live frame never
+/// carries a reason the table does not hold.
 ///
 /// Safe on a duplicate delivery of an event that is already decrypted. The row
 /// is built from the incoming envelope, so this can run for it, but
@@ -777,7 +872,16 @@ pub(crate) async fn recheck_persisted_utd(
     row: &PendingUtd,
     index: Option<&IndexHandle>,
 ) -> Attempt {
-    redecrypt_one(room, store, account_id, row, index).await
+    match redecrypt_one(room, store, account_id, row, index).await {
+        Attempt::StillUtd(reason) => {
+            if record_utd_reasons(store, account_id, &[(row, reason.clone())]).await {
+                Attempt::StillUtd(reason)
+            } else {
+                Attempt::WriteFailed
+            }
+        }
+        other => other,
+    }
 }
 
 /// Parse a room ID string and look up its `Room` handle on the client.
@@ -1383,13 +1487,63 @@ mod tests {
     }
 
     #[test]
-    fn a_decrypted_or_sessionless_event_is_not_rechecked() {
+    fn only_a_stored_utd_is_rechecked_with_or_without_a_session() {
         let envelope: Value = serde_json::from_str(UTD_ENCRYPTED).expect("fixture");
         // Decrypted by the SDK before dispatch: stored with its real type.
         assert!(pending_utd_for_persisted("m.room.message", "$e", "!r:x", &envelope).is_none());
-        // The drain could never match this row either, so a recheck cannot help.
+        // No session id: the drain can never match it, but it still needs a
+        // reason, so the ingest path gets a row for it.
         let malformed: Value = serde_json::from_str(MALFORMED).expect("fixture");
-        assert!(pending_utd_for_persisted("m.room.encrypted", "$e", "!r:x", &malformed).is_none());
+        let row = pending_utd_for_persisted("m.room.encrypted", "$e", "!r:x", &malformed)
+            .expect("a sessionless UTD is still a pending row");
+        assert_eq!(row.raw_event, malformed);
+    }
+
+    #[test]
+    fn a_withheld_notice_names_its_session() {
+        let unverified = serde_json::json!({
+            "type": "m.room_key.withheld",
+            "sender": "@alice:x",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "code": "m.unverified",
+                "room_id": "!r:x",
+                "session_id": "sess",
+                "sender_key": "key"
+            }
+        });
+        assert_eq!(
+            withheld_session(&unverified),
+            Some(WithheldSession {
+                room_id: "!r:x".to_owned(),
+                session_id: "sess".to_owned(),
+            })
+        );
+        // ruma's typed content drops these two fields for this code.
+        let mut history = unverified.clone();
+        history["content"]["code"] = "m.history_not_shared".into();
+        assert!(withheld_session(&history).is_some());
+        // `m.no_olm` names no session.
+        let no_olm = serde_json::json!({
+            "type": "m.room_key.withheld",
+            "content": { "algorithm": "m.megolm.v1.aes-sha2", "code": "m.no_olm", "sender_key": "key" }
+        });
+        assert_eq!(withheld_session(&no_olm), None);
+    }
+
+    #[test]
+    fn a_full_withheld_queue_drops_the_notice() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let notice = |session: &str| {
+            serde_json::json!({
+                "type": "m.room_key.withheld",
+                "content": { "code": "m.unverified", "room_id": "!r:x", "session_id": session }
+            })
+        };
+        queue_withheld(&tx, Uuid::nil(), &notice("a"));
+        queue_withheld(&tx, Uuid::nil(), &notice("b"));
+        assert_eq!(rx.try_recv().expect("first notice").session_id, "a");
+        assert!(rx.try_recv().is_err(), "the second notice did not fit");
     }
 
     #[test]
