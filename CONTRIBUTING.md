@@ -55,6 +55,7 @@ a copy here would go stale the first time a hook is added.
 
 The required `lint-and-test` pull-request job runs `cargo test --all` after formatting and clippy.
 The local hook runs the same suite so failures are caught before review begins; skipping that hook no longer skips the required CI copy.
+CI skips those Rust steps, and reports success, on a pull request that changes none of the files the local Rust hooks select, such as a docs-only or web-only change.
 CI also gates the whole web job on web pull requests.
 
 To skip deliberately:

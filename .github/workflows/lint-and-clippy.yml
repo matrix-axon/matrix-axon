@@ -32,6 +32,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Two commits: on a pull request the checkout is the merge commit, and
+          # `rust-changed` below diffs it against its first parent (the base).
+          fetch-depth: 2
 
       - name: check-environment
         uses: ./.github/actions/check-environment
@@ -61,7 +65,10 @@ jobs:
 
       - name: Install pre-commit
         shell: bash
-        run: python -m pip install --disable-pip-version-check pre-commit
+        # pyyaml is named although pre-commit depends on it: scripts/ci/
+        # changed-by-hook.py imports it directly, and a dependency that is only
+        # present transitively can disappear without anyone editing this file.
+        run: python -m pip install --disable-pip-version-check pre-commit pyyaml
 
       - name: actionlint
         shell: bash
@@ -80,12 +87,40 @@ jobs:
         shell: bash
         run: pre-commit run hook-filters --all-files --hook-stage pre-push
 
+      # Whether this pull request changes anything the Rust gate below reads.
+      # Everything above and `check-bundle-version` stays unconditional; only
+      # the cache restore, rustfmt, clippy and the test suite -- the 20-30
+      # minutes -- are skipped, and only on a pull request that touches none of
+      # `*rust_files` in .pre-commit-config.yaml, the same filter the pre-push
+      # hooks use. The job itself must still run and pass: it is a required
+      # check, and a required check that never reports blocks the merge, which
+      # is why this is a step condition and not a `paths:` filter on the
+      # workflow. Pushes to main and manual runs get no `--base`, so they run
+      # the full gate. See scripts/ci/changed-by-hook.py for the fail-safes.
+      # The decision logic gates a required check, so it is tested: a filter or
+      # `--also` edit that silently changed what gets skipped would otherwise be
+      # found only by a skipped test that should have run.
+      - name: test changed-by-hook
+        shell: bash
+        run: python -I scripts/ci/test-changed-by-hook.py
+
+      - name: rust-changed
+        id: rust-changed
+        shell: bash
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+        run: python scripts/ci/changed-by-hook.py rust-clippy --base "$BASE"
+
+      # Not conditional: `check-bundle-version` below asks cargo for the
+      # workspace version, and it runs on a change to clients/web/package.json,
+      # which is not a Rust input.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - name: Cache Cargo registry and build
+        if: steps.rust-changed.outputs.changed == 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -103,11 +138,14 @@ jobs:
         run: pre-commit run bundle-version --all-files --hook-stage pre-push
 
       - name: Check formatting
+        if: steps.rust-changed.outputs.changed == 'true'
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: steps.rust-changed.outputs.changed == 'true'
         # Flag order matches the rust-clippy hook's `entry:` verbatim.
         run: cargo clippy --all-features --all-targets -- -D warnings
 
       - name: Test
+        if: steps.rust-changed.outputs.changed == 'true'
         run: cargo test --all
