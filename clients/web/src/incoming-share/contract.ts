@@ -1,5 +1,5 @@
 import type { components } from '../api/schema'
-import { matchUrls } from '../html/linkify'
+import { serverBodyUrls } from '../html/linkify'
 
 export type PreviewInput = components['schemas']['LinkPreviewRequest']
 export type PreviewFailure = 'invalid' | 'preview_too_large' | 'event_too_large'
@@ -23,7 +23,7 @@ export function previewPreflight(
   }
   if (new TextEncoder().encode(request.body).length > 64 * 1024)
     return 'event_too_large'
-  const urls = new Set(matchUrls(request.body).map((match) => match.url))
+  const urls = serverBodyUrls(request.body)
   const seen = new Set<string>()
   const entries: Record<string, unknown>[] = []
   for (const preview of previews) {

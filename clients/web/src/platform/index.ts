@@ -164,7 +164,7 @@ export interface DeviceLinkPreview {
   siteName?: string
   /** Re-encoded by the plugin: at most 1200 px on its longest side, no metadata. */
   image?: {
-    bytes: Uint8Array
+    bytes: Uint8Array<ArrayBuffer>
     mimeType: 'image/jpeg' | 'image/png'
     width: number
     height: number

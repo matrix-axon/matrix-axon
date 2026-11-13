@@ -380,7 +380,9 @@ export function FailedSend({
   }
   return (
     <span class="local-echo-status error">
-      Failed to send
+      {event.localEcho.previewsRejected
+        ? 'Failed to send: the server refused its link previews. Retry sends it without them.'
+        : 'Failed to send'}
       <button
         type="button"
         class="ghost"

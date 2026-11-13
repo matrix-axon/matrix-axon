@@ -3618,6 +3618,102 @@ span.composer-attachment-thumb {
   margin-bottom: 0.4rem;
 }
 
+/* ---- composer link previews (ADR 0132) ----
+   The cards a message will carry. A sideways strip of fixed-size cards, like
+   the attachment strip, so three of them never take the field's height. */
+.composer-link-previews {
+  list-style: none;
+  margin: 0 0 0.4rem;
+  padding: 0.3rem 0.6rem;
+  border-left: 3px solid var(--accent);
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.composer-link-preview {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  box-sizing: border-box;
+  width: min(16rem, 80vw);
+  min-height: 4.75rem;
+  max-height: 9rem;
+  padding: 0.35rem 1.6rem 0.35rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-raised);
+  font-size: 0.8rem;
+  overflow: hidden;
+}
+
+.composer-link-preview-thumb {
+  flex: 0 0 auto;
+  width: 3.5rem;
+  height: 3.5rem;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--bg);
+}
+
+.composer-link-preview-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.composer-link-preview-text strong,
+.composer-link-preview-text .link-preview-description {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+
+.composer-link-preview-ask {
+  align-self: flex-start;
+  margin-top: 0.15rem;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+.composer-link-preview-remove {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  width: 1.15rem;
+  height: 1.15rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 0.7rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.65);
+  border: 0;
+  border-radius: 999px;
+}
+
+.composer-link-preview-remove:hover,
+.composer-link-preview-remove:focus-visible {
+  background: #000;
+}
+
+.composer-link-preview-marker {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+}
+
 /* Visually hidden, but still clickable via the paperclip's `.click()` and
    reachable by tests — `display: none` would break both. */
 .composer-file-input {
@@ -4978,6 +5074,19 @@ span.composer-attachment-thumb {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+/* A radio list whose choices each carry an explanation (link previews). */
+.settings-radio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0.5rem 0;
+}
+
+.setting-detail {
+  margin: 0.15rem 0 0 1.6rem;
+  font-size: 0.85rem;
 }
 
 .linked-sign-ins {

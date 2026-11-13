@@ -41,6 +41,19 @@ export type TimeFormat = '12h' | '24h'
  */
 export type StateEventVisibility = 'hidden' | 'important' | 'all'
 
+/**
+ * Who may build a link preview for the composer (ADR 0132 § 4). A value
+ * names what the user permits; a source the platform lacks is unavailable,
+ * not an error, so a stored `device` behaves as `off` in a browser.
+ */
+export type LinkPreviewSetting = 'off' | 'device' | 'device+homeserver'
+
+export const LINK_PREVIEW_SETTINGS: readonly LinkPreviewSetting[] = [
+  'off',
+  'device',
+  'device+homeserver',
+]
+
 /** Desktop sidebar bounds in CSS pixels. Keep the room list readable. */
 export const SIDEBAR_WIDTH_MIN = 360
 export const SIDEBAR_WIDTH_MAX = 640
@@ -196,6 +209,13 @@ export interface SettingsV1 {
    * phone or tablet registration.
    */
   pushDisclosure: PushDisclosure
+  /**
+   * Composer link previews (ADR 0132 § 4). Per device, like Element's
+   * encrypted-room setting, because what a device can do and which network
+   * it is on differ between devices. The default depends on the platform:
+   * `device` in the shell, which has a fetcher, and `off` in a browser.
+   */
+  linkPreviews: LinkPreviewSetting
 }
 
 const DEFAULTS: SettingsV1 = {
@@ -227,6 +247,7 @@ const DEFAULTS: SettingsV1 = {
   cacheRoomList: true,
   messageNotifications: false,
   pushDisclosure: 'activity',
+  linkPreviews: 'off',
 }
 
 const MAX_RECENT_REACTIONS = 3
@@ -303,22 +324,25 @@ export function writeStoredZoom(storage: Storage, zoom: number): void {
   }
 }
 
-function parse(raw: string | null): SettingsV1 {
+function parse(
+  raw: string | null,
+  defaults: SettingsV1 = DEFAULTS,
+): SettingsV1 {
   if (raw === null) {
-    return DEFAULTS
+    return defaults
   }
   let value: unknown
   try {
     value = JSON.parse(raw)
   } catch {
-    return DEFAULTS
+    return defaults
   }
   if (
     typeof value !== 'object' ||
     value === null ||
     (value as { version?: unknown }).version !== 1
   ) {
-    return DEFAULTS
+    return defaults
   }
   const v1 = value as Partial<SettingsV1>
   return {
@@ -427,6 +451,11 @@ function parse(raw: string | null): SettingsV1 {
       v1.pushDisclosure,
       DEFAULTS.pushDisclosure,
     ),
+    linkPreviews: oneOf(
+      LINK_PREVIEW_SETTINGS,
+      v1.linkPreviews,
+      defaults.linkPreviews,
+    ),
   }
 }
 
@@ -459,6 +488,8 @@ export interface SettingsStore {
   messageNotifications: Signal<boolean>
   /** What a remote banner may say. Default `activity`. */
   pushDisclosure: Signal<PushDisclosure>
+  /** Composer link previews (ADR 0132 § 4). */
+  linkPreviews: Signal<LinkPreviewSetting>
   /**
    * Pin a room key, or re-pin an already-pinned one to the top — most
    * recently pinned first (ADR 0038).
@@ -483,11 +514,20 @@ export interface SettingsStore {
 /**
  * Load settings and keep every change persisted. Storage is injectable for
  * tests (jsdom under Node 25 has no working `localStorage`).
+ *
+ * `linkPreviewsDefault` is the platform's default for a device that has
+ * never chosen: `device` where the shell can build previews, else `off`.
  */
 export function createSettingsStore(
   storage: Storage = window.localStorage,
+  {
+    linkPreviewsDefault = 'off',
+  }: { linkPreviewsDefault?: LinkPreviewSetting } = {},
 ): SettingsStore {
-  const initial = parse(storage.getItem(STORAGE_KEY))
+  const initial = parse(storage.getItem(STORAGE_KEY), {
+    ...DEFAULTS,
+    linkPreviews: linkPreviewsDefault,
+  })
   const theme = signal<Theme>(initial.theme)
   const activeAccountId = signal<string | null>(initial.activeAccountId)
   const pinnedRooms = signal<string[]>(initial.pinnedRooms)
@@ -517,6 +557,7 @@ export function createSettingsStore(
   const cacheRoomList = signal<boolean>(initial.cacheRoomList)
   const messageNotifications = signal<boolean>(initial.messageNotifications)
   const pushDisclosure = signal<PushDisclosure>(initial.pushDisclosure)
+  const linkPreviews = signal<LinkPreviewSetting>(initial.linkPreviews)
 
   effect(() => {
     const envelope: SettingsV1 = {
@@ -548,6 +589,7 @@ export function createSettingsStore(
       cacheRoomList: cacheRoomList.value,
       messageNotifications: messageNotifications.value,
       pushDisclosure: pushDisclosure.value,
+      linkPreviews: linkPreviews.value,
     }
     try {
       storage.setItem(STORAGE_KEY, JSON.stringify(envelope))
@@ -585,6 +627,7 @@ export function createSettingsStore(
     cacheRoomList,
     messageNotifications,
     pushDisclosure,
+    linkPreviews,
     pinRoom(key: string) {
       pinnedRooms.value = [key, ...pinnedRooms.value.filter((k) => k !== key)]
     },

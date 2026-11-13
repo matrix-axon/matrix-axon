@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { useServices } from '../services'
-import { nativePreviewLinks } from '../incoming-share/urls'
+import { nativePreviewLinks } from '../preview-links'
 import { LinkPreviews } from '../components/LinkPreviews'
 import { shareCompleted, shareOperations } from '../incoming-share/types'
 import type { ShareOperation } from '../incoming-share/types'

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { markdownToHtmlIfFormatted, markdownToPlainText } from './markdown'
+import {
+  markdownCodeRanges,
+  markdownToHtmlIfFormatted,
+  markdownToPlainText,
+} from './markdown'
 
 describe('markdownToHtmlIfFormatted', () => {
   it('returns null for plain prose (TUI parity)', () => {
@@ -69,5 +73,40 @@ describe('markdownToPlainText', () => {
     expect(markdownToPlainText('**x** <script>alert(1)</script>')).toBe(
       'x <script>alert(1)</script>',
     )
+  })
+})
+
+describe('markdownCodeRanges', () => {
+  it('finds code spans and fenced and indented blocks, in order', () => {
+    const text = 'a `b` c\n\n```\nd\n```\n\n    e\n\n`f`'
+    const ranges = markdownCodeRanges(text)
+    expect(ranges.map(({ start, end }) => text.slice(start, end))).toEqual([
+      '`b`',
+      '```\nd\n```',
+      '    e',
+      '`f`',
+    ])
+  })
+  it('finds none in prose', () => {
+    expect(markdownCodeRanges('plain https://a.org text')).toEqual([])
+  })
+  it.each([
+    ['a quote', '> ```\n> Https://x.org\n> ```', '```\n> Https://x.org\n> ```'],
+    [
+      'a list item',
+      '- item\n\n  ```\n  Https://x.org\n  ```',
+      '```\n  Https://x.org\n  ```',
+    ],
+    [
+      'a quote in a list item',
+      '1. a\n   > ```\n   > Https://x.org\n   > ```',
+      '```\n   > Https://x.org\n   > ```',
+    ],
+    ['a quote, as a span', '> `Https://x.org`', '`Https://x.org`'],
+  ])('finds a block inside %s', (_, text, code) => {
+    const ranges = markdownCodeRanges(text)
+    expect(ranges.map(({ start, end }) => text.slice(start, end))).toEqual([
+      code,
+    ])
   })
 })

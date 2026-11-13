@@ -38,6 +38,7 @@ import type { ApiClient } from '../api/client'
 import { resolveApiBaseUrl, useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
 import type {
+  LinkPreviewSetting,
   StateEventVisibility,
   Theme,
   TimeFormat,
@@ -86,6 +87,84 @@ const MESSAGE_GESTURE_ACTION_LABELS: Record<MessageGestureAction, string> = {
   react: 'React',
   edit: 'Edit',
   delete: 'Delete',
+}
+
+/**
+ * Composer link previews (ADR 0132 § 4). Per device. The shell offers all
+ * three values; a browser cannot read another site, so it offers Off and the
+ * homeserver on request, and shows "this device" as unavailable. A stored
+ * `device` behaves as `off` there, and is shown as Off.
+ */
+function LinkPreviewSettings() {
+  const { settings, platform } = useServices()
+  const device = platform.linkPreview !== undefined
+  const stored = settings.linkPreviews.value
+  const current: LinkPreviewSetting =
+    !device && stored === 'device' ? 'off' : stored
+  const options: {
+    value: LinkPreviewSetting
+    label: string
+    detail: string
+    unavailable?: boolean
+  }[] = [
+    {
+      value: 'off',
+      label: 'Off',
+      detail: 'Links are sent without previews, and nothing is looked up.',
+    },
+    {
+      value: 'device',
+      label: 'On this device',
+      detail: device
+        ? 'When you add a link, this device reads the page to build its preview, before you send. The site sees your address.'
+        : 'Unavailable in a browser, which cannot read other sites. The Axon app can.',
+      unavailable: !device,
+    },
+    {
+      value: 'device+homeserver',
+      label: device
+        ? 'On this device, or your homeserver when you ask'
+        : 'Your homeserver, when you ask',
+      detail:
+        'A card can offer Try homeserver. Choosing it shows the link to your homeserver, even in an encrypted room.',
+    },
+  ]
+  return (
+    <section class="panel">
+      <h2>Link previews</h2>
+      <div
+        class="settings-radio-list"
+        role="radiogroup"
+        aria-label="Link previews"
+      >
+        {options.map(({ value, label, detail, unavailable }) => (
+          <div key={value}>
+            <label class="setting-row">
+              <input
+                type="radio"
+                name="link-previews"
+                value={value}
+                checked={current === value}
+                disabled={unavailable}
+                aria-describedby={`link-previews-${value}`}
+                onChange={() => (settings.linkPreviews.value = value)}
+              />
+              {label}
+            </label>
+            <p id={`link-previews-${value}`} class="muted setting-detail">
+              {detail}
+            </p>
+          </div>
+        ))}
+      </div>
+      <p class="muted">
+        A preview is sent with your message, so recipients see what your device
+        saw and do not look the link up themselves. With previews on, a link
+        sent without one carries a marker asking other apps not to preview it.
+        This setting applies to this device only.
+      </p>
+    </section>
+  )
 }
 
 /** Theme + (schema-versioned) local settings (ADR 0046, M-W3). */
@@ -247,6 +326,7 @@ function SettingsPageContents() {
           ))}
         </div>
       </section>
+      <LinkPreviewSettings />
       <section class="panel">
         <h2>Rooms</h2>
         <label class="setting-row">

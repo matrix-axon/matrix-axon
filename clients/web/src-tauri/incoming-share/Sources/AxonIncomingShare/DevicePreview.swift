@@ -14,8 +14,11 @@
       case .timeout: return "The on-device preview lookup timed out."
       case .noMetadata: return "The device found no usable preview metadata for this link."
       case .unsupportedURL: return "This address is not supported for on-device previews."
+      // No A record: an IPv6-only site, or a name that does not exist, which
+      // the resolver does not tell apart (issue 1059). The copy fits both.
       case .publicIPv4Required:
-        return "On-device previews require a public IPv4 destination. IPv6-only sites are not supported."
+        return
+          "No IPv4 address was found for this site. Check the link; on-device previews also cannot reach sites that only have IPv6 addresses."
       }
     }
   }

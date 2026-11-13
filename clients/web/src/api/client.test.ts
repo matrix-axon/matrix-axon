@@ -17,6 +17,7 @@ import {
   apiErrorCode,
   apiErrorMessage,
   AXON_DEADLINES_MS,
+  AXON_PREVIEW_SEND_MS,
   createApiClient,
   isErrorEnvelope,
   REQUEST_TIMEOUT_MESSAGE,
@@ -738,6 +739,7 @@ describe("deadlines that wait past axon's own (issues 872 and 879)", () => {
       'POST /v1/accounts/{account_id}/rooms/{room_id}/send-media': 65_000,
       'PUT /v1/accounts/{account_id}/rooms/{room_id}/avatar': 65_000,
       'PUT /v1/accounts/{account_id}/profile/avatar': 65_000,
+      'POST /v1/accounts/{account_id}/link-previews/generate': 30_000,
     })
     for (const ms of Object.values(AXON_DEADLINES_MS)) {
       expect(ms).toBeGreaterThan(API_REQUEST_TIMEOUT_MS)
@@ -807,6 +809,40 @@ describe("deadlines that wait past axon's own (issues 872 and 879)", () => {
       api.POST('/v1/accounts/{account_id}/rooms/{room_id}/read', {
         params: { path: { account_id: ACCT, room_id: ROOM } },
         body: { event_id: '$e' },
+      }),
+    ).rejects.toThrow(REQUEST_TIMEOUT_MESSAGE)
+  })
+
+  // ADR 0132 § 6: axon runs a send carrying previews, even `[]`, under its
+  // upload timeout, after a slot wait; an ordinary send keeps its own.
+  it('gives a send that carries previews the preview-send deadline', async () => {
+    expect(AXON_PREVIEW_SEND_MS).toBe(70_000)
+    const SEND = `${ROOMS}/${encodeURIComponent(ROOM)}/send`
+    server.use(
+      http.post(SEND, async () => {
+        await delay(150)
+        return HttpResponse.json({ data: { event_id: '$sent' } })
+      }),
+    )
+    const api = createApiClient(
+      stubAuth('tok'),
+      BASE_URL,
+      undefined,
+      40,
+      { 'POST /v1/accounts/{account_id}/rooms/{room_id}/send': 40 },
+      5_000,
+    )
+    const params = { path: { account_id: ACCT, room_id: ROOM } }
+
+    const { response } = await api.POST(
+      '/v1/accounts/{account_id}/rooms/{room_id}/send',
+      { params, body: { body: 'https://example.org', url_previews: [] } },
+    )
+    expect(response.status).toBe(200)
+    await expect(
+      api.POST('/v1/accounts/{account_id}/rooms/{room_id}/send', {
+        params,
+        body: { body: 'plain', url_previews: null },
       }),
     ).rejects.toThrow(REQUEST_TIMEOUT_MESSAGE)
   })

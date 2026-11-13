@@ -233,6 +233,7 @@ export function RoomPage() {
     search,
     timelines,
     attachments: staging,
+    linkPreviews: linkPreviewCache,
     platform,
   } = useServices()
   // Warm across room switches rather than rebuilt per mount (ADR 0085 phase
@@ -1251,6 +1252,7 @@ export function RoomPage() {
     roomReferenceCompletions,
     emojiCompletions,
     submitMessage,
+    composerLinkPreviews,
   } = useMessageComposer({
     timeline,
     accountId,
@@ -1268,6 +1270,12 @@ export function RoomPage() {
     onMutation: search.clear,
     staging,
     nativeDrops: platform.onNativeFileDrop,
+    linkPreviews: {
+      setting: settings.linkPreviews.value,
+      device: platform.linkPreview,
+      api,
+      cache: linkPreviewCache,
+    },
   })
   void ephemeral.revision.value
   const typingText = formatTypingIndicator(
@@ -2298,6 +2306,7 @@ export function RoomPage() {
             onAttach={attachable ? stage : undefined}
             attachments={{ ...attachments, onRemove: removeAttachment }}
             onSubmit={submitMessage}
+            linkPreviews={composerLinkPreviews}
           />
         </div>
 

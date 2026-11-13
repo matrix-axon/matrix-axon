@@ -17,6 +17,11 @@ import {
 } from '../media/media-service'
 import { perfMark } from '../perf'
 import type { PreviewInput } from '../incoming-share/contract'
+import {
+  isPreviewRejection,
+  wirePreview,
+  type OutgoingLinkPreview,
+} from '../link-preview-send'
 
 export type SendProgress = (
   state: 'dispatching' | 'sent' | 'failed' | 'unknown',
@@ -33,7 +38,15 @@ export type StickerSend = Pick<
 export type LocalEchoStatus = 'pending' | 'failed'
 
 type SendOptions = {
+  /** Wire previews with upload ids already staged: share recovery's path. */
   urlPreviews?: PreviewInput[]
+  /**
+   * The composer's previews (ADR 0132 § 6–7), as `planLinkPreviews` decided
+   * them; `[]` is the "no previews" marker. Thumbnails travel as bytes and
+   * are uploaded afresh on every attempt, so a Retry never sends an upload
+   * that was consumed or has expired. Not used with `urlPreviews`.
+   */
+  linkPreviews?: readonly OutgoingLinkPreview[]
   progress?: SendProgress
   replyTo?: string
   threadRoot?: string
@@ -70,6 +83,13 @@ export type TimelineEvent = EventDto & {
      * that no longer exists.
      */
     batch?: { index: number; total: number }
+    /**
+     * The server rejected this send for its previews (ADR 0132 § 6), so
+     * Retry sends the text with `[]`: the same previews would be rejected
+     * again, and leaving the field out would hand the links to recipients'
+     * clients.
+     */
+    previewsRejected?: true
   }
 }
 
@@ -136,6 +156,8 @@ const RETAINED_EVENT_LIMIT = PAGE_LIMIT * 12
 export type HeadLoadOutcome = 'applied' | 'declined' | 'failed' | 'superseded'
 
 export interface TimelineStore {
+  /** The thread a thread-scoped store sends into, else `undefined`. */
+  readonly threadRoot: string | undefined
   /** Resume a native file-backed upload through the ordinary send boundary. */
   sendStagedMedia(
     uploadId: string,
@@ -1199,7 +1221,10 @@ export function createTimelineStore(
       response?: Response
     }>,
     progress?: SendProgress,
-  ): Promise<{ ok: true; eventId: string } | { ok: false }> {
+  ): Promise<
+    | { ok: true; eventId: string }
+    | { ok: false; status?: number; code?: unknown }
+  > {
     // Persistence must succeed BEFORE the request starts. A response received
     // before its event id is persisted remains dispatching on disk.
     try {
@@ -1226,7 +1251,7 @@ export function createTimelineStore(
         if (progress !== undefined)
           await progress(definite ? 'failed' : 'unknown')
         error.value = apiErrorMessage(apiError)
-        return { ok: false }
+        return { ok: false, status: response?.status, code }
       }
       error.value = null
       if (progress !== undefined) await progress('sent', data.data.event_id)
@@ -1324,14 +1349,41 @@ export function createTimelineStore(
 
   /** Mark a pending echo failed. Its body/options — and, for media, its `File`
    *  — are retained, so Retry has everything it needs. */
-  function failEcho(localId: string): void {
+  function failEcho(localId: string, previewsRejected = false): void {
     events.value = events.value.map((event) =>
       event.event_id === localId
         ? {
             ...event,
-            localEcho: { ...event.localEcho!, status: 'failed' as const },
+            localEcho: {
+              ...event.localEcho!,
+              status: 'failed' as const,
+              ...(previewsRejected && { previewsRejected: true as const }),
+            },
           }
         : event,
+    )
+  }
+
+  /**
+   * Stage this attempt's thumbnails, in parallel, and build the wire list
+   * (ADR 0132 § 7). A thumbnail that fails to upload costs its card the
+   * image, not the card. Uploads left behind by a failed send expire on the
+   * server's schedule.
+   */
+  async function stagePreviews(
+    previews: readonly OutgoingLinkPreview[],
+  ): Promise<PreviewInput[]> {
+    return Promise.all(
+      previews.map(async (preview) => {
+        if (preview.image === null) return wirePreview(preview, null)
+        const { bytes, mimeType } = preview.image
+        const extension = mimeType.slice('image/'.length).replace('jpeg', 'jpg')
+        const staged = await media.upload(
+          accountId,
+          new File([bytes], `preview.${extension}`, { type: mimeType }),
+        )
+        return wirePreview(preview, staged.ok ? staged.uploadId : null)
+      }),
     )
   }
 
@@ -1401,24 +1453,28 @@ export function createTimelineStore(
         buildLocalEcho(localId, body, options, options.senderId),
       ]
 
-    const result = await mutateWithResult(
-      () =>
-        api.POST('/v1/accounts/{account_id}/rooms/{room_id}/send', {
-          params: { path: { account_id: accountId, room_id: roomId } },
-          body: {
-            ...formattedParts(body, options.formattedBody),
-            reply_to: options.replyTo ?? null,
-            thread_root: targetThread ?? null,
-            ...(options.urlPreviews === undefined
-              ? {}
-              : { url_previews: options.urlPreviews }),
-          },
-        }),
-      options.progress,
-    )
+    const result = await mutateWithResult(async () => {
+      const previews =
+        options.linkPreviews === undefined
+          ? options.urlPreviews
+          : await stagePreviews(options.linkPreviews)
+      return api.POST('/v1/accounts/{account_id}/rooms/{room_id}/send', {
+        params: { path: { account_id: accountId, room_id: roomId } },
+        body: {
+          ...formattedParts(body, options.formattedBody),
+          reply_to: options.replyTo ?? null,
+          thread_root: targetThread ?? null,
+          ...(previews === undefined ? {} : { url_previews: previews }),
+        },
+      })
+    }, options.progress)
 
     if (!result.ok) {
-      failEcho(localId)
+      failEcho(
+        localId,
+        options.linkPreviews !== undefined &&
+          isPreviewRejection(result.status, result.code),
+      )
       return false
     }
     await reconcileEcho(localId, result.eventId)
@@ -1714,6 +1770,7 @@ export function createTimelineStore(
 
     ingestLive,
 
+    threadRoot,
     send,
     sendStagedMedia,
     sendMedia,
@@ -1725,7 +1782,18 @@ export function createTimelineStore(
       if (failed?.localEcho === undefined) {
         return false
       }
-      const { body, options, media: failedMedia, sticker } = failed.localEcho
+      const {
+        body,
+        media: failedMedia,
+        sticker,
+        previewsRejected,
+      } = failed.localEcho
+      // A rejection for the previews retries the text with the "no previews"
+      // marker (ADR 0132 § 6). `[]` passed the composer's size check whenever
+      // the rejected cards did, since fewer previews are never larger.
+      const options = previewsRejected
+        ? { ...failed.localEcho.options, linkPreviews: [] }
+        : failed.localEcho.options
       // Drops the old echo (and its preview url); the retry builds a fresh one.
       events.value = dropEchoes(
         events.value,

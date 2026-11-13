@@ -102,6 +102,10 @@ import {
 import { createSearchStore, type SearchStore } from './stores/search'
 import { createSettingsStore, type SettingsStore } from './stores/settings'
 import {
+  createLinkPreviewCache,
+  type LinkPreviewCache,
+} from './composer-link-previews'
+import {
   createRoomDetailsStore,
   type RoomDetailsStore,
 } from './stores/room-details'
@@ -195,6 +199,12 @@ export interface AppServices {
    * room — on a phone, every room change.
    */
   attachments: AttachmentStaging
+  /**
+   * Composer link-preview results, shared by every composer (ADR 0132 § 5).
+   * In the graph for the same reason as `attachments`, and wiped on sign-out
+   * by `connectLinkPreviewCacheReset`.
+   */
+  linkPreviews: LinkPreviewCache
   /**
    * The room the user is currently viewing (`accountId/roomId`), or `null`.
    * Set by `RoomPage`; `RoomList` reads it to mark the open row.
@@ -1596,6 +1606,20 @@ export function connectAttachmentReset(
   })
 }
 
+/**
+ * Forget every composer link-preview result when the session ends. They name
+ * the links someone typed, which the next reader of this device has no
+ * business seeing. Writes no signals, so it settles inside the flush.
+ */
+export function connectLinkPreviewCacheReset(
+  auth: CompositeAuthProvider,
+  linkPreviews: LinkPreviewCache,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) linkPreviews.clear()
+  })
+}
+
 /** Route raw Matrix ephemeral passthrough frames into the web overlay store. */
 export function connectEphemeralPassthrough(
   live: LiveConnection,
@@ -1708,7 +1732,10 @@ export function createServices(
     )
   }
   const attachments = createAttachmentStaging()
-  const settings = createSettingsStore(storage)
+  const settings = createSettingsStore(storage, {
+    // ADR 0132 § 4: a device that can build previews starts with them on.
+    linkPreviewsDefault: platform.linkPreview === undefined ? 'off' : 'device',
+  })
   // Instrumentation has to be live *before* anything worth measuring happens.
   // The room-list cache marks its read during this function, and `App`'s
   // effect — the other place the stored preference is applied — runs after
@@ -1939,6 +1966,8 @@ export function createServices(
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
+  const linkPreviews = createLinkPreviewCache()
+  connectLinkPreviewCacheReset(auth, linkPreviews)
   return {
     auth,
     api,
@@ -1948,6 +1977,7 @@ export function createServices(
     cache,
     telemetry,
     attachments,
+    linkPreviews,
     settings,
     accounts,
     matrixOAuthQr,

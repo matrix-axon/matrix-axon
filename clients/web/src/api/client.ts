@@ -98,6 +98,11 @@ const AXON_READ_RECEIPT_MS = 30_000
 const AXON_ROOM_ENTRY_MS = 30_000
 /** `default_media_upstream_upload_timeout_secs`: media sends, avatar sets (room and account). */
 const AXON_UPSTREAM_UPLOAD_MS = 60_000
+/**
+ * Homeserver link-preview generation: one fixed deadline covers connecting
+ * and every request (`crates/axon-sync/src/preview_generation.rs`).
+ */
+const AXON_PREVIEW_GENERATION_MS = 25_000
 
 /**
  * The calls axon bounds more loosely than `API_REQUEST_TIMEOUT_MS`, each given
@@ -116,9 +121,9 @@ const AXON_UPSTREAM_UPLOAD_MS = 60_000
  * are listed: a profile lookup or a directory search can reach another
  * homeserver over federation, so axon runs both under its room-entry timeout.
  *
- * `POST …/send` takes the send-mutation timeout because this client never
- * bundles link previews. A send that did would run under the upload timeout
- * (`crates/axon-api/src/routes/bundled_previews.rs`).
+ * `POST …/send` takes the send-mutation timeout here. A send that bundles
+ * link previews runs under the upload timeout instead, and takes
+ * {@link AXON_PREVIEW_SEND_MS}.
  */
 export const AXON_DEADLINES_MS: RouteDeadlines = {
   'POST /v1/accounts/{account_id}/rooms/{room_id}/send':
@@ -153,6 +158,40 @@ export const AXON_DEADLINES_MS: RouteDeadlines = {
     AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
   'PUT /v1/accounts/{account_id}/profile/avatar':
     AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
+  'POST /v1/accounts/{account_id}/link-previews/generate':
+    AXON_PREVIEW_GENERATION_MS + PAST_AXON_MS,
+}
+
+/**
+ * How long axon waits for one of the account's preview-send slots before it
+ * answers 503 (`crates/axon-api/src/routes/bundled_previews.rs`).
+ */
+const AXON_PREVIEW_SLOT_MS = 5_000
+
+/**
+ * A `POST …/send` that carries `url_previews`, even `[]`: axon runs it as a
+ * preview send, under its upload timeout, after waiting for a slot when a
+ * thumbnail is attached (`bundled_previews.rs`, ADR 0132 § 6). Sizing it as an
+ * ordinary send would hang up on a slow one and report a send that may yet
+ * land as an unknown outcome.
+ */
+export const AXON_PREVIEW_SEND_MS =
+  AXON_PREVIEW_SLOT_MS + AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS
+
+const SEND_ROUTE = 'POST /v1/accounts/{account_id}/rooms/{room_id}/send'
+
+/** Whether a `/send` request's JSON body carries `url_previews`. */
+async function carriesPreviews(request: Request): Promise<boolean> {
+  try {
+    const body: unknown = JSON.parse(await request.clone().text())
+    return (
+      typeof body === 'object' &&
+      body !== null &&
+      (body as { url_previews?: unknown }).url_previews != null
+    )
+  } catch {
+    return false
+  }
 }
 
 /** One request's deadline: its route's entry in `routes`, else `timeoutMs`. */
@@ -556,6 +595,7 @@ export function createApiClient(
   platform: Pick<Platform, 'fetch'> = browserPlatform(),
   timeoutMs = API_REQUEST_TIMEOUT_MS,
   routeTimeouts: RouteDeadlines = AXON_DEADLINES_MS,
+  previewSendMs = AXON_PREVIEW_SEND_MS,
 ): ApiClient {
   // Each outgoing request's deadline, held strongly for as long as its request
   // is in flight. `fetchWithinDeadline` must race the deadline itself, not the
@@ -571,14 +611,15 @@ export function createApiClient(
 
   const bearer: Middleware = {
     async onRequest({ request, schemaPath }) {
+      let ms = deadlineMs(request.method, schemaPath, timeoutMs, routeTimeouts)
+      if (
+        `${request.method.toUpperCase()} ${schemaPath}` === SEND_ROUTE &&
+        (await carriesPreviews(request))
+      )
+        ms = Math.max(ms, previewSendMs)
       // Created before the token is asked for, because acquiring one can be a
       // network round trip of its own — see `withinDeadline`.
-      const deadline =
-        timeoutMs > 0
-          ? AbortSignal.timeout(
-              deadlineMs(request.method, schemaPath, timeoutMs, routeTimeouts),
-            )
-          : null
+      const deadline = timeoutMs > 0 ? AbortSignal.timeout(ms) : null
       const trace = perfTraceRequest(request.url)
       // Only a provider that *went* somewhere can fail to come back, and the
       // synchronous ones are the common case (a pasted token is a string).

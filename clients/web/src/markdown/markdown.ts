@@ -66,6 +66,62 @@ export function markdownToHtmlIfFormatted(text: string): string | null {
   return sanitizeOutgoingHtml((md.parser(tokens) as string).trim())
 }
 
+/**
+ * What may begin a line inside a container: indentation (a list item) and
+ * `>` markers (a quote), in any nesting.
+ */
+const CONTAINER_PREFIX = '(?:[ \\t]*>)*[ \\t]*'
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Where `raw` occurs in `text` from `cursor`. A block inside a quote or a
+ * list item reaches the lexer with each later line's container prefix
+ * removed, so its lines are matched with any prefix put back.
+ */
+function locate(
+  text: string,
+  raw: string,
+  cursor: number,
+): { start: number; end: number } | null {
+  const start = text.indexOf(raw, cursor)
+  if (start !== -1) return { start, end: start + raw.length }
+  if (!raw.includes('\n')) return null
+  const pattern = new RegExp(
+    raw.split('\n').map(escapeRegExp).join(`\\n${CONTAINER_PREFIX}`),
+    'g',
+  )
+  pattern.lastIndex = cursor
+  const match = pattern.exec(text)
+  return match === null
+    ? null
+    : { start: match.index, end: match.index + match[0].length }
+}
+
+/**
+ * Where `text`'s Markdown code is: fenced and indented blocks, and code
+ * spans, as ranges of `text`, including code inside quotes and list items.
+ * Found from the same lexer the send uses, so it agrees with what renders as
+ * code. Callers use this to leave code alone, never to find it: a range it
+ * cannot place is left out.
+ */
+export function markdownCodeRanges(
+  text: string,
+): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = []
+  let cursor = 0
+  md.walkTokens(md.lexer(text), (token) => {
+    if (token.type !== 'code' && token.type !== 'codespan') return
+    const range = locate(text, token.raw, cursor)
+    if (range === null) return
+    ranges.push(range)
+    cursor = range.end
+  })
+  return ranges
+}
+
 /** Convert Markdown input to compact, display-only text for one-line previews. */
 export function markdownToPlainText(text: string): string {
   const html = md.parser(md.lexer(text)) as string

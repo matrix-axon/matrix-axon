@@ -200,6 +200,22 @@ function PreviewLink({
       rel="noopener noreferrer"
     >
       {children}
+      <LinkPreviewText preview={preview} />
+    </a>
+  )
+}
+
+/**
+ * A card's text, shared with the composer's cards (ADR 0132 § 5). The real
+ * host name leads, because everything after it is the sender's claim.
+ */
+export function LinkPreviewText({
+  preview,
+}: {
+  preview: Pick<LinkPreview, 'hostname' | 'siteName' | 'title' | 'description'>
+}) {
+  return (
+    <>
       <span class="link-preview-host">{preview.hostname}</span>
       {preview.siteName !== null && (
         <span class="link-preview-site">{preview.siteName}</span>
@@ -208,7 +224,7 @@ function PreviewLink({
       {preview.description !== null && (
         <span class="link-preview-description">{preview.description}</span>
       )}
-    </a>
+    </>
   )
 }
 

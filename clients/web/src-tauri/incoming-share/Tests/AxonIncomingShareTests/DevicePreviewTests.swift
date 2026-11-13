@@ -162,7 +162,9 @@
         XCTFail("An IPv6-only origin cannot start preview acquisition")
       } catch {
         XCTAssertEqual(error as? DevicePreviewFailure, .publicIPv4Required)
-        XCTAssertTrue(DevicePreviewFailure.publicIPv4Required.explanation.contains("IPv6-only"))
+        let explanation = DevicePreviewFailure.publicIPv4Required.explanation
+        XCTAssertTrue(explanation.contains("Check the link"))
+        XCTAssertTrue(explanation.contains("IPv6"))
       }
       XCTAssertEqual(try store.refreshOwned(input.id, owner: input.owner!), input)
       XCTAssertNil(TextShare.validation(input))

@@ -1,0 +1,95 @@
+{
+  "description": "Link identity for composer link previews (ADR 0132 section 1). Two links are one link when their WHATWG URL serializations are equal: `new URL(url).href` in the web composer, and `url::Url::to_string` on the server, which rejects a send whose previews name one destination twice. Each case gives a link as typed and the serialization both must produce. The web tests and the server's axon-core test read this file.",
+  "cases": [
+    {
+      "name": "host case is folded",
+      "url": "https://EXAMPLE.org/Article",
+      "href": "https://example.org/Article"
+    },
+    {
+      "name": "scheme case is folded",
+      "url": "HTTPS://example.org/a",
+      "href": "https://example.org/a"
+    },
+    {
+      "name": "the default port is dropped",
+      "url": "https://example.org:443/a",
+      "href": "https://example.org/a"
+    },
+    {
+      "name": "another port is kept",
+      "url": "https://example.org:8443/a",
+      "href": "https://example.org:8443/a"
+    },
+    {
+      "name": "an empty path becomes /",
+      "url": "https://example.org",
+      "href": "https://example.org/"
+    },
+    {
+      "name": "an empty path with the default port becomes /",
+      "url": "https://example.org:443",
+      "href": "https://example.org/"
+    },
+    {
+      "name": "an empty path before a query becomes /",
+      "url": "https://example.org?q=1",
+      "href": "https://example.org/?q=1"
+    },
+    {
+      "name": "a trailing slash on a non-empty path is kept",
+      "url": "https://example.org/a/",
+      "href": "https://example.org/a/"
+    },
+    {
+      "name": "a fragment is kept",
+      "url": "https://example.org/a#top",
+      "href": "https://example.org/a#top"
+    },
+    {
+      "name": "an empty fragment is kept",
+      "url": "https://example.org/a#",
+      "href": "https://example.org/a#"
+    },
+    {
+      "name": "an empty query is kept",
+      "url": "https://example.org/a?",
+      "href": "https://example.org/a?"
+    },
+    {
+      "name": "dot segments are resolved",
+      "url": "https://example.org/a/./b/../c",
+      "href": "https://example.org/a/c"
+    },
+    {
+      "name": "percent-encoding keeps its hex case",
+      "url": "https://example.org/%c3%a9",
+      "href": "https://example.org/%c3%a9"
+    },
+    {
+      "name": "an encoded unreserved character is not decoded",
+      "url": "https://example.org/a%7Eb",
+      "href": "https://example.org/a%7Eb"
+    },
+    {
+      "name": "an apostrophe in a query is encoded",
+      "url": "https://example.org/?q='x'",
+      "href": "https://example.org/?q=%27x%27"
+    },
+    {
+      "name": "an apostrophe in a path is not encoded",
+      "url": "https://example.org/it's",
+      "href": "https://example.org/it's"
+    },
+    {
+      "name": "an apostrophe in a fragment is not encoded",
+      "url": "https://example.org/a#it's",
+      "href": "https://example.org/a#it's"
+    },
+    {
+      "name": "a trailing dot on the host is kept",
+      "url": "https://example.org./a",
+      "href": "https://example.org./a"
+    }
+  ]
+}

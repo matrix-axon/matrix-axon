@@ -116,6 +116,17 @@ it('keeps the exact image on insertion, replacement, formatting, and submission'
   expect(input.value).toBe('')
 })
 
+it('keeps custom emoji offsets when a link scheme is lowercased on send', () => {
+  // `Https://` becomes `https://` (same length); the binding must not move.
+  const { input, open, onSubmit } = setup('  Https://a.org ')
+  open(16)
+  fireEvent.click(screen.getByRole('button', { name: 'First' }))
+  fireEvent.submit(input.closest('form')!)
+  expect(onSubmit).toHaveBeenCalledWith('https://a.org :smile:', [
+    { start: 14, end: 21, shortcode: 'smile', mxc: 'mxc://first/smile' },
+  ])
+})
+
 it('restores bindings with native history input events and trims offsets on send', () => {
   const { input, open, onSubmit } = setup('  hi ')
   open(5)

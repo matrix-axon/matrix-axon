@@ -602,7 +602,8 @@ describe('durable incoming-share recovery', () => {
       return original(action, args)
     }
     await f.store.generate('https://example.org')
-    expect(f.store.error.value).toContain('IPv6-only sites are not supported')
+    expect(f.store.error.value).toContain('Check the link')
+    expect(f.store.error.value).toContain('only have IPv6 addresses')
     expect(f.store.error.value).toContain('link remains sendable')
     expect(f.store.selected.value).toEqual(input)
     expect(f.post).not.toHaveBeenCalled()
