@@ -1855,6 +1855,35 @@ describe('shell layout (ADR 0062)', () => {
 })
 
 describe('shell keyboard shortcuts (ADR 0078)', () => {
+  it.each([false, true])(
+    'media shortcuts work in text fields (native=%s)',
+    async (native) => {
+      const shell = window as unknown as Record<string, unknown>
+      if (native) shell.__TAURI_INTERNALS__ = {}
+      try {
+        const services = testServices()
+        const { findByRole } = render(<App services={services} />)
+        await findByRole('heading', { name: 'Add a Room' })
+        const input = document.createElement('textarea')
+        document.body.append(input)
+        try {
+          for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+            fireEvent.keyDown(input, { key: 'c', altKey: true, ...modifier })
+            expect(services.timelineMediaExpanded.value).toBe(false)
+            fireEvent.keyDown(input, { key: 'c', altKey: true, ...modifier })
+            expect(services.timelineMediaExpanded.value).toBe(false)
+            fireEvent.keyDown(input, { key: 'e', altKey: true, ...modifier })
+            expect(services.timelineMediaExpanded.value).toBe(true)
+          }
+        } finally {
+          input.remove()
+        }
+      } finally {
+        delete shell.__TAURI_INTERNALS__
+      }
+    },
+  )
+
   it('Ctrl-B toggles the sidebar, and is inert on a utility page', async () => {
     const services = testServices()
     const { container } = render(<App services={services} />)

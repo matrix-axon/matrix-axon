@@ -5892,6 +5892,22 @@ input[type='checkbox'] {
   }
 }
 
+/* Collapsed timelines retain attachment metadata without a preview card. */
+.media-collapsed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.collapsed-gallery {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 /* Non-image attachment card: a compact header and full-width caption. */
 .media-attachment {
   display: flex;

@@ -872,6 +872,7 @@ function ShellChrome() {
     threadUnread,
     verification,
     platform: svcPlatform,
+    timelineMediaExpanded,
   } = useServices()
   const pendingShareCount = incomingShares?.pending.value.length ?? 0
   const pendingSharesUnavailable = incomingShares?.unavailable.value ?? false
@@ -1370,6 +1371,14 @@ function ShellChrome() {
       // so the shifted twin is the sidebar toggle that survives typing.
       'mod+b': toggleSidebar,
       'mod+shift+b': toggleSidebar,
+      'mod+alt+c': (event) => {
+        event.preventDefault()
+        timelineMediaExpanded.value = false
+      },
+      'mod+alt+e': (event) => {
+        event.preventDefault()
+        timelineMediaExpanded.value = true
+      },
       'mod+alt+s': (event) => {
         if (mode === 'utility' || singlePane || !hasSpaces) return
         event.preventDefault()

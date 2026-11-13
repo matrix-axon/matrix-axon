@@ -333,11 +333,14 @@ export function FormattedBody({
   body,
   content,
   className,
+  hideImages = false,
 }: {
   accountId: string
   body: string | null | undefined
   content: unknown
   className?: string
+  /** Collapsed timelines retain inline custom emoji and image alt text. */
+  hideImages?: boolean
 }) {
   const { media, rooms } = useServices()
   const rootRef = useRef<HTMLSpanElement>(null)
@@ -381,18 +384,38 @@ export function FormattedBody({
       c?.format === 'org.matrix.custom.html' &&
       typeof c.formatted_body === 'string'
     ) {
-      const rendered = renderMatrixHtml(c.formatted_body, {
+      let rendered = renderMatrixHtml(c.formatted_body, {
         resolveUserLink: (href, label) =>
           resolveMatrixToUserLink(href, label, { localDm: true }),
         resolveRoomLink: (href, label) =>
           resolveMatrixToRoomLink(href, roomLinkContext, label),
       })
+      if (hideImages) {
+        const template = document.createElement('template')
+        template.innerHTML = rendered
+        for (const img of template.content.querySelectorAll(
+          'img:not([data-mx-emoticon])',
+        )) {
+          img.replaceWith(
+            document.createTextNode(img.getAttribute('alt') ?? '[image]'),
+          )
+        }
+        rendered = template.innerHTML
+      }
       return bodyHasEmoji
         ? addEmojiTooltipsToHtml(rendered, emojiNames)
         : rendered
     }
     return null
-  }, [content, accountId, roomList, roomTitles, bodyHasEmoji, emojiNames])
+  }, [
+    content,
+    accountId,
+    roomList,
+    roomTitles,
+    bodyHasEmoji,
+    emojiNames,
+    hideImages,
+  ])
 
   // Resolve inline `<img data-mxc>` (the sanitizer moved a safe `mxc://` src
   // here) to authenticated blob URLs after mount. This is imperative DOM

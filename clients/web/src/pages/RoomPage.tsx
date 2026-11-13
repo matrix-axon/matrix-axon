@@ -228,6 +228,7 @@ export function RoomPage() {
     threadUnread,
     composerFocus,
     settings,
+    timelineMediaExpanded,
     favourites,
     messageGestures,
     search,
@@ -1418,6 +1419,10 @@ export function RoomPage() {
     if (command.kind === 'usage') {
       commandTimeline.error.value = `usage: ${slashCommandUsage(command.name)}`
       return false
+    }
+    if (command.kind === 'timeline-media') {
+      timelineMediaExpanded.value = command.expanded
+      return true
     }
     if (command.kind === 'formatted-message') {
       const current = commandAction
@@ -3458,6 +3463,7 @@ function eventPreview(event: EventDto | undefined): string | null {
 }
 
 type ComposerCommand =
+  | { kind: 'timeline-media'; expanded: boolean }
   | { kind: 'cancel-invite'; user: string }
   | { kind: 'formatted-message'; message: FormattedMessage }
   | { kind: 'forget' }
@@ -3492,6 +3498,17 @@ function parseComposerCommand(body: string): ComposerCommand | null {
     return null
   }
   const args = trimmed.slice(name.length).trim()
+  if (
+    commandName === SLASH_COMMAND.collapse ||
+    commandName === SLASH_COMMAND.expand
+  ) {
+    return args === ''
+      ? {
+          kind: 'timeline-media',
+          expanded: commandName === SLASH_COMMAND.expand,
+        }
+      : { kind: 'usage', name: commandName }
+  }
   if (commandName === SLASH_COMMAND.help) {
     return { kind: 'help' }
   }
