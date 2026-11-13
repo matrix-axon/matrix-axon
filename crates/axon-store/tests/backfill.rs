@@ -11,7 +11,7 @@ mod common;
 
 use std::time::Duration;
 
-use axon_store::RoomBackfillFailure;
+use axon_store::{PageSpeed, RoomBackfillFailure};
 use common::{insert_message, migrated_store, raw_pool, test_account};
 use sqlx_postgres::PgPool;
 use uuid::Uuid;
@@ -102,7 +102,14 @@ async fn save_room_backfill_roundtrips_and_accumulates() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok-1"), false, 40, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("tok-1"),
+            false,
+            40,
+            PageSpeed::Fast,
+        )
         .await
         .expect("first save");
     let first = store
@@ -115,7 +122,14 @@ async fn save_room_backfill_roundtrips_and_accumulates() {
     assert_eq!(first.events_backfilled, 40);
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok-2"), false, 35, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("tok-2"),
+            false,
+            35,
+            PageSpeed::Fast,
+        )
         .await
         .expect("second save");
     let second = store
@@ -131,7 +145,7 @@ async fn save_room_backfill_roundtrips_and_accumulates() {
 
     // Exhaustion: end came back NULL -> complete, no further token.
     store
-        .save_room_backfill(account_id, &room_id, None, true, 5, true)
+        .save_room_backfill(account_id, &room_id, None, true, 5, PageSpeed::Fast)
         .await
         .expect("final save");
     let done = store
@@ -180,7 +194,14 @@ async fn a_retryable_failure_defers_the_room_and_keeps_its_token() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("deep-token"), false, 100, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("deep-token"),
+            false,
+            100,
+            PageSpeed::Fast,
+        )
         .await
         .expect("save");
     let fresh = store
@@ -236,7 +257,14 @@ async fn a_rejected_token_is_cleared_and_the_room_stays_due() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("stale-token"), false, 10, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("stale-token"),
+            false,
+            10,
+            PageSpeed::Fast,
+        )
         .await
         .expect("save");
     store
@@ -271,7 +299,14 @@ async fn a_rejected_token_is_cleared_and_the_room_stays_due() {
     // count but not the rejection count, which is what lets a second rejection
     // at the same depth park the room.
     store
-        .save_room_backfill(account_id, &room_id, Some("walked-back"), false, 20, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("walked-back"),
+            false,
+            20,
+            PageSpeed::Fast,
+        )
         .await
         .expect("save");
     let state = store
@@ -314,7 +349,14 @@ async fn clearing_failures_unparks_the_room_and_keeps_its_cursor() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 300, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("tok"),
+            false,
+            300,
+            PageSpeed::Fast,
+        )
         .await
         .expect("save");
     store
@@ -408,7 +450,14 @@ async fn a_successful_page_clears_failure_state() {
     assert!(parked.parked && !parked.retry_due);
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 50, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("tok"),
+            false,
+            50,
+            PageSpeed::Fast,
+        )
         .await
         .expect("save after the park expired");
     let state = store
@@ -464,7 +513,14 @@ async fn only_a_fast_page_resets_the_timeout_streak() {
 
     // A slow success clears the backoff but keeps the streak.
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 100, false)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("tok"),
+            false,
+            100,
+            PageSpeed::Slow,
+        )
         .await
         .expect("slow page");
     let state = streak(&store).await;
@@ -504,7 +560,14 @@ async fn only_a_fast_page_resets_the_timeout_streak() {
 
     // A fast page resets it.
     store
-        .save_room_backfill(account_id, &room_id, Some("tok-2"), false, 100, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("tok-2"),
+            false,
+            100,
+            PageSpeed::Fast,
+        )
         .await
         .expect("fast page");
     assert_eq!(streak(&store).await.timeout_streak, 0);
@@ -536,7 +599,14 @@ async fn delete_room_backfill_removes_the_cursor() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 10, true)
+        .save_room_backfill(
+            account_id,
+            &room_id,
+            Some("tok"),
+            false,
+            10,
+            PageSpeed::Fast,
+        )
         .await
         .expect("save");
     store
@@ -567,7 +637,7 @@ async fn purge_room_clears_stored_state_and_enqueues_search_purge() {
     seed_room_state(&pool, account_id, &room_id).await;
     seed_room_account_data(&pool, account_id, &room_id).await;
     store
-        .save_room_backfill(account_id, &room_id, Some("tok"), false, 2, true)
+        .save_room_backfill(account_id, &room_id, Some("tok"), false, 2, PageSpeed::Fast)
         .await
         .expect("save backfill");
 
@@ -868,11 +938,18 @@ async fn list_room_backfill_returns_all_cursors() {
     let room_b = format!("!b-{}:localhost", Uuid::new_v4());
 
     store
-        .save_room_backfill(account_id, &room_a, Some("tok-a"), false, 10, true)
+        .save_room_backfill(
+            account_id,
+            &room_a,
+            Some("tok-a"),
+            false,
+            10,
+            PageSpeed::Fast,
+        )
         .await
         .expect("save a");
     store
-        .save_room_backfill(account_id, &room_b, None, true, 20, true)
+        .save_room_backfill(account_id, &room_b, None, true, 20, PageSpeed::Fast)
         .await
         .expect("save b");
 
@@ -921,13 +998,13 @@ async fn backfill_progress_counts_joined_rooms_and_completion() {
         .expect("remove empty room event");
     // Room A fully backfilled; B still ongoing (no row); left/banned rooms excluded.
     store
-        .save_room_backfill(account_id, &room_a, None, true, 2, true)
+        .save_room_backfill(account_id, &room_a, None, true, 2, PageSpeed::Fast)
         .await
         .expect("complete a");
     set_membership(&pool, account_id, &room_left, &user_id, "leave").await;
     set_membership(&pool, account_id, &room_banned, &user_id, "ban").await;
     store
-        .save_room_backfill(account_id, &room_banned, None, true, 1, true)
+        .save_room_backfill(account_id, &room_banned, None, true, 1, PageSpeed::Fast)
         .await
         .expect("complete banned room");
     let empty_account = test_account(&store, "empty-progress").await;

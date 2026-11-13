@@ -6,7 +6,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use axon_core::{DatabaseConfig, DatabaseTimeouts};
-use axon_store::Store;
+use axon_store::{PageSpeed, Store};
 use common::{cleanup_account, insert_message, raw_pool, test_account, TriggerFixture};
 use sqlx_postgres::PgPool;
 use uuid::Uuid;
@@ -116,7 +116,7 @@ async fn bulk_jobs_use_one_separate_connection_and_a_longer_deadline() {
     let room = format!("!bulk-{}:localhost", Uuid::new_v4());
     let event_id = insert_message(&store, account, &room, 1, "fixture").await;
     store
-        .save_room_backfill(account, &room, Some("original"), true, 1, true)
+        .save_room_backfill(account, &room, Some("original"), true, 1, PageSpeed::Fast)
         .await
         .unwrap();
     let token = store
@@ -608,7 +608,14 @@ async fn leave_state_and_purge_intent_commit_together() {
         .await
         .unwrap();
     store
-        .save_room_backfill(account, room, Some("complete-token"), true, 7, true)
+        .save_room_backfill(
+            account,
+            room,
+            Some("complete-token"),
+            true,
+            7,
+            PageSpeed::Fast,
+        )
         .await
         .unwrap();
     let old = insert_message(&store, account, room, 10, "before leave").await;
@@ -934,7 +941,7 @@ async fn no_op_purge_retries_preserve_rejoined_backfill_cursor() {
     let room = "!cursor-retry:localhost";
     let old = insert_message(&store, account, room, 1, "old history").await;
     store
-        .save_room_backfill(account, room, Some("old"), true, 1, true)
+        .save_room_backfill(account, room, Some("old"), true, 1, PageSpeed::Fast)
         .await
         .unwrap();
     // Fail final intent removal after the event batch has committed.
@@ -960,7 +967,7 @@ async fn no_op_purge_retries_preserve_rejoined_backfill_cursor() {
         .is_none());
     let fresh = insert_message(&store, account, room, 2, "rejoined history").await;
     store
-        .save_room_backfill(account, room, Some("new"), true, 7, true)
+        .save_room_backfill(account, room, Some("new"), true, 7, PageSpeed::Fast)
         .await
         .unwrap();
     // A persistently failing retry has no old events left to delete.

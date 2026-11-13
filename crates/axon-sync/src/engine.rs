@@ -4998,7 +4998,7 @@ mod purge_ingestion_tests {
                         Some("old-token"),
                         true,
                         1,
-                        true,
+                        axon_store::PageSpeed::Fast,
                     )
                     .await
                     .unwrap();

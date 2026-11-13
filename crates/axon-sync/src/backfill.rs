@@ -55,7 +55,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axon_core::SyncConfig;
-use axon_store::{RoomBackfillFailure, RoomBackfillState};
+use axon_store::{PageSpeed, RoomBackfillFailure, RoomBackfillState};
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::api::client::message::get_message_events;
@@ -560,10 +560,10 @@ struct Page {
     /// The resume token for the next page; `None` once the room's history is
     /// exhausted.
     end: Option<String>,
-    /// Whether the homeserver answered fast, by the gate's rule: under half the
-    /// page timeout, counted from when the request was sent, not from when it
-    /// started waiting for a permit.
-    fast: bool,
+    /// How fast the homeserver answered, by the gate's rule: under half the
+    /// page timeout is fast, counted from when the request was sent, not from
+    /// when it started waiting for a permit.
+    speed: PageSpeed,
 }
 
 /// Fetch and decrypt one `/messages` page.
@@ -610,7 +610,11 @@ async fn fetch_page(
     Ok(Page {
         events,
         end: response.end,
-        fast: is_fast(elapsed, timeout),
+        speed: if is_fast(elapsed, timeout) {
+            PageSpeed::Fast
+        } else {
+            PageSpeed::Slow
+        },
     })
 }
 
@@ -685,7 +689,7 @@ async fn backfill_room_page(
     // would keep the backfill task parked inside the await, and shutdown / logout /
     // delete — which cancel the token and then await this task's handle — would
     // stall until the request eventually resolved.
-    let Page { events, end, fast } = tokio::select! {
+    let Page { events, end, speed } = tokio::select! {
         biased;
         _ = cancel.cancelled() => return PageOutcome::Abandoned,
         result = fetch_page(gate, room, request, params.page_timeout) => match result {
@@ -721,7 +725,7 @@ async fn backfill_room_page(
             end.as_deref(),
             complete,
             fetched as i64,
-            fast,
+            speed,
         )
         .await
     {

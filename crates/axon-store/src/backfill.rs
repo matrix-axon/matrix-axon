@@ -69,6 +69,15 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomBackfillState {
     }
 }
 
+/// How fast a successful backfill page came back, by the homeserver gate's rule:
+/// fast is under half the page timeout. Only a fast page clears a room's timeout
+/// streak (ADR 0122's amendment of 2026-11-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSpeed {
+    Fast,
+    Slow,
+}
+
 /// One failed backfill page, as [`Store::record_room_backfill_failure`] stores
 /// it. The engine decides the class, delay and parking (ADR 0121); the store
 /// only records them.
@@ -199,8 +208,8 @@ impl Store {
     /// flag, and add `added` to the running `events_backfilled` count. Upsert, so
     /// the first page for a room inserts the row and later pages update it. A
     /// successful page also clears any failure backoff or parking, but not the
-    /// token rejection count (ADR 0121). Only a `fast` page clears the timeout
-    /// streak (ADR 0122's amendment of 2026-11-12).
+    /// token rejection count (ADR 0121). Only a [`PageSpeed::Fast`] page clears the
+    /// timeout streak (ADR 0122's amendment of 2026-11-12).
     ///
     /// Progress is saved only *after* a page's events are fully persisted, so a
     /// crash mid-page simply re-pages from the previously saved token — idempotent,
@@ -212,7 +221,7 @@ impl Store {
         oldest_seen_token: Option<&str>,
         complete: bool,
         added: i64,
-        fast: bool,
+        speed: PageSpeed,
     ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "INSERT INTO room_backfill \
@@ -234,7 +243,7 @@ impl Store {
         .bind(oldest_seen_token)
         .bind(complete)
         .bind(added)
-        .bind(fast)
+        .bind(speed == PageSpeed::Fast)
         .execute(&self.pool)
         .await?;
         Ok(())
