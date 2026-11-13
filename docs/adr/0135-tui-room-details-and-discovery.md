@@ -78,18 +78,23 @@ Visible source errors and server acquisition diagnostics remain the debugging su
 
 The sidebar replaces its capped `space/children` read with bounded `space/hierarchy` pagination using `enrich=false`.
 `app/spaces.rs` remains the membership and freshness owner, with four workers acquired before spawning and held for the whole walk.
+This bounds concurrent walks but has a known latency cost: four slow walks can occupy every worker for up to 60 seconds, delaying other visible roots and pending navigation.
+The startup selection deadline remains 30 seconds and can fall back to an available room while those walks continue.
 The shallow joined-room projection, account filtering, root ordering, collapse state, and navigation are preserved.
 Discovered summaries and the hierarchy's `joined` flag do not create navigation targets; the same account's room list remains authoritative.
 
 Each walk requests 100 children per page and allows at most 200 pages, 2 MiB per response, 16 MiB in total, and 60 seconds overall.
 Each page also retains the standard 30-second HTTP timeout.
 The byte budget includes ignored discovery fields and error bodies, and no allocation is sized from `total_children`.
+An exhausted byte budget fails before another HTTP request is sent.
 Room IDs are deduplicated across pages; page and parent identities, child shape, cursor size, empty/control/whitespace cursors, and repeated cursors are checked.
 A last page reporting more links than the walk collected is incomplete, including a concurrent addition behind the cursor; reconciliation starts a fresh walk.
 
 Only a complete walk replaces cached membership, including confirmed empty membership.
 Any failure or limit keeps the last complete grouping and marks the root `(incomplete; retrying)`; on first failure, rooms remain in provisional Ungrouped.
 Retries start from the first page after 30 seconds.
+A space that permanently exceeds a budget can repeatedly transfer up to 16 MiB per attempt under that fixed cooldown.
+[Issue 1090](https://github.com/matrix-axon/matrix-axon/issues/1090) tracks bounded retry backoff separately from discovery browsing.
 Explicit refresh and relationship changes bypass that delay.
 Reconnect waits one second for connection stability and preserves failed-read deadlines while invalidating membership and re-reading root order.
 Invalidation and root removal abort the walk immediately, and request IDs reject queued old outcomes even after a rejoin of the same account and room.

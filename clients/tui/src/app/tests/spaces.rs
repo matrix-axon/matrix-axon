@@ -38,6 +38,25 @@ async fn space_hierarchy_respects_remaining_walk_bytes_before_decoding() {
 }
 
 #[tokio::test]
+async fn exhausted_hierarchy_budget_does_not_send_a_request() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+    let error = client
+        .space_hierarchy(Uuid::nil(), "!space:srv", Some("next"), 0)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ApiError::Request(message) if message.contains("byte budget exhausted"))
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "an exhausted walk must not open another connection"
+    );
+}
+
+#[tokio::test]
 async fn overlarge_space_order_is_rejected_before_any_request() {
     let client = AxonClient::new("http://127.0.0.1:1".to_owned(), None);
     let error = client

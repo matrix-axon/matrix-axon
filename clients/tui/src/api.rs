@@ -49,6 +49,7 @@ pub(crate) const ROOM_MEMBERS_LIMIT: usize = 2 * 1024 * 1024;
 /// instead of allocating from a peer-chosen length.
 const INVITE_LIST_LIMIT: usize = 1024 * 1024;
 pub(crate) const HIERARCHY_PAGE_SIZE: usize = 100;
+pub(crate) const HIERARCHY_PAGE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -139,6 +140,11 @@ impl AxonClient {
         cursor: Option<&str>,
         remaining_bytes: usize,
     ) -> Result<(SpaceHierarchyPage, usize), ApiError> {
+        if remaining_bytes == 0 {
+            return Err(ApiError::Request(
+                "space hierarchy byte budget exhausted".to_owned(),
+            ));
+        }
         let mut request = self
             .http
             .get(format!(
@@ -154,8 +160,11 @@ impl AxonClient {
         if let Some(cursor) = cursor {
             request = request.query(&[("cursor", cursor)]);
         }
-        self.send_bounded_counted(read_request(request), remaining_bytes.min(2 * 1024 * 1024))
-            .await
+        self.send_bounded_counted(
+            read_request(request),
+            remaining_bytes.min(HIERARCHY_PAGE_BYTES),
+        )
+        .await
     }
 
     pub async fn space_order(&self) -> Result<PreferenceDto, ApiError> {

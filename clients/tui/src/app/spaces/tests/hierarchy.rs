@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::HIERARCHY_PAGE_BYTES;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -267,7 +268,7 @@ async fn malformed_pages_and_cursors_cannot_settle_membership() {
 #[tokio::test]
 async fn page_and_total_body_budgets_apply_before_decoding_ignored_summaries() {
     let mut oversized = page(&[], None, 0);
-    oversized["discovery"] = json!({"padding": "x".repeat(2 * 1024 * 1024)});
+    oversized["discovery"] = json!({"padding": "x".repeat(HIERARCHY_PAGE_BYTES)});
     let stub = Stub::new(vec![Reply::page(oversized)]).await;
     let err = walk_space_children(&stub.client, &key("!work:srv"))
         .await
@@ -277,7 +278,7 @@ async fn page_and_total_body_budgets_apply_before_decoding_ignored_summaries() {
     let replies = (0..9)
         .map(|n| {
             let mut value = page(&[], Some(&format!("next{n}")), 1);
-            value["discovery"] = json!({"padding": "x".repeat(2 * 1024 * 1024 - 512)});
+            value["discovery"] = json!({"padding": "x".repeat(HIERARCHY_PAGE_BYTES - 512)});
             Reply::page(value)
         })
         .collect();
@@ -287,6 +288,32 @@ async fn page_and_total_body_budgets_apply_before_decoding_ignored_summaries() {
         .unwrap_err();
     assert!(err.to_string().contains("size limit"));
     for _ in 0..9 {
+        stub.request().await;
+    }
+}
+
+#[tokio::test]
+async fn exactly_exhausted_walk_budget_stops_before_requesting_another_page() {
+    let replies = (0..HIERARCHY_MAX_BYTES / HIERARCHY_PAGE_BYTES)
+        .map(|n| {
+            let mut value = page(&[], Some(&format!("next{n}")), 1);
+            value["padding"] = json!("");
+            let mut reply = Reply::page(value);
+            let padding = HIERARCHY_PAGE_BYTES - reply.body.len();
+            reply.body = reply.body.replace(
+                "\"padding\":\"\"",
+                &format!("\"padding\":\"{}\"", "x".repeat(padding)),
+            );
+            assert_eq!(reply.body.len(), HIERARCHY_PAGE_BYTES);
+            reply
+        })
+        .collect();
+    let mut stub = Stub::new(replies).await;
+    let error = walk_space_children(&stub.client, &key("!work:srv"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("byte budget exhausted"));
+    for _ in 0..HIERARCHY_MAX_BYTES / HIERARCHY_PAGE_BYTES {
         stub.request().await;
     }
 }
