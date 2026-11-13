@@ -615,6 +615,17 @@ Options considered and not taken:
 Interactive successes are not counted as answers. The gateway's helper does
 not know whether a call was fast, and many calls include local work.
 
+A long-poll's return is not checked for speed. A long-poll is meant to take up
+to its own timeout, so its return shows that the homeserver is still answering,
+not that it has capacity to spare. That is weaker evidence than a fast success,
+and it is accepted on purpose: the 2026-11-06 replay under Consequences relies
+on it. For the same reason any answer that finished after the timed-out request
+started counts, not only a long-poll that started after it. A 30 s long-poll
+started after a 30 s page has almost never returned by the time the page times
+out. So a homeserver that is overloaded on `/messages` but still answers the
+long-poll excuses one timeout per `TIMEOUT_HOLD`, and the next timeout finds
+that held slot and counts in full.
+
 ### Why this keeps decision 4's protection
 
 The worst case is one more abandoned request per `TIMEOUT_HOLD` per gate than

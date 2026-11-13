@@ -192,8 +192,11 @@ struct State {
     /// Slots kept by timed-out requests.
     held: Vec<Hold>,
     /// When the homeserver last answered: a background request's fast
-    /// success, or a long-poll that returned. A timeout is isolated only if
-    /// this is later than the timed-out request's start.
+    /// success, or a long-poll that returned successfully. Only the former is
+    /// checked for speed. A long-poll is meant to run up to its own timeout, so
+    /// its return shows only that the homeserver is still answering (ADR 0122's
+    /// amendment of 2026-11-12). A timeout is isolated only if this is later
+    /// than the timed-out request's start.
     answered_at: Option<Instant>,
     /// Fast successes since the limit last changed.
     fast: u32,
