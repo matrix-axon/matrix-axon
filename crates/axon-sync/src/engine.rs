@@ -814,13 +814,20 @@ async fn persist_timeline_event(
 /// A paged event that the SDK could not decrypt (keys not yet imported) arrives
 /// as a UTD, exactly as on the live path; the re-decryption queue back-fills it
 /// once keys arrive.
+///
+/// Returns the stored row when the event was persisted as a UTD. There is no
+/// per-row re-check here, unlike the live path: a backfill can store thousands
+/// of permanently undecryptable rows, and each re-check would be another SDK
+/// decrypt attempt (and warning) for a row that cannot succeed. The backfill
+/// driver instead re-checks, once per page, only the sessions whose keys
+/// arrived while the page was written ([`redecrypt::KeyArrivalWatch`], #947).
 pub(crate) async fn persist_backfilled_event(
     ctx: &PersistContext,
     room: &Room,
     tev: &matrix_sdk::deserialized_responses::TimelineEvent,
-) {
+) -> Option<PendingUtd> {
     if skip_departed_room_ingestion(ctx, room) {
-        return;
+        return None;
     }
     let raw = tev.raw();
     let ev: AnySyncTimelineEvent = match raw.deserialize() {
@@ -831,16 +838,11 @@ pub(crate) async fn persist_backfilled_event(
                 error = %err,
                 "failed to deserialize backfilled event; skipping"
             );
-            return;
+            return None;
         }
     };
-    let Some(raw_val) = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event") else {
-        return;
-    };
-    // No re-check here, unlike the live path: a backfill can store thousands of
-    // permanently undecryptable rows, and each re-check would be another SDK
-    // decrypt attempt (and warning) for a row that cannot succeed.
-    let _ = persist_event_core(
+    let raw_val = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event")?;
+    persist_event_core(
         ctx,
         &ev,
         raw_val,
@@ -848,7 +850,7 @@ pub(crate) async fn persist_backfilled_event(
         tev.encryption_info().map(|info| info.as_ref()),
         false,
     )
-    .await;
+    .await
 }
 
 /// Persist one timeline event — live (`emit_live = true`) or backfilled
