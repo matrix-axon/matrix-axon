@@ -806,6 +806,13 @@ async fn persist_timeline_event(
 /// Returns the stored UTD row and the SDK's reason for it, for the caller to
 /// record with the rest of its page in one write
 /// ([`redecrypt::record_utd_reasons`]). `None` for anything else.
+///
+/// There is no per-row re-check here, unlike the live path: a backfill can
+/// store thousands of permanently undecryptable rows, and each re-check would
+/// be another SDK decrypt attempt (and warning) for a row that cannot succeed.
+/// The backfill driver instead re-checks, once per page, only the sessions
+/// whose keys arrived while the page was written
+/// ([`redecrypt::KeyArrivalWatch`], #947).
 #[must_use = "a backfilled UTD's reason is recorded by the caller"]
 pub(crate) async fn persist_backfilled_event(
     ctx: &PersistContext,
@@ -828,10 +835,7 @@ pub(crate) async fn persist_backfilled_event(
         }
     };
     let raw_val = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event")?;
-    // No re-check here, unlike the live path: a backfill can store thousands of
-    // permanently undecryptable rows, and each re-check would be another SDK
-    // decrypt attempt (and warning) for a row that cannot succeed. The paged
-    // event already carries the SDK's failure reason.
+    // The paged event already carries the SDK's failure reason.
     persist_event_core(
         ctx,
         &ev,
