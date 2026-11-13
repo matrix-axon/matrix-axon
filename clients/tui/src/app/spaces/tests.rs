@@ -1018,13 +1018,12 @@ fn removed_relationships_do_not_own_rooms_and_confirmed_empty_roots_are_hidden()
         .get_mut(&key("!work:srv"))
         .unwrap()
         .inflight = Some(7);
-    let removed =
-        serde_json::from_value(serde_json::json!({"room_id": "!a:srv", "via": []})).unwrap();
-    let missing_via = serde_json::from_value(serde_json::json!({"room_id": "!b:srv"})).unwrap();
+    // The hierarchy lists only current links; their removal is observed by
+    // the next complete walk rather than an empty-via legacy response row.
     app.apply_space_outcome(SpaceOutcome::Children {
         key: key("!work:srv"),
         request: 7,
-        result: Ok(vec![removed, missing_via]),
+        result: Ok(Vec::new()),
     });
     assert!(!app
         .sidebar_rows(None)
@@ -1197,8 +1196,7 @@ async fn offscreen_invalidated_membership_settles_and_empty_roots_can_reappear()
         .sidebar_rows(None)
         .iter()
         .any(|r| matches!(r, SidebarRow::Ungrouped { provisional: true })));
-    let child =
-        serde_json::from_value(serde_json::json!({"room_id": "!a:srv", "via": ["srv"]})).unwrap();
+    let child = "!a:srv".to_owned();
     app.apply_space_outcome(SpaceOutcome::Children {
         key: key("!work:srv"),
         request,
@@ -1472,3 +1470,5 @@ fn live_calculated_space_title_preserves_header_focus_and_timeline_selection() {
     assert_eq!(RoomKey::from(app.selected_room().unwrap()), selected);
     assert!(app.sidebar_rows(None).iter().any(|row| matches!(row, SidebarRow::Space { index, .. } if app.rooms.rooms[*index].title() == "Calculated space")));
 }
+
+mod hierarchy;

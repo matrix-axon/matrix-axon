@@ -11,14 +11,87 @@ use tokio::task::AbortHandle;
 
 use super::{App, BootstrapStage, RoomFilter, RoomKey, Status};
 use crate::api::{
-    ApiError, EventDto, MemberDto, PreferenceDto, PreferencesChangedDto, RoomDto, SpaceChildDto,
-    TimelinePage,
+    ApiError, EventDto, MemberDto, PreferenceDto, PreferencesChangedDto, RoomDto, TimelinePage,
+    HIERARCHY_PAGE_SIZE,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const WORKERS: usize = 4;
 const LOOKAHEAD: usize = 8;
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+// Local hierarchy pages, not homeserver discovery pages (ADR 0135).
+const HIERARCHY_MAX_PAGES: usize = 200;
+const HIERARCHY_MAX_BYTES: usize = 16 * 1024 * 1024;
+const HIERARCHY_TIMEOUT: Duration = Duration::from_secs(60);
+const HIERARCHY_CURSOR_BYTES: usize = 4096;
+
+/// Publish membership atomically only after the last page. An interrupted walk
+/// cannot prove absence, so it must never prune the last complete grouping.
+async fn walk_space_children(
+    client: &crate::api::AxonClient,
+    key: &RoomKey,
+) -> Result<Vec<String>, ApiError> {
+    tokio::time::timeout(HIERARCHY_TIMEOUT, async {
+        let mut children = Vec::new();
+        let mut seen = HashSet::new();
+        let mut cursors = HashSet::new();
+        let mut cursor = None;
+        let mut remaining_bytes = HIERARCHY_MAX_BYTES;
+        for _ in 0..HIERARCHY_MAX_PAGES {
+            let (page, bytes) = client
+                .space_hierarchy(
+                    key.account_id,
+                    &key.room_id,
+                    cursor.as_deref(),
+                    remaining_bytes,
+                )
+                .await?;
+            remaining_bytes -= bytes;
+            if page.room_id != key.room_id || page.children.len() > HIERARCHY_PAGE_SIZE {
+                return Err(ApiError::Request("invalid space hierarchy page".to_owned()));
+            }
+            for child in page.children {
+                if child.parent_room_id != key.room_id
+                    || ruma::RoomId::parse(&child.room_id).is_err()
+                    || child.via.is_empty()
+                    || child.via.iter().any(String::is_empty)
+                {
+                    return Err(ApiError::Request(
+                        "invalid space hierarchy child".to_owned(),
+                    ));
+                }
+                if seen.insert(child.room_id.clone()) {
+                    children.push(child.room_id);
+                }
+            }
+            let Some(next) = page.next_cursor else {
+                // A moving hierarchy can grow during pagination. Do not claim
+                // completeness when the last snapshot still names more links.
+                if (children.len() as u64) < page.total_children {
+                    return Err(ApiError::Request(
+                        "space hierarchy ended before its total".to_owned(),
+                    ));
+                }
+                return Ok(children);
+            };
+            if next.is_empty()
+                || next.len() > HIERARCHY_CURSOR_BYTES
+                || next.chars().any(|c| c.is_whitespace() || c.is_control())
+                || !cursors.insert(next.clone())
+            {
+                return Err(ApiError::Request(
+                    "invalid or repeated space hierarchy cursor".to_owned(),
+                ));
+            }
+            cursor = Some(next);
+        }
+        Err(ApiError::Request(
+            "space hierarchy exceeds 200 pages".to_owned(),
+        ))
+    })
+    .await
+    .map_err(|_| ApiError::Request("space hierarchy exceeded 60-second walk deadline".to_owned()))?
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SidebarRow {
@@ -79,6 +152,14 @@ pub(crate) struct ChildrenState {
 }
 
 impl ChildrenState {
+    fn invalidate(&mut self) {
+        self.dirty = true;
+        self.inflight = None;
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
+    }
+
     pub(crate) fn is_pending(&self) -> bool {
         self.children.is_none() || self.dirty || self.inflight.is_some()
     }
@@ -169,7 +250,7 @@ pub(crate) enum SpaceOutcome {
     Children {
         key: RoomKey,
         request: u64,
-        result: Result<Vec<SpaceChildDto>, ApiError>,
+        result: Result<Vec<String>, ApiError>,
     },
     OrderRead {
         revision: u64,
@@ -947,14 +1028,14 @@ impl App {
 
     pub(crate) fn invalidate_space(&mut self, key: &RoomKey) {
         if let Some(state) = self.spaces.children.get_mut(key) {
-            state.dirty = true;
+            state.invalidate();
             state.retry_at = None;
         }
     }
 
     pub(crate) fn refresh_spaces(&mut self) {
         for state in self.spaces.children.values_mut() {
-            state.dirty = true;
+            state.invalidate();
             state.retry_at = None;
         }
         self.spaces.order_read_again = true;
@@ -973,7 +1054,7 @@ impl App {
         }
         self.spaces.reconnect_refresh_at = None;
         for state in self.spaces.children.values_mut() {
-            state.dirty = true;
+            state.invalidate();
         }
         self.spaces.order_read_again = true;
         self.request_rooms_refresh();
@@ -1073,7 +1154,7 @@ impl App {
             let client = self.client.clone();
             let tx = tx.clone();
             let task = tokio::spawn(async move {
-                let result = client.space_children(key.account_id, &key.room_id).await;
+                let result = walk_space_children(&client, &key).await;
                 let _ = tx.send(SpaceOutcome::Children {
                     key,
                     request,
@@ -1300,13 +1381,7 @@ impl App {
                 }
                 match result {
                     Ok(children) => {
-                        state.children = Some(
-                            children
-                                .into_iter()
-                                .filter(|child| !child.via.is_empty())
-                                .map(|child| child.room_id)
-                                .collect(),
-                        );
+                        state.children = Some(children);
                         state.error = None;
                         state.retry_at = None;
                     }
@@ -1315,7 +1390,7 @@ impl App {
                         state.error = Some(error.clone());
                         if report_debug {
                             self.status = Status::Debug(format!(
-                                "space children failed: account_id={} room_id={}: {error}",
+                                "space membership incomplete: account_id={} room_id={}: {error}",
                                 key.account_id, key.room_id
                             ));
                         }

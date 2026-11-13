@@ -147,7 +147,8 @@
 - Keep `app/spaces.rs` as the shared sidebar projection and freshness owner: space roots, leaf rooms, and nonselectable headings/dividers.
   `rooms.selected` owns the open timeline; `spaces.focus` owns a focused header and must never become a message/draft target.
   Reserve a contextual section header above scrolled children when it fits, and keep that root's membership fresh even when the original header is above the viewport.
-- Joined spaces come from `RoomDto.room_type`; children come from `GET …/space/children` and are intersected with the same account's room list.
+- Joined spaces come from `RoomDto.room_type`; direct children come from paged `GET …/space/hierarchy?limit=100&enrich=false` and are intersected with the same account's room list.
+  Never trigger enrichment or selected-child discovery for sidebar grouping.
   First parent in root order wins independently of collapse state; joined subspaces remain roots.
   Favorites sort within each group, `/filter fav` flattens, and name/unread filters reveal matches temporarily.
   Explicit collapse overrides filter reveal until the filter changes.
@@ -155,7 +156,11 @@
   Unknown destination membership keeps a keyed navigation intent, canceled by later navigation or filter/account changes.
 - Membership fetches acquire one of four permits before spawning, request only visible roots plus lookahead, retain cached membership on failure, and coalesce live invalidations.
   Startup and pending navigation also prioritize their destination root through the same pool.
-  A root removed during a read cancels its worker; a request invalidated while in flight cannot settle the cache.
+  A root removed or invalidated during a walk cancels its worker; its request ID fences queued outcomes, including a removal followed by a rejoin.
+  Deduplicate room IDs and replace membership only after the final page; a failed or incomplete walk retains the last complete grouping and marks the root incomplete.
+  Each walk allows 200 pages, 2 MiB per page, 16 MiB in total, and 60 seconds overall, alongside each read's 30-second timeout.
+  Reject malformed, oversized, or repeated cursors and unexpected page/parent IDs.
+  Failed walks retry from the first page after 30 seconds; explicit refresh and relationship changes retry immediately.
   Reconnect and `/refresh` invalidate membership and re-read instance order.
 - `space_order` is instance-scoped, including `preferences.changed` envelopes with a nil account UUID.
   Preserve hidden/absent keys on reorder, suppress own-device echoes, serialize GET/PUT work, and retain unsaved edits across failures and older reads.

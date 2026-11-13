@@ -936,7 +936,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                             String::new()
                         };
                         let suffix = match app.spaces.children.get(&key) {
-                            Some(state) if state.error.is_some() => " (load failed; retrying)",
+                            Some(state) if state.error.is_some() => " (incomplete; retrying)",
                             Some(state) if !state.is_pending() => "",
                             _ => " (loading…)",
                         };

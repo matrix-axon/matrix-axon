@@ -189,6 +189,8 @@ shows it.
   That follow-up should also show the containing space header remaining visible while scrolling through a large group.
   Exercise top-room startup, Left/Right group navigation, and pinning a focused space to the shared first position.
   Also show confirmed empty spaces disappearing while loading and failed roots remain available.
+  Sidebar membership now pages `space/hierarchy` with `enrich=false` (ADR 0135), preserving grouping when a walk fails and showing `(incomplete; retrying)` on its root.
+  More than 1,000 children, incomplete walks, and recovery remain **not covered** by the pilot; focused TUI HTTP tests cover these paths without changing the smoke harness.
   Root reordering must also be demonstrated changing the web picker through the shared preference.
 - **Galleries in the TUI.** The TUI has no gallery grouping, so this is `n/a` rather than a demo gap.
 - **Sort, filter, and the name filter on web mobile.** The controls are all

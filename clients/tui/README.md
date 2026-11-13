@@ -164,12 +164,17 @@ The TUI does not fetch member lists to calculate titles.
 Older servers and rooms awaiting the server's first reconciliation sweep fall back to room ID when no name or alias is available.
 
 Space membership loads in the background for visible roots and a small lookahead.
+The sidebar pages Axon's local `space/hierarchy` with `enrich=false`, so groups can include more than 1,000 child links without requesting homeserver discovery.
+The four-worker pool allows 100 children per page, at most 200 pages, 2 MiB per response, 16 MiB overall, and 60 seconds per walk.
 Previously loaded membership invalidated by live updates is refreshed through the same bounded pool, even off screen.
 Startup waits for saved root order and the first group's membership before opening the top room, after loading its read markers and drafts.
 Empty or failed groups are skipped; a 30-second selection deadline falls back to the first currently available room rather than leaving startup stuck.
 Explicit room navigation during startup takes precedence over that automatic choice.
 Until those reads complete, rooms remain accessible in the provisional Ungrouped section.
-Failed reads are marked on the root and retried; `/refresh` also retries them.
+A failed or incomplete walk marks the root `(incomplete; retrying)` and keeps its last complete grouping.
+On an initial failure, joined rooms remain accessible under provisional Ungrouped.
+Only a complete walk can remove old child links; retries start from the first page after 30 seconds, and `/refresh` retries immediately.
+An older server without `space/hierarchy` shows the same incomplete marker; upgrade Axon to load space membership.
 Live `m.space.child` updates invalidate the affected group, and reconnect refreshes both membership and saved order.
 An account without joined spaces retains the flat room list.
 Only joined child rooms with an active relationship are displayed, and a room with multiple parents belongs to the first space in root order.
