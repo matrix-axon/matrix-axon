@@ -241,7 +241,17 @@ Account lifecycle operations map to:
 - Enable backup: `POST /v1/accounts/{account_id}/backup/enable`
 - Delete: `DELETE /v1/accounts/{account_id}`
 
-Login, logout, and recover return `{ "data": <AccountDto> }`. Recover requires an active account and consumes a transient `recovery_key` without persisting it. Enable backup returns flattened `AccountDto` plus `backup_action`; `recovery_key` is required for create/export/replace and omitted to kick an already-enabled upload. Unverified accounts are refused before the key is sent. Logout is non-destructive: the returned account is `deactivated` and its archive remains available for a later login. Delete returns `204 No Content` and permanently removes the account and its local Axon data.
+Login and logout return `{ "data": <AccountDto> }`.
+Recover returns flattened `AccountDto` plus `backup_action` and `redecrypt`.
+It requires an active account and consumes a transient `recovery_key` without persisting it.
+A recover 200 means 4S secret-storage import succeeded, not that history keys were recovered.
+Report device verification, the returned backup snapshot, backup action, and re-decryption counts separately; a timeout is incomplete.
+Share backup observations with `/status` and backup-action wording with `/backup enable`.
+Older servers that omit the sibling results must show them as unavailable, never as zero counts or successful backup setup.
+Enable backup returns flattened `AccountDto` plus `backup_action`; `recovery_key` is required for create/export/replace and omitted to kick an already-enabled upload.
+Unverified accounts are refused before the key is sent.
+Logout is non-destructive: the returned account is `deactivated` and its archive remains available for a later login.
+Delete returns `204 No Content` and permanently removes the account and its local Axon data.
 
 Login, logout, recover, backup enable, and delete run off the event loop: secret-bearing calls are spawned as tasks that own and then drop the password or recovery key, and results land back through a channel the main loop drains, so the UI keeps redrawing and a second lifecycle verb is refused while one is in flight. Login is idempotent server-side — an already-`active` account is returned unchanged with the password never consulted — so the client reports that no-op distinctly (`already logged in: … (no changes)`) by comparing the returned `account_id` against the accounts that were active before the attempt. After a real new/reactivated login, prompt for a recovery key only when the returned account is not verified; empty Enter or `Esc` skips. Logout asks for `[y/N]` confirmation unless `display.confirm_logout = false`. Delete always asks for an explicit `YES` confirmation.
 

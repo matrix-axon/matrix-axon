@@ -4,6 +4,78 @@
 use super::support::*;
 use crate::app::*;
 
+#[tokio::test]
+async fn recover_http_results_reach_the_completed_response_even_after_refresh_failure() {
+    let body = serde_json::json!({
+        "data": {
+            "account_id": Uuid::from_u128(1), "user_id": "@alice:example.com",
+            "state": "active", "verified": true,
+            "backup": {"exists_on_server": false},
+            "backup_action": "export_pending",
+            "redecrypt": {
+                "selected": 10, "attempted": 2, "decrypted": 0,
+                "still_pending": 10, "timed_out": true
+            }
+        }
+    })
+    .to_string();
+    // The one-response stub closes after recover, so follow-up reads fail.
+    // Their warning must not replace the completed recovery's own results.
+    let base = spawn_api_stub(vec![body]).await;
+    let mut app = app_with_rooms(Vec::new());
+    app.client = AxonClient::new(base, None);
+    let result = app
+        .client
+        .recover(Uuid::from_u128(1), "test-only-key")
+        .await
+        .unwrap();
+    app.handle_lifecycle_outcome(LifecycleOutcome::Recover {
+        user_id: "@alice:example.com".to_owned(),
+        result: Ok(result),
+    })
+    .await;
+
+    let status = app.status.text(false);
+    assert!(status.contains("4S secret storage imported"));
+    assert!(status.contains("device verified"));
+    assert!(status.contains("megolm backup: none on homeserver"));
+    assert!(status.contains("megolm backup export pending"));
+    assert!(status.contains("10 selected, 2 attempted, 0 decrypted, 10 still pending"));
+    assert!(status.contains("timed out (incomplete)"));
+    assert!(status.contains("account refresh failed"));
+    assert!(status.contains("room refresh failed"));
+    assert_eq!(
+        app.pending_command_response.as_deref(),
+        Some(status.as_str())
+    );
+    assert!(!status.contains("test-only-key"));
+    assert!(!status.contains("recovered encryption keys"));
+
+    app.display.input_lines = 1;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::ui::prepare(&mut app, frame.area());
+            crate::ui::draw(frame, &mut app);
+        })
+        .unwrap();
+    assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
+    let buffer = terminal.backend().buffer();
+    let rendered = (0..30)
+        .map(|y| {
+            (0..120)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("megolm backup export pending"));
+    assert!(rendered.contains("10 selected, 2 attempted, 0 decrypted"));
+    assert!(rendered.contains("timed out (incomplete)"));
+    app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+    assert_eq!(app.mode, Mode::Compose);
+}
+
 #[test]
 fn logout_prompts_for_confirmation_when_enabled() {
     let mut app = app_with_rooms(Vec::new());

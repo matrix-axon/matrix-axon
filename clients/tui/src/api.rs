@@ -227,7 +227,7 @@ impl AxonClient {
         &self,
         account_id: Uuid,
         recovery_key: &str,
-    ) -> Result<AccountDto, ApiError> {
+    ) -> Result<RecoverResponse, ApiError> {
         let request = self
             .http
             .post(format!(
@@ -1777,6 +1777,30 @@ pub struct BackupSnapshot {
     pub recovery_state: RecoveryState,
 }
 
+impl BackupSnapshot {
+    /// Shared backup observations for `/status` and recovery results.
+    /// 4S completeness is independent of history-key import.
+    pub(crate) fn status_lines(&self) -> [String; 2] {
+        let exists = match self.exists_on_server {
+            Some(true) => "on homeserver",
+            Some(false) => "none on homeserver",
+            None => "existence unknown",
+        };
+        let uploading = if self.this_device_uploading {
+            "this device uploading"
+        } else {
+            "this device not uploading"
+        };
+        [
+            format!(
+                "megolm backup: {exists}; {uploading}; state {}",
+                self.backup_state.as_str()
+            ),
+            format!("4S secret storage: {}", self.recovery_state.as_str()),
+        ]
+    }
+}
+
 /// SDK backup machine state on the wire (ADR 0098).
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1827,7 +1851,7 @@ impl RecoveryState {
     }
 }
 
-/// What `POST …/backup/enable` did about megolm backup (ADR 0098).
+/// What `POST …/recover` or `POST …/backup/enable` did about megolm backup (ADR 0098).
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupAction {
@@ -1844,6 +1868,28 @@ pub struct EnableBackupResponse {
     #[serde(flatten)]
     pub account: AccountDto,
     pub backup_action: BackupAction,
+}
+
+/// Recover 200 means secret-storage import succeeded, not history recovery.
+/// Older servers omit the sibling results; absence must not imply success.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct RecoverResponse {
+    #[serde(flatten)]
+    pub account: AccountDto,
+    #[serde(default)]
+    pub backup_action: Option<BackupAction>,
+    #[serde(default)]
+    pub redecrypt: Option<RedecryptSummary>,
+}
+
+/// Stored-message re-decryption results, independent of device verification.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct RedecryptSummary {
+    pub selected: u64,
+    pub attempted: u64,
+    pub decrypted: u64,
+    pub still_pending: u64,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -3710,6 +3756,51 @@ mod tests {
             response.data.account.backup.recovery_state,
             RecoveryState::Enabled
         );
+    }
+
+    #[test]
+    fn recover_response_preserves_results_independently_of_verification() {
+        let response: ApiResponse<RecoverResponse> = serde_json::from_value(serde_json::json!({
+            "data": {
+                "account_id": Uuid::nil(), "user_id": "@alice:example.com",
+                "state": "active", "verified": true,
+                "backup": {"exists_on_server": false},
+                "backup_action": "failed",
+                "redecrypt": {
+                    "selected": 11, "attempted": 7, "decrypted": 3,
+                    "still_pending": 8, "timed_out": true
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(response.data.account.verified, Some(true));
+        assert_eq!(response.data.account.backup.exists_on_server, Some(false));
+        assert_eq!(response.data.backup_action, Some(BackupAction::Failed));
+        assert_eq!(
+            response.data.redecrypt,
+            Some(RedecryptSummary {
+                selected: 11,
+                attempted: 7,
+                decrypted: 3,
+                still_pending: 8,
+                timed_out: true,
+            })
+        );
+    }
+
+    #[test]
+    fn recover_response_from_an_older_server_does_not_invent_results() {
+        let response: ApiResponse<RecoverResponse> = serde_json::from_value(serde_json::json!({
+            "data": {
+                "account_id": Uuid::nil(), "user_id": "@alice:example.com",
+                "state": "active", "verified": true
+            }
+        }))
+        .unwrap();
+        assert_eq!(response.data.account.verified, Some(true));
+        assert_eq!(response.data.account.backup, BackupSnapshot::default());
+        assert_eq!(response.data.backup_action, None);
+        assert_eq!(response.data.redecrypt, None);
     }
 
     #[test]

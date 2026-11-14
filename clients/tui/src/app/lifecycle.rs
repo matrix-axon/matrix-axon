@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 
 use crate::api::{
     AccountDto, AccountState, BackupAction, DeviceListDto, EnableBackupResponse, FlowDto,
-    VerificationFrameDto, HTTP_REQUEST_TIMEOUT,
+    RecoverResponse, VerificationFrameDto, HTTP_REQUEST_TIMEOUT,
 };
 
 use super::{
@@ -64,7 +64,7 @@ pub(crate) enum LifecycleOutcome {
     },
     Recover {
         user_id: String,
-        result: Result<AccountDto, String>,
+        result: Result<RecoverResponse, String>,
     },
     BackupEnableReady {
         target: Option<String>,
@@ -426,7 +426,7 @@ impl App {
         };
         self.clear_lifecycle_input();
         self.mode = Mode::Compose;
-        self.status = Status::from(format!("recovering encryption keys for {user_id}…"));
+        self.status = Status::from(format!("importing secret storage for {user_id}…"));
         self.lifecycle_busy = true;
         let client = self.client.clone();
         let account_id = account.account_id;
@@ -1418,10 +1418,9 @@ impl App {
                 }
             }
             LifecycleOutcome::Recover { user_id, result } => match result {
-                Ok(account) => {
+                Ok(response) => {
                     let warning = self.refresh_after_lifecycle_change().await;
-                    self.status =
-                        recovery_success_status(&account.user_id, account.verified, warning);
+                    self.status = recovery_success_status(&response, warning);
                 }
                 Err(error) => {
                     self.status = Status::from(format!("recovery failed for {user_id}: {error}"));
@@ -2085,7 +2084,15 @@ fn backup_enable_success_status(
     action: BackupAction,
     warning: Option<String>,
 ) -> Status {
-    let summary = match action {
+    let summary = backup_action_summary(user_id, action);
+    Status::from(match warning {
+        Some(warning) => format!("{summary}; {warning}"),
+        None => summary,
+    })
+}
+
+fn backup_action_summary(user_id: &str, action: BackupAction) -> String {
+    match action {
         BackupAction::Joined => format!("joined existing megolm backup: {user_id}"),
         BackupAction::Enabled => format!("enabled megolm backup: {user_id}"),
         BackupAction::ExportPending => {
@@ -2097,28 +2104,40 @@ fn backup_enable_success_status(
         BackupAction::AlreadyUploading => {
             format!("already uploading megolm keys to backup: {user_id}")
         }
-    };
-    Status::from(match warning {
-        Some(warning) => format!("{summary}; {warning}"),
-        None => summary,
-    })
+    }
 }
 
-fn recovery_success_status(
-    user_id: &str,
-    verified: Option<bool>,
-    warning: Option<String>,
-) -> Status {
-    let verification = match verified {
+fn recovery_success_status(response: &RecoverResponse, warning: Option<String>) -> Status {
+    let account = &response.account;
+    let verification = match account.verified {
         Some(true) => "device verified",
         Some(false) => "device remains unverified",
         None => "device verification unavailable",
     };
-    lifecycle_success_status(
-        "recovered encryption keys",
-        &format!("{user_id} ({verification})"),
-        warning,
-    )
+    let mut lines = vec![format!(
+        "4S secret storage imported: {} ({verification})",
+        account.user_id
+    )];
+    lines.extend(account.backup.status_lines());
+    lines.push(match response.backup_action {
+        Some(action) => backup_action_summary(&account.user_id, action),
+        None => "megolm backup action unavailable from this server".to_owned(),
+    });
+    lines.push(match &response.redecrypt {
+        Some(stats) => format!(
+            "stored-message re-decryption: {} selected, {} attempted, {} decrypted, {} still pending{}",
+            stats.selected,
+            stats.attempted,
+            stats.decrypted,
+            stats.still_pending,
+            if stats.timed_out { "; timed out (incomplete)" } else { "" }
+        ),
+        None => "stored-message re-decryption results unavailable from this server".to_owned(),
+    });
+    if let Some(warning) = warning {
+        lines.push(warning);
+    }
+    Status::from(lines.join("\n"))
 }
 
 fn should_offer_post_login_recovery(already_active: bool, verified: Option<bool>) -> bool {
@@ -2265,15 +2284,84 @@ mod tests {
     }
 
     #[test]
-    fn recovery_success_reports_derived_verification_state() {
-        assert_eq!(
-            recovery_success_status("@alice:example.com", Some(true), None).text(false),
-            "recovered encryption keys: @alice:example.com (device verified)"
+    fn recovery_success_separates_import_verification_backup_and_decryption() {
+        for (verified, verification) in [
+            (Some(true), "device verified"),
+            (Some(false), "device remains unverified"),
+            (None, "device verification unavailable"),
+        ] {
+            let response: RecoverResponse = serde_json::from_value(serde_json::json!({
+                "account_id": Uuid::nil(), "user_id": "@alice:example.com",
+                "state": "active", "verified": verified,
+                "backup": {"exists_on_server": false},
+                "backup_action": "failed",
+                "redecrypt": {
+                    "selected": 11, "attempted": 7, "decrypted": 3,
+                    "still_pending": 8, "timed_out": true
+                }
+            }))
+            .unwrap();
+            let status = recovery_success_status(&response, Some("room refresh failed".to_owned()))
+                .text(false);
+            assert!(status.starts_with(&format!(
+                "4S secret storage imported: @alice:example.com ({verification})"
+            )));
+            assert!(status.contains("megolm backup: none on homeserver"));
+            assert!(status.contains("megolm backup enable failed"));
+            assert!(status.contains(
+                "11 selected, 7 attempted, 3 decrypted, 8 still pending; timed out (incomplete)"
+            ));
+            assert!(status.ends_with("room refresh failed"));
+            assert!(!status.contains("recovered encryption keys"));
+        }
+    }
+
+    #[test]
+    fn recovery_success_reports_backup_actions_even_when_no_message_decrypted() {
+        for (action, expected) in [
+            ("joined", "joined existing megolm backup"),
+            ("enabled", "enabled megolm backup"),
+            (
+                "already_uploading",
+                "already uploading megolm keys to backup",
+            ),
+            ("export_pending", "megolm backup export pending"),
+            ("failed", "megolm backup enable failed"),
+        ] {
+            let response: RecoverResponse = serde_json::from_value(serde_json::json!({
+                "account_id": Uuid::nil(), "user_id": "@alice:example.com",
+                "state": "active", "verified": true,
+                "backup": {"exists_on_server": true},
+                "backup_action": action,
+                "redecrypt": {
+                    "selected": 0, "attempted": 0, "decrypted": 0,
+                    "still_pending": 0, "timed_out": false
+                }
+            }))
+            .unwrap();
+            let status = recovery_success_status(&response, None).text(false);
+            assert!(status.contains(expected), "{action}: {status}");
+            assert!(status.contains("0 selected, 0 attempted, 0 decrypted, 0 still pending"));
+            assert!(!status.contains("timed out"));
+            assert!(!status.contains("recovered encryption keys"));
+        }
+    }
+
+    #[test]
+    fn recovery_success_reports_unavailable_results_from_older_servers() {
+        let response: RecoverResponse = serde_json::from_value(serde_json::json!({
+            "account_id": Uuid::nil(), "user_id": "@alice:example.com",
+            "state": "active", "verified": true
+        }))
+        .unwrap();
+        let status = recovery_success_status(&response, None).text(false);
+        assert!(status.contains("megolm backup: existence unknown"));
+        assert!(status.contains("megolm backup action unavailable from this server"));
+        assert!(
+            status.contains("stored-message re-decryption results unavailable from this server")
         );
-        assert_eq!(
-            recovery_success_status("@alice:example.com", Some(false), None).text(false),
-            "recovered encryption keys: @alice:example.com (device remains unverified)"
-        );
+        assert!(!status.contains("0 decrypted"));
+        assert!(!status.contains("recovered encryption keys"));
     }
 
     #[test]
