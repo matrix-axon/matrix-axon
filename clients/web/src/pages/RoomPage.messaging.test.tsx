@@ -3563,7 +3563,7 @@ describe('room command', () => {
         server_names: [],
       }),
     )
-    expect(textarea.value).toBe('')
+    await waitFor(() => expect(textarea.value).toBe(''))
     expect(window.location.pathname).toBe(
       `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
     )
