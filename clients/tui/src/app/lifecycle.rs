@@ -35,6 +35,13 @@ pub(super) enum RecoverResolution {
     Missing,
 }
 
+/// Last completed recovery attempt for one account in this TUI session.
+/// Contains only the displayed result, never the submitted recovery key.
+pub(crate) struct RecoveryResult {
+    pub(crate) completed_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) summary: String,
+}
+
 /// Result of a login/logout request run off the event loop. The slow network
 /// call happens in a spawned task; this is what it sends back for the main loop
 /// to apply (refresh + status) without ever blocking redraws.
@@ -63,6 +70,7 @@ pub(crate) enum LifecycleOutcome {
         result: Result<Vec<AccountDto>, String>,
     },
     Recover {
+        account_id: Uuid,
         user_id: String,
         result: Result<RecoverResponse, String>,
     },
@@ -437,7 +445,11 @@ impl App {
                 .recover(account_id, &recovery_key)
                 .await
                 .map_err(|err| err.to_string());
-            let _ = tx.send(LifecycleOutcome::Recover { user_id, result });
+            let _ = tx.send(LifecycleOutcome::Recover {
+                account_id,
+                user_id,
+                result,
+            });
         });
     }
 
@@ -1419,17 +1431,30 @@ impl App {
                     }
                 }
             }
-            LifecycleOutcome::Recover { user_id, result } => match result {
-                Ok(response) => {
-                    let warning = self.refresh_after_lifecycle_change().await;
-                    self.pending_recovery_response =
-                        Some(recovery_success_status(&response, warning).text(false));
-                    self.present_pending_recovery_response();
-                }
-                Err(error) => {
-                    self.status = Status::from(format!("recovery failed for {user_id}: {error}"));
-                }
-            },
+            LifecycleOutcome::Recover {
+                account_id,
+                user_id,
+                result,
+            } => {
+                let completed_at = chrono::Utc::now();
+                let status = match result {
+                    Ok(response) => {
+                        let warning = self.refresh_after_lifecycle_change().await;
+                        recovery_success_status(&response, warning)
+                    }
+                    Err(error) => Status::from(format!("recovery failed for {user_id}: {error}")),
+                };
+                let summary = status.text(false);
+                self.last_recovery_results.insert(
+                    account_id,
+                    RecoveryResult {
+                        completed_at,
+                        summary: summary.clone(),
+                    },
+                );
+                self.pending_recovery_response = Some(summary);
+                self.present_pending_recovery_response();
+            }
             LifecycleOutcome::BackupEnableReady { target, result } => {
                 self.lifecycle_busy = false;
                 match result {
@@ -2210,6 +2235,7 @@ mod tests {
         );
 
         app.handle_lifecycle_outcome(LifecycleOutcome::Recover {
+            account_id: Uuid::from_u128(1),
             user_id: "@alice:example.com".to_owned(),
             result: Err("the recovery key was rejected by Axon".to_owned()),
         })

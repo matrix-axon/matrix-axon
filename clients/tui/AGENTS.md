@@ -249,6 +249,9 @@ Report device verification, the returned backup snapshot, backup action, and re-
 Share backup observations with `/status` and backup-action wording with `/backup enable`.
 Missing or malformed sibling results must show as unavailable, never as zero counts or successful backup setup.
 Keep a completed recovery result until the current popup or prompt ends, then use the normal command-response presentation.
+Retain the latest attempt, including failure, per account UUID in memory and show its UTC completion time and full result under that account in `/status`.
+Logout retains this session result; authoritative account removal prunes it, and restarting the TUI starts empty.
+Never retain the submitted recovery key or persist recovery results to disk.
 Explain when no stored messages needed re-decryption or selected messages were not attempted.
 Recovery uses the 300-second lifecycle request timeout; progress names import, backup setup, and stored-message decryption.
 Enable backup returns flattened `AccountDto` plus `backup_action`; `recovery_key` is required for create/export/replace and omitted to kick an already-enabled upload.

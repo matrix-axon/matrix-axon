@@ -3113,6 +3113,13 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
                     .status_lines()
                     .map(|line| format!("      {line}")),
             );
+            if let Some(result) = app.last_recovery_results.get(&account.account_id) {
+                lines.push(format!(
+                    "      Last recovery result (this session; {}):",
+                    result.completed_at.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
+                lines.extend(result.summary.lines().map(|line| format!("        {line}")));
+            }
         }
     }
 

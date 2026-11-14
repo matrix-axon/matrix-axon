@@ -963,6 +963,8 @@ pub(crate) struct App {
     /// Recovery can finish behind another popup or prompt. Keep its full
     /// result until compose can present it without replacing that interaction.
     pub(crate) pending_recovery_response: Option<String>,
+    /// One completed recovery result per account, kept only for this session.
+    pub(crate) last_recovery_results: HashMap<Uuid, lifecycle::RecoveryResult>,
     pub(crate) should_quit: bool,
     /// Sender for results of in-flight login/logout work spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
@@ -1432,6 +1434,7 @@ impl App {
             status: Status::Info(config_status),
             pending_command_response: None,
             pending_recovery_response: None,
+            last_recovery_results: HashMap::new(),
             should_quit: false,
             lifecycle_tx: None,
             lifecycle_busy: false,
@@ -1788,6 +1791,8 @@ impl App {
     /// `is_known_inactive_account` can still filter their rooms off the room list.
     pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountDto>) {
         let selected_account_id = self.active_account_filter();
+        self.last_recovery_results
+            .retain(|id, _| accounts.iter().any(|account| account.account_id == *id));
         self.accounts.inactive_ids = accounts
             .iter()
             .filter(|a| a.state != AccountState::Active)

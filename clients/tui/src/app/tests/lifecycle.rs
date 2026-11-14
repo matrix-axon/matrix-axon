@@ -32,7 +32,9 @@ async fn recover_http_results_reach_the_completed_response_even_after_refresh_fa
         .recover(Uuid::from_u128(1), "test-only-key")
         .await
         .unwrap();
+    let before_completion = chrono::Utc::now();
     app.handle_lifecycle_outcome(LifecycleOutcome::Recover {
+        account_id: Uuid::from_u128(1),
         user_id: "@alice:example.com".to_owned(),
         result: Ok(result),
     })
@@ -53,6 +55,9 @@ async fn recover_http_results_reach_the_completed_response_even_after_refresh_fa
     );
     assert!(!status.contains("test-only-key"));
     assert!(!status.contains("recovered encryption keys"));
+    let completed_at = app.last_recovery_results[&Uuid::from_u128(1)].completed_at;
+    assert!(completed_at >= before_completion);
+    assert!(completed_at <= chrono::Utc::now());
 
     app.display.input_lines = 1;
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
@@ -77,6 +82,86 @@ async fn recover_http_results_reach_the_completed_response_even_after_refresh_fa
     assert!(rendered.contains("timed out (incomplete)"));
     app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
     assert_eq!(app.mode, Mode::Compose);
+
+    // A later account refresh and unrelated command do not erase the result.
+    app.set_accounts(vec![account("@alice:example.com", AccountState::Active)]);
+    app.handle_command(Command::Help).await;
+    app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+    app.handle_command(Command::Status).await;
+    assert_eq!(app.mode, Mode::Popup(PopupKind::Status));
+    let replay = popup_status_lines(&app).join("\n");
+    assert!(replay.contains(&format!(
+        "Last recovery result (this session; {}):",
+        completed_at.format("%Y-%m-%d %H:%M:%S UTC")
+    )));
+    assert!(replay.contains("megolm backup export pending"));
+    assert!(replay.contains("10 selected, 2 attempted, 0 decrypted, 10 still pending"));
+    assert!(replay.contains("timed out (incomplete)"));
+    assert!(!replay.contains("test-only-key"));
+    assert_eq!(
+        app.last_recovery_results[&Uuid::from_u128(1)].completed_at,
+        completed_at
+    );
+}
+
+#[tokio::test]
+async fn recovery_status_keeps_only_the_latest_attempt_for_each_account_id() {
+    let mut app = app_with_rooms(Vec::new());
+    let first = account_with_id(
+        Uuid::from_u128(1),
+        "@alice:example.com",
+        AccountState::Active,
+    );
+    let mut second = account_with_id(
+        Uuid::from_u128(2),
+        "@alice:example.com",
+        AccountState::Active,
+    );
+    app.set_accounts(vec![first.clone(), second.clone()]);
+    assert!(!popup_status_lines(&app)
+        .join("\n")
+        .contains("Last recovery result"));
+    for (account_id, error) in [
+        (first.account_id, "first attempt"),
+        (second.account_id, "second account attempt"),
+        (first.account_id, "latest attempt"),
+    ] {
+        app.handle_lifecycle_outcome(LifecycleOutcome::Recover {
+            account_id,
+            user_id: first.user_id.clone(),
+            result: Err(error.to_owned()),
+        })
+        .await;
+    }
+    assert_eq!(app.last_recovery_results.len(), 2);
+    let lines = popup_status_lines(&app);
+    let first_heading = lines
+        .iter()
+        .position(|line| line.contains(&format!("[{}]", first.account_id)))
+        .unwrap();
+    let second_heading = lines
+        .iter()
+        .position(|line| line.contains(&format!("[{}]", second.account_id)))
+        .unwrap();
+    let first_block = lines[first_heading..second_heading].join("\n");
+    let second_block = lines[second_heading..].join("\n");
+    assert!(first_block.contains("recovery failed for @alice:example.com: latest attempt"));
+    assert!(!first_block.contains("first attempt"));
+    assert!(!first_block.contains("second account attempt"));
+    assert!(second_block.contains("second account attempt"));
+    assert!(!second_block.contains("latest attempt"));
+
+    // Logout retains the session result; an authoritative deletion removes it.
+    second.state = AccountState::Deactivated;
+    app.set_accounts(vec![first.clone(), second.clone()]);
+    assert_eq!(app.last_recovery_results.len(), 2);
+    assert!(popup_status_lines(&app)
+        .join("\n")
+        .contains("second account attempt"));
+    app.set_accounts(vec![second]);
+    assert!(!app.last_recovery_results.contains_key(&first.account_id));
+    assert_eq!(app.last_recovery_results.len(), 1);
+    assert!(app_with_rooms(Vec::new()).last_recovery_results.is_empty());
 }
 
 #[tokio::test]
@@ -96,6 +181,7 @@ async fn recovery_result_waits_for_an_open_popup_or_prompt_without_losing_its_de
         let response: crate::api::ApiResponse<crate::api::RecoverResponse> =
             serde_json::from_str(&recover_response_body()).unwrap();
         app.handle_lifecycle_outcome(LifecycleOutcome::Recover {
+            account_id: Uuid::from_u128(1),
             user_id: "@alice:example.com".to_owned(),
             result: Ok(response.data),
         })
