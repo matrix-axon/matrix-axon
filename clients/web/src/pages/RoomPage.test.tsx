@@ -1309,6 +1309,48 @@ describe('RoomPage', () => {
     expect(await findByText('still here')).toBeTruthy()
   })
 
+  it('keeps a redacted thread root visible when hiding redacted events', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
+        () =>
+          HttpResponse.json({
+            data: [
+              {
+                root_event_id: '$gone',
+                reply_count: 1,
+                latest_reply_event_id: '$reply',
+                latest_reply_ts: T0 + 2,
+              },
+            ],
+          }),
+      ),
+    )
+    const { services, container, findByText, queryByText } = renderRoom([
+      event('$still', T0, { body: 'still here' }),
+      event('$gone', T0 + 1, {
+        redacted: true,
+        content: null,
+        body: null,
+        redaction_event_id: '$r',
+      }),
+      event('$orphan', T0 + 3, {
+        redacted: true,
+        content: null,
+        body: null,
+        redaction_event_id: '$r2',
+      }),
+    ])
+    services.settings.hideRedactedEvents.value = true
+
+    await waitFor(() =>
+      expect(container.querySelector('[data-event-id="$gone"]')).not.toBeNull(),
+    )
+    expect(container.querySelector('[data-event-id="$orphan"]')).toBeNull()
+    expect(await findByText('still here')).toBeTruthy()
+    expect(queryByText('message deleted')).not.toBeNull()
+  })
+
   it('retries UTD decryption once and reloads when rows decrypt', async () => {
     let timelineCalls = 0
     let redecryptCalls = 0

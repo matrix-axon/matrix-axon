@@ -276,6 +276,7 @@ export function RoomPage() {
   // A persisted preference, not per-room view state (Settings → Timeline).
   const stateEvents = settings.stateEvents.value
   const hideRedacted = settings.hideRedactedEvents.value
+  const threadSummaries = threads.summaries.value
   const [reactionPickerEventId, setReactionPickerEventId] = useState<
     string | null
   >(null)
@@ -801,9 +802,11 @@ export function RoomPage() {
       if (!renderable) {
         return 'hidden'
       }
-      return hiddenByRedaction(event, hideRedacted) ? 'redacted' : 'shown'
+      return hiddenByRedaction(event, hideRedacted, threadSummaries)
+        ? 'redacted'
+        : 'shown'
     },
-    [hideRedacted, settings.developerMode.value, stateEvents],
+    [hideRedacted, settings.developerMode.value, stateEvents, threadSummaries],
   )
   /** The rendering question, for the callers that only ask that one. */
   const isVisibleTimelineEvent = useCallback(
@@ -1019,7 +1022,9 @@ export function RoomPage() {
     return computeRoomReceipt({
       displayed: displayed.map(candidate),
       loaded: timeline.events.value
-        .filter((event) => !hiddenByRedaction(event, hideRedacted))
+        .filter(
+          (event) => !hiddenByRedaction(event, hideRedacted, threadSummaries),
+        )
         .map(candidate),
       openThread,
       threads: threadSummaryStates.map(({ summary, threadMarker }) => ({
@@ -1039,6 +1044,7 @@ export function RoomPage() {
     unreadThreadCutoff,
     openThread,
     hideRedacted,
+    threadSummaries,
     threadMarkerRevision,
   ])
   const threadReceiptCeiling = roomReceipt.blocker
