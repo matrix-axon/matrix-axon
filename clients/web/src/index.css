@@ -3915,6 +3915,19 @@ span.composer-attachment-thumb {
   display: none;
 }
 
+.event-action-copy-status {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.35rem);
+  z-index: 30;
+  max-width: 100%;
+  padding: 0.2rem 0.4rem;
+  background: var(--bg);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
 .event-action-icon {
   display: none;
   width: 1rem;
@@ -3982,15 +3995,26 @@ span.composer-attachment-thumb {
     opacity: 1;
   }
 
-  /* Last resort for narrow phones. At 375px, with developer mode and the delete
-     confirmation open, the time plus eight buttons are wider than the row even
+  /* Last resort for the narrowest phones. With the delete confirmation open,
+     the time plus seven buttons are wider than the row even
      with the name collapsed to nothing. The time's width is not predictable (it
      follows the timezone and the 12h/24h setting), so rather than reserve room
      for it, drop it while the bar is open, as "(edited)" is dropped above. It
      comes back when the bar closes. */
-  @media (max-width: 24rem) {
+  @media (max-width: 22rem) {
     .event-row.actions-open .event-head > .event-time-copy,
     .event-row.actions-open .event-head > time {
+      display: none;
+    }
+  }
+
+  /* Inspect adds another button; only that larger bar needs the extra room
+     on 375px phones. Ordinary action bars retain the timestamp. */
+  @media (max-width: 24rem) {
+    .event-row.actions-open
+      .event-head:has(.event-actions.has-inspect)
+      > .event-time-copy,
+    .event-row.actions-open .event-head:has(.event-actions.has-inspect) > time {
       display: none;
     }
   }

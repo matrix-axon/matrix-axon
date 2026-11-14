@@ -152,7 +152,6 @@ function EventActionButton({
         type="button"
         title={title}
         class={`${className} event-action-button`}
-        aria-label={label}
         aria-expanded={ariaExpanded}
         onTouchStart={() => {
           clearLongPress()
@@ -185,30 +184,37 @@ function EventActionButton({
   )
 }
 
-function CopyMessageAction({ body }: { body: string }) {
+function CopyMessageAction({
+  body,
+  onCopy,
+}: {
+  body: string
+  onCopy: () => void
+}) {
   const { status, copy } = useCopyFeedback()
-  const label =
-    status === 'copied'
-      ? 'Copied'
-      : status === 'failed'
-        ? 'Copy failed'
-        : 'Copy'
   return (
-    <EventActionButton
-      label={label}
-      className={status === 'failed' ? 'ghost danger' : 'ghost'}
-      title="Copy text; select timestamp to copy link"
-      onClick={() => void copy(body)}
-    >
-      <EventActionIcon name={status === 'copied' ? 'confirm' : 'copy'} />
-      <span
-        class="event-action-label"
-        aria-live="polite"
-        role={status === 'idle' ? undefined : 'status'}
+    <>
+      <EventActionButton
+        label="Copy"
+        className={status === 'failed' ? 'ghost danger' : 'ghost'}
+        title="Copy text; select timestamp to copy link"
+        onClick={() => {
+          onCopy()
+          void copy(body)
+        }}
       >
-        {label}
-      </span>
-    </EventActionButton>
+        <EventActionIcon name={status === 'copied' ? 'confirm' : 'copy'} />
+        <span class="event-action-label">Copy</span>
+      </EventActionButton>
+      {status !== 'idle' && (
+        <span
+          class={`event-copy-status event-action-copy-status${status === 'failed' ? ' error' : ''}`}
+          role="status"
+        >
+          {status === 'copied' ? 'Copied' : 'Copy failed'}
+        </span>
+      )}
+    </>
   )
 }
 
@@ -326,6 +332,7 @@ export function MessageEventRow({
   const [confirmingRedact, setConfirmingRedact] = useState(false)
   const [inspectOpen, setInspectOpen] = useState(false)
   const desktopClickTimer = useRef<number | null>(null)
+  const cancelTimestampLinkCopy = useRef<(() => void) | null>(null)
   const gestureFeedbacks = useGestureFeedback()
   const isState = isStateEvent(event)
   const replyTo = inReplyToId(event)
@@ -516,6 +523,7 @@ export function MessageEventRow({
             event={event}
             format={settings.timeFormat.value}
             touchHoldEnabled={touchHoldEnabled}
+            cancelPendingLinkCopyRef={cancelTimestampLinkCopy}
           />
           <FailedSend event={event} timeline={timeline} />
           {event.edited && (
@@ -529,7 +537,7 @@ export function MessageEventRow({
             </button>
           )}
           {(hasMessageActions || developerMode) && (
-            <span class="event-actions">
+            <span class={`event-actions${developerMode ? ' has-inspect' : ''}`}>
               {hasMessageActions && (
                 <>
                   <EventActionButton
@@ -549,7 +557,14 @@ export function MessageEventRow({
                     </EventActionButton>
                   )}
                   {event.body !== null && event.body !== undefined && (
-                    <CopyMessageAction body={event.body} />
+                    // Match timestamp copying, including filenames and whitespace.
+                    <CopyMessageAction
+                      body={event.body}
+                      onCopy={() => {
+                        cancelDesktopClick()
+                        cancelTimestampLinkCopy.current?.()
+                      }}
+                    />
                   )}
                   <EventActionButton
                     label="React"

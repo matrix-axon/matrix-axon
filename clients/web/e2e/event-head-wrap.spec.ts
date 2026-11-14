@@ -53,8 +53,8 @@ for (const width of [320, 375]) {
     expect(result!.actionsRight).toBeLessThanOrEqual(result!.headRight + 1)
     // The edit marker yields while the bar is open.
     expect(result!.editedDisplay).toBe('none')
-    // The time yields too at these narrow phone widths, leaving room for Copy
-    // and the wider developer-mode delete confirmation bar.
-    expect(result!.timeDisplay).toBe('none')
+    // Ordinary bars keep the timestamp at 375px; only the narrowest phones
+    // need to hide it while actions are open.
+    expect(result!.timeDisplay).toBe(width === 320 ? 'none' : 'block')
   })
 }

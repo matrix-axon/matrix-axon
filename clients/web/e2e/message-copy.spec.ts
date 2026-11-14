@@ -108,6 +108,8 @@ for (const width of [320, 375, 390, 1400]) {
     if (width < 768) expect(presentation.labelWidth).toBe(1)
     else expect(presentation.labelWidth).toBeGreaterThan(10)
 
+    const beforeCopy = await copy.boundingBox()
+    const actionsBeforeCopy = await row.locator('.event-actions').boundingBox()
     if (hasTouch) await copy.tap()
     else await copy.click()
     await expect
@@ -117,7 +119,18 @@ for (const width of [320, 375, 390, 1400]) {
         ),
       )
       .toBe(BODY)
-    await expect(row.getByRole('button', { name: 'Copied' })).toBeVisible()
+    await expect(row.getByRole('status')).toHaveText('Copied')
+    await expect(copy).toHaveAccessibleName('Copy')
+    await expect(copy).toHaveText('Copy')
+    expect(await copy.boundingBox()).toEqual(beforeCopy)
+    expect(await row.locator('.event-actions').boundingBox()).toEqual(
+      actionsBeforeCopy,
+    )
+    expect(
+      await row
+        .getByRole('status')
+        .evaluate((el) => el.closest('button') === null),
+    ).toBe(true)
 
     // Include the widest action state: an own message with delete confirmation.
     await row.getByRole('button', { name: 'Delete', exact: true }).click()

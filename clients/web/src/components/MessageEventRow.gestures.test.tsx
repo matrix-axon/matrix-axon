@@ -13,6 +13,17 @@ import { MessageEventRow } from './MessageEventRow'
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111'
 const OWN_USER = '@me:hs'
+const clipboardDescriptor = Object.getOwnPropertyDescriptor(
+  navigator,
+  'clipboard',
+)
+
+function mockClipboard(writeText: Clipboard['writeText']) {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  })
+}
 
 function event(overrides: Partial<TimelineEvent> = {}): TimelineEvent {
   return {
@@ -118,14 +129,18 @@ function pointer(
 
 afterEach(() => {
   cleanup()
-  vi.unstubAllGlobals()
+  if (clipboardDescriptor) {
+    Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
+  } else {
+    Reflect.deleteProperty(navigator, 'clipboard')
+  }
   vi.useRealTimers()
 })
 
 describe('MessageEventRow copy action', () => {
   it('copies the plain body without opening another message action', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
-    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    mockClipboard(writeText)
     const view = renderRow({
       rowEvent: event({
         body: 'plain **text**\nsecond line',
@@ -146,6 +161,8 @@ describe('MessageEventRow copy action', () => {
     await vi.waitFor(() =>
       expect(view.getByRole('status').textContent).toBe('Copied'),
     )
+    expect(view.getByRole('button', { name: 'Copy', exact: true })).toBeTruthy()
+    expect(view.getByRole('status').closest('button')).toBeNull()
     expect(view.onOpenActions).not.toHaveBeenCalled()
     expect(view.onReply).not.toHaveBeenCalled()
     expect(view.onOpenThread).not.toHaveBeenCalled()
@@ -154,19 +171,88 @@ describe('MessageEventRow copy action', () => {
 
   it('reports clipboard failure and lets the user retry', async () => {
     const writeText = vi.fn().mockRejectedValue(new Error('denied'))
-    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    mockClipboard(writeText)
     const view = renderRow()
     fireEvent.click(view.getByRole('button', { name: 'Copy', exact: true }))
-    const retry = await view.findByRole('button', { name: 'Copy failed' })
+    await vi.waitFor(() =>
+      expect(view.getByRole('status').textContent).toBe('Copy failed'),
+    )
+    const retry = view.getByRole('button', { name: 'Copy', exact: true })
     writeText.mockResolvedValue(undefined)
     fireEvent.click(retry)
-    expect(await view.findByRole('button', { name: 'Copied' })).toBeTruthy()
+    await vi.waitFor(() =>
+      expect(view.getByRole('status').textContent).toBe('Copied'),
+    )
     expect(writeText).toHaveBeenCalledTimes(2)
   })
 
   it('omits copying for a message without a text body', () => {
     const view = renderRow({ rowEvent: event({ body: null }) })
     expect(view.queryByRole('button', { name: 'Copy', exact: true })).toBeNull()
+  })
+
+  it.each([
+    ['empty text', '', { msgtype: 'm.text', body: '' }],
+    ['whitespace', ' \n\t ', { msgtype: 'm.text', body: ' \n\t ' }],
+    ['emote', 'waves 👋', { msgtype: 'm.emote', body: 'waves 👋' }],
+    [
+      'media filename',
+      'report.pdf',
+      { msgtype: 'm.file', body: 'report.pdf', url: 'mxc://hs/report' },
+    ],
+  ])(
+    'copies %s unchanged, matching the timestamp',
+    async (_, body, content) => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      mockClipboard(writeText)
+      const view = renderRow({
+        rowEvent: event({
+          body,
+          content: content as unknown as TimelineEvent['content'],
+        }),
+      })
+      fireEvent.click(view.getByRole('button', { name: 'Copy', exact: true }))
+      await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(body))
+    },
+  )
+
+  it('copies once while a desktop message click is waiting for a double-click', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    mockClipboard(writeText)
+    const view = renderRow()
+    fireEvent.pointerDown(view.body, { pointerType: 'mouse', pointerId: 1 })
+    fireEvent.click(view.body, { detail: 1 })
+    expect(view.onOpenActions).not.toHaveBeenCalled()
+    fireEvent.click(view.getByRole('button', { name: 'Copy', exact: true }))
+    await act(async () => await Promise.resolve())
+    vi.advanceTimersByTime(500)
+    expect(writeText).toHaveBeenCalledExactlyOnceWith('hello')
+    expect(view.onOpenActions).not.toHaveBeenCalled()
+    expect(view.onReply).not.toHaveBeenCalled()
+    expect(view.onOpenThread).not.toHaveBeenCalled()
+    expect(view.timeline.toggleReaction).not.toHaveBeenCalled()
+  })
+
+  it('cancels a pending timestamp link copy when Copy is selected', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    mockClipboard(writeText)
+    const view = renderRow()
+    const timestamp = view.getByRole('button', { name: 'Copy link' })
+    fireEvent.pointerDown(timestamp, {
+      pointerType: 'mouse',
+      pointerId: 1,
+      isPrimary: true,
+    })
+    fireEvent.click(timestamp, { detail: 1 })
+    expect(writeText).not.toHaveBeenCalled()
+    fireEvent.click(view.getByRole('button', { name: 'Copy', exact: true }))
+    await act(async () => await Promise.resolve())
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+    })
+    expect(writeText).toHaveBeenCalledExactlyOnceWith('hello')
   })
 })
 
