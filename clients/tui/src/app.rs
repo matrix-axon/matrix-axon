@@ -960,6 +960,9 @@ pub(crate) struct App {
     /// A completed slash-command response waiting for the renderer to decide
     /// whether it fits in the fixed-height entry box.
     pub(crate) pending_command_response: Option<String>,
+    /// Recovery can finish behind another popup or prompt. Keep its full
+    /// result until compose can present it without replacing that interaction.
+    pub(crate) pending_recovery_response: Option<String>,
     pub(crate) should_quit: bool,
     /// Sender for results of in-flight login/logout work spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
@@ -1428,6 +1431,7 @@ impl App {
             show_input_help: true,
             status: Status::Info(config_status),
             pending_command_response: None,
+            pending_recovery_response: None,
             should_quit: false,
             lifecycle_tx: None,
             lifecycle_busy: false,

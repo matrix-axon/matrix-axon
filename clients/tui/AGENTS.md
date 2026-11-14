@@ -247,7 +247,10 @@ It requires an active account and consumes a transient `recovery_key` without pe
 A recover 200 means 4S secret-storage import succeeded, not that history keys were recovered.
 Report device verification, the returned backup snapshot, backup action, and re-decryption counts separately; a timeout is incomplete.
 Share backup observations with `/status` and backup-action wording with `/backup enable`.
-Older servers that omit the sibling results must show them as unavailable, never as zero counts or successful backup setup.
+Missing or malformed sibling results must show as unavailable, never as zero counts or successful backup setup.
+Keep a completed recovery result until the current popup or prompt ends, then use the normal command-response presentation.
+Explain when no stored messages needed re-decryption or selected messages were not attempted.
+Recovery uses the 300-second lifecycle request timeout; progress names import, backup setup, and stored-message decryption.
 Enable backup returns flattened `AccountDto` plus `backup_action`; `recovery_key` is required for create/export/replace and omitted to kick an already-enabled upload.
 Unverified accounts are refused before the key is sent.
 Logout is non-destructive: the returned account is `deactivated` and its archive remains available for a later login.

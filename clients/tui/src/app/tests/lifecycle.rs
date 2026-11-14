@@ -4,9 +4,8 @@
 use super::support::*;
 use crate::app::*;
 
-#[tokio::test]
-async fn recover_http_results_reach_the_completed_response_even_after_refresh_failure() {
-    let body = serde_json::json!({
+fn recover_response_body() -> String {
+    serde_json::json!({
         "data": {
             "account_id": Uuid::from_u128(1), "user_id": "@alice:example.com",
             "state": "active", "verified": true,
@@ -18,10 +17,14 @@ async fn recover_http_results_reach_the_completed_response_even_after_refresh_fa
             }
         }
     })
-    .to_string();
+    .to_string()
+}
+
+#[tokio::test]
+async fn recover_http_results_reach_the_completed_response_even_after_refresh_failure() {
     // The one-response stub closes after recover, so follow-up reads fail.
     // Their warning must not replace the completed recovery's own results.
-    let base = spawn_api_stub(vec![body]).await;
+    let base = spawn_api_stub(vec![recover_response_body()]).await;
     let mut app = app_with_rooms(Vec::new());
     app.client = AxonClient::new(base, None);
     let result = app
@@ -74,6 +77,46 @@ async fn recover_http_results_reach_the_completed_response_even_after_refresh_fa
     assert!(rendered.contains("timed out (incomplete)"));
     app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
     assert_eq!(app.mode, Mode::Compose);
+}
+
+#[tokio::test]
+async fn recovery_result_waits_for_an_open_popup_or_prompt_without_losing_its_details() {
+    for mode in [
+        Mode::Popup(PopupKind::Help),
+        Mode::Popup(PopupKind::CommandResponse),
+        Mode::LoginUsername,
+    ] {
+        let mut app = app_with_rooms(Vec::new());
+        app.client = AxonClient::new("http://127.0.0.1:1".to_owned(), None);
+        app.mode = mode.clone();
+        app.status = Status::from("active interaction".to_owned());
+        let previous = (mode == Mode::Popup(PopupKind::CommandResponse))
+            .then(|| "previous command result".to_owned());
+        app.pending_command_response = previous.clone();
+        let response: crate::api::ApiResponse<crate::api::RecoverResponse> =
+            serde_json::from_str(&recover_response_body()).unwrap();
+        app.handle_lifecycle_outcome(LifecycleOutcome::Recover {
+            user_id: "@alice:example.com".to_owned(),
+            result: Ok(response.data),
+        })
+        .await;
+        crate::ui::prepare(&mut app, ratatui::layout::Rect::new(0, 0, 120, 30));
+        assert_eq!(app.mode, mode);
+        assert_eq!(app.status.text(false), "active interaction");
+        assert_eq!(app.pending_command_response, previous);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        crate::ui::prepare(&mut app, ratatui::layout::Rect::new(0, 0, 120, 30));
+        assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
+        let result = app.pending_command_response.as_deref().unwrap();
+        assert!(result.contains("4S secret storage imported"));
+        assert!(result.contains("megolm backup export pending"));
+        assert!(result.contains("10 selected, 2 attempted, 0 decrypted, 10 still pending"));
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        crate::ui::prepare(&mut app, ratatui::layout::Rect::new(0, 0, 120, 30));
+        assert_eq!(app.mode, Mode::Compose, "dismissed results must not reopen");
+    }
 }
 
 #[test]

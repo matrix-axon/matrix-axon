@@ -184,6 +184,7 @@ fn command_response_needs_popup(app: &App, input_area: Rect) -> bool {
 /// the occlusion math no longer agrees with. Feeding both halves one area is
 /// what closes that.
 pub(crate) fn prepare(app: &mut App, screen: Rect) {
+    app.present_pending_recovery_response();
     app.discard_device_picker_if_closed();
     let areas = pane_areas(app, screen);
     app.frame.areas = areas;

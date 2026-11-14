@@ -1876,10 +1876,21 @@ pub struct EnableBackupResponse {
 pub struct RecoverResponse {
     #[serde(flatten)]
     pub account: AccountDto,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_recovery_result")]
     pub backup_action: Option<BackupAction>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_recovery_result")]
     pub redecrypt: Option<RedecryptSummary>,
+}
+
+/// Optional observations cannot turn a successful import into a failure.
+/// Discard an invalid observation as a whole rather than inventing zero counts.
+fn optional_recovery_result<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// Stored-message re-decryption results, independent of device verification.
@@ -3801,6 +3812,100 @@ mod tests {
         assert_eq!(response.data.account.backup, BackupSnapshot::default());
         assert_eq!(response.data.backup_action, None);
         assert_eq!(response.data.redecrypt, None);
+    }
+
+    #[test]
+    fn malformed_optional_recovery_results_do_not_turn_import_success_into_failure() {
+        for result in [
+            serde_json::json!({"selected": 10}),
+            serde_json::json!({"selected": "bad", "attempted": 2, "decrypted": 0,
+                "still_pending": 10, "timed_out": true}),
+            serde_json::json!({"selected": 10, "attempted": 2, "decrypted": 0,
+                "still_pending": 10, "timed_out": "bad"}),
+            serde_json::json!("bad"),
+            serde_json::Value::Null,
+        ] {
+            let response: ApiResponse<RecoverResponse> =
+                serde_json::from_value(serde_json::json!({
+                    "data": {
+                        "account_id": Uuid::nil(), "user_id": "@alice:example.com",
+                        "state": "active", "verified": true,
+                        "backup_action": "export_pending", "redecrypt": result
+                    }
+                }))
+                .unwrap();
+            assert_eq!(response.data.account.verified, Some(true));
+            assert_eq!(
+                response.data.backup_action,
+                Some(BackupAction::ExportPending)
+            );
+            assert_eq!(response.data.redecrypt, None);
+        }
+    }
+
+    #[test]
+    fn unrecognized_backup_action_keeps_the_import_and_decryption_results() {
+        let response: RecoverResponse = serde_json::from_value(serde_json::json!({
+            "account_id": Uuid::nil(), "user_id": "@alice:example.com", "state": "active",
+            "backup_action": "future_action",
+            "redecrypt": {"selected": 10, "attempted": 2, "decrypted": 0,
+                "still_pending": 10, "timed_out": true}
+        }))
+        .unwrap();
+        assert_eq!(response.backup_action, None);
+        assert_eq!(response.redecrypt.unwrap().selected, 10);
+        // Only the optional observations may degrade; malformed account data
+        // still fails validation rather than inventing a successful identity.
+        assert!(
+            serde_json::from_value::<RecoverResponse>(serde_json::json!({
+                "account_id": "invalid", "user_id": "@alice:example.com", "state": "active"
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_waits_beyond_the_read_and_message_timeouts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            assert!(request
+                .starts_with(b"POST /v1/accounts/00000000-0000-0000-0000-000000000000/recover "));
+            received_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            let body = r#"{"data":{"account_id":"00000000-0000-0000-0000-000000000000","user_id":"@alice:example.com","state":"active"}}"#;
+            let reply = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let request =
+            tokio::spawn(async move { client.recover(Uuid::nil(), "test-only-key").await });
+        received_rx.await.unwrap();
+        // Pause only after real socket I/O, then resume before waiting on it
+        // again. No wall-clock sleep or paused-clock auto-advance races.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        let still_waiting = !request.is_finished();
+        tokio::time::resume();
+        assert!(
+            still_waiting,
+            "recover must use the 300-second lifecycle timeout"
+        );
+        release_tx.send(()).unwrap();
+        let response = request.await.unwrap().unwrap();
+        assert_eq!(response.account.user_id, "@alice:example.com");
+        server.await.unwrap();
     }
 
     #[test]

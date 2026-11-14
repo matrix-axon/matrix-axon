@@ -426,7 +426,9 @@ impl App {
         };
         self.clear_lifecycle_input();
         self.mode = Mode::Compose;
-        self.status = Status::from(format!("importing secret storage for {user_id}…"));
+        self.status = Status::from(format!(
+            "recovering {user_id}: importing 4S, setting up backup, and retrying stored-message decryption…"
+        ));
         self.lifecycle_busy = true;
         let client = self.client.clone();
         let account_id = account.account_id;
@@ -1420,7 +1422,9 @@ impl App {
             LifecycleOutcome::Recover { user_id, result } => match result {
                 Ok(response) => {
                     let warning = self.refresh_after_lifecycle_change().await;
-                    self.status = recovery_success_status(&response, warning);
+                    self.pending_recovery_response =
+                        Some(recovery_success_status(&response, warning).text(false));
+                    self.present_pending_recovery_response();
                 }
                 Err(error) => {
                     self.status = Status::from(format!("recovery failed for {user_id}: {error}"));
@@ -1704,6 +1708,18 @@ impl App {
             }
         }
         (!warnings.is_empty()).then(|| warnings.join("; "))
+    }
+
+    /// A recovery result belongs in the normal command-response popup, after
+    /// any existing interaction has ended. Present it only once.
+    pub(crate) fn present_pending_recovery_response(&mut self) {
+        if self.mode != Mode::Compose || self.is_mid_command() {
+            return;
+        }
+        if let Some(response) = self.pending_recovery_response.take() {
+            self.status = Status::from(response.clone());
+            self.pending_command_response = Some(response);
+        }
     }
 
     pub(super) fn resolve_logout_target(&self, target: Option<&str>) -> LogoutResolution {
@@ -2124,14 +2140,25 @@ fn recovery_success_status(response: &RecoverResponse, warning: Option<String>) 
         None => "megolm backup action unavailable from this server".to_owned(),
     });
     lines.push(match &response.redecrypt {
-        Some(stats) => format!(
-            "stored-message re-decryption: {} selected, {} attempted, {} decrypted, {} still pending{}",
-            stats.selected,
-            stats.attempted,
-            stats.decrypted,
-            stats.still_pending,
-            if stats.timed_out { "; timed out (incomplete)" } else { "" }
-        ),
+        Some(stats) => {
+            let explanation = if stats.timed_out {
+                "; timed out (incomplete)"
+            } else if stats.attempted < stats.selected {
+                "; incomplete: some selected messages were not attempted"
+            } else if stats.selected == 0 {
+                "; no stored messages to re-decrypt"
+            } else {
+                ""
+            };
+            format!(
+                "stored-message re-decryption: {} selected, {} attempted, {} decrypted, {} still pending{}",
+                stats.selected,
+                stats.attempted,
+                stats.decrypted,
+                stats.still_pending,
+                explanation
+            )
+        }
         None => "stored-message re-decryption results unavailable from this server".to_owned(),
     });
     if let Some(warning) = warning {
@@ -2342,6 +2369,7 @@ mod tests {
             let status = recovery_success_status(&response, None).text(false);
             assert!(status.contains(expected), "{action}: {status}");
             assert!(status.contains("0 selected, 0 attempted, 0 decrypted, 0 still pending"));
+            assert!(status.contains("no stored messages to re-decrypt"));
             assert!(!status.contains("timed out"));
             assert!(!status.contains("recovered encryption keys"));
         }
@@ -2362,6 +2390,20 @@ mod tests {
         );
         assert!(!status.contains("0 decrypted"));
         assert!(!status.contains("recovered encryption keys"));
+    }
+
+    #[test]
+    fn recovery_success_explains_partial_attempts_without_a_timeout() {
+        let response: RecoverResponse = serde_json::from_value(serde_json::json!({
+            "account_id": Uuid::nil(), "user_id": "@alice:example.com", "state": "active",
+            "redecrypt": {"selected": 10, "attempted": 2, "decrypted": 1,
+                "still_pending": 9, "timed_out": false}
+        }))
+        .unwrap();
+        let status = recovery_success_status(&response, None).text(false);
+        assert!(status.contains("10 selected, 2 attempted, 1 decrypted, 9 still pending"));
+        assert!(status.contains("incomplete: some selected messages were not attempted"));
+        assert!(!status.contains("timed out"));
     }
 
     #[test]

@@ -424,11 +424,14 @@ fn status_shows_honest_megolm_backup_snapshot() {
     app.set_accounts(vec![uploading, none_on_server]);
 
     let status = popup_status_lines(&app).join("\n");
-    assert!(status.contains("megolm backup: on homeserver; this device uploading; state enabled"));
-    assert!(status.contains("4S secret storage: enabled"));
-    assert!(status
-        .contains("megolm backup: none on homeserver; this device not uploading; state unknown"));
-    assert!(status.contains("4S secret storage: incomplete"));
+    for expected in [
+        "      megolm backup: on homeserver; this device uploading; state enabled",
+        "      4S secret storage: enabled",
+        "      megolm backup: none on homeserver; this device not uploading; state unknown",
+        "      4S secret storage: incomplete",
+    ] {
+        assert!(status.lines().any(|line| line == expected), "{expected}");
+    }
     assert!(
         !status.to_ascii_lowercase().contains("keys recovered"),
         "recovery_state must not be presented as history-key import"
