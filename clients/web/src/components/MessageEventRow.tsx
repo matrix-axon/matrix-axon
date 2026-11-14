@@ -98,12 +98,14 @@ export function isUnsupportedBodylessEvent(event: TimelineEvent): boolean {
 
 function EventActionButton({
   label,
+  title,
   className = 'ghost',
   ariaExpanded,
   onClick,
   children,
 }: {
   label: string
+  title?: string
   className?: string
   ariaExpanded?: boolean
   onClick: () => void
@@ -148,7 +150,9 @@ function EventActionButton({
     <span class="event-action-tooltip-wrap">
       <button
         type="button"
+        title={title}
         class={`${className} event-action-button`}
+        aria-label={label}
         aria-expanded={ariaExpanded}
         onTouchStart={() => {
           clearLongPress()
@@ -178,6 +182,33 @@ function EventActionButton({
         </span>
       )}
     </span>
+  )
+}
+
+function CopyMessageAction({ body }: { body: string }) {
+  const { status, copy } = useCopyFeedback()
+  const label =
+    status === 'copied'
+      ? 'Copied'
+      : status === 'failed'
+        ? 'Copy failed'
+        : 'Copy'
+  return (
+    <EventActionButton
+      label={label}
+      className={status === 'failed' ? 'ghost danger' : 'ghost'}
+      title="Copy text; select timestamp to copy link"
+      onClick={() => void copy(body)}
+    >
+      <EventActionIcon name={status === 'copied' ? 'confirm' : 'copy'} />
+      <span
+        class="event-action-label"
+        aria-live="polite"
+        role={status === 'idle' ? undefined : 'status'}
+      >
+        {label}
+      </span>
+    </EventActionButton>
   )
 }
 
@@ -516,6 +547,9 @@ export function MessageEventRow({
                       <EventActionIcon name="thread" />
                       <span class="event-action-label">Thread</span>
                     </EventActionButton>
+                  )}
+                  {event.body !== null && event.body !== undefined && (
+                    <CopyMessageAction body={event.body} />
                   )}
                   <EventActionButton
                     label="React"

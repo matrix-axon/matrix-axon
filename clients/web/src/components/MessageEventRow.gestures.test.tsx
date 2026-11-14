@@ -118,7 +118,56 @@ function pointer(
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
+})
+
+describe('MessageEventRow copy action', () => {
+  it('copies the plain body without opening another message action', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const view = renderRow({
+      rowEvent: event({
+        body: 'plain **text**\nsecond line',
+        content: {
+          msgtype: 'm.text',
+          body: 'plain **text**\nsecond line',
+          format: 'org.matrix.custom.html',
+          formatted_body: '<strong>formatted text</strong>',
+        } as unknown as TimelineEvent['content'],
+      }),
+    })
+
+    fireEvent.click(view.getByRole('button', { name: 'Copy', exact: true }))
+
+    await vi.waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith('plain **text**\nsecond line'),
+    )
+    await vi.waitFor(() =>
+      expect(view.getByRole('status').textContent).toBe('Copied'),
+    )
+    expect(view.onOpenActions).not.toHaveBeenCalled()
+    expect(view.onReply).not.toHaveBeenCalled()
+    expect(view.onOpenThread).not.toHaveBeenCalled()
+    expect(view.timeline.toggleReaction).not.toHaveBeenCalled()
+  })
+
+  it('reports clipboard failure and lets the user retry', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'))
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const view = renderRow()
+    fireEvent.click(view.getByRole('button', { name: 'Copy', exact: true }))
+    const retry = await view.findByRole('button', { name: 'Copy failed' })
+    writeText.mockResolvedValue(undefined)
+    fireEvent.click(retry)
+    expect(await view.findByRole('button', { name: 'Copied' })).toBeTruthy()
+    expect(writeText).toHaveBeenCalledTimes(2)
+  })
+
+  it('omits copying for a message without a text body', () => {
+    const view = renderRow({ rowEvent: event({ body: null }) })
+    expect(view.queryByRole('button', { name: 'Copy', exact: true })).toBeNull()
+  })
 })
 
 describe('MessageEventRow gestures', () => {
