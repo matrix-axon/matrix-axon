@@ -64,6 +64,8 @@ Three is a composer limit, well inside the server and renderer cap of eight and 
 A link is eligible when the existing static check accepts it (`nativePreviewLinks`, first in `incoming-share/urls.ts`): HTTPS, a public-looking DNS name with no IP literal, no credentials, no internationalized label, and no reserved suffix such as `.local`, `.onion` or `.test`.
 That check moves to a shared module, because the composer and share recovery must agree on it; the web PR moved it to `clients/web/src/preview-links.ts`, beside the link identity.
 
+> **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** A Matrix link (matrix.to or `matrix:`) is never eligible, though it passes the static check: the recipient's client builds its card instead, from the recipient's own access.
+
 ### 2. Two sources, in a fixed order, never escalating on their own
 
 1. **This device.**
