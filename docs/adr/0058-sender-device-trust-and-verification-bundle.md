@@ -40,7 +40,14 @@ trap, so they are reported separately:
 `VerificationLevel` to the spec's four values: `Verified` → `verified`;
 `Unverified(VerificationViolation)` → `verification_violation`;
 `Unverified(None(_))` → `unknown` (couldn't link to a device);
-everything else unverified → `unverified`. It is recorded in a **new, nullable
+everything else unverified → `unverified`.
+
+*Amended 2026-11-14 (issue #59):* `Unverified(MismatchedSender)` now maps to a
+fifth value, `mismatched_sender`, instead of `unverified`. The SDK reports it
+when the Megolm session belongs to a user other than the event's `sender`, which
+is how every message in an encrypted bridged room arrives, and it withholds the
+session's device for it, so the bundle's live device half is always empty. A new
+migration widens the CHECK constraint; rows already stored keep `unverified`. It is recorded in a **new, nullable
 `sender_trust` column** on `event_sender_device_keys` (CHECK-constrained),
 **alongside** the existing coarse `verification_state` rather than replacing it —
 the legacy column and its contract are untouched, and existing rows need no

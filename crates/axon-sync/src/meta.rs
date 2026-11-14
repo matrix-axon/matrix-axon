@@ -90,8 +90,13 @@ impl CryptoMeta {
 ///   when the event arrived (previously verified, identity since changed).
 /// * `unknown` — the message couldn't be linked back to any device (deleted
 ///   device, key from an insecure source).
+/// * `mismatched_sender` — the Megolm session belongs to a different user than
+///   the event's `sender` (issue #59). Every message in an encrypted bridged
+///   room arrives like this: the sender is a puppet, the session the bridge
+///   bot's. The SDK withholds the session's device for these, so the
+///   verification bundle's live device half is always empty for them.
 /// * `unverified` — everything else unverified (unverified identity, unsigned
-///   device, mismatched sender).
+///   device).
 ///
 /// Unlike the coarse [`crypto_meta`] `verification_state` (`verified`/
 /// `unverified`), this preserves the *reason* a message is unverified.
@@ -102,6 +107,7 @@ pub(crate) fn sender_trust(state: &VerificationState) -> &'static str {
             "verification_violation"
         }
         VerificationState::Unverified(VerificationLevel::None(_)) => "unknown",
+        VerificationState::Unverified(VerificationLevel::MismatchedSender) => "mismatched_sender",
         VerificationState::Unverified(_) => "unverified",
     }
 }
@@ -249,11 +255,18 @@ mod tests {
             ))),
             "unknown"
         );
+        // A session owned by someone other than the sender keeps its own verdict
+        // (issue #59) rather than reading as an ordinary unverified device.
+        assert_eq!(
+            sender_trust(&VerificationState::Unverified(
+                VerificationLevel::MismatchedSender
+            )),
+            "mismatched_sender"
+        );
         // Everything else unverified collapses to the plain verdict.
         for level in [
             VerificationLevel::UnverifiedIdentity,
             VerificationLevel::UnsignedDevice,
-            VerificationLevel::MismatchedSender,
         ] {
             assert_eq!(
                 sender_trust(&VerificationState::Unverified(level)),

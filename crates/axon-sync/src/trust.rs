@@ -190,12 +190,11 @@ impl SenderTrustEngine {
     ) -> Result<CurrentTrust, TrustError> {
         let encryption = client.encryption();
 
-        // Known limitation (issue #59): we look the device up under the event's
-        // `sender`. For a `MismatchedSender` event the session device belongs to a
-        // *different* user than `sender`, so `get_device` returns `None` here and
-        // `device_known` is reported `false` — the live half can't surface a
-        // mismatched device. The at-decrypt `sender_trust` snapshot still records
-        // the mismatch, so it isn't lost, just not re-derivable live.
+        // A `mismatched_sender` event (issue #59) arrives with no device id: the
+        // SDK withholds the session's device when its owner isn't `sender`, so
+        // the device half below reads unknown and there is nothing to look up
+        // under the real owner either. The snapshot's verdict is what tells a
+        // client why.
         let (device_known, device_cross_signed) = match device_id {
             Some(device_id) => {
                 let device_id: OwnedDeviceId = device_id.into();

@@ -39,7 +39,8 @@ pub enum TrustError {
 /// for a UTD not yet re-decrypted).
 #[derive(Debug, Clone)]
 pub struct TrustSnapshot {
-    /// The four-valued sender-trust verdict at decrypt time.
+    /// The sender-trust verdict at decrypt time (the same values as the
+    /// timeline event's `sender_trust`).
     pub sender_trust: Option<String>,
     /// The coarse `verified`/`unverified` verification state at decrypt time.
     pub verification_state: Option<String>,
@@ -64,7 +65,8 @@ pub struct TrustSnapshot {
 #[derive(Debug, Clone)]
 pub struct CurrentTrust {
     /// Whether the sending device is currently known to the SDK (a deleted or
-    /// not-yet-downloaded device is `false`).
+    /// not-yet-downloaded device is `false`). Always `false` for a
+    /// `mismatched_sender` snapshot, whose device id the SDK withholds.
     pub device_known: bool,
     /// Whether the sending device is currently cross-signed by the sender's own
     /// master key. `None` when the device isn't known.

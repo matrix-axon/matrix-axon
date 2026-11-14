@@ -103,10 +103,11 @@ pub struct EventCrypto<'a> {
     /// Verification state of the sending device at decrypt time: `verified` or
     /// `unverified`. A snapshot — it can change later as devices are verified.
     pub verification_state: &'a str,
-    /// The four-valued sender-trust verdict at decrypt time (M7c): `verified`,
-    /// `unverified`, `unknown`, or `verification_violation`. `None` when no
-    /// verdict could be derived. A snapshot — distinct from the sender's
-    /// *current* trust, which the verification bundle reads live.
+    /// The sender-trust verdict at decrypt time (M7c): `verified`,
+    /// `unverified`, `unknown`, `verification_violation`, or
+    /// `mismatched_sender`. `None` when no verdict could be derived. A
+    /// snapshot — distinct from the sender's *current* trust, which the
+    /// verification bundle reads live.
     pub sender_trust: Option<&'a str>,
 }
 

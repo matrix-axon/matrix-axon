@@ -2774,10 +2774,13 @@ export interface components {
                 sender: string;
                 /**
                  * @description Sender-device trust snapshot at decrypt time (M7c): `verified`,
-                 *     `unverified`, `unknown`, or `verification_violation`. `null` for
-                 *     unencrypted events and rows with no recorded verdict (e.g. a UTD not yet
-                 *     re-decrypted). This is the at-receipt snapshot; the sender's *current*
-                 *     trust is available from the per-event verification bundle.
+                 *     `unverified`, `unknown`, `verification_violation`, or
+                 *     `mismatched_sender` (the Megolm session belongs to a user other than
+                 *     `sender`, as in a bridged room). `null` for unencrypted events and rows
+                 *     with no recorded verdict (e.g. a UTD not yet re-decrypted). Treat an
+                 *     unrecognized value as `unverified`. This is the at-receipt snapshot; the
+                 *     sender's *current* trust is available from the per-event verification
+                 *     bundle.
                  */
                 sender_trust?: string | null;
                 /** @description Matrix state key for state events. `null` for message-like events. */
@@ -3495,10 +3498,13 @@ export interface components {
                 sender: string;
                 /**
                  * @description Sender-device trust snapshot at decrypt time (M7c): `verified`,
-                 *     `unverified`, `unknown`, or `verification_violation`. `null` for
-                 *     unencrypted events and rows with no recorded verdict (e.g. a UTD not yet
-                 *     re-decrypted). This is the at-receipt snapshot; the sender's *current*
-                 *     trust is available from the per-event verification bundle.
+                 *     `unverified`, `unknown`, `verification_violation`, or
+                 *     `mismatched_sender` (the Megolm session belongs to a user other than
+                 *     `sender`, as in a bridged room). `null` for unencrypted events and rows
+                 *     with no recorded verdict (e.g. a UTD not yet re-decrypted). Treat an
+                 *     unrecognized value as `unverified`. This is the at-receipt snapshot; the
+                 *     sender's *current* trust is available from the per-event verification
+                 *     bundle.
                  */
                 sender_trust?: string | null;
                 /** @description Matrix state key for state events. `null` for message-like events. */
@@ -4321,7 +4327,11 @@ export interface components {
              *     master key. `null` when the device isn't known.
              */
             device_cross_signed?: boolean | null;
-            /** @description Whether the sending device is currently known to axon. */
+            /**
+             * @description Whether the sending device is currently known to axon. Always `false`
+             *     when the snapshot's verdict is `mismatched_sender`: the session's device
+             *     belongs to another user and is not recorded.
+             */
             device_known: boolean;
             /** @description Whether the sender's user identity is currently known. */
             identity_known: boolean;
@@ -4707,10 +4717,13 @@ export interface components {
             sender: string;
             /**
              * @description Sender-device trust snapshot at decrypt time (M7c): `verified`,
-             *     `unverified`, `unknown`, or `verification_violation`. `null` for
-             *     unencrypted events and rows with no recorded verdict (e.g. a UTD not yet
-             *     re-decrypted). This is the at-receipt snapshot; the sender's *current*
-             *     trust is available from the per-event verification bundle.
+             *     `unverified`, `unknown`, `verification_violation`, or
+             *     `mismatched_sender` (the Megolm session belongs to a user other than
+             *     `sender`, as in a bridged room). `null` for unencrypted events and rows
+             *     with no recorded verdict (e.g. a UTD not yet re-decrypted). Treat an
+             *     unrecognized value as `unverified`. This is the at-receipt snapshot; the
+             *     sender's *current* trust is available from the per-event verification
+             *     bundle.
              */
             sender_trust?: string | null;
             /** @description Matrix state key for state events. `null` for message-like events. */
@@ -6485,7 +6498,10 @@ export interface components {
             forwarder_device_id?: string | null;
             /** @description If forwarded, the user id that forwarded the key. */
             forwarder_user_id?: string | null;
-            /** @description The four-valued sender-trust verdict at decrypt time. */
+            /**
+             * @description The sender-trust verdict at decrypt time (the same values as the
+             *     timeline event's `sender_trust`).
+             */
             sender_trust?: string | null;
             /** @description The Megolm session id the event was encrypted with. */
             session_id?: string | null;
