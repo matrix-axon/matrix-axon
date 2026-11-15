@@ -39,21 +39,14 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # Prefer the base branch's live tip to the event's base.sha, which is
+      # recorded when the PR is opened and goes stale as main advances. A stale
+      # base holds published migrations at stale bytes and blames the branch for
+      # main's own changes. On a pull_request the job runs in the base repo, so
+      # origin is the canonical repo. base.sha remains the fallback. The runner
+      # reads BASE_REF and BASE_SHA and appends that base to the hook entry.
       - name: Migrations are forward-only
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          # Prefer the base branch's live tip to the event's `base.sha`, which
-          # is recorded when the PR is opened and goes stale as main advances.
-          # A stale base holds published migrations at stale bytes and blames
-          # the branch for main's own changes — precisely the failure this
-          # check was rewritten to stop making. On a pull_request event the job
-          # runs in the base repo, so `origin` is always the canonical repo.
-          # `base.sha` remains the fallback.
-          base="$BASE_SHA"
-          if [ -n "$BASE_REF" ] && git rev-parse --verify --quiet "origin/$BASE_REF^{commit}" >/dev/null; then
-            base="origin/$BASE_REF"
-          fi
-          echo "base: $base ($(git rev-parse --short "${base:-HEAD}"))"
-          scripts/check-migrations-immutable.sh "$base"
+        run: python3 scripts/ci/run-hook-entry.py migrations-immutable --pull-request-base

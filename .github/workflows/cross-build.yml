@@ -168,14 +168,15 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # The rustfmt, rust-clippy, and cargo-test hook entries.
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: python3 scripts/ci/run-hook-entry.py rustfmt
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: python3 scripts/ci/run-hook-entry.py rust-clippy
 
       - name: Test
-        run: cargo test --all
+        run: python3 scripts/ci/run-hook-entry.py cargo-test
 
   windows:
     name: Build for Windows

@@ -148,6 +148,13 @@ trying to leave, described more politely.
   in the same commit, and CI remains the backstop. `scripts/check-hook-filters.py`
   is what makes that survivable — it pins the intended selection for each of
   these paths, so a filter edited without its case updated fails loudly.
+- **CI runs the hook entry instead of keeping a second copy.**
+  The expensive checks stay separate steps, and each one is `python3 scripts/ci/run-hook-entry.py <hook>`.
+  That runner reads the hook `entry` from `.pre-commit-config.yaml` and execs it from the repo root, with no shell.
+  `scripts/check-hook-commands.py` fails when a gate step's command is not that invocation, or when the step is turned off with `continue-on-error`, a disallowed `if:`, step `env`, or a shell other than bash.
+  Routing the steps through `pre-commit run` would collapse the web job's lint, format, test, and build checks into one failure, and it would drop the dependency caches those workflows set up (#200).
+  The migrations and OpenAPI steps pass `--pull-request-base`, and the runner appends the pull request's base ref, which the local hook does not have.
+  Every hook is named in that script as run by pre-commit, run through the runner, or local-only, so adding a hook means choosing one.
 - **The docs point at the config instead of restating it.** `AGENTS.md` and
   `CONTRIBUTING.md` describe what the gate is *for*, what is deliberately absent
   from it, and how to skip it — but they do not enumerate the hooks, because a

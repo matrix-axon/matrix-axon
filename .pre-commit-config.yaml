@@ -91,7 +91,23 @@ repos:
         language: python
         additional_dependencies: ["pyyaml"]
         entry: scripts/check-hook-filters.py
-        files: '^(\.pre-commit-config\.yaml|scripts/(check-hook-filters\.py|setup-hooks\.sh)|AGENTS\.md|CONTRIBUTING\.md)$'
+        # scripts/check-hook-commands.py is here so a change to the path list it
+        # generates re-runs this hook, not only the command check.
+        files: '^(\.pre-commit-config\.yaml|scripts/(check-hook-filters\.py|check-hook-commands\.py|setup-hooks\.sh)|AGENTS\.md|CONTRIBUTING\.md)$'
+        pass_filenames: false
+        stages: [pre-push]
+      # CI runs the expensive hooks by executing each `entry` through
+      # scripts/ci/run-hook-entry.py, so a failure stays its own check and the
+      # dependency caches stay in the workflow (#200). This fails when a step's
+      # command is not that runner, or when the step is switched off.
+      # `files` is the regex scripts/check-hook-commands.py generates. Paste
+      # the value it prints; do not hand-edit it.
+      - id: hook-commands
+        name: CI steps run pre-push hook entries
+        language: python
+        additional_dependencies: ["pyyaml"]
+        entry: scripts/check-hook-commands.py
+        files: '^(\.github/workflows/cross-build\.yml|\.github/workflows/desktop-build\.yml|\.github/workflows/lint-and-clippy\.yml|\.github/workflows/lint-and-test\.yml|\.github/workflows/migrations-immutable\.yml|\.github/workflows/openapi-compat\.yml|\.github/workflows/web-lint-and-test\.yml|\.pre-commit-config\.yaml|scripts/check-hook-commands\.py|scripts/ci/run-hook-entry\.py|scripts/ci/test-check-hook-commands\.py)$'
         pass_filenames: false
         stages: [pre-push]
       - id: migrations-immutable
@@ -270,9 +286,9 @@ repos:
         files: &rust_files '^(Cargo\.(toml|lock)|\.cargo/config\.toml|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
         pass_filenames: false
         stages: [pre-push]
-      # CI re-types this command rather than running the hook, unlike
-      # actionlint/adr-numbers/hook-filters above. Tracked in #200; keep the
-      # flag order in lint-and-clippy.yml matching this line until it is.
+      # CI execs this entry through scripts/ci/run-hook-entry.py rather than
+      # copying it, so a failure stays its own check. The env prefix and the
+      # flag order live only on this line.
       #
       # AXON_WEB_AUTOBUILD=0: `--all-features` turns on `embed-web`, whose
       # build.rs would otherwise run `pnpm` on a checkout with no bundle. CI
@@ -285,8 +301,8 @@ repos:
         files: *rust_files
         pass_filenames: false
         stages: [pre-push]
-      # The expensive gate. The required lint-and-test PR job runs the same
-      # command in CI; keeping it here catches failures before review begins.
+      # The expensive gate. The required lint job runs this entry; keeping it
+      # here catches failures before review begins.
       # `SKIP=cargo-test` skips only the local copy deliberately.
       - id: cargo-test
         name: cargo test --all

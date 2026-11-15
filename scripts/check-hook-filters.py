@@ -44,8 +44,10 @@ Usage: scripts/check-hook-filters.py [<config>]
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -53,6 +55,12 @@ import yaml
 #
 # Add a row when you add a hook or widen a filter. A row that goes stale fails
 # loudly, which is the point -- the failure mode being tested is silence.
+#
+# hook-commands is not named in these sets. Its path list lives in
+# check-hook-commands.py. main() adds that hook to every path on the list and
+# synthesizes a {hook-commands} case for a watched path that has no row. A
+# watched path that another hook also selects must have a real row; the
+# synthesized case fails on purpose so those other hooks stay visible.
 CASES: list[tuple[str, set[str]]] = [
     # The #180 regression: a real web source file must reach every web hook.
     ("clients/web/src/app.tsx", {"prettier", "web-lint", "web-test", "web-build"}),
@@ -225,8 +233,29 @@ CASES: list[tuple[str, set[str]]] = [
     ("AGENTS.md", {"hook-filters", "markdown-no-liquid", "prettier"}),
     ("CONTRIBUTING.md", {"hook-filters", "markdown-no-liquid", "prettier"}),
     ("scripts/setup-hooks.sh", {"hook-filters"}),
-    # Nothing local claims a workflow file; actionlint does, and it is out of
-    # scope here (see the module docstring).
+    # The rust workflows are rust inputs (the filter names them). hook-commands
+    # is added from the command check's path list. cross-build, the desktop
+    # workflow, and the migrations and OpenAPI workflows are on that list and
+    # have no row here: nothing else local selects them.
+    (
+        ".github/workflows/lint-and-clippy.yml",
+        {"rustfmt", "rust-clippy", "cargo-test"},
+    ),
+    (
+        ".github/workflows/lint-and-test.yml",
+        {"rustfmt", "rust-clippy", "cargo-test"},
+    ),
+    # The web workflow is a web input. hook-commands is added from the path list.
+    (
+        ".github/workflows/web-lint-and-test.yml",
+        {"web-api-schema", "web-lint", "web-test", "web-build"},
+    ),
+    # This hook's own files filter selects the command check, so the row names
+    # hook-filters. hook-commands is added because the path is on its list.
+    ("scripts/check-hook-commands.py", {"hook-filters"}),
+    # Nothing local claims this workflow file; actionlint does, and it is out
+    # of scope here (see the module docstring). A hook-commands filter wide
+    # enough to select every workflow would claim this one and fail.
     (".github/workflows/smoke.yml", set()),
     ("README.md", {"markdown-no-liquid", "prettier"}),
 ]
@@ -297,6 +326,19 @@ def selected(hooks: dict[str, dict], path: str) -> set[str]:
     return out
 
 
+def _load_command_checker():
+    """The command check owns the path list. This file must not copy it."""
+    path = Path(__file__).resolve().parent / "check-hook-commands.py"
+    spec = importlib.util.spec_from_file_location("check_hook_commands", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses looks the class's module up in sys.modules during exec.
+    sys.modules["check_hook_commands"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def main() -> int:
     config = sys.argv[1] if len(sys.argv) > 1 else ".pre-commit-config.yaml"
     with open(config) as fh:
@@ -329,7 +371,16 @@ def main() -> int:
             f"(only {sorted(ALWAYS_RUN)} may run unfiltered)"
         )
 
+    try:
+        watched = set(_load_command_checker().watched_paths())
+    except (OSError, RuntimeError, ImportError) as exc:
+        print(f"could not load scripts/check-hook-commands.py: {exc}", file=sys.stderr)
+        return 2
+
     covered = {hook_id for _, expected in CASES for hook_id in expected}
+    # The command check generates this hook's cases. A hand-written row would
+    # be a second list.
+    covered.add("hook-commands")
     untested = set(hooks) - covered - ALWAYS_RUN
     if untested:
         problems.append(f"local hooks with no case in CASES: {sorted(untested)}")
@@ -375,14 +426,36 @@ def main() -> int:
     for problem in problems:
         print(problem, file=sys.stderr)
 
+    case_paths = {path for path, _ in CASES}
     failures = 0
+
+    def fail(path: str, got: set[str], expected: set[str], note: str = "") -> None:
+        nonlocal failures
+        failures += 1
+        print(f"FAIL {path}", file=sys.stderr)
+        print(f"     selected {sorted(got)}", file=sys.stderr)
+        print(f"     expected {sorted(expected)}", file=sys.stderr)
+        if note:
+            print(f"     {note}", file=sys.stderr)
+
     for path, expected in CASES:
         got = selected(hooks, path)
+        expected = set(expected)
+        if path in watched:
+            expected.add("hook-commands")
         if got != expected:
-            failures += 1
-            print(f"FAIL {path}", file=sys.stderr)
-            print(f"     selected {sorted(got)}", file=sys.stderr)
-            print(f"     expected {sorted(expected)}", file=sys.stderr)
+            fail(path, got, expected)
+
+    for path in sorted(watched - case_paths):
+        got = selected(hooks, path)
+        expected = {"hook-commands"}
+        if got != expected:
+            note = ""
+            if got - expected:
+                note = "another hook selects this path; add a CASES row for it"
+            elif "hook-commands" not in got:
+                note = "hook-commands files filter does not select this watched path"
+            fail(path, got, expected, note)
 
     if failures or problems:
         print(
@@ -391,7 +464,8 @@ def main() -> int:
         )
         return 1
 
-    print(f"hook filters ok ({len(CASES)} paths, {len(hooks)} local hooks)")
+    checked = len(CASES) + len(watched - case_paths)
+    print(f"hook filters ok ({checked} paths, {len(hooks)} local hooks)")
     return 0
 
 
