@@ -410,6 +410,16 @@ async fn resolve_media_content(
         })?;
         let raster_only = content["m.relates_to"]["rel_type"] == "m.annotation"
             && content["m.relates_to"]["key"].as_str() == Some(mxc_url);
+        // A replacement's media, a preview image an edit added among them
+        // (ADR 0132 section 8), is described by its `m.new_content`: its
+        // fallback carries `[]` for previews, which would hide the image's
+        // encrypted descriptor and type.
+        let content = match content.get("m.new_content") {
+            Some(new) if content["m.relates_to"]["rel_type"] == "m.replace" && new.is_object() => {
+                new.clone()
+            }
+            _ => content,
+        };
         return Ok((content, raster_only));
     }
     if store

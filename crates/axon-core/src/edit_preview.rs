@@ -235,10 +235,17 @@ fn encrypted_file_is_valid(file: &Value) -> bool {
         && serde_json::to_vec(file).is_ok_and(|v| v.len() <= MAX_MEDIA_SOURCE_BYTES)
 }
 
-/// Whether HTML contains a spoiler (`data-mx-spoiler`). A false positive, such
-/// as the attribute's name written as text, only sends `[]`.
+/// Whether HTML contains a spoiler (`data-mx-spoiler`), in any case, since
+/// HTML attribute names are case-insensitive; the web renderer matches it the
+/// same way. A false positive, such as the attribute's name written as text,
+/// only sends `[]`.
 pub fn has_spoiler(formatted_body: Option<&str>) -> bool {
-    formatted_body.is_some_and(|html| html.contains("data-mx-spoiler"))
+    const SPOILER: &[u8] = b"data-mx-spoiler";
+    formatted_body.is_some_and(|html| {
+        html.as_bytes()
+            .windows(SPOILER.len())
+            .any(|w| w.eq_ignore_ascii_case(SPOILER))
+    })
 }
 
 /// The previews an edit that omits the field carries forward, before the size
@@ -504,6 +511,20 @@ mod tests {
             Some(vec![])
         );
         assert_eq!(carry_forward(None, "https://a.example/", html), None);
+        // Attribute names are case-insensitive.
+        let shouted = Some(r#"<span DATA-MX-Spoiler>https://a.example/</span>"#);
+        assert_eq!(
+            carry_forward(Some(&current), "https://a.example/", shouted),
+            Some(vec![])
+        );
+        assert_eq!(
+            carry_forward(
+                Some(&current),
+                "https://a.example/",
+                Some("<b>https://a.example/</b>")
+            ),
+            Some(vec![card("https://a.example/")])
+        );
     }
 
     #[test]

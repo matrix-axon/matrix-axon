@@ -104,12 +104,14 @@ The 40 KiB content budget covers the whole replacement event, which carries the 
 An edit that sets the field and does not fit is a definite `413`, as on a send, and uses the same upload slots, image limits, encryption checks and upload deadline when it has new images.
 An edit that omits the field is not checked against these budgets once its carried previews are gone, exactly as an edit was before.
 A kept plaintext thumbnail stays plaintext in a room that has turned on encryption since, because it was readable already.
+The authenticated media proxy finds an image an edit added in the replacement's `m.new_content`, with its encryption descriptor and type, and refuses it once the edit or the message it replaces is redacted.
 A removed preview's thumbnail is not deleted from the homeserver.
 
 ## Upgrade behavior
 
 The bundled-preview migration builds two ordinary GIN indexes on `events` inside the normal migration transaction.
 These builds can block writes for their duration on large event stores; plan an appropriate maintenance window.
+The edit-preview migration adds two more, on replacements' `m.new_content` previews; they are partial on edits, so they stay small, but building them still reads the whole table.
 [Issue 843](https://github.com/matrix-axon/matrix-axon/issues/843) tracks a safe concurrent/prebuild procedure, including interrupted builds and coordination with the migration ledger.
 Do not simply precreate these index names: the current migration uses plain `CREATE INDEX` and would reject an existing name.
 

@@ -1746,3 +1746,78 @@ async fn utd_reason_is_recorded_read_and_cleared() {
 
     common::cleanup_account(&pool, account_id).await;
 }
+
+/// ADR 0132 section 8: an image an edit added is found in the replacement's
+/// `m.new_content`, in either spelling, for its own account only; the alias
+/// counts only when the standard field is absent there, as on a send.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_finds_preview_images_added_by_an_edit() {
+    let store = common::migrated_store().await;
+    let owner = common::test_account(&store, "edit-preview-owner").await;
+    let other = common::test_account(&store, "edit-preview-other").await;
+    for (field, key, shadowed) in [
+        ("m.url_previews", "og:image", false),
+        ("com.beeper.linkpreviews", "beeper:image:encryption", false),
+        ("com.beeper.linkpreviews", "og:image", true),
+    ] {
+        let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+        let mut card = json!({"matched_url": "https://example.org/"});
+        card[key] = if key == "og:image" {
+            json!(mxc)
+        } else {
+            json!({"url": mxc, "v": "v2"})
+        };
+        let mut new_content = json!({"msgtype": "m.text", "body": "https://example.org/"});
+        new_content[field] = json!([card]);
+        if shadowed {
+            new_content["m.url_previews"] = json!([]);
+        }
+        let original = format!("$original-{}", Uuid::new_v4());
+        let edit = format!("$edit-{}", Uuid::new_v4());
+        let relation = json!({"rel_type": "m.replace", "event_id": original});
+        for (event_id, content, relates_to) in [
+            (&original, json!({"msgtype": "m.text", "body": "x"}), None),
+            (
+                &edit,
+                json!({
+                    "msgtype": "m.text",
+                    "body": "* https://example.org/",
+                    "m.url_previews": [],
+                    "m.new_content": new_content,
+                    "m.relates_to": relation,
+                }),
+                Some(relation.clone()),
+            ),
+        ] {
+            store
+                .upsert_event(&NewEvent {
+                    event_id,
+                    room_id: "!edit-previews:localhost",
+                    account_id: owner,
+                    sender: "@alice:localhost",
+                    origin_ts: 1_700_000_000_000,
+                    event_type: "m.room.message",
+                    content: Some(content.clone()),
+                    raw_event: json!({"type": "m.room.message", "content": content}),
+                    megolm_session_id: None,
+                    redacts: None,
+                    relates_to,
+                    decrypted_body_text: None,
+                })
+                .await
+                .unwrap();
+        }
+        let found = store.get_event_by_mxc_url(owner, &mxc).await.unwrap();
+        if shadowed {
+            assert!(found.is_none(), "{field} {key}");
+        } else {
+            assert_eq!(found.unwrap().event_id, edit, "{field} {key}");
+        }
+        assert!(store
+            .get_event_by_mxc_url(other, &mxc)
+            .await
+            .unwrap()
+            .is_none());
+    }
+}
