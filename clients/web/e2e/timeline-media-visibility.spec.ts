@@ -478,3 +478,36 @@ for (const position of ['history', 'bottom'] as const) {
     }
   })
 }
+
+test('ungrouping hidden gallery images exposes reply and react without showing media', async ({
+  page,
+}) => {
+  await setup(page)
+  await command(roomComposer(page), '/collapse')
+  await page
+    .getByRole('button', { name: 'Ungroup images', exact: true })
+    .click()
+  const stream = page.locator('.room-stream')
+  const row = stream.locator('.event-row[data-event-id="$gallery-a"]')
+  await expect(row.locator('.media-collapsed')).toHaveCount(1)
+  await expect(stream.locator(TIMELINE_MEDIA)).toHaveCount(0)
+
+  await row.locator('.media-attachment-name').click()
+  await row.getByRole('button', { name: 'Reply', exact: true }).click()
+  await expect(page.locator('.composer-banner')).toContainText('Replying to')
+  await expect(page.locator('.composer-banner')).toContainText(
+    'Caption gallery-a',
+  )
+  await page
+    .locator('.composer-banner')
+    .getByRole('button', { name: 'Cancel', exact: true })
+    .click()
+
+  await row.locator('.media-attachment-name').click()
+  await row.getByRole('button', { name: 'React', exact: true }).click()
+  await expect(
+    row.getByRole('group', { name: 'React with', exact: true }),
+  ).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(stream.locator(TIMELINE_MEDIA)).toHaveCount(0)
+})

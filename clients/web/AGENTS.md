@@ -215,6 +215,8 @@ before starting a milestone.
   Leave AltGraph key events uncanceled; they can present as Ctrl+Alt on international keyboards.
   Collapsed gallery event IDs and highlight styling belong to the inner attachment items; shared captions remain deduplicated.
   Collapsed media reply quotes render text excerpts because their jump overlay covers embedded attachment controls.
+  While timeline media is hidden, grouped galleries intentionally offer metadata and downloads; use Ungroup images for each message's reply/react controls and configured row gestures without showing the images.
+  Image viewing and gallery-grid keyboard/gesture interactions return with `/expand`.
 - **Attachment cards** (`components/MediaAttachment.tsx`, `MediaTile.tsx`): captions span the card width and the shared `MediaDownloadButton` occupies the top-right header/tile corner.
   `openMediaCard` delegates clicks once from `data-media-preview-card`, excluding nested controls except the real filename/tile opener.
   The message touch recognizer resolves the card to that opener, preserving configured double-tap, hold, and swipe actions while leaving nested links and download controls independent.

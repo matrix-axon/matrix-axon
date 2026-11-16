@@ -95,6 +95,9 @@ The choice applies to existing and incoming messages in every room and thread, s
 Composer attachment and link previews are unaffected.
 Repeated gallery captions appear once in either mode, and collapsed media reply quotes retain a text excerpt.
 AltGr character input keeps its normal text-entry behavior.
+While media is hidden, grouped galleries show filenames and downloads without image-viewer or tile-gesture controls.
+Choose **Ungroup images** to reach each message's Reply, React, and other actions while keeping its image hidden.
+Use `/expand` to restore image viewing.
 
 Messages with bundled URL previews (`m.url_previews` or Beeper's `com.beeper.linkpreviews`) show cards beneath the body in room and thread timelines, including attachment captions.
 Compact pinned thread headers omit the cards; the full root message retains them.
@@ -126,7 +129,7 @@ and swipe left as unique bindings for reply, thread, reaction, edit, or delete.
 The default preset reacts with 👍 on double tap, opens a thread on hold, and
 replies on swipe left; swipe right always keeps its mobile back-navigation
 behavior.
-Individual images and loaded tiles in collapsed galleries use the same
+Individual images and loaded gallery tiles use the same
 configured actions while retaining a single tap to open the full-size viewer.
 Each gallery gesture targets the tile where it begins; gallery whitespace and
 tiles that are loading, failed, or still uploading remain gesture-free.
