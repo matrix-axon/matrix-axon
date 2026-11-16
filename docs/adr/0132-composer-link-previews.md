@@ -247,7 +247,7 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
 
 ### 8. Editing a message with previews
 
-_Added 2026-11-12; revised 2026-11-13 after review._
+_Added 2026-11-12; revised 2026-11-13 and 2026-11-16 after review._
 Until this section, saving any edit erased the message's cards.
 The server builds the replacement's `m.new_content` from the new text alone, and the store shows an edited message from its latest `m.new_content` (`TIMELINE_SELECT` in `axon-store`), so the cards disappeared for Axon readers, and for every client that applies edits.
 There was also no way to remove one card and keep the rest.
@@ -261,7 +261,14 @@ The 40 KiB content check covers the whole replacement event, which carries the b
 **The message's current previews.**
 Carry-forward and `keep` entries (below) start from the message as it stands: the store's copy with its latest edit applied.
 If the store does not have the message yet, the server uses the original event, which it already fetches to check that the account wrote it.
-A store that has the message but not its latest edit, made a moment ago on another device, gives that edit's previous previews; the next edit corrects it.
+Either copy can be out of date, and carry-forward then brings back cards a later edit removed, with no signal:
+
+- A store that has the message but not its latest edit gives that edit's previous previews.
+  Every Axon client reads the same store, so this lasts only for the sync delay after an edit, from any client, and the next edit corrects it.
+- The original event can be more than one edit behind.
+  Since an Axon client edits only messages it has shown from the store, this case is rare, but nothing bounds how far behind it is.
+  Reading the homeserver's latest edit instead is [#1107](https://github.com/matrix-axon/matrix-axon/issues/1107), for the server PR.
+
 The field is read as the timeline reads it:
 
 - `m.url_previews`, when present, is authoritative, even when it is empty or malformed; a value that is not a list counts as `[]`.
@@ -270,6 +277,8 @@ The field is read as the timeline reads it:
 
 A current entry is used only if it passes the checks a new entry does: a matched link within the send limits, title, description and site name within theirs, an image that is a well-formed `mxc://` URI or an encrypted-file object of the shape the server writes, and only the keys the server itself writes.
 An entry that fails is left out, as if the message did not have it.
+So are the entries past the eighth, the most a send may carry, in the order the message lists them; a message with more came from another client.
+The message still has a preview field when every entry is left out, so carry-forward and `keep` then send `[]`, never no field, and the message keeps its "no previews" marker.
 Whether its media still exists is not checked: a card whose image is gone renders without it, as it does today.
 Both spellings are written back, as on a send.
 
@@ -289,7 +298,7 @@ Both spellings are written back, as on a send.
   Each entry is either a new preview, in the send shape, with an optional `image_upload_id` uploaded for this attempt, or `{"matched_url": …, "keep": true}`.
   A kept entry copies the message's current entry for that link, image included, without uploading anything.
   As on a send, every entry's link must be a complete bare link in the new body.
-  A kept link whose current entry fails the checks above is left out, as carry-forward leaves it out.
+  A kept link whose current entry fails the checks above is left out, as carry-forward leaves it out, and a list left with no entries is sent as `[]`.
   A kept link with no current entry at all, because another device's edit removed it, is `409 previews_changed`, and nothing is sent.
 
 Copying an image reference into the replacement discloses nothing new: the room, the sender and the media are the same as in the event being replaced.
@@ -300,17 +309,19 @@ It goes on being referenced by the event history, as an image removed by an edit
 **Telling the client.**
 A server with this section answers `GET /v1/capabilities` with `{"edit_url_previews": true}`.
 An older server has no such route, and its `404` means no.
-The web client asks once per session, before the first edit, and shows edit-mode cards only when the answer is yes.
-Otherwise edit mode shows none, as before this section, and when the message has cards it says that saving the edit removes them.
-So an older server never receives an edit from a composer that promised to keep the cards.
+The web client asks when it starts, and shows edit-mode cards only when the answer is yes.
+Otherwise edit mode shows none and the edit sends no `url_previews`, as before this section, and when the message has cards it says that saving the edit may remove them.
+A `404` is kept for the session.
+Any other failure, such as a network error, a timeout or a 5xx, is not kept: edit mode opened before an answer, or after a failure, counts as no, and opening edit mode asks again.
+So an older server never receives an edit from a composer that promised to keep the cards, and a server with this section that answered late still carries the cards forward, because the edit omitted the field.
 
 **The edit composer.**
 
-- Opening edit mode shows the message's current cards, parsed as the timeline renders them, each with its X.
+- Opening edit mode shows the message's current cards, each with its X: the entries the server would use, read and checked as above, so a card the server would leave out is never shown and then lost on save.
   They appear under any setting, because removing a card fetches nothing.
 - Links that the edit adds follow section 5 under the setting, as in a new message, with lookups and new cards.
   New cards can be added only while the edit has fewer than three cards in total, counting the message's.
-  A message that already has three or more, sent by another client for example, shows them all and gets no new ones; none are dropped for the count.
+  A message that already has three or more, sent by another client for example, shows them all, up to the eight above, and gets no new ones; none are dropped for the three-card count.
   Links already in the message are not added, so opening edit mode never fetches anything.
 - Deleting a link from the text hides its card, whether it is new or was already on the message.
   Typing or pasting it back in the same edit brings back the message's card without a lookup, unless the user discarded it with its X.
@@ -322,7 +333,9 @@ So an older server never receives an edit from a composer that promised to keep 
 A message card counts as _removed_ when it was on the message as edit mode opened and is not sent with the edit: the user discarded it with its X, its link is no longer in the text, or the size check dropped it.
 The first rule that matches decides the field:
 
-1. **The new text contains a spoiler:** `[]` if the message has a preview field now or the new body has an eligible link, otherwise omit the field.
+1. **The new text contains a spoiler:** `[]` if the message has a preview field now, otherwise omit the field.
+   Omitting matches section 6's rule 1 for a send: a message that never had previews gets none authored for a spoiler, and recipients' clients decide as they do today.
+   Sending `[]` for a message that has a field is what the server's carry-forward would do anyway; the composer sends it explicitly so the spoiler does not depend on carry-forward, and the message keeps its "no previews" marker.
 2. **At least one card kept and ready**, kept from the message or new, after the size check: send those cards, in text order, the kept ones as `keep` entries.
 3. **A message card was removed, or, with previews on, the edit added an eligible link:** send `[]`.
    An added link counts whether or not its card survived: a link pasted into a message that had no preview field, and then discarded, gives `[]`, as it would in a new message.
@@ -337,6 +350,7 @@ A card dropped for size counts as removed, so rule 3 sends `[]` rather than leav
 If even `[]` does not fit, the edit can only omit the field.
 When the message has a preview field now, or a discarded link is in the body, the composer first asks the question section 6 asks, since the message would lose its marker.
 Omitting the field is then safe to send, because the server's carry-forward degrades to fit, ending with no field.
+This holds as an invariant, and the server PR tests it: any carried list is at least as large as `[]`, so when `[]` does not fit, no carried entry fits either, and a card the user discarded is never sent again.
 
 A failed edit has no echo: the composer reopens edit mode with the text, as it does today, and now with its cards too.
 New cards' thumbnails are still bytes and are uploaded again on the next save.
@@ -374,7 +388,8 @@ An edit that carries previews uses the same 70-second client deadline as a send 
     What the Apple, Android and Windows calls send is checked by packet capture, with the steps in `clients/web/src-tauri/axon-link-preview/README.md`.
   - No TLS crate: `rustls` 0.23 with the ring provider, `tokio-rustls` and `webpki-roots` were already present, and rustls takes the server name separately from the socket.
 - Two implementations of the fetch boundary exist, held together by a shared fixture.
-- An edit keeps a message's cards unless the editor removes them (section 8), in every client, because the server carries them forward.
+- Once the server change (Delivery item 5) is deployed, an edit keeps a message's cards unless the editor removes them (section 8), in every client, because the server carries them forward.
+  Until then, an edit from any client, the web client included, still erases them.
   The TUI cannot remove or add a card in an edit.
 - The TUI remains a gap in `docs/client-parity.md`.
 - Telegram-style controls (media size, card above the text) are not included.
