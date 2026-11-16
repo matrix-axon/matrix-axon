@@ -116,6 +116,18 @@ pub(crate) fn megolm_session_id(raw_event: &Value) -> Option<&str> {
     raw_event.get("content")?.get("session_id")?.as_str()
 }
 
+/// The megolm session of a paged event the SDK could not decrypt, read from the
+/// event itself rather than its stored row (#947: a UTD whose row already
+/// existed, or failed to write, still names its session). `None` for an event
+/// that decrypted or is not encrypted. Pure.
+pub(crate) fn paged_utd_session_id(ev: &TimelineEvent) -> Option<String> {
+    if !matches!(ev.kind, TimelineEventKind::UnableToDecrypt { .. }) {
+        return None;
+    }
+    let content: Value = ev.raw().get_field("content").ok().flatten()?;
+    content.get("session_id")?.as_str().map(str::to_owned)
+}
+
 /// Extract `(content, type)` from a re-decrypted event, or `None` if the SDK
 /// returned anything other than a successful decryption (it hands back a UTD
 /// `TimelineEvent` when no key is available yet — not an error). Pure.
@@ -916,6 +928,15 @@ type ArrivalBatch = Option<Vec<(OwnedRoomId, String)>>;
 /// the store when the SDK decrypted the event. A key that arrives after that
 /// read is matched by [`run`], whose query then sees the written rows. Every
 /// key in between was buffered here.
+///
+/// That argument relies on the SDK's stream being ready as soon as a batch is
+/// sent: [`buffered`](Self::buffered) polls without waiting, and treats a
+/// pending poll as "nothing buffered". Today the stream is a `tokio` broadcast
+/// receiver with a synchronous `map`, so a sent batch is ready on the first
+/// poll. An SDK upgrade that puts an async step (a store read, a task hop) in
+/// that stream would quietly bring #947 back;
+/// `key_arrival_tests::a_key_imported_during_the_page_is_rechecked` is the
+/// test that would catch it.
 pub(crate) struct KeyArrivalWatch {
     /// `None` without an `OlmMachine`: no keys arrive, and nothing to watch.
     stream: Option<BoxStream<'static, ArrivalBatch>>,
@@ -993,8 +1014,9 @@ fn sessions_to_recheck<'a>(
 
 /// Drain the pending UTDs of every session in `page_sessions` whose key arrived
 /// during the backfill page that `watch` covered (see [`KeyArrivalWatch`]).
-/// Local only, like [`recheck_persisted_utd`]. Returns how many sessions were
-/// re-checked.
+/// Local only, like [`recheck_persisted_utd`]. Stops between sessions once
+/// `cancel` fires, since a lagged watch can mean many sessions; the next
+/// start's sweep covers the rest. Returns how many sessions were re-checked.
 pub(crate) async fn recheck_backfilled_sessions(
     room: &Room,
     store: &Store,
@@ -1002,6 +1024,7 @@ pub(crate) async fn recheck_backfilled_sessions(
     page_sessions: &BTreeSet<String>,
     mut watch: KeyArrivalWatch,
     index: Option<&IndexHandle>,
+    cancel: &CancellationToken,
 ) -> usize {
     let arrivals = watch.buffered();
     let sessions = sessions_to_recheck(room.room_id(), page_sessions, &arrivals);
@@ -1016,7 +1039,11 @@ pub(crate) async fn recheck_backfilled_sessions(
         "re-checking backfilled UTDs whose keys arrived during the page"
     );
     let client = room.client();
+    let mut rechecked = 0;
     for session_id in &sessions {
+        if cancel.is_cancelled() {
+            break;
+        }
         redecrypt_session(
             &client,
             store,
@@ -1026,8 +1053,9 @@ pub(crate) async fn recheck_backfilled_sessions(
             index,
         )
         .await;
+        rechecked += 1;
     }
-    sessions.len()
+    rechecked
 }
 
 /// Parse a room ID string and look up its `Room` handle on the client.
@@ -1474,8 +1502,12 @@ mod key_arrival_tests {
     const PASSPHRASE: &str = "key-arrival-test";
 
     /// A room-key export file holding one new megolm session for `room_id`,
-    /// and that session's id.
-    async fn room_key_export(room_id: &RoomId) -> (std::path::PathBuf, String) {
+    /// and that session's id. The file lives in `dir`, which removes it on
+    /// drop, panics included.
+    async fn room_key_export(
+        dir: &tempfile::TempDir,
+        room_id: &RoomId,
+    ) -> (std::path::PathBuf, String) {
         let outbound = GroupSession::new(SessionConfig::version_1());
         let session = InboundGroupSession::new(
             Curve25519PublicKey::from(&Curve25519SecretKey::new()),
@@ -1491,17 +1523,15 @@ mod key_arrival_tests {
         .expect("inbound session");
         let export =
             encrypt_room_key_export(&[session.export().await], PASSPHRASE, 1).expect("key export");
-        let path = std::env::temp_dir().join(format!("axon-key-arrival-{}.txt", Uuid::new_v4()));
-        std::fs::write(&path, export).expect("write key export");
+        let path = dir.path().join("keys.txt");
+        tokio::fs::write(&path, export)
+            .await
+            .expect("write key export");
         (path, outbound.session_id())
     }
 
     async fn import(client: &Client, path: std::path::PathBuf) {
-        let result = client
-            .encryption()
-            .import_room_keys(path.clone(), PASSPHRASE)
-            .await;
-        let _ = std::fs::remove_file(&path);
+        let result = client.encryption().import_room_keys(path, PASSPHRASE).await;
         assert_eq!(result.expect("import").imported_count, 1);
     }
 
@@ -1513,9 +1543,14 @@ mod key_arrival_tests {
         let client =
             backup_gate_tests::client_without_backup_keys(Arc::new(AtomicUsize::new(0))).await;
         let room = <&RoomId>::try_from("!paged:localhost").unwrap();
-        let (path, session_id) = room_key_export(room).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (path, session_id) = room_key_export(&dir, room).await;
 
         let mut watch = KeyArrivalWatch::start(&client).await;
+        // The SDK publishes the imported session to the received-keys stream
+        // before `import_room_keys` returns, so the batch is already buffered
+        // here. If an SDK upgrade defers that publish, this test fails, and so
+        // would the backfill re-check (see `KeyArrivalWatch`).
         import(&client, path).await;
 
         let page = BTreeSet::from([session_id.clone(), "never-arrives".to_owned()]);
@@ -1533,7 +1568,8 @@ mod key_arrival_tests {
         let client =
             backup_gate_tests::client_without_backup_keys(Arc::new(AtomicUsize::new(0))).await;
         let room = <&RoomId>::try_from("!paged:localhost").unwrap();
-        let (path, session_id) = room_key_export(room).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (path, session_id) = room_key_export(&dir, room).await;
         import(&client, path).await;
 
         let mut watch = KeyArrivalWatch::start(&client).await;
@@ -1678,6 +1714,32 @@ mod tests {
     fn reads_session_id_from_utd_envelope() {
         let envelope: Value = serde_json::from_str(UTD_ENCRYPTED).expect("fixture");
         assert_eq!(megolm_session_id(&envelope), Some("session-abc-123"));
+    }
+
+    /// #947: the backfill re-check takes a UTD's session from the paged event,
+    /// so it does not depend on the row having been written. A decrypted event
+    /// names no session to re-check.
+    #[test]
+    fn paged_utd_session_id_reads_the_event() {
+        let raw: Raw<AnySyncTimelineEvent> = serde_json::from_str(UTD_ENCRYPTED).unwrap();
+        let utd = TimelineEvent::from_utd(
+            raw,
+            UnableToDecryptInfo {
+                session_id: None,
+                reason: UnableToDecryptReason::MissingMegolmSession {
+                    withheld_code: None,
+                },
+            },
+        );
+        assert_eq!(
+            paged_utd_session_id(&utd).as_deref(),
+            Some("session-abc-123")
+        );
+        let plain: Raw<AnySyncTimelineEvent> = serde_json::from_str(DECRYPTED_MESSAGE).unwrap();
+        assert_eq!(
+            paged_utd_session_id(&TimelineEvent::from_plaintext(plain)),
+            None
+        );
     }
 
     #[test]

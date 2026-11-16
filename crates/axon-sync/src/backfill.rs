@@ -75,7 +75,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::{persist_backfilled_event, PersistContext};
 use crate::homeserver_gate::{is_fast, GateError, HomeserverGate, Outcome, TIMEOUT_HOLD};
-use crate::redecrypt::{megolm_session_id, recheck_backfilled_sessions, KeyArrivalWatch};
+use crate::redecrypt::{paged_utd_session_id, recheck_backfilled_sessions, KeyArrivalWatch};
 
 /// The filesystem the disk-space valve guards: the configured override, else the
 /// sync data dir. Shared by the valve (`disk_ok`) and the live `GET /v1/status`
@@ -733,17 +733,19 @@ async fn backfill_room_page(
     // decision 2), including when the page is abandoned part way.
     let mut utd_reasons = Vec::new();
     let mut abandoned = false;
-    // The megolm sessions of the page's UTDs, for the re-check below.
+    // The megolm sessions of the page's UTDs, for the re-check below. Read
+    // from the paged events, not the stored rows, so a UTD whose row already
+    // existed (or failed to write) is still covered.
     let mut utd_sessions = BTreeSet::new();
     for tev in &events {
         if cancel.is_cancelled() {
             abandoned = true;
             break;
         }
+        if let Some(session_id) = paged_utd_session_id(tev) {
+            utd_sessions.insert(session_id);
+        }
         if let Some(utd) = persist_backfilled_event(ctx, room, tev).await {
-            if let Some(session_id) = megolm_session_id(&utd.0.raw_event) {
-                utd_sessions.insert(session_id.to_owned());
-            }
             utd_reasons.push(utd);
         }
     }
@@ -768,6 +770,7 @@ async fn backfill_room_page(
             &utd_sessions,
             key_arrivals,
             ctx.index.as_ref(),
+            cancel,
         )
         .await;
     }
