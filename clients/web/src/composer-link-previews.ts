@@ -1,10 +1,11 @@
 import { signal, type ReadonlySignal } from '@preact/signals'
 import type { ApiClient } from './api/client'
+import type { EditPreviewDraft, EditPreviewSeed } from './edit-link-previews'
 import { matchUrls } from './html/linkify'
+import type { LinkPreview } from './link-previews'
 import type {
   OutgoingLinkPreview,
   PreviewContent,
-  PreviewDraft,
   PreviewThumbnail,
 } from './link-preview-send'
 import {
@@ -27,6 +28,11 @@ import type { LinkPreviewSetting } from './stores/settings'
  * composer reports every edit; this decides which links have cards, starts
  * and cancels lookups, and hands a send the cards the user kept. One
  * instance belongs to one draft, and `take` starts the next one.
+ *
+ * An edit's draft starts from the message's own cards (§ 8): they show under
+ * any setting, because removing one fetches nothing, and the message's links
+ * never get new cards. Links the edit adds follow the setting, while the edit
+ * has fewer than three cards in all.
  */
 
 /** Cards per message (§ 1); a fourth link gets none. */
@@ -75,6 +81,8 @@ export type CardState =
   | { status: 'failed'; failure: PreviewFailure }
   /** No device source: the homeserver may be asked, and has not been. */
   | { status: 'offer' }
+  /** A card the message being edited already has (§ 8). */
+  | { status: 'kept'; preview: LinkPreview }
 
 export interface ComposerPreviewCard {
   /** The link's identity (`linkIdentity`), which keys everything here. */
@@ -172,9 +180,10 @@ export interface ComposerLinkPreviews {
   /**
    * Adopt `text` without adding any of its links: a restored draft, one
    * pushed from another device, or a new scope. Its links get no card and no
-   * lookup until the user retypes or re-pastes them (§ 5).
+   * lookup until the user retypes or re-pastes them (§ 5). With `edit`, the
+   * draft edits a message and starts from its cards (§ 8).
    */
-  reset(text: string): void
+  reset(text: string, edit?: EditPreviewSeed): void
   /**
    * An edit made the draft `text`. `inserted` is a paste or a drop, whose new
    * links are complete at once; a typed link is complete once whitespace
@@ -194,10 +203,11 @@ export interface ComposerLinkPreviews {
   askHomeserver(identity: string): void
   /** Whether `text` holds a link this draft discarded. */
   hasDiscardedLink(text: string): boolean
-  /** What a send needs from the draft, as it stands. */
-  snapshot(): PreviewDraft
+  /** What a send needs from the draft, as it stands. `kept` and `opened`
+   *  are empty unless the draft edits a message. */
+  snapshot(): EditPreviewDraft
   /** `snapshot`, then start the next draft, empty. */
-  take(): PreviewDraft
+  take(): EditPreviewDraft
   dispose(): void
 }
 
@@ -273,6 +283,12 @@ export function createComposerLinkPreviews(
   let restored = new Set<string>()
   let pasted = new Set<string>()
   let discarded = new Set<string>()
+  /** Editing a message: its cards by identity, and the links its text had,
+   *  which never get new cards (§ 8). */
+  let editing = false
+  let addNew = true
+  let existing = new Map<string, LinkPreview>()
+  let original = new Set<string>()
   const entries = new Map<string, Entry>()
   let sources: PreviewSources = { setting: 'off' }
   let suspended = false
@@ -300,9 +316,38 @@ export function createComposerLinkPreviews(
   }
 
   function wanted(): Link[] {
+    if (editing) return wantedInEdit()
     return slotted().filter(
       (link) => !restored.has(link.identity) && !discarded.has(link.identity),
     )
+  }
+
+  /** An edit's cards, in text order: the message's own, wherever their link
+   *  still is, and new links' while the edit has fewer than three cards.
+   *  None of the message's cards is ever dropped for the count (§ 8). */
+  function wantedInEdit(): Link[] {
+    const links = scan(text, pasted)
+    const shown = new Set(
+      links
+        .filter((l) => existing.has(l.identity) && !discarded.has(l.identity))
+        .map((l) => l.identity),
+    )
+    const room = Math.max(0, MAX_COMPOSER_PREVIEWS - shown.size)
+    // A discarded new link keeps its slot, as in a new message.
+    const fresh = addNew
+      ? links
+          .filter(
+            (l) =>
+              l.complete &&
+              !original.has(l.identity) &&
+              !existing.has(l.identity),
+          )
+          .slice(0, room)
+          .filter((l) => !discarded.has(l.identity))
+          .map((l) => l.identity)
+      : []
+    const keep = new Set([...shown, ...fresh])
+    return links.filter((l) => keep.has(l.identity))
   }
 
   function settle(identity: string, entry: Entry, state: CardState) {
@@ -350,6 +395,17 @@ export function createComposerLinkPreviews(
   }
 
   function start(identity: string, link: Link, immediately: boolean) {
+    const message = editing ? existing.get(identity) : undefined
+    if (message !== undefined) {
+      // Back in the text after a deletion: the message's card returns
+      // without a lookup (§ 8).
+      entries.set(identity, {
+        matchedUrl: link.matchedUrl,
+        state: { status: 'kept', preview: message },
+        abort: null,
+      })
+      return
+    }
     const cached = cache.get(identity)
     if (cached !== undefined) {
       entries.set(identity, {
@@ -391,12 +447,16 @@ export function createComposerLinkPreviews(
 
   function reconcile() {
     if (disposed) return
-    if (suspended || !linkPreviewsEnabled(sources)) {
+    const enabled = !suspended && linkPreviewsEnabled(sources)
+    if (!enabled && !editing) {
       dropAll()
       publish()
       return
     }
-    const links = wanted()
+    // Off, an edit keeps showing the message's cards and adds none.
+    const links = wanted().filter(
+      (link) => enabled || existing.has(link.identity),
+    )
     const keep = new Set(links.map((link) => link.identity))
     for (const identity of [...entries.keys()])
       if (!keep.has(identity)) drop(identity)
@@ -420,6 +480,7 @@ export function createComposerLinkPreviews(
         hostname: hostnameOf(link.identity),
         state: entry.state,
         canAskHomeserver:
+          entry.state.status !== 'kept' &&
           homeserverOn() &&
           (entry.state.status === 'offer' || entry.state.status === 'failed'),
       }
@@ -432,24 +493,38 @@ export function createComposerLinkPreviews(
     if (!sameCards(cards.peek(), next)) cards.value = next
   }
 
-  function snapshot(): PreviewDraft {
+  function snapshot(): EditPreviewDraft {
+    const shown = wanted()
     return {
-      cards: wanted().flatMap((link): OutgoingLinkPreview[] => {
+      cards: shown.flatMap((link): OutgoingLinkPreview[] => {
         const state = entries.get(link.identity)?.state
         return state?.status === 'ready'
           ? [{ ...content(state.result), matchedUrl: link.matchedUrl }]
           : []
       }),
+      kept: shown.flatMap((link) =>
+        entries.get(link.identity)?.state.status === 'kept'
+          ? [link.matchedUrl]
+          : [],
+      ),
+      opened: new Set(existing.keys()),
       discarded: new Set(discarded),
     }
   }
 
-  function reset(next: string) {
+  function reset(next: string, edit?: EditPreviewSeed) {
     dropAll()
     text = next
-    restored = identities(next)
     pasted = new Set()
-    discarded = new Set()
+    editing = edit !== undefined
+    addNew = edit?.addNew ?? true
+    existing = new Map(edit?.cards.map((card) => [card.url, card]) ?? [])
+    original =
+      edit === undefined
+        ? new Set()
+        : new Set([...identities(edit.originalText), ...(edit.refused ?? [])])
+    restored = edit === undefined ? identities(next) : new Set()
+    discarded = new Set(edit?.discarded ?? [])
     reconcile()
   }
 
@@ -476,9 +551,10 @@ export function createComposerLinkPreviews(
       sources = next
       if (changed) {
         // A card's state was decided under the old sources: keep only the
-        // results, and decide the rest again.
+        // results and the message's own cards, and decide the rest again.
         for (const [identity, entry] of [...entries])
-          if (entry.state.status !== 'ready') drop(identity)
+          if (entry.state.status !== 'ready' && entry.state.status !== 'kept')
+            drop(identity)
       }
       if (changed || nextSuspended !== suspended) {
         suspended = nextSuspended

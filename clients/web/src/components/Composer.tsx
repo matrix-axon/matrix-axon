@@ -24,7 +24,7 @@ import {
   type LinkPreviewCache,
   type PreviewSources,
 } from '../composer-link-previews'
-import type { PreviewDraft } from '../link-preview-send'
+import type { EditPreviewDraft, EditPreviewSeed } from '../edit-link-previews'
 import { ComposerLinkPreviews } from './ComposerLinkPreviews'
 import { lowercaseLinkSchemes } from '../html/linkify'
 import { markdownCodeRanges } from '../markdown/markdown'
@@ -168,7 +168,7 @@ function pickFiles(
 
 /** The previews a submitted message carries (ADR 0132 § 6). */
 export interface SubmittedPreviews {
-  draft: PreviewDraft
+  draft: EditPreviewDraft
   /**
    * The user chose to send a message too long for its "no previews" marker,
    * though a link they discarded is in it.
@@ -188,8 +188,15 @@ export interface ComposerLinkPreviewOptions {
   markerFits(
     body: string,
     inlineEmoji: readonly InlineEmojiReference[] | undefined,
-    draft: PreviewDraft,
+    draft: EditPreviewDraft,
   ): Promise<boolean>
+  /**
+   * The message this draft edits (ADR 0132 § 8): its cards, which edit mode
+   * starts from, and the account their images load as. `hasField` says the
+   * message has a preview field, whose "no previews" marker an edit too long
+   * for it would lose, so the user is asked first.
+   */
+  edit?: { seed: EditPreviewSeed; accountId: string; hasField: boolean }
 }
 
 /**
@@ -236,7 +243,13 @@ export function Composer({
   placeholder: string
   ariaLabel?: string
   status?: string
-  banner?: { label: string; excerpt: string; onCancel: () => void }
+  banner?: {
+    label: string
+    excerpt: string
+    /** A line below it, such as what saving an edit does to its previews. */
+    note?: string
+    onCancel: () => void
+  }
   initialValue?: string
   initialInlineEmoji?: readonly InlineEmojiReference[]
   onSubmit(
@@ -314,6 +327,12 @@ export function Composer({
   useEffect(() => {
     previewCache.current = linkPreviews?.cache
   })
+  // The message an edit starts from, as the latest props name it, for the
+  // resets below. Declared before them, so it is current when they run.
+  const editSeed = useRef(linkPreviews?.edit?.seed)
+  useLayoutEffect(() => {
+    editSeed.current = linkPreviews?.edit?.seed
+  })
   // One draft's cards. Created with the draft it starts from, whose links
   // are restored rather than added (ADR 0132 § 5).
   const [previews] = useState(() => {
@@ -322,7 +341,7 @@ export function Composer({
       writer: () => previewCache.current?.writer() ?? (() => {}),
       clear: () => previewCache.current?.clear(),
     })
-    created.reset(initialValue)
+    created.reset(initialValue, linkPreviews?.edit?.seed)
     return created
   })
   useEffect(() => () => previews.dispose(), [previews])
@@ -441,7 +460,7 @@ export function Composer({
     synced.current = initialValue
     syncedEmoji.current = initialEmojiKey
     setDraft(initialValue)
-    previews.reset(initialValue)
+    previews.reset(initialValue, editSeed.current)
     setMarkerQuestion(false)
     setCaret(initialValue.length)
     setEmojiSelection(null)
@@ -693,7 +712,7 @@ export function Composer({
       emojiHistory.current = initialEmojiHistory(initialValue, inline.current)
       setDraft(initialValue)
       // A draft from elsewhere is restored, not typed (ADR 0132 § 5).
-      previews.reset(initialValue)
+      previews.reset(initialValue, editSeed.current)
     }
   }, [initialValue, initialEmojiKey, draft, previews])
 
@@ -1185,7 +1204,8 @@ export function Composer({
     if (
       linkPreviews !== undefined &&
       !allowUnmarked &&
-      previews.hasDiscardedLink(message)
+      (previews.hasDiscardedLink(message) ||
+        linkPreviews.edit?.hasField === true)
     ) {
       // The one use of the discard record at send time (ADR 0132 § 6): a
       // message too long for even `[]` would expose a discarded link if the
@@ -1272,6 +1292,11 @@ export function Composer({
           <span>
             <strong>{banner.label}</strong>{' '}
             <span class="muted">{banner.excerpt}</span>
+            {banner.note !== undefined && (
+              <span class="composer-banner-note" role="status">
+                {banner.note}
+              </span>
+            )}
           </span>
           <button type="button" class="ghost" onClick={banner.onCancel}>
             Cancel
@@ -1280,17 +1305,30 @@ export function Composer({
       )}
       <ComposerLinkPreviews
         cards={previews.cards.value}
+        accountId={linkPreviews?.edit?.accountId}
         onDiscard={(identity) => previews.discard(identity)}
         onAskHomeserver={(identity) => previews.askHomeserver(identity)}
       />
       {markerQuestion && (
         <div class="composer-link-preview-marker" role="alert">
-          This message is too long to carry its “no previews” marker, so other
-          apps could preview a link you removed the preview of. Shorten it, or
-          send it anyway.{' '}
-          <button type="button" onClick={() => submit(true)}>
-            Send anyway
-          </button>
+          {linkPreviews?.edit === undefined ? (
+            <>
+              This message is too long to carry its “no previews” marker, so
+              other apps could preview a link you removed the preview of.
+              Shorten it, or send it anyway.{' '}
+              <button type="button" onClick={() => submit(true)}>
+                Send anyway
+              </button>
+            </>
+          ) : (
+            <>
+              This edit is too long to carry its “no previews” marker, so other
+              apps could preview its links. Shorten it, or save it anyway.{' '}
+              <button type="button" onClick={() => submit(true)}>
+                Save anyway
+              </button>
+            </>
+          )}
         </div>
       )}
       {attachments !== undefined && attachments.items.length > 0 && (

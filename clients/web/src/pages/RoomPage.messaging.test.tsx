@@ -806,6 +806,138 @@ describe('editing and redacting', () => {
   })
 })
 
+describe('editing link previews (ADR 0132 § 8)', () => {
+  const LINK = 'https://a.example.org/article'
+  const EDIT_PATH = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId`
+  const withCard = (body: string) =>
+    event('$mine', 200, {
+      sender: OWN_USER,
+      body,
+      content: {
+        msgtype: 'm.text',
+        body,
+        'm.url_previews': [
+          { 'matrix:matched_url': LINK, 'og:title': 'The article' },
+        ],
+      } as unknown as EventDto['content'],
+    })
+
+  /** Serve the capabilities answer, the edit, and the refetched message. */
+  function serveEdit(
+    capability: Response,
+    answer: () => Response = () =>
+      HttpResponse.json({ data: { event_id: '$edit' } }),
+    refetched: EventDto = withCard(`see ${LINK}`),
+  ) {
+    const edits: Record<string, unknown>[] = []
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/capabilities`, () => capability),
+      http.put(EDIT_PATH, async ({ request }) => {
+        edits.push((await request.json()) as Record<string, unknown>)
+        return answer()
+      }),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: refetched }),
+      ),
+    )
+    return edits
+  }
+
+  const supported = () =>
+    HttpResponse.json({ data: { edit_url_previews: true } })
+
+  async function openEdit(body = `see ${LINK}`, capabilities = true) {
+    const utils = renderRoom([withCard(body)])
+    if (capabilities) {
+      utils.services.capabilities.refresh()
+      await waitFor(() =>
+        expect(utils.services.capabilities.editUrlPreviews.value).toBe(true),
+      )
+    }
+    fireEvent.click((await utils.findAllByRole('button', { name: 'Edit' }))[0])
+    const textarea = utils.getByLabelText('Message Ops') as HTMLTextAreaElement
+    return { ...utils, textarea }
+  }
+
+  it("shows the message's card and keeps it through an unrelated edit", async () => {
+    const edits = serveEdit(supported())
+    const { textarea, findByRole } = await openEdit()
+    const cards = await findByRole('list', { name: 'Link previews to send' })
+    expect(within(cards).getByText('The article')).toBeTruthy()
+
+    fireEvent.input(textarea, { target: { value: `now see ${LINK}` } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(1))
+    expect(edits[0].url_previews).toEqual([{ matched_url: LINK, keep: true }])
+  })
+
+  it('removes a card with its X, sending the "no previews" marker', async () => {
+    const edits = serveEdit(supported())
+    const { textarea, findByRole } = await openEdit()
+    const cards = await findByRole('list', { name: 'Link previews to send' })
+    fireEvent.click(
+      within(cards).getByRole('button', {
+        name: 'Remove the preview of a.example.org',
+      }),
+    )
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(1))
+    expect(edits[0].url_previews).toEqual([])
+  })
+
+  it('on an older server, shows no cards, warns, and leaves the field out', async () => {
+    const edits = serveEdit(
+      HttpResponse.json({ error: { code: 'not_found' } }, { status: 404 }),
+    )
+    const { textarea, findByText, queryByRole } = await openEdit(
+      `see ${LINK}`,
+      false,
+    )
+    expect(
+      await findByText('Saving this edit may remove its link previews.'),
+    ).toBeTruthy()
+    expect(queryByRole('list', { name: 'Link previews to send' })).toBeNull()
+    fireEvent.input(textarea, { target: { value: `now see ${LINK}` } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(1))
+    expect(edits[0]).not.toHaveProperty('url_previews')
+  })
+
+  it('after 409 previews_changed, reopens with the message as it now is', async () => {
+    const plain = event('$mine', 200, {
+      sender: OWN_USER,
+      body: `see ${LINK}`,
+      content: { msgtype: 'm.text', body: `see ${LINK}`, 'm.url_previews': [] },
+    })
+    const edits = serveEdit(
+      supported(),
+      () =>
+        HttpResponse.json(
+          { error: { code: 'previews_changed', message: 'changed' } },
+          { status: 409 },
+        ),
+      plain,
+    )
+    const { textarea, findByText, queryByRole, getByLabelText } =
+      await openEdit()
+    fireEvent.input(textarea, { target: { value: `now see ${LINK}` } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(
+      await findByText(
+        'This message’s link previews changed on another device. Check them and save again.',
+      ),
+    ).toBeTruthy()
+    await waitFor(() =>
+      expect((getByLabelText('Message Ops') as HTMLTextAreaElement).value).toBe(
+        `now see ${LINK}`,
+      ),
+    )
+    // The card another device removed is gone from edit mode too.
+    expect(queryByRole('list', { name: 'Link previews to send' })).toBeNull()
+    expect(edits).toHaveLength(1)
+  })
+})
+
 describe('reactions', () => {
   it('quick-picker reacts and chip click toggles off', async () => {
     let posted: unknown

@@ -166,6 +166,33 @@ function PreviewImageRequest({
   )
 }
 
+/**
+ * A message card's image in the edit composer (ADR 0132 § 8): the same
+ * request the timeline makes first, with nothing shown until it loads and
+ * nothing at all if it fails. The timeline's card has the fallbacks.
+ */
+export function MessagePreviewThumb({
+  accountId,
+  image,
+}: {
+  accountId: string
+  image: LinkPreviewImage
+}) {
+  const { ref, state } = useMediaBlob<HTMLSpanElement>(accountId, image.mxc, {
+    thumbnail: image.encrypted
+      ? undefined
+      : { width: 480, height: 270, method: 'scale' },
+    maxBytes: MAX_PREVIEW_IMAGE_BYTES,
+  })
+  return (
+    <span ref={ref} class="composer-link-preview-thumb-slot">
+      {state.status === 'ready' && (
+        <img class="composer-link-preview-thumb" src={state.url} alt="" />
+      )}
+    </span>
+  )
+}
+
 /** Consumes the shared validated shape; pending-share UI can reuse this card. */
 export function LinkPreviewCard({
   accountId,

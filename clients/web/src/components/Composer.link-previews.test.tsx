@@ -118,6 +118,8 @@ describe('Composer link previews', () => {
           },
         ],
         discarded: new Set(),
+        kept: [],
+        opened: new Set(),
       },
       allowUnmarked: false,
     })
@@ -151,6 +153,8 @@ describe('Composer link previews', () => {
           },
         ],
         discarded: new Set(),
+        kept: [],
+        opened: new Set(),
       },
       allowUnmarked: false,
     })
@@ -193,7 +197,12 @@ describe('Composer link previews', () => {
     // A discarded link in the body waits for the marker check (§ 6).
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith(A, undefined, {
-        draft: { cards: [], discarded: new Set([A]) },
+        draft: {
+          cards: [],
+          discarded: new Set([A]),
+          kept: [],
+          opened: new Set(),
+        },
         allowUnmarked: false,
       }),
     )
@@ -349,13 +358,20 @@ describe('Composer link previews', () => {
     expect(markerFits).toHaveBeenCalledWith(`${A} ${B}`, undefined, {
       cards: [],
       discarded: new Set([A]),
+      kept: [],
+      opened: new Set(),
     })
     expect(onSubmit).not.toHaveBeenCalled()
     expect(textarea.value).toBe(`${A} ${B} `)
 
     fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }))
     expect(onSubmit).toHaveBeenCalledWith(`${A} ${B}`, undefined, {
-      draft: { cards: [], discarded: new Set([A]) },
+      draft: {
+        cards: [],
+        discarded: new Set([A]),
+        kept: [],
+        opened: new Set(),
+      },
       allowUnmarked: true,
     })
     expect(textarea.value).toBe('')
@@ -400,7 +416,7 @@ describe('Composer link previews', () => {
     send()
     // Still a preview-authoring composer: the parent decides the field.
     expect(onSubmit).toHaveBeenCalledWith(A, undefined, {
-      draft: { cards: [], discarded: new Set() },
+      draft: { cards: [], discarded: new Set(), kept: [], opened: new Set() },
       allowUnmarked: false,
     })
   })

@@ -235,6 +235,7 @@ export function RoomPage() {
     timelines,
     attachments: staging,
     linkPreviews: linkPreviewCache,
+    capabilities,
     platform,
   } = useServices()
   // Warm across room switches rather than rebuilt per mount (ADR 0085 phase
@@ -1312,6 +1313,7 @@ export function RoomPage() {
       device: platform.linkPreview,
       api,
       cache: linkPreviewCache,
+      capabilities,
     },
   })
   void ephemeral.revision.value

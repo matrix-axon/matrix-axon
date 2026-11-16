@@ -847,6 +847,39 @@ describe("deadlines that wait past axon's own (issues 872 and 879)", () => {
     ).rejects.toThrow(REQUEST_TIMEOUT_MESSAGE)
   })
 
+  // ADR 0132 § 8: an edit that carries previews is bounded the same way.
+  it('gives an edit that carries previews the preview-send deadline', async () => {
+    const EDIT = `${ROOMS}/${encodeURIComponent(ROOM)}/events/:eventId`
+    server.use(
+      http.put(EDIT, async () => {
+        await delay(150)
+        return HttpResponse.json({ data: { event_id: '$edit' } })
+      }),
+    )
+    const api = createApiClient(
+      stubAuth('tok'),
+      BASE_URL,
+      undefined,
+      40,
+      {},
+      5_000,
+    )
+    const params = { path: { account_id: ACCT, room_id: ROOM, event_id: '$e' } }
+    const route = '/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}'
+
+    const { response } = await api.PUT(route, {
+      params,
+      body: {
+        body: 'https://example.org',
+        url_previews: [{ matched_url: 'https://example.org', keep: true }],
+      },
+    })
+    expect(response.status).toBe(200)
+    await expect(
+      api.PUT(route, { params, body: { body: 'plain' } }),
+    ).rejects.toThrow(REQUEST_TIMEOUT_MESSAGE)
+  })
+
   // Typing is bounded at 10 s by axon, so it keeps the floor.
   it('keeps the floor on a route the table does not list', async () => {
     server.use(

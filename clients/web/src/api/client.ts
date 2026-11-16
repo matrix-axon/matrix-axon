@@ -173,14 +173,18 @@ const AXON_PREVIEW_SLOT_MS = 5_000
  * preview send, under its upload timeout, after waiting for a slot when a
  * thumbnail is attached (`bundled_previews.rs`, ADR 0132 § 6). Sizing it as an
  * ordinary send would hang up on a slow one and report a send that may yet
- * land as an unknown outcome.
+ * land as an unknown outcome. An edit that carries them is bounded the same
+ * way (§ 8).
  */
 export const AXON_PREVIEW_SEND_MS =
   AXON_PREVIEW_SLOT_MS + AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS
 
-const SEND_ROUTE = 'POST /v1/accounts/{account_id}/rooms/{room_id}/send'
+const PREVIEW_ROUTES: ReadonlySet<string> = new Set([
+  'POST /v1/accounts/{account_id}/rooms/{room_id}/send',
+  'PUT /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}',
+])
 
-/** Whether a `/send` request's JSON body carries `url_previews`. */
+/** Whether a `/send` or edit request's JSON body carries `url_previews`. */
 async function carriesPreviews(request: Request): Promise<boolean> {
   try {
     const body: unknown = JSON.parse(await request.clone().text())
@@ -613,7 +617,7 @@ export function createApiClient(
     async onRequest({ request, schemaPath }) {
       let ms = deadlineMs(request.method, schemaPath, timeoutMs, routeTimeouts)
       if (
-        `${request.method.toUpperCase()} ${schemaPath}` === SEND_ROUTE &&
+        PREVIEW_ROUTES.has(`${request.method.toUpperCase()} ${schemaPath}`) &&
         (await carriesPreviews(request))
       )
         ms = Math.max(ms, previewSendMs)

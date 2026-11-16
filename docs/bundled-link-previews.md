@@ -317,7 +317,7 @@ It reads a generated thumbnail at once through the [recovery endpoint](#durable-
 
 What a send carries is decided against the formatted body being sent:
 
-- previews off, an edit, a message with attachments, or one containing a spoiler: the field is omitted;
+- previews off, a message with attachments, or one containing a spoiler: the field is omitted;
 - at least one card the user kept and that is ready: those cards, in text order, at most three;
 - any other link that passes the static eligibility check: `url_previews: []`;
 - otherwise the field is omitted.
@@ -328,6 +328,15 @@ Each attempt uploads the kept thumbnails afresh, in parallel, and sends the new 
 A rejection with 413 `preview_too_large`, `event_too_large` or `payload_too_large`, 400 `bad_request` or 404 `not_found` leaves a failed message whose Retry sends the text with `[]`.
 Any other failure keeps the cards, and Retry uploads their thumbnails again.
 The client waits for a `/send` carrying `url_previews` as long as for an upload (the five-second slot wait plus the upstream upload timeout), because that is how the server bounds it.
+
+Edit mode follows [ADR 0132 section 8](adr/0132-composer-link-previews.md#8-editing-a-message-with-previews), and only against a server whose `GET /v1/capabilities` reports `edit_url_previews`.
+The client asks once signed in; a `404` is kept for the session, and any other failure counts as no until edit mode next opens and asks again.
+Against any other server, edit mode shows no cards, says that saving may remove them, and leaves the field out, as before.
+Edit mode shows the message's cards that the server would keep, under any setting, each with its X; deleting a link hides its card, and typing it back restores the card without a lookup unless it was discarded.
+Links the edit adds get cards under the setting while the edit has fewer than three cards, counting the message's; a media caption gets none.
+An edit sends `[]` for a spoiler when the message has a preview field, otherwise its kept cards as `{"matched_url", "keep": true}` and its new cards in text order; `[]` when a card was removed or, with previews on, a link was added; and otherwise leaves the field out, so the server carries the cards forward.
+The size check measures the whole replacement, dropping new images, then new cards, then the message's cards, from the end; a card dropped for size counts as removed.
+After `409 previews_changed`, edit mode reopens on the message as it now stands, keeping the typed text and discards; after a preview rejection it reopens without the new cards.
 
 The server finds a `matched_url` only behind a lowercase `http://` or `https://`, so the composer lowercases each bare link's scheme before sending (`Https://` from a capitalized first word becomes `https://`), leaving code spans and blocks as written.
 
