@@ -100,19 +100,25 @@ The macOS build is signed with a Developer ID certificate and notarized by Apple
 
 The Windows executables and installer are signed through Azure Artifact Signing (ADR 0119), so they show a verified publisher; SmartScreen may still warn on the first downloads of a new release while its reputation builds.
 
-
 #### Linux
 
 The Linux builds are not signed, so some Linux desktops will warn the first time you run them.
-The Linux client can leverage system autocorrect/spell-checking for any dictionaries you have installed. For example, to have the client flag spelling errors in English and Finnish on an Ubuntu box:
+The Linux client can leverage system autocorrect/spell-checking for any dictionaries you have installed. For example, to have the client flag spelling errors in English and Finnish on an Ubuntu box, see the example below. You may need to adjust package versions for your distribution (e.g. `libgspell-1-2` or `libgspell-1-3`).
+
 ```sh
-# specify your preferred dictionaries below
-sudo apt install libvoikko1 voikko-fi libenchant-2-2 gspell-1 hunspell hunspell-en-us hunspell-en-gb 
-# set LANGUAGE below just for axon; include multiple languages with : as the delimeter
+# install spell checking support
+sudo apt install hunspell libenchant-2-2 libgspell-1-3
+# install English language libraries
+sudo apt install hunspell-en-us hunspell-en-gb
+# install Finnish language libraries
+sudo apt install libvoikko1 voikko-fi
+# set LANGUAGE below just for axon; include multiple languages with : as the delimiter
 LANGUAGE=fi:en_US axon
+# for AppImage rather than installed DEB package (fill in current version)
+LANGUAGE=fi:en_US ./Axon_<version>_amd64.AppImage
 ```
 
-### Building from source
+#### Building from source
 
 Building the shell yourself is documented in [`clients/web/src-tauri/README.md`](../clients/web/src-tauri/README.md).
 
