@@ -27,7 +27,7 @@
 //! ingest retry, a key arrival, a withheld notice, a sweep — keeps the stored
 //! reason current.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +35,8 @@ use std::time::Duration;
 use axon_core::{UtdReason, UtdReasonKind};
 use axon_search::IndexHandle;
 use axon_store::{PendingUtd, Store, UtdReasonUpdate};
-use futures_util::StreamExt;
+use futures_util::stream::BoxStream;
+use futures_util::{FutureExt, StreamExt};
 use matrix_sdk::deserialized_responses::{
     DeviceLinkProblem, EncryptionInfo, TimelineEvent, TimelineEventKind, UnableToDecryptReason,
     VerificationLevel,
@@ -43,7 +44,7 @@ use matrix_sdk::deserialized_responses::{
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::AnyTimelineEvent;
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::RoomId;
+use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::{Client, Room};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -113,6 +114,18 @@ impl RedecryptSummary {
 /// `megolm_session_id` hot column. `None` if the field is absent or non-string.
 pub(crate) fn megolm_session_id(raw_event: &Value) -> Option<&str> {
     raw_event.get("content")?.get("session_id")?.as_str()
+}
+
+/// The megolm session of a paged event the SDK could not decrypt, read from the
+/// event itself rather than its stored row (#947: a UTD whose row already
+/// existed, or failed to write, still names its session). `None` for an event
+/// that decrypted or is not encrypted. Pure.
+pub(crate) fn paged_utd_session_id(ev: &TimelineEvent) -> Option<String> {
+    if !matches!(ev.kind, TimelineEventKind::UnableToDecrypt { .. }) {
+        return None;
+    }
+    let content: Value = ev.raw().get_field("content").ok().flatten()?;
+    content.get("session_id")?.as_str().map(str::to_owned)
 }
 
 /// Extract `(content, type)` from a re-decrypted event, or `None` if the SDK
@@ -893,6 +906,158 @@ pub(crate) async fn recheck_persisted_utd(
     }
 }
 
+/// One batch of room keys from the SDK's arrival stream, as `(room, session)`
+/// pairs, or `None` where the subscription lagged and dropped some.
+type ArrivalBatch = Option<Vec<(OwnedRoomId, String)>>;
+
+/// The room keys that reach the crypto store while one backfill page is being
+/// decrypted and written (#947).
+///
+/// This is the backfill side of the race that [`recheck_persisted_utd`] closes
+/// for live sync (#938). A key that lands after the SDK tried a paged event but
+/// before its row is written is drained by [`run`] against a table that does not
+/// have the row yet, so the row stays a UTD until the next restart. Live sync
+/// re-checks every new UTD. Backfill cannot afford that: one page can store
+/// dozens of rows whose keys will never arrive (the Steve-instance backlog),
+/// and each attempt is an SDK decrypt and an SDK warning.
+///
+/// So backfill re-checks only the sessions that could have been missed. The
+/// watch subscribes to the same arrival stream as [`run`] before the page is
+/// decrypted, and after the page is written [`recheck_backfilled_sessions`]
+/// reads what it buffered. A key that arrived before the subscription was in
+/// the store when the SDK decrypted the event. A key that arrives after that
+/// read is matched by [`run`], whose query then sees the written rows. Every
+/// key in between was buffered here.
+///
+/// That argument relies on the SDK's stream being ready as soon as a batch is
+/// sent: [`buffered`](Self::buffered) polls without waiting, and treats a
+/// pending poll as "nothing buffered". Today the stream is a `tokio` broadcast
+/// receiver with a synchronous `map`, so a sent batch is ready on the first
+/// poll. An SDK upgrade that puts an async step (a store read, a task hop) in
+/// that stream would quietly bring #947 back;
+/// `key_arrival_tests::a_key_imported_during_the_page_is_rechecked` is the
+/// test that would catch it.
+pub(crate) struct KeyArrivalWatch {
+    /// `None` without an `OlmMachine`: no keys arrive, and nothing to watch.
+    stream: Option<BoxStream<'static, ArrivalBatch>>,
+}
+
+impl KeyArrivalWatch {
+    /// Subscribe to the arrival stream. Must be called before the page's events
+    /// are decrypted.
+    pub(crate) async fn start(client: &Client) -> Self {
+        let stream = client
+            .encryption()
+            .room_keys_received_stream()
+            .await
+            .map(|stream| {
+                stream
+                    .map(|batch| {
+                        batch.ok().map(|infos| {
+                            infos
+                                .into_iter()
+                                .map(|info| (info.room_id, info.session_id))
+                                .collect()
+                        })
+                    })
+                    .boxed()
+            });
+        Self { stream }
+    }
+
+    /// Every batch buffered since [`start`](Self::start), without waiting for
+    /// more.
+    fn buffered(&mut self) -> Vec<ArrivalBatch> {
+        let mut batches = Vec::new();
+        if let Some(stream) = self.stream.as_mut() {
+            // `now_or_never` is `None` once nothing more is buffered, and the
+            // inner `None` is a closed stream.
+            while let Some(Some(batch)) = stream.next().now_or_never() {
+                batches.push(batch);
+            }
+        }
+        batches
+    }
+
+    #[cfg(test)]
+    fn from_stream(stream: BoxStream<'static, ArrivalBatch>) -> Self {
+        Self {
+            stream: Some(stream),
+        }
+    }
+}
+
+/// The sessions in `room_id` to re-check after a backfill page: those whose
+/// keys arrived while it was being written, or every one of them if the
+/// subscription lagged, since a dropped batch may have named any of them. Pure.
+fn sessions_to_recheck<'a>(
+    room_id: &RoomId,
+    page_sessions: &'a BTreeSet<String>,
+    arrivals: &[ArrivalBatch],
+) -> Vec<&'a str> {
+    if arrivals.iter().any(Option::is_none) {
+        return page_sessions.iter().map(String::as_str).collect();
+    }
+    let arrived: BTreeSet<&str> = arrivals
+        .iter()
+        .flatten()
+        .flatten()
+        .filter(|(room, _)| room == room_id)
+        .map(|(_, session)| session.as_str())
+        .collect();
+    page_sessions
+        .iter()
+        .map(String::as_str)
+        .filter(|session| arrived.contains(session))
+        .collect()
+}
+
+/// Drain the pending UTDs of every session in `page_sessions` whose key arrived
+/// during the backfill page that `watch` covered (see [`KeyArrivalWatch`]).
+/// Local only, like [`recheck_persisted_utd`]. Stops between sessions once
+/// `cancel` fires, since a lagged watch can mean many sessions; the next
+/// start's sweep covers the rest. Returns how many sessions were re-checked.
+pub(crate) async fn recheck_backfilled_sessions(
+    room: &Room,
+    store: &Store,
+    account_id: Uuid,
+    page_sessions: &BTreeSet<String>,
+    mut watch: KeyArrivalWatch,
+    index: Option<&IndexHandle>,
+    cancel: &CancellationToken,
+) -> usize {
+    let arrivals = watch.buffered();
+    let sessions = sessions_to_recheck(room.room_id(), page_sessions, &arrivals);
+    if sessions.is_empty() {
+        return 0;
+    }
+    tracing::debug!(
+        %account_id,
+        room_id = %room.room_id(),
+        sessions = sessions.len(),
+        lagged = arrivals.iter().any(Option::is_none),
+        "re-checking backfilled UTDs whose keys arrived during the page"
+    );
+    let client = room.client();
+    let mut rechecked = 0;
+    for session_id in &sessions {
+        if cancel.is_cancelled() {
+            break;
+        }
+        redecrypt_session(
+            &client,
+            store,
+            account_id,
+            room.room_id().as_str(),
+            session_id,
+            index,
+        )
+        .await;
+        rechecked += 1;
+    }
+    rechecked
+}
+
 /// Parse a room ID string and look up its `Room` handle on the client.
 fn room_handle(client: &Client, room_id: &str) -> Option<Room> {
     let room_id = RoomId::parse(room_id).ok()?;
@@ -916,7 +1081,7 @@ mod backup_gate_tests {
 
     /// A client with a session (so it has a crypto store) but no backup keys,
     /// against a homeserver that counts key-backup requests.
-    async fn client_without_backup_keys(backup_requests: Arc<AtomicUsize>) -> Client {
+    pub(super) async fn client_without_backup_keys(backup_requests: Arc<AtomicUsize>) -> Client {
         let app = Router::new().fallback(move |uri: axum::http::Uri| {
             if uri.path().contains("/room_keys/") {
                 backup_requests.fetch_add(1, Ordering::SeqCst);
@@ -1318,6 +1483,101 @@ mod backup_gate_tests {
     }
 }
 
+/// [`KeyArrivalWatch`] against a real crypto store: a room key imported after
+/// the watch starts is what the backfill re-check sees (#947).
+#[cfg(test)]
+mod key_arrival_tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use matrix_sdk_base::crypto::encrypt_room_key_export;
+    use matrix_sdk_base::crypto::olm::{InboundGroupSession, SenderData};
+    use matrix_sdk_base::crypto::types::EventEncryptionAlgorithm;
+    use matrix_sdk_base::crypto::vodozemac::megolm::{GroupSession, SessionConfig};
+    use matrix_sdk_base::crypto::vodozemac::{
+        Curve25519PublicKey, Curve25519SecretKey, Ed25519SecretKey,
+    };
+
+    use super::*;
+
+    const PASSPHRASE: &str = "key-arrival-test";
+
+    /// A room-key export file holding one new megolm session for `room_id`,
+    /// and that session's id. The file lives in `dir`, which removes it on
+    /// drop, panics included.
+    async fn room_key_export(
+        dir: &tempfile::TempDir,
+        room_id: &RoomId,
+    ) -> (std::path::PathBuf, String) {
+        let outbound = GroupSession::new(SessionConfig::version_1());
+        let session = InboundGroupSession::new(
+            Curve25519PublicKey::from(&Curve25519SecretKey::new()),
+            Ed25519SecretKey::new().public_key(),
+            room_id,
+            &outbound.session_key(),
+            SenderData::unknown(),
+            None,
+            EventEncryptionAlgorithm::MegolmV1AesSha2,
+            None,
+            false,
+        )
+        .expect("inbound session");
+        let export =
+            encrypt_room_key_export(&[session.export().await], PASSPHRASE, 1).expect("key export");
+        let path = dir.path().join("keys.txt");
+        tokio::fs::write(&path, export)
+            .await
+            .expect("write key export");
+        (path, outbound.session_id())
+    }
+
+    async fn import(client: &Client, path: std::path::PathBuf) {
+        let result = client.encryption().import_room_keys(path, PASSPHRASE).await;
+        assert_eq!(result.expect("import").imported_count, 1);
+    }
+
+    /// The race in #947: the SDK has already tried the paged event, then its
+    /// key lands before the row is written. The watch, started before the
+    /// attempt, must hold that key so the page's session is re-checked.
+    #[tokio::test]
+    async fn a_key_imported_during_the_page_is_rechecked() {
+        let client =
+            backup_gate_tests::client_without_backup_keys(Arc::new(AtomicUsize::new(0))).await;
+        let room = <&RoomId>::try_from("!paged:localhost").unwrap();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (path, session_id) = room_key_export(&dir, room).await;
+
+        let mut watch = KeyArrivalWatch::start(&client).await;
+        // The SDK publishes the imported session to the received-keys stream
+        // before `import_room_keys` returns, so the batch is already buffered
+        // here. If an SDK upgrade defers that publish, this test fails, and so
+        // would the backfill re-check (see `KeyArrivalWatch`).
+        import(&client, path).await;
+
+        let page = BTreeSet::from([session_id.clone(), "never-arrives".to_owned()]);
+        let arrivals = watch.buffered();
+        assert_eq!(
+            sessions_to_recheck(room, &page, &arrivals),
+            vec![session_id.as_str()]
+        );
+    }
+
+    /// A key already in the store when the watch starts was there for the
+    /// SDK's decrypt attempt, so it is not re-checked.
+    #[tokio::test]
+    async fn a_key_imported_before_the_page_is_not_rechecked() {
+        let client =
+            backup_gate_tests::client_without_backup_keys(Arc::new(AtomicUsize::new(0))).await;
+        let room = <&RoomId>::try_from("!paged:localhost").unwrap();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (path, session_id) = room_key_export(&dir, room).await;
+        import(&client, path).await;
+
+        let mut watch = KeyArrivalWatch::start(&client).await;
+        let page = BTreeSet::from([session_id]);
+        assert!(sessions_to_recheck(room, &page, &watch.buffered()).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1456,6 +1716,32 @@ mod tests {
         assert_eq!(megolm_session_id(&envelope), Some("session-abc-123"));
     }
 
+    /// #947: the backfill re-check takes a UTD's session from the paged event,
+    /// so it does not depend on the row having been written. A decrypted event
+    /// names no session to re-check.
+    #[test]
+    fn paged_utd_session_id_reads_the_event() {
+        let raw: Raw<AnySyncTimelineEvent> = serde_json::from_str(UTD_ENCRYPTED).unwrap();
+        let utd = TimelineEvent::from_utd(
+            raw,
+            UnableToDecryptInfo {
+                session_id: None,
+                reason: UnableToDecryptReason::MissingMegolmSession {
+                    withheld_code: None,
+                },
+            },
+        );
+        assert_eq!(
+            paged_utd_session_id(&utd).as_deref(),
+            Some("session-abc-123")
+        );
+        let plain: Raw<AnySyncTimelineEvent> = serde_json::from_str(DECRYPTED_MESSAGE).unwrap();
+        assert_eq!(
+            paged_utd_session_id(&TimelineEvent::from_plaintext(plain)),
+            None
+        );
+    }
+
     #[test]
     fn missing_session_id_is_none() {
         let envelope: Value = serde_json::from_str(MALFORMED).expect("fixture");
@@ -1588,6 +1874,71 @@ mod tests {
         let (content, event_type) = extract_decrypted(&ev).expect("decrypted fields");
         assert_eq!(event_type, "m.room.message");
         assert_eq!(content["body"], "hello from a re-decrypted message");
+    }
+
+    fn room_id(id: &str) -> OwnedRoomId {
+        id.parse().expect("room id")
+    }
+
+    fn sessions(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    fn arrived(pairs: &[(&str, &str)]) -> ArrivalBatch {
+        Some(
+            pairs
+                .iter()
+                .map(|(room, session)| (room_id(room), (*session).to_owned()))
+                .collect(),
+        )
+    }
+
+    /// Only a session of this page, in this room, whose key arrived during it
+    /// is re-checked. A page full of never-decryptable sessions costs nothing.
+    #[test]
+    fn a_backfilled_page_rechecks_only_sessions_whose_keys_arrived() {
+        let room = room_id("!r:x");
+        let page = sessions(&["s1", "s2", "s3"]);
+        let arrivals = [
+            arrived(&[("!r:x", "s2"), ("!other:x", "s3")]),
+            arrived(&[("!r:x", "elsewhere")]),
+        ];
+        assert_eq!(sessions_to_recheck(&room, &page, &arrivals), vec!["s2"]);
+        assert!(sessions_to_recheck(&room, &page, &[]).is_empty());
+    }
+
+    /// A lagged subscription may have dropped a batch naming any of the page's
+    /// sessions, so all of them are re-checked.
+    #[test]
+    fn a_lagged_watch_rechecks_every_session_of_the_page() {
+        let room = room_id("!r:x");
+        let page = sessions(&["s1", "s2"]);
+        let arrivals = [arrived(&[("!r:x", "s2")]), None];
+        assert_eq!(
+            sessions_to_recheck(&room, &page, &arrivals),
+            vec!["s1", "s2"]
+        );
+    }
+
+    /// The watch hands back what arrived and returns at once when nothing
+    /// more is buffered: it must never hold up the backfill loop waiting for
+    /// a key.
+    #[tokio::test]
+    async fn the_watch_reads_buffered_arrivals_without_waiting() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ArrivalBatch>();
+        let mut watch = KeyArrivalWatch::from_stream(
+            futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)).boxed(),
+        );
+        tx.send(arrived(&[("!r:x", "s1")])).unwrap();
+        tx.send(None).unwrap();
+        let batches = tokio::time::timeout(Duration::from_secs(5), async { watch.buffered() })
+            .await
+            .expect("the read waited for more keys");
+        assert_eq!(batches, vec![arrived(&[("!r:x", "s1")]), None]);
+        // Still open, nothing buffered: an empty read, not a wait.
+        assert!(watch.buffered().is_empty());
+        drop(tx);
+        assert!(watch.buffered().is_empty());
     }
 
     #[test]

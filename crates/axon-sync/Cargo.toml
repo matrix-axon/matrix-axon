@@ -59,3 +59,5 @@ chrono = { workspace = true }
 # clamps, and deadlines are asserted exactly instead of slept through.
 tokio = { workspace = true, features = ["net", "test-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
+# Room-key export files for the key-arrival tests, removed even on panic.
+tempfile = "3"

@@ -19,6 +19,12 @@
 //! (send, then decrypt each event via the same [`matrix_sdk::Room::decrypt_event`]
 //! the re-decryption queue uses) minus that cache write. See issue #287.
 //!
+//! A page's UTDs can miss a room key that lands between the decrypt attempt and
+//! the row write, because the re-decryption queue drains that key before the row
+//! exists. So each page watches the key-arrival stream from just before it is
+//! decrypted, and once it is written re-checks only the sessions whose keys
+//! arrived ([`KeyArrivalWatch`], #947).
+//!
 //! It is *not* a one-shot boot sweep: the task lives for the whole supervised run
 //! and re-polls `joined_rooms()` when idle, so a newly joined or re-joined room is
 //! picked up without a restart. Per-room progress is persisted after every page
@@ -49,6 +55,7 @@
 //! dir) is low — backfill grows storage unbounded ("to room start"), so it must
 //! not fill the disk. Live sync is unaffected; only backfill pauses.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -68,6 +75,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::{persist_backfilled_event, PersistContext};
 use crate::homeserver_gate::{is_fast, GateError, HomeserverGate, Outcome, TIMEOUT_HOLD};
+use crate::redecrypt::{paged_utd_session_id, recheck_backfilled_sessions, KeyArrivalWatch};
 
 /// The filesystem the disk-space valve guards: the configured override, else the
 /// sync data dir. Shared by the valve (`disk_ok`) and the live `GET /v1/status`
@@ -564,6 +572,9 @@ struct Page {
     /// page timeout is fast, counted from when the request was sent, not from
     /// when it started waiting for a permit.
     speed: PageSpeed,
+    /// The room keys that arrived from just before decryption on, read once
+    /// the page is written (#947).
+    key_arrivals: KeyArrivalWatch,
 }
 
 /// Fetch and decrypt one `/messages` page.
@@ -600,6 +611,10 @@ async fn fetch_page(
         Err(_elapsed) => return Err(FetchError::TimedOut),
     };
 
+    // Subscribe before the first decrypt attempt, so a key that the attempt
+    // misses is either buffered here or matched by the re-decryption queue
+    // after the row is written. See `KeyArrivalWatch`.
+    let key_arrivals = KeyArrivalWatch::start(&client).await;
     let mut events = Vec::with_capacity(response.chunk.len());
     for raw in response.chunk {
         events.push(decrypt_paged_event(room, raw).await);
@@ -615,6 +630,7 @@ async fn fetch_page(
         } else {
             PageSpeed::Slow
         },
+        key_arrivals,
     })
 }
 
@@ -689,7 +705,12 @@ async fn backfill_room_page(
     // would keep the backfill task parked inside the await, and shutdown / logout /
     // delete — which cancel the token and then await this task's handle — would
     // stall until the request eventually resolved.
-    let Page { events, end, speed } = tokio::select! {
+    let Page {
+        events,
+        end,
+        speed,
+        key_arrivals,
+    } = tokio::select! {
         biased;
         _ = cancel.cancelled() => return PageOutcome::Abandoned,
         result = fetch_page(gate, room, request, params.page_timeout) => match result {
@@ -712,10 +733,17 @@ async fn backfill_room_page(
     // decision 2), including when the page is abandoned part way.
     let mut utd_reasons = Vec::new();
     let mut abandoned = false;
+    // The megolm sessions of the page's UTDs, for the re-check below. Read
+    // from the paged events, not the stored rows, so a UTD whose row already
+    // existed (or failed to write) is still covered.
+    let mut utd_sessions = BTreeSet::new();
     for tev in &events {
         if cancel.is_cancelled() {
             abandoned = true;
             break;
+        }
+        if let Some(session_id) = paged_utd_session_id(tev) {
+            utd_sessions.insert(session_id);
         }
         if let Some(utd) = persist_backfilled_event(ctx, room, tev).await {
             utd_reasons.push(utd);
@@ -730,6 +758,21 @@ async fn backfill_room_page(
     }
     if abandoned {
         return PageOutcome::Abandoned;
+    }
+    // A key that landed while the page was being decrypted and written may
+    // have been drained before its rows existed (#947). After the reasons
+    // above, so a row that still fails keeps the re-check's newer reason.
+    if !utd_sessions.is_empty() {
+        recheck_backfilled_sessions(
+            room,
+            &ctx.store,
+            account_id,
+            &utd_sessions,
+            key_arrivals,
+            ctx.index.as_ref(),
+            cancel,
+        )
+        .await;
     }
 
     let fetched = events.len();
