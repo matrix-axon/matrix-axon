@@ -13,14 +13,16 @@
 export function hiddenByRedaction(
   event: { redacted: boolean; event_id: string },
   hideRedacted: boolean,
-  liveThreadRoots?: ReadonlyMap<string, { reply_count: number }>,
+  liveThreadRoots: ReadonlySet<string>,
 ): boolean {
-  if (!hideRedacted || !event.redacted) {
-    return false
-  }
   // A redacted thread root that still has replies is the only way into them
   // from the room, so the preference yields: hiding it would orphan the thread.
-  // `reply_count` already excludes redacted members, so a positive count means
-  // there is something left to read.
-  return (liveThreadRoots?.get(event.event_id)?.reply_count ?? 0) <= 0
+  return hideRedacted && event.redacted && !liveThreadRoots.has(event.event_id)
 }
+
+/**
+ * The `liveThreadRoots` argument for a caller with no thread roots to except,
+ * such as a thread's own replies (a reply cannot be a root). Named so that
+ * passing nothing is a visible decision rather than an omission.
+ */
+export const NO_THREAD_ROOTS: ReadonlySet<string> = new Set()
