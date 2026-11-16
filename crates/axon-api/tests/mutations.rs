@@ -286,6 +286,203 @@ async fn send(
     (status, json)
 }
 
+/// An edit's previews (ADR 0132 section 8): `keep` entries and new ones reach
+/// the sender in order, new images are claimed and then consumed, and the
+/// message's current content comes from the store.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn edit_previews_reach_the_sender_with_the_stored_message() {
+    let store = store().await;
+    let account = store
+        .upsert_account(
+            &format!("@edit-previews-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let room = format!("!edit-previews-{}:localhost", Uuid::new_v4());
+    let event_id = format!("$edit-previews-{}:localhost", Uuid::new_v4());
+    let content = json!({
+        "msgtype": "m.text",
+        "body": "https://a.example/ https://b.example/",
+        "m.url_previews": [{"matrix:matched_url": "https://a.example/"}]
+    });
+    store
+        .upsert_event(&axon_store::NewEvent {
+            event_id: &event_id,
+            room_id: &room,
+            account_id: account,
+            sender: "@me:localhost",
+            origin_ts: 1,
+            event_type: "m.room.message",
+            content: Some(content.clone()),
+            raw_event: json!({"type": "m.room.message", "content": content}),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: Some("https://a.example/ https://b.example/"),
+        })
+        .await
+        .unwrap();
+    let sender = Arc::new(StubSender::ok("$replacement"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store, sender.clone(), uploads.clone());
+    let image = Uuid::new_v4();
+    let uri = format!("/v1/accounts/{account}/rooms/{room}/events/{event_id}");
+    let body = "https://a.example/ https://b.example/";
+    for previews in [
+        json!([
+            {"matched_url": "https://a.example/", "keep": true},
+            {"matched_url": "https://b.example/", "title": "B", "image_upload_id": image}
+        ]),
+        json!([]),
+        Value::Null,
+    ] {
+        let mut request = json!({"body": body});
+        if !previews.is_null() {
+            request["url_previews"] = previews;
+        }
+        let (status, response) = send(&app, "PUT", &uri, Some(request)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+    }
+    // Another room's event of the same id is not this message.
+    let (status, _) = send(
+        &app,
+        "PUT",
+        &format!("/v1/accounts/{account}/rooms/!other:localhost/events/{event_id}"),
+        Some(json!({"body": "x"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let edits: Vec<_> = sender
+        .calls()
+        .into_iter()
+        .map(|call| match call {
+            Call::Edit {
+                previews, current, ..
+            } => (previews, current),
+            other => panic!("unexpected call {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        edits,
+        vec![
+            (
+                Some(vec![
+                    "keep https://a.example/".to_owned(),
+                    "new https://b.example/ +image".to_owned()
+                ]),
+                Some(content.clone())
+            ),
+            (Some(vec![]), Some(content.clone())),
+            (None, Some(content)),
+            (None, None),
+        ]
+    );
+    assert_eq!(uploads.claims(), vec![(account, image)]);
+    assert_eq!(uploads.completes(), uploads.claims());
+    assert!(uploads.releases().is_empty());
+}
+
+/// An explicit list is checked before any claim or dispatch.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn invalid_edit_previews_never_claim_or_dispatch() {
+    let sender = Arc::new(StubSender::ok("$must-not-send"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let uri = "/v1/accounts/00000000-0000-0000-0000-000000000000/rooms/!room:localhost/events/$e";
+    let image = Uuid::new_v4();
+    let nine: Vec<Value> = (0..9)
+        .map(|n| json!({"matched_url": format!("https://a.example/{n}"), "keep": true}))
+        .collect();
+    for (name, request, want) in [
+        (
+            "keep false",
+            json!({"body": "https://a.example/", "url_previews": [{"matched_url": "https://a.example/", "keep": false}]}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "kept link not in the body",
+            json!({"body": "text", "url_previews": [{"matched_url": "https://a.example/", "keep": true}]}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "new link not in the body",
+            json!({"body": "text", "url_previews": [{"matched_url": "https://a.example/", "image_upload_id": image}]}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "the same link twice",
+            json!({"body": "https://a.example/", "url_previews": [
+                {"matched_url": "https://a.example/", "keep": true},
+                {"matched_url": "https://a.example/", "image_upload_id": image}
+            ]}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "keep with metadata",
+            json!({"body": "https://a.example/", "url_previews": [{"matched_url": "https://a.example/", "keep": true, "title": "t"}]}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "more than eight",
+            json!({"body": (0..9).map(|n| format!("https://a.example/{n}")).collect::<Vec<_>>().join(" "), "url_previews": nine}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "too large",
+            json!({"body": format!("https://a.example/ {}", "x".repeat(41 * 1024)), "url_previews": [{"matched_url": "https://a.example/", "image_upload_id": image}]}),
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+    ] {
+        let (status, body) = send(&app, "PUT", uri, Some(request)).await;
+        assert_eq!(status, want, "{name}: {body}");
+    }
+    assert!(sender.calls().is_empty());
+    assert!(uploads.claims().is_empty());
+}
+
+/// A `keep` entry for a link another device removed is a 409 that sends
+/// nothing, and the edit's new image goes back for a retry.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn previews_changed_is_a_409_that_releases_the_uploads() {
+    let sender = Arc::new(StubSender::failing(Outcome::PreviewsChanged));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let image = Uuid::new_v4();
+    let (status, body) = send(
+        &app,
+        "PUT",
+        "/v1/accounts/00000000-0000-0000-0000-000000000000/rooms/!room:localhost/events/$e",
+        Some(
+            json!({"body": "https://a.example/ https://b.example/", "url_previews": [
+                {"matched_url": "https://a.example/", "keep": true},
+                {"matched_url": "https://b.example/", "image_upload_id": image}
+            ]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "previews_changed");
+    assert_eq!(uploads.releases(), uploads.claims());
+    assert!(uploads.completes().is_empty());
+}
+
+/// `GET /v1/capabilities` tells a client that edits keep previews; an older
+/// server's 404 means they do not.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn capabilities_report_edit_url_previews() {
+    let app = app(store().await, Arc::new(StubSender::ok("$unused")));
+    let (status, body) = send(&app, "GET", "/v1/capabilities", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"data": {"edit_url_previews": true}}));
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn mutations_route_to_sender_and_envelope_result() {
@@ -356,6 +553,8 @@ async fn mutations_route_to_sender_and_envelope_result() {
                 event_id: event_id.to_owned(),
                 body: "edited".to_owned(),
                 formatted: None,
+                previews: None,
+                current: None,
             },
             Call::Redact {
                 account_id,
@@ -744,6 +943,8 @@ async fn formatted_fields_reach_the_sender() {
                     "org.matrix.custom.html".to_owned(),
                     "<em>edited</em>".to_owned(),
                 )),
+                previews: None,
+                current: None,
             },
         ]
     );

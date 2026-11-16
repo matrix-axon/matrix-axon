@@ -8,13 +8,16 @@ use std::{
 };
 
 use axon_core::{
+    edit_preview::{EditPreview, PreviewEdit},
     link_preview::{self, LinkPreview, PreviewSend},
     Formatted, Relation,
 };
 use uuid::Uuid;
 
 use crate::{
-    dto::{LinkPreviewRequest, SendMediaRequest, SendMessageRequest},
+    dto::{
+        EditPreviewRequest, EditRequest, LinkPreviewRequest, SendMediaRequest, SendMessageRequest,
+    },
     response::{ApiError, ApiResponse},
     sender::MessageSender,
     uploads::StagedUploadService,
@@ -129,15 +132,7 @@ pub(super) async fn send(
     let has_uploads = request.attachment_id.is_some()
         || request.previews.iter().any(|p| p.image_upload_id.is_some());
     let permit = if has_uploads {
-        Some(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                SEND_SLOTS.for_account(account_id).acquire_owned(),
-            )
-            .await
-            .map_err(|_| ApiError::service_unavailable("preview send capacity timed out"))?
-            .map_err(|_| ApiError::service_unavailable("preview send capacity unavailable"))?,
-        )
+        Some(acquire_slot(account_id).await?)
     } else {
         None
     };
@@ -147,31 +142,27 @@ pub(super) async fn send(
         tracing::debug!(%account_id, %room_id, preview_count = request.previews.len(), "preview-aware send started");
         let mut claimed = Vec::new();
         let result = async {
-            let mut previews = Vec::with_capacity(request.previews.len());
-            for p in &request.previews {
-                let image = if let Some(id) = p.image_upload_id {
-                    let image = uploads.claim_preview_upload(account_id, id).await?;
-                    claimed.push(id);
-                    Some(image)
-                } else { None };
-                previews.push(LinkPreview { metadata: p.metadata(), image });
-            }
+            let previews = claim_previews(&*uploads, account_id, &request.previews, &mut claimed).await?;
             let attachment = if let Some(id) = request.attachment_id {
                 let upload = uploads.claim_upload(account_id, id).await?;
                 claimed.push(id);
                 Some(upload.into())
-            } else { None };
-            let message = PreviewSend { body: &request.body, formatted: request.formatted(), relation: request.relation(), previews };
-            sender.send_with_previews(account_id, &room_id, message, attachment).await.map_err(ApiError::from)
-        }.await;
-        for id in claimed {
-            let cleanup = if result.is_ok() { uploads.complete_upload(account_id, id).await } else { uploads.release_upload(account_id, id).await };
-            if let Err(error) = cleanup {
-                // Never format error detail: it can contain private input.
-                let kind = error.diagnostic_kind();
-                tracing::warn!(%account_id, %room_id, upload_id = %id, sent = result.is_ok(), error_kind = kind, "preview send upload bookkeeping failed; boot reconciliation/expiry will recover");
-            }
+            } else {
+                None
+            };
+            let message = PreviewSend {
+                body: &request.body,
+                formatted: request.formatted(),
+                relation: request.relation(),
+                previews,
+            };
+            sender
+                .send_with_previews(account_id, &room_id, message, attachment)
+                .await
+                .map_err(ApiError::from)
         }
+        .await;
+        settle_claims(&*uploads, account_id, &room_id, claimed, result.is_ok()).await;
         match result {
             Ok(event_id) => {
                 tracing::info!(%account_id, %room_id, %event_id, preview_count = request.previews.len(), elapsed_ms = started.elapsed().as_millis(), "sent message with bundled previews");
@@ -181,9 +172,186 @@ pub(super) async fn send(
                 let (status, code) = error.diagnostics();
                 tracing::warn!(%account_id, %room_id, elapsed_ms = started.elapsed().as_millis(), status, code, "preview-aware send failed; upload cleanup attempted");
                 Err(error)
-            },
+            }
         }
-    }).await.map_err(|_| ApiError::internal())?
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+}
+
+/// Claim each preview's image, in order, recording every claim in `claimed`
+/// so the caller settles it whatever happens next.
+async fn claim_previews(
+    uploads: &dyn StagedUploadService,
+    account_id: Uuid,
+    requests: &[LinkPreviewRequest],
+    claimed: &mut Vec<Uuid>,
+) -> Result<Vec<LinkPreview>, ApiError> {
+    let mut previews = Vec::with_capacity(requests.len());
+    for p in requests {
+        let image = if let Some(id) = p.image_upload_id {
+            let image = uploads.claim_preview_upload(account_id, id).await?;
+            claimed.push(id);
+            Some(image)
+        } else {
+            None
+        };
+        previews.push(LinkPreview {
+            metadata: p.metadata(),
+            image,
+        });
+    }
+    Ok(previews)
+}
+
+/// Consume the claimed uploads after a success, or release them for a retry.
+async fn settle_claims(
+    uploads: &dyn StagedUploadService,
+    account_id: Uuid,
+    room_id: &str,
+    claimed: Vec<Uuid>,
+    sent: bool,
+) {
+    for id in claimed {
+        let cleanup = if sent {
+            uploads.complete_upload(account_id, id).await
+        } else {
+            uploads.release_upload(account_id, id).await
+        };
+        if let Err(error) = cleanup {
+            // Never format error detail: it can contain private input.
+            let kind = error.diagnostic_kind();
+            tracing::warn!(%account_id, %room_id, upload_id = %id, sent, error_kind = kind, "preview upload bookkeeping failed; boot reconciliation/expiry will recover");
+        }
+    }
+}
+
+/// An edit (ADR 0132 section 8), validated before any claim. `current` is the
+/// message's content as the store shows it, if the store has it.
+pub(super) async fn edit(
+    sender: Arc<dyn MessageSender>,
+    uploads: Arc<dyn StagedUploadService>,
+    account_id: Uuid,
+    room_id: String,
+    event_id: String,
+    request: EditRequest,
+    current: Option<serde_json::Value>,
+) -> Result<ApiResponse<crate::dto::SendResultDto>, ApiError> {
+    formatted(&request.format, &request.formatted_body)?;
+    let formatted_body = request.formatted_body.as_deref().map(|body| Formatted {
+        format: "org.matrix.custom.html",
+        body,
+    });
+    if let Some(previews) = &request.url_previews {
+        validate_edit_previews(&request.body, formatted_body, previews)?;
+    }
+    let new: Vec<LinkPreviewRequest> = request
+        .url_previews
+        .iter()
+        .flatten()
+        .filter_map(|p| match p {
+            EditPreviewRequest::New(p) => Some(p.clone()),
+            EditPreviewRequest::Keep(_) => None,
+        })
+        .collect();
+    let permit = if new.iter().any(|p| p.image_upload_id.is_some()) {
+        Some(acquire_slot(account_id).await?)
+    } else {
+        None
+    };
+    tokio::spawn(async move {
+        let _permit = permit;
+        let mut claimed = Vec::new();
+        let result = async {
+            let mut claimed_new =
+                claim_previews(&*uploads, account_id, &new, &mut claimed).await?.into_iter();
+            let previews = request.url_previews.as_ref().map(|list| {
+                list.iter()
+                    .filter_map(|p| match p {
+                        EditPreviewRequest::Keep(k) => Some(EditPreview::Keep {
+                            matched_url: k.matched_url.clone(),
+                        }),
+                        EditPreviewRequest::New(_) => claimed_new.next().map(EditPreview::New),
+                    })
+                    .collect()
+            });
+            let edit = PreviewEdit {
+                body: &request.body,
+                formatted: request.formatted_body.as_deref().map(|body| Formatted {
+                    format: "org.matrix.custom.html",
+                    body,
+                }),
+                previews,
+                current,
+            };
+            sender
+                .edit(account_id, &room_id, &event_id, edit)
+                .await
+                .map_err(ApiError::from)
+        }
+        .await;
+        settle_claims(&*uploads, account_id, &room_id, claimed, result.is_ok()).await;
+        if let Err(error) = &result {
+            let (status, code) = error.diagnostics();
+            tracing::debug!(%account_id, %room_id, status, code, "edit failed; upload cleanup attempted");
+        }
+        result.map(|event_id| ApiResponse::new(crate::dto::SendResultDto { event_id }))
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+}
+
+/// An edit's explicit list, checked before any claim: `keep` is `true`, upload
+/// ids are distinct, every link is a complete bare link in the new body and a
+/// distinct destination, and new entries are within the send limits. The
+/// size of the whole replacement, with kept entries, is checked by the sender.
+fn validate_edit_previews(
+    body: &str,
+    formatted_body: Option<Formatted<'_>>,
+    previews: &[EditPreviewRequest],
+) -> Result<(), ApiError> {
+    let mut ids = HashSet::new();
+    let mut all = Vec::with_capacity(previews.len());
+    let mut new = Vec::new();
+    for p in previews {
+        match p {
+            EditPreviewRequest::Keep(k) => {
+                if !k.keep {
+                    return Err(ApiError::bad_request(
+                        "a preview entry with `keep` must set it to true",
+                    ));
+                }
+                all.push(link_preview::PreviewMetadata {
+                    matched_url: k.matched_url.clone(),
+                    ..Default::default()
+                });
+            }
+            EditPreviewRequest::New(p) => {
+                if p.image_upload_id.is_some_and(|id| !ids.insert(id)) {
+                    return Err(ApiError::bad_request(
+                        "upload IDs must be distinct within an edit",
+                    ));
+                }
+                all.push(p.metadata());
+                new.push((p.metadata(), p.image_upload_id.is_some()));
+            }
+        }
+    }
+    link_preview::validate_metadata(body, &all).map_err(preview_error)?;
+    // A lower bound: the replacement carries the body twice and kept entries
+    // too, which the sender checks once the message's previews are known.
+    link_preview::preflight(body, formatted_body, Relation::default(), &new, false)
+        .map_err(preview_error)
+}
+
+async fn acquire_slot(account_id: Uuid) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        SEND_SLOTS.for_account(account_id).acquire_owned(),
+    )
+    .await
+    .map_err(|_| ApiError::service_unavailable("preview send capacity timed out"))?
+    .map_err(|_| ApiError::service_unavailable("preview send capacity unavailable"))
 }
 
 #[cfg(test)]

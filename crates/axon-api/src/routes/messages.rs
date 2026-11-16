@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use axon_store::Store;
 use axum::extract::State;
 use uuid::Uuid;
 
@@ -266,8 +267,11 @@ pub async fn send_media(
     request_body = EditRequest,
     responses(
         (status = 200, description = "Edit sent", body = ApiResponse<SendResultDto>),
-        (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 400, description = "Malformed request, or invalid preview metadata or image", body = crate::response::ErrorResponse),
         (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
+        (status = 404, description = "Account, room or preview upload not found", body = crate::response::ErrorResponse),
+        (status = 409, description = "previews_changed: a `keep` entry names a link the message has no preview for, because another device's edit removed it. Nothing was sent; reload the message and edit again.", body = crate::response::ErrorResponse),
+        (status = 413, description = "An edit that sets url_previews: event_too_large (40960-byte budget for the whole replacement), preview_too_large (32768-byte preview budget), or payload_too_large (thumbnail bytes). Nothing was sent.", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
         (status = 503, description = "Account not reachable", body = crate::response::ErrorResponse),
         (status = 504, description = "Timed out waiting on the SDK gateway (ADR 0030 decision #4, issue #241) — most likely the account's sync engine hasn't completed its first sync yet (see `AccountDto.sync_state`)", body = crate::response::ErrorResponse),
@@ -276,14 +280,21 @@ pub async fn send_media(
 )]
 pub async fn edit_message(
     State(sender): State<Arc<dyn MessageSender>>,
+    State(uploads): State<Arc<dyn StagedUploadService>>,
+    State(store): State<Store>,
     Path((account_id, room_id, event_id)): Path<(Uuid, String, String)>,
     Json(req): Json<EditRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
-    let fmt = formatted(&req.format, &req.formatted_body)?;
-    let new_id = sender
-        .edit(account_id, &room_id, &event_id, &req.body, fmt)
-        .await?;
-    Ok(ApiResponse::new(SendResultDto { event_id: new_id }))
+    // The message as it stands, with its latest edit applied, for its link
+    // previews (ADR 0132 section 8). Absent from the store, the sender uses
+    // the original event instead.
+    let current = store
+        .get_event(account_id, &event_id)
+        .await?
+        .filter(|row| row.room_id == room_id)
+        .and_then(|row| row.content);
+    super::bundled_previews::edit(sender, uploads, account_id, room_id, event_id, req, current)
+        .await
 }
 
 /// Redact an event

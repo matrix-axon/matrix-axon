@@ -5,6 +5,7 @@ Native share intake follows the server prerequisites and web image-card renderer
 Sending never fetches the linked webpage or an external preview image.
 The explicit [generation helper](#opt-in-homeserver-generation) delegates acquisition to the homeserver.
 The web client's room and thread composers author previews under [ADR 0132](adr/0132-composer-link-previews.md); see [Composer authoring](#composer-authoring).
+Edits keep, remove and add previews as [Editing a message](#editing-a-message) describes.
 
 ## Request shape
 
@@ -73,6 +74,38 @@ These APIs have no caller idempotency key: never automatically replay an uncerta
 Uploaded Matrix objects can remain orphaned after failure; local staged bytes retain their existing expiry and boot-reconciliation rules.
 Logs identify account/room/event/upload IDs, counts, failure status/code and cleanup failure category, never shared URLs, titles, image bytes or encrypted-file keys.
 
+## Editing a message
+
+`PUT /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}` accepts the same optional `url_previews`, following [ADR 0132 section 8](adr/0132-composer-link-previews.md#8-editing-a-message-with-previews).
+`GET /v1/capabilities` answers `{"data": {"edit_url_previews": true}}` on a server that does; an older server has no such route, and its `404` means an edit there erases the message's previews.
+
+An edit's previews go in the replacement's `m.new_content`, which the store and edit-aware clients show.
+Whenever `m.new_content` carries them, the top-level `* ` fallback carries `m.url_previews: []` and `com.beeper.linkpreviews: []`, so a client that shows the fallback builds no preview of its own.
+
+The message's current previews are the store's copy with its latest edit applied, or the original event when the store does not have the message.
+Either can be out of date; [issue 1107](https://github.com/matrix-axon/matrix-axon/issues/1107) tracks reading the latest edit instead.
+`m.url_previews` is authoritative when present, and a value that is not a list counts as `[]`; otherwise `com.beeper.linkpreviews` is read in the standard spelling.
+A current entry is used only if it passes the checks a new entry does, with only the keys the server writes, and only the first eight; others are left out.
+
+- **Omitted or null: carry forward.**
+  A message with no preview field gets none.
+  Otherwise the replacement keeps, in order, the entries whose link is still a complete bare link in the new body, and sends `[]` when none remain or the new formatted body has a spoiler (`data-mx-spoiler`).
+  Carried entries degrade to fit the budgets below: whole entries, last first, then `[]`, then no field, so carrying never makes an edit too large to send.
+  A carried list is never smaller than `[]`, so when `[]` does not fit, nothing carried is sent either.
+  This is what the TUI and any client unaware of the field get.
+- **`[]`:** no previews.
+- **A list:** the whole set, at most eight, each a new preview in the send shape (with an optional `image_upload_id`) or `{"matched_url": "…", "keep": true}`.
+  A `keep` entry copies the message's current entry for that link, image included, without uploading anything.
+  Every entry's link must be a complete bare link in the new body, and destinations must be distinct.
+  A kept link whose current entry fails the checks is left out, and a list left with no entries is sent as `[]`.
+  A kept link the message has no entry for at all, because another device's edit removed it, is `409 previews_changed`, and nothing is sent.
+
+The 40 KiB content budget covers the whole replacement event, which carries the body twice, and the 32 KiB preview budget covers `m.new_content`'s list.
+An edit that sets the field and does not fit is a definite `413`, as on a send, and uses the same upload slots, image limits, encryption checks and upload deadline when it has new images.
+An edit that omits the field is not checked against these budgets once its carried previews are gone, exactly as an edit was before.
+A kept plaintext thumbnail stays plaintext in a room that has turned on encryption since, because it was readable already.
+A removed preview's thumbnail is not deleted from the homeserver.
+
 ## Upgrade behavior
 
 The bundled-preview migration builds two ordinary GIN indexes on `events` inside the normal migration transaction.
@@ -88,6 +121,7 @@ The OpenAPI golden test checks schema synchronization; future native/web adapter
 
 ```sh
 cargo test -p axon-core link_preview
+cargo test -p axon-core edit_preview
 cargo test -p axon-sync --lib preview_encryption_refreshes
 cargo test -p axon-api --lib bundled_previews
 cargo test -p axon-api --test openapi

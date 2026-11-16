@@ -66,13 +66,13 @@ pub struct PreviewSend<'a> {
     pub previews: Vec<LinkPreview>,
 }
 
-fn bounded(value: &str, limit: usize) -> bool {
+pub(crate) fn bounded(value: &str, limit: usize) -> bool {
     value.encode_utf16().take(limit + 1).count() <= limit
 }
 
 /// Same bare-URL tokenization as clients/web/src/html/linkify.ts, including
 /// trailing sentence punctuation. An embedded URL prefix is not a match.
-fn body_urls(body: &str) -> HashSet<&str> {
+pub(crate) fn body_urls(body: &str) -> HashSet<&str> {
     body.split(|c: char| c.is_whitespace() || matches!(c, '\u{feff}' | '<' | '>' | '"'))
         .filter_map(|token| {
             let start = ["http://", "https://", "matrix:"]
@@ -129,6 +129,17 @@ pub fn entry(metadata: &PreviewMetadata) -> Value {
         if let Some(text) = text {
             value[key] = json!(text);
         }
+    }
+    value
+}
+
+/// An entry for a size check made before any image is uploaded: with an
+/// image, a placeholder of [`IMAGE_RESERVE_BYTES`] stands in for the SDK media
+/// descriptor the upload will produce.
+pub fn reserved_entry(metadata: &PreviewMetadata, image: bool) -> Value {
+    let mut value = entry(metadata);
+    if image {
+        value["matrix:image:encrypted"] = json!("x".repeat(IMAGE_RESERVE_BYTES));
     }
     value
 }
@@ -253,13 +264,7 @@ pub fn preflight(
         &mut content,
         previews
             .iter()
-            .map(|(m, image)| {
-                let mut value = entry(m);
-                if *image {
-                    value["matrix:image:encrypted"] = json!("x".repeat(IMAGE_RESERVE_BYTES));
-                }
-                value
-            })
+            .map(|(m, image)| reserved_entry(m, *image))
             .collect(),
     );
     if media {

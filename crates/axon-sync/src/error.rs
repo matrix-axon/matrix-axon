@@ -13,6 +13,10 @@ use uuid::Uuid;
 pub enum GatewayError {
     #[error("message exceeds the event size budget")]
     EventTooLarge,
+    /// An edit kept a link preview the message no longer has, because another
+    /// device's edit removed it (ADR 0132 section 8). Nothing was sent.
+    #[error("the message's link previews changed since this edit began")]
+    PreviewsChanged,
     /// No account row exists for this id.
     #[error("no such account: {0}")]
     UnknownAccount(Uuid),

@@ -301,6 +301,11 @@ impl From<crate::sender::SendError> for ApiError {
                 "event_too_large",
                 "message exceeds the event size budget; shorten text or remove formatting/previews",
             ),
+            SendError::PreviewsChanged => ApiError::new(
+                StatusCode::CONFLICT,
+                "previews_changed",
+                "the message's link previews changed since this edit began; reload it and edit again",
+            ),
             SendError::NotFound(msg) => ApiError::not_found(msg),
             SendError::Forbidden(msg) => ApiError::forbidden(msg),
             SendError::Unavailable(msg) => ApiError::service_unavailable(msg),

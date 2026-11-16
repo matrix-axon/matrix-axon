@@ -48,15 +48,38 @@ impl LinkPreviewRequest {
     }
 }
 
-fn deserialize_previews<'de, D: serde::Deserializer<'de>>(
+/// An entry of an edit's `url_previews` (ADR 0132 section 8): a new preview,
+/// in the send shape, or `{"matched_url": …, "keep": true}` to copy the
+/// message's current preview for that link, image included, without uploading
+/// anything.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum EditPreviewRequest {
+    Keep(KeepPreviewRequest),
+    New(LinkPreviewRequest),
+}
+
+/// Keep the message's current preview for `matched_url`. A link whose current
+/// preview fails the server's checks is left out; a link the message has no
+/// preview for at all, because another device's edit removed it, is
+/// `409 previews_changed`.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct KeepPreviewRequest {
+    pub matched_url: String,
+    /// Must be `true`.
+    pub keep: bool,
+}
+
+fn deserialize_previews<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
-) -> Result<Option<Vec<LinkPreviewRequest>>, D::Error> {
-    struct Bounded(Vec<LinkPreviewRequest>);
-    impl<'de> Deserialize<'de> for Bounded {
+) -> Result<Option<Vec<T>>, D::Error> {
+    struct Bounded<T>(Vec<T>);
+    impl<'de, T: Deserialize<'de>> Deserialize<'de> for Bounded<T> {
         fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            struct Visitor;
-            impl<'de> serde::de::Visitor<'de> for Visitor {
-                type Value = Bounded;
+            struct Visitor<T>(std::marker::PhantomData<T>);
+            impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+                type Value = Bounded<T>;
                 fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     f.write_str("at most eight URL previews")
                 }
@@ -74,10 +97,10 @@ fn deserialize_previews<'de, D: serde::Deserializer<'de>>(
                     Ok(Bounded(values))
                 }
             }
-            deserializer.deserialize_seq(Visitor)
+            deserializer.deserialize_seq(Visitor(std::marker::PhantomData))
         }
     }
-    Option::<Bounded>::deserialize(deserializer).map(|value| value.map(|v| v.0))
+    Option::<Bounded<T>>::deserialize(deserializer).map(|value| value.map(|v| v.0))
 }
 
 /// Calling this endpoint is explicit consent to disclose the URL to the
@@ -1134,8 +1157,27 @@ pub struct SendMediaRequest {
 /// is the new *caption*: the media and its filename are kept, and an empty
 /// `body` (or one equal to the filename) removes the caption. Editing any other
 /// kind of message is a `400`.
+///
+/// Link previews (ADR 0132 section 8) go in the replacement's `m.new_content`,
+/// with an explicit `[]` in its top-level fallback. Whether a server supports
+/// `url_previews` here is `GET /v1/capabilities`' `edit_url_previews`.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct EditRequest {
+    /// Omitted or null: carry the message's current previews forward, keeping,
+    /// in order, those whose link is still a complete bare link in `body`.
+    /// A message with no preview field gets none; one with a field whose links
+    /// are all gone, or whose new formatted body has a spoiler, gets `[]`.
+    /// Carried previews degrade to fit the size budget: whole entries, last
+    /// first, then `[]`, then no field.
+    ///
+    /// `[]`: no previews. A list: the whole set, at most 8, each a new preview
+    /// (with the send limits, and an optional `image_upload_id`) or a `keep`
+    /// entry. Every entry's link must be a complete bare link in `body`. The
+    /// replacement must fit 40960 bytes and its previews 32768, as on a send;
+    /// overflow is a definite 413 before any upload or dispatch.
+    #[serde(default, deserialize_with = "deserialize_previews")]
+    #[schema(max_items = 8)]
+    pub url_previews: Option<Vec<EditPreviewRequest>>,
     /// The new plain-text message body, or a media message's new caption (and
     /// formatting fallback).
     pub body: String,
@@ -1146,6 +1188,15 @@ pub struct EditRequest {
     /// The rendered HTML body. Must be paired with `format`.
     #[serde(default)]
     pub formatted_body: Option<String>,
+}
+
+/// Optional features this server supports (`GET /v1/capabilities`). An older
+/// server has no such route, and its `404` means none of them.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CapabilitiesDto {
+    /// An edit accepts `url_previews` and carries a message's previews forward
+    /// when it omits them (ADR 0132 section 8).
+    pub edit_url_previews: bool,
 }
 
 /// Request body for reacting to an event (`POST …/events/{event_id}/reactions`).

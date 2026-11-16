@@ -7,6 +7,7 @@
 
 pub mod account_actions;
 pub mod config;
+pub mod edit_preview;
 pub mod error;
 pub mod image_pack;
 pub mod link_preview;

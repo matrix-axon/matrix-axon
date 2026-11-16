@@ -212,6 +212,12 @@ pub enum Call {
         body: String,
         /// The `(format, formatted_body)` the handler passed, if any.
         formatted: Option<(String, String)>,
+        /// The explicit preview list, one line per entry (`keep <url>` or
+        /// `new <url>`, with ` +image` when it has one); `None` carries
+        /// forward.
+        previews: Option<Vec<String>>,
+        /// The message content the handler read from the store.
+        current: Option<serde_json::Value>,
     },
     Redact {
         account_id: Uuid,
@@ -239,6 +245,7 @@ pub enum Outcome {
     Invalid(String),
     Upstream(String),
     Timeout(String),
+    PreviewsChanged,
 }
 
 impl Outcome {
@@ -251,6 +258,7 @@ impl Outcome {
             Outcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
             Outcome::Upstream(m) => Err(SendError::Upstream(m.clone())),
             Outcome::Timeout(m) => Err(SendError::Timeout(m.clone())),
+            Outcome::PreviewsChanged => Err(SendError::PreviewsChanged),
         }
     }
 }
@@ -2283,15 +2291,30 @@ impl MessageSender for StubSender {
         account_id: Uuid,
         room_id: &str,
         event_id: &str,
-        body: &str,
-        formatted: Option<Formatted<'_>>,
+        edit: axon_core::edit_preview::PreviewEdit<'_>,
     ) -> Result<String, SendError> {
+        use axon_core::edit_preview::EditPreview;
         self.calls.lock().unwrap().push(Call::Edit {
             account_id,
             room_id: room_id.to_owned(),
             event_id: event_id.to_owned(),
-            body: body.to_owned(),
-            formatted: formatted.map(|f| (f.format.to_owned(), f.body.to_owned())),
+            body: edit.body.to_owned(),
+            formatted: edit
+                .formatted
+                .map(|f| (f.format.to_owned(), f.body.to_owned())),
+            previews: edit.previews.as_ref().map(|list| {
+                list.iter()
+                    .map(|p| match p {
+                        EditPreview::Keep { matched_url } => format!("keep {matched_url}"),
+                        EditPreview::New(p) => format!(
+                            "new {}{}",
+                            p.metadata.matched_url,
+                            if p.image.is_some() { " +image" } else { "" }
+                        ),
+                    })
+                    .collect()
+            }),
+            current: edit.current.clone(),
         });
         self.outcome.to_result()
     }

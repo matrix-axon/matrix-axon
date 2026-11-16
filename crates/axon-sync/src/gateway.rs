@@ -730,6 +730,34 @@ fn preview_image_info(
     value
 }
 
+/// One preview's MSC4095 entry, uploading its image, if it has one, into
+/// `room` (encrypted when `encrypted`).
+async fn preview_entry(
+    room: &Room,
+    preview: axon_core::link_preview::LinkPreview,
+    encrypted: bool,
+) -> Result<Value, GatewayError> {
+    use axon_core::link_preview::{MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS};
+    let Some(image) = preview.image else {
+        return Ok(axon_core::link_preview::entry(&preview.metadata));
+    };
+    if image.bytes.len() as u64 > MAX_IMAGE_BYTES
+        || image.width == 0
+        || image.height == 0
+        || u64::from(image.width) * u64::from(image.height) > MAX_IMAGE_PIXELS
+    {
+        return Err(GatewayError::Invalid("invalid preview image limits".into()));
+    }
+    let mimetype = image
+        .mimetype
+        .parse()
+        .map_err(|_| GatewayError::Invalid("invalid preview image MIME".into()))?;
+    let entry = preview_image_info(&preview.metadata, &image);
+    let source =
+        upload_media_source_with_encryption(room, &mimetype, image.bytes, encrypted).await?;
+    set_preview_source(entry, source)
+}
+
 fn set_preview_source(mut value: Value, source: MediaSource) -> Result<Value, GatewayError> {
     validate_preview_media_source(&source)?;
     match source {
@@ -1115,7 +1143,7 @@ impl SdkGateway {
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
     ) -> Result<String, GatewayError> {
-        use axon_core::link_preview::{self, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS};
+        use axon_core::link_preview;
         link_preview::preflight(
             message.body,
             message.formatted,
@@ -1140,35 +1168,7 @@ impl SdkGateway {
         // At most two uploads per send run at once. Consume the owned bytes;
         // avoid cloning up to 16 MiB while preserving input card order.
         let entries = futures_util::stream::iter(message.previews)
-            .map(|preview| {
-                let room = &room;
-                async move {
-                    let Some(image) = preview.image else {
-                        return Ok(link_preview::entry(&preview.metadata));
-                    };
-                    if image.bytes.len() as u64 > MAX_IMAGE_BYTES
-                        || image.width == 0
-                        || image.height == 0
-                        || u64::from(image.width) * u64::from(image.height) > MAX_IMAGE_PIXELS
-                    {
-                        return Err(GatewayError::Invalid("invalid preview image limits".into()));
-                    }
-                    let mimetype = image
-                        .mimetype
-                        .parse()
-                        .map_err(|_| GatewayError::Invalid("invalid preview image MIME".into()))?;
-                    let entry = preview_image_info(&preview.metadata, &image);
-                    let source = upload_media_source_with_encryption(
-                        room,
-                        &mimetype,
-                        image.bytes,
-                        encrypted,
-                    )
-                    .await?;
-                    set_preview_source(entry, source)
-                }
-                .boxed()
-            })
+            .map(|preview| preview_entry(&room, preview, encrypted).boxed())
             .buffered(2)
             .try_collect::<Vec<_>>()
             .await?;
@@ -1345,14 +1345,22 @@ impl SdkGateway {
     /// *whole* original content: it keeps the original `msgtype`, and for media
     /// it carries the media itself with only the caption changed. See
     /// [`replacement_content`] for the rules.
+    ///
+    /// Previews follow ADR 0132 section 8: they go in `m.new_content`, with an
+    /// explicit `[]` in the top-level fallback. An edit that omits them carries
+    /// the message's current previews forward, fitted to the size check; one
+    /// that sets them sends that list, copying `keep` entries from the message
+    /// and uploading new entries' images.
     pub async fn edit(
         &self,
         account_id: Uuid,
         room_id: &str,
         event_id: &str,
-        body: &str,
-        formatted: Option<Formatted<'_>>,
+        edit: axon_core::edit_preview::PreviewEdit<'_>,
     ) -> Result<String, GatewayError> {
+        use axon_core::edit_preview::{self as previews, EditPreview};
+        use futures_util::{FutureExt, StreamExt, TryStreamExt};
+        let (body, formatted) = (edit.body, edit.formatted);
         let room = self.room(account_id, room_id).await?;
         // Validate the target id up front so a bad id is a clean 400, not a 502.
         let target_id = parse_event_id(event_id)?;
@@ -1370,9 +1378,107 @@ impl SdkGateway {
         }
 
         let original = editable_message_content(target.raw())?;
-        let content = replacement_content(original, target_id, body, formatted)?;
-        let resp = room.send(content).await.map_err(map_sdk_err)?;
-        Ok(resp.response.event_id.to_string())
+        // The message as it stands: the store's copy with its latest edit
+        // applied, else the original event fetched above. Either can be
+        // behind (issue #1107).
+        let current_content = match edit.current {
+            Some(content) => content,
+            None => target
+                .raw()
+                .get_field::<Value>("content")
+                .ok()
+                .flatten()
+                .unwrap_or(Value::Null),
+        };
+        let current = previews::current_previews(&current_content);
+        let replacement = replacement_content(original, target_id, body, formatted)?;
+        let mut content = serde_json::to_value(&replacement)
+            .map_err(|_| GatewayError::Invalid("invalid replacement content".into()))?;
+
+        let Some(requested) = edit.previews else {
+            // Carry forward. No new media, so no encryption lookup beyond the
+            // SDK's own, exactly as an edit without previews.
+            let carried =
+                previews::carry_forward(current.as_ref(), body, formatted.map(|f| f.body))
+                    .and_then(|entries| previews::fit_carried(&content, entries));
+            if let Some(entries) = carried {
+                previews::install_edit_previews(&mut content, entries);
+            }
+            let response = room
+                .send_raw("m.room.message", content)
+                .await
+                .map_err(map_sdk_err)?;
+            return Ok(response.response.event_id.to_string());
+        };
+
+        // An explicit list: resolve `keep` entries against the message, and
+        // check the size with each new image's reserve before any upload.
+        enum Planned {
+            Kept(Value),
+            New(axon_core::link_preview::LinkPreview),
+        }
+        let mut planned = Vec::with_capacity(requested.len());
+        for preview in requested {
+            match preview {
+                EditPreview::Keep { matched_url } => {
+                    match previews::resolve_keep(current.as_ref(), &matched_url) {
+                        Ok(Some(entry)) => planned.push(Planned::Kept(entry)),
+                        Ok(None) => {}
+                        Err(previews::PreviewsChanged) => {
+                            return Err(GatewayError::PreviewsChanged)
+                        }
+                    }
+                }
+                EditPreview::New(preview) => planned.push(Planned::New(preview)),
+            }
+        }
+        let reserved = planned
+            .iter()
+            .map(|p| match p {
+                Planned::Kept(entry) => entry.clone(),
+                Planned::New(preview) => axon_core::link_preview::reserved_entry(
+                    &preview.metadata,
+                    preview.image.is_some(),
+                ),
+            })
+            .collect();
+        let mut preflight = content.clone();
+        previews::install_edit_previews(&mut preflight, reserved);
+        previews::check_replacement(&preflight).map_err(preview_validation_error)?;
+
+        ensure_joined(&room)?;
+        // As on a send: one fresh lookup even without uploads, since a cached
+        // false state could expose the message itself.
+        let encrypted = fresh_preview_encryption(&room, account_id).await?;
+        let has_uploads = planned
+            .iter()
+            .any(|p| matches!(p, Planned::New(preview) if preview.image.is_some()));
+        let entries = futures_util::stream::iter(planned)
+            .map(|p| {
+                let room = &room;
+                async move {
+                    match p {
+                        Planned::Kept(entry) => Ok(entry),
+                        Planned::New(preview) => preview_entry(room, preview, encrypted).await,
+                    }
+                }
+                .boxed()
+            })
+            .buffered(2)
+            .try_collect::<Vec<_>>()
+            .await?;
+        previews::install_edit_previews(&mut content, entries);
+        previews::check_replacement(&content).map_err(preview_validation_error)?;
+        if has_uploads && !encrypted && fresh_preview_encryption(&room, account_id).await? {
+            return Err(GatewayError::Invalid(
+                "room encryption changed; review and retry the edit".into(),
+            ));
+        }
+        let response = room
+            .send_raw("m.room.message", content)
+            .await
+            .map_err(map_preview_send_error)?;
+        Ok(response.response.event_id.to_string())
     }
 
     /// Redact `event_id`, optionally with a reason. Returns the redaction event's id.

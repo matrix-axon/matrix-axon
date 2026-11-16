@@ -163,6 +163,7 @@ fn timed_out(verb: &str, timeout: Duration) -> SendError {
 fn map_err(err: GatewayError) -> SendError {
     match err {
         GatewayError::EventTooLarge => SendError::EventTooLarge,
+        GatewayError::PreviewsChanged => SendError::PreviewsChanged,
         GatewayError::UnknownAccount(id) => SendError::NotFound(format!("no such account: {id}")),
         GatewayError::AccountNotActive(id) => {
             SendError::Forbidden(format!("account not active: {id}"))
@@ -259,14 +260,23 @@ impl MessageSender for GatewayAdapter {
         account_id: Uuid,
         room_id: &str,
         event_id: &str,
-        body: &str,
-        formatted: Option<Formatted<'_>>,
+        edit: axon_core::edit_preview::PreviewEdit<'_>,
     ) -> Result<String, SendError> {
+        // An edit that sets its previews is bounded like a preview send, which
+        // is how a client sizes its own deadline for it.
+        if edit.previews.is_some() {
+            return self
+                .with_upload_timeout(
+                    account_id,
+                    "preview edit",
+                    self.gateway.edit(account_id, room_id, event_id, edit),
+                )
+                .await;
+        }
         self.with_mutation_timeout(
             account_id,
             "edit",
-            self.gateway
-                .edit(account_id, room_id, event_id, body, formatted),
+            self.gateway.edit(account_id, room_id, event_id, edit),
         )
         .await
     }

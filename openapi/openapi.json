@@ -4085,7 +4085,7 @@
             }
           },
           "400": {
-            "description": "Malformed request",
+            "description": "Malformed request, or invalid preview metadata or image",
             "content": {
               "application/json": {
                 "schema": {
@@ -4114,6 +4114,36 @@
           },
           "403": {
             "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account, room or preview upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "previews_changed: a `keep` entry names a link the message has no preview for, because another device's edit removed it. Nothing was sent; reload the message and edit again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "An edit that sets url_previews: event_too_large (40960-byte budget for the whole replacement), preview_too_large (32768-byte preview budget), or payload_too_large (thumbnail bytes). Nothing was sent.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8097,6 +8127,46 @@
         }
       }
     },
+    "/v1/capabilities": {
+      "get": {
+        "tags": [
+          "status"
+        ],
+        "summary": "Get server capabilities",
+        "description": "The optional features this server supports. A server without this route\nsupports none of them.",
+        "operationId": "get_capabilities",
+        "responses": {
+          "200": {
+            "description": "This server's optional features",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_CapabilitiesDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/devices/{device_id}/state/{namespace}": {
       "get": {
         "tags": [
@@ -10556,6 +10626,28 @@
               },
               "status": {
                 "$ref": "#/components/schemas/BindStatusDto"
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_CapabilitiesDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Optional features this server supports (`GET /v1/capabilities`). An older\nserver has no such route, and its `404` means none of them.",
+            "required": [
+              "edit_url_previews"
+            ],
+            "properties": {
+              "edit_url_previews": {
+                "type": "boolean",
+                "description": "An edit accepts `url_previews` and carries a message's previews forward\nwhen it omits them (ADR 0132 section 8)."
               }
             }
           }
@@ -14044,6 +14136,19 @@
           }
         }
       },
+      "CapabilitiesDto": {
+        "type": "object",
+        "description": "Optional features this server supports (`GET /v1/capabilities`). An older\nserver has no such route, and its `404` means none of them.",
+        "required": [
+          "edit_url_previews"
+        ],
+        "properties": {
+          "edit_url_previews": {
+            "type": "boolean",
+            "description": "An edit accepts `url_previews` and carries a message's previews forward\nwhen it omits them (ADR 0132 section 8)."
+          }
+        }
+      },
       "CrawlFailure": {
         "type": "string",
         "description": "Why a crawl failed or stopped early. Allowlisted; never upstream text.",
@@ -14609,9 +14714,20 @@
           "not_found"
         ]
       },
+      "EditPreviewRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/KeepPreviewRequest"
+          },
+          {
+            "$ref": "#/components/schemas/LinkPreviewRequest"
+          }
+        ],
+        "description": "An entry of an edit's `url_previews` (ADR 0132 section 8): a new preview,\nin the send shape, or `{\"matched_url\": …, \"keep\": true}` to copy the\nmessage's current preview for that link, image included, without uploading\nanything."
+      },
       "EditRequest": {
         "type": "object",
-        "description": "Request body for editing a message (`PUT …/events/{event_id}`). Replaces the\ntarget event's text via an `m.replace` relation.\n\nLike [`SendMessageRequest`], `format` + `formatted_body` are optional and must\nbe supplied together to set rich text on the replacement.\n\nThe replacement keeps the target's `msgtype`. For a text, notice, or emote,\n`body` is the new text. For an image, file, audio, or video message, `body`\nis the new *caption*: the media and its filename are kept, and an empty\n`body` (or one equal to the filename) removes the caption. Editing any other\nkind of message is a `400`.",
+        "description": "Request body for editing a message (`PUT …/events/{event_id}`). Replaces the\ntarget event's text via an `m.replace` relation.\n\nLike [`SendMessageRequest`], `format` + `formatted_body` are optional and must\nbe supplied together to set rich text on the replacement.\n\nThe replacement keeps the target's `msgtype`. For a text, notice, or emote,\n`body` is the new text. For an image, file, audio, or video message, `body`\nis the new *caption*: the media and its filename are kept, and an empty\n`body` (or one equal to the filename) removes the caption. Editing any other\nkind of message is a `400`.\n\nLink previews (ADR 0132 section 8) go in the replacement's `m.new_content`,\nwith an explicit `[]` in its top-level fallback. Whether a server supports\n`url_previews` here is `GET /v1/capabilities`' `edit_url_previews`.",
         "required": [
           "body"
         ],
@@ -14633,6 +14749,17 @@
               "null"
             ],
             "description": "The rendered HTML body. Must be paired with `format`."
+          },
+          "url_previews": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/EditPreviewRequest"
+            },
+            "description": "Omitted or null: carry the message's current previews forward, keeping,\nin order, those whose link is still a complete bare link in `body`.\nA message with no preview field gets none; one with a field whose links\nare all gone, or whose new formatted body has a spoiler, gets `[]`.\nCarried previews degrade to fit the size budget: whole entries, last\nfirst, then `[]`, then no field.\n\n`[]`: no previews. A list: the whole set, at most 8, each a new preview\n(with the send limits, and an optional `image_upload_id`) or a `keep`\nentry. Every entry's link must be a complete bare link in `body`. The\nreplacement must fit 40960 bytes and its previews 32768, as on a send;\noverflow is a definite 413 before any upload or dispatch.",
+            "maxItems": 8
           }
         }
       },
@@ -15280,6 +15407,24 @@
             "description": "Federation-resolution hints (ruma's `via`) for an alias/id this\naccount's client has no direct path to."
           }
         }
+      },
+      "KeepPreviewRequest": {
+        "type": "object",
+        "description": "Keep the message's current preview for `matched_url`. A link whose current\npreview fails the server's checks is left out; a link the message has no\npreview for at all, because another device's edit removed it, is\n`409 previews_changed`.",
+        "required": [
+          "matched_url",
+          "keep"
+        ],
+        "properties": {
+          "keep": {
+            "type": "boolean",
+            "description": "Must be `true`."
+          },
+          "matched_url": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "KnockRoomRequest": {
         "type": "object",
