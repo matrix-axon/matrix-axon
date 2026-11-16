@@ -427,10 +427,10 @@ pub struct LiveEvent {
     /// The event's `m.relates_to` object, if any.
     pub relates_to: Option<Value>,
     /// The sender-trust verdict snapshot (M7c): `verified`, `unverified`,
-    /// `unknown`, or `verification_violation`. `None` for unencrypted events and
-    /// for UTDs (whose verdict is only known once re-decryption back-fills it —
-    /// re-decryption does not re-emit a live frame, so clients re-read the
-    /// timeline for the back-filled value).
+    /// `unknown`, `verification_violation`, or `mismatched_sender`. `None` for
+    /// unencrypted events and for UTDs (whose verdict is only known once
+    /// re-decryption back-fills it — re-decryption does not re-emit a live
+    /// frame, so clients re-read the timeline for the back-filled value).
     pub sender_trust: Option<String>,
     /// Why the event could not be decrypted (ADR 0136 decision 2), when it is a
     /// UTD and the ingest path's local decryption retry recorded a reason.

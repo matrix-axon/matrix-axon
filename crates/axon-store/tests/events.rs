@@ -676,6 +676,54 @@ async fn event_sender_trust_reads_snapshot() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// Issue #59: the `mismatched_sender` verdict passes the column's CHECK
+/// constraint and reads back as stored, with no device id (the SDK withholds it
+/// for a session owned by another user).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn event_sender_trust_stores_mismatched_sender() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+
+    let user = format!("@mismatch-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let event_id = insert_message(&store, account_id, &room_id, 1_700_000_000_000, "hi").await;
+
+    let returned = store
+        .upsert_event_crypto(&EventCrypto {
+            account_id,
+            event_id: &event_id,
+            session_id: Some("bridge-session"),
+            curve25519_key: Some("CURVE"),
+            ed25519_key: Some("ED"),
+            forwarded: false,
+            forwarder_user_id: None,
+            forwarder_device_id: None,
+            device_id: None,
+            verification_state: "unverified",
+            sender_trust: Some("mismatched_sender"),
+        })
+        .await
+        .expect("the CHECK constraint accepts mismatched_sender");
+    assert_eq!(returned.as_deref(), Some("mismatched_sender"));
+
+    let snap = store
+        .event_sender_trust(account_id, &event_id)
+        .await
+        .expect("query")
+        .expect("event exists");
+    assert_eq!(snap.sender_trust.as_deref(), Some("mismatched_sender"));
+    assert_eq!(snap.verification_state.as_deref(), Some("unverified"));
+    assert_eq!(snap.device_id, None);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 // ── get_event_by_mxc_url ────────────────────────────────────────────────────
 
 async fn insert_image_event(

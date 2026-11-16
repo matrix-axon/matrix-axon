@@ -443,10 +443,13 @@ pub struct EventDto {
     /// The `event_id` of the redaction that masked this event, if redacted.
     pub redaction_event_id: Option<String>,
     /// Sender-device trust snapshot at decrypt time (M7c): `verified`,
-    /// `unverified`, `unknown`, or `verification_violation`. `null` for
-    /// unencrypted events and rows with no recorded verdict (e.g. a UTD not yet
-    /// re-decrypted). This is the at-receipt snapshot; the sender's *current*
-    /// trust is available from the per-event verification bundle.
+    /// `unverified`, `unknown`, `verification_violation`, or
+    /// `mismatched_sender` (the Megolm session belongs to a user other than
+    /// `sender`, as in a bridged room). `null` for unencrypted events and rows
+    /// with no recorded verdict (e.g. a UTD not yet re-decrypted). Treat an
+    /// unrecognized value as `unverified`. This is the at-receipt snapshot; the
+    /// sender's *current* trust is available from the per-event verification
+    /// bundle.
     pub sender_trust: Option<String>,
     /// Why this event could not be decrypted (ADR 0136 decision 2). Set only
     /// on an event without content that is not redacted, and only once Axon has
@@ -656,7 +659,8 @@ pub struct VerificationBundleDto {
 /// The at-decrypt snapshot half of a [`VerificationBundleDto`].
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TrustSnapshotDto {
-    /// The four-valued sender-trust verdict at decrypt time.
+    /// The sender-trust verdict at decrypt time (the same values as the
+    /// timeline event's `sender_trust`).
     pub sender_trust: Option<String>,
     /// The coarse `verified`/`unverified` verification state at decrypt time.
     pub verification_state: Option<String>,
@@ -680,7 +684,9 @@ pub struct TrustSnapshotDto {
 /// The live evidence half of a [`VerificationBundleDto`].
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CurrentTrustDto {
-    /// Whether the sending device is currently known to axon.
+    /// Whether the sending device is currently known to axon. Always `false`
+    /// when the snapshot's verdict is `mismatched_sender`: the session's device
+    /// belongs to another user, so axon does not look one up.
     pub device_known: bool,
     /// Whether the sending device is currently cross-signed by the sender's own
     /// master key. `null` when the device isn't known.

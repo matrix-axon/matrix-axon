@@ -10785,7 +10785,7 @@
                   "string",
                   "null"
                 ],
-                "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, or `verification_violation`. `null` for\nunencrypted events and rows with no recorded verdict (e.g. a UTD not yet\nre-decrypted). This is the at-receipt snapshot; the sender's *current*\ntrust is available from the per-event verification bundle."
+                "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, `verification_violation`, or\n`mismatched_sender` (the Megolm session belongs to a user other than\n`sender`, as in a bridged room). `null` for unencrypted events and rows\nwith no recorded verdict (e.g. a UTD not yet re-decrypted). Treat an\nunrecognized value as `unverified`. This is the at-receipt snapshot; the\nsender's *current* trust is available from the per-event verification\nbundle."
               },
               "state_key": {
                 "type": [
@@ -12253,7 +12253,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, or `verification_violation`. `null` for\nunencrypted events and rows with no recorded verdict (e.g. a UTD not yet\nre-decrypted). This is the at-receipt snapshot; the sender's *current*\ntrust is available from the per-event verification bundle."
+                  "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, `verification_violation`, or\n`mismatched_sender` (the Megolm session belongs to a user other than\n`sender`, as in a bridged room). `null` for unencrypted events and rows\nwith no recorded verdict (e.g. a UTD not yet re-decrypted). Treat an\nunrecognized value as `unverified`. This is the at-receipt snapshot; the\nsender's *current* trust is available from the per-event verification\nbundle."
                 },
                 "state_key": {
                   "type": [
@@ -14207,7 +14207,7 @@
           },
           "device_known": {
             "type": "boolean",
-            "description": "Whether the sending device is currently known to axon."
+            "description": "Whether the sending device is currently known to axon. Always `false`\nwhen the snapshot's verdict is `mismatched_sender`: the session's device\nbelongs to another user, so axon does not look one up."
           },
           "identity_known": {
             "type": "boolean",
@@ -14890,7 +14890,7 @@
               "string",
               "null"
             ],
-            "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, or `verification_violation`. `null` for\nunencrypted events and rows with no recorded verdict (e.g. a UTD not yet\nre-decrypted). This is the at-receipt snapshot; the sender's *current*\ntrust is available from the per-event verification bundle."
+            "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, `verification_violation`, or\n`mismatched_sender` (the Megolm session belongs to a user other than\n`sender`, as in a bridged room). `null` for unencrypted events and rows\nwith no recorded verdict (e.g. a UTD not yet re-decrypted). Treat an\nunrecognized value as `unverified`. This is the at-receipt snapshot; the\nsender's *current* trust is available from the per-event verification\nbundle."
           },
           "state_key": {
             "type": [
@@ -18086,7 +18086,7 @@
               "string",
               "null"
             ],
-            "description": "The four-valued sender-trust verdict at decrypt time."
+            "description": "The sender-trust verdict at decrypt time (the same values as the\ntimeline event's `sender_trust`)."
           },
           "session_id": {
             "type": [

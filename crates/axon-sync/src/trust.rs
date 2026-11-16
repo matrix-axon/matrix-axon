@@ -164,7 +164,11 @@ impl SenderTrustEngine {
         })?;
 
         let current = self
-            .current_trust(&client, &sender, snap.device_id.as_deref())
+            .current_trust(
+                &client,
+                &sender,
+                live_lookup_device_id(snap.sender_trust.as_deref(), snap.device_id.as_deref()),
+            )
             .await?;
         Ok(TrustBundle {
             sender: snap.sender.clone(),
@@ -190,12 +194,9 @@ impl SenderTrustEngine {
     ) -> Result<CurrentTrust, TrustError> {
         let encryption = client.encryption();
 
-        // Known limitation (issue #59): we look the device up under the event's
-        // `sender`. For a `MismatchedSender` event the session device belongs to a
-        // *different* user than `sender`, so `get_device` returns `None` here and
-        // `device_known` is reported `false` — the live half can't surface a
-        // mismatched device. The at-decrypt `sender_trust` snapshot still records
-        // the mismatch, so it isn't lost, just not re-derivable live.
+        // For a `mismatched_sender` event (issue #59) the caller passes no
+        // device id (see `live_lookup_device_id`), so the device half below
+        // reads unknown. The snapshot's verdict is what tells a client why.
         let (device_known, device_cross_signed) = match device_id {
             Some(device_id) => {
                 let device_id: OwnedDeviceId = device_id.into();
@@ -260,4 +261,56 @@ fn snapshot(snap: &EventSenderTrust) -> Option<TrustSnapshot> {
         forwarder_user_id: snap.forwarder_user_id.clone(),
         forwarder_device_id: snap.forwarder_device_id.clone(),
     })
+}
+
+/// The device id to look up live under the event's `sender`, or `None` to skip
+/// the lookup. A `mismatched_sender` snapshot never gets one (issue #59): its
+/// session belongs to another user, so a device found under `sender` would be
+/// the wrong device. The SDK already withholds the id for these events; this
+/// keeps the bundle's `device_known: false` contract from resting on that alone.
+fn live_lookup_device_id<'a>(
+    sender_trust: Option<&str>,
+    device_id: Option<&'a str>,
+) -> Option<&'a str> {
+    if sender_trust == Some(crate::meta::MISMATCHED_SENDER) {
+        if device_id.is_some() {
+            tracing::debug!(
+                device_id,
+                "mismatched_sender snapshot carries a device id; skipping the live lookup"
+            );
+        }
+        return None;
+    }
+    device_id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_lookup_device_id;
+
+    #[test]
+    fn a_mismatched_sender_snapshot_never_looks_a_device_up() {
+        assert_eq!(
+            live_lookup_device_id(Some("mismatched_sender"), Some("BRIDGEBOTDEVICE")),
+            None
+        );
+        assert_eq!(live_lookup_device_id(Some("mismatched_sender"), None), None);
+    }
+
+    #[test]
+    fn every_other_verdict_looks_its_device_up() {
+        for verdict in [
+            Some("verified"),
+            Some("unverified"),
+            Some("unknown"),
+            Some("verification_violation"),
+            None,
+        ] {
+            assert_eq!(
+                live_lookup_device_id(verdict, Some("DEVICEA")),
+                Some("DEVICEA"),
+                "{verdict:?}"
+            );
+        }
+    }
 }
