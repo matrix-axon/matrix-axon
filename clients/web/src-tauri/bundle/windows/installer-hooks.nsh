@@ -6,10 +6,11 @@
 ; "Create desktop shortcut"; leave it unchecked unless the user opts in.
 !define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
 
-; Link to the project documentation on the finish page.
-!define MUI_FINISHPAGE_LINK "Learn more about Axon at matrix-axon.github.io/matrix-axon"
+; Link to the project documentation on the finish page. The link control is
+; a single line about 290px wide; longer text wraps and the second line (the
+; URL) is clipped, so the link text is just the URL.
+!define MUI_FINISHPAGE_LINK "https://matrix-axon.github.io/matrix-axon/"
 !define MUI_FINISHPAGE_LINK_LOCATION "https://matrix-axon.github.io/matrix-axon/"
-; Set the link colour explicitly: left to the MUI2 default it rendered
-; white-on-white on the finish page. Hex RRGGBB, as
-; NSIS SetCtlColors expects: a standard link blue.
+; Set the link colour explicitly (hex RRGGBB, a standard link blue) rather
+; than relying on the MUI2 default.
 !define MUI_FINISHPAGE_LINK_COLOR "0000EE"
