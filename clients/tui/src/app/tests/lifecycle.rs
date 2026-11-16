@@ -165,6 +165,66 @@ async fn recovery_status_keeps_only_the_latest_attempt_for_each_account_id() {
 }
 
 #[tokio::test]
+async fn multiple_recoveries_behind_an_interaction_are_presented_together_once() {
+    for mode in [
+        Mode::Popup(PopupKind::Help),
+        Mode::Popup(PopupKind::CommandResponse),
+        Mode::LoginUsername,
+    ] {
+        let mut app = app_with_rooms(Vec::new());
+        app.client = AxonClient::new("http://127.0.0.1:1".to_owned(), None);
+        app.mode = mode.clone();
+        app.status = Status::from("active interaction".to_owned());
+        let previous = (mode == Mode::Popup(PopupKind::CommandResponse))
+            .then(|| "previous command result".to_owned());
+        app.pending_command_response = previous.clone();
+        for (id, user_id) in [(1, "@alice:example.com"), (2, "@bob:example.com")] {
+            let mut response: crate::api::ApiResponse<crate::api::RecoverResponse> =
+                serde_json::from_str(&recover_response_body()).unwrap();
+            response.data.account.account_id = Uuid::from_u128(id);
+            response.data.account.user_id = user_id.to_owned();
+            app.handle_lifecycle_outcome(LifecycleOutcome::Recover {
+                account_id: Uuid::from_u128(id),
+                user_id: user_id.to_owned(),
+                result: Ok(response.data),
+            })
+            .await;
+        }
+        assert_eq!(app.mode, mode);
+        assert_eq!(app.status.text(false), "active interaction");
+        assert_eq!(app.pending_command_response, previous);
+        assert_eq!(app.last_recovery_results.len(), 2);
+        let waiting = app.pending_recovery_response.as_deref().unwrap();
+        assert!(waiting.contains("4S secret storage imported: @alice:example.com"));
+        assert!(waiting.contains("4S secret storage imported: @bob:example.com"));
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        crate::ui::prepare(&mut app, ratatui::layout::Rect::new(0, 0, 120, 30));
+        assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
+        let result = app.pending_command_response.as_deref().unwrap();
+        assert!(
+            result
+                .find("4S secret storage imported: @alice:example.com")
+                .unwrap()
+                < result
+                    .find("4S secret storage imported: @bob:example.com")
+                    .unwrap()
+        );
+        assert_eq!(result.matches("4S secret storage imported:").count(), 2);
+        assert_eq!(
+            result
+                .matches("10 selected, 2 attempted, 0 decrypted, 10 still pending")
+                .count(),
+            2
+        );
+        assert!(app.pending_recovery_response.is_none());
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        crate::ui::prepare(&mut app, ratatui::layout::Rect::new(0, 0, 120, 30));
+        assert_eq!(app.mode, Mode::Compose, "combined results must not reopen");
+    }
+}
+
+#[tokio::test]
 async fn recovery_result_waits_for_an_open_popup_or_prompt_without_losing_its_details() {
     for mode in [
         Mode::Popup(PopupKind::Help),

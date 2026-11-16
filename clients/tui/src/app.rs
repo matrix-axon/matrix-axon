@@ -960,8 +960,8 @@ pub(crate) struct App {
     /// A completed slash-command response waiting for the renderer to decide
     /// whether it fits in the fixed-height entry box.
     pub(crate) pending_command_response: Option<String>,
-    /// Recovery can finish behind another popup or prompt. Keep its full
-    /// result until compose can present it without replacing that interaction.
+    /// Recoveries can finish behind another popup or prompt. Accumulate full
+    /// results until compose can present them without replacing that interaction.
     pub(crate) pending_recovery_response: Option<String>,
     /// One completed recovery result per account, kept only for this session.
     pub(crate) last_recovery_results: HashMap<Uuid, lifecycle::RecoveryResult>,
@@ -1786,7 +1786,10 @@ impl App {
         self.show_input_help = false;
     }
 
-    /// Replace the account list. Only Active accounts go into `accounts.accounts`
+    /// Replace the account list with a complete, authoritative, unfiltered
+    /// `GET /v1/accounts` snapshot, including inactive accounts. Never pass a
+    /// filtered or partial list: absence prunes session recovery results.
+    /// Only Active accounts go into `accounts.accounts`
     /// (for display and navigation); inactive IDs are recorded separately so
     /// `is_known_inactive_account` can still filter their rooms off the room list.
     pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountDto>) {

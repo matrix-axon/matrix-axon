@@ -1452,7 +1452,13 @@ impl App {
                         summary: summary.clone(),
                     },
                 );
-                self.pending_recovery_response = Some(summary);
+                match self.pending_recovery_response.as_mut() {
+                    Some(pending) => {
+                        pending.push_str("\n\n");
+                        pending.push_str(&summary);
+                    }
+                    None => self.pending_recovery_response = Some(summary),
+                }
                 self.present_pending_recovery_response();
             }
             LifecycleOutcome::BackupEnableReady { target, result } => {
@@ -1735,8 +1741,9 @@ impl App {
         (!warnings.is_empty()).then(|| warnings.join("; "))
     }
 
-    /// A recovery result belongs in the normal command-response popup, after
-    /// any existing interaction has ended. Present it only once.
+    /// Recovery results belong in the normal command-response popup, after
+    /// any existing interaction has ended. Present all waiting results
+    /// together, in completion order, only once.
     pub(crate) fn present_pending_recovery_response(&mut self) {
         if self.mode != Mode::Compose || self.is_mid_command() {
             return;

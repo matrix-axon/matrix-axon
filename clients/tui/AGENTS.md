@@ -248,7 +248,7 @@ A recover 200 means 4S secret-storage import succeeded, not that history keys we
 Report device verification, the returned backup snapshot, backup action, and re-decryption counts separately; a timeout is incomplete.
 Share backup observations with `/status` and backup-action wording with `/backup enable`.
 Missing or malformed sibling results must show as unavailable, never as zero counts or successful backup setup.
-Keep a completed recovery result until the current popup or prompt ends, then use the normal command-response presentation.
+Keep completed recovery results until the current popup or prompt ends, then show all waiting results together, in completion order, through the normal command-response presentation.
 Retain the latest attempt, including failure, per account UUID in memory and show its UTC completion time and full result under that account in `/status`.
 Logout retains this session result; authoritative account removal prunes it, and restarting the TUI starts empty.
 Never retain the submitted recovery key or persist recovery results to disk.

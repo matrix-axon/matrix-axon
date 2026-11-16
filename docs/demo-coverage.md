@@ -133,7 +133,7 @@ shows it.
   Durable `m.favourite` reorder and the instance `space_order` rail are not shown in a scene.
 - **TUI recovery results.** There is no recovery/backup scene.
   `/recover` reports 4S import, device verification, the backup snapshot/action, and stored-message re-decryption counts with any timeout.
-  Focused HTTP, lifecycle, and terminal rendering tests cover these results, including delayed responses, malformed optional observations, completion behind another popup or prompt, and replay of the latest session result per account through `/status`; the recordings do not.
+  Focused HTTP, lifecycle, and terminal rendering tests cover these results, including delayed responses, malformed optional observations, multiple completions behind another popup or prompt, and replay of the latest session result per account through `/status`; the recordings do not.
 - **Device verification.** Needs a second device to verify against, which the
   corpus does not stand up.
 - **Matrix OAuth QR account acquisition.** Needs MAS and a second trusted
