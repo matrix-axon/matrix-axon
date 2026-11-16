@@ -474,6 +474,13 @@ jobs:
       - name: Assert the server carries the web client
         run: scripts/assert-web-embedded.sh "target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-server" web-dist
 
+      # Fails if a runner-image change pulls the binaries above glibc 2.35, the
+      # Ubuntu 22.04 version and the floor install.md states.
+      - name: Assert the binaries run on glibc 2.35
+        run: |
+          BIN=target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}
+          scripts/assert-glibc-floor.sh 2.35 $BIN/axon-server $BIN/axon-tui
+
       - name: Zip binaries
         run: |
           BIN=target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}

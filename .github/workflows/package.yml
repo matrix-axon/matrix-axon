@@ -81,7 +81,7 @@ jobs:
           scripts/release-notes-test.sh
 
       - name: Embedded web client scripts
-        run: shellcheck scripts/assert-web-embedded.sh scripts/embed-web-smoke.sh scripts/expect-tests.sh
+        run: shellcheck scripts/assert-web-embedded.sh scripts/embed-web-smoke.sh scripts/expect-tests.sh scripts/assert-glibc-floor.sh
 
   packages:
     name: .deb and .rpm (${{ matrix.arch }})
