@@ -91,10 +91,29 @@ Then sign in with a token — `docker compose exec axon-server axon-server token
 The one-time `/bootstrap/<code>` URL signs in the browser client, not the app, and minting a token consumes it — so do the browser sign-in first if you want both.
 Each release also carries `THIRDPARTY-axon-desktop.txt`, the full license disclosure for everything the app bundles.
 
+#### macOS
+
 The macOS build is a universal binary, so Apple Silicon and Intel both run natively; the Windows and Linux builds are x64 only, so on ARM use the browser client or build the shell yourself ([#455](https://github.com/matrix-axon/matrix-axon/issues/455)).
 The macOS build is signed with a Developer ID certificate and notarized by Apple, so it opens without a Gatekeeper warning.
+
+#### Windows
+
 The Windows executables and installer are signed through Azure Artifact Signing (ADR 0119), so they show a verified publisher; SmartScreen may still warn on the first downloads of a new release while its reputation builds.
+
+
+#### Linux
+
 The Linux builds are not signed, so some Linux desktops will warn the first time you run them.
+The Linux client can leverage system autocorrect/spell-checking for any dictionaries you have installed. For example, to have the client flag spelling errors in English and Finnish on an Ubuntu box:
+```sh
+# specify your preferred dictionaries below
+sudo apt install libvoikko1 voikko-fi libenchant-2-2 gspell-1 hunspell hunspell-en-us hunspell-en-gb 
+# set LANGUAGE below just for axon; include multiple languages with : as the delimeter
+LANGUAGE=fi:en_US axon
+```
+
+### Building from source
+
 Building the shell yourself is documented in [`clients/web/src-tauri/README.md`](../clients/web/src-tauri/README.md).
 
 ### Terminal client (axon-tui)
