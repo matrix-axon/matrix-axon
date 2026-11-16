@@ -412,6 +412,9 @@ export function RoomPage() {
     // length test: cached rows (ADR 0085 phase 2) make the list non-empty
     // while still unconfirmed, and a deep link may be the only thing asking.
     void rooms.ensureLoaded()
+    // The room list's preview reads wait while this page's first fetch has
+    // the link (issue #278). A deep-linked jump releases on the store's cap.
+    const releasePreviews = rooms.holdPreviews()
     void threads.refresh()
     void members.refresh()
     // With a deep-linked event the jump effect below owns the initial load,
@@ -427,8 +430,9 @@ export function RoomPage() {
       openThread !== null ||
       timeline.events.peek().length > 0
     ) {
-      void timeline.loadLatest()
+      void timeline.loadLatest().finally(releasePreviews)
     }
+    return releasePreviews
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance
   }, [timeline])
 

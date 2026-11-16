@@ -16,6 +16,7 @@ import {
   describe,
   expect,
   it,
+  onTestFinished,
   vi,
 } from 'vitest'
 import { ServicesContext } from '../services'
@@ -329,6 +330,35 @@ describe('RoomPage', () => {
     )
     expect(bodies).toEqual(['body of $1', 'body of $2'])
     expect(container.querySelectorAll('.day-separator')).toHaveLength(2)
+  })
+
+  it('holds room-list previews until its first page is in (issue #278)', async () => {
+    const services = testServices()
+    const release = vi.fn()
+    const hold = vi
+      .spyOn(services.rooms, 'holdPreviews')
+      .mockReturnValue(release)
+    const releasedAtTimelineStart: number[] = []
+    const onStart = ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname.endsWith('/timeline')) {
+        releasedAtTimelineStart.push(release.mock.calls.length)
+      }
+    }
+    server.events.on('request:start', onStart)
+    onTestFinished(() => server.events.removeListener('request:start', onStart))
+
+    const { findByText, unmount } = renderRoom([event('$1', T0)], {
+      services,
+    })
+
+    expect(await findByText('body of $1')).toBeTruthy()
+    expect(hold).toHaveBeenCalledTimes(1)
+    expect(releasedAtTimelineStart).toEqual([0])
+    await waitFor(() => expect(release).toHaveBeenCalledTimes(1))
+    // And on unmount, for a page left before its fetch settled; the store
+    // ignores a second release of the same hold.
+    unmount()
+    expect(release).toHaveBeenCalledTimes(2)
   })
 
   it('keeps only one message action bar open at a time', async () => {

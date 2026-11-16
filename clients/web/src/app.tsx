@@ -64,6 +64,7 @@ import { SLASH_COMMAND } from './slash-commands'
 import {
   createServices,
   resolveApiBaseUrl,
+  ROOM_ROUTE,
   ServicesContext,
   useServices,
   type AppServices,
@@ -1677,7 +1678,7 @@ function ShellChrome() {
               <Route path="/pending-shares" component={PendingSharesPage} />
               <Route path="/licenses" component={LicensesPage} />
               <Route path="/privacy" component={PrivacyPage} />
-              <Route path="/:accountId/rooms/:roomId" component={RoomPage} />
+              <Route path={ROOM_ROUTE} component={RoomPage} />
               <Route default component={NotFound} />
             </Router>
           </main>
