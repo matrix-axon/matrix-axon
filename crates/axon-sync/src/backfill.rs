@@ -708,11 +708,28 @@ async fn backfill_room_page(
         },
     };
 
+    // UTD reasons for the page, written in one statement after it (ADR 0136
+    // decision 2), including when the page is abandoned part way.
+    let mut utd_reasons = Vec::new();
+    let mut abandoned = false;
     for tev in &events {
         if cancel.is_cancelled() {
-            return PageOutcome::Abandoned;
+            abandoned = true;
+            break;
         }
-        persist_backfilled_event(ctx, room, tev).await;
+        if let Some(utd) = persist_backfilled_event(ctx, room, tev).await {
+            utd_reasons.push(utd);
+        }
+    }
+    if !utd_reasons.is_empty() {
+        let batch: Vec<_> = utd_reasons
+            .iter()
+            .map(|(row, reason)| (row, reason.clone()))
+            .collect();
+        crate::redecrypt::record_utd_reasons(&ctx.store, account_id, &batch).await;
+    }
+    if abandoned {
+        return PageOutcome::Abandoned;
     }
 
     let fetched = events.len();

@@ -434,6 +434,8 @@ pub struct LiveEvent {
     pub sender_trust: Option<String>,
     /// Why the event could not be decrypted (ADR 0136 decision 2), when it is a
     /// UTD and the ingest path's local decryption retry recorded a reason.
-    /// `None` for decrypted and unencrypted events.
+    /// `None` for decrypted and unencrypted events, and for a UTD the retry
+    /// decrypted: the frame still describes the event as it arrived (ADR 0014),
+    /// and a timeline read returns the content.
     pub utd_reason: Option<crate::UtdReason>,
 }

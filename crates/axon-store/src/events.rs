@@ -125,6 +125,18 @@ pub struct PendingUtd {
     pub raw_event: Value,
 }
 
+/// One row's reason for [`Store::record_utd_reasons`].
+#[derive(Debug, Clone, Copy)]
+pub struct UtdReasonUpdate<'a> {
+    /// The room the row belongs to; matched as well as the event id, like the
+    /// back-fill does.
+    pub room_id: &'a str,
+    /// The undecryptable event.
+    pub event_id: &'a str,
+    /// Why it could not be decrypted.
+    pub reason: &'a axon_core::UtdReason,
+}
+
 impl sqlx_core::from_row::FromRow<'_, PgRow> for PendingUtd {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
         Ok(PendingUtd {
@@ -861,24 +873,28 @@ impl Store {
     pub async fn record_utd_reasons(
         &self,
         account_id: Uuid,
-        reasons: &[(&str, &axon_core::UtdReason)],
+        reasons: &[UtdReasonUpdate<'_>],
     ) -> Result<Vec<String>, StoreError> {
         if reasons.is_empty() {
             return Ok(Vec::new());
         }
-        let event_ids: Vec<&str> = reasons.iter().map(|(id, _)| *id).collect();
-        let kinds: Vec<&str> = reasons.iter().map(|(_, r)| r.kind.as_str()).collect();
-        let details: Vec<Option<&str>> = reasons.iter().map(|(_, r)| r.detail()).collect();
+        let room_ids: Vec<&str> = reasons.iter().map(|u| u.room_id).collect();
+        let event_ids: Vec<&str> = reasons.iter().map(|u| u.event_id).collect();
+        let kinds: Vec<&str> = reasons.iter().map(|u| u.reason.kind.as_str()).collect();
+        let details: Vec<Option<&str>> = reasons.iter().map(|u| u.reason.detail()).collect();
         let changed = sqlx_core::query_scalar::query_scalar::<Postgres, String>(
             "UPDATE events AS e \
              SET utd_reason = v.kind, utd_reason_detail = v.detail \
-             FROM UNNEST($2::text[], $3::text[], $4::text[]) AS v(event_id, kind, detail) \
-             WHERE e.account_id = $1 AND e.event_id = v.event_id AND e.content IS NULL \
+             FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[]) \
+                  AS v(room_id, event_id, kind, detail) \
+             WHERE e.account_id = $1 AND e.room_id = v.room_id AND e.event_id = v.event_id \
+               AND e.content IS NULL \
                AND (e.utd_reason IS DISTINCT FROM v.kind \
                     OR e.utd_reason_detail IS DISTINCT FROM v.detail) \
              RETURNING e.event_id",
         )
         .bind(account_id)
+        .bind(&room_ids)
         .bind(&event_ids)
         .bind(&kinds)
         .bind(&details)

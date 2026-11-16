@@ -779,8 +779,9 @@ async fn persist_timeline_event(
     .then(|| crate::meta::redacts(&raw_val).map(str::to_owned))
     .flatten();
     // The live sync path: persist and emit the fresh event to `/v1/ws`. A UTD
-    // gets one local decryption retry first (see `UtdCheck::Recheck`).
-    persist_event_core(
+    // gets one local decryption retry first (see `UtdCheck::Recheck`), which
+    // records its reason, so nothing comes back.
+    let _ = persist_event_core(
         &ctx,
         &ev,
         raw_val,
@@ -801,13 +802,18 @@ async fn persist_timeline_event(
 /// A paged event that the SDK could not decrypt (keys not yet imported) arrives
 /// as a UTD, exactly as on the live path; the re-decryption queue back-fills it
 /// once keys arrive.
+///
+/// Returns the stored UTD row and the SDK's reason for it, for the caller to
+/// record with the rest of its page in one write
+/// ([`redecrypt::record_utd_reasons`]). `None` for anything else.
+#[must_use = "a backfilled UTD's reason is recorded by the caller"]
 pub(crate) async fn persist_backfilled_event(
     ctx: &PersistContext,
     room: &Room,
     tev: &matrix_sdk::deserialized_responses::TimelineEvent,
-) {
+) -> Option<(axon_store::PendingUtd, axon_core::UtdReason)> {
     if skip_departed_room_ingestion(ctx, room) {
-        return;
+        return None;
     }
     let raw = tev.raw();
     let ev: AnySyncTimelineEvent = match raw.deserialize() {
@@ -818,12 +824,10 @@ pub(crate) async fn persist_backfilled_event(
                 error = %err,
                 "failed to deserialize backfilled event; skipping"
             );
-            return;
+            return None;
         }
     };
-    let Some(raw_val) = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event") else {
-        return;
-    };
+    let raw_val = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event")?;
     // No re-check here, unlike the live path: a backfill can store thousands of
     // permanently undecryptable rows, and each re-check would be another SDK
     // decrypt attempt (and warning) for a row that cannot succeed. The paged
@@ -836,7 +840,7 @@ pub(crate) async fn persist_backfilled_event(
         tev.encryption_info().map(|info| info.as_ref()),
         UtdCheck::Known(redecrypt::utd_reason(tev)),
     )
-    .await;
+    .await
 }
 
 /// How [`persist_event_core`] learns why a UTD could not be decrypted (ADR 0136
@@ -853,8 +857,8 @@ enum UtdCheck<'a> {
     /// will not run again, so the row would stay a UTD until the next restart
     /// (#938).
     Recheck(&'a Room),
-    /// The backfill path: the SDK's reason for a paged UTD, recorded as is.
-    /// Nothing is emitted live.
+    /// The backfill path: the SDK's reason for a paged UTD, handed back to the
+    /// caller to record with its page. Nothing is emitted live.
     Known(Option<axon_core::UtdReason>),
 }
 
@@ -867,8 +871,9 @@ enum UtdCheck<'a> {
 /// clients through timeline reads (M8) and search (M9) instead — both driven by
 /// `upsert_event`, not the emit.
 ///
-/// A UTD's failure reason is recorded per `utd` before the live emit, so the
-/// frame carries it.
+/// On the live path a UTD's failure reason is recorded before the emit, so the
+/// frame carries it. On the backfill path it is returned, with the stored row,
+/// for the caller to record.
 async fn persist_event_core(
     ctx: &PersistContext,
     ev: &AnySyncTimelineEvent,
@@ -876,7 +881,7 @@ async fn persist_event_core(
     room_id: &str,
     enc_info: Option<&EncryptionInfo>,
     utd: UtdCheck<'_>,
-) {
+) -> Option<(axon_store::PendingUtd, axon_core::UtdReason)> {
     // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
     let event_type: String = raw_val
         .get("type")
@@ -963,7 +968,7 @@ async fn persist_event_core(
                 error = %err,
                 "failed to persist event"
             );
-            return;
+            return None;
         }
     };
     tracing::debug!(
@@ -1014,10 +1019,7 @@ async fn persist_event_core(
             }
         }
         // Every stored UTD, session id or not: the SDK already classified it.
-        (Some(row), UtdCheck::Known(Some(reason))) => {
-            redecrypt::record_utd_reasons(&ctx.store, ctx.account_id, &[(&row, reason)]).await;
-            None
-        }
+        (Some(row), UtdCheck::Known(Some(reason))) => return Some((row, reason)),
         _ => None,
     };
 
@@ -1047,6 +1049,7 @@ async fn persist_event_core(
             utd_reason,
         }));
     }
+    None
 }
 
 /// Write the crypto sibling rows for an event already persisted to `events`.

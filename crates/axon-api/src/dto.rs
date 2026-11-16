@@ -451,9 +451,14 @@ pub struct EventDto {
     /// Why this event could not be decrypted (ADR 0136 decision 2). Set only
     /// on an event without content that is not redacted, and only once Axon has
     /// recorded a reason: `null` for a decrypted, unencrypted or redacted
-    /// event, and for a UTD stored before reasons were kept, until its next
-    /// decryption attempt. On `/v1/ws`, set when the ingest path's local retry
-    /// recorded one.
+    /// event. A UTD stored before reasons were kept also reads `null` until
+    /// something retries it: a room key or withheld notice for its session, or
+    /// an explicit re-decryption. A restart does not.
+    ///
+    /// On a `/v1/ws` `timeline.event` frame for an `m.room.encrypted` event,
+    /// `null` usually means the ingest path's local retry decrypted it after
+    /// all: re-read the event for its content rather than showing "unable to
+    /// decrypt".
     pub utd_reason: Option<UtdReasonDto>,
     /// Relation aggregation (M8): `true` when at least one valid `m.replace` edit
     /// targets this event, in which case `content`/`body` above are already the

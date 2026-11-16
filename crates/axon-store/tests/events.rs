@@ -10,7 +10,9 @@
 
 mod common;
 
-use axon_store::{EventCiphertext, EventCrypto, NewEvent, RoomStateUpsert, TimelineCursor};
+use axon_store::{
+    EventCiphertext, EventCrypto, NewEvent, RoomStateUpsert, TimelineCursor, UtdReasonUpdate,
+};
 use common::insert_message;
 use serde_json::{json, Value};
 use sqlx_core::row::Row;
@@ -1539,9 +1541,16 @@ async fn utd_reason_is_recorded_read_and_cleared() {
     // The event ids the batch write changed.
     let record = |batch: Vec<(String, UtdReason)>| {
         let store = store.clone();
+        let room_id = room_id.clone();
         async move {
-            let refs: Vec<(&str, &UtdReason)> =
-                batch.iter().map(|(id, r)| (id.as_str(), r)).collect();
+            let refs: Vec<UtdReasonUpdate<'_>> = batch
+                .iter()
+                .map(|(id, reason)| UtdReasonUpdate {
+                    room_id: &room_id,
+                    event_id: id,
+                    reason,
+                })
+                .collect();
             store
                 .record_utd_reasons(account_id, &refs)
                 .await
@@ -1563,6 +1572,20 @@ async fn utd_reason_is_recorded_read_and_cleared() {
         .await
         .is_empty());
     assert!(record(Vec::new()).await.is_empty());
+    // The room is matched too, as the back-fill does.
+    let elsewhere = store
+        .record_utd_reasons(
+            account_id,
+            &[UtdReasonUpdate {
+                room_id: "!other:localhost",
+                event_id: &utd,
+                reason: &UtdReason::new(UtdReasonKind::Other),
+            }],
+        )
+        .await
+        .expect("record in another room");
+    assert!(elsewhere.is_empty());
+    assert_eq!(read(utd.clone()).await, Some(missing.clone()));
 
     // A withheld notice replaces it, detail included. In one batch, only the
     // row whose reason moved is written.

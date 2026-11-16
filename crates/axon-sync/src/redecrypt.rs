@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use axon_core::{UtdReason, UtdReasonKind};
 use axon_search::IndexHandle;
-use axon_store::{PendingUtd, Store};
+use axon_store::{PendingUtd, Store, UtdReasonUpdate};
 use futures_util::StreamExt;
 use matrix_sdk::deserialized_responses::{
     DeviceLinkProblem, EncryptionInfo, TimelineEvent, TimelineEventKind, UnableToDecryptReason,
@@ -601,9 +601,9 @@ async fn redecrypt_rows(
                         flush_reasons(store, account_id, &mut reasons, &mut summary).await;
                     }
                 }
-                Attempt::Failed => summary.attempted_event_ids.push(row.event_id.clone()),
-                // Left unmarked, so the next startup sweep tries it again.
-                Attempt::WriteFailed => {}
+                // Left unmarked, so the next startup sweep tries it again: an
+                // SDK error or a failed write taught nothing about the row.
+                Attempt::Failed | Attempt::WriteFailed => {}
             }
         }
         flush_reasons(store, account_id, &mut reasons, &mut summary).await;
@@ -647,7 +647,8 @@ pub(crate) enum Attempt {
     /// The SDK still could not decrypt it, and said why. The caller records
     /// the reason. A malformed envelope is `Other`.
     StillUtd(UtdReason),
-    /// The SDK call itself failed, so nothing new is known about the row.
+    /// The SDK call itself failed, so nothing new is known about the row. It
+    /// stays eligible for the startup sweep.
     Failed,
     /// A store write failed: the back-fill, or on the live path the reason.
     /// The row keeps what it had and stays eligible for the startup sweep.
@@ -695,9 +696,13 @@ async fn redecrypt_one(
     };
 
     // `decrypt_event` returns a UTD `TimelineEvent` (not an error) when the key
-    // still isn't available; only a genuine `Decrypted` kind yields content.
+    // still isn't available; only a genuine `Decrypted` kind yields content. A
+    // decrypted payload with no readable type or content cannot be stored
+    // either, and no retry changes it, so it is classified as `other`.
     let Some((content, event_type)) = extract_decrypted(&decrypted) else {
-        return utd_reason(&decrypted).map_or(Attempt::Failed, Attempt::StillUtd);
+        return Attempt::StillUtd(
+            utd_reason(&decrypted).unwrap_or(UtdReason::new(UtdReasonKind::Other)),
+        );
     };
 
     // Plaintext-derived hot columns, now available post-decryption.
@@ -775,9 +780,13 @@ pub(crate) async fn record_utd_reasons(
     account_id: Uuid,
     reasons: &[(&PendingUtd, UtdReason)],
 ) -> bool {
-    let batch: Vec<(&str, &UtdReason)> = reasons
+    let batch: Vec<UtdReasonUpdate<'_>> = reasons
         .iter()
-        .map(|(row, reason)| (row.event_id.as_str(), reason))
+        .map(|(row, reason)| UtdReasonUpdate {
+            room_id: &row.room_id,
+            event_id: &row.event_id,
+            reason,
+        })
         .collect();
     let changed = match store.record_utd_reasons(account_id, &batch).await {
         Ok(changed) => changed,

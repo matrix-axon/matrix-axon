@@ -10805,7 +10805,7 @@
                   },
                   {
                     "$ref": "#/components/schemas/UtdReasonDto",
-                    "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent, and for a UTD stored before reasons were kept, until its next\ndecryption attempt. On `/v1/ws`, set when the ingest path's local retry\nrecorded one."
+                    "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent. A UTD stored before reasons were kept also reads `null` until\nsomething retries it: a room key or withheld notice for its session, or\nan explicit re-decryption. A restart does not.\n\nOn a `/v1/ws` `timeline.event` frame for an `m.room.encrypted` event,\n`null` usually means the ingest path's local retry decrypted it after\nall: re-read the event for its content rather than showing \"unable to\ndecrypt\"."
                   }
                 ]
               }
@@ -12273,7 +12273,7 @@
                     },
                     {
                       "$ref": "#/components/schemas/UtdReasonDto",
-                      "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent, and for a UTD stored before reasons were kept, until its next\ndecryption attempt. On `/v1/ws`, set when the ingest path's local retry\nrecorded one."
+                      "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent. A UTD stored before reasons were kept also reads `null` until\nsomething retries it: a room key or withheld notice for its session, or\nan explicit re-decryption. A restart does not.\n\nOn a `/v1/ws` `timeline.event` frame for an `m.room.encrypted` event,\n`null` usually means the ingest path's local retry decrypted it after\nall: re-read the event for its content rather than showing \"unable to\ndecrypt\"."
                     }
                   ]
                 }
@@ -14910,7 +14910,7 @@
               },
               {
                 "$ref": "#/components/schemas/UtdReasonDto",
-                "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent, and for a UTD stored before reasons were kept, until its next\ndecryption attempt. On `/v1/ws`, set when the ingest path's local retry\nrecorded one."
+                "description": "Why this event could not be decrypted (ADR 0136 decision 2). Set only\non an event without content that is not redacted, and only once Axon has\nrecorded a reason: `null` for a decrypted, unencrypted or redacted\nevent. A UTD stored before reasons were kept also reads `null` until\nsomething retries it: a room key or withheld notice for its session, or\nan explicit re-decryption. A restart does not.\n\nOn a `/v1/ws` `timeline.event` frame for an `m.room.encrypted` event,\n`null` usually means the ingest path's local retry decrypted it after\nall: re-read the event for its content rather than showing \"unable to\ndecrypt\"."
               }
             ]
           }

@@ -1693,7 +1693,11 @@ async fn event_read_carries_utd_reason() {
     store
         .record_utd_reasons(
             account_id,
-            &[(&utds[0], &axon_core::UtdReason::withheld("m.unverified"))],
+            &[axon_store::UtdReasonUpdate {
+                room_id: &room_id,
+                event_id: &utds[0],
+                reason: &axon_core::UtdReason::withheld("m.unverified"),
+            }],
         )
         .await
         .expect("record reason");
