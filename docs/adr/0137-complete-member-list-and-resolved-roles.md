@@ -60,13 +60,20 @@ Both outcomes record `too_large` for `MEMBERS_TTL`, so a room that is too big is
 The entry cap is the one that binds: the byte cap admits `MAX_SNAPSHOT_ENTRIES` entries averaging up to about 520 bytes, above every measured per-room average.
 
 Outcomes map onto ADR 0126's value statuses: `200` with a valid body is `available`; an invalid body is the `invalid_response` failure; `403` is `forbidden`; `too_large` as above; every other outcome is a failure that updates only the refresh fields.
+Those failures keep ADR 0126's categories and backoff unchanged.
+A `401` is `unauthorized`, because token refresh stays with the account's sync, and a `429` is `rate_limited`.
+`FAILURE_BACKOFF` is never shorter than the response's `Retry-After` or `retry_after_ms`.
+After a single `401` while sync refreshes the token, an expired snapshot therefore reads `complete: false` for at most the first backoff step, one minute.
 
 ### 2. The snapshot is stored apart from synced state and merged on read
 
 A new table, `room_member_snapshots`, holds one row per account, room, and user: the membership event's ID and `origin_server_ts`, and its membership, display name, and avatar URL.
 Departed members keep only the first three.
 The room's acquisition row (kind `members` in `room_detail_acquisitions`) carries the status, `fetched_at`, `expires_at`, and refresh fields, as for the other kinds.
-A commit replaces the room's snapshot rows and updates the acquisition row in one transaction.
+A commit updates the acquisition row and brings the room's snapshot rows into line with the response in one transaction.
+It writes only the users whose event ID differs or who are new, deletes the users the response no longer has, and leaves every other row untouched.
+An hourly refresh of an unchanged room therefore writes no snapshot rows.
+The number of rows the commit wrote or deleted is the signal decision 5 uses to decide whether the snapshot changed.
 Snapshot rows are deleted with the acquisition row: on account removal and room purge through the summary foreign key, and on every new membership epoch through ADR 0126's trigger.
 They are also deleted when a refresh ends `too_large` or `forbidden`, which ADR 0126 treats as conclusive answers that replace the value; the list then returns to the projection alone.
 A refresh that fails transiently keeps them (decision 3 says how `complete` reports that).
@@ -78,7 +85,8 @@ A read merges the two per user by comparing events, never write times:
 
 - **Both sources have the user, with the same event:** they agree.
 - **Both have the user, with different events:** the event with the later `origin_server_ts` wins; on equal timestamps the snapshot wins, because it is the homeserver's resolved state.
-  This is the ordering the `room_state` upsert already applies to sync's own replays.
+  The `room_state` upsert uses the same `origin_server_ts` order but breaks ties the other way: it accepts an equal timestamp, so the later write wins, because sync's delivery order is the only tiebreak it has.
+  The merge deliberately does not copy that tie-break: a row the upsert accepted on an equal timestamp still loses to the snapshot.
 - **Only `room_state` has the user:** that row wins.
   The snapshot holds every user with a membership at the time it was served, so a user it lacks had no membership then, and sync's row is newer.
 - **Only the snapshot has the user:** the snapshot row is used.
@@ -91,6 +99,9 @@ A sync transaction that commits while the request is in flight is compared by it
 An old event that sync delivers late or replays, such as a join for a user the snapshot shows as departed, has an earlier `origin_server_ts` than the snapshot's event and loses, so it cannot bring a departed member back.
 A membership change that sync delivers shows at once, and a change sync never delivered, such as a join inside a timeline gap, shows after the next refresh; `MEMBERS_TTL` bounds that staleness.
 `origin_server_ts` is set by each event's origin server, so it is not a total order across servers; the merge inherits that limit from the projection rather than adding a new one.
+In particular, a synced event with a far-future timestamp, from a misconfigured or hostile server, beats every later snapshot event for that user, just as it already blocks every later sync event in the projection's upsert.
+`complete: true` means the list has a current snapshot; it does not guarantee that each row is correct against such an event.
+Bounding the timestamp, in the projection and the merge alike, is [issue 1108](https://github.com/matrix-axon/matrix-axon/issues/1108).
 
 ### 3. `GET …/rooms/{room_id}/members/page` is the paginated read; `/members` is unchanged
 
@@ -150,7 +161,11 @@ It returns:
   A read with `min_level` then fails with `409` and the error code `roles_unavailable` rather than return an empty page, so a client cannot mistake it for a room with no moderators.
 - **Cost:** the read merges and folds the room's rows in memory, then filters, orders, and slices.
   Its size is bounded by `MAX_SNAPSHOT_ENTRIES` plus the room's projection, and on the surveyed instance is at most about 2,600 rows.
-  A maintained read model with stored keys and a fold-rule version replaces this if measurement shows it is too slow; the API does not change.
+  At `MAX_SNAPSHOT_ENTRIES` every page, each cursor page included, repeats that work over 20,000 rows, and a `members` frame makes a client re-read every page it holds.
+  Step 3 measures a 100-row page read at the cap on the production host.
+  If a page read exceeds 100 ms, step 3 caches the merged, folded order per room before it closes issue 659.
+  The cache is invalidated by a snapshot commit or a `room_state` member change.
+  A maintained read model with stored keys and a fold-rule version is the next step if that is not enough; the API does not change in either case.
 
 The legacy `/members` keeps its contract, shape, and cost: the projection only, unpaginated, never scheduling acquisition.
 It remains the source for sender display names and mention candidates, and its description says it is partial and points at `/members/page`.
@@ -175,7 +190,17 @@ Role names such as "admin" and "moderator" stay a client presentation choice ove
 ### 5. `room_details.changed` names `members`
 
 `RoomDetailSource` gains `members`, telling a client to re-read `/members/page`.
-It is published when a snapshot commit changes the merged list, when a job that a read reported as `queued` or `running` ends (as ADR 0126 decision 5 does for its jobs), and when sync inserts or changes a `room_state` member row.
+It is published only when what a page would show may have changed, or when a refresh a client is waiting on is over:
+
+- **A snapshot commit** publishes when it wrote or deleted any snapshot row (decision 2).
+- **A job that a read reported as `queued` or `running`** publishes when it ends, as ADR 0126 decision 5 does for its jobs.
+  It also publishes when it is dropped from the full `members` queue, as amended ADR 0126 decision 4 does for dropped jobs, so a panel showing "fetching" re-reads and its next read schedules the job again.
+- **A sync write to a `room_state` member row** publishes only when the store reports that the row changed and the new row wins the merge.
+  A row wins when the room has no available snapshot, or the snapshot has no row for that user, or the snapshot's row has a strictly earlier `origin_server_ts`.
+  That is one indexed lookup per changed row.
+  The member rows that lazy loading re-delivers with most timeline batches are identical rewrites, so they publish nothing.
+  A late or replayed event that loses to a newer snapshot event publishes nothing either.
+
 Each room's processing step still publishes at most one frame with the union of its sources.
 A client re-reads the pages it holds on the frame, on reconnect, and on reopen, and debounces bursts as the TUI already does for membership events (ADR 0135).
 
@@ -241,13 +266,14 @@ Step 2 lets both clients start before step 3 lands; their PRs can follow step 2 
 
 ## Verification
 
-- **Merge, against the store:** a `room_state` event with a later `origin_server_ts` beats the snapshot's and an earlier one loses; equal timestamps with different events go to the snapshot; the same event in both is one member; a user only in `room_state` is listed from it; a winning `leave` is left out of both the page and `total`; with no available snapshot the read is the projection; a new epoch removes the snapshot.
+- **Merge, against the store:** a `room_state` event with a later `origin_server_ts` beats the snapshot's and an earlier one loses; equal timestamps with different events go to the snapshot, including when the `room_state` row was written through the real upsert after the snapshot commit; the same event in both is one member; a user only in `room_state` is listed from it; a winning `leave` is left out of both the page and `total`; with no available snapshot the read is the projection; a new epoch removes the snapshot.
 - **Merge races:** a sync write whose transaction starts before the request and commits after it, carrying a newer membership, wins; a replayed or late-delivered older join for a user the snapshot shows as departed, including one with an equal `origin_server_ts` for the projection's upsert, does not bring them back.
 - **`complete`:** `true` with a fresh snapshot and with an expired one whose refresh is queued or running; `false` after a refresh fails following expiry, while the rows are still served; `false` with the projection alone after a refresh ends `too_large` or `forbidden`, which deletes the rows.
 - **Paging:** the documented order; no repeats or skips across pages under concurrent unrelated changes; `total`, `q` with folded input (the TUI's test vectors), `membership`, `min_level` including `"infinite"`, `leave` rejected, and the page-size bounds.
-- **Acquisition, under paused tokio time against a mock homeserver:** `200` stores every entry, departed members with their event only; an oversized body is refused before parsing, and a list over `MAX_SNAPSHOT_ENTRIES` is not stored, both recorded `too_large`; `403` records `forbidden`; failures back off; repeated reads schedule nothing until `next_attempt_at`; a leave during the request commits nothing, including when a rejoin follows; unjoined rooms make no request; `/members` never schedules a job.
+- **Acquisition, under paused tokio time against a mock homeserver:** `200` stores every entry, departed members with their event only; an oversized body is refused before parsing, and a list over `MAX_SNAPSHOT_ENTRIES` is not stored, both recorded `too_large`; `403` records `forbidden`; failures back off; a `401` records `unauthorized`, and the first retry after it, with the token refreshed, restores `complete`; a `429` with `Retry-After` is not retried before it; a second refresh of an unchanged list writes no snapshot rows; repeated reads schedule nothing until `next_attempt_at`; a leave during the request commits nothing, including when a rejoin follows; unjoined rooms make no request; `/members` never schedules a job.
 - **Lanes:** a hung `members` request neither delays the room's alias, directory, or absence jobs nor evicts them from their queue; a full `members` queue drops its own oldest job.
 - **Roles:** a v12 room's creator resolves to `"infinite"` with `is_creator`; a pre-v12 room uses `users` and `users_default`; an unresolvable room returns `roles: "unavailable"` and null levels, and `min_level` there returns `409 roles_unavailable`; `/power_levels` reports `privileged_creators` and `own_level`.
-- **Frames:** `members` fires on a snapshot change, on the end of an observed job, and on a sync member change, and stays silent on identical rewrites.
+- **Frames:** `members` fires on a snapshot change, on the end of an observed job, on an observed job dropped from the full queue, and on a sync member change that wins the merge; it stays silent on identical rewrites, on a refresh that changes no snapshot row and was not observed, and on a sync row that loses to a newer snapshot event.
+- **Cost, in step 3:** a 100-row page read, first page and a deep cursor page, over a synthetic room at `MAX_SNAPSHOT_ENTRIES`, measured on the production host and recorded in the PR against the 100 ms threshold in decision 3.
 - **Live, on a disposable Synapse stack:** a room with more members than the projection holds becomes complete after one read; a join made while sync is paused appears after the next refresh; a v12 room's creator shows as such.
 - **Production, read-only:** after step 3, the largest surveyed room's `/members/page` `total` matches Synapse's non-departed member count.
