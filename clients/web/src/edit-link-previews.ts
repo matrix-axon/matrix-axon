@@ -38,6 +38,25 @@ const ENTRY_KEYS: ReadonlySet<string> = new Set([
   'matrix:image:size',
 ])
 
+/** The keys of the encrypted-file object the server writes. */
+const ENCRYPTED_FILE_KEYS: ReadonlySet<string> = new Set([
+  'url',
+  'key',
+  'iv',
+  'hashes',
+  'v',
+])
+const IMAGE_TYPES: ReadonlySet<unknown> = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+])
+const MAX_URL_UNITS = 4096
+const MAX_MXC_BYTES = 1024
+const MAX_MEDIA_SOURCE_BYTES = 1024
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024
+const MAX_IMAGE_PIXELS = 4_000_000
+
 const bytes = (value: unknown) =>
   new TextEncoder().encode(JSON.stringify(value)).length
 
@@ -47,12 +66,103 @@ function record(value: unknown): Record<string, unknown> | null {
     : null
 }
 
+/** A well-formed `mxc://server/media` reference, as the server parses one. */
+function mxcIsValid(value: unknown): boolean {
+  if (typeof value !== 'string' || !value.startsWith('mxc://')) return false
+  if (new TextEncoder().encode(value).length > MAX_MXC_BYTES) return false
+  const rest = value.slice('mxc://'.length)
+  const slash = rest.indexOf('/')
+  if (slash === -1) return false
+  const media = rest.slice(slash + 1)
+  return slash > 0 && media !== '' && !media.includes('/')
+}
+
+function encryptedFileIsValid(value: unknown): boolean {
+  const file = record(value)
+  return (
+    file !== null &&
+    Object.keys(file).every((key) => ENCRYPTED_FILE_KEYS.has(key)) &&
+    mxcIsValid(file.url) &&
+    record(file.key) !== null &&
+    typeof file.iv === 'string' &&
+    typeof record(file.hashes)?.sha256 === 'string' &&
+    typeof file.v === 'string' &&
+    bytes(file) <= MAX_MEDIA_SOURCE_BYTES
+  )
+}
+
+/** A positive whole number no larger than `max`, when present. */
+function countWithin(value: unknown, max: number): boolean {
+  return (
+    value === undefined ||
+    (typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value > 0 &&
+      value <= max)
+  )
+}
+
+/** Text no longer than `limit` UTF-16 units, when present. */
+function textWithin(value: unknown, limit: number): boolean {
+  return (
+    value === undefined || (typeof value === 'string' && value.length <= limit)
+  )
+}
+
+/**
+ * Whether the server would use this current entry, in the standard
+ * spelling: the checks a new entry gets (`entry_is_valid` in
+ * `crates/axon-core/src/edit_preview.rs`). The timeline's renderer is more
+ * forgiving, truncating text and dropping a bad image, so a card it shows can
+ * still be one the server leaves out of an edit.
+ */
+function entryIsValid(entry: Record<string, unknown>): boolean {
+  if (Object.keys(entry).some((key) => !ENTRY_KEYS.has(key))) return false
+  const matched = entry['matrix:matched_url']
+  if (typeof matched !== 'string' || matched.length > MAX_URL_UNITS)
+    return false
+  let url: URL
+  try {
+    url = new URL(matched)
+  } catch {
+    return false
+  }
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username !== '' ||
+    url.password !== ''
+  )
+    return false
+  const plain = Object.hasOwn(entry, 'og:image')
+  const encrypted = Object.hasOwn(entry, 'matrix:image:encrypted')
+  if (plain && encrypted) return false
+  if (plain && !mxcIsValid(entry['og:image'])) return false
+  if (encrypted && !encryptedFileIsValid(entry['matrix:image:encrypted']))
+    return false
+  const width = entry['og:image:width']
+  const height = entry['og:image:height']
+  return (
+    textWithin(entry['og:title'], 300) &&
+    textWithin(entry['og:description'], 1000) &&
+    textWithin(entry['og:site_name'], 120) &&
+    (entry['og:image:type'] === undefined ||
+      IMAGE_TYPES.has(entry['og:image:type'])) &&
+    countWithin(width, MAX_IMAGE_PIXELS) &&
+    countWithin(height, MAX_IMAGE_PIXELS) &&
+    (typeof width !== 'number' ||
+      typeof height !== 'number' ||
+      width * height <= MAX_IMAGE_PIXELS) &&
+    countWithin(entry['matrix:image:size'], MAX_IMAGE_BYTES)
+  )
+}
+
 /** A message's preview field, as the server reads it for an edit. */
 export interface MessagePreviewField {
   /** The message has a preview field, even an empty one. */
   hasField: boolean
   /** The entries the server would use, in the standard spelling, by link
-   *  identity: the first eight, with only the keys it writes. */
+   *  identity: among the first eight, those passing its checks, the first
+   *  for each link. */
   entries: ReadonlyMap<string, Record<string, unknown>>
 }
 
@@ -83,9 +193,8 @@ export function messagePreviewField(content: unknown): MessagePreviewField {
           delete entry[alias]
         }
     }
-    if (Object.keys(entry).some((key) => !ENTRY_KEYS.has(key))) return
-    const matched = entry['matrix:matched_url']
-    const identity = typeof matched === 'string' ? linkIdentity(matched) : null
+    if (!entryIsValid(entry)) return
+    const identity = linkIdentity(entry['matrix:matched_url'] as string)
     if (identity !== null && !entries.has(identity))
       entries.set(identity, entry)
   })
@@ -271,25 +380,26 @@ export function planEditPreviews(
   const bare = matchUrls(request.body).map(({ url }) => url)
   const position = (url: string) => bare.indexOf(url)
   const counted = new Set<string>()
-  const take = (url: string) => {
+  // A kept card needs only its link in the body and an entry the server will
+  // copy: the fetch policy in `eligible` governs new cards, and the server
+  // keeps a card for any link it accepted (§ 8).
+  const take = (url: string, fetched: boolean) => {
     const identity = linkIdentity(url)
     if (
       identity === null ||
       counted.has(identity) ||
       position(url) === -1 ||
-      !eligible.includes(url)
+      (fetched ? !eligible.includes(url) : !field.entries.has(identity))
     )
       return false
     counted.add(identity)
     return true
   }
-  const kept = draft.kept.filter(
-    (url) => take(url) && field.entries.has(linkIdentity(url)!),
-  )
+  const kept = draft.kept.filter((url) => take(url, false))
   let previews: EditLinkPreview[] = [
     ...kept.map((matchedUrl) => ({ kind: 'keep' as const, matchedUrl })),
     ...draft.cards
-      .filter((card) => take(card.matchedUrl))
+      .filter((card) => take(card.matchedUrl, true))
       .map((preview) => ({ kind: 'new' as const, preview })),
   ].sort(
     (a, b) =>

@@ -72,7 +72,16 @@ describe('messagePreviewField', () => {
   it('converts the alias, and leaves out what the server would not keep', () => {
     const field = messagePreviewField({
       'com.beeper.linkpreviews': [
-        { matched_url: A, 'beeper:image:encryption': { url: 'mxc://s/m' } },
+        {
+          matched_url: A,
+          'beeper:image:encryption': {
+            url: 'mxc://s/m',
+            key: {},
+            iv: 'AAAA',
+            hashes: { sha256: 'h' },
+            v: 'v2',
+          },
+        },
         { matched_url: B, 'og:url': 'extra key' },
       ],
     })
@@ -80,7 +89,13 @@ describe('messagePreviewField', () => {
     expect([...field.entries.keys()]).toEqual([A])
     expect(field.entries.get(A)).toEqual({
       'matrix:matched_url': A,
-      'matrix:image:encrypted': { url: 'mxc://s/m' },
+      'matrix:image:encrypted': {
+        url: 'mxc://s/m',
+        key: {},
+        iv: 'AAAA',
+        hashes: { sha256: 'h' },
+        v: 'v2',
+      },
     })
   })
 
@@ -88,6 +103,71 @@ describe('messagePreviewField', () => {
     const urls = Array.from({ length: 10 }, (_, n) => `https://e.org/${n}`)
     const field = messagePreviewField({ 'm.url_previews': urls.map(entry) })
     expect([...field.entries.keys()]).toEqual(urls.slice(0, 8))
+  })
+})
+
+describe('messagePreviewField mirrors the server checks', () => {
+  const encrypted = {
+    url: 'mxc://example.org/enc',
+    key: { kty: 'oct' },
+    iv: 'AAAA',
+    hashes: { sha256: 'hash' },
+    v: 'v2',
+  }
+  const image = {
+    'og:image': 'mxc://example.org/abc',
+    'og:image:type': 'image/png',
+    'og:image:width': 10,
+    'og:image:height': 10,
+    'matrix:image:size': 100,
+  }
+
+  it.each([
+    ['a title past 300 units', { 'og:title': 't'.repeat(301) }],
+    ['a description past 1000 units', { 'og:description': 'd'.repeat(1001) }],
+    ['a site name past 120 units', { 'og:site_name': 's'.repeat(121) }],
+    ['a title that is not text', { 'og:title': 7 }],
+    ['an image that is not mxc', { 'og:image': 'https://a.example/x.png' }],
+    ['an mxc with a path', { 'og:image': 'mxc://example.org/a/b' }],
+    ['both image keys', { ...image, 'matrix:image:encrypted': encrypted }],
+    ['an SVG type', { 'og:image:type': 'image/svg+xml' }],
+    ['a zero width', { 'og:image:width': 0 }],
+    ['too many pixels', { 'og:image:width': 4000, 'og:image:height': 4000 }],
+    ['an image past 2 MiB', { 'matrix:image:size': 3 * 1024 * 1024 }],
+    [
+      'a descriptor with an extra key',
+      { 'matrix:image:encrypted': { ...encrypted, extra: 1 } },
+    ],
+    [
+      'a descriptor without its hash',
+      { 'matrix:image:encrypted': { ...encrypted, hashes: {} } },
+    ],
+    [
+      'credentials in the link',
+      { 'matrix:matched_url': 'https://u:p@a.example/' },
+    ],
+    ['a non-web link', { 'matrix:matched_url': 'ftp://a.example/' }],
+  ])('leaves out an entry with %s', (_, fields) => {
+    const content = {
+      'm.url_previews': [{ 'matrix:matched_url': A, ...fields }],
+    }
+    expect(messagePreviewField(content).entries.size).toBe(0)
+    // The timeline still renders some of these; edit mode does not offer
+    // a card the server would drop on save.
+    expect(messageCards({ msgtype: 'm.text', body: A, ...content }, A)).toEqual(
+      [],
+    )
+  })
+
+  it.each([
+    ['text only', { 'og:title': 'Title' }],
+    ['a plain image', image],
+    ['an encrypted image', { 'matrix:image:encrypted': encrypted }],
+  ])('keeps an entry with %s', (_, fields) => {
+    const content = {
+      'm.url_previews': [{ 'matrix:matched_url': A, ...fields }],
+    }
+    expect([...messagePreviewField(content).entries.keys()]).toEqual([A])
   })
 })
 
@@ -142,6 +222,16 @@ describe('planEditPreviews', () => {
         { kind: 'keep', matchedUrl: A },
       ],
     })
+  })
+
+  it('keeps a card whose link new lookups would refuse', () => {
+    // The fetch policy refuses plain http for new cards; the server keeps
+    // the message's own card for it.
+    const HTTP = 'http://plain.example.org/page'
+    const req = request(`edited ${HTTP}`, withCards(HTTP, HTTP))
+    expect(
+      plan(req, draft({ kept: [HTTP], opened: new Set([HTTP]) }), HTTP),
+    ).toEqual({ kind: 'send', previews: [{ kind: 'keep', matchedUrl: HTTP }] })
   })
 
   it('sends [] when a card is removed (rule 3)', () => {

@@ -632,6 +632,13 @@ describe('editing a message (§ 8)', () => {
     })
   })
 
+  it('shows a card whose link new lookups would refuse', () => {
+    const HTTP = 'http://plain.example.org/page'
+    editing({ setting: 'off' }, `see ${HTTP} `, [HTTP])
+    expect(statuses()).toEqual([[HTTP, 'kept']])
+    expect(controller.snapshot().kept).toEqual([HTTP])
+  })
+
   it('hides a card whose link is deleted, and brings it back without a lookup', () => {
     const { device } = deviceSource()
     editing({ setting: 'device', device }, `see ${A} `, [A])

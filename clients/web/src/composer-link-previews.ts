@@ -224,17 +224,25 @@ interface Entry {
   abort: AbortController | null
 }
 
-/** Distinct eligible links in text order, with completeness. */
-function scan(text: string, pasted: ReadonlySet<string>): Link[] {
+/**
+ * Distinct eligible links in text order, with completeness. `kept` names
+ * links that count whatever the fetch policy says: an edited message's own
+ * cards, which the server keeps for any `http` or `https` link (§ 8).
+ */
+function scan(
+  text: string,
+  pasted: ReadonlySet<string>,
+  kept: ReadonlySet<string> = new Set(),
+): Link[] {
   const links = new Map<string, Link>()
   for (const match of matchUrls(text)) {
     // As the composer will send it (`lowercaseLinkSchemes`), so a card's
     // `matched_url` is the text the server finds in the body.
     const url = match.url.replace(/^https?:/i, (scheme) => scheme.toLowerCase())
     const { end } = match
-    if (!isPreviewLink(url)) continue
     const identity = linkIdentity(url)
     if (identity === null) continue
+    if (!isPreviewLink(url) && !kept.has(identity)) continue
     // Whitespace after the link's own run of characters: typing can no
     // longer extend it, so the user has finished it.
     const complete = pasted.has(identity) || /^\S*\s/.test(text.slice(end))
@@ -326,7 +334,7 @@ export function createComposerLinkPreviews(
    *  still is, and new links' while the edit has fewer than three cards.
    *  None of the message's cards is ever dropped for the count (§ 8). */
   function wantedInEdit(): Link[] {
-    const links = scan(text, pasted)
+    const links = scan(text, pasted, new Set(existing.keys()))
     const shown = new Set(
       links
         .filter((l) => existing.has(l.identity) && !discarded.has(l.identity))
