@@ -1330,7 +1330,7 @@ function ShellChrome() {
     (expanded: boolean) => (event: KeyboardEvent) => {
       // AltGr also presents as Ctrl+Alt on international keyboards. It must
       // keep reaching the text field, even when its key matches this command.
-      if (event.getModifierState('AltGraph')) return
+      if (event.isComposing || event.getModifierState('AltGraph')) return
       event.preventDefault()
       timelineMediaExpanded.value = expanded
     }

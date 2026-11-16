@@ -42,7 +42,21 @@ export function chordOf(event: KeyboardEvent): Chord {
   if (event.shiftKey) {
     parts.push('shift')
   }
-  parts.push(event.key.toLowerCase())
+  // Measured on macOS with a US keyboard: Safari reports ç/KeyC and
+  // ´/KeyE for the two Command+Option media commands. Keep this physical-key
+  // exception confined to those chords; ordinary shortcuts stay logical.
+  const appleMediaKey =
+    isApplePlatform() &&
+    event.metaKey &&
+    event.altKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    !event.isComposing &&
+    !event.getModifierState('AltGraph') &&
+    (event.code === 'KeyC' || event.code === 'KeyE')
+  parts.push(
+    appleMediaKey ? event.code.slice(3).toLowerCase() : event.key.toLowerCase(),
+  )
   return parts.join('+')
 }
 

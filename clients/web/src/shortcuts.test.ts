@@ -31,6 +31,62 @@ describe('chordOf (ADR 0078)', () => {
     expect(chordOf(key({ key: '?', shiftKey: true }))).toBe('?')
   })
 
+  it.each([
+    ['ç', 'KeyC', 'mod+alt+c'],
+    ['´', 'KeyE', 'mod+alt+e'],
+    ['Dead', 'KeyE', 'mod+alt+e'],
+    ['c', 'KeyC', 'mod+alt+c'],
+    ['e', 'KeyE', 'mod+alt+e'],
+  ])(
+    'matches the Mac media chord for key=%s code=%s',
+    (value, code, expected) => {
+      vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+      )
+      expect(
+        chordOf(key({ key: value, code, metaKey: true, altKey: true })),
+      ).toBe(expected)
+    },
+  )
+
+  it('keeps other chords, platforms, and composition on event.key', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    )
+    for (const init of [
+      { key: 'ß', code: 'KeyS', metaKey: true, altKey: true },
+      { key: 'ç', code: '', metaKey: true, altKey: true },
+      { key: 'ç', code: 'KeyC', ctrlKey: true, altKey: true },
+      { key: 'ç', code: 'KeyC', metaKey: true },
+      { key: 'ç', code: 'KeyC', metaKey: true, altKey: true, shiftKey: true },
+      {
+        key: 'ç',
+        code: 'KeyC',
+        metaKey: true,
+        altKey: true,
+        isComposing: true,
+      },
+    ]) {
+      expect(chordOf(key(init))).toContain(init.key)
+    }
+    const altGraph = key({
+      key: 'ç',
+      code: 'KeyC',
+      metaKey: true,
+      altKey: true,
+    })
+    Object.defineProperty(altGraph, 'getModifierState', {
+      value: (modifier: string) => modifier === 'AltGraph',
+    })
+    expect(chordOf(altGraph)).toBe('mod+alt+ç')
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (X11; Linux x86_64)',
+    )
+    expect(
+      chordOf(key({ key: 'ç', code: 'KeyC', metaKey: true, altKey: true })),
+    ).toBe('mod+alt+ç')
+  })
+
   it('normalizes modified keys, lowercasing the key', () => {
     expect(chordOf(key({ key: 'k', ctrlKey: true }))).toBe('mod+k')
     // Ctrl+Shift+F reports `event.key === 'F'`.

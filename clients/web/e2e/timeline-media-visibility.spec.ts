@@ -511,3 +511,41 @@ test('ungrouping hidden gallery images exposes reply and react without showing m
   await page.keyboard.press('Escape')
   await expect(stream.locator(TIMELINE_MEDIA)).toHaveCount(0)
 })
+
+test('recorded Mac Option characters activate media shortcuts on Apple profiles', async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    !testInfo.project.name.startsWith('webkit'),
+    'Apple platform mapping',
+  )
+  await setup(page)
+  const composer = roomComposer(page)
+  await composer.fill('Keep this Mac draft')
+  for (const [key, code, expanded] of [
+    ['ç', 'KeyC', false],
+    ['´', 'KeyE', true],
+    ['ç', 'KeyC', false],
+    ['Dead', 'KeyE', true],
+  ] as const) {
+    // Event readings measured through macOS System Events on a real Mac;
+    // synthetic dispatch here is regression coverage, not the measurement.
+    await composer.evaluate(
+      (input, reading) =>
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            ...reading,
+            metaKey: true,
+            altKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      { key, code },
+    )
+    await expect(page.locator('.room-stream .gallery-grid')).toHaveCount(
+      expanded ? 1 : 0,
+    )
+    await expect(composer).toHaveValue('Keep this Mac draft')
+  }
+})

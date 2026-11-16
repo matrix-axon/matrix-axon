@@ -213,6 +213,8 @@ before starting a milestone.
   Non-emoji images in formatted text and collapsed captions become alt text before media acquisition.
   Keep composer previews independent of this timeline-only choice.
   Leave AltGraph key events uncanceled; they can present as Ctrl+Alt on international keyboards.
+  On macOS, these two exact Command+Option chords match physical `KeyC`/`KeyE`; all unrelated chords retain `event.key`, and active IME composition is ignored.
+  Native Safari 27.2 on macOS 26.7.3 with the US layout reports `ç`/`KeyC` and `´`/`KeyE`, so character-only matching misses both commands.
   Collapsed gallery event IDs and highlight styling belong to the inner attachment items; shared captions remain deduplicated.
   Collapsed media reply quotes render text excerpts because their jump overlay covers embedded attachment controls.
   While timeline media is hidden, grouped galleries intentionally offer metadata and downloads; use Ungroup images for each message's reply/react controls and configured row gestures without showing the images.

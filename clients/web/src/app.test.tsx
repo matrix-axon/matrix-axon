@@ -1884,6 +1884,59 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
     },
   )
 
+  it.each([false, true])(
+    'Mac media shortcuts accept native Option characters (native=%s)',
+    async (native) => {
+      vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+      )
+      const shell = window as unknown as Record<string, unknown>
+      if (native) shell.__TAURI_INTERNALS__ = {}
+      const services = testServices()
+      const input = document.createElement('textarea')
+      try {
+        const { findByRole } = render(<App services={services} />)
+        await findByRole('heading', { name: 'Add a Room' })
+        document.body.append(input)
+        input.value = 'Keep the draft'
+        for (const [key, code, expanded] of [
+          ['ç', 'KeyC', false],
+          ['´', 'KeyE', true],
+          ['ç', 'KeyC', false],
+          ['Dead', 'KeyE', true],
+        ] as const) {
+          const event = new KeyboardEvent('keydown', {
+            key,
+            code,
+            metaKey: true,
+            altKey: true,
+            bubbles: true,
+            cancelable: true,
+          })
+          input.dispatchEvent(event)
+          expect(event.defaultPrevented).toBe(true)
+          expect(services.timelineMediaExpanded.value).toBe(expanded)
+          expect(input.value).toBe('Keep the draft')
+        }
+        const composing = new KeyboardEvent('keydown', {
+          key: 'c',
+          code: 'KeyC',
+          metaKey: true,
+          altKey: true,
+          isComposing: true,
+          bubbles: true,
+          cancelable: true,
+        })
+        input.dispatchEvent(composing)
+        expect(composing.defaultPrevented).toBe(false)
+        expect(services.timelineMediaExpanded.value).toBe(true)
+      } finally {
+        input.remove()
+        delete shell.__TAURI_INTERNALS__
+      }
+    },
+  )
+
   it('leaves AltGr media chords uncanceled while typing', async () => {
     const services = testServices()
     const { findByRole } = render(<App services={services} />)
