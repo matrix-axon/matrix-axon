@@ -42,7 +42,21 @@ export function chordOf(event: KeyboardEvent): Chord {
   if (event.shiftKey) {
     parts.push('shift')
   }
-  parts.push(event.key.toLowerCase())
+  // Measured on macOS with a US keyboard: Safari reports ç/KeyC and
+  // ´/KeyE for the two Command+Option media commands. Keep this physical-key
+  // exception confined to those chords; ordinary shortcuts stay logical.
+  const appleMediaKey =
+    isApplePlatform() &&
+    event.metaKey &&
+    event.altKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    !event.isComposing &&
+    !event.getModifierState('AltGraph') &&
+    (event.code === 'KeyC' || event.code === 'KeyE')
+  parts.push(
+    appleMediaKey ? event.code.slice(3).toLowerCase() : event.key.toLowerCase(),
+  )
   return parts.join('+')
 }
 
@@ -223,6 +237,18 @@ export const KEYS = {
   strike: { label: 'Ctrl-Shift-X', aria: 'Control+Shift+X' },
   code: { label: 'Ctrl-E', aria: 'Control+E' },
   link: { label: 'Ctrl-Shift-K', aria: 'Control+Shift+K' },
+  collapseMedia: {
+    label: 'Ctrl-Alt-C',
+    aria: 'Control+Alt+C',
+    appleLabel: '⌘-Option-C',
+    appleAria: 'Meta+Alt+C',
+  },
+  expandMedia: {
+    label: 'Ctrl-Alt-E',
+    aria: 'Control+Alt+E',
+    appleLabel: '⌘-Option-E',
+    appleAria: 'Meta+Alt+E',
+  },
   toggleSpaces: {
     label: 'Ctrl-Alt-S',
     aria: 'Control+Alt+S',
@@ -447,6 +473,14 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
   {
     group: 'Messages',
     rows: [
+      {
+        keys: KEYS.collapseMedia,
+        description: 'Hide timeline images and preview cards',
+      },
+      {
+        keys: KEYS.expandMedia,
+        description: 'Show timeline images and preview cards',
+      },
       { keys: 'Shift-Enter', description: 'Insert a line break' },
       { keys: ':emoji-shortcode:', description: 'Insert an emoji' },
       {

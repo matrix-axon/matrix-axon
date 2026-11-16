@@ -14,17 +14,24 @@ export function MediaCaption({
   accountId,
   caption,
   content,
+  hideImages = false,
 }: {
   accountId: string
   caption: string
   content?: unknown
+  hideImages?: boolean
 }) {
   const formatted = useMemo(
     () => captionRenderContent(caption, content),
     [caption, content],
   )
   return (
-    <FormattedBody accountId={accountId} body={caption} content={formatted} />
+    <FormattedBody
+      accountId={accountId}
+      body={caption}
+      content={formatted}
+      hideImages={hideImages}
+    />
   )
 }
 

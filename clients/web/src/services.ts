@@ -148,6 +148,8 @@ export interface AppServices {
   auth: CompositeAuthProvider
   api: ApiClient
   settings: SettingsStore
+  /** Session-only timeline presentation, shared across rooms and threads. */
+  timelineMediaExpanded: Signal<boolean>
   accounts: AccountsStore
   matrixOAuthQr: MatrixOAuthQrStore
   matrixOAuthQrGrant: MatrixOAuthQrGrantStore
@@ -1994,6 +1996,7 @@ export function createServices(
     attachments,
     linkPreviews,
     settings,
+    timelineMediaExpanded: signal(true),
     accounts,
     matrixOAuthQr,
     matrixOAuthQrGrant,

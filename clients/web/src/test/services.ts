@@ -284,6 +284,7 @@ export function testServices(
     attachments,
     linkPreviews,
     settings,
+    timelineMediaExpanded: signal(true),
     accounts,
     matrixOAuthQr,
     matrixOAuthQrGrant,

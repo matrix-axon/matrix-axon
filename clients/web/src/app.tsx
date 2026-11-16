@@ -873,6 +873,7 @@ function ShellChrome() {
     threadUnread,
     verification,
     platform: svcPlatform,
+    timelineMediaExpanded,
   } = useServices()
   const pendingShareCount = incomingShares?.pending.value.length ?? 0
   const pendingSharesUnavailable = incomingShares?.unavailable.value ?? false
@@ -1325,6 +1326,14 @@ function ShellChrome() {
   // platform's standard chords that a page never could. Only the primary
   // modifier counts: on macOS `Ctrl-F`/`Ctrl-N` are text-field cursor keys.
   const native = isTauriRuntime()
+  const setTimelineMediaVisibility =
+    (expanded: boolean) => (event: KeyboardEvent) => {
+      // AltGr also presents as Ctrl+Alt on international keyboards. It must
+      // keep reaching the text field, even when its key matches this command.
+      if (event.isComposing || event.getModifierState('AltGraph')) return
+      event.preventDefault()
+      timelineMediaExpanded.value = expanded
+    }
   useShortcuts(
     {
       // Search's modifier twin (ADR 0066), reachable from the composer.
@@ -1371,6 +1380,8 @@ function ShellChrome() {
       // so the shifted twin is the sidebar toggle that survives typing.
       'mod+b': toggleSidebar,
       'mod+shift+b': toggleSidebar,
+      'mod+alt+c': setTimelineMediaVisibility(false),
+      'mod+alt+e': setTimelineMediaVisibility(true),
       'mod+alt+s': (event) => {
         if (mode === 'utility' || singlePane || !hasSpaces) return
         event.preventDefault()
