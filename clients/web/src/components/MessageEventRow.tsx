@@ -98,12 +98,14 @@ export function isUnsupportedBodylessEvent(event: TimelineEvent): boolean {
 
 function EventActionButton({
   label,
+  title,
   className = 'ghost',
   ariaExpanded,
   onClick,
   children,
 }: {
   label: string
+  title?: string
   className?: string
   ariaExpanded?: boolean
   onClick: () => void
@@ -148,6 +150,7 @@ function EventActionButton({
     <span class="event-action-tooltip-wrap">
       <button
         type="button"
+        title={title}
         class={`${className} event-action-button`}
         aria-expanded={ariaExpanded}
         onTouchStart={() => {
@@ -178,6 +181,44 @@ function EventActionButton({
         </span>
       )}
     </span>
+  )
+}
+
+function CopyMessageAction({
+  body,
+  onCopy,
+}: {
+  body: string
+  onCopy: () => void
+}) {
+  const { status, copy } = useCopyFeedback()
+  return (
+    <>
+      <EventActionButton
+        label="Copy"
+        className={status === 'failed' ? 'ghost danger' : 'ghost'}
+        title="Copy text; select timestamp to copy link"
+        onClick={() => {
+          onCopy()
+          void copy(body, 'body-action')
+        }}
+      >
+        <EventActionIcon name={status === 'copied' ? 'confirm' : 'copy'} />
+        <span class="event-action-label">Copy</span>
+      </EventActionButton>
+      <span
+        class={`event-copy-status event-action-copy-status${status === 'failed' ? ' error' : ''}`}
+        aria-live="polite"
+        aria-atomic="true"
+        role={status === 'idle' ? undefined : 'status'}
+      >
+        {status === 'idle'
+          ? ''
+          : status === 'copied'
+            ? 'Copied'
+            : 'Copy failed'}
+      </span>
+    </>
   )
 }
 
@@ -295,6 +336,7 @@ export function MessageEventRow({
   const [confirmingRedact, setConfirmingRedact] = useState(false)
   const [inspectOpen, setInspectOpen] = useState(false)
   const desktopClickTimer = useRef<number | null>(null)
+  const cancelTimestampLinkCopy = useRef<(() => void) | null>(null)
   const gestureFeedbacks = useGestureFeedback()
   const isState = isStateEvent(event)
   const replyTo = inReplyToId(event)
@@ -485,6 +527,7 @@ export function MessageEventRow({
             event={event}
             format={settings.timeFormat.value}
             touchHoldEnabled={touchHoldEnabled}
+            cancelPendingLinkCopyRef={cancelTimestampLinkCopy}
           />
           <FailedSend event={event} timeline={timeline} />
           {event.edited && (
@@ -516,6 +559,16 @@ export function MessageEventRow({
                       <EventActionIcon name="thread" />
                       <span class="event-action-label">Thread</span>
                     </EventActionButton>
+                  )}
+                  {event.body !== null && event.body !== undefined && (
+                    // Match timestamp copying, including filenames and whitespace.
+                    <CopyMessageAction
+                      body={event.body}
+                      onCopy={() => {
+                        cancelDesktopClick()
+                        cancelTimestampLinkCopy.current?.()
+                      }}
+                    />
                   )}
                   <EventActionButton
                     label="React"

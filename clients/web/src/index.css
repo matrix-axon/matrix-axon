@@ -3915,6 +3915,23 @@ span.composer-attachment-thumb {
   display: none;
 }
 
+.event-action-copy-status {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.35rem);
+  z-index: 30;
+  max-width: 100%;
+  padding: 0.2rem 0.4rem;
+  background: var(--bg);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.event-action-copy-status:empty {
+  padding: 0;
+}
+
 .event-action-icon {
   display: none;
   width: 1rem;
@@ -3958,7 +3975,7 @@ span.composer-attachment-thumb {
 
   /* The open bar takes priority over the edit marker, at every phone width
      (a deliberate trade-off, not a narrow-phone fallback): name, time,
-     "(edited)" and five buttons do not fit on a 375px phone without truncating
+     "(edited)" and six buttons do not fit on a 375px phone without truncating
      the name to a couple of letters. Edit history is not reachable while the
      bar is open; the marker returns when it closes. */
   .event-row.actions-open .event-head > .edited-marker {
@@ -3982,8 +3999,8 @@ span.composer-attachment-thumb {
     opacity: 1;
   }
 
-  /* Last resort for the narrowest phones. At 320px, with the delete
-     confirmation open, the time plus six buttons are wider than the row even
+  /* Last resort for the narrowest phones. With the delete confirmation open,
+     the time plus seven buttons are wider than the row even
      with the name collapsed to nothing. The time's width is not predictable (it
      follows the timezone and the 12h/24h setting), so rather than reserve room
      for it, drop it while the bar is open, as "(edited)" is dropped above. It
@@ -3991,6 +4008,17 @@ span.composer-attachment-thumb {
   @media (max-width: 22rem) {
     .event-row.actions-open .event-head > .event-time-copy,
     .event-row.actions-open .event-head > time {
+      display: none;
+    }
+  }
+
+  /* Delete confirmation adds another button. Reserve its extra room on narrow
+     phones, including when Inspect is present, while smaller bars keep time. */
+  @media (max-width: 24rem) {
+    .event-row.actions-open
+      .event-head:has(.event-actions .confirm)
+      > .event-time-copy,
+    .event-row.actions-open .event-head:has(.event-actions .confirm) > time {
       display: none;
     }
   }

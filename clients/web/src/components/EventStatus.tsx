@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState } from 'preact/hooks'
+import type { Ref } from 'preact'
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from 'preact/hooks'
 import { copyText, type CopySource } from '../copy-text'
 import { matrixToEventLink } from '../matrix-to'
 import type { TimeFormat } from '../stores/settings'
@@ -44,16 +51,28 @@ export function EventTime({
   event,
   format,
   touchHoldEnabled = false,
+  cancelPendingLinkCopyRef,
 }: {
   event: TimelineEvent
   format?: TimeFormat
   touchHoldEnabled?: boolean
+  /** Let another explicit copy action supersede a pending timestamp click. */
+  cancelPendingLinkCopyRef?: Ref<() => void>
 }) {
   const [copyStatus, setCopyStatus] = useState<
     'idle' | 'link-copied' | 'text-copied' | 'no-text' | 'failed' | 'retry'
   >('idle')
   const clearCopyStatus = useRef<number | null>(null)
   const linkClickTimer = useRef<number | null>(null)
+  const clearLinkClick = useCallback(() => {
+    if (linkClickTimer.current !== null) {
+      window.clearTimeout(linkClickTimer.current)
+      linkClickTimer.current = null
+    }
+  }, [])
+  useImperativeHandle(cancelPendingLinkCopyRef ?? null, () => clearLinkClick, [
+    clearLinkClick,
+  ])
   const holdTimer = useRef<number | null>(null)
   const holdCopyTimer = useRef<number | null>(null)
   const copiedOnTouchEnd = useRef(false)
@@ -149,12 +168,6 @@ export function EventTime({
     if (event.body === null || event.body === undefined) return
     const ok = await copyText(event.body, 'body-retry-click')
     reportCopy(ok ? 'text-copied' : 'failed')
-  }
-  const clearLinkClick = () => {
-    if (linkClickTimer.current !== null) {
-      window.clearTimeout(linkClickTimer.current)
-      linkClickTimer.current = null
-    }
   }
   const clearHoldCopy = () => {
     if (holdCopyTimer.current !== null) {

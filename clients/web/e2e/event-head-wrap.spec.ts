@@ -53,8 +53,8 @@ for (const width of [320, 375]) {
     expect(result!.actionsRight).toBeLessThanOrEqual(result!.headRight + 1)
     // The edit marker yields while the bar is open.
     expect(result!.editedDisplay).toBe('none')
-    // The time yields too, but only on the narrowest phones (22rem and below,
-    // so 320px here); at 375px it stays.
-    expect(result!.timeDisplay).toBe(width <= 352 ? 'none' : 'block')
+    // Ordinary bars keep the timestamp at 375px; only the narrowest phones
+    // need to hide it while actions are open.
+    expect(result!.timeDisplay).toBe(width === 320 ? 'none' : 'block')
   })
 }

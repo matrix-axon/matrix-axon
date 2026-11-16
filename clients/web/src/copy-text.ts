@@ -5,6 +5,7 @@ import { isTauriRuntime } from './platform'
 export type CopySource =
   | 'link-click'
   | 'body-dblclick'
+  | 'body-action'
   | 'body-retry-click'
   | 'body-hold-touchend'
   | 'body-hold-click'

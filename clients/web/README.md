@@ -139,6 +139,10 @@ Choosing an action already assigned to another gesture swaps the two
 assignments, keeping mappings unique without requiring an intermediate Off.
 Holding a timestamp copies the message body while touch and hold is enabled,
 and tapping it continues to copy the Matrix.to event link.
+The message action bar also has Copy between Thread and React for messages with a text body.
+It appears on hover on desktop or after tapping a message on mobile, with a Copy label on wide displays and a clipboard icon on mobile.
+Copy uses the same plain message body as the timestamp gestures, including in the Tauri app.
+This includes emotes, attachment filenames or captions, and whitespace; Copy is omitted only when the body is absent.
 On desktop, double-clicking a timestamp copies the message body while a single
 click copies the link; message text always remains selectable with a mouse.
 Double-clicking a message body runs the action assigned to Double tap and

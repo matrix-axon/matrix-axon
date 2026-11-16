@@ -1,13 +1,13 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { copyText } from '../copy-text'
+import { copyText, type CopySource } from '../copy-text'
 
 export type CopyStatus = 'idle' | 'copied' | 'failed'
 
 /** Brief Copied / failed feedback around a clipboard write. */
 export function useCopyFeedback(idleMs = 1800): {
   status: CopyStatus
-  copy: (text: string) => Promise<boolean>
+  copy: (text: string, source?: CopySource) => Promise<boolean>
 } {
   const [status, setStatus] = useState<CopyStatus>('idle')
   const timer = useRef<number | null>(null)
@@ -19,12 +19,15 @@ export function useCopyFeedback(idleMs = 1800): {
     }
   }, [])
 
-  const copy = async (text: string): Promise<boolean> => {
+  const copy = async (
+    text: string,
+    source: CopySource = 'other',
+  ): Promise<boolean> => {
     if (timer.current !== null) {
       window.clearTimeout(timer.current)
       timer.current = null
     }
-    const ok = await copyText(text)
+    const ok = await copyText(text, source)
     setStatus(ok ? 'copied' : 'failed')
     timer.current = window.setTimeout(() => {
       setStatus('idle')

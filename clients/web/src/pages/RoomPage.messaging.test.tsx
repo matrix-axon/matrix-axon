@@ -3333,7 +3333,7 @@ describe('room command', () => {
         { user_id: '@bob:Example.ORG' },
       ]),
     )
-    expect(textarea.value).toBe('')
+    await waitFor(() => expect(textarea.value).toBe(''))
   })
 
   it('/invite leaves the command recoverable when the server rejects it', async () => {
@@ -3563,7 +3563,7 @@ describe('room command', () => {
         server_names: [],
       }),
     )
-    expect(textarea.value).toBe('')
+    await waitFor(() => expect(textarea.value).toBe(''))
     expect(window.location.pathname).toBe(
       `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
     )
@@ -3747,6 +3747,7 @@ describe('room command', () => {
 
     await waitFor(() => expect(leaveRequests).toBe(1))
     expect(confirm).not.toHaveBeenCalled()
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
     confirm.mockRestore()
   })
 
@@ -3774,6 +3775,7 @@ describe('room command', () => {
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
     await waitFor(() => expect(leaveRequests).toBe(1))
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
   })
 
   it('/forget leaves the command in place when the server rejects it', async () => {
