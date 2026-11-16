@@ -24,7 +24,7 @@ import {
   maxByArrivalOrderBelow,
   viewMayClaimReadState,
 } from '../timeline/arrival-order'
-import { hiddenByRedaction } from '../timeline/visibility'
+import { hiddenByRedaction, NO_THREAD_ROOTS } from '../timeline/visibility'
 import {
   Composer,
   type ComposerAutocompleteOption,
@@ -401,7 +401,7 @@ export function ThreadPanel({
     const shown = thread.events.value.filter(
       (event) =>
         !event.event_id.startsWith('local:') &&
-        !hiddenByRedaction(event, hideRedacted),
+        !hiddenByRedaction(event, hideRedacted, NO_THREAD_ROOTS),
     )
     const displayLast = shown.at(-1)
     const arrivalMax = maxByArrivalOrder(shown)
@@ -529,11 +529,9 @@ export function ThreadPanel({
     }
   }, [api, accountId, rootId, root])
 
-  const visibleEvents = thread.events.value.filter(
-    (event) => !hideRedacted || !event.redacted,
-  )
   const isVisibleEvent = (event: TimelineEvent): boolean =>
-    !hideRedacted || !event.redacted
+    !hiddenByRedaction(event, hideRedacted, NO_THREAD_ROOTS)
+  const visibleEvents = thread.events.value.filter(isVisibleEvent)
 
   /**
    * `ArrowUp` on an empty thread composer edits the newest message we can edit

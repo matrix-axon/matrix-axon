@@ -781,6 +781,30 @@ export function RoomPage() {
   // apart from theirs. That is not a behaviour change for rendering — both
   // answers still hide the row — and `isUnsupportedBodylessEvent` excludes
   // redacted events itself, so nothing above reorders around it.
+  // The redacted roots the hide-redacted setting must not hide: those whose
+  // thread still has replies. Derived and keyed by value so the visibility
+  // memos below change identity only when the verdict could — not on every
+  // summaries refresh, and not at all while the setting is off.
+  const threadSummaries = threads.summaries.value
+  const liveRootsKey = useMemo(
+    () =>
+      hideRedacted
+        ? timeline.events.value
+            .filter(
+              (event) =>
+                event.redacted &&
+                (threadSummaries.get(event.event_id)?.reply_count ?? 0) > 0,
+            )
+            .map((event) => event.event_id)
+            .sort()
+            .join('\n')
+        : '',
+    [hideRedacted, timeline.events.value, threadSummaries],
+  )
+  const liveThreadRoots = useMemo(
+    () => new Set(liveRootsKey === '' ? [] : liveRootsKey.split('\n')),
+    [liveRootsKey],
+  )
   const timelineEventVisibility = useCallback(
     (event: TimelineEvent): 'shown' | 'redacted' | 'hidden' => {
       if (threadRootId(event) !== null) {
@@ -801,9 +825,11 @@ export function RoomPage() {
       if (!renderable) {
         return 'hidden'
       }
-      return hiddenByRedaction(event, hideRedacted) ? 'redacted' : 'shown'
+      return hiddenByRedaction(event, hideRedacted, liveThreadRoots)
+        ? 'redacted'
+        : 'shown'
     },
-    [hideRedacted, settings.developerMode.value, stateEvents],
+    [hideRedacted, settings.developerMode.value, stateEvents, liveThreadRoots],
   )
   /** The rendering question, for the callers that only ask that one. */
   const isVisibleTimelineEvent = useCallback(
@@ -1019,7 +1045,9 @@ export function RoomPage() {
     return computeRoomReceipt({
       displayed: displayed.map(candidate),
       loaded: timeline.events.value
-        .filter((event) => !hiddenByRedaction(event, hideRedacted))
+        .filter(
+          (event) => !hiddenByRedaction(event, hideRedacted, liveThreadRoots),
+        )
         .map(candidate),
       openThread,
       threads: threadSummaryStates.map(({ summary, threadMarker }) => ({
@@ -1039,6 +1067,7 @@ export function RoomPage() {
     unreadThreadCutoff,
     openThread,
     hideRedacted,
+    liveThreadRoots,
     threadMarkerRevision,
   ])
   const threadReceiptCeiling = roomReceipt.blocker
@@ -1173,7 +1202,10 @@ export function RoomPage() {
       if (event.type === 'm.room.member') {
         inBackground(members.refresh())
       }
-      if (threadRootId(event) !== null) {
+      // A redaction frame names no thread, but it may have removed a thread's
+      // last surviving reply, and the summary's `reply_count` decides whether
+      // a redacted root stays visible.
+      if (threadRootId(event) !== null || event.type === 'm.room.redaction') {
         inBackground(threads.refresh())
       }
     })
