@@ -241,7 +241,23 @@ Account lifecycle operations map to:
 - Enable backup: `POST /v1/accounts/{account_id}/backup/enable`
 - Delete: `DELETE /v1/accounts/{account_id}`
 
-Login, logout, and recover return `{ "data": <AccountDto> }`. Recover requires an active account and consumes a transient `recovery_key` without persisting it. Enable backup returns flattened `AccountDto` plus `backup_action`; `recovery_key` is required for create/export/replace and omitted to kick an already-enabled upload. Unverified accounts are refused before the key is sent. Logout is non-destructive: the returned account is `deactivated` and its archive remains available for a later login. Delete returns `204 No Content` and permanently removes the account and its local Axon data.
+Login and logout return `{ "data": <AccountDto> }`.
+Recover returns flattened `AccountDto` plus `backup_action` and `redecrypt`.
+It requires an active account and consumes a transient `recovery_key` without persisting it.
+A recover 200 means 4S secret-storage import succeeded, not that history keys were recovered.
+Report device verification, the returned backup snapshot, backup action, and re-decryption counts separately; a timeout is incomplete.
+Share backup observations with `/status` and backup-action wording with `/backup enable`.
+Missing or malformed sibling results must show as unavailable, never as zero counts or successful backup setup.
+Keep completed recovery results until the current popup or prompt ends, then show all waiting results together, in completion order, through the normal command-response presentation.
+Retain the latest attempt, including failure, per account UUID in memory and show its UTC completion time and full result under that account in `/status`.
+Logout retains this session result; authoritative account removal prunes it, and restarting the TUI starts empty.
+Never retain the submitted recovery key or persist recovery results to disk.
+Explain when no stored messages needed re-decryption or selected messages were not attempted.
+Recovery uses the 300-second lifecycle request timeout; progress names import, backup setup, and stored-message decryption.
+Enable backup returns flattened `AccountDto` plus `backup_action`; `recovery_key` is required for create/export/replace and omitted to kick an already-enabled upload.
+Unverified accounts are refused before the key is sent.
+Logout is non-destructive: the returned account is `deactivated` and its archive remains available for a later login.
+Delete returns `204 No Content` and permanently removes the account and its local Axon data.
 
 Login, logout, recover, backup enable, and delete run off the event loop: secret-bearing calls are spawned as tasks that own and then drop the password or recovery key, and results land back through a channel the main loop drains, so the UI keeps redrawing and a second lifecycle verb is refused while one is in flight. Login is idempotent server-side — an already-`active` account is returned unchanged with the password never consulted — so the client reports that no-op distinctly (`already logged in: … (no changes)`) by comparing the returned `account_id` against the accounts that were active before the attempt. After a real new/reactivated login, prompt for a recovery key only when the returned account is not verified; empty Enter or `Esc` skips. Logout asks for `[y/N]` confirmation unless `display.confirm_logout = false`. Delete always asks for an explicit `YES` confirmation.
 

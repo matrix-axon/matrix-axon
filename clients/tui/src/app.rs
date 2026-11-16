@@ -960,6 +960,11 @@ pub(crate) struct App {
     /// A completed slash-command response waiting for the renderer to decide
     /// whether it fits in the fixed-height entry box.
     pub(crate) pending_command_response: Option<String>,
+    /// Recoveries can finish behind another popup or prompt. Accumulate full
+    /// results until compose can present them without replacing that interaction.
+    pub(crate) pending_recovery_response: Option<String>,
+    /// One completed recovery result per account, kept only for this session.
+    pub(crate) last_recovery_results: HashMap<Uuid, lifecycle::RecoveryResult>,
     pub(crate) should_quit: bool,
     /// Sender for results of in-flight login/logout work spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
@@ -1428,6 +1433,8 @@ impl App {
             show_input_help: true,
             status: Status::Info(config_status),
             pending_command_response: None,
+            pending_recovery_response: None,
+            last_recovery_results: HashMap::new(),
             should_quit: false,
             lifecycle_tx: None,
             lifecycle_busy: false,
@@ -1779,11 +1786,16 @@ impl App {
         self.show_input_help = false;
     }
 
-    /// Replace the account list. Only Active accounts go into `accounts.accounts`
+    /// Replace the account list with a complete, authoritative, unfiltered
+    /// `GET /v1/accounts` snapshot, including inactive accounts. Never pass a
+    /// filtered or partial list: absence prunes session recovery results.
+    /// Only Active accounts go into `accounts.accounts`
     /// (for display and navigation); inactive IDs are recorded separately so
     /// `is_known_inactive_account` can still filter their rooms off the room list.
     pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountDto>) {
         let selected_account_id = self.active_account_filter();
+        self.last_recovery_results
+            .retain(|id, _| accounts.iter().any(|account| account.account_id == *id));
         self.accounts.inactive_ids = accounts
             .iter()
             .filter(|a| a.state != AccountState::Active)

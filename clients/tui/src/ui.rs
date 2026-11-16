@@ -184,6 +184,7 @@ fn command_response_needs_popup(app: &App, input_area: Rect) -> bool {
 /// the occlusion math no longer agrees with. Feeding both halves one area is
 /// what closes that.
 pub(crate) fn prepare(app: &mut App, screen: Rect) {
+    app.present_pending_recovery_response();
     app.discard_device_picker_if_closed();
     let areas = pane_areas(app, screen);
     app.frame.areas = areas;
@@ -2995,31 +2996,6 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
     lines
 }
 
-/// Honest `/status` lines for `AccountDto.backup` (ADR 0098).
-/// `recovery_state` is 4S completeness, not history-key import.
-fn account_backup_status_lines(backup: &crate::api::BackupSnapshot) -> [String; 2] {
-    let exists = match backup.exists_on_server {
-        Some(true) => "on homeserver",
-        Some(false) => "none on homeserver",
-        None => "existence unknown",
-    };
-    let uploading = if backup.this_device_uploading {
-        "this device uploading"
-    } else {
-        "this device not uploading"
-    };
-    [
-        format!(
-            "      megolm backup: {exists}; {uploading}; state {}",
-            backup.backup_state.as_str()
-        ),
-        format!(
-            "      4S secret storage: {}",
-            backup.recovery_state.as_str()
-        ),
-    ]
-}
-
 pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
     use crate::app::ConnectionState;
 
@@ -3131,7 +3107,19 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
                 "  {marker} {identity}  ({state_label}, {rooms_for_account} rooms)",
             ));
             lines.push(format!("      device: {device_str}  [{verified_str}]",));
-            lines.extend(account_backup_status_lines(&account.backup));
+            lines.extend(
+                account
+                    .backup
+                    .status_lines()
+                    .map(|line| format!("      {line}")),
+            );
+            if let Some(result) = app.last_recovery_results.get(&account.account_id) {
+                lines.push(format!(
+                    "      Last recovery result (this session; {}):",
+                    result.completed_at.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
+                lines.extend(result.summary.lines().map(|line| format!("        {line}")));
+            }
         }
     }
 
