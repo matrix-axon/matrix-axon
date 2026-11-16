@@ -234,8 +234,9 @@ CASES: list[tuple[str, set[str]]] = [
     ("CONTRIBUTING.md", {"hook-filters", "markdown-no-liquid", "prettier"}),
     ("scripts/setup-hooks.sh", {"hook-filters"}),
     # The rust workflows are rust inputs (the filter names them). hook-commands
-    # is added from the command check's path list. cross-build, the desktop
-    # workflow, and the migrations and OpenAPI workflows are on that list and
+    # is added from the command check's path list. cross-build.yml is a rust
+    # input because it repeats those steps. desktop-build.yml is a shell input.
+    # The migrations and OpenAPI workflows are on the command-check list and
     # have no row here: nothing else local selects them.
     (
         ".github/workflows/lint-and-clippy.yml",
@@ -245,6 +246,14 @@ CASES: list[tuple[str, set[str]]] = [
         ".github/workflows/lint-and-test.yml",
         {"rustfmt", "rust-clippy", "cargo-test"},
     ),
+    (
+        ".github/workflows/cross-build.yml",
+        {"rustfmt", "rust-clippy", "cargo-test"},
+    ),
+    (
+        ".github/workflows/desktop-build.yml",
+        {"shell-fmt", "shell-clippy", "shell-test"},
+    ),
     # The web workflow is a web input. hook-commands is added from the path list.
     (
         ".github/workflows/web-lint-and-test.yml",
@@ -252,7 +261,17 @@ CASES: list[tuple[str, set[str]]] = [
     ),
     # This hook's own files filter selects the command check, so the row names
     # hook-filters. hook-commands is added because the path is on its list.
-    ("scripts/check-hook-commands.py", {"hook-filters"}),
+    (
+        "scripts/check-hook-commands.py",
+        {"hook-filters", "rustfmt", "rust-clippy", "cargo-test"},
+    ),
+    # The runner execs every gated hook entry. The rust filter selects it so
+    # rust-changed cannot skip the required steps. Shell and web CI select it
+    # through workflow path lists, which this script does not model.
+    (
+        "scripts/ci/run-hook-entry.py",
+        {"rustfmt", "rust-clippy", "cargo-test"},
+    ),
     # Nothing local claims this workflow file; actionlint does, and it is out
     # of scope here (see the module docstring). A hook-commands filter wide
     # enough to select every workflow would claim this one and fail.
@@ -335,7 +354,11 @@ def _load_command_checker():
     module = importlib.util.module_from_spec(spec)
     # dataclasses looks the class's module up in sys.modules during exec.
     sys.modules["check_hook_commands"] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop("check_hook_commands", None)
+        raise
     return module
 
 
@@ -373,7 +396,7 @@ def main() -> int:
 
     try:
         watched = set(_load_command_checker().watched_paths())
-    except (OSError, RuntimeError, ImportError) as exc:
+    except (Exception, SystemExit) as exc:
         print(f"could not load scripts/check-hook-commands.py: {exc}", file=sys.stderr)
         return 2
 

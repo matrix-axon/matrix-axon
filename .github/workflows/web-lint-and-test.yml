@@ -14,6 +14,9 @@ on:
       - "openapi/openapi.json"
       - "clients/web/**"
       - ".github/workflows/web-lint-and-test.yml"
+      # The job execs the web hook entries through this script. A pull
+      # request that edits only the runner must still run them.
+      - "scripts/ci/run-hook-entry.py"
 
 permissions:
   contents: read

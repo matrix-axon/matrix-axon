@@ -10,12 +10,14 @@ that stops running the hook entry fails this file as well as the hook.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check-hook-commands.py"
@@ -84,6 +86,15 @@ class Runner(unittest.TestCase):
         self.assertEqual(scanned["rustfmt"], "cargo fmt --all -- --check")
         self.assertEqual(scanned["rust-clippy"], "env AXON_WEB_AUTOBUILD=0 cargo clippy --all-features")
         self.assertNotIn("actionlint", scanned)
+
+    def test_scanner_keeps_a_trailing_comment_off_the_id(self) -> None:
+        text = "      - id: rustfmt  # gates the expensive hooks\n        entry: cargo fmt --all -- --check\n"
+        self.assertEqual(
+            checker.runner.scan_entries(text)["rustfmt"],
+            "cargo fmt --all -- --check",
+        )
+        glued = checker.runner.scan_entries("      - id: foo#bar\n        entry: true\n")
+        self.assertEqual(glued["foo#bar"], "true")
 
     def test_scanner_rejects_a_folded_entry(self) -> None:
         text = "      - id: folded\n        entry: >\n          cargo test --all\n"
@@ -329,6 +340,125 @@ class Agreement(unittest.TestCase):
             self.assertTrue(any("github.workspace" in problem for problem in found), found)
             (root / "web.yml").write_text(present, encoding="utf-8")
             self.assertEqual(checker.check(root, spec), [])
+
+    def test_workflow_shell_and_directory_count(self) -> None:
+        step = checker.Step("ci.yml", "lint", "Clippy")
+        spec = self.spec_for(runner={"rust-clippy": checker.Run((step,))})
+        config = """\
+        repos:
+          - repo: local
+            hooks:
+              - id: rust-clippy
+                entry: env A=1 cargo clippy -- -D warnings
+        """
+        workflow_shell = workflow(
+            """\
+            defaults:
+              run:
+                shell: pwsh
+            jobs:
+              lint:
+                steps:
+                  - name: Clippy
+                    run: python3 scripts/ci/run-hook-entry.py rust-clippy
+            """
+        )
+        workflow_dir = workflow(
+            """\
+            defaults:
+              run:
+                working-directory: clients/web
+            jobs:
+              lint:
+                steps:
+                  - name: Clippy
+                    run: python3 scripts/ci/run-hook-entry.py rust-clippy
+            """
+        )
+        job_overrides = workflow(
+            """\
+            defaults:
+              run:
+                shell: pwsh
+                working-directory: clients/web
+            jobs:
+              lint:
+                defaults:
+                  run:
+                    shell: bash
+                steps:
+                  - name: Clippy
+                    working-directory: ${{ github.workspace }}
+                    run: python3 scripts/ci/run-hook-entry.py rust-clippy
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repo(root, config, {"ci.yml": workflow_shell})
+            found = checker.check(root, spec)
+            self.assertTrue(any("inherits shell" in problem for problem in found), found)
+            (root / "ci.yml").write_text(workflow_dir, encoding="utf-8")
+            found = checker.check(root, spec)
+            self.assertTrue(any("github.workspace" in problem for problem in found), found)
+            (root / "ci.yml").write_text(job_overrides, encoding="utf-8")
+            self.assertEqual(checker.check(root, spec), [])
+
+    def test_pinned_format_must_inherit_clients_web(self) -> None:
+        step = checker.Step("web.yml", "web", "Check formatting")
+        spec = self.spec_for(
+            local_only={"prettier": "the package check is pinned instead"},
+            fixed={
+                step: checker.Pinned(
+                    "pnpm format:check",
+                    "package prettier",
+                    directory="clients/web",
+                )
+            },
+        )
+        config = """\
+        repos:
+          - repo: local
+            hooks:
+              - id: prettier
+                entry: prettier --check .
+        """
+        good = workflow(
+            """\
+            jobs:
+              web:
+                defaults:
+                  run:
+                    working-directory: clients/web
+                steps:
+                  - name: Check formatting
+                    run: pnpm format:check
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repo(root, config, {"web.yml": good})
+            self.assertEqual(checker.check(root, spec), [])
+            dropped = good.replace(
+                "    defaults:\n      run:\n        working-directory: clients/web\n",
+                "",
+            )
+            (root / "web.yml").write_text(dropped, encoding="utf-8")
+            found = checker.check(root, spec)
+        self.assertTrue(any("must inherit working-directory" in problem for problem in found), found)
+
+    def test_under_test_is_a_flag_not_an_environment_variable(self) -> None:
+        with mock.patch.object(checker, "_run_unit_tests", return_value=0) as run:
+            with mock.patch.object(checker, "check", return_value=[]) as checked:
+                code = checker.main(["scripts/check-hook-commands.py", "--under-test"])
+        run.assert_not_called()
+        checked.assert_called_once()
+        self.assertEqual(code, 0)
+        with mock.patch.dict(os.environ, {"HOOK_COMMANDS_UNDER_TEST": "1"}):
+            with mock.patch.object(checker, "_run_unit_tests", return_value=0) as run:
+                with mock.patch.object(checker, "check", return_value=[]):
+                    code = checker.main(["scripts/check-hook-commands.py"])
+        run.assert_called_once()
+        self.assertEqual(code, 0)
 
     def test_base_ref_step_requires_the_two_env_keys(self) -> None:
         step = checker.Step("mig.yml", "migrations-immutable", "Migrations are forward-only")

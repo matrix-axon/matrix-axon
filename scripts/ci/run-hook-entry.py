@@ -31,7 +31,9 @@ HOOK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Shell syntax the runner refuses to interpret. An entry is an argv, the same
 # way pre-commit runs it. `=` belongs to `env VAR=value` and is allowed.
 _SHELL = set(";|&<>`$()\\")
-_ID_LINE = re.compile(r"^(\s*)- id:\s*(\S+)\s*$")
+# A trailing ` # comment` is YAML, not part of the id. `\S+` stays greedy so
+# `foo#bar` (no space before `#`) remains one token, which is what YAML does.
+_ID_LINE = re.compile(r"^(\s*)- id:\s*(\S+)\s*(?:#.*)?$")
 _ENTRY_LINE = re.compile(r"^(\s*)entry:\s*(.*)$")
 _FOLDED = {">", "|", ">-", "|-", ">+", "|+", ""}
 

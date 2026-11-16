@@ -18,7 +18,9 @@ For every gate step (pre-commit, the runner, and the pinned format check):
 
 - `continue-on-error` is absent or boolean false. The string "false" is not
   the boolean, so it does not count.
-- `shell` is absent or `bash`, and so is the job's `defaults.run.shell`.
+- `shell` is absent or `bash`. A shell inherited from the job or the
+  workflow `defaults.run` must be bash too. The job's value wins when both
+  are set.
 - `env` is absent, unless the hook takes `--pull-request-base`, in which case
   the step has exactly `BASE_REF` and `BASE_SHA` from the pull_request event.
 - `if` is absent, except the three rust steps in `lint-and-clippy.yml`, which
@@ -26,11 +28,12 @@ For every gate step (pre-commit, the runner, and the pinned format check):
 - The job's own `if` is absent, except `cross-build.yml`'s `lint-fmt-test`,
   which honors the workflow's `checks` input.
 
-A job `working-directory` would hide `scripts/ci/run-hook-entry.py`. A step
-in such a job sets `working-directory` to `${{ github.workspace }}`. The
-runner then chdirs to the repo root, so `pnpm --dir` and `--manifest-path`
-in the entry stay correct. The pinned `pnpm format:check` step inherits the
-web job's `clients/web` directory on purpose.
+A `working-directory` on the job or the workflow would hide
+`scripts/ci/run-hook-entry.py`. A step in such a job sets `working-directory`
+to `${{ github.workspace }}`. The runner then chdirs to the repo root, so
+`pnpm --dir` and `--manifest-path` in the entry stay correct. The pinned
+`pnpm format:check` step sets no directory of its own and must inherit
+`clients/web`.
 
 ## Every hook is classified
 
@@ -55,7 +58,6 @@ Usage: scripts/check-hook-commands.py
 from __future__ import annotations
 
 import importlib.util
-import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -124,10 +126,15 @@ class Step:
 
 @dataclass(frozen=True)
 class Pinned:
-    """A step whose command is frozen, and which is not a hook entry."""
+    """A step whose command is frozen, and which is not a hook entry.
+
+    `directory` is the working directory the step must inherit from the job
+    or the workflow. None means the repo root.
+    """
 
     command: str
     reason: str
+    directory: str | None = None
 
 
 @dataclass(frozen=True)
@@ -230,6 +237,7 @@ FIXED: dict[Step, Pinned] = {
     Step(WEB, WEB_JOB, "Check formatting"): Pinned(
         "pnpm format:check",
         "the web package's prettier, not the repo prettier hook",
+        directory="clients/web",
     ),
 }
 
@@ -458,20 +466,29 @@ def _mapping(value: object) -> dict | None:
     return None
 
 
-def _job_directory(job: dict) -> str | None:
-    defaults = _mapping(job.get("defaults")) or {}
-    run = _mapping(defaults.get("run")) or {}
-    directory = run.get("working-directory")
-    if directory is None:
-        return None
-    return str(directory)
+def _run_defaults(container: dict) -> dict:
+    defaults = _mapping(container.get("defaults")) or {}
+    return _mapping(defaults.get("run")) or {}
+
+
+def _inherited(doc: dict, job: dict, key: str):
+    """Job `defaults.run` wins. Otherwise the workflow's value, else None."""
+    job_run = _run_defaults(job)
+    if key in job_run:
+        return job_run.get(key)
+    workflow_run = _run_defaults(doc)
+    if key in workflow_run:
+        return workflow_run.get(key)
+    return None
 
 
 def _where(step: Step) -> str:
     return f"{step.file} job {step.job} step {step.name!r}"
 
 
-def _check_disabled(job: dict, item: dict, step: Step, *, expect_env: dict | None) -> list[str]:
+def _check_disabled(
+    doc: dict, job: dict, item: dict, step: Step, *, expect_env: dict | None
+) -> list[str]:
     """Finding 1: a gate step cannot be switched off around its run line."""
     problems = []
     where = _where(step)
@@ -485,11 +502,10 @@ def _check_disabled(job: dict, item: dict, step: Step, *, expect_env: dict | Non
     if shell not in (None, "bash"):
         problems.append(f"{where} sets shell: {shell!r}; the gate runs under bash")
     else:
-        defaults = _mapping(job.get("defaults")) or {}
-        job_shell = (_mapping(defaults.get("run")) or {}).get("shell")
-        if shell is None and job_shell not in (None, "bash"):
+        inherited = _inherited(doc, job, "shell")
+        if shell is None and inherited not in (None, "bash"):
             problems.append(
-                f"{where} inherits shell {job_shell!r}; the gate runs under bash"
+                f"{where} inherits shell {inherited!r}; the gate runs under bash"
             )
     actual_if = item.get("if", None)
     allowed_if = STEP_IF.get(step)
@@ -507,23 +523,31 @@ def _check_disabled(job: dict, item: dict, step: Step, *, expect_env: dict | Non
     return problems
 
 
-def _check_launch_directory(job: dict, item: dict, step: Step, *, inherit: bool) -> list[str]:
+def _check_launch_directory(
+    doc: dict, job: dict, item: dict, step: Step, *, directory: str | None
+) -> list[str]:
+    """`directory` is what a pinned step must inherit. None means the repo root."""
     where = _where(step)
     own = item.get("working-directory", None)
     own_text = None if own is None else str(own)
-    if inherit:
+    inherited = _inherited(doc, job, "working-directory")
+    inherited_text = None if inherited is None else str(inherited)
+    if directory is not None:
         if own_text is not None:
             return [
                 f"{where} sets working-directory {own_text!r}; "
-                "this step is pinned to the job directory"
+                f"this step is pinned to {directory!r}"
+            ]
+        if inherited_text != directory:
+            return [
+                f"{where} must inherit working-directory {directory!r}, found {inherited_text!r}"
             ]
         return []
-    job_dir = _job_directory(job)
-    if job_dir:
+    if inherited_text is not None:
         if own_text != WORKSPACE:
             return [
                 f"{where} must set working-directory to {WORKSPACE!r} "
-                f"because the job runs in {job_dir!r}; found {own_text!r}"
+                f"because the job runs in {inherited_text!r}; found {own_text!r}"
             ]
         return []
     if own_text is not None:
@@ -632,12 +656,13 @@ def check(root: Path, spec: Spec = SPEC, enforce_files_filter: bool | None = Non
             problems.extend(_check_job_gate(step.file, step.job, job))
 
     for hook_id, step in spec.via_pre_commit.items():
+        doc = workflow(step.file)
         job, item = resolve(step)
-        if item is None or job is None:
+        if item is None or job is None or doc is None:
             continue
         where = _where(step)
-        problems.extend(_check_disabled(job, item, step, expect_env=None))
-        problems.extend(_check_launch_directory(job, item, step, inherit=False))
+        problems.extend(_check_disabled(doc, job, item, step, expect_env=None))
+        problems.extend(_check_launch_directory(doc, job, item, step, directory=None))
         run, run_error = _run_text(step, item)
         if run_error or run is None:
             if run_error:
@@ -651,12 +676,13 @@ def check(root: Path, spec: Spec = SPEC, enforce_files_filter: bool | None = Non
         expected = runner_command(hook_id, pull_request_base=executed.pull_request_base)
         expect_env = BASE_ENV if executed.pull_request_base else None
         for step in executed.steps:
+            doc = workflow(step.file)
             job, item = resolve(step)
-            if item is None or job is None:
+            if item is None or job is None or doc is None:
                 continue
             where = _where(step)
-            problems.extend(_check_disabled(job, item, step, expect_env=expect_env))
-            problems.extend(_check_launch_directory(job, item, step, inherit=False))
+            problems.extend(_check_disabled(doc, job, item, step, expect_env=expect_env))
+            problems.extend(_check_launch_directory(doc, job, item, step, directory=None))
             run, run_error = _run_text(step, item)
             if run_error or run is None:
                 if run_error:
@@ -666,12 +692,15 @@ def check(root: Path, spec: Spec = SPEC, enforce_files_filter: bool | None = Non
                 problems.append(_command_problem(where, expected, run))
 
     for step, pinned in spec.fixed.items():
+        doc = workflow(step.file)
         job, item = resolve(step)
-        if item is None or job is None:
+        if item is None or job is None or doc is None:
             continue
         where = _where(step)
-        problems.extend(_check_disabled(job, item, step, expect_env=None))
-        problems.extend(_check_launch_directory(job, item, step, inherit=True))
+        problems.extend(_check_disabled(doc, job, item, step, expect_env=None))
+        problems.extend(
+            _check_launch_directory(doc, job, item, step, directory=pinned.directory)
+        )
         run, run_error = _run_text(step, item)
         if run_error or run is None:
             if run_error:
@@ -764,17 +793,21 @@ def repo_root() -> Path:
 
 def _run_unit_tests(root: Path) -> int:
     test = root / "scripts" / "ci" / "test-check-hook-commands.py"
-    env = os.environ.copy()
-    env["HOOK_COMMANDS_UNDER_TEST"] = "1"
-    completed = subprocess.run([sys.executable, str(test)], env=env, check=False)
+    completed = subprocess.run([sys.executable, str(test)], check=False)
     return completed.returncode
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv[1:])
+    if args not in ([], ["--under-test"]):
+        print("usage: python3 scripts/check-hook-commands.py [--under-test]", file=sys.stderr)
+        return 2
     root = repo_root()
     # The hook is the CI run of these tests. The lint workflow does not invoke
     # them with the system interpreter, which has no PyYAML (finding 7).
-    if os.environ.get("HOOK_COMMANDS_UNDER_TEST") != "1":
+    # `--under-test` is the only recursion guard. An inherited environment
+    # variable must not skip the suite.
+    if args != ["--under-test"]:
         status = _run_unit_tests(root)
         if status != 0:
             return status

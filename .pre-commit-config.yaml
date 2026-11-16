@@ -283,7 +283,11 @@ repos:
         # test suite behind it buys nothing. Requires rustfmt to stay ordered
         # first among the rust hooks.
         fail_fast: true
-        files: &rust_files '^(Cargo\.(toml|lock)|\.cargo/config\.toml|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
+        # CI execs these entries through scripts/ci/run-hook-entry.py, and
+        # cross-build.yml repeats them. rust-changed reads this same filter,
+        # so a pull request that edits only that machinery must still run the
+        # gate. desktop-build.yml is a shell input, below, not one of these.
+        files: &rust_files '^(Cargo\.(toml|lock)|\.cargo/config\.toml|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|\.github/workflows/cross-build\.yml|scripts/ci/run-hook-entry\.py|scripts/check-hook-commands\.py|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
         pass_filenames: false
         stages: [pre-push]
       # CI execs this entry through scripts/ci/run-hook-entry.py rather than
@@ -336,7 +340,10 @@ repos:
         language: system
         entry: cargo fmt --manifest-path clients/web/src-tauri/Cargo.toml --check
         fail_fast: true
-        files: &shell_files '^clients/web/(src-tauri/(src/.*\.rs|(remote-push|axon-http|axon-link-preview)/(src/.*\.rs|build\.rs|Cargo\.toml)|(axon-http|axon-link-preview)/testdata/.*|build\.rs|Cargo\.(toml|lock)|tauri\.conf\.json|capabilities/.*\.json)|src/incoming-share/fixtures/.*\.json)$'
+        # desktop-build.yml is what execs these entries in CI. The checks
+        # job's path filter already includes that workflow; this is the local
+        # half, so a push of only that file still runs the shell gate.
+        files: &shell_files '^(\.github/workflows/desktop-build\.yml|clients/web/(src-tauri/(src/.*\.rs|(remote-push|axon-http|axon-link-preview)/(src/.*\.rs|build\.rs|Cargo\.toml)|(axon-http|axon-link-preview)/testdata/.*|build\.rs|Cargo\.(toml|lock)|tauri\.conf\.json|capabilities/.*\.json)|src/incoming-share/fixtures/.*\.json))$'
         pass_filenames: false
         stages: [pre-push]
       - id: shell-clippy

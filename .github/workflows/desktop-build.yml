@@ -40,6 +40,9 @@ on:
       # reader and the composer share (ADR 0132).
       - 'clients/web/src/incoming-share/fixtures/**'
       - '.github/workflows/desktop-build.yml'
+      # `checks` execs the shell hook entries through this script. A pull
+      # request that edits only the runner must still run them.
+      - 'scripts/ci/run-hook-entry.py'
       - '.github/actions/tauri-build/**'
       # `checks` compiles the frontend the crate embeds, so the JS half of the
       # shell (`@tauri-apps/*`) is an input to it.
