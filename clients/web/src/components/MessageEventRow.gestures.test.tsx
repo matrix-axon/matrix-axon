@@ -2,6 +2,7 @@ import { signal } from '@preact/signals'
 import { act, cleanup, fireEvent, render } from '@testing-library/preact'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ServicesContext } from '../services'
+import * as perf from '../perf'
 import type { MembersStore } from '../stores/members'
 import {
   defaultMessageGestures,
@@ -135,10 +136,12 @@ afterEach(() => {
     Reflect.deleteProperty(navigator, 'clipboard')
   }
   vi.useRealTimers()
+  vi.restoreAllMocks()
 })
 
 describe('MessageEventRow copy action', () => {
   it('copies the plain body without opening another message action', async () => {
+    const mark = vi.spyOn(perf, 'perfMark')
     const writeText = vi.fn().mockResolvedValue(undefined)
     mockClipboard(writeText)
     const view = renderRow({
@@ -153,6 +156,10 @@ describe('MessageEventRow copy action', () => {
       }),
     })
 
+    const liveRegion = view.row.querySelector('[aria-live="polite"]')
+    expect(liveRegion).not.toBeNull()
+    expect(liveRegion!.textContent).toBe('')
+
     fireEvent.click(view.getByRole('button', { name: 'Copy', exact: true }))
 
     await vi.waitFor(() =>
@@ -163,6 +170,11 @@ describe('MessageEventRow copy action', () => {
     )
     expect(view.getByRole('button', { name: 'Copy', exact: true })).toBeTruthy()
     expect(view.getByRole('status').closest('button')).toBeNull()
+    expect(view.getByRole('status')).toBe(liveRegion)
+    expect(mark).toHaveBeenCalledWith(
+      'copy:ok',
+      expect.objectContaining({ source: 'body-action' }),
+    )
     expect(view.onOpenActions).not.toHaveBeenCalled()
     expect(view.onReply).not.toHaveBeenCalled()
     expect(view.onOpenThread).not.toHaveBeenCalled()
@@ -170,12 +182,17 @@ describe('MessageEventRow copy action', () => {
   })
 
   it('reports clipboard failure and lets the user retry', async () => {
+    const mark = vi.spyOn(perf, 'perfMark')
     const writeText = vi.fn().mockRejectedValue(new Error('denied'))
     mockClipboard(writeText)
     const view = renderRow()
     fireEvent.click(view.getByRole('button', { name: 'Copy', exact: true }))
     await vi.waitFor(() =>
       expect(view.getByRole('status').textContent).toBe('Copy failed'),
+    )
+    expect(mark).toHaveBeenCalledWith(
+      'copy:failed',
+      expect.objectContaining({ source: 'body-action' }),
     )
     const retry = view.getByRole('button', { name: 'Copy', exact: true })
     writeText.mockResolvedValue(undefined)
@@ -189,6 +206,29 @@ describe('MessageEventRow copy action', () => {
   it('omits copying for a message without a text body', () => {
     const view = renderRow({ rowEvent: event({ body: null }) })
     expect(view.queryByRole('button', { name: 'Copy', exact: true })).toBeNull()
+  })
+
+  it('keeps the live region mounted across feedback expiry and failure', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    mockClipboard(writeText)
+    const view = renderRow()
+    const liveRegion = view.row.querySelector('[aria-live="polite"]')!
+    const button = view.getByRole('button', { name: 'Copy', exact: true })
+    expect(liveRegion.textContent).toBe('')
+    fireEvent.click(button)
+    await act(async () => await Promise.resolve())
+    expect(liveRegion.textContent).toBe('Copied')
+    await act(async () => {
+      vi.advanceTimersByTime(1800)
+    })
+    expect(liveRegion.isConnected).toBe(true)
+    expect(liveRegion.textContent).toBe('')
+    writeText.mockRejectedValue(new Error('denied'))
+    fireEvent.click(button)
+    await act(async () => await Promise.resolve())
+    expect(view.getByRole('status')).toBe(liveRegion)
+    expect(liveRegion.textContent).toBe('Copy failed')
   })
 
   it.each([

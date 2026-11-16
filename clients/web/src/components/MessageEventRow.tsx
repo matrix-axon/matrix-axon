@@ -200,20 +200,24 @@ function CopyMessageAction({
         title="Copy text; select timestamp to copy link"
         onClick={() => {
           onCopy()
-          void copy(body)
+          void copy(body, 'body-action')
         }}
       >
         <EventActionIcon name={status === 'copied' ? 'confirm' : 'copy'} />
         <span class="event-action-label">Copy</span>
       </EventActionButton>
-      {status !== 'idle' && (
-        <span
-          class={`event-copy-status event-action-copy-status${status === 'failed' ? ' error' : ''}`}
-          role="status"
-        >
-          {status === 'copied' ? 'Copied' : 'Copy failed'}
-        </span>
-      )}
+      <span
+        class={`event-copy-status event-action-copy-status${status === 'failed' ? ' error' : ''}`}
+        aria-live="polite"
+        aria-atomic="true"
+        role={status === 'idle' ? undefined : 'status'}
+      >
+        {status === 'idle'
+          ? ''
+          : status === 'copied'
+            ? 'Copied'
+            : 'Copy failed'}
+      </span>
     </>
   )
 }
@@ -537,7 +541,7 @@ export function MessageEventRow({
             </button>
           )}
           {(hasMessageActions || developerMode) && (
-            <span class={`event-actions${developerMode ? ' has-inspect' : ''}`}>
+            <span class="event-actions">
               {hasMessageActions && (
                 <>
                   <EventActionButton

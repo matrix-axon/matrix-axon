@@ -3928,6 +3928,10 @@ span.composer-attachment-thumb {
   pointer-events: none;
 }
 
+.event-action-copy-status:empty {
+  padding: 0;
+}
+
 .event-action-icon {
   display: none;
   width: 1rem;
@@ -4008,13 +4012,13 @@ span.composer-attachment-thumb {
     }
   }
 
-  /* Inspect adds another button; only that larger bar needs the extra room
-     on 375px phones. Ordinary action bars retain the timestamp. */
+  /* Delete confirmation adds another button. Reserve its extra room on narrow
+     phones, including when Inspect is present, while smaller bars keep time. */
   @media (max-width: 24rem) {
     .event-row.actions-open
-      .event-head:has(.event-actions.has-inspect)
+      .event-head:has(.event-actions .confirm)
       > .event-time-copy,
-    .event-row.actions-open .event-head:has(.event-actions.has-inspect) > time {
+    .event-row.actions-open .event-head:has(.event-actions .confirm) > time {
       display: none;
     }
   }

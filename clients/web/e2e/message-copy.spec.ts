@@ -9,8 +9,19 @@ import {
 
 const BODY = 'Copy **plain text**\nSecond line with Unicode: café 👋'
 
-for (const width of [320, 375, 390, 1400]) {
-  test(`message Copy action copies text and fits at ${width}px`, async ({
+const layouts = [
+  { width: 320, own: true, inspect: false },
+  { width: 353, own: true, inspect: false },
+  { width: 375, own: true, inspect: false },
+  { width: 384, own: true, inspect: false },
+  { width: 375, own: true, inspect: true },
+  { width: 375, own: false, inspect: true },
+  { width: 390, own: true, inspect: false },
+  { width: 1400, own: true, inspect: false },
+]
+
+for (const { width, own, inspect } of layouts) {
+  test(`message Copy action copies text and fits at ${width}px (${own ? 'own' : 'other'}${inspect ? ', Inspect' : ''})`, async ({
     page,
     hasTouch,
   }) => {
@@ -28,8 +39,8 @@ for (const width of [320, 375, 390, 1400]) {
       })
     })
     await signIn(page)
-    // Include Inspect at 375px, where the additional action is tightest.
-    if (width === 375) {
+    // Include both large and small bars with Inspect.
+    if (inspect) {
       await page.addInitScript(() =>
         localStorage.setItem(
           'axon.settings',
@@ -46,7 +57,7 @@ for (const width of [320, 375, 390, 1400]) {
                 account_id: ACCOUNT_ID,
                 event_id: '$copy-target',
                 room_id: ROOM_ID,
-                sender: '@me:hs',
+                sender: own ? '@me:hs' : '@alice:hs',
                 origin_ts: Date.now(),
                 type: 'm.room.message',
                 body: BODY,
@@ -92,9 +103,8 @@ for (const width of [320, 375, 390, 1400]) {
       'Thread',
       'Copy',
       'React',
-      'Edit',
-      'Delete',
-      ...(width === 375 ? ['Inspect'] : []),
+      ...(own ? ['Edit', 'Delete'] : []),
+      ...(inspect ? ['Inspect'] : []),
     ])
     const presentation = await copy.evaluate((button) => {
       const icon = button.querySelector('.event-action-icon')!
@@ -108,6 +118,8 @@ for (const width of [320, 375, 390, 1400]) {
     if (width < 768) expect(presentation.labelWidth).toBe(1)
     else expect(presentation.labelWidth).toBeGreaterThan(10)
 
+    const timestamp = row.getByRole('button', { name: 'Copy link' })
+    if (width > 352) await expect(timestamp).toBeVisible()
     const beforeCopy = await copy.boundingBox()
     const actionsBeforeCopy = await row.locator('.event-actions').boundingBox()
     if (hasTouch) await copy.tap()
@@ -133,10 +145,16 @@ for (const width of [320, 375, 390, 1400]) {
     ).toBe(true)
 
     // Include the widest action state: an own message with delete confirmation.
-    await row.getByRole('button', { name: 'Delete', exact: true }).click()
-    await expect(
-      row.getByRole('button', { name: 'Confirm delete' }),
-    ).toBeVisible()
+    if (own) {
+      await row.getByRole('button', { name: 'Delete', exact: true }).click()
+      await expect(
+        row.getByRole('button', { name: 'Confirm delete' }),
+      ).toBeVisible()
+    }
+    if (width > 352 && width <= 384) {
+      if (own) await expect(timestamp).toBeHidden()
+      else await expect(timestamp).toBeVisible()
+    }
     const bounds = await row.evaluate((element) => {
       const head = element.querySelector('.event-head')!.getBoundingClientRect()
       const actions = element
