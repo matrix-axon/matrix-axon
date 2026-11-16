@@ -66,7 +66,7 @@ pub struct TrustSnapshot {
 pub struct CurrentTrust {
     /// Whether the sending device is currently known to the SDK (a deleted or
     /// not-yet-downloaded device is `false`). Always `false` for a
-    /// `mismatched_sender` snapshot, whose device id the SDK withholds.
+    /// `mismatched_sender` snapshot: the lookup is skipped for that verdict.
     pub device_known: bool,
     /// Whether the sending device is currently cross-signed by the sender's own
     /// master key. `None` when the device isn't known.

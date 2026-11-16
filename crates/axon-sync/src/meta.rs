@@ -100,6 +100,10 @@ impl CryptoMeta {
 ///
 /// Unlike the coarse [`crypto_meta`] `verification_state` (`verified`/
 /// `unverified`), this preserves the *reason* a message is unverified.
+/// The `sender_trust` verdict for a Megolm session owned by a user other than
+/// the event's `sender` (issue #59).
+pub(crate) const MISMATCHED_SENDER: &str = "mismatched_sender";
+
 pub(crate) fn sender_trust(state: &VerificationState) -> &'static str {
     match state {
         VerificationState::Verified => "verified",
@@ -107,7 +111,7 @@ pub(crate) fn sender_trust(state: &VerificationState) -> &'static str {
             "verification_violation"
         }
         VerificationState::Unverified(VerificationLevel::None(_)) => "unknown",
-        VerificationState::Unverified(VerificationLevel::MismatchedSender) => "mismatched_sender",
+        VerificationState::Unverified(VerificationLevel::MismatchedSender) => MISMATCHED_SENDER,
         VerificationState::Unverified(_) => "unverified",
     }
 }

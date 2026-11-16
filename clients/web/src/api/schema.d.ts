@@ -4330,7 +4330,7 @@ export interface components {
             /**
              * @description Whether the sending device is currently known to axon. Always `false`
              *     when the snapshot's verdict is `mismatched_sender`: the session's device
-             *     belongs to another user and is not recorded.
+             *     belongs to another user, so axon does not look one up.
              */
             device_known: boolean;
             /** @description Whether the sender's user identity is currently known. */

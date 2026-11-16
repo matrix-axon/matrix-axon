@@ -34,26 +34,27 @@ trap, so they are reported separately:
   differ. It lives only in the verification bundle (and the overlay frame below),
   never overwrites the snapshot.
 
-### The four-valued `sender_trust` verdict maps the SDK's `VerificationState`
+### The `sender_trust` verdict maps the SDK's `VerificationState`
 
 `meta::sender_trust` collapses matrix-sdk's `VerificationState` /
 `VerificationLevel` to the spec's four values: `Verified` → `verified`;
 `Unverified(VerificationViolation)` → `verification_violation`;
 `Unverified(None(_))` → `unknown` (couldn't link to a device);
-everything else unverified → `unverified`.
-
-*Amended 2026-11-14 (issue #59):* `Unverified(MismatchedSender)` now maps to a
-fifth value, `mismatched_sender`, instead of `unverified`. The SDK reports it
-when the Megolm session belongs to a user other than the event's `sender`, which
-is how every message in an encrypted bridged room arrives, and it withholds the
-session's device for it, so the bundle's live device half is always empty. A new
-migration widens the CHECK constraint; rows already stored keep `unverified`. It is recorded in a **new, nullable
+everything else unverified → `unverified`. It is recorded in a **new, nullable
 `sender_trust` column** on `event_sender_device_keys` (CHECK-constrained),
 **alongside** the existing coarse `verification_state` rather than replacing it —
 the legacy column and its contract are untouched, and existing rows need no
 backfill (a UTD re-decrypted later upserts the verdict). Derived at the single
 `crypto_meta` choke point so both the live-dispatch and UTD re-decryption paths
 populate it identically (ADR 0015).
+
+*Amended 2026-11-14 (issue #59):* `Unverified(MismatchedSender)` now maps to a
+fifth value, `mismatched_sender`, that is not one of the spec's four, instead of
+`unverified`. The SDK reports it when the Megolm session belongs to a user other
+than the event's `sender`, which is how every message in an encrypted bridged
+room arrives, and it withholds the session's device for it. The bundle does not
+look a device up for this verdict, so its live device half is empty. A new
+migration widens the CHECK constraint; rows already stored keep `unverified`.
 
 The verdict is an **immutable snapshot**, so it is **write-once-non-null**: the
 upsert `COALESCE`s `sender_trust` (`COALESCE(existing, EXCLUDED)`) rather than

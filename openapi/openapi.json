@@ -14207,7 +14207,7 @@
           },
           "device_known": {
             "type": "boolean",
-            "description": "Whether the sending device is currently known to axon. Always `false`\nwhen the snapshot's verdict is `mismatched_sender`: the session's device\nbelongs to another user and is not recorded."
+            "description": "Whether the sending device is currently known to axon. Always `false`\nwhen the snapshot's verdict is `mismatched_sender`: the session's device\nbelongs to another user, so axon does not look one up."
           },
           "identity_known": {
             "type": "boolean",

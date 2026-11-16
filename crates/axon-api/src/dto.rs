@@ -686,7 +686,7 @@ pub struct TrustSnapshotDto {
 pub struct CurrentTrustDto {
     /// Whether the sending device is currently known to axon. Always `false`
     /// when the snapshot's verdict is `mismatched_sender`: the session's device
-    /// belongs to another user and is not recorded.
+    /// belongs to another user, so axon does not look one up.
     pub device_known: bool,
     /// Whether the sending device is currently cross-signed by the sender's own
     /// master key. `null` when the device isn't known.
