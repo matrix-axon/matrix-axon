@@ -281,8 +281,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             clients/web/src-tauri/target
-          key: desktop-linux-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
-          restore-keys: desktop-linux-cargo-
+          # The runner image is part of the key: cargo fingerprints do not track
+          # system libraries, so a `target/` cached from another image (24.04)
+          # would be reused against the wrong glibc and webkit2gtk, defeating
+          # the glibc floor this job's pin exists to guarantee.
+          key: desktop-linux-jammy-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: desktop-linux-jammy-cargo-
 
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
