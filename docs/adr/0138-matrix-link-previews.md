@@ -29,7 +29,7 @@ A permalink is often shared exactly because the recipient is in the source room 
 - **A single-event read.** `GET /v1/accounts/{account_id}/events/{event_id}` reads one event from Axon's store.
   An event Axon never ingested is a 404, even when the account could read it on the homeserver.
 - **Backfill** (ADR 0043) pages every joined room back to its start by default, so an event in a joined room is usually in the store.
-  The exceptions are a room still being backfilled, an operator's depth cap or disabled backfill, and rooms the account has not joined but can read, such as a `world_readable` room or one it has left.
+  The exceptions are a room still being backfilled, an operator's depth cap or disabled backfill, and a room the account has left, where the homeserver still serves the history it could read while a member.
 - **Media is authorized by the event that names it.**
   `GET /v1/media/{account_id}/{server_name}/{media_id}` serves an `mxc://` object only when a stored event refers to it, and takes the encrypted-file descriptor and MIME type from that event (`resolve_media_content` in `routes/media.rs`).
 
@@ -41,16 +41,21 @@ A Matrix link is any link whose origin is `https://matrix.to`, and any `matrix:`
 The composer gives it no card and no lookup, on any platform, and never offers "Try homeserver" for it.
 
 The rule sits beside ADR 0132's static check, not inside it.
-`isPreviewLink` stays the network boundary that the shell's plugin and the Swift reader mirror rule for rule through their shared fixture.
-The places that choose which links get cards apply it together with a new `isMatrixLink` (in `matrix-to.ts`), and `nativePreviewLinks` does the same.
-
-So a Matrix link is not an eligible link in ADR 0132 § 6.
-A message whose only links are Matrix links omits `url_previews`, as a message whose only links are `http` links does.
-Sending `[]` would stop other clients from building their own card for it.
-That disclosure was ADR 0132's reason for `[]`, and it does not apply here: what another client could fetch is the matrix.to page, not the message.
-
-Share recovery checks a staged card against `nativePreviewLinks`, so a card the iOS Share Extension built for a matrix.to link is dropped before it is sent.
+`isPreviewLink` stays the network boundary that the shell's plugin and the Swift reader mirror rule for rule, and the shared fixture (`incoming-share/fixtures/device-preview-urls.json`) describes `isPreviewLink` alone.
+The web test that reads the fixture calls `isPreviewLink` rather than `nativePreviewLinks`, so the fixture never has to know about Matrix links, and a separate web-only test covers the exclusion.
+A new `isMatrixLink` (in `matrix-to.ts`) is applied together with `isPreviewLink` wherever the web client chooses links for cards: the composer, `nativePreviewLinks`, and therefore share recovery.
+Share recovery takes both its "Try homeserver" offers and its check of a staged card from `nativePreviewLinks`, so it neither offers the homeserver for a matrix.to link nor sends a card the iOS Share Extension built for one.
 The Share Extension's Swift reader still fetches the page; teaching it the same rule is iOS work, left for later.
+
+**What is sent** (ADR 0132 § 6).
+Matrix links are left out of § 6 entirely: the rules there are applied as if the body's Matrix links were not in it.
+
+- A body whose only links are Matrix links omits `url_previews` (rule 4), as a body whose only links are `http` links does.
+  Sending `[]` would stop other clients from building their own card for it.
+  That disclosure was ADR 0132's reason for `[]`, and it does not apply here: what another client could fetch is the matrix.to page, not the message.
+- A body with Matrix links and other eligible links follows rules 2 and 3 on the other links alone.
+  Kept cards are sent (rule 2), and otherwise `[]` (rule 3), for example when the body's only `https` link was discarded.
+  Either list also tells other clients not to preview the Matrix links, which costs nothing, because an Axon recipient's card does not come from the list (§ 6 below).
 
 ### 2. The recipient's client builds the card, from its own access
 
@@ -64,10 +69,13 @@ Other Axon users see the same card through their own access; users of other clie
   The links come from the body the message shows, after the reply fallback (`<mx-reply>`) is removed, so a reply from an older client does not get a card for the message it replies to.
 - **How many.** The first three distinct events, in text order, as in ADR 0132 § 1.
   A link to the message itself gets no card.
+- **When.** A card's event is read only when its message comes within a screen's height of the visible part of the timeline, so scrolling past a long history does not read every linked event in it.
 - **No nesting.** A card shows the linked message's text as plain text.
   A Matrix link inside it is text, never another card.
-- **No setting.** The `linkPreviews` setting governs fetches that reach other sites or disclose a link to the homeserver.
-  This lookup goes to the recipient's own Axon server, and from there to the homeserver the recipient's account already uses for that room, so it needs no setting.
+- **A setting of its own.** `matrixLinkCards`, per device like `linkPreviews`, with two values, on and off; the default is on.
+  It is separate from `linkPreviews`, which governs fetches that reach other sites or disclose a link before it is sent.
+  Off means no cards and no reads, and the links stay pills.
+  Any sender in a shared room can make a recipient's client read events through the recipient's homeserver (§ 3), so the recipient gets a way to stop it.
 
 ### 3. A room-scoped read that falls back to the homeserver
 
@@ -76,45 +84,70 @@ The path already carries `PUT` (edit) and `DELETE` (redact); this adds `GET`.
 
 1. **The store first.** An event stored for this account and this room is returned from the store, with its latest edit applied and its redaction masked, as the timeline shows it.
    A stored event in a different room is a 404: event ids are unique, so the link is wrong.
-2. **Then the homeserver.** Otherwise Axon asks the account's homeserver for `GET /_matrix/client/v3/rooms/{roomId}/event/{eventId}`.
-   The homeserver applies the room's history visibility, so it answers only for an account that may read the event.
-   An encrypted event is decrypted with the room keys Axon holds, in the same way backfill decrypts a paged event; when it cannot be, the event is returned with `content: null`, as a UTD.
-   A homeserver 403 or 404 is a 404 here, so the route does not reveal which rooms exist.
-3. **Not stored.** An event fetched this way is not written to the store.
+2. **Then the homeserver, for a room the account knows.** Only a room the account's Matrix client knows, because the account has joined it, has been invited to it, or has left it, is looked up on the homeserver.
+   Any other room is a 404 without a request.
+   So a sender cannot make a recipient's client probe rooms the recipient has never been in, and a `world_readable` room the account has never joined gets no card.
+   Otherwise Axon asks the account's homeserver for `GET /_matrix/client/v3/rooms/{roomId}/event/{eventId}`, and the homeserver applies the room's history visibility, so it answers only for an account that may read the event.
+   A homeserver 403 or 404 is a 404 here: either way there is nothing to show, and the client does the same thing for both.
+3. **Decrypted and judged as the timeline would.** An encrypted event is decrypted by the account's Matrix client, in the same way backfill decrypts a paged event, so any rule the client applies at decryption also applies here, including ADR 0136's exclusion of insecure devices once it is in force.
+   When it cannot be decrypted, it is returned with `content: null`, as a UTD.
+   A decrypted event carries the `sender_trust` verdict that ingestion would have recorded, computed from the decryption's `EncryptionInfo` by the same function (`meta::sender_trust`); § 5 says what the card does with it.
+4. **Redactions and edits.** A homeserver event that carries `unsigned.redacted_because` is returned with `redacted: true` and `content` and `body` null, as a redacted stored event is.
+   An edit is applied when the homeserver bundles it in `unsigned["m.relations"]["m.replace"]`, which servers implementing Matrix 1.7 (MSC3925) do with the whole replacement event.
+   The replacement is decrypted and judged in the same way, and is used only if it is a valid edit by the original sender under the same rules as stored edits; it then replaces `content` and `body`, sets `edited: true`, and its own `sender_trust` is the one returned.
+   Without a bundled replacement, `edited` is false.
+5. **Not stored.** An event fetched this way is not written to the store.
    Timeline reads come straight from the store, and an isolated old event in a room still being backfilled, or capped, would appear beyond a gap.
-   It also keeps rooms the account has not joined out of the store and the search index.
+   It also keeps rooms the account has left out of the store and the search index.
+   Each fetched event's content is kept in memory for an hour, for its media (§ 4); the event itself is read again in each new session.
 
-`LinkedEventDto` carries only what a card needs: `event_id`, `room_id`, `sender`, `origin_ts`, `type`, `content`, `body`, `relates_to`, `redacted`, `edited`, and `source` (`store` or `homeserver`).
-It is not an `EventDto`, because a homeserver event has no arrival order, reactions or recorded sender trust, and a DTO that pretended to have them would invite a client to use them.
-A homeserver event's edits are not applied: the card shows the event as the homeserver returned it.
+`LinkedEventDto` carries only what a card needs: `event_id`, `room_id`, `sender`, `origin_ts`, `type`, `content`, `body`, `relates_to`, `redacted`, `edited`, `sender_trust`, and `source` (`store` or `homeserver`).
+`sender_trust` has the values and meaning it has on `EventDto`, and is `null` for an unencrypted event and for a UTD.
+It is not an `EventDto`, because a homeserver event has no arrival order or reactions, and a DTO that pretended to have them would invite a client to use them.
 
-The homeserver request is made because a user is looking at a message, as a media download is, so ADR 0122 counts it as interactive.
-It never waits for the gate, and reports a timeout or server error to it through `HomeserverGates::interactive_call`.
-Like media downloads, it has its own cap on concurrent requests across the process, here four, and SDK retries are off.
-It is bounded by one 15-second deadline, and a slow or failed request is an ordinary 502, 503 or 504 that the client treats as transient.
+The homeserver request runs only because a message is on screen, but no one asked for it, so it is a background caller of the homeserver's load gate (ADR 0122), not an interactive one.
+It takes a permit before sending, and waits for one at most five seconds; with no permit by then it answers 503, and the client tries again the next time the message is rendered.
+So when the homeserver is struggling, card reads wait behind it rather than add to it, and they report their outcomes to the gate as every other background caller does.
+Across the process, at most four run at once, a cap of their own, separate from the 16-slot semaphore media downloads share, so card reads can never take a media download's slot.
+SDK retries are off, and one 15-second deadline, starting once the permit is held, bounds the request.
+A slow or failed request is an ordinary 502, 503 or 504 that the client treats as transient.
 An account that is not connected answers 503, and one that is logged out answers 409, as the other homeserver-backed routes do.
 
-### 4. Media of a fetched event is authorized for a short time
+### 4. A card's media is read through the event it names
 
 A card shows a linked image's thumbnail, and a video's poster when the event has one.
-For a stored event the media route already works.
-For a fetched event it would 404, because no stored event names the `mxc://` URI.
+The media route serves an `mxc://` object only when a stored event refers to it, so for a fetched event it would 404.
+Granting the account that `mxc://` URI by itself would let any event naming the same URI decide how it is served: another event in a room the account can read could name it with a different MIME type or encrypted-file descriptor.
 
-So when the route returns a homeserver event whose content names media (`url`, `file`, `info.thumbnail_url` or `info.thumbnail_file`), it records a grant in memory: account, `mxc://` URI, and that event's content.
-`resolve_media_content` consults the grants after the store, and takes the encrypted-file descriptor and MIME type from the granted content exactly as it does from a stored event.
-A grant lasts an hour and the table is bounded, the oldest grant going first.
-After a restart or an expiry, the next read of the event grants it again, so a card that is rendered again works.
+So the card's media request names its event.
+The media and thumbnail routes take two optional query parameters, `room_id` and `event_id`, which must be given together.
+When they are, the route resolves the `mxc://` URI against that event alone, and serves it only if that event's content names it, in `url`, `file`, `info.thumbnail_url` or `info.thumbnail_file`.
+The encrypted-file descriptor and MIME type come from that event's content, exactly as `resolve_media_content` takes them from a stored event today.
+The event is the stored one when the account has it, and otherwise the content the linked-event route kept in memory when it fetched it (§ 3).
+No other event, stored or fetched, can change how the card's media is served.
+Without the parameters, the routes behave exactly as they do today.
 
-A grant lets the account fetch only media that an event the homeserver just returned to that account refers to, which is the same rule the store enforces for stored events.
+The kept contents are bounded per account: 64 events, an hour each, the least recently used going first when the account's table is full.
+One account's reads can therefore never evict another's, and an eviction costs a homeserver read, not a broken card.
+A media request for an evicted or expired event is a 404, and the card then reads the event again, which keeps its content again, and retries the image once.
+The same happens after a restart.
 
 ### 5. The card
 
 - It shows the sender's name, the room's name, the time, and up to three lines of the message's text.
   A name the client does not know is shown as the Matrix id.
-- An image or sticker shows its thumbnail, and a video its poster, through the existing media path.
+- An image or sticker shows its thumbnail, and a video its poster, through the media request of § 4.
   A file or audio message shows its name.
 - A redacted event reads "Message deleted"; an undecryptable one reads "Message could not be decrypted".
   Any other event type gets a one-line description, as the timeline gives it.
+- **Sender trust.** The card is shown away from the room the message came from, so it says plainly when its `sender_trust` does not support the sender's name:
+  - `verification_violation`: "The sender's identity has changed since you verified it."
+  - `unknown`: "Sent from a device that can no longer be identified."
+  - `mismatched_sender`: "Encrypted by another user's device, such as a bridge."
+    This is how every message in an encrypted bridged room arrives, so the text is shown, not hidden as a UTD would be, and the card names the sender as the event does.
+  - `verified`, `unverified`, and `null` add nothing.
+    `unverified` is the common case for a sender this account never verified, and the timeline does not mark it either.
+  The timeline shows the same verdicts in the event inspector and nowhere else today; a timeline badge, when one is added, should use the same words.
 - The card is a link to the event in its room, like the pill: in its thread when the event is a thread reply, and to the room's join flow when the account has not joined it.
 - A read that answers 404 leaves no card.
   A transient failure leaves no card either, and the read is tried again when the message is rendered again.
@@ -132,16 +165,20 @@ The renderer skips any received preview whose `matched_url` is a Matrix link, wh
 - A Matrix link never sends the sender's view of a message to the room, so no message leaves its room or its encryption through a card.
 - Only Axon users see the card.
   Recipients on other clients see whatever their client draws for the link, which is usually a pill.
-- Rendering a message with an event link can make one homeserver request per linked event the store lacks.
-  The client's cache, the three-card cap and the server's concurrency cap bound it, and its failures still slow the gate's background callers.
-- The homeserver learns that the account read the event.
-  It already serves that account's room, so this discloses nothing to a new party.
+- Any sender in a shared room can make a recipient's client read up to three linked events per message, in rooms the recipient knows.
+  The setting turns that off; otherwise the client's cache, the on-screen rule, the three-card cap, the server's cap of four, and the load gate bound it.
+- The homeserver learns which linked events the account's client read, and when, including events another user chose to link.
+  It already serves that account's rooms and sees the account's own reads of them, but this tells it what was on the user's screen, not only what the user scrolled to.
+- A store event and a homeserver event of the same link can differ only where the homeserver omits a bundled edit; otherwise both show the latest valid edit, and both mask a redaction.
 - A card can lag the event: an edit or redaction after the read is not shown until the message is rendered again in a new session.
-- Media grants live in memory, so a multi-process deployment would need them shared; Axon runs one server process.
+- The fetched contents live in memory, so a multi-process deployment would need them shared; Axon runs one server process.
+- Media requests without `room_id` and `event_id` keep today's resolution, which picks one stored event among those naming a URI.
+  This ADR narrows that only for cards.
 - The TUI gets neither change for now; `docs/client-parity.md` records the gap.
 
 ## Delivery
 
 1. This ADR.
-2. **Server:** the room-scoped event route and `LinkedEventDto`, the homeserver read, and the media grants.
-3. **Web:** sections 1, 2, 5 and 6, stacked on the server PR, with `docs/client-parity.md` and `docs/demo-coverage.md` updated.
+2. **Server:** the room-scoped event route and `LinkedEventDto`, the homeserver read behind the gate, the kept contents, and the media routes' `room_id` and `event_id` parameters.
+   The OpenAPI document (`openapi/openapi.json`) is regenerated with the new operation, parameters and schema, and `clients/web/src/api/schema.d.ts` with it, as the generated-artifact exception allows.
+3. **Web:** sections 1, 2, 5 and 6, and the `matrixLinkCards` setting, stacked on the server PR, with `docs/client-parity.md` and `docs/demo-coverage.md` updated.

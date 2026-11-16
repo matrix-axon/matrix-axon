@@ -1,6 +1,6 @@
 # ADR 0132 — Composer link previews
 
-**Status:** Proposed. Extends [ADR 0125](0125-ios-first-incoming-sharing.md); supersedes nothing.
+**Status:** Proposed. Extends [ADR 0125](0125-ios-first-incoming-sharing.md); supersedes nothing. Amended by [ADR 0138](0138-matrix-link-previews.md) for Matrix links (§§ 1, 5 and 6).
 
 ## Context
 
@@ -170,7 +170,11 @@ The settings page explains that a device lookup shows the site your address when
   Edit mode has its own rules (section 8).
   The thread composer behaves the same as the room composer.
 
+> **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** None of this applies to a Matrix link: it gets no card and no lookup.
+
 ### 6. What is sent
+
+> **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** A Matrix link is not an eligible link here: the rules below are applied as if the body's Matrix links were not in it.
 
 MSC4095 gives the field three meanings, and the composer chooses between them deliberately.
 A non-empty list is the whole set of previews: recipients' clients preview those links and no others.
