@@ -307,6 +307,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # Fails if a runner-image change pulls the shell binary above glibc 2.35,
+      # the Ubuntu 22.04 version and the floor install.md states. Only the
+      # shell itself is checked; the AppImage's bundled libraries come from
+      # this same image.
+      - name: Assert the shell runs on glibc 2.35
+        run: scripts/assert-glibc-floor.sh 2.35 clients/web/src-tauri/target/release/axon
+
       - name: Collect artifacts
         run: |
           mkdir -p dist-desktop
