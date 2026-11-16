@@ -26,6 +26,12 @@ import { mergeRoomListDelta } from './room-list-delta'
 import type { EventDto } from './timeline'
 
 export interface RoomPreview {
+  /**
+   * The room's `last_event_id` this preview was read for: what a newer
+   * message or a stale answer is compared against. Not necessarily the
+   * previewed message's own id, which is older when the newest event is not
+   * a message (a reaction, a state change).
+   */
   eventId: string
   senderDisplay: string
   body: string
@@ -392,6 +398,11 @@ export function createRoomsStore(
   const previewRetryTimers = new Set<ReturnType<typeof setTimeout>>()
   /** Set when the server has no batch route; see `pumpPerRoomPreviews`. */
   let previewsPerRoom = false
+  /**
+   * 404/405 answers to batches since the last answered one. One could be a
+   * proxy or a restart; the second in a row settles it.
+   */
+  let unsupportedAnswers = 0
   const perRoomQueue: PreviewRequest[] = []
   let perRoomActive = 0
   /**
@@ -947,8 +958,14 @@ export function createRoomsStore(
     })
     if (outcome === 'unsupported') {
       // A server older than the batch route: POST to an unknown `/v1/` path
-      // is a 405 (the catch-all is GET-only), or a 404 behind a proxy. Read
-      // this session's previews the old way from here on.
+      // is a 405 (the catch-all is GET-only), or a 404 behind a proxy. Ask
+      // once more after the first retry delay before reading this session's
+      // previews the old way from here on, so a passing 404 does not.
+      unsupportedAnswers += 1
+      if (unsupportedAnswers < 2 && previewRetryDelaysMs.length > 0) {
+        requeuePreviews(current, previewRetryDelaysMs[0])
+        return
+      }
       previewsPerRoom = true
       perRoomQueue.push(...current, ...previewQueue.splice(0))
       pumpPerRoomPreviews()
@@ -958,6 +975,7 @@ export function createRoomsStore(
       retryPreviews(current)
       return
     }
+    unsupportedAnswers = 0
     const byRoom = new Map(
       previews.map((preview) => [roomKey(preview), preview]),
     )
@@ -976,22 +994,32 @@ export function createRoomsStore(
    * key, so the next time its row mounts it asks again.
    */
   function retryPreviews(failed: PreviewRequest[]): void {
-    const again: PreviewRequest[] = []
+    // By each request's own failures: a batch can mix rows asking for the
+    // first time with rows already sent again.
+    const byFailures = new Map<number, PreviewRequest[]>()
     for (const request of failed) {
       request.failures += 1
       if (request.failures > previewRetryDelaysMs.length) {
         requestedPreviews.delete(request.key)
+        continue
+      }
+      const again = byFailures.get(request.failures)
+      if (again === undefined) {
+        byFailures.set(request.failures, [request])
       } else {
         again.push(request)
       }
     }
-    if (again.length === 0) {
-      return
+    for (const [failures, again] of byFailures) {
+      requeuePreviews(again, previewRetryDelaysMs[failures - 1])
     }
-    const delay = previewRetryDelaysMs[again[0].failures - 1]
+  }
+
+  /** Put `requests` back at the front of the queue after `delay`. */
+  function requeuePreviews(requests: PreviewRequest[], delay: number): void {
     const timer = setTimeout(() => {
       previewRetryTimers.delete(timer)
-      previewQueue.unshift(...again)
+      previewQueue.unshift(...requests)
       schedulePreviewFlush()
     }, delay)
     previewRetryTimers.add(timer)
@@ -1242,6 +1270,7 @@ export function createRoomsStore(
     previewRetryTimers.clear()
     senderNames.clear()
     previewsPerRoom = false
+    unsupportedAnswers = 0
     // Here rather than below the pristine-store guard with the rest of the
     // session's rows: these keys belong to the queues just emptied.
     requestedPreviews.clear()

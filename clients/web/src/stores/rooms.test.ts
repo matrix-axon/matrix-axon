@@ -2218,7 +2218,10 @@ describe('room-list previews (issue #278)', () => {
         }),
       ),
     )
-    const store = previewStore({ previewBatchDelayMs: 0 })
+    const store = previewStore({
+      previewBatchDelayMs: 0,
+      previewRetryDelaysMs: [10],
+    })
     await store.refresh()
 
     for (const room of store.rooms.value.slice(0, 5)) {
@@ -2236,9 +2239,87 @@ describe('room-list previews (issue #278)', () => {
         body: 'message 5',
       }),
     )
-    expect(asked).toHaveLength(1)
+    // The first 405 and the one that settled it.
+    expect(asked).toHaveLength(2)
     expect(maxInFlight).toBeLessThanOrEqual(4)
     expect(maxInFlight).toBeGreaterThan(1)
+  })
+
+  it('asks again after one 404 rather than reading per row for the session', async () => {
+    const rooms = [listed(0), listed(1)]
+    const { asked } = serve(rooms, (body, call) =>
+      call % 2 === 1
+        ? new HttpResponse(null, { status: 404 })
+        : HttpResponse.json({
+            data: body.rooms.map((room) =>
+              previewDto(room, { event_id: room.room_id.replace('!r', '$e') }),
+            ),
+          }),
+    )
+    const store = previewStore({
+      previewBatchDelayMs: 0,
+      previewRetryDelaysMs: [10],
+    })
+    await store.refresh()
+
+    store.hydratePreview(store.rooms.value[0])
+    await vi.waitFor(() =>
+      expect(store.preview(roomKey(rooms[0]))?.body).toBe('hello'),
+    )
+    // A later 404 is a first one again, since a batch was answered in
+    // between. Still batching: a per-row read would be a timeline request,
+    // which has no handler here.
+    store.hydratePreview(store.rooms.value[1])
+    await vi.waitFor(() =>
+      expect(store.preview(roomKey(rooms[1]))?.body).toBe('hello'),
+    )
+    expect(asked).toHaveLength(4)
+  })
+
+  it('backs each request off by its own failures, in a batch that mixes them', async () => {
+    const rooms = [listed(0), listed(1)]
+    let store: ReturnType<typeof makeStore> | null = null
+    let release: (() => void) | null = null
+    const { asked } = serve(rooms, (_, call) => {
+      if (call === 1) {
+        // Room 1 asks for the first time while room 0's first read is out; a
+        // hold keeps both queued until room 0 is back, so they share a batch.
+        release = store!.holdPreviews()
+        store!.hydratePreview(store!.rooms.value[1])
+      }
+      return call <= 2
+        ? HttpResponse.json(
+            { error: { code: 'unavailable', message: 'busy' } },
+            { status: 503 },
+          )
+        : HttpResponse.json({ data: [] })
+    })
+    store = previewStore({
+      previewBatchDelayMs: 0,
+      previewRetryDelaysMs: [30, 400],
+      previewHoldMaxMs: 60_000,
+    })
+    await store.refresh()
+
+    store.hydratePreview(store.rooms.value[0])
+    await vi.waitFor(() => expect(release).not.toBeNull())
+    // Room 0's first retry comes due behind the hold.
+    await sleep(100)
+    expect(asked).toHaveLength(1)
+    release!()
+    // Every batch is kept, so wait for the last and read them in order.
+    await vi.waitFor(() => expect(asked).toHaveLength(4))
+    expect(
+      asked.map((batch) => batch.rooms.map((room) => room.room_id)),
+    ).toEqual([
+      [rooms[0].room_id],
+      // Room 0 back from its first retry, room 1 asking for the first time.
+      [rooms[0].room_id, rooms[1].room_id],
+      // That failed too: room 1 is on its first retry, 30 ms later ...
+      [rooms[1].room_id],
+      // ... and room 0 on its second, 400 ms later.
+      [rooms[0].room_id],
+    ])
   })
 
   it('sends a failed batch again after a delay', async () => {
@@ -2397,13 +2478,13 @@ describe('room-list previews (issue #278)', () => {
   describe('naming a live sender on a server without the route', () => {
     /**
      * Serve `rooms`, answer the first batch with a preview of room 0 by Carol
-     * (so the store learns her name) and the second with a 405, and hold room
-     * 0's member list until `releaseRoster`. A third batch, from a later
-     * session, gets Bob's message under the name Robert.
+     * (so the store learns her name) and the next two with a 405, and hold
+     * room 0's member list until `releaseRoster`. A fourth batch, from a
+     * later session, gets Bob's message under the name Robert.
      */
     function serveWithoutRoute(rooms: ReturnType<typeof listed>[]) {
       const { asked } = serve(rooms, (_, call) =>
-        call === 2
+        call === 2 || call === 3
           ? new HttpResponse(null, { status: 405 })
           : HttpResponse.json({
               data: [
@@ -2471,7 +2552,10 @@ describe('room-list previews (issue #278)', () => {
     it('does not name a message a newer one has replaced', async () => {
       const rooms = [listed(0), listed(1)]
       const { rosterReads, releaseRoster } = serveWithoutRoute(rooms)
-      const store = previewStore({ previewBatchDelayMs: 0 })
+      const store = previewStore({
+        previewBatchDelayMs: 0,
+        previewRetryDelaysMs: [10],
+      })
       await fallBack(store, rosterReads)
 
       // Bob is not named yet: his message reads the member list.
@@ -2497,7 +2581,10 @@ describe('room-list previews (issue #278)', () => {
     it("does not name the next session's preview after a sign-out", async () => {
       const rooms = [listed(0), listed(1)]
       const { rosterReads, releaseRoster } = serveWithoutRoute(rooms)
-      const store = previewStore({ previewBatchDelayMs: 0 })
+      const store = previewStore({
+        previewBatchDelayMs: 0,
+        previewRetryDelaysMs: [10],
+      })
       await fallBack(store, rosterReads)
 
       store.noteTimelineEvent(

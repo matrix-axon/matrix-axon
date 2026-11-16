@@ -1,6 +1,7 @@
 import { effect, signal, untracked, type Signal } from '@preact/signals'
 import { createContext } from 'preact'
 import { useContext } from 'preact/hooks'
+import { exec } from 'preact-iso/router'
 import { createApiClient, inBackground, type ApiClient } from './api/client'
 import {
   deviceStateChange,
@@ -236,14 +237,17 @@ export interface AppServices {
   remotePushError: Signal<string | null>
 }
 
+/** The room page's route, as `app.tsx` mounts it. */
+export const ROOM_ROUTE = '/:accountId/rooms/:roomId'
+
 /**
- * Whether `pathname` is a room (`/:accountId/rooms/:roomId`, `app.tsx`). A
- * launch straight into one holds room-list previews until its first page is
- * in (issue #278): the cached rows paint first and would otherwise send their
- * preview reads ahead of the page the user is looking at.
+ * Whether `pathname` is a room (`ROOM_ROUTE`, matched as the router matches
+ * it). A launch straight into one holds room-list previews until its first
+ * page is in (issue #278): the cached rows paint first and would otherwise
+ * send their preview reads ahead of the page the user is looking at.
  */
 export function isRoomRoute(pathname: string): boolean {
-  return /^\/[^/]+\/rooms\/[^/]+\/?$/.test(pathname)
+  return exec(pathname, ROOM_ROUTE) !== undefined
 }
 
 /**

@@ -1375,7 +1375,15 @@ describe('RoomList account labels', () => {
       { previews: 'unsupported' },
     )
 
-    expect(await findByText('Bob: the previous text message')).toBeTruthy()
+    // The second 405, which settles that the route is missing, comes
+    // after the first retry delay.
+    expect(
+      await findByText(
+        'Bob: the previous text message',
+        {},
+        { timeout: 5_000 },
+      ),
+    ).toBeTruthy()
   })
 
   it('against a server without batch previews, skips a redacted latest message and previews the one before it', async () => {
@@ -1435,7 +1443,11 @@ describe('RoomList account labels', () => {
       { previews: 'unsupported' },
     )
 
-    expect(await findByText('Bob: still here')).toBeTruthy()
+    // The second 405, which settles that the route is missing, comes
+    // after the first retry delay.
+    expect(
+      await findByText('Bob: still here', {}, { timeout: 5_000 }),
+    ).toBeTruthy()
   })
 })
 
