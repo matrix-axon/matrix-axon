@@ -62,14 +62,16 @@ Pointing a `<video>` straight at the server would not work there even with crede
 | 4     | The shells proxy ticket URLs through a custom scheme        | web (`clients/web/src-tauri`, plus the platform glue) | one   |
 | 5     | Deferred: pass seek ranges through to the homeserver        | server                                                | later |
 
-Phase 1 helps every client, including the TUI's downloads, without any client change: the first byte leaves Axon as soon as the first chunk arrives.
-It also removes the 100 MiB and 60 s failures.
+Phase 1 removes the server's own 100 MiB and 60 s limits for video and audio, and the first byte leaves Axon as soon as the first chunk arrives.
+It does not lift any client's limits.
+The TUI's `get_media` (`clients/tui/src/api.rs`) still buffers the whole body, refuses anything over 20 MiB (`MAX_MEDIA_BYTES`) and gives up after 60 s (`MEDIA_TIMEOUT`).
+Lifting those is a separate TUI change, outside this ADR.
 Phases 2 to 4 let the player start before the download finishes and seek within what has arrived.
 Until phase 4 lands, the shells keep the blob path, which phase 1 already makes faster and no longer limited to 100 MiB.
 
 ### 2. Phase 1: download from the homeserver as a stream
 
-`MediaFetcher` (the port `axon-media` owns, ADR 0021) gains a streaming method beside the buffered one:
+`MediaFetcher` (the SDK-free port `axon-media` owns, ADR 0045) gains a streaming method beside the buffered one:
 
 ```rust
 async fn download_stream(&self, account_id: Uuid, mxc_url: &str, encrypted_file: Option<Value>)
@@ -87,10 +89,20 @@ It sends a GET to the authenticated media endpoint (`/_matrix/client/v1/media/do
 A `401` with `M_UNKNOWN_TOKEN` gets one `refresh_access_token()` and one retry, so MAS-issued tokens (ADR 0097) keep working.
 The method returns once the response headers arrive.
 
-Encrypted media is decrypted as it streams:
+That client comes with a whole-request timeout this request must not inherit.
+Axon sets no `RequestConfig`, so matrix-sdk's default 30 s `timeout` is copied onto the `reqwest::Client` that `Client::http_client()` returns, and reqwest applies a client timeout to the whole body, not just the headers.
+The SDK's own media download avoids it by setting the per-request timeout to `Duration::MAX` (`matrix-sdk` `media.rs`, "Downloading a file should have no timeout").
+The stream request does the same, so the shared client's 30 s never cuts a body off.
+The deadlines that do apply are the ones in section 3: `fetch_timeout_secs` until the response headers, then `stall_timeout_secs` on each body read.
 
-- The descriptor gets the same checks `AttachmentDecryptor::new` applies before any network work: version `v2`, algorithm `A256CTR`, a 32-byte key, a 16-byte IV and a SHA-256 hash.
-  A descriptor that fails them is `Undecryptable`, as today.
+Encrypted media is decrypted as it streams.
+Malformed descriptors keep today's errors:
+
+- The descriptor is deserialized into ruma's `EncryptedFile` before any network work, as today.
+  ruma rejects a wrong-length key or IV there, because `k` and `iv` are fixed-size arrays, along with anything else that does not parse.
+  Those failures stay `GatewayError::Invalid`, which becomes `400 bad_request`, exactly as `SdkMediaProxy::download` maps them now.
+- The two checks `AttachmentDecryptor::new` makes, a `v2` version and a SHA-256 hash present, are made next, also before any network work.
+  Failing either is `Undecryptable` (`422 media_undecryptable`), as it is today.
 - Each chunk updates a SHA-256 over the ciphertext, then goes through `Ctr128BE<Aes256>` and on to the cache.
 - After the last chunk, a hash mismatch makes the object `Undecryptable` (section 4).
 
@@ -116,10 +128,15 @@ The download runs as its own task, detached from the request that started it.
 
 The limits change with it:
 
-- `fetch_timeout_secs` keeps its name and becomes the deadline for the upstream response headers.
+- `fetch_timeout_secs` keeps its name and becomes the deadline for the upstream response headers on this path, enforced with `tokio::time::timeout` around the send.
   Its documentation changes to say so.
-- A new `stall_timeout_secs` (default 30) cancels a download that delivers no bytes for that long.
-  There is no total-duration limit on a streamed download.
+- A new `stall_timeout_secs` (default 30) cancels a download that delivers no bytes for that long, enforced with a `tokio::time::timeout` around each body read.
+  There is no total-duration limit on a streamed download, which is why section 2 clears the inherited reqwest timeout rather than leaving it in force.
+- The download task holds a `max_concurrent_downloads` permit (the `downloads` semaphore `fetch_capped` takes today, default 16) for as long as the upstream request is open.
+  Over the limit, downloads queue as they do today.
+  Size and stall time are bounded per download, so the permit is what bounds the number of open homeserver connections.
+  A streamed video holds its permit for minutes rather than seconds, which leaves fewer permits for images while several videos download.
+  Videos download only when the user opens one, so the default is kept, and the permit wait gets a `debug` log so contention shows up if it happens.
 - A new `max_stream_bytes` (default 2 GiB) replaces `max_object_bytes` for the streaming path only.
   `max_object_bytes` was protecting process memory, and a streamed object no longer passes through memory.
   An object over `max_stream_bytes` is refused with `too_large` before the body is read, when `Content-Length` says so, or when the running total passes it.
@@ -158,14 +175,26 @@ A `<video>` cannot carry a bearer header, so the server issues a URL that stands
 - A ticket is 32 random bytes, base64url-encoded, held in an in-memory table keyed by the ticket.
   The table records the account, the MXC URI, the event id, the issuing token's id and session id, and the times the ticket was created and last used.
   Restarting the server drops every ticket, and the client simply asks for a new one (section 6).
-- A ticket expires 30 minutes after its last use and never more than 12 hours after it was issued, nor after the issuing token's own `expires_at`.
-  Revoking a token, or signing out its session, drops its tickets.
-  The revocation paths in `axon-api` call into the ticket table.
+- A ticket expires 30 minutes after its last use and never more than 12 hours after it was issued.
+- Every use also re-checks the issuing token.
+  A new read-only store lookup by token id rejects the ticket unless that token is unrevoked and unexpired.
+  So a ticket is accepted exactly when the bearer token that issued it would be.
+  - This covers every way a credential ends, with no callback into the ticket table: `axon token revoke` and the management API's revoke both go through `Store::revoke_token`'s `remove_token`.
+    Identity unbind, from the CLI or the management API, revokes that identity's tokens inside the store.
+    An OAuth session's access tokens simply expire.
+  - A non-expiring operator token (`expires_at` is `None`) imposes no expiry of its own, so its tickets rely on that per-use check and the 30-minute and 12-hour limits.
+  - An OAuth access token lives an hour (`access_token_ttl_secs`), so its tickets stop working within the hour even while the client keeps refreshing.
+    The client then requests a new ticket and resumes, as section 6 describes.
+  - The lookup is one primary-key read per range request.
+    That is the same cost every bearer request already pays.
 - The table holds at most 4096 tickets and drops the least recently used past that.
 - Tickets are never logged.
-  The route's tracing span records the route template, not the path.
+  The app's outermost `TraceLayer` (`crates/axon-api/src/lib.rs`) records `path = %request.uri().path()` on an `INFO` span for every request, including routes outside `require_bearer`.
+  So its `make_span_with` changes to record `/v1/media-stream/{ticket}` in place of any path under that prefix.
+  A handler span of its own would not stop that outer one recording the raw path.
+  Ticket-route errors do not carry the ticket in their `Display` text or their error envelope.
 
-Two alternatives were rejected; see Alternatives considered.
+The alternatives to tickets are covered under Alternatives considered.
 
 The ticket route is additive, so it needs no `API-Breaking-Change` trailer (ADR 0099).
 The OpenAPI spec documents both routes.
@@ -229,19 +258,21 @@ This phase begins by checking that support against production Synapse, and gets 
 
 ## Consequences
 
-- Video and audio over 100 MiB play, up to `max_stream_bytes`.
+- In the web client and the shells, video and audio over 100 MiB play, up to `max_stream_bytes`.
   Playback starts once the player has its first few hundred KiB, not once the whole file has arrived.
 - For streamed video and audio, an encrypted attachment's integrity check moves from before serving to after.
   A tampered stream is cut off and never cached, but bytes before the cut have already been played (section 4).
 - A ticket is a credential in a URL.
-  It is limited to one object, a 30-minute idle lifetime and its issuing token, but it is written into Caddy's access log on every range request.
+  It is limited to one object, a 30-minute idle lifetime and its issuing token's validity.
+  Axon's own request log records the route template instead (section 5), but Caddy's access log records the ticket on every range request.
   Operators who ship those logs elsewhere should know that.
 - `axon-media` adds a second custom scheme to the shells and widens their CSP by one source.
 - The shell's 4 MiB range clamp means each scheme response is buffered in the shell process, up to 4 MiB.
 - The Download button is unchanged: a large download is still buffered in the page and limited to 120 s.
   Making it stream, by pointing it at the ticket route in the browser and saving through the shell's own download path in the shells, is a follow-up.
-- The TUI needs no change.
-  Its downloads start sooner and are no longer limited to 100 MiB once phase 1 lands.
+- The TUI is unchanged by this plan.
+  It still refuses media over 20 MiB and still gives up on a transfer after 60 s, whatever the server allows.
+  Raising those limits, or streaming to disk, is a separate TUI change.
 
 ## Alternatives considered
 
