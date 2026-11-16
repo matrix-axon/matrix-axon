@@ -119,12 +119,29 @@ The download runs as its own task, detached from the request that started it.
 - A request for bytes past the written point waits on the same channel.
   So a seek forward waits for the download to reach that point, and phase 5 is about removing that wait.
 - With no upstream `Content-Length`, the length is unknown until the end.
-  Such a response is a plain `200` with a chunked body and no `Accept-Ranges`, until the download completes.
+  A request without `Range` then gets a plain `200` with a chunked body and no `Accept-Ranges`.
+  A request with `Range` waits until the download completes and the length is known, then is answered like any other range.
+  This is the degraded case: such an object plays only after it has fully arrived, as everything does today.
+  It is also why every ranged response, including the shell's in section 7, carries a known total length.
+  It is expected to be rare, and the phase 1 PR records whether production Synapse ever omits `Content-Length` on a media download.
   Encrypted media declares `info.size`, but that value is sender-controlled, so it is a hint only and never written into a `Content-Range`.
-- When the download completes and, for encrypted media, the hash matches, the staging file is promoted into the LRU exactly as today.
+- The download runs to completion once started, whether or not anyone is still reading.
+  A player that has buffered ahead may close its connection, and a user may pause for minutes.
+  Cancelling a reader-less download would delete the staging file and turn the next read at a large offset into a download from byte 0, the very re-download this ADR removes.
+  The only things that stop a download early are the stall timeout, the size limits below, the length check, a hash mismatch and server shutdown.
+  A video opened and abandoned at once still downloads in full.
+  That waste is bounded by the separate stream permits and the reservation rule below, and the object is then in the cache for the next play.
+- When the download completes, the length check passes and, for encrypted media, the hash matches, the staging file is promoted into the LRU exactly as today.
   Later requests are ordinary cache hits.
-- The download keeps going while any request has been attached within the last 60 s, so a player that closes and reopens connections while seeking does not restart it.
-  After 60 s with no readers it is cancelled and the staging file is deleted.
+
+The upstream body has to be exactly as long as promised, because unencrypted media has no hash to catch a truncated file:
+
+- The request sends `Accept-Encoding: identity`.
+  A response with any other `Content-Encoding` fails the download as `Upstream`.
+  Axon's reqwest is built without decompression features, so an encoded body would otherwise be cached still compressed, with a `Content-Length` that is not the media's length.
+- A body that ends before its `Content-Length`, or runs past it, fails the download.
+  The staging file is never promoted, and every response still reading the object is cut off mid-body, exactly as for a hash mismatch in section 4.
+  A chunked body counts as complete only when hyper reports a clean end of stream, so a connection dropped mid-chunk is also a failure.
 
 The limits change with it:
 
@@ -132,16 +149,30 @@ The limits change with it:
   Its documentation changes to say so.
 - A new `stall_timeout_secs` (default 30) cancels a download that delivers no bytes for that long, enforced with a `tokio::time::timeout` around each body read.
   There is no total-duration limit on a streamed download, which is why section 2 clears the inherited reqwest timeout rather than leaving it in force.
-- The download task holds a `max_concurrent_downloads` permit (the `downloads` semaphore `fetch_capped` takes today, default 16) for as long as the upstream request is open.
-  Over the limit, downloads queue as they do today.
-  Size and stall time are bounded per download, so the permit is what bounds the number of open homeserver connections.
-  A streamed video holds its permit for minutes rather than seconds, which leaves fewer permits for images while several videos download.
-  Videos download only when the user opens one, so the default is kept, and the permit wait gets a `debug` log so contention shows up if it happens.
+- Streamed downloads take a permit from their own semaphore, sized by a new `max_concurrent_streams` (default 4), for as long as the upstream request is open.
+  They do not use the `downloads` semaphore that `fetch_capped` takes today (`max_concurrent_downloads`, default 16).
+  A streamed video holds its permit for minutes rather than seconds.
+  Sharing the 16 permits would let a few open videos queue every image, avatar and thumbnail behind them.
+  With their own semaphore, buffered media never waits on a stream.
+  Together the two semaphores bound the number of open homeserver connections, since size and stall time are already bounded per download.
+  A stream waits at most `fetch_timeout_secs` for its permit, then fails with `503`, which the client treats as retryable.
+  Today's wait for a `downloads` permit has no bound, and that is unchanged.
 - A new `max_stream_bytes` (default 2 GiB) replaces `max_object_bytes` for the streaming path only.
   `max_object_bytes` was protecting process memory, and a streamed object no longer passes through memory.
   An object over `max_stream_bytes` is refused with `too_large` before the body is read, when `Content-Length` says so, or when the running total passes it.
-- Each in-flight streamed download counts its bytes against the LRU's `max_bytes` total cap as they are written, and the cache evicts to make room.
-  A download that cannot fit even after evicting everything else is refused with `too_large`.
+  Startup rejects a configuration whose `max_stream_bytes` exceeds `max_bytes`, because an object the limit allows could then never fit.
+- A streamed download reserves its space in the LRU before it reads the body.
+  - With a known `Content-Length`, it reserves the full length at once.
+    The cache evicts completed entries, least recently used first, to make room, which is the LRU's ordinary behaviour.
+    Reservations of downloads still in flight are never evicted.
+  - When completed entries cannot be evicted far enough because in-flight reservations hold the rest, the new download waits for room for at most `fetch_timeout_secs`, then fails with `503`.
+    It is not refused as `too_large`: the object is within `max_stream_bytes`, and the client should retry rather than report it as too big.
+  - With no `Content-Length`, the reservation grows as bytes arrive.
+    If it cannot grow, the download fails with `503`, and the partial file is deleted.
+  - At the defaults, the 4 stream permits times 2 GiB is 8 GiB, more than the 5 GiB `max_bytes`.
+    So reservations, not arithmetic between the two settings, are what keep the cache inside its cap.
+    A third concurrent 2 GiB video therefore waits for room rather than failing outright.
+    Several multi-GiB videos at once are unusual on a personal server.
 
 ### 4. Phase 1: unverified plaintext reaches the player
 
@@ -154,6 +185,17 @@ CTR mode has no integrity of its own, so a flipped ciphertext bit flips the same
 Such an attacker cannot read the plaintext or choose it without knowing it, but can corrupt known positions.
 For a video or audio stream, the consequence is a damaged frame or an audio glitch in a decoder that already handles damaged input.
 That is a much smaller risk than an image or document decoder handed altered bytes, which is why section 2 restricts streaming to `video/*` and `audio/*`.
+
+That restriction rests on the event's `info.mimetype`, which the sender chooses, so any blob can be labelled `video/mp4` and opted into verify-after-serve.
+This ADR does not add a content sniff, because the label does not widen the risk:
+
+- **The sender** controls the plaintext anyway and can attach any bytes with a valid hash, so skipping the hash check gives a sender nothing it lacked.
+- **A homeserver** is the party the hash check guards against, and it cannot relabel an encrypted attachment.
+  `info.mimetype` sits inside the encrypted event content, which it cannot read or alter.
+  For unencrypted media there is no hash to check, before or after this ADR.
+- **Where the bytes go.** Whatever the bytes really are, they reach only a `<video>` or `<audio>` element.
+  They are served as the declared `video/*` or `audio/*` type with `X-Content-Type-Options: nosniff`, and the ticket route refuses any other type.
+  The residual exposure is the browser's media decoder parsing a mislabelled or bit-flipped file, which it must already survive from any untrusted video.
 
 When the hash fails:
 
@@ -187,12 +229,27 @@ A `<video>` cannot carry a bearer header, so the server issues a URL that stands
     The client then requests a new ticket and resumes, as section 6 describes.
   - The lookup is one primary-key read per range request.
     That is the same cost every bearer request already pays.
+- Every use also re-runs `get_media`'s own checks (`resolve_media_content`), since the ticket route serves through the same code.
+  Those checks require that the account still exists and that the owning event is still stored with its content.
+  Redaction leaves the content `NULL`, which already fails closed with `404`.
+  So a ticket for a redacted event, or for an account that has been removed, stops working on its next request rather than serving for up to 12 hours.
+  Room membership is not checked, which matches the bearer route: `get_media` does not check it either.
 - The table holds at most 4096 tickets and drops the least recently used past that.
+  Each issuing token holds at most 32 live tickets, and a 33rd evicts that token's own least recently used ticket.
+  So one client minting tickets in a loop churns only its own tickets and cannot evict other users' tickets out of the shared table.
+  A single viewer needs only a few tickets at once: one per open video or audio preview.
 - Tickets are never logged.
   The app's outermost `TraceLayer` (`crates/axon-api/src/lib.rs`) records `path = %request.uri().path()` on an `INFO` span for every request, including routes outside `require_bearer`.
-  So its `make_span_with` changes to record `/v1/media-stream/{ticket}` in place of any path under that prefix.
+  So its `make_span_with` changes to record `/v1/media-stream/{ticket}` in place of any path under that prefix, matched by prefix.
+  A path under the prefix that matches no route, which falls to the `/v1/{*path}` catch-all, is redacted too.
+  The layer's `on_response` and `on_failure` events log inside that span and add no URI of their own, so the one change covers them.
   A handler span of its own would not stop that outer one recording the raw path.
+  An audit of `crates/` for `.uri()`, `OriginalUri` and `MatchedPath` found no other reader of the request path in the request pipeline.
+  The OAuth rate limiter and callback read only their own query strings, and there is no panic-catching layer.
+  The phase 2 PR repeats that audit, and a test asserts that a ticket request's log output does not contain the ticket.
   Ticket-route errors do not carry the ticket in their `Display` text or their error envelope.
+- The route ignores `If-Range`, as `get_media` does today.
+  That is correct here: the `ETag` is a hash of the MXC URI and an MXC object never changes, so a range is always taken from the current representation.
 
 The alternatives to tickets are covered under Alternatives considered.
 
@@ -234,15 +291,42 @@ The handler:
 - Learns the server base from a new `set_media_stream_base` command, which the page calls whenever its server changes.
   Today `axon-http` takes a full URL on every request and the shell keeps no server base of its own.
   The handler refuses to run until the base is set, and only ever requests that base's `/v1/media-stream/` prefix, so the scheme cannot become a general fetch from the page.
-- Clamps every range to at most 4 MiB.
-  It turns an open-ended `bytes=N-` into `bytes=N-(N+4 MiB-1)` and answers `206` with the true total length.
-  Tauri's scheme responder takes a whole body, not a stream, so this clamp is what keeps each response bounded.
-  Players handle a short `206` by asking for the next range, and Tauri's own `streaming` example works the same way.
-  A request with no `Range` header is answered as `bytes=0-` with the same clamp, and as a `206`.
+- Returns at most 4 MiB of body per response.
+  Tauri's scheme responder takes a whole body, not a stream, so this bound is what keeps each response's memory in the shell fixed.
+
+The bound is applied to what comes back, not by rewriting what is asked for.
+The handler forwards the player's `Range` header unchanged, reads at most 4 MiB of the upstream body, then drops the upstream connection.
+That one rule covers every range form, because the server always answers a ranged ticket request with a `206` whose `Content-Range` carries the known total (section 3):
+
+- **`bytes=a-b` within 4 MiB** comes back whole, and is returned as the server sent it.
+- **Open-ended `bytes=N-`, or `bytes=a-b` wider than 4 MiB.**
+  The handler returns the first 4 MiB as a `206`, with `Content-Range: bytes N-(N+4 MiB-1)/len` and a matching `Content-Length`.
+- **A suffix `bytes=-N`** is resolved to an absolute start by the server.
+  The upstream `Content-Range` then says where it begins, at `len-N`.
+  If N is over 4 MiB, the handler returns the first 4 MiB from that start, with the `Content-Range` rewritten to the bytes it actually returns.
+  Players reading an MP4 index from the end of the file use either form, and both arrive with the total length the player needs for its next absolute request.
+- **A range past the end** is answered by the server with `416` and `Content-Range: bytes */len`, and the handler passes that through.
+  Because the handler never widens or invents a range, its own bound can never produce a `416`.
+- **A matching `If-None-Match`** gets a `304` from the server with no body, passed through as is.
+  `If-Range` is passed through and ignored by the server, which is correct for an immutable object (section 5).
+
+A shorter `206` than requested is valid HTTP: the response's `Content-Range` says which bytes it holds.
+The Chromium-based WebViews (Windows, Android) and AVFoundation then request the next range, and Tauri's own `streaming` example relies on the same behaviour.
+
+A request with no `Range` header is the one case that does not fit.
+A `206` is not a valid answer to it, and a `200` would have to carry the whole object.
+The handler forwards it as is.
+If the server's `Content-Length` is at most 4 MiB, the handler returns the `200` whole.
+Otherwise it answers `502` and logs a `warn` with the platform.
+The same applies to a `200` that the server sends for a `Range` it ignores, such as a multi-range request.
+Media elements open with a ranged request (Chromium sends `bytes=0-`, AVFoundation `bytes=0-1`), and the section 6 probe sends `bytes=0-0`, so nothing in the app is expected to reach this case.
+The device check below records the first request each platform's player actually sends.
+If one of them turns out to send a request without `Range`, that platform keeps the blob path until the handler can stream a response body, rather than the ADR answering it with an invalid `206`.
 
 The CSP gains `axon-media: http://axon-media.localhost` in `media-src`, and in `connect-src` for the section 6 probe.
 
 Before this phase merges, it must be checked on a real iOS device, a real Android device, macOS, Windows and Linux.
+On each, the check records the player's first request and confirms that playback, seeking and a short `206` all work.
 iOS (`WKURLSchemeHandler` feeding AVFoundation) and Android (`shouldInterceptRequest`) are the platforms where media through a custom scheme is least predictable.
 If one of them cannot play through the scheme, that platform keeps the blob path, which phase 1 has already improved, and the gap is filed as an issue.
 
@@ -262,12 +346,16 @@ This phase begins by checking that support against production Synapse, and gets 
   Playback starts once the player has its first few hundred KiB, not once the whole file has arrived.
 - For streamed video and audio, an encrypted attachment's integrity check moves from before serving to after.
   A tampered stream is cut off and never cached, but bytes before the cut have already been played (section 4).
+  The sender's own `info.mimetype` decides which objects stream, which section 4 explains does not widen that risk.
+- A streamed download runs to completion even if the viewer closes the preview at once, so abandoned videos still cost their full upstream transfer.
+  Four stream permits and the cache reservation bound that cost.
 - A ticket is a credential in a URL.
-  It is limited to one object, a 30-minute idle lifetime and its issuing token's validity.
+  It is limited to one object, a 30-minute idle lifetime, its issuing token's validity and the owning event still being stored.
   Axon's own request log records the route template instead (section 5), but Caddy's access log records the ticket on every range request.
   Operators who ship those logs elsewhere should know that.
 - `axon-media` adds a second custom scheme to the shells and widens their CSP by one source.
-- The shell's 4 MiB range clamp means each scheme response is buffered in the shell process, up to 4 MiB.
+- Each shell scheme response is buffered in the shell process, up to 4 MiB.
+  A request without `Range` for an object larger than that is refused (section 7), so the device check is what confirms no platform's player sends one.
 - The Download button is unchanged: a large download is still buffered in the page and limited to 120 s.
   Making it stream, by pointing it at the ticket route in the browser and saving through the shell's own download path in the shells, is a follow-up.
 - The TUI is unchanged by this plan.
