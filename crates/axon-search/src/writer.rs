@@ -448,6 +448,7 @@ mod tests {
             redacts: None,
             redaction_event_id: None,
             sender_trust: None,
+            utd_reason: None,
             edited: false,
             edit_count: 0,
             latest_edit_ts: None,

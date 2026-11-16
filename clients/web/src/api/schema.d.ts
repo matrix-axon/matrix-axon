@@ -2784,6 +2784,7 @@ export interface components {
                 state_key?: string | null;
                 /** @description Matrix event type, e.g. `m.room.message`. */
                 type: string;
+                utd_reason?: null | components["schemas"]["UtdReasonDto"];
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -3504,6 +3505,7 @@ export interface components {
                 state_key?: string | null;
                 /** @description Matrix event type, e.g. `m.room.message`. */
                 type: string;
+                utd_reason?: null | components["schemas"]["UtdReasonDto"];
             }[];
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -4715,6 +4717,7 @@ export interface components {
             state_key?: string | null;
             /** @description Matrix event type, e.g. `m.room.message`. */
             type: string;
+            utd_reason?: null | components["schemas"]["UtdReasonDto"];
         };
         /**
          * @description A verification flow's replayable state (`GET …/verify` /
@@ -6501,6 +6504,31 @@ export interface components {
             typing: boolean;
         };
         /**
+         * @description Why an event could not be decrypted (ADR 0136 decision 2).
+         *
+         *     A client that sees `kind: "withheld"` with `withheld_code: "m.unverified"`
+         *     while the account's `verified` is `false` can explain that the sender's app
+         *     does not share keys with unverified devices, and offer the verify and
+         *     recovery-key flows.
+         */
+        UtdReasonDto: {
+            /** @description The failure class. */
+            kind: components["schemas"]["UtdReasonKindDto"];
+            verification_level?: null | components["schemas"]["VerificationLevelDto"];
+            /**
+             * @description For `withheld`, the code the sender's device gave: `m.unverified`,
+             *     `m.blacklisted`, `m.unauthorised`, `m.unavailable`, `m.no_olm`,
+             *     `m.history_not_shared`, or a custom code (printable ASCII, at most 64
+             *     bytes; a code that is not is dropped). `null` for other kinds.
+             */
+            withheld_code?: string | null;
+        };
+        /**
+         * @description The class of a decryption failure (ADR 0136 decision 2).
+         * @enum {string}
+         */
+        UtdReasonKindDto: "missing_key" | "withheld" | "sender_not_trusted" | "other";
+        /**
          * @description The per-event verification bundle (M7c): the durable at-decrypt trust
          *     snapshot plus live cross-signing evidence. The two are deliberately separate
          *     (ADR 0031) — the snapshot is what Matrix's evidence said when the event
@@ -6515,6 +6543,12 @@ export interface components {
             sender: string;
             snapshot?: null | components["schemas"]["TrustSnapshotDto"];
         };
+        /**
+         * @description The SDK's verification level of a sender whose message was refused
+         *     (ADR 0136 decision 2).
+         * @enum {string}
+         */
+        VerificationLevelDto: "unverified_identity" | "verification_violation" | "unsigned_device" | "missing_device" | "insecure_source" | "mismatched_sender";
     };
     responses: never;
     parameters: never;

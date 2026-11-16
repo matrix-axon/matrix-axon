@@ -48,7 +48,7 @@ pub use display_names::DisplayNameWrite;
 pub use error::StoreError;
 pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,
-    ThreadSummary, TimelineCursor, TimelineRow,
+    ThreadSummary, TimelineCursor, TimelineRow, UtdReasonUpdate,
 };
 pub use image_packs::{ImagePackRow, ImagePackSnapshot};
 pub use instance_preferences::InstancePreference;

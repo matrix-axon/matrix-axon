@@ -1,6 +1,6 @@
 # ADR 0136 — Exclude non-cross-signed devices (MSC4153)
 
-**Status:** Proposed. This ADR is the plan only; implementation waits for its review.
+**Status:** Accepted. Implementation is tracked in [issue 1081](https://github.com/matrix-axon/matrix-axon/issues/1081).
 
 ## Context
 
