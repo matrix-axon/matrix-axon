@@ -658,6 +658,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::media::{MediaError, MediaResource};
 
     /// An edit-added preview image is described by `m.new_content`; an edited
     /// attachment the replacement names itself keeps its own descriptor even
@@ -701,7 +702,6 @@ mod tests {
             "image/webp"
         );
     }
-    use crate::media::{MediaError, MediaResource};
 
     #[test]
     fn selects_primary_encrypted_file_by_url() {
