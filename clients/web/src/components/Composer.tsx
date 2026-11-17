@@ -708,7 +708,7 @@ export function Composer({
       initialValue === synced.current &&
       initialEmojiKey === syncedEmoji.current
     ) {
-      if (reseed) previews.reset(draft, seed)
+      if (reseed) previews.reseed(seed)
       return
     }
     const clean = draft === '' || draft === synced.current
@@ -724,7 +724,7 @@ export function Composer({
       setDraft(initialValue)
       // A draft from elsewhere is restored, not typed (ADR 0132 § 5).
       previews.reset(initialValue, seed)
-    } else if (reseed) previews.reset(draft, seed)
+    } else if (reseed) previews.reseed(seed)
   }, [initialValue, initialEmojiKey, draft, previews, seed])
 
   // Focus when entering a reply/edit so typing can start immediately.

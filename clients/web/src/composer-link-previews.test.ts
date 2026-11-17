@@ -727,6 +727,32 @@ describe('editing a message (§ 8)', () => {
     expect(statuses()).toEqual([[A, 'kept']])
   })
 
+  it('a re-seed keeps the draft and its pasted links, which stay complete', async () => {
+    // An edit opened before the server answered, upgraded once it did: the
+    // user had already pasted a link with nothing after it.
+    const { device, calls } = deviceSource()
+    const sources: PreviewSources = { setting: 'device', device }
+    make(sources, `was ${A} `)
+    controller.edit(`was ${A} and ${B}`, true)
+    expect(statuses()).toEqual([[B, 'loading']])
+    controller.reseed({
+      originalText: `was ${A} `,
+      cards: [card(A)],
+      addNew: true,
+    })
+    expect(statuses()).toEqual([
+      [A, 'kept'],
+      [B, 'loading'],
+    ])
+    calls.at(-1)!.resolve(devicePreview(B))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(statuses()).toEqual([
+      [A, 'kept'],
+      [B, 'ready'],
+    ])
+    expect(controller.snapshot().opened).toEqual(new Set([A]))
+  })
+
   it('a new draft leaves edit mode', () => {
     editing({ setting: 'off' }, `${A} `, [A])
     expect(controller.take().kept).toEqual([A])

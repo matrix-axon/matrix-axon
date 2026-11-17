@@ -192,6 +192,12 @@ export interface ComposerLinkPreviews {
    */
   reset(text: string, edit?: EditPreviewSeed): void
   /**
+   * Start again from `edit` (or leave edit mode, without one), keeping the
+   * draft as it is: its text, and which of its links were pasted, so a
+   * pasted link stays complete. A reopened or upgraded edit (§ 8).
+   */
+  reseed(edit?: EditPreviewSeed): void
+  /**
    * An edit made the draft `text`. `inserted` is a paste or a drop, whose new
    * links are complete at once; a typed link is complete once whitespace
    * follows it.
@@ -566,10 +572,15 @@ export function createComposerLinkPreviews(
     }
   }
 
-  function reset(next: string, edit?: EditPreviewSeed) {
+  function reset(
+    next: string,
+    edit?: EditPreviewSeed,
+    carried: ReadonlySet<string> = new Set(),
+  ) {
     dropAll()
+    const present = identities(next)
     text = next
-    pasted = new Set()
+    pasted = new Set([...carried].filter((id) => present.has(id)))
     editing = edit !== undefined
     addNew = edit?.addNew ?? true
     existing = new Map(edit?.cards.map((card) => [card.url, card]) ?? [])
@@ -586,6 +597,9 @@ export function createComposerLinkPreviews(
     cards,
     plainHttp,
     reset,
+    reseed(edit) {
+      reset(text, edit, pasted)
+    },
     edit(next, inserted = false) {
       if (next === text) return
       const before = identities(text)
