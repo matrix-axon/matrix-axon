@@ -3,6 +3,49 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.29 - 2026-11-17
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* feat(server): record why a message could not be decrypted (utd_reason) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1094
+* fix(sync): record MismatchedSender as its own sender_trust verdict by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1102
+* temporarily ignore picomatch security advisory until new version is available by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1127
+#### Features
+* feat(tui): paginate sidebar space membership by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1082
+* feat(web): composer link previews (ADR 0132 PR 3) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1070
+* feat(web): add /collapse and /expand timeline commands by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1095
+* feat(web): add a copy text action to messages by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1099
+* feat(web): make Favs independent and persist room-list preferences by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1118
+#### Bug Fixes
+* fix(web): stop iOS text autosizing on rotation by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1087
+* fix(sync): one slow room no longer shuts the homeserver gate by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1083
+* fix(sync): re-check backfilled UTDs whose key arrived during the page by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1096
+* fix(web): keep a redacted thread root visible when hiding redacted events by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1098
+* fix(tui): report recovery outcomes and retain them in /status by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1100
+* fix(web): keep the Rooms button visible beside a long Account select by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1114
+* docs(adr): ADR 0140 — fill the holes that limited syncs leave in room history by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1126
+#### Performance
+* feat(api): batch room-list previews in one request (#278) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1060
+* feat(web): read room-list previews in batches behind the open room (#278) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1092
+#### Documentation
+* docs(adr): ADR 0132 § 8 — editing a message with link previews by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1069
+* docs(adr): ADR 0137 — complete member list and resolved member roles by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1086
+* docs(adr): ADR 0138 — previews of Matrix links, built by the recipient by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1097
+* break out client notes by operating system and add instructions for spell-check in Linux by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1106
+#### Build and CI
+* ci: skip the Rust gate steps on pull requests that touch no Rust inputs by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1064
+* ci: run pre-push hook entries from CI by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1103
+* ci(windows): show license, Axon icon and docs link in the NSIS installer by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1115
+* ci(cross-build): build Linux release zips on ubuntu-22.04 (glibc 2.35 floor) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1113
+#### Other Changes
+* ci: build the Linux desktop app on ubuntu-22.04 for older glibc by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1104
+* feat(server): link previews on an edit (ADR 0132 delivery item 5) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1116
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.28...v0.1.29
+
 ## v0.1.28 - 2026-11-12
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
