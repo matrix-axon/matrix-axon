@@ -409,10 +409,7 @@ describe('Composer link previews', () => {
   it('says why a plain http:// link has no card', () => {
     const { device } = deferredDevice()
     const { type } = setup({ sources: { setting: 'device', device } })
-    const note = () =>
-      screen.queryByText(
-        'Only https:// links get a preview, so http:// links are sent without one.',
-      )
+    const note = () => screen.queryByText('Only https:// links are previewed')
     type('see http://plain.example.org/page')
     expect(note()).toBeNull()
     type('see http://plain.example.org/page ')

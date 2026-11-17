@@ -1311,8 +1311,7 @@ export function Composer({
       />
       {previews.plainHttp.value && (
         <div class="composer-link-preview-note" role="status">
-          Only https:// links get a preview, so http:// links are sent without
-          one.
+          Only https:// links are previewed
         </div>
       )}
       {markerQuestion && (
