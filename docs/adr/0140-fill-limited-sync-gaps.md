@@ -66,7 +66,7 @@ CREATE TABLE room_timeline_gaps (
                           CHECK (origin IN ('limited', 'lag_probe', 'token_rejected')),
     from_token            TEXT,                  -- next page's `from`; NULL = the live end
     stored_before         TIMESTAMPTZ NOT NULL,  -- the stop boundary (decision 2)
-    anchor_event_id       TEXT,                  -- oldest event of the limited batch, for logs
+    batch_event_ids       TEXT[]      NOT NULL DEFAULT '{}',  -- the limited batch (decision 1)
     detected_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     pages_fetched         INTEGER     NOT NULL DEFAULT 0,
     events_recovered      BIGINT      NOT NULL DEFAULT 0,
@@ -88,17 +88,34 @@ Recording is durable, so a restart, a crash or a supervised account restart neve
 A limited response with a `prev_batch` gets an `origin = 'limited'` row.
 Its `from_token` is that `prev_batch` and its `stored_before` is the insert time.
 A limited response without a `prev_batch` gets a row that starts from the live end (`from_token` NULL), with the margin of decision 3.
-`anchor_event_id` is only for logs and is NULL when the batch was empty.
-No rule depends on it.
+`batch_event_ids` holds the ids of the limited batch's events, at most `timeline_limit` of them; the first-window test below uses it.
 `sync.timeline_limit` is validated to be at least 1 at startup, so a limited response always carries events for the handler to store.
 Events can still all be dropped when they fail to parse.
 
 **The first window of a room is not a hole.**
-The filler drops a row unpaged when the room has no event stored for this account outside the limited batch.
-The test is on stored events, not on the `room_backfill` row.
-With backfill on, such a room has no backfill cursor yet, so backfill's walk from the live end covers the range.
-With backfill off, history from before Axon's first sync of a room is deliberately not fetched.
-Any other row is paged, including one for a room whose backfill cursor is already behind the hole, since backfill never walks forward to it.
+A room's first sliding-sync response is usually `limited`.
+Paging that row would fetch the room's whole history.
+That is backfill's job, and `sync.backfill_enabled = false` and `sync.backfill_target_depth` exist to limit it.
+So such a row is dropped unpaged.
+
+A row is a first window when nothing was stored in the room before its batch:
+
+> the room has no stored event outside `batch_event_ids` whose `received_at` is earlier than the earliest `received_at` among the batch's stored events.
+
+Only an earlier sync response, or backfill, can have stored such an event.
+Events that live sync stores after the batch fail the comparison, however long the row waits.
+So the test gives the same answer whenever it is evaluated.
+
+The watcher cannot use the simpler "the room has no stored events" when it inserts the row.
+The SDK sends the broadcast before the response's handlers run, but the watcher is a separate task.
+By the time it reads the broadcast, this response's batch, or a later response's events, may already be stored.
+That would make a first window look like a hole and page the whole room.
+
+The filler evaluates the test when it first picks a row up, at least 60 s after `detected_at`, by which time the response's handlers have long finished.
+If none of the batch's events was stored (all failed to parse), the row is dropped and logged at `WARN`.
+Such a row is either a first window or a hole whose newest events are unreadable, and paging it could walk the whole room.
+The management re-verify action of decision 7 covers the second case.
+Every other row is paged, whatever the backfill settings, including one for a room whose backfill cursor is already behind the hole, since backfill never walks forward to it.
 
 ### 2. Fill each hole by paging back until history stored before it
 
@@ -173,25 +190,46 @@ The only way to find them is to walk each room's history again.
 A limited-sync hole can only lie in history that live sync stored.
 Backfill pages are contiguous, and each starts where the last ended.
 The oldest event live sync stored in a room is the room's lowest `events.id`, because every row before it was in the room's first window.
-So the verification pass walks each room from the live end back to the page that contains that event, or to the room's start.
-It stores every page, and already-stored events are no-ops.
-It never walks into history that backfill stored or that backfill was configured not to fetch, so it neither extends history nor depends on `sync.backfill_enabled` or `sync.backfill_target_depth`.
+So the verification pass walks each room from the live end back to that event.
+The stop points are recorded when a room is queued:
 
-Progress lives in its own table, `room_history_verify (account_id, room_id, from_token, stop_event_id, complete, events_recovered, …)` plus ADR 0121's failure columns, keyed by `(account_id, room_id)` with `ON DELETE CASCADE` from `accounts`.
+- **The first window.** The pass closes at the first page that contains any of the room's lowest-`id` events, up to `timeline_limit` of them.
+  That is the room's first window, and all of it would have to be missing from `/messages` for this to fail.
+- **A count backstop.** The room's stored count and highest `events.id` are recorded when it is queued.
+  The pass counts the events on its pages that were already stored with an `id` at or below that highest id.
+  Once it has seen as many as the room held, it has passed every event stored then, and it closes.
+  Events stored after queueing (new live events, gap fills) are not counted, so they cannot close it early.
+- **The room's start.** If a homeserver withholds stored events from `/messages`, filtering them or having purged them, neither stop fires and the walk ends at the room's start.
+  That is logged at `WARN` with the room, because it can store history older than the first window.
+
+The pass stores every page, and already-stored events are no-ops.
+The first-window stop ends it above any history that backfill stored.
+The count backstop ends it no later than the oldest event Axon held when the room was queued.
+In a room with backfilled history, that means the backstop re-reads that history without adding to it.
+Short of the third case, it never goes past the oldest event Axon holds, so it neither extends history nor depends on `sync.backfill_enabled` or `sync.backfill_target_depth`.
+
+Progress lives in its own table, `room_history_verify (account_id, room_id, from_token, stop_event_ids, seeded_count, seeded_max_id, seen_stored, complete, events_recovered, …)` plus ADR 0121's failure columns, keyed by `(account_id, room_id)` with `ON DELETE CASCADE` from `accounts`.
 It is not kept on `room_backfill`, because a room with stored events can have no `room_backfill` row: with backfill off, or before its first page is saved.
 The migration seeds one row for every `(account_id, room_id)` that has stored events.
-`stop_event_id` is the room's lowest-`id` event at that time.
+The stop points are taken from the room's rows at that time.
 Rooms first seen after the migration need no row, because their holes are recorded from the start.
 
-The pass runs only when no gap rows are open and ordinary backfill is idle, through the same gate and guards.
-It is persisted per page, and it is not repeated after it completes.
-The pass runs on its own after the upgrade, with nothing for a user or operator to do.
+**Scheduling.**
+The pass shares the backfill task, its gate and its guards.
+Open gap rows still come first.
+They are bounded, since each closes when it meets stored history, and they cover the newest history.
+After them, the task alternates one verification page with one ordinary backfill page, so neither starves the other.
+A room is not verified while it has an open gap row, because that row is filling the same newest history; other rooms' verification continues.
+`history_verify.rooms_pending` counts every incomplete room, and `history_verify.rooms_held` counts those waiting on an open gap row.
+The pass is persisted per page, and it is not repeated after it completes.
+It runs on its own after the upgrade, with nothing for a user or operator to do.
 Users should not need to know their history ever had holes in order to get it back.
 `sync.history_verify_enabled` (default `true`) turns it off, for an operator who must avoid the one-off load on the homeserver.
 
 On Adam's production account there are 2.47 M stored events across 15,388 rooms, so the pass is at most about 25,000 pages at the default page size.
 It is fewer in practice, because history stored by backfill is not re-read.
 Most rooms are small, and at backfill's pacing it finishes in hours, not days.
+While ordinary backfill is also busy, the pass gets every other page, which at most doubles that.
 
 ### 5. Clients learn that a filled hole changed history
 
@@ -199,9 +237,17 @@ A room's newest events are unaffected by a fill, but a client that already holds
 A head refresh does not help, because it merges only the newest page.
 
 - **A durable revision.**
-  Each room gets a `history_rev` counter (on `room_summaries`).
-  Every gap-fill or verification page that inserted at least one event increments it; ordinary backfill, which only extends behind the oldest event, does not.
-  It is exposed on each room in `GET /v1/rooms`, and so in the room-list deltas of [ADR 0134](0134-incremental-room-list-reads.md).
+  Each room gets a `history_rev` column on `room_summaries`.
+  It changes when a gap-fill or verification page inserted at least one event; ordinary backfill, which only extends behind the oldest event, does not change it.
+  Its new value is the next value of a database sequence, not the old value plus one.
+  So a value never repeats, even when a purge or rebuild re-derives the summary row, and a client never mistakes a changed room for an unchanged one.
+  It is exposed on each room in `GET /v1/rooms`.
+- **The room-list delta.**
+  `history_rev` is added to the column list of the [ADR 0134](0134-incremental-room-list-reads.md) trigger, as that ADR requires of every new `RoomDto` field.
+  A change to it alone then stamps `list_changed_at`, and the room is in the next `since` delta.
+  The write is coalesced with the frame below, so a room's summary row is written at most once a second however fast its pages land.
+  Only rooms where a page actually inserted events change.
+  So a delta read after the verification pass names just the rooms that were repaired, not every room it walked.
 - **A frame.**
   The server sends an additive WebSocket frame, `timeline.history_filled`, with payload `{room_id, oldest_ts, newest_ts, inserted, history_rev}`.
   Frames are coalesced per room to at most one per second.
@@ -223,6 +269,7 @@ There are three deletion sites, and each is named here so the implementation fol
 - **Account deletion.** `room_timeline_gaps` and `room_history_verify` rows go by `ON DELETE CASCADE` when `delete_account_row` deletes the `accounts` row, the same as `room_backfill`.
 - **Room purge.** `purge_room`'s closing statement deletes the room's gap and verification rows beside `del_backfill`, under the same `NOT preserve_room_after_purge($1, $2, $3)` guard.
   A purge that deleted no events still removes them, and holes recorded after a rejoin survive.
+  A kept room's incomplete verification row is re-queued with fresh stop points and counts, because the purge deleted events its count backstop was waiting to see.
 - **Not in `delete_event_batches`' `reset_backfill` CTE.**
   That CTE resets the backfill cursor so that deleted history can be fetched again.
   A gap row that survives it stays correct, because its walk needs an event stored before the hole was detected, and it walks further when those were deleted.
@@ -235,12 +282,12 @@ Events the filler then stores get `id`s above the purge watermark, so the purge 
 ### 7. Logging, status and a developer switch
 
 - Every log line carries `account_id` and `room_id`.
-  Detecting a hole logs at `INFO` with `prev_batch` and `anchor_event_id`.
+  Detecting a hole logs at `INFO` with `prev_batch` and the batch's oldest event id; dropping a first window logs at `DEBUG`.
   Each page logs at `DEBUG` with its `inserted` and `already_stored` counts.
   Closing a hole logs at `INFO` with `pages_fetched` and `events_recovered`.
-- `GET /v1/status` gains `history_gaps: {open, parked, events_recovered}` and `history_verify: {rooms_pending, rooms_complete, events_recovered}` beside the existing `backfill` block.
+- `GET /v1/status` gains `history_gaps: {open, parked, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_complete, events_recovered}` beside the existing `backfill` block.
 - The management API ([ADR 0109](0109-management-api.md)) gains an action that re-queues the verification pass for one room or a whole account, so an operator can re-verify after a suspected loss without SQL.
-  A re-queued row takes the room's current lowest-`id` event as its stop point.
+  A re-queued room takes its stop points and counts from the room's rows at that time.
 - A non-zero `events_recovered` from the verification pass is itself evidence of past loss; it is logged at `WARN` once per room with the count.
 
 ## Consequences
@@ -285,5 +332,7 @@ All server-side (`crates/`), in this order:
 1. Gap table, the detecting watcher with its lag probe, the `timeline_limit` validation, the filler inside the backfill task, and that task's spawn whatever `backfill_enabled` says (decisions 1–3, 6, and the logging and status of 7).
    Verified by a Synapse integration test that sends more than `timeline_limit` events between two syncs and asserts every one is stored, with backfill both on and off.
    Unit tests cover nested holes, a token rejection restarted from the live end with a crash after its first page, and a lag window with two holes in it.
-2. The verification pass, its table and seeding migration, its config switch, and the management action (decisions 4 and 7).
+   They also cover the first-window test when the watcher reads the broadcast after this response's handlers, or a later response's, have stored their events, with backfill on and off.
+2. The verification pass, its table and seeding migration, its config switch, its interleaving with backfill, and the management action (decisions 4 and 7).
+   Tests cover each stop point, including a first window that `/messages` never returns.
 3. `history_rev`, the `timeline.history_filled` frame and their OpenAPI entries (decision 5), followed by separate web and TUI PRs to consume them.
