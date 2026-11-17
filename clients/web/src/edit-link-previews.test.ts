@@ -200,14 +200,42 @@ describe('planEditPreviews', () => {
     'm.url_previews': urls.map(entry),
   })
 
-  it("keeps the message's cards with an unrelated edit (rule 2)", () => {
+  it('leaves the field out when every card is kept and none is new (rule 2)', () => {
+    // A plain text edit: the server carries the cards forward against the
+    // message as it now is, so another device's change is no 409.
     const req = request(`now ${A}`, withCards(`then ${A}`, A))
     expect(
       plan(req, draft({ kept: [A], opened: new Set([A]) }), `then ${A}`),
-    ).toEqual({ kind: 'send', previews: [{ kind: 'keep', matchedUrl: A }] })
+    ).toEqual({ kind: 'omit' })
   })
 
-  it('sends kept and new cards in text order (rule 2)', () => {
+  it("keeps the message's cards as keep entries once the set changes (rule 3)", () => {
+    const req = request(`now ${A} ${B}`, withCards(`then ${A} ${B}`, A, B))
+    // One card removed: the other is kept explicitly.
+    expect(
+      plan(
+        req,
+        draft({ kept: [A], opened: new Set([A, B]) }),
+        `then ${A} ${B}`,
+      ),
+    ).toEqual({ kind: 'send', previews: [{ kind: 'keep', matchedUrl: A }] })
+    // A new card added: the kept one goes with it.
+    expect(
+      plan(
+        request(`now ${A} ${C}`, withCards(`then ${A}`, A)),
+        draft({ kept: [A], cards: [fresh(C)], opened: new Set([A]) }),
+        `then ${A}`,
+      ),
+    ).toEqual({
+      kind: 'send',
+      previews: [
+        { kind: 'keep', matchedUrl: A },
+        { kind: 'new', preview: fresh(C) },
+      ],
+    })
+  })
+
+  it('sends kept and new cards in text order (rule 3)', () => {
     const req = request(`${B} ${A}`, withCards(A, A))
     expect(
       plan(
@@ -228,27 +256,31 @@ describe('planEditPreviews', () => {
     // The fetch policy refuses plain http for new cards; the server keeps
     // the message's own card for it.
     const HTTP = 'http://plain.example.org/page'
-    const req = request(`edited ${HTTP}`, withCards(HTTP, HTTP))
+    const req = request(`edited ${HTTP}`, withCards(`${HTTP} ${A}`, HTTP, A))
     expect(
-      plan(req, draft({ kept: [HTTP], opened: new Set([HTTP]) }), HTTP),
+      plan(
+        req,
+        draft({ kept: [HTTP], opened: new Set([HTTP, A]) }),
+        `${HTTP} ${A}`,
+      ),
     ).toEqual({ kind: 'send', previews: [{ kind: 'keep', matchedUrl: HTTP }] })
   })
 
-  it('sends [] when a card is removed (rule 3)', () => {
+  it('sends [] when a card is removed (rule 4)', () => {
     const req = request(A, withCards(A, A))
     expect(
       plan(req, draft({ opened: new Set([A]), discarded: new Set([A]) })),
     ).toEqual({ kind: 'send', previews: [] })
   })
 
-  it('sends [] for an added link without a card, with previews on (rule 3)', () => {
+  it('sends [] for an added link without a card, with previews on (rule 4)', () => {
     const req = request(`x ${B}`, { msgtype: 'm.text', body: 'x' })
     expect(plan(req, draft(), 'x')).toEqual({ kind: 'send', previews: [] })
     // Off, an added link changes nothing.
     expect(plan(req, draft(), 'x', false)).toEqual({ kind: 'omit' })
   })
 
-  it('omits the field when the cards and links are untouched (rule 4)', () => {
+  it('omits the field when the cards and links are untouched (rule 5)', () => {
     const req = request(`edited ${A}`, { msgtype: 'm.text', body: A })
     expect(plan(req, draft(), A)).toEqual({ kind: 'omit' })
     // An opted-out message keeps its marker through carry-forward.

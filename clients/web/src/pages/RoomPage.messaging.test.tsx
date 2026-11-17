@@ -808,6 +808,7 @@ describe('editing and redacting', () => {
 
 describe('editing link previews (ADR 0132 § 8)', () => {
   const LINK = 'https://a.example.org/article'
+  const LINK2 = 'https://b.example.org/other'
   const EDIT_PATH = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId`
   const withCard = (body: string) =>
     event('$mine', 200, {
@@ -818,6 +819,21 @@ describe('editing link previews (ADR 0132 § 8)', () => {
         body,
         'm.url_previews': [
           { 'matrix:matched_url': LINK, 'og:title': 'The article' },
+        ],
+      } as unknown as EventDto['content'],
+    })
+
+  /** A message with a card for each of two links. */
+  const withTwoCards = (body = `see ${LINK} and ${LINK2}`) =>
+    event('$mine', 200, {
+      sender: OWN_USER,
+      body,
+      content: {
+        msgtype: 'm.text',
+        body,
+        'm.url_previews': [
+          { 'matrix:matched_url': LINK, 'og:title': 'The article' },
+          { 'matrix:matched_url': LINK2, 'og:title': 'The other' },
         ],
       } as unknown as EventDto['content'],
     })
@@ -846,8 +862,12 @@ describe('editing link previews (ADR 0132 § 8)', () => {
   const supported = () =>
     HttpResponse.json({ data: { edit_url_previews: true } })
 
-  async function openEdit(body = `see ${LINK}`, capabilities = true) {
-    const utils = renderRoom([withCard(body)])
+  async function openEdit(
+    body = `see ${LINK}`,
+    capabilities = true,
+    message = withCard(body),
+  ) {
+    const utils = renderRoom([message])
     if (capabilities) {
       utils.services.capabilities.refresh()
       await waitFor(() =>
@@ -859,13 +879,33 @@ describe('editing link previews (ADR 0132 § 8)', () => {
     return { ...utils, textarea }
   }
 
-  it("shows the message's card and keeps it through an unrelated edit", async () => {
+  it("shows the message's card and lets the server carry it through an unrelated edit", async () => {
     const edits = serveEdit(supported())
     const { textarea, findByRole } = await openEdit()
     const cards = await findByRole('list', { name: 'Link previews to send' })
     expect(within(cards).getByText('The article')).toBeTruthy()
 
     fireEvent.input(textarea, { target: { value: `now see ${LINK}` } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(1))
+    // Every card kept and none new: the field is left out, so another
+    // device's change to the previews cannot make this a 409.
+    expect(edits[0]).not.toHaveProperty('url_previews')
+  })
+
+  it('keeps the other cards explicitly once one is removed', async () => {
+    const edits = serveEdit(supported())
+    const { textarea, findByRole } = await openEdit(
+      undefined,
+      true,
+      withTwoCards(),
+    )
+    const cards = await findByRole('list', { name: 'Link previews to send' })
+    fireEvent.click(
+      within(cards).getByRole('button', {
+        name: 'Remove the preview of b.example.org',
+      }),
+    )
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await waitFor(() => expect(edits).toHaveLength(1))
     expect(edits[0].url_previews).toEqual([{ matched_url: LINK, keep: true }])
@@ -919,7 +959,9 @@ describe('editing link previews (ADR 0132 § 8)', () => {
       plain,
     )
     const { textarea, findByText, queryByRole, getByLabelText } =
-      await openEdit()
+      await openEdit(undefined, true, withTwoCards())
+    // Dropping the second link removes its card, so the first is kept
+    // explicitly, and another device has removed it meanwhile.
     fireEvent.input(textarea, { target: { value: `now see ${LINK}` } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
     expect(
@@ -938,10 +980,11 @@ describe('editing link previews (ADR 0132 § 8)', () => {
   })
 
   it('after 409 with the text unchanged, reopens on the new cards and saves without the stale one', async () => {
+    const body = `see ${LINK} and ${LINK2}`
     const plain = event('$mine', 200, {
       sender: OWN_USER,
-      body: `see ${LINK}`,
-      content: { msgtype: 'm.text', body: `see ${LINK}`, 'm.url_previews': [] },
+      body,
+      content: { msgtype: 'm.text', body, 'm.url_previews': [] },
     })
     let conflict = true
     const edits = serveEdit(
@@ -957,8 +1000,13 @@ describe('editing link previews (ADR 0132 § 8)', () => {
       plain,
     )
     const { textarea, findByRole, findByText, queryByRole, getByLabelText } =
-      await openEdit()
-    await findByRole('list', { name: 'Link previews to send' })
+      await openEdit(body, true, withTwoCards(body))
+    const cards = await findByRole('list', { name: 'Link previews to send' })
+    fireEvent.click(
+      within(cards).getByRole('button', {
+        name: 'Remove the preview of b.example.org',
+      }),
+    )
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await waitFor(() => expect(edits).toHaveLength(1))
     expect(edits[0].url_previews).toEqual([{ matched_url: LINK, keep: true }])
@@ -1000,15 +1048,27 @@ describe('editing link previews (ADR 0132 § 8)', () => {
       queryByText('Saving this edit may remove its link previews.'),
     ).toBeNull()
     expect(textarea.value).toBe(`now see ${LINK}`)
+    // The card's X now works: removing it sends the "no previews" marker,
+    // which an edit without cards would never send.
+    fireEvent.click(
+      within(cards).getByRole('button', {
+        name: 'Remove the preview of a.example.org',
+      }),
+    )
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await waitFor(() => expect(edits).toHaveLength(1))
-    expect(edits[0].url_previews).toEqual([{ matched_url: LINK, keep: true }])
+    expect(edits[0].url_previews).toEqual([])
   })
 
   it('keeps a card whose link the user typed with an uppercase scheme', async () => {
     const edits = serveEdit(supported())
-    const { textarea, findByRole } = await openEdit()
+    const { textarea, findByRole } = await openEdit(
+      undefined,
+      true,
+      withTwoCards(),
+    )
     await findByRole('list', { name: 'Link previews to send' })
+    // Dropping the second link makes the first an explicit `keep`.
     const upper = LINK.replace('https://', 'HTTPS://')
     fireEvent.input(textarea, { target: { value: `now see ${upper}` } })
     fireEvent.keyDown(textarea, { key: 'Enter' })

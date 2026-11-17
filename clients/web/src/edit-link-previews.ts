@@ -362,11 +362,14 @@ export function editFits(
  * first matching rule wins:
  *
  * 1. a spoiler: `[]` if the message has a preview field, otherwise omit;
- * 2. a card kept or ready after the size check: those cards, in text order,
+ * 2. every card the message showed kept, none new, and all of them fit:
+ *    omit, and the server carries them forward against the message as it
+ *    now is, so a plain text edit never meets `409 previews_changed`;
+ * 3. a card kept or ready after the size check: those cards, in text order,
  *    the message's as `keep` entries;
- * 3. a message card removed, or, with previews on, an eligible link added:
+ * 4. a message card removed, or, with previews on, an eligible link added:
  *    `[]`, or the marker question when even that does not fit;
- * 4. otherwise omit, and the server carries the previews forward.
+ * 5. otherwise omit, and the server carries the previews forward.
  *
  * The size check drops new cards' images, last first, then new cards, then
  * the message's cards, which are copied whole.
@@ -403,18 +406,27 @@ export function planEditPreviews(
     return true
   }
   const kept = draft.kept.filter((url) => take(url, false))
+  const fresh = draft.cards.filter((card) => take(card.matchedUrl, true))
+  const fits = (list: readonly EditLinkPreview[]) =>
+    editFits(request, list, field)
+  // Kept cards are distinct and among those opened, so equal counts mean
+  // every one is kept. When they do not all fit, the rules below degrade
+  // them, or ask, rather than leave it to the server to drop the field.
+  if (
+    fresh.length === 0 &&
+    kept.length > 0 &&
+    kept.length === draft.opened.size &&
+    fits(kept.map((matchedUrl) => ({ kind: 'keep', matchedUrl })))
+  )
+    return { kind: 'omit' }
   let previews: EditLinkPreview[] = [
     ...kept.map((matchedUrl) => ({ kind: 'keep' as const, matchedUrl })),
-    ...draft.cards
-      .filter((card) => take(card.matchedUrl, true))
-      .map((preview) => ({ kind: 'new' as const, preview })),
+    ...fresh.map((preview) => ({ kind: 'new' as const, preview })),
   ].sort(
     (a, b) =>
       position(a.kind === 'keep' ? a.matchedUrl : a.preview.matchedUrl) -
       position(b.kind === 'keep' ? b.matchedUrl : b.preview.matchedUrl),
   )
-  const fits = (list: readonly EditLinkPreview[]) =>
-    editFits(request, list, field)
   while (previews.length > 0 && !fits(previews)) {
     const image = previews.findLastIndex(
       (p) => p.kind === 'new' && p.preview.image !== null,
