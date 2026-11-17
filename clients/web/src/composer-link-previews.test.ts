@@ -735,3 +735,54 @@ describe('editing a message (§ 8)', () => {
     expect(controller.snapshot().opened).toEqual(new Set())
   })
 })
+
+describe('the plain http:// note (§ 1)', () => {
+  const HTTP = 'http://plain.example.org/page'
+  const on: PreviewSources = { setting: 'device', device: vi.fn() }
+
+  it('is raised by a complete typed or pasted http:// link', () => {
+    make(on)
+    controller.edit(`see ${HTTP}`)
+    expect(controller.plainHttp.value).toBe(false)
+    controller.edit(`see ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(true)
+    controller.edit(`see `)
+    expect(controller.plainHttp.value).toBe(false)
+    controller.edit(`see ${HTTP}`, true)
+    expect(controller.plainHttp.value).toBe(true)
+  })
+
+  it('is not raised by an https:// link, or with previews off or suspended', () => {
+    make(on)
+    controller.edit(`${A} `)
+    expect(controller.plainHttp.value).toBe(false)
+    make({ setting: 'off' })
+    controller.edit(`${HTTP} `)
+    expect(controller.plainHttp.value).toBe(false)
+    make(on)
+    controller.edit(`${HTTP} `)
+    controller.configure(on, true)
+    expect(controller.plainHttp.value).toBe(false)
+  })
+
+  it('is not raised by a restored draft until the link is typed again', () => {
+    make(on, `draft ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(false)
+    controller.edit('draft ')
+    controller.edit(`draft ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(true)
+  })
+
+  it("is not raised by the edited message's own links, only by added ones", () => {
+    controller = createComposerLinkPreviews(createLinkPreviewCache())
+    controller.reset(`was ${HTTP} `, {
+      originalText: `was ${HTTP} `,
+      cards: [],
+      addNew: true,
+    })
+    controller.configure(on, false)
+    expect(controller.plainHttp.value).toBe(false)
+    controller.edit(`was ${HTTP} and http://other.example.org/ `)
+    expect(controller.plainHttp.value).toBe(true)
+  })
+})

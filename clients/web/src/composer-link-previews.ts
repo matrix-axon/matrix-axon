@@ -178,6 +178,13 @@ export function createLinkPreviewCache(
 export interface ComposerLinkPreviews {
   cards: ReadonlySignal<readonly ComposerPreviewCard[]>
   /**
+   * The draft has a plain `http://` link the user added, complete as a card's
+   * would be, while previews are on. Only HTTPS links get a card (§ 1), so
+   * the composer says why this one has none. Links of a restored draft, or of
+   * the message being edited, never raise it.
+   */
+  plainHttp: ReadonlySignal<boolean>
+  /**
    * Adopt `text` without adding any of its links: a restored draft, one
    * pushed from another device, or a new scope. Its links get no card and no
    * lookup until the user retypes or re-pastes them (§ 5). With `edit`, the
@@ -254,8 +261,30 @@ function scan(
   return [...links.values()]
 }
 
+/**
+ * Every bare web link's identity, eligible or not, so that what was pasted or
+ * restored is known for a plain `http://` link too. Cards still come only
+ * from `scan`.
+ */
 function identities(text: string): Set<string> {
-  return new Set(scan(text, new Set()).map((link) => link.identity))
+  return new Set(
+    matchUrls(text).flatMap(({ url }) => {
+      const identity = /^https?:/i.test(url) ? linkIdentity(url) : null
+      return identity === null ? [] : [identity]
+    }),
+  )
+}
+
+/** The complete plain `http://` links in `text`, by identity. */
+function plainHttpLinks(text: string, pasted: ReadonlySet<string>): string[] {
+  return matchUrls(text).flatMap(({ url, end }) => {
+    if (!/^http:\/\//i.test(url)) return []
+    const identity = linkIdentity(url)
+    return identity !== null &&
+      (pasted.has(identity) || /^\S*\s/.test(text.slice(end)))
+      ? [identity]
+      : []
+  })
 }
 
 function hostnameOf(identity: string): string {
@@ -287,6 +316,7 @@ export function createComposerLinkPreviews(
   } = {},
 ): ComposerLinkPreviews {
   const cards = signal<readonly ComposerPreviewCard[]>([])
+  const plainHttp = signal(false)
   let text = ''
   let restored = new Set<string>()
   let pasted = new Set<string>()
@@ -499,6 +529,16 @@ export function createComposerLinkPreviews(
       ]
     })
     if (!sameCards(cards.peek(), next)) cards.value = next
+    const http =
+      !suspended &&
+      linkPreviewsEnabled(sources) &&
+      plainHttpLinks(text, pasted).some(
+        (identity) =>
+          !restored.has(identity) &&
+          !original.has(identity) &&
+          !existing.has(identity),
+      )
+    if (plainHttp.peek() !== http) plainHttp.value = http
   }
 
   function snapshot(): EditPreviewDraft {
@@ -538,6 +578,7 @@ export function createComposerLinkPreviews(
 
   return {
     cards,
+    plainHttp,
     reset,
     edit(next, inserted = false) {
       if (next === text) return

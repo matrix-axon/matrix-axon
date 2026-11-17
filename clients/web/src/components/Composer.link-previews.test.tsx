@@ -406,6 +406,22 @@ describe('Composer link previews', () => {
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
 
+  it('says why a plain http:// link has no card', () => {
+    const { device } = deferredDevice()
+    const { type } = setup({ sources: { setting: 'device', device } })
+    const note = () =>
+      screen.queryByText(
+        'Only https:// links get a preview, so http:// links are sent without one.',
+      )
+    type('see http://plain.example.org/page')
+    expect(note()).toBeNull()
+    type('see http://plain.example.org/page ')
+    expect(note()).toBeTruthy()
+    expect(device).not.toHaveBeenCalled()
+    type('see ')
+    expect(note()).toBeNull()
+  })
+
   it('makes no cards when previews are off', () => {
     const { device } = deferredDevice()
     const { paste, send, onSubmit } = setup({

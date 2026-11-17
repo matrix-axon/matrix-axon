@@ -3783,6 +3783,13 @@ span.composer-attachment-thumb {
   font-size: 0.85rem;
 }
 
+/* Why a plain http:// link has no card (ADR 0132 § 1). */
+.composer-link-preview-note {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 /* Visually hidden, but still clickable via the paperclip's `.click()` and
    reachable by tests — `display: none` would break both. */
 .composer-file-input {

@@ -313,6 +313,7 @@ The web client's room and thread composers ([ADR 0132](adr/0132-composer-link-pr
 Settings → Link previews is per device: `off`, `device` or `device+homeserver`.
 The shell builds cards on the device with its restricted fetcher; a browser cannot, so it offers only `off` and the homeserver on request.
 The composer calls generation only from a card's **Try homeserver** button, once per link, never automatically.
+A plain `http://` link gets no card, since only HTTPS links do ([ADR 0132 section 1](adr/0132-composer-link-previews.md#1-the-composer-authors-bundled-previews-up-to-three-per-message)); while previews are on, a complete one the user added gets a short note saying so instead.
 It reads a generated thumbnail at once through the [recovery endpoint](#durable-thumbnail-recovery), keeps the bytes, and forgets the handle, which then expires; a failed read costs the card its image, never its text.
 
 What a send carries is decided against the formatted body being sent:
