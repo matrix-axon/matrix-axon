@@ -93,7 +93,6 @@ Each release also carries `THIRDPARTY-axon-desktop.txt`, the full license disclo
 
 The Windows and Linux builds are x64 only, so on ARM use the browser client or build the shell yourself ([#455](https://github.com/matrix-axon/matrix-axon/issues/455)).
 
-
 #### macOS
 
 The macOS build is a universal binary, so Apple Silicon and Intel both run natively.
