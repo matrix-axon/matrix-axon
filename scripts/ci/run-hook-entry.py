@@ -28,8 +28,11 @@ import sys
 from pathlib import Path
 
 HOOK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-# Shell syntax the runner refuses to interpret. An entry is an argv, the same
-# way pre-commit runs it. `=` belongs to `env VAR=value` and is allowed.
+# Shell syntax the runner refuses to interpret, including inside quotes.
+# An entry is an argv, the same way pre-commit runs it. `=` belongs to
+# `env VAR=value` and is allowed. A quoted metacharacter is refused too:
+# no current entry needs one, and accepting it would mean parsing quotes
+# here. Relax that only when an entry actually needs it.
 _SHELL = set(";|&<>`$()\\")
 # A trailing ` # comment` is YAML, not part of the id. `\S+` stays greedy so
 # `foo#bar` (no space before `#`) remains one token, which is what YAML does.
@@ -50,6 +53,11 @@ def repo_root() -> Path:
 
 
 def _strip_yaml_comment(value: str) -> str:
+    """Drop a trailing YAML comment from one scalar line.
+
+    YAML starts a comment at `#` only at the start of the value or after
+    whitespace. `foo#bar` stays one token, and a `#` inside quotes stays too.
+    """
     in_single = False
     in_double = False
     for index, char in enumerate(value):
@@ -57,7 +65,12 @@ def _strip_yaml_comment(value: str) -> str:
             in_single = not in_single
         elif char == '"' and not in_single:
             in_double = not in_double
-        elif char == "#" and not in_single and not in_double:
+        elif (
+            char == "#"
+            and not in_single
+            and not in_double
+            and (index == 0 or value[index - 1].isspace())
+        ):
             return value[:index].rstrip()
     return value.strip()
 
@@ -106,6 +119,30 @@ def scan_entries(text: str) -> dict[str, str | None]:
             continue
         found[current_id] = _unquote(entry_match.group(2))
     return found
+
+
+def _exec_entry(command: list[str]) -> int:
+    """Run `command` as this process and return only when it does not replace us.
+
+    POSIX `exec` replaces this process, so the child's status is this step's
+    status. On Windows, CPython's `os.execvp` spawns the child and then exits
+    0 without waiting, which would hide a failing command.
+    """
+    if os.name == "nt":
+        try:
+            completed = subprocess.run(command, check=False)
+        except OSError as exc:
+            print(f"run-hook-entry: could not run {command[0]}: {exc}", file=sys.stderr)
+            return 127
+        if completed.returncode is None:
+            return 127
+        return completed.returncode
+    try:
+        os.execvp(command[0], command)
+    except OSError as exc:
+        print(f"run-hook-entry: could not run {command[0]}: {exc}", file=sys.stderr)
+        return 127
+    return 127
 
 
 def argv_from_entry(entry: str) -> list[str]:
@@ -188,12 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         shown = base if base else "HEAD"
         print(f"base: {base} ({_git_short(shown)})", flush=True)
         command.append(base)
-    try:
-        os.execvp(command[0], command)
-    except OSError as exc:
-        print(f"run-hook-entry: could not run {command[0]}: {exc}", file=sys.stderr)
-        return 127
-    return 127
+    return _exec_entry(command)
 
 
 if __name__ == "__main__":

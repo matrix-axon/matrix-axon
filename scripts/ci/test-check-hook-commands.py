@@ -9,7 +9,9 @@ that stops running the hook entry fails this file as well as the hook.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import os
 import re
 import sys
@@ -95,6 +97,55 @@ class Runner(unittest.TestCase):
         )
         glued = checker.runner.scan_entries("      - id: foo#bar\n        entry: true\n")
         self.assertEqual(glued["foo#bar"], "true")
+
+    def test_scanner_keeps_a_hash_inside_a_plain_token(self) -> None:
+        text = "      - id: sample\n        entry: cargo test -- a#b  # note\n"
+        self.assertEqual(checker.runner.scan_entries(text)["sample"], "cargo test -- a#b")
+        quoted = checker.runner.scan_entries('      - id: quoted\n        entry: "a # b"  # note\n')
+        self.assertEqual(quoted["quoted"], "a # b")
+
+    def test_windows_returns_the_child_status(self) -> None:
+        with (
+            mock.patch.object(checker.runner.os, "name", "nt"),
+            mock.patch.object(
+                checker.runner.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=2),
+            ) as run,
+            mock.patch.object(checker.runner.os, "execvp") as execvp,
+        ):
+            code = checker.runner._exec_entry(["cargo", "test"])
+        self.assertEqual(code, 2)
+        run.assert_called_once_with(["cargo", "test"], check=False)
+        execvp.assert_not_called()
+
+    def test_windows_reports_a_missing_command(self) -> None:
+        with (
+            mock.patch.object(checker.runner.os, "name", "nt"),
+            mock.patch.object(
+                checker.runner.subprocess,
+                "run",
+                side_effect=FileNotFoundError("missing"),
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = checker.runner._exec_entry(["missing-tool"])
+        self.assertEqual(code, 127)
+
+    def test_posix_replaces_the_process(self) -> None:
+        with (
+            mock.patch.object(checker.runner.os, "name", "posix"),
+            mock.patch.object(
+                checker.runner.os,
+                "execvp",
+                side_effect=AssertionError("replaced"),
+            ) as execvp,
+            mock.patch.object(checker.runner.subprocess, "run") as run,
+        ):
+            with self.assertRaises(AssertionError):
+                checker.runner._exec_entry(["cargo", "test"])
+        execvp.assert_called_once_with("cargo", ["cargo", "test"])
+        run.assert_not_called()
 
     def test_scanner_rejects_a_folded_entry(self) -> None:
         text = "      - id: folded\n        entry: >\n          cargo test --all\n"
