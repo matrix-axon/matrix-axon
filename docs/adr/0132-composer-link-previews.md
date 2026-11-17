@@ -1,6 +1,6 @@
 # ADR 0132 — Composer link previews
 
-**Status:** Proposed. Extends [ADR 0125](0125-ios-first-incoming-sharing.md); supersedes nothing.
+**Status:** Proposed. Extends [ADR 0125](0125-ios-first-incoming-sharing.md); supersedes nothing. Amended by [ADR 0138](0138-matrix-link-previews.md) for Matrix links (§§ 1, 5, 6 and 8).
 
 ## Context
 
@@ -63,6 +63,8 @@ Three is a composer limit, well inside the server and renderer cap of eight and 
 
 A link is eligible when the existing static check accepts it (`nativePreviewLinks`, first in `incoming-share/urls.ts`): HTTPS, a public-looking DNS name with no IP literal, no credentials, no internationalized label, and no reserved suffix such as `.local`, `.onion` or `.test`.
 That check moves to a shared module, because the composer and share recovery must agree on it; the web PR moved it to `clients/web/src/preview-links.ts`, beside the link identity.
+
+> **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** A Matrix link (matrix.to or `matrix:`) is never eligible, though it passes the static check: the recipient's client builds its card instead, from the recipient's own access.
 
 ### 2. Two sources, in a fixed order, never escalating on their own
 
@@ -168,7 +170,11 @@ The settings page explains that a device lookup shows the site your address when
   Edit mode has its own rules (section 8).
   The thread composer behaves the same as the room composer.
 
+> **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** None of this applies to a Matrix link: it gets no card and no lookup.
+
 ### 6. What is sent
+
+> **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** A Matrix link is not an eligible link here: the rules below are applied as if the body's Matrix links were not in it.
 
 MSC4095 gives the field three meanings, and the composer chooses between them deliberately.
 A non-empty list is the whole set of previews: recipients' clients preview those links and no others.
@@ -248,6 +254,9 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
 ### 8. Editing a message with previews
 
 _Added 2026-11-12; revised 2026-11-13 and 2026-11-16 after review._
+
+> **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** A Matrix link is not an eligible link here either: the rules below are applied as if the body's Matrix links were not in it.
+> A current entry whose matched link is a Matrix link is left out, as an entry that fails the checks below is.
 Until this section, saving any edit erased the message's cards.
 The server builds the replacement's `m.new_content` from the new text alone, and the store shows an edited message from its latest `m.new_content` (`TIMELINE_SELECT` in `axon-store`), so the cards disappeared for Axon readers, and for every client that applies edits.
 There was also no way to remove one card and keep the rest.
