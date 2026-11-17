@@ -285,16 +285,7 @@ pub async fn edit_message(
     Path((account_id, room_id, event_id)): Path<(Uuid, String, String)>,
     Json(req): Json<EditRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
-    // The message as it stands, with its latest edit applied, for its link
-    // previews (ADR 0132 section 8). Absent from the store, the sender uses
-    // the original event instead.
-    let current = store
-        .get_event(account_id, &event_id)
-        .await?
-        .filter(|row| row.room_id == room_id)
-        .and_then(|row| row.content);
-    super::bundled_previews::edit(sender, uploads, account_id, room_id, event_id, req, current)
-        .await
+    super::bundled_previews::edit(sender, uploads, store, account_id, room_id, event_id, req).await
 }
 
 /// Redact an event

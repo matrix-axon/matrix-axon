@@ -12,6 +12,7 @@ use axon_core::{
     link_preview::{self, LinkPreview, PreviewSend},
     Formatted, Relation,
 };
+use axon_store::Store;
 use uuid::Uuid;
 
 use crate::{
@@ -226,16 +227,15 @@ async fn settle_claims(
     }
 }
 
-/// An edit (ADR 0132 section 8), validated before any claim. `current` is the
-/// message's content as the store shows it, if the store has it.
+/// An edit (ADR 0132 section 8), validated before any claim or store read.
 pub(super) async fn edit(
     sender: Arc<dyn MessageSender>,
     uploads: Arc<dyn StagedUploadService>,
+    store: Store,
     account_id: Uuid,
     room_id: String,
     event_id: String,
     request: EditRequest,
-    current: Option<serde_json::Value>,
 ) -> Result<ApiResponse<crate::dto::SendResultDto>, ApiError> {
     formatted(&request.format, &request.formatted_body)?;
     let formatted_body = request.formatted_body.as_deref().map(|body| Formatted {
@@ -275,6 +275,15 @@ pub(super) async fn edit(
                     })
                     .collect()
             });
+            // The message as it stands, with its latest edit applied, read as
+            // late as possible: after validation, any wait for an upload slot,
+            // and the claims. Absent from the store, the sender uses the
+            // original event instead.
+            let current = store
+                .get_event(account_id, &event_id)
+                .await?
+                .filter(|row| row.room_id == room_id)
+                .and_then(|row| row.content);
             let edit = PreviewEdit {
                 body: &request.body,
                 formatted: request.formatted_body.as_deref().map(|body| Formatted {
