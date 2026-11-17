@@ -249,6 +249,9 @@ Events the filler then stores get `id`s above the purge watermark, so the purge 
 - Each limited response costs at least one extra `/messages` page.
   On a quiet account that is rare.
   During an import it is one page per 100 missing events, which is the minimum needed to fetch them.
+  A room that comes back into the sliding-sync window can be reported `limited` with nothing missing.
+  That costs one page that closes on its first stored event.
+  The implementation PR measures how often this happens on a large account before shipping, and logs it separately.
 - The verification pass re-reads, once, the history of each room that live sync stored, a one-off load on the homeserver bounded by the load gate.
 - Filled events get `events.id` values larger than newer events, as backfilled events already do.
   Code that treats `id` as arrival order ([ADR 0089](0089-read-receipt-target-resolution.md), #505) must already handle backfilled rows, and gap rows are no different.
