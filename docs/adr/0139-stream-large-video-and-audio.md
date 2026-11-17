@@ -156,6 +156,12 @@ So a reader that has caught up with the download must not be handed a clean end 
   Those bytes are already covered by the section 4 trade-off.
 - A response that reaches the tail waits there for the verdict.
   The verdict follows the last chunk at once, so a reader that has caught up waits only for one hash finalisation.
+- A ranged request that starts in the tail, such as `bytes=-N` or `bytes=<len-N>-` for an MP4 index (`moov`) at the end of the file, therefore waits for the whole download.
+  It would wait for most of it anyway, since those bytes arrive last (the "past the written point" case above).
+  For a known-length object only the stall timeout bounds that wait, and in the shells the 120 s `axon-http` deadline turns a longer one into a `502`.
+  The player's Retry then succeeds once the download has finished and the object is a cache hit.
+  So phases 1 to 4 do not make a moov-at-end video start early: it starts when its download completes, as today, but without today's size and time limits.
+  Phase 5 is what would change that (section 8).
 - On a pass, the tail and the end of the body go out.
 - On a failure, the response is aborted, not finished.
   Its body stream yields an error, so hyper closes an HTTP/1.1 connection short of its `Content-Length`, or omits a chunked body's final chunk, and resets an HTTP/2 stream.
@@ -176,7 +182,9 @@ The limits change with it:
   Sharing the 16 permits would let a few open videos queue every image, avatar and thumbnail behind them.
   With their own semaphore, buffered media never waits on a stream.
   Together the two semaphores bound the number of open homeserver connections, since size and stall time are already bounded per download.
-  A stream waits at most `fetch_timeout_secs` for its permit, then fails with `503`, which the client treats as retryable.
+  A stream's wait for its permit and its wait for the upstream response headers share one deadline of `fetch_timeout_secs`, measured from when the request arrives.
+  Past it the stream fails with `503`, which the client treats as retryable.
+  So a request under load waits at most 60 s at the defaults before that answer, not 60 s for a permit and another 60 s for the headers.
   Today's wait for a `downloads` permit has no bound, and that is unchanged.
 - A new `max_stream_bytes` (default 2 GiB) replaces `max_object_bytes` for the streaming path only.
   `max_object_bytes` was protecting process memory, and a streamed object no longer passes through memory.
@@ -255,7 +263,8 @@ A `<video>` cannot carry a bearer header, so the server issues a URL that stands
   The device checks in sections 6 and 7 record whether seeking back re-requests and whether playback suffers.
   If it does, relaxing `no-store` is decided then, weighing smoother seeking against plaintext on disk.
 - A ticket is 32 random bytes, base64url-encoded, held in an in-memory table keyed by the ticket.
-  The table records the account, the MXC URI, the event id, the issuing token's id and session id, and the times the ticket was created and last used.
+  The table records the account, the MXC URI, the issuing token's id and session id, and the times the ticket was created and last used.
+  It records no event id, because the checks below resolve the event from the MXC URI, exactly as `get_media` does.
   Restarting the server drops every ticket, and the client simply asks for a new one (section 6).
 - A ticket expires 30 minutes after its last use and never more than 12 hours after it was issued.
 - Every use also re-checks the issuing token.
@@ -270,9 +279,15 @@ A `<video>` cannot carry a bearer header, so the server issues a URL that stands
   - The lookup is one primary-key read per range request.
     That is the same cost every bearer request already pays.
 - Every use also re-runs `get_media`'s own checks (`resolve_media_content`), since the ticket route serves through the same code.
-  Those checks require that the account still exists and that the owning event is still stored with its content.
+  `resolve_media_content` takes no event id: `get_event_by_mxc_url` resolves the URI to the oldest stored event that references it.
+  The checks require that the account still exists and that this event is still stored with its content.
   Redaction leaves the content `NULL`, which already fails closed with `404`.
-  So a ticket for a redacted event, or for an account that has been removed, stops working on its next request rather than serving for up to 12 hours.
+  So a ticket stops working on its next request once its account is removed or the resolved event is redacted, rather than serving for up to 12 hours.
+  - The event checked is the one the URI resolves to, not necessarily the one the user opened.
+    If two events share a URI and only the newer one is redacted, the ticket keeps working, as the bearer route does.
+  - Media authorized only by an image pack or an inline message has no owning event.
+    `resolve_media_content` serves it as a sniffed raster image (`raster_only`), never as `video/*` or `audio/*`, so the mint refuses a ticket for it.
+    Every ticketed object therefore has an owning event.
   Room membership is not checked, which matches the bearer route: `get_media` does not check it either.
 - The table holds at most 4096 tickets and drops the least recently used past that.
   Each issuing token holds at most 32 live tickets, and a 33rd evicts that token's own least recently used ticket.
@@ -327,7 +342,11 @@ Before this phase merges, it is checked in Safari on iOS and in Chrome and Firef
 Each check plays a large video, seeks back into the part already played, and records whether that seek re-requests ranges under `no-store` (section 5) and whether playback stalls.
 
 The ticket URL is the server's own origin when the web client is served by the server (ADR 0116), so no CORS or CSP change is needed there.
-It also works cross-origin, as in the Vite dev proxy: a `<video>` without a `crossorigin` attribute needs no CORS headers.
+Only the `<video>` load would be exempt from CORS if it were cross-origin.
+The section 6 probe is a `fetch` with a `Range` value that is not CORS-safelisted, so cross-origin it would need a preflight.
+That is no new constraint: the server sends no CORS headers at all (`crates/axon-api/src/web.rs`), so every API call the web client makes already requires the same origin.
+The Vite dev proxy is same-origin from the browser's view.
+The ticket route therefore adds no CORS handling, and the probe has the same origin requirement as the rest of the client.
 
 ### 7. Phase 4: the shells proxy ticket URLs through a custom scheme
 
@@ -376,10 +395,18 @@ The device check below records the first request each platform's player actually
 If one of them turns out to send a request without `Range`, that platform keeps the blob path until the handler can stream a response body, rather than the ADR answering it with an invalid `206`.
 
 The CSP gains `axon-media: http://axon-media.localhost` in `media-src`, and in `connect-src` for the section 6 probe.
+In the shells the probe is cross-origin: the page is `tauri://localhost` or `http://tauri.localhost`, and the probe goes to the `axon-media` scheme.
+So the handler answers the probe's `OPTIONS` preflight itself, allowing the `Range` request header for the app's own origin.
+It also adds `Access-Control-Allow-Origin` for that origin, and `Access-Control-Expose-Headers: Content-Range`, to its responses.
+The device check includes the probe path, by playing an expired ticket.
 
 Before this phase merges, it must be checked on a real iOS device, a real Android device, macOS, Windows and Linux.
 On each, the check records the player's first request and confirms that playback, seeking and a short `206` all work.
 It also records how many scheme requests a minute of playback takes, and whether seeking back re-requests ranges under `no-store` (section 5).
+It records whether the upstream connection is reused between scheme requests or torn down after each 4 MiB, since the handler drops it mid-body.
+If teardown turns out to matter, rewriting the outgoing `Range` to a bounded `bytes=N-(N+4 MiB-1)` for the absolute forms would let the connection be reused, leaving suffix and unknown-length requests as they are.
+It plays an OAuth-session video across its access token's expiry, to confirm that the probe, the new ticket and the `currentTime` restore in section 6 recover without a visible stall.
+If they do not, binding a ticket's life to the OAuth session rather than the access token is the follow-up, filed by the phase 4 PR.
 At 4 MiB a response, a 1 GiB video plays through about 256 requests.
 Each re-runs the ticket, token and event checks: an in-memory lookup and two indexed reads.
 If that count turns out to matter, the follow-up is a streaming response body in the scheme handler, which Tauri's responder does not offer today.
@@ -405,10 +432,12 @@ This phase begins by checking that support against production Synapse, and gets 
   The sender's own `info.mimetype` decides which objects stream, which section 4 explains does not widen that risk.
 - A streamed download runs to completion even if the viewer closes the preview at once, so abandoned videos still cost their full upstream transfer.
   Four stream permits and the cache reservation bound that cost.
+  The permits are server-wide, so one user who abandons four large previews can make others' video wait for a `503`; a per-account share is #1139.
 - A ticket is a credential in a URL.
   It is limited to one object, a 30-minute idle lifetime, its issuing token's validity and the owning event still being stored.
   Axon's own request log records the route template instead (section 5), but Caddy's access log records the ticket on every range request.
   Operators who ship those logs elsewhere should know that.
+  Redaction relies on a prefix rule in the `TraceLayer` plus an audit and a test; a router-owned redaction helper is #1140.
 - A ticket's checks run when a request starts, not while its response streams.
   So a response already in progress when its token is revoked, or its event redacted, runs to the end of its range.
   In the shells that is at most 4 MiB.
