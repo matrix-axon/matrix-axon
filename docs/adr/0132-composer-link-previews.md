@@ -1,6 +1,6 @@
 # ADR 0132 — Composer link previews
 
-**Status:** Proposed. Extends [ADR 0125](0125-ios-first-incoming-sharing.md); supersedes nothing. Amended by [ADR 0138](0138-matrix-link-previews.md) for Matrix links (§§ 1, 5 and 6).
+**Status:** Proposed. Extends [ADR 0125](0125-ios-first-incoming-sharing.md); supersedes nothing. Amended by [ADR 0138](0138-matrix-link-previews.md) for Matrix links (§§ 1, 5, 6 and 8).
 
 ## Context
 
@@ -254,6 +254,9 @@ Whether to retry a send whose outcome is unknown stays the user's choice, as it 
 ### 8. Editing a message with previews
 
 _Added 2026-11-12; revised 2026-11-13 and 2026-11-16 after review._
+
+> **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** A Matrix link is not an eligible link here either: the rules below are applied as if the body's Matrix links were not in it.
+> A current entry whose matched link is a Matrix link is left out, as an entry that fails the checks below is.
 Until this section, saving any edit erased the message's cards.
 The server builds the replacement's `m.new_content` from the new text alone, and the store shows an edited message from its latest `m.new_content` (`TIMELINE_SELECT` in `axon-store`), so the cards disappeared for Axon readers, and for every client that applies edits.
 There was also no way to remove one card and keep the rest.
