@@ -403,6 +403,7 @@ mod tests {
             purge_on_leave: false,
             state_redaction_tx,
             room_details,
+            gaps: None,
         };
         let cancel = CancellationToken::new();
         let worker = tokio::spawn(run(
@@ -505,6 +506,7 @@ mod tests {
             purge_on_leave: false,
             state_redaction_tx,
             room_details: room_details.clone(),
+            gaps: None,
         };
         let cancel = CancellationToken::new();
         let worker = tokio::spawn(run(client, ctx, HomeserverGate::for_test(), cancel.clone()));

@@ -726,7 +726,17 @@ pub(crate) struct PersistContext {
     /// Coalesces `room_details.changed` frames for metadata state changes
     /// (ADR 0126).
     pub(crate) room_details: crate::room_details::RoomDetailsChanges,
+    /// The account run's gap recorder (ADR 0140), drained by
+    /// [`persist_timeline_event`] before it stores an event. `None` where no
+    /// live sync runs, such as most tests.
+    pub(crate) gaps: Option<Arc<crate::backfill::gaps::GapRecorder>>,
 }
+
+/// An event row that [`persist_event_core`] could not write: a store error,
+/// not an event that could never be stored. The event is missing, so a pager
+/// must fetch its page again rather than move past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EventWriteFailed;
 
 /// Parse an event's raw JSON text into a [`serde_json::Value`], logging (with
 /// `what` naming the caller's context, e.g. `"state event"`) and returning
@@ -776,6 +786,15 @@ pub(crate) async fn persist_timeline_event(
     enc_info: Option<EncryptionInfo>,
     Ctx(ctx): Ctx<PersistContext>,
 ) {
+    // Record this response's holes before storing any of its events: the SDK
+    // has already broadcast it, and saves its position only after this
+    // handler returns, so the rows are durable before a restart could resume
+    // past them (ADR 0140).
+    if let Some(gaps) = &ctx.gaps {
+        let client = room.client();
+        gaps.drain(&|| crate::backfill::gaps::joined_room_ids(&client))
+            .await;
+    }
     // The SDK updates room membership before dispatching a sync batch. Do not
     // retain its departure/trailing events after the state handler captures a purge
     // watermark, even if the worker has already finished deleting room state.
@@ -816,7 +835,9 @@ pub(crate) async fn persist_timeline_event(
 ///
 /// Returns the stored UTD row and the SDK's reason for it, for the caller to
 /// record with the rest of its page in one write
-/// ([`redecrypt::record_utd_reasons`]). `None` for anything else.
+/// ([`redecrypt::record_utd_reasons`]). `None` for anything else, including
+/// an event skipped because it can never be stored (it does not parse, or its
+/// room was purged). A failed write is [`EventWriteFailed`].
 ///
 /// There is no per-row re-check here, unlike the live path: a backfill can
 /// store thousands of permanently undecryptable rows, and each re-check would
@@ -829,9 +850,9 @@ pub(crate) async fn persist_backfilled_event(
     ctx: &PersistContext,
     room: &Room,
     tev: &matrix_sdk::deserialized_responses::TimelineEvent,
-) -> Option<(axon_store::PendingUtd, axon_core::UtdReason)> {
+) -> Result<Option<(axon_store::PendingUtd, axon_core::UtdReason)>, EventWriteFailed> {
     if skip_departed_room_ingestion(ctx, room) {
-        return None;
+        return Ok(None);
     }
     let raw = tev.raw();
     let ev: AnySyncTimelineEvent = match raw.deserialize() {
@@ -842,10 +863,12 @@ pub(crate) async fn persist_backfilled_event(
                 error = %err,
                 "failed to deserialize backfilled event; skipping"
             );
-            return None;
+            return Ok(None);
         }
     };
-    let raw_val = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event")?;
+    let Some(raw_val) = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event") else {
+        return Ok(None);
+    };
     // The paged event already carries the SDK's failure reason.
     persist_event_core(
         ctx,
@@ -888,7 +911,7 @@ enum UtdCheck<'a> {
 ///
 /// On the live path a UTD's failure reason is recorded before the emit, so the
 /// frame carries it. On the backfill path it is returned, with the stored row,
-/// for the caller to record.
+/// for the caller to record. A failed event-row write is [`EventWriteFailed`].
 async fn persist_event_core(
     ctx: &PersistContext,
     ev: &AnySyncTimelineEvent,
@@ -896,7 +919,7 @@ async fn persist_event_core(
     room_id: &str,
     enc_info: Option<&EncryptionInfo>,
     utd: UtdCheck<'_>,
-) -> Option<(axon_store::PendingUtd, axon_core::UtdReason)> {
+) -> Result<Option<(axon_store::PendingUtd, axon_core::UtdReason)>, EventWriteFailed> {
     // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
     let event_type: String = raw_val
         .get("type")
@@ -983,7 +1006,7 @@ async fn persist_event_core(
                 error = %err,
                 "failed to persist event"
             );
-            return None;
+            return Err(EventWriteFailed);
         }
     };
     tracing::debug!(
@@ -1034,7 +1057,7 @@ async fn persist_event_core(
             }
         }
         // Every stored UTD, session id or not: the SDK already classified it.
-        (Some(row), UtdCheck::Known(Some(reason))) => return Some((row, reason)),
+        (Some(row), UtdCheck::Known(Some(reason))) => return Ok(Some((row, reason))),
         _ => None,
     };
 
@@ -1064,7 +1087,7 @@ async fn persist_event_core(
             utd_reason,
         }));
     }
-    None
+    Ok(None)
 }
 
 /// Write the crypto sibling rows for an event already persisted to `events`.
@@ -1960,6 +1983,23 @@ async fn run_account(
         room_details.clone(),
         room_details_cancel.clone(),
     ));
+    // Holes that limited responses leave in stored history (ADR 0140). The
+    // recorder has its own subscription to the room-update broadcast, taken
+    // before the sync service starts, and the ingestion handler below drains
+    // it before storing anything, so each hole's row commits before the SDK
+    // saves its position past the response. It reads the database clock here,
+    // before any response is stored, as its lag boundary of last resort.
+    let gap_signal = Arc::new(backfill::gaps::GapSignal::default());
+    let gap_recorder = Arc::new(backfill::gaps::GapRecorder::new(
+        client.subscribe_to_all_room_updates(),
+        backfill::gaps::GapWatcher::new(
+            account.account_id,
+            store.clone(),
+            config.timeline_limit,
+            Arc::clone(&gap_signal),
+        )
+        .await,
+    ));
     let persist_ctx = PersistContext {
         store: store.clone(),
         account_id: account.account_id,
@@ -1969,6 +2009,7 @@ async fn run_account(
         purge_on_leave: config.purge_on_leave,
         state_redaction_tx,
         room_details: room_details.clone(),
+        gaps: Some(Arc::clone(&gap_recorder)),
     };
     // Clone before the handler context takes ownership: the backfill task persists
     // paged events through the same path (M10), reusing this context.
@@ -2159,34 +2200,13 @@ async fn run_account(
         },
     ));
 
-    // Holes that limited responses leave in stored history (ADR 0140): a
-    // second reader of the same broadcast, also subscribed before `start`. It
-    // only records rows, so it keeps up; the backfill task below pages them.
-    // It reads the database clock here, before any response is stored, as its
-    // lag boundary of last resort.
-    let gap_signal = Arc::new(backfill::gaps::GapSignal::default());
-    let gap_updates = client.subscribe_to_all_room_updates();
-    let gap_watcher = backfill::gaps::GapWatcher::new(
-        account.account_id,
-        store.clone(),
-        {
-            let client = client.clone();
-            Box::new(move || {
-                client
-                    .joined_rooms()
-                    .iter()
-                    .map(|room| room.room_id().to_string())
-                    .collect()
-            })
-        },
-        config.timeline_limit,
-        Arc::clone(&gap_signal),
-    )
-    .await;
+    // The gap recorder's drain task, beside the ingestion handler that drains
+    // it: it empties the broadcast between live events and retries refused
+    // rows (ADR 0140).
     let gap_watch_cancel = cancel.child_token();
     let gap_watch_handle = tokio::spawn(backfill::gaps::watch(
-        gap_updates,
-        gap_watcher,
+        Arc::clone(&gap_recorder),
+        client.clone(),
         gap_watch_cancel.clone(),
     ));
 
@@ -5027,6 +5047,7 @@ mod purge_ingestion_tests {
                     purge_on_leave,
                     state_redaction_tx,
                     room_details,
+                    gaps: None,
                 });
                 client.add_event_handler(
                     move |ev: AnySyncTimelineEvent,

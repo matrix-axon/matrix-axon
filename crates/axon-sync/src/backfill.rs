@@ -77,7 +77,7 @@ use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::Client;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{persist_backfilled_event, PersistContext};
+use crate::engine::{persist_backfilled_event, EventWriteFailed, PersistContext};
 use crate::homeserver_gate::{is_fast, GateError, HomeserverGate, Outcome, TIMEOUT_HOLD};
 use crate::redecrypt::{paged_utd_session_id, recheck_backfilled_sessions, KeyArrivalWatch};
 
@@ -136,6 +136,11 @@ enum PageFailure {
     /// Anything else — a transport error, a `5xx`, a `429`. Retry the same token
     /// after a growing delay, then park.
     Retryable,
+    /// The homeserver served the page, but an event on it could not be written
+    /// to the store. Moving past the page would lose that event for good, so
+    /// the same token is retried after a growing delay, as for
+    /// [`Retryable`](Self::Retryable), then parked.
+    StoreWrite,
 }
 
 impl PageFailure {
@@ -146,6 +151,7 @@ impl PageFailure {
             PageFailure::Inaccessible => "inaccessible",
             PageFailure::TimedOut => "timed_out",
             PageFailure::Retryable => "retryable",
+            PageFailure::StoreWrite => "store_write",
         }
     }
 
@@ -215,7 +221,9 @@ fn failure_record(
         PageFailure::Rejected if prior_rejections > 0 => (PARK_FOR, true, true),
         PageFailure::Rejected => (Duration::ZERO, false, true),
         PageFailure::Inaccessible => (PARK_FOR, true, false),
-        PageFailure::TimedOut | PageFailure::Retryable if failures >= PARK_AFTER => {
+        PageFailure::TimedOut | PageFailure::Retryable | PageFailure::StoreWrite
+            if failures >= PARK_AFTER =>
+        {
             (PARK_FOR, true, false)
         }
         PageFailure::TimedOut => (
@@ -223,7 +231,7 @@ fn failure_record(
             false,
             false,
         ),
-        PageFailure::Retryable => (retry_delay(failures), false, false),
+        PageFailure::Retryable | PageFailure::StoreWrite => (retry_delay(failures), false, false),
     };
     RoomBackfillFailure {
         kind: failure.as_str(),
@@ -741,6 +749,9 @@ enum Written {
     /// Cancelled part way. What was written stays, and is idempotent to write
     /// again.
     Abandoned,
+    /// Every event was attempted, but this many could not be written to the
+    /// store. The page must be fetched again: its token stays where it was.
+    StoreFailed(usize),
 }
 
 /// Persist one fetched page through the live ingestion path, then record its
@@ -762,6 +773,9 @@ async fn write_page(
     // from the paged events, not the stored rows, so a UTD whose row already
     // existed (or failed to write) is still covered.
     let mut utd_sessions = BTreeSet::new();
+    // Events that could not be written. The rest of the page is still written
+    // (idempotently), and the caller fetches it again.
+    let mut failed_writes = 0;
     for tev in events {
         if cancel.is_cancelled() {
             abandoned = true;
@@ -770,8 +784,10 @@ async fn write_page(
         if let Some(session_id) = paged_utd_session_id(tev) {
             utd_sessions.insert(session_id);
         }
-        if let Some(utd) = persist_backfilled_event(ctx, room, tev).await {
-            utd_reasons.push(utd);
+        match persist_backfilled_event(ctx, room, tev).await {
+            Ok(Some(utd)) => utd_reasons.push(utd),
+            Ok(None) => {}
+            Err(EventWriteFailed) => failed_writes += 1,
         }
     }
     if !utd_reasons.is_empty() {
@@ -798,6 +814,9 @@ async fn write_page(
             cancel,
         )
         .await;
+    }
+    if failed_writes > 0 {
+        return Written::StoreFailed(failed_writes);
     }
     Written::Complete
 }
@@ -880,8 +899,14 @@ async fn backfill_room_page(
         },
     };
 
-    if write_page(ctx, room, &events, key_arrivals, cancel).await == Written::Abandoned {
-        return PageOutcome::Abandoned;
+    match write_page(ctx, room, &events, key_arrivals, cancel).await {
+        Written::Complete => {}
+        Written::Abandoned => return PageOutcome::Abandoned,
+        // Saving the cursor would move past events that are not stored.
+        Written::StoreFailed(failed) => {
+            tracing::warn!(account_id = %account_id, room_id = %room_id, failed, "backfill: events on the page could not be stored; keeping the cursor to fetch it again");
+            return PageOutcome::Failed(PageFailure::StoreWrite);
+        }
     }
 
     let fetched = events.len();
@@ -1108,6 +1133,19 @@ mod tests {
         let other = failure_record(PageFailure::Retryable, 0, 0, 3);
         assert!(!other.timed_out);
         assert_eq!(other.retry_after, retry_delay(1));
+    }
+
+    /// A page the store could not fully write is retried on the same token,
+    /// backing off like a retryable homeserver failure, then parked.
+    #[test]
+    fn a_store_write_failure_backs_off_on_the_same_token_then_parks() {
+        let first = failure_record(PageFailure::StoreWrite, 0, 0, 0);
+        assert_eq!(first.kind, "store_write");
+        assert!(!first.clear_token && !first.parked && !first.timed_out);
+        assert_eq!(first.retry_after, retry_delay(1));
+        let fifth = failure_record(PageFailure::StoreWrite, PARK_AFTER - 1, 0, 0);
+        assert!(fifth.parked && !fifth.clear_token);
+        assert_eq!(fifth.retry_after, PARK_FOR);
     }
 
     #[test]

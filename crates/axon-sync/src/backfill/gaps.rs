@@ -11,24 +11,24 @@
 //!
 //! * [`GapWatcher`] reads the SDK's room-update broadcast, which carries each
 //!   room's `limited` flag and `prev_batch`, and records a row for every hole.
-//!   It only inserts rows, so it keeps up with the broadcast. If it lags
-//!   anyway, it cannot tell which lost responses were limited, so it records a
-//!   probe for every room that stored events during the lag (decision 3).
+//!   If the broadcast lags, it cannot tell which lost responses were limited,
+//!   so it records a probe for every room that stored events during the lag
+//!   (decision 3).
 //! * [`Filler`] runs inside the backfill task, ahead of ordinary backfill, and
 //!   pages each row backward until a page holds an event stored before the
 //!   hole (decision 2). It runs whatever `sync.backfill_enabled` says.
 //!
+//! The watcher is not a task of its own. The live ingestion handler drains it
+//! ([`GapRecorder::drain`]) before it stores an event. The SDK sends a
+//! response's broadcast before it runs that response's handlers, awaits the
+//! handlers, and only then saves its sliding-sync position. So a hole's row is
+//! committed before any of the response's events are stored, and before a
+//! restart could resume past the response. A row the database refuses is kept
+//! and retried with the same room, token and batch.
+//!
 //! Every boundary is a stored row's `events.received_at`, which
 //! `ON CONFLICT DO NOTHING` never changes; nothing here reads the application
 //! clock or orders by `origin_ts`.
-//!
-//! The ordering this relies on is the SDK's (matrix-sdk 0.19,
-//! `call_sync_response_handlers`): a response's broadcast is sent before its
-//! event handlers run, the handlers are awaited, and the next response is not
-//! processed until they finish. So the events stored just before a hole always
-//! have earlier `received_at` values than the row that records it, and any
-//! response that fell out of the broadcast had stored its events before the
-//! watcher noticed the lag.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +41,8 @@ use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::api::client::message::get_message_events;
 use matrix_sdk::{Client, RoomState};
 use matrix_sdk_base::sync::RoomUpdates;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{broadcast, Mutex, Notify};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -67,9 +68,29 @@ pub(super) const AWAITING_RECHECK: Duration = Duration::from_secs(2);
 /// one only makes a probe walk further, never wrongly.
 const RECENT_UPDATES: usize = 8;
 
-/// How often the watcher retries recording lag probes that the database
-/// refused, when no update arrives to retry them sooner.
-const PROBE_RETRY: Duration = Duration::from_secs(30);
+/// How long the handler that drained a hole keeps retrying its insert, so a
+/// database blip or a lock held for a while does not leave the row in memory
+/// only. The SDK cannot save its position past the response meanwhile. It is
+/// several of `database.timeouts.lock_secs` (3 s by default), so a lock held
+/// elsewhere for most of it is outlasted.
+const INSERT_BUDGET: Duration = Duration::from_secs(30);
+
+/// The wait before the second insert attempt, doubled for each later one up
+/// to [`INSERT_RETRY_MAX`].
+const INSERT_RETRY: Duration = Duration::from_millis(100);
+
+const INSERT_RETRY_MAX: Duration = Duration::from_secs(5);
+
+/// The first delay before a refused insert or probe is retried from memory,
+/// doubled for each further refusal, up to [`PENDING_RETRY_MAX`].
+const PENDING_RETRY: Duration = Duration::from_secs(1);
+
+const PENDING_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// How often the account's drain task empties the broadcast between live
+/// events, so responses that carry no timeline events do not pile up into a
+/// lag, and work the database refused is retried.
+const DRAIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Shared between the watcher, which records rows, and the backfill task, which
 /// pages them: whether a row was recorded since the task last looked, and a
@@ -98,16 +119,71 @@ impl GapSignal {
     }
 }
 
-/// The joined rooms' ids, read when a lag is probed. The engine passes the
-/// SDK's `joined_rooms()`; tests pass a fixed list.
-pub(crate) type JoinedRooms = Box<dyn Fn() -> Vec<String> + Send + Sync>;
+/// The joined rooms' ids, read only when a lag is probed. The engine passes
+/// [`joined_room_ids`]; tests pass a fixed list. A parameter rather than a
+/// field: the recorder lives in the client's handler context, so holding a
+/// client in it would keep every replaced client alive.
+pub(crate) type JoinedRooms<'a> = &'a (dyn Fn() -> Vec<String> + Send + Sync);
+
+/// The SDK's joined rooms, as [`JoinedRooms`] reads them.
+pub(crate) fn joined_room_ids(client: &Client) -> Vec<String> {
+    client
+        .joined_rooms()
+        .iter()
+        .map(|room| room.room_id().to_string())
+        .collect()
+}
+
+/// A limited response's hole whose insert the database refused, kept exactly
+/// as the response described it until a retry commits it.
+#[derive(Debug, Clone)]
+struct PendingHole {
+    room_id: String,
+    prev_batch: Option<String>,
+    batch: Vec<String>,
+}
+
+/// Work the database refused, retried from memory with a growing delay.
+#[derive(Default)]
+struct Pending {
+    holes: Vec<PendingHole>,
+    /// A lag boundary whose probes are not recorded yet.
+    probe: Option<LagMark>,
+    /// Consecutive refused retries, for the delay.
+    refusals: u32,
+    retry_at: Option<Instant>,
+}
+
+impl Pending {
+    fn is_empty(&self) -> bool {
+        self.holes.is_empty() && self.probe.is_none()
+    }
+
+    fn due(&self) -> bool {
+        !self.is_empty() && self.retry_at.is_none_or(|at| Instant::now() >= at)
+    }
+
+    fn refused(&mut self) {
+        self.refusals = self.refusals.saturating_add(1);
+        let delay = PENDING_RETRY
+            .saturating_mul(1 << self.refusals.saturating_sub(1).min(5))
+            .min(PENDING_RETRY_MAX);
+        self.retry_at = Some(Instant::now() + delay);
+    }
+
+    fn settled(&mut self) {
+        if self.is_empty() {
+            self.refusals = 0;
+            self.retry_at = None;
+        }
+    }
+}
 
 /// Records a row for every hole a limited response leaves, and probes for the
 /// holes a lagged broadcast hid (ADR 0140 decisions 1 and 3).
 pub(crate) struct GapWatcher {
     account_id: Uuid,
     store: Store,
-    joined_rooms: JoinedRooms,
     timeline_limit: u32,
     signal: Arc<GapSignal>,
     /// The database clock and event-id sequence when the watcher subscribed,
@@ -117,9 +193,9 @@ pub(crate) struct GapWatcher {
     /// The event ids of the last few updates that carried timeline events,
     /// newest first.
     recent: VecDeque<Vec<String>>,
-    /// A lag boundary whose probes are not recorded yet, because the database
-    /// refused them. Retried until they are.
-    pending_probe: Option<LagMark>,
+    pending: Pending,
+    /// [`INSERT_BUDGET`], shortened by tests.
+    insert_budget: Duration,
 }
 
 impl GapWatcher {
@@ -129,7 +205,6 @@ impl GapWatcher {
     pub(crate) async fn new(
         account_id: Uuid,
         store: Store,
-        joined_rooms: JoinedRooms,
         timeline_limit: u32,
         signal: Arc<GapSignal>,
     ) -> Self {
@@ -152,18 +227,25 @@ impl GapWatcher {
         Self {
             account_id,
             store,
-            joined_rooms,
             timeline_limit,
             signal,
             subscribed,
             recent: VecDeque::with_capacity(RECENT_UPDATES),
-            pending_probe: None,
+            pending: Pending::default(),
+            insert_budget: INSERT_BUDGET,
         }
+    }
+
+    /// The same watcher with a shorter insert budget, so tests need not wait
+    /// for the real one to run out.
+    #[cfg(test)]
+    pub(crate) fn with_insert_budget(mut self, budget: Duration) -> Self {
+        self.insert_budget = budget;
+        self
     }
 
     /// Record the holes in one response's joined rooms.
     pub(crate) async fn observe(&mut self, updates: &RoomUpdates) {
-        self.retry_pending_probe(0).await;
         let mut update_ids = Vec::new();
         for (room_id, update) in &updates.joined {
             let timeline = &update.timeline;
@@ -173,12 +255,12 @@ impl GapWatcher {
                 // earliest storage time, which is all the first-window test
                 // reads; a server that overfills the batch is cut to size.
                 let limit = (self.timeline_limit.max(1) as usize).min(batch_ids.len());
-                self.record_limited(
-                    room_id.as_str(),
-                    timeline.prev_batch.as_deref(),
-                    &batch_ids[..limit],
-                )
-                .await;
+                let hole = PendingHole {
+                    room_id: room_id.to_string(),
+                    prev_batch: timeline.prev_batch.clone(),
+                    batch: batch_ids[..limit].to_vec(),
+                };
+                self.record_limited(hole).await;
             }
             update_ids.extend(batch_ids);
         }
@@ -188,54 +270,91 @@ impl GapWatcher {
         }
     }
 
-    async fn record_limited(&mut self, room_id: &str, prev_batch: Option<&str>, batch: &[String]) {
-        match self
-            .store
-            .record_limited_gap(self.account_id, room_id, prev_batch, batch)
-            .await
-        {
-            Ok(gap_id) => {
-                tracing::info!(
-                    account_id = %self.account_id,
-                    room_id = %room_id,
-                    gap_id,
-                    prev_batch = prev_batch.unwrap_or("<none: live end>"),
-                    oldest_event_id = batch.first().map_or("<none>", String::as_str),
-                    batch_len = batch.len(),
-                    "limited sync left a hole in the room's history; recorded it for filling"
-                );
-                self.signal.mark();
-            }
-            Err(err) => {
-                // This response's update is not in `recent` yet, so the boundary
-                // comes from an earlier one, before this hole.
-                tracing::warn!(
-                    account_id = %self.account_id,
-                    room_id = %room_id,
-                    reason = err.diagnostic_reason(),
-                    "could not record a limited sync's hole; probing the rooms that stored events since the last update instead"
-                );
-                let boundary = self.lag_boundary().await;
-                self.add_pending_probe(boundary);
-                self.retry_pending_probe(0).await;
-            }
+    /// Insert a hole's row, retrying briefly while the caller waits. A row the
+    /// database still refuses is kept, unchanged, for
+    /// [`retry_pending`](Self::retry_pending).
+    async fn record_limited(&mut self, hole: PendingHole) {
+        // A hole already waiting in memory means the database is refusing
+        // these inserts: queue behind it rather than stall the handler for a
+        // whole budget per room. Its retry records this one too.
+        if !self.pending.holes.is_empty() {
+            tracing::error!(
+                account_id = %self.account_id,
+                room_id = %hole.room_id,
+                prev_batch = hole.prev_batch.as_deref().unwrap_or("<none: live end>"),
+                "gap table is refusing inserts; keeping this limited sync's hole in memory and retrying"
+            );
+            self.pending.holes.push(hole);
+            return;
         }
+        let started = Instant::now();
+        let mut delay = INSERT_RETRY;
+        let mut attempt = 1u32;
+        loop {
+            let reason = match self.insert_hole(&hole).await {
+                Ok(()) => return,
+                Err(reason) => reason,
+            };
+            if started.elapsed() + delay < self.insert_budget {
+                tracing::warn!(account_id = %self.account_id, room_id = %hole.room_id, attempt, reason, "could not record a limited sync's hole; retrying");
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2).min(INSERT_RETRY_MAX);
+                attempt += 1;
+                continue;
+            }
+            // Until the retry commits it, a restart forgets this hole: the SDK
+            // saves its position once this response's handlers finish.
+            tracing::error!(
+                account_id = %self.account_id,
+                room_id = %hole.room_id,
+                prev_batch = hole.prev_batch.as_deref().unwrap_or("<none: live end>"),
+                attempts = attempt,
+                reason,
+                "could not record a limited sync's hole; keeping it in memory and retrying"
+            );
+            self.pending.holes.push(hole);
+            self.pending.refused();
+            return;
+        }
+    }
+
+    async fn insert_hole(&self, hole: &PendingHole) -> Result<(), &'static str> {
+        let gap_id = self
+            .store
+            .record_limited_gap(
+                self.account_id,
+                &hole.room_id,
+                hole.prev_batch.as_deref(),
+                &hole.batch,
+            )
+            .await
+            .map_err(|err| err.diagnostic_reason())?;
+        tracing::info!(
+            account_id = %self.account_id,
+            room_id = %hole.room_id,
+            gap_id,
+            prev_batch = hole.prev_batch.as_deref().unwrap_or("<none: live end>"),
+            oldest_event_id = hole.batch.first().map_or("<none>", String::as_str),
+            batch_len = hole.batch.len(),
+            "limited sync left a hole in the room's history; recorded it for filling"
+        );
+        self.signal.mark();
+        Ok(())
     }
 
     /// The broadcast dropped `skipped` updates. Probe every joined room that
     /// stored events after the last update this watcher read.
-    pub(crate) async fn lagged(&mut self, skipped: u64) {
+    pub(crate) async fn lagged(&mut self, skipped: u64, joined: JoinedRooms<'_>) {
         let boundary = self.lag_boundary().await;
-        self.add_pending_probe(boundary);
-        self.retry_pending_probe(skipped).await;
-    }
-
-    fn add_pending_probe(&mut self, boundary: LagMark) {
         // Two pending lags merge into the earlier boundary, which covers both.
-        self.pending_probe = Some(
-            self.pending_probe
+        self.pending.probe = Some(
+            self.pending
+                .probe
                 .map_or(boundary, |pending| pending.earliest(boundary)),
         );
+        if !self.record_probes(skipped, joined).await {
+            self.pending.refused();
+        }
     }
 
     /// The latest `received_at` (and highest id) among the stored events of
@@ -261,23 +380,20 @@ impl GapWatcher {
         self.subscribed
     }
 
-    async fn retry_pending_probe(&mut self, skipped: u64) {
-        let Some(boundary) = self.pending_probe else {
-            return;
+    /// Record the pending lag's probes. Returns `false` if the database
+    /// refused them; they stay pending.
+    async fn record_probes(&mut self, skipped: u64, joined: JoinedRooms<'_>) -> bool {
+        let Some(boundary) = self.pending.probe else {
+            return true;
         };
-        let joined = (self.joined_rooms)();
+        let joined = joined();
         match self
             .store
-            .record_lag_probes(
-                self.account_id,
-                boundary,
-                &joined,
-                i64::from(self.timeline_limit.max(1)),
-            )
+            .record_lag_probes(self.account_id, boundary, &joined)
             .await
         {
             Ok(rooms) => {
-                self.pending_probe = None;
+                self.pending.probe = None;
                 tracing::warn!(
                     account_id = %self.account_id,
                     boundary = %boundary.received_at,
@@ -292,13 +408,46 @@ impl GapWatcher {
                 if !rooms.is_empty() {
                     self.signal.mark();
                 }
+                true
             }
-            Err(err) => tracing::warn!(
-                account_id = %self.account_id,
-                boundary = %boundary.received_at,
-                reason = err.diagnostic_reason(),
-                "could not record lag probes; retrying"
-            ),
+            Err(err) => {
+                tracing::warn!(
+                    account_id = %self.account_id,
+                    boundary = %boundary.received_at,
+                    reason = err.diagnostic_reason(),
+                    "could not record lag probes; retrying"
+                );
+                false
+            }
+        }
+    }
+
+    /// Retry the holes and probes the database refused, once their delay has
+    /// passed.
+    pub(crate) async fn retry_pending(&mut self, joined: JoinedRooms<'_>) {
+        if !self.pending.due() {
+            return;
+        }
+        let mut refused = false;
+        let holes = std::mem::take(&mut self.pending.holes);
+        for hole in holes {
+            if refused {
+                self.pending.holes.push(hole);
+                continue;
+            }
+            if let Err(reason) = self.insert_hole(&hole).await {
+                tracing::warn!(account_id = %self.account_id, room_id = %hole.room_id, reason, "could not record a kept hole; retrying");
+                refused = true;
+                self.pending.holes.push(hole);
+            }
+        }
+        if !refused && !self.record_probes(0, joined).await {
+            refused = true;
+        }
+        if refused {
+            self.pending.refused();
+        } else {
+            self.pending.settled();
         }
     }
 }
@@ -311,28 +460,57 @@ fn event_ids(events: &[TimelineEvent]) -> Vec<String> {
         .collect()
 }
 
-/// Run `watcher` over `updates` until `cancel` fires or the broadcast closes.
-/// Subscribe before the sync service starts, so the first response is not
-/// missed.
-pub(crate) async fn watch(
-    mut updates: broadcast::Receiver<RoomUpdates>,
-    mut watcher: GapWatcher,
-    cancel: CancellationToken,
-) {
-    loop {
-        let retry = watcher.pending_probe.is_some();
-        let next = tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(PROBE_RETRY), if retry => {
-                watcher.retry_pending_probe(0).await;
-                continue;
+/// One account run's gap watcher with its own subscription to the
+/// room-update broadcast, drained in-line by the live ingestion handler.
+pub(crate) struct GapRecorder {
+    state: Mutex<(broadcast::Receiver<RoomUpdates>, GapWatcher)>,
+}
+
+impl GapRecorder {
+    /// Subscribe before the sync service starts, so the first response is not
+    /// missed.
+    pub(crate) fn new(updates: broadcast::Receiver<RoomUpdates>, watcher: GapWatcher) -> Self {
+        Self {
+            state: Mutex::new((updates, watcher)),
+        }
+    }
+
+    /// Record the holes of every response broadcast so far. The live
+    /// ingestion handler calls this before it stores an event, so a
+    /// response's holes are committed before its events are, and before the
+    /// SDK saves the position past it. Holding the lock across the inserts
+    /// makes a concurrent caller wait for them too.
+    pub(crate) async fn drain(&self, joined: JoinedRooms<'_>) {
+        let mut state = self.state.lock().await;
+        let (updates, watcher) = &mut *state;
+        watcher.retry_pending(joined).await;
+        loop {
+            match updates.try_recv() {
+                Ok(batch) => watcher.observe(&batch).await,
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    watcher.lagged(skipped, joined).await;
+                }
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => {
+                    return;
+                }
             }
-            next = updates.recv() => next,
-        };
-        match next {
-            Ok(batch) => watcher.observe(&batch).await,
-            Err(broadcast::error::RecvError::Lagged(skipped)) => watcher.lagged(skipped).await,
-            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// Drain `recorder` every [`DRAIN_INTERVAL`] until `cancel` fires: between
+/// live events, responses that carry none still go through it, so they do not
+/// fill the broadcast into a lag, and refused work is retried.
+pub(crate) async fn watch(recorder: Arc<GapRecorder>, client: Client, cancel: CancellationToken) {
+    let joined = move || joined_room_ids(&client);
+    let mut tick = tokio::time::interval(DRAIN_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tick.tick() => recorder.drain(&joined).await,
         }
     }
 }
@@ -523,9 +701,8 @@ impl Filler<'_> {
         };
         // Written in full even when it closes the row, so the hole's events on
         // it are kept; the already-stored ones are no-ops.
-        if write_page(self.ctx, room, &events, key_arrivals, self.cancel).await
-            == Written::Abandoned
-        {
+        let written = write_page(self.ctx, room, &events, key_arrivals, self.cancel).await;
+        if written == Written::Abandoned {
             return GapPage::Abandoned;
         }
         let inserted = match store.count_stored_events(account_id, &ids).await {
@@ -545,6 +722,13 @@ impl Filler<'_> {
             already_stored = lookup.already_stored,
             "gap fill: wrote a page"
         );
+        // An event the store refused is still missing: neither advance nor
+        // close the row, so the page is fetched again after a backoff. Its
+        // other events are no-ops then, and do not move the boundary.
+        if let Written::StoreFailed(failed) = written {
+            tracing::warn!(account_id = %account_id, room_id = %gap.room_id, gap_id = gap.id, failed, "gap fill: events on the page could not be stored; keeping the row's token to fetch it again");
+            return GapPage::Failed(PageFailure::StoreWrite);
+        }
 
         let end = match end {
             Some(end) if !lookup.reaches_stored_history => end,

@@ -12,7 +12,7 @@ mod common;
 
 use std::time::Duration;
 
-use axon_store::{GapCheck, GapOrigin, RoomBackfillFailure, Store, TimelineGap};
+use axon_store::{GapCheck, GapOrigin, NewEvent, RoomBackfillFailure, Store, TimelineGap};
 use common::{insert_message, migrated_store, raw_pool, test_account};
 use uuid::Uuid;
 
@@ -104,21 +104,66 @@ async fn a_batch_after_stored_history_is_a_hole_with_a_resolved_boundary() {
     store.delete_account_row(account_id).await.expect("cleanup");
 }
 
-/// A row with a `prev_batch` takes its insert time as its boundary.
+/// A row with a `prev_batch` resolves its boundary at the check too, to the
+/// batch's earliest storage time, so recording it before or after its batch is
+/// stored makes no difference.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn a_limited_row_with_prev_batch_is_bounded_by_its_insert_time() {
+async fn a_limited_row_with_prev_batch_resolves_its_boundary_from_the_batch() {
     let store = migrated_store().await;
     let account_id = test_account(&store, "gaps-prev").await;
     let room_id = room();
+    store_events(&store, account_id, &room_id, 2).await;
+    // Recorded before its batch is stored, as the ingestion handler does.
+    let batch_ids: Vec<String> = (0..3)
+        .map(|_| format!("$batch-{}:localhost", Uuid::new_v4()))
+        .collect();
     let id = store
-        .record_limited_gap(account_id, &room_id, Some("t-prev"), &["$x".to_owned()])
+        .record_limited_gap(account_id, &room_id, Some("t-prev"), &batch_ids)
         .await
         .expect("record");
     let row = gap(&store, account_id, id).await.expect("row");
     assert_eq!(row.origin, GapOrigin::Limited);
     assert_eq!(row.from_token.as_deref(), Some("t-prev"));
-    assert!(row.stored_before.is_some());
+    assert_eq!(row.stored_before, None, "resolved at the check");
+    assert_eq!(
+        store.check_timeline_gap(id, WAIT).await.expect("check"),
+        GapCheck::AwaitingBatch
+    );
+    store
+        .upsert_event(&NewEvent {
+            event_id: &batch_ids[0],
+            room_id: &room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 10,
+            event_type: "m.room.message",
+            content: None,
+            raw_event: serde_json::json!({ "type": "m.room.message" }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("store the batch's first event");
+    assert_eq!(
+        store.check_timeline_gap(id, WAIT).await.expect("check"),
+        GapCheck::Hole
+    );
+    let batch_min = store
+        .lag_mark(account_id, &batch_ids)
+        .await
+        .expect("mark")
+        .expect("stored")
+        .received_at;
+    let row = gap(&store, account_id, id).await.expect("row");
+    assert_eq!(row.stored_before, Some(batch_min));
+    assert_eq!(
+        row.from_token.as_deref(),
+        Some("t-prev"),
+        "pages from prev_batch"
+    );
     store.delete_account_row(account_id).await.expect("cleanup");
 }
 
@@ -207,7 +252,7 @@ async fn a_rejected_token_restarts_from_the_live_end() {
     let boundary = mark.received_at;
     store_events(&store, account_id, &room_id, 1).await;
     let probes = store
-        .record_lag_probes(account_id, mark, std::slice::from_ref(&room_id), 20)
+        .record_lag_probes(account_id, mark, std::slice::from_ref(&room_id))
         .await
         .expect("probe");
     assert_eq!(probes, vec![room_id.clone()]);
@@ -228,7 +273,7 @@ async fn a_rejected_token_restarts_from_the_live_end() {
 }
 
 /// Probes go to joined rooms that stored an event at or after the boundary,
-/// and carry each room's lowest-id events as their first-window stop.
+/// and carry each room's lowest-id event as their first-window stop.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn lag_probes_cover_joined_rooms_active_since_the_boundary() {
@@ -244,7 +289,7 @@ async fn lag_probes_cover_joined_rooms_active_since_the_boundary() {
 
     let joined = vec![quiet.clone(), busy.clone()];
     let probes = store
-        .record_lag_probes(account_id, mark, &joined, 2)
+        .record_lag_probes(account_id, mark, &joined)
         .await
         .expect("probe");
     assert_eq!(
@@ -262,7 +307,11 @@ async fn lag_probes_cover_joined_rooms_active_since_the_boundary() {
     assert!(probe.batch_checked, "probes have no batch to wait for");
     assert_eq!(probe.from_token, None);
     assert_eq!(probe.stored_before, Some(boundary));
-    assert_eq!(probe.stop_event_ids, busy_first[..2].to_vec());
+    assert_eq!(
+        probe.stop_event_ids,
+        busy_first[..1].to_vec(),
+        "the first event stored in the room"
+    );
 
     // The stop rule: an event stored before the boundary, or a stop event.
     let lookup = store

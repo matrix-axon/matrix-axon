@@ -164,12 +164,15 @@ When more than that reach a room between two responses, the homeserver sends onl
 Axon records every such hole and fetches the missing events from `/messages` ([ADR 0140](adr/0140-fill-limited-sync-gaps.md)).
 A busy room while sync is slow, a restart after an outage, or a bulk import can each leave one.
 
-- A watcher on the SDK's room-update broadcast writes one `room_timeline_gaps` row per hole, logged at `INFO` as "limited sync left a hole in the room's history".
+- The live ingestion handler writes one `room_timeline_gaps` row per hole, from the SDK's room-update broadcast, logged at `INFO` as "limited sync left a hole in the room's history".
+  The row commits before the response's events are stored and before the SDK saves its sync position, so a restart cannot skip it.
+  An insert the database refuses is retried for up to 30 seconds while sync waits on it, then from memory with the same room, token and batch; until it commits, a restart loses that hole, which is logged at `ERROR`.
   A room's first response is also `limited`, but nothing was stored before it, so that row is dropped unpaged (a `DEBUG` line): history before a room's first window is backfill's job.
 - The backfill task pages each row backward, ahead of ordinary backfill pages and through the same load gate, disk guard and throttle.
   A row closes on the first page that holds an event Axon stored before the hole was detected, and logs at `INFO` with its `pages_fetched` and `events_recovered`.
   A row that recovered nothing logs "limited sync had nothing missing" instead: a room coming back into the sliding-sync window can be reported `limited` with no hole.
   Failures back off and park as backfill rooms do (ADR 0121); a rejected token restarts the row from the room's live end.
+  A page with an event the store could not write keeps its token and backs off the same way, for gap rows and ordinary backfill alike, so the event is fetched again rather than skipped.
 - The task runs even when `sync.backfill_enabled = false`; it then pages only these rows and never extends history.
   `sync.backfill_target_depth` does not apply to them.
 - If the broadcast lags, the watcher cannot tell which lost responses were limited, so it probes every joined room that stored events during the lag (a `WARN` line with the boundary and the number of rooms).

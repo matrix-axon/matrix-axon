@@ -19,17 +19,18 @@
 --   * from_token       — the next page's `from`; NULL means the live end.
 --   * stored_before    — the stop boundary: a page holding an event whose row
 --                        was stored (`events.received_at`) before it closes the
---                        row. NULL until the filler resolves it, for a limited
---                        response that carried no `prev_batch`.
+--                        row. A lag probe's is set when it is recorded; a
+--                        limited row's is NULL until the filler resolves it to
+--                        the earliest `received_at` among the batch's events.
 --   * batch_event_ids  — the limited batch's event ids, for the first-window
 --                        test (a room's first window is not a hole).
 --   * batch_checked    — the first-window test has run and found a hole, so it
 --                        is not evaluated again. Lag probes are created checked;
 --                        they have no batch.
---   * stop_event_ids   — a lag probe's extra stop: the room's lowest-id events
---                        (its first window) when the probe was recorded, so a
---                        room first seen during the lag is not walked to its
---                        start. Empty for other rows.
+--   * stop_event_ids   — a lag probe's extra stop: the room's lowest-id event
+--                        (the first Axon stored there) when the probe was
+--                        recorded, so a room first seen during the lag is not
+--                        walked to its start. Empty for other rows.
 --   * pages_fetched, events_recovered — progress, for logs and status.
 --   * consecutive_failures, last_failure, retry_at, parked — the ADR 0121
 --                        failure backoff, as on `room_backfill`.

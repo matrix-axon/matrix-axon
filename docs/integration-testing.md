@@ -87,6 +87,10 @@ It runs twice, with `sync.backfill_enabled` on and then off:
    Sliding sync resumes from its saved position, so the room arrives `limited` with only the newest events.
    The script waits for every sent event to be stored, checks that axon logged a hole and closed every gap row, and reads `history_gaps.events_recovered` from `GET /v1/status`.
 
+A third run, with backfill off, restarts axon while a transaction holds a lock on `room_timeline_gaps`, so the hole's insert waits.
+It sends one more message meanwhile, stops axon, and starts it again once the lock is gone.
+The hole must still be filled, which needs its row committed before the SDK saves its sync position past the limited response.
+
 ```sh
 scripts/gap-fill-test.sh
 # Ports taken locally (a dev Synapse on 8008, say):

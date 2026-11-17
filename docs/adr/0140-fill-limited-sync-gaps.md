@@ -55,7 +55,9 @@ A busy room while sync is slow, a reconnect after an outage, and a room coming b
 ### 1. Record every hole that a limited response leaves
 
 A new per-account watcher subscribes to the room-update broadcast before the sync service starts, beside the push watcher.
-For each joined room whose timeline is `limited`, it records a hole in a new table:
+For each joined room whose timeline is `limited`, it records a hole in a new table.
+It is not a task of its own: the live ingestion handler drains it before storing an event (see "Recording is durable" below).
+The table:
 
 ```sql
 CREATE TABLE room_timeline_gaps (
@@ -86,12 +88,21 @@ The implementation adds two columns to this sketch.
 The surrogate key lets one room hold any number of holes and probes.
 It also means replacing `from_token` after each page can never collide with another row.
 The watcher only inserts rows, so it keeps up with the broadcast; the paging happens elsewhere (decision 2).
-Recording is durable, so a restart, a crash or a supervised account restart never forgets a hole.
 
-A limited response with a `prev_batch` gets an `origin = 'limited'` row.
-Its `from_token` is that `prev_batch` and its `stored_before` is the insert time.
+**Recording is durable before the SDK moves past the response.**
+The SDK sends a response's broadcast before it runs that response's handlers, awaits the handlers, and only then saves its sliding-sync position.
+So the live ingestion handler drains the watcher before it stores an event, and the response's rows commit before any of its events, and before a restart could resume past it.
+A row recorded by a separate task instead could still be pending when the position was saved, and a restart would forget the hole (found in review of step 1).
+An insert the database refuses is retried for up to 30 seconds while the handler waits, which outlasts several of the default 3-second lock deadlines.
+If it is still refused, it is kept in memory exactly as the response described it (room, token and batch) and retried until it commits; a restart in that window is the one way a hole is lost, and it is logged at `ERROR`.
+Later holes then queue behind it at once, so an outage stalls sync for one budget, not one per room.
+It does not fall back to a lag probe, which could run before the batch is stored, find nothing to probe, and drop the hole.
+A small task drains the watcher between live events too, so responses without timeline events do not fill the broadcast into a lag.
+
+A limited response with a `prev_batch` gets an `origin = 'limited'` row whose `from_token` is that `prev_batch`.
 A limited response without a `prev_batch` gets a row that starts from the live end (`from_token` NULL).
-Its `stored_before` stays NULL until the filler picks it up, and is then set to the earliest `received_at` among the batch's stored events.
+Either row's `stored_before` stays NULL until the filler picks it up, and is then set to the earliest `received_at` among the batch's stored events.
+(This plan first took the insert time for a row with a `prev_batch`; the batch's time is equally valid, and does not depend on when a retried insert ran.)
 `batch_event_ids` holds the ids of the limited batch's events, at most `timeline_limit` of them; the first-window test below uses it.
 `sync.timeline_limit` is validated to be at least 1 at startup, so a limited response always carries events for the handler to store.
 Events can still all be dropped when they fail to parse.
@@ -110,10 +121,9 @@ Only an earlier sync response, or backfill, can have stored such an event.
 Events that live sync stores after the batch fail the comparison, however long the row waits.
 So the test gives the same answer whenever it is evaluated.
 
-The watcher cannot use the simpler "the room has no stored events" when it inserts the row.
-The SDK sends the broadcast before the response's handlers run, but the watcher is a separate task.
-By the time it reads the broadcast, this response's batch, or a later response's events, may already be stored.
-That would make a first window look like a hole and page the whole room.
+The simpler "the room has no stored events" when the row is inserted would not do.
+Backfill can page a newly joined room before its first response's handlers run, and a row retried from memory is inserted after its batch, or a later response's events, are stored.
+Either would make a first window look like a hole and page the whole room.
 
 **When a row is picked up.**
 There is no fixed wait.
@@ -147,9 +157,9 @@ The walk follows `/messages` stream order, and the boundary compares `events.rec
 `ON CONFLICT DO NOTHING` never changes that time.
 This matters for the case that prompted this ADR: imported events carry `origin_ts` values years older than the events Axon stored around them.
 
-For an `origin = 'limited'` row, `stored_before` is its insert time.
+For an `origin = 'limited'` row, `stored_before` is the earliest `received_at` among its batch's stored events.
 The events just before the hole were stored by an earlier sync response.
-The SDK finishes that response's timeline handlers before it processes the next response, and only then sends the next response's broadcast, which the watcher receives before inserting the row.
+The SDK finishes that response's timeline handlers before it processes the next response, so they were stored before any of this response's batch.
 So those events always satisfy the boundary, and the walk stops at them.
 
 Holes nest correctly.
@@ -198,7 +208,9 @@ It stops at the first page holding an event stored before the boundary.
 A probe that finds nothing missing costs one or two pages.
 
 A room first seen during the lag has nothing stored before the boundary, and its probe would walk to the room's start.
-So a probe also closes at the first page holding any of the room's lowest-`id` events, its first window, as the verification pass does (decision 4).
+So a probe also closes at the first page holding the room's lowest-`id` event, the first event Axon stored there, which precedes every hole a later response could leave.
+It takes that one event, not up to `timeline_limit` of the lowest: when a room's first window is shorter than that, they include events of later responses, above the holes, and the probe would close before reaching them (found in review of step 1).
+The cost is up to one extra page, through the rest of the first window.
 History before a room's first window stays backfill's job.
 The lag is logged at `WARN` with the boundary and the number of rooms probed.
 

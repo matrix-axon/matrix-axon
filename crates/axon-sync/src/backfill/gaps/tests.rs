@@ -29,6 +29,10 @@ use crate::engine::persist_timeline_event;
 /// the request log.
 const PAGE: u32 = 4;
 
+/// The in-handler insert budget for harnesses with a recorder: long enough
+/// for a few attempts, short enough that a refused hole reaches memory fast.
+const INSERT_BUDGET_FOR_TESTS: Duration = Duration::from_millis(500);
+
 /// The stand-in homeserver's state: each room's timeline in stream order, the
 /// queued sliding-sync responses, rejected tokens, and every `/messages`
 /// request's `(room, from)`.
@@ -125,10 +129,24 @@ struct Harness {
     rooms: HashMap<&'static str, String>,
     pos: u64,
     server: tokio::task::JoinHandle<()>,
+    /// The gap recorder the ingestion handler drains, as in the engine; `None`
+    /// for tests that hand updates to a watcher themselves.
+    recorder: Option<Arc<GapRecorder>>,
 }
 
 impl Harness {
+    /// A harness whose tests drive a [`GapWatcher`] by hand.
     async fn new(tags: &[&'static str]) -> Self {
+        Self::build(tags, false).await
+    }
+
+    /// A harness whose ingestion handler drains a [`GapRecorder`], as the
+    /// engine's does.
+    async fn with_recorder(tags: &[&'static str]) -> Self {
+        Self::build(tags, true).await
+    }
+
+    async fn build(tags: &[&'static str], inline: bool) -> Self {
         let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
             .await
             .unwrap();
@@ -201,6 +219,18 @@ impl Harness {
             .unwrap();
         let (live_tx, _) = broadcast::channel(64);
         let (state_redaction_tx, _) = tokio::sync::mpsc::channel(32);
+        let signal = Arc::new(GapSignal::default());
+        let recorder = if inline {
+            let watcher = GapWatcher::new(account_id, store.clone(), 5, Arc::clone(&signal))
+                .await
+                .with_insert_budget(INSERT_BUDGET_FOR_TESTS);
+            Some(Arc::new(GapRecorder::new(
+                client.subscribe_to_all_room_updates(),
+                watcher,
+            )))
+        } else {
+            None
+        };
         let ctx = PersistContext {
             store: store.clone(),
             account_id,
@@ -210,6 +240,7 @@ impl Harness {
             purge_on_leave: false,
             state_redaction_tx,
             room_details: crate::room_details::RoomDetailsChanges::new(account_id, live_tx),
+            gaps: recorder.clone(),
         };
         client.add_event_handler_context(ctx.clone());
         client.add_event_handler(persist_timeline_event);
@@ -234,13 +265,14 @@ impl Harness {
             upstream,
             updates,
             ctx,
-            signal: Arc::new(GapSignal::default()),
+            signal,
             gate: HomeserverGate::for_test(),
             health: BackfillHealth::new(None),
             cancel: CancellationToken::new(),
             rooms,
             pos: 0,
             server,
+            recorder,
         }
     }
 
@@ -273,6 +305,19 @@ impl Harness {
     /// handlers have stored its events. Returns its room-update broadcast,
     /// which the test hands to the watcher whenever it chooses.
     async fn sync(&mut self, deliveries: &[Delivery]) -> RoomUpdates {
+        self.queue(deliveries);
+        tokio::time::timeout(Duration::from_secs(10), self.sync.sync_once())
+            .await
+            .unwrap()
+            .unwrap();
+        // Each insert is its own transaction; keep storage times distinct
+        // between responses on a coarse database clock.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        self.updates.try_recv().expect("the response's broadcast")
+    }
+
+    /// Queue the next sliding-sync response without serving it.
+    fn queue(&mut self, deliveries: &[Delivery]) {
         self.pos += 1;
         let mut rooms = serde_json::Map::new();
         {
@@ -301,26 +346,22 @@ impl Harness {
             .unwrap()
             .sync
             .push_back(json!({"pos": self.pos.to_string(), "lists": {}, "rooms": rooms}));
-        tokio::time::timeout(Duration::from_secs(10), self.sync.sync_once())
-            .await
-            .unwrap()
-            .unwrap();
-        // Each insert is its own transaction; keep storage times distinct
-        // between responses on a coarse database clock.
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        self.updates.try_recv().expect("the response's broadcast")
     }
 
     async fn watcher(&self) -> GapWatcher {
-        let rooms: Vec<String> = self.rooms.values().cloned().collect();
         GapWatcher::new(
             self.account_id,
             self.store.clone(),
-            Box::new(move || rooms.clone()),
             5,
             Arc::clone(&self.signal),
         )
         .await
+    }
+
+    /// Every room of the harness, as the watcher reads the joined rooms.
+    fn joined_rooms(&self) -> impl Fn() -> Vec<String> + Send + Sync {
+        let rooms: Vec<String> = self.rooms.values().cloned().collect();
+        move || rooms.clone()
     }
 
     fn params(&self, enabled: bool) -> BackfillParams {
@@ -483,7 +524,7 @@ async fn nested_holes_are_filled_to_their_own_boundaries() {
     h.sync(&[deliver("a", 50, 52)]).await;
     h.append("a", 18);
     let u4 = h.sync(&[deliver("a", 65, 70).limited()]).await;
-    watcher.lagged(1).await;
+    watcher.lagged(1, &h.joined_rooms()).await;
     watcher.observe(&u4).await;
     let rows = h.gaps().await;
     assert_eq!(rows.len(), 2);
@@ -620,7 +661,7 @@ async fn a_lag_probe_fills_every_hole_in_the_window() {
     // shorter than the stall, would lie after the lost responses and miss
     // both holes.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    watcher.lagged(4).await;
+    watcher.lagged(4, &h.joined_rooms()).await;
 
     h.fill().await;
     assert!(h.gaps().await.is_empty());
@@ -637,10 +678,12 @@ async fn a_lag_probe_fills_every_hole_in_the_window() {
         ]
         .concat()
     );
-    // The room first seen during the lag: its probe closes on its first
-    // window, so its earlier history stays backfill's job.
-    assert_eq!(h.stored("b").await, range(25, 30));
-    assert_eq!(h.take_requests("b"), vec![None]);
+    // The room first seen during the lag: its probe closes on the page that
+    // holds the first event stored there (25, the oldest of its first
+    // window), and that page is written in full. Its earlier history stays
+    // backfill's job.
+    assert_eq!(h.stored("b").await, range(22, 30));
+    assert_eq!(h.take_requests("b"), [vec![None], tokens(&[26])].concat());
     h.finish().await;
 }
 
@@ -693,4 +736,310 @@ async fn a_first_window_is_never_paged_however_late_the_watcher_reads_it() {
             h.finish().await;
         }
     }
+}
+
+/// Makes `table` refuse the first `times` inserts of rows matching `when`, as a
+/// failing write would. The count lives in a sequence, so a refused insert's
+/// rollback does not undo it. `when` names a room id no other test uses.
+struct InjectedFailures {
+    store: Store,
+    name: String,
+    table: &'static str,
+}
+
+impl InjectedFailures {
+    async fn install(store: &Store, table: &'static str, when: &str, times: u32) -> Self {
+        let name = format!("gap_test_{}", Uuid::new_v4().simple());
+        for sql in [
+            format!("CREATE SEQUENCE {name}"),
+            format!(
+                "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     IF nextval('{name}') <= {times} THEN \
+                         RAISE EXCEPTION 'injected failure'; \
+                     END IF; \
+                     RETURN NEW; \
+                 END $$"
+            ),
+            format!(
+                "CREATE TRIGGER {name} BEFORE INSERT ON {table} FOR EACH ROW \
+                 WHEN ({when}) EXECUTE FUNCTION {name}()"
+            ),
+        ] {
+            sqlx_core::query::query(&sql)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        Self {
+            store: store.clone(),
+            name,
+            table,
+        }
+    }
+
+    /// How many inserts reached the trigger.
+    async fn attempts(&self) -> i64 {
+        let (attempts,): (i64,) = sqlx_core::query_as::query_as(&format!(
+            "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM {}",
+            self.name
+        ))
+        .fetch_one(self.store.pool())
+        .await
+        .unwrap();
+        attempts
+    }
+
+    async fn remove(self) {
+        let name = &self.name;
+        for sql in [
+            format!("DROP TRIGGER {name} ON {}", self.table),
+            format!("DROP FUNCTION {name}()"),
+            format!("DROP SEQUENCE {name}"),
+        ] {
+            sqlx_core::query::query(&sql)
+                .execute(self.store.pool())
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// Review finding: a probe's first-window stop must precede the hole even
+/// when the room's first window was shorter than the timeline limit, whether
+/// that window was read before the lag or lost in it. Several lowest-id
+/// events would include the later limited batch, and the probe would close on
+/// its first page with the hole untouched.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_short_first_window_does_not_stop_a_lag_probe_inside_the_hole() {
+    let mut h = Harness::new(&["s", "d"]).await;
+    let mut watcher = h.watcher().await;
+    // "s": a one-event first window, read before the lag.
+    h.append("s", 1);
+    let u0 = h.sync(&[deliver("s", 0, 1)]).await;
+    watcher.observe(&u0).await;
+    // "d": a one-event first window, lost in the lag.
+    h.append("d", 1);
+    h.sync(&[deliver("d", 0, 1)]).await;
+    // Both rooms then get a limited response the watcher also loses.
+    h.append("s", 24);
+    h.append("d", 24);
+    h.sync(&[
+        deliver("s", 20, 25).limited(),
+        deliver("d", 20, 25).limited(),
+    ])
+    .await;
+    watcher.lagged(2, &h.joined_rooms()).await;
+
+    h.fill().await;
+    assert!(h.gaps().await.is_empty());
+    for tag in ["s", "d"] {
+        assert_eq!(h.stored(tag).await, range(0, 25), "{tag}: hole filled");
+        assert_eq!(
+            h.take_requests(tag),
+            [vec![None], tokens(&[21, 17, 13, 9, 5, 1])].concat(),
+            "{tag}: walked down to the room's first stored event"
+        );
+    }
+    h.finish().await;
+}
+
+/// Review finding: an event the store refuses must not be skipped. The row
+/// keeps its token and backs off, and the next attempt stores the event and
+/// only then closes.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_failed_event_write_keeps_the_row_until_its_page_is_stored() {
+    let mut h = Harness::new(&["w"]).await;
+    let mut watcher = h.watcher().await;
+    h.append("w", 5);
+    let u0 = h.sync(&[deliver("w", 0, 5)]).await;
+    watcher.observe(&u0).await;
+    h.append("w", 30);
+    let u1 = h.sync(&[deliver("w", 30, 35).limited()]).await;
+    watcher.observe(&u1).await;
+    // Fail one write on the page that reaches the history before the hole:
+    // the page from s6 holds 2..5, where 2..4 were stored before it, so
+    // without the failure it would close the row.
+    let failures = InjectedFailures::install(
+        &h.store,
+        "events",
+        &format!(
+            "NEW.room_id = '{}' AND NEW.event_id = '{}'",
+            h.room("w"),
+            Harness::event_id("w", 5)
+        ),
+        1,
+    )
+    .await;
+
+    h.fill().await;
+    assert_eq!(failures.attempts().await, 1, "the write was refused once");
+    let row = h.gaps().await.pop().expect("the row stays open");
+    assert_eq!(row.from_token.as_deref(), Some("s6"), "its token is kept");
+    assert_eq!(row.consecutive_failures, 1, "and it backs off");
+    assert_eq!(h.stored("w").await, &range(0, 5) | &range(6, 35));
+
+    // Once the backoff ends, the page is fetched again, 5 is stored, and the
+    // row closes.
+    sqlx_core::query::query("UPDATE room_timeline_gaps SET retry_at = NULL WHERE id = $1")
+        .bind(row.id)
+        .execute(h.store.pool())
+        .await
+        .unwrap();
+    h.take_requests("w");
+    h.fill().await;
+    assert!(h.gaps().await.is_empty());
+    assert_eq!(h.stored("w").await, range(0, 35));
+    assert_eq!(h.take_requests("w"), tokens(&[6]));
+    failures.remove().await;
+    h.finish().await;
+}
+
+/// Review finding: a hole whose insert the database refuses, while the
+/// handler waits, is kept exactly and retried, even though its batch is not
+/// stored yet when it is first refused. Nothing falls back to a probe that
+/// could run before the batch is visible.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_refused_hole_is_kept_and_recorded_exactly_on_retry() {
+    let mut h = Harness::with_recorder(&["f"]).await;
+    h.append("f", 5);
+    h.sync(&[deliver("f", 0, 5)]).await;
+    h.append("f", 30);
+    // Every attempt the handler waits for is refused (many more than fit in
+    // the budget), and so is the first retry from memory.
+    let failures = InjectedFailures::install(
+        &h.store,
+        "room_timeline_gaps",
+        &format!("NEW.room_id = '{}'", h.room("f")),
+        1_000,
+    )
+    .await;
+    h.sync(&[deliver("f", 30, 35).limited()]).await;
+    let in_handler = failures.attempts().await;
+    assert!(in_handler > 1, "retried while the handler waited");
+    assert!(h.gaps().await.is_empty(), "refused");
+    assert_eq!(h.stored("f").await, &range(0, 5) | &range(30, 35));
+
+    // A second hole meanwhile queues behind it without another budget's
+    // wait: the gap table is known to be refusing inserts.
+    h.append("f", 10);
+    let started = std::time::Instant::now();
+    h.sync(&[deliver("f", 40, 45).limited()]).await;
+    assert!(
+        started.elapsed() < INSERT_BUDGET_FOR_TESTS,
+        "queued at once"
+    );
+    assert_eq!(failures.attempts().await, in_handler, "not attempted");
+
+    // The drain task's next pass, once the database accepts the rows again
+    // and the retry delay has passed.
+    sqlx_core::query::query(&format!(
+        "ALTER SEQUENCE {} RESTART WITH 2000",
+        failures.name
+    ))
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+    tokio::time::sleep(PENDING_RETRY + Duration::from_millis(100)).await;
+    let joined = h.joined_rooms();
+    h.recorder.as_ref().unwrap().drain(&joined).await;
+    let mut rows = h.gaps().await;
+    assert_eq!(rows.len(), 2, "both recorded on retry");
+    let newer = rows.remove(0);
+    assert_eq!(newer.from_token.as_deref(), Some("s40"));
+    let row = rows.remove(0);
+    assert_eq!(row.origin, GapOrigin::Limited);
+    assert_eq!(row.from_token.as_deref(), Some("s30"));
+    failures.remove().await;
+
+    h.fill().await;
+    assert!(h.gaps().await.is_empty());
+    assert_eq!(h.stored("f").await, range(0, 45));
+    h.finish().await;
+}
+
+/// Review finding: a hole's row must be committed before the SDK saves its
+/// sync position past the response, or a restart forgets the hole. The
+/// handler drains the recorder, so while the insert waits on a lock the
+/// response is not finished, and the row exists the moment it is.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_hole_is_committed_before_the_response_finishes() {
+    let mut h = Harness::with_recorder(&["g"]).await;
+    h.append("g", 5);
+    h.sync(&[deliver("g", 0, 5)]).await;
+    h.append("g", 30);
+
+    // Block inserts into the gap table, as a lock held elsewhere would.
+    let mut blocker = h.store.pool().begin().await.unwrap();
+    sqlx_core::query::query("LOCK TABLE room_timeline_gaps IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    h.queue(&[deliver("g", 30, 35).limited()]);
+    let sync = h.sync.clone();
+    let response = tokio::spawn(async move { sync.sync_once().await });
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        !response.is_finished(),
+        "the response finished, and its position could be saved, before its hole was recorded"
+    );
+    blocker.rollback().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), response)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    h.updates.try_recv().expect("the response's broadcast");
+    let row = h.gaps().await.pop().expect("committed with the response");
+    assert_eq!(row.from_token.as_deref(), Some("s30"));
+    h.finish().await;
+}
+
+/// The same rule for ordinary backfill, which shares the page writer: a page
+/// with a refused write is a failure, and the cursor is not saved past it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn ordinary_backfill_keeps_its_cursor_when_a_write_fails() {
+    let mut h = Harness::new(&["o"]).await;
+    h.append("o", 12);
+    h.sync(&[deliver("o", 8, 12).limited()]).await;
+    let failures = InjectedFailures::install(
+        &h.store,
+        "events",
+        &format!(
+            "NEW.room_id = '{}' AND NEW.event_id = '{}'",
+            h.room("o"),
+            Harness::event_id("o", 5)
+        ),
+        1,
+    )
+    .await;
+    // The first page from the live end holds 8..11, all stored already.
+    assert!(matches!(h.backfill_page("o").await, PageOutcome::Paged));
+    let before = h
+        .store
+        .get_room_backfill(h.account_id, h.room("o"))
+        .await
+        .unwrap()
+        .unwrap()
+        .oldest_seen_token;
+    assert_eq!(before.as_deref(), Some("s8"));
+    assert!(matches!(
+        h.backfill_page("o").await,
+        PageOutcome::Failed(PageFailure::StoreWrite)
+    ));
+    let after = h
+        .store
+        .get_room_backfill(h.account_id, h.room("o"))
+        .await
+        .unwrap()
+        .unwrap()
+        .oldest_seen_token;
+    assert_eq!(after, before, "the cursor did not move past 5");
+    failures.remove().await;
+    h.finish().await;
 }

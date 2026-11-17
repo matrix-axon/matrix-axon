@@ -17,6 +17,11 @@
 #      events. Assert every burst event is stored, that a hole was recorded,
 #      and that no gap row is left open.
 #
+# A third run (backfill off) restarts axon while the hole's insert is stuck on a
+# lock held on the gap table, sends a message meanwhile, then restarts it again
+# once the lock is gone. The hole must survive: its row has to be committed
+# before the SDK saves its sync position past the limited response.
+#
 # Without the gap filler the burst's older events are never fetched, and step 4
 # times out.
 #
@@ -100,23 +105,46 @@ send_messages() {
     done
 }
 
-# --- one run per backfill setting ----------------------------------------------
+# --- the gap table lock for the restart case -------------------------------------
 
+# Seconds the lock is held: longer than axon waits before it stops below.
+LOCK_SECS=15
+
+# hold_gap_lock — lock the gap table against inserts in the background, as a
+# long transaction elsewhere would.
+hold_gap_lock() {
+    docker exec -d "$PG" psql -U axon -d "$ITEST_DB" -c \
+        "BEGIN; LOCK TABLE room_timeline_gaps IN SHARE ROW EXCLUSIVE MODE; SELECT pg_sleep(${LOCK_SECS}); COMMIT;"
+}
+gap_lock_held() {
+    psql_q "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+            WHERE c.relname = 'room_timeline_gaps' AND l.mode = 'ShareRowExclusiveLock' AND l.granted"
+}
+gap_inserts_waiting() {
+    psql_q "SELECT count(*) FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND query LIKE 'INSERT INTO room_timeline_gaps%'"
+}
+
+# --- one run per case -------------------------------------------------------------
+
+# run_case <backfill_enabled> [restart-while-locked]
 run_case() {
-    local backfill="$1"
+    local backfill="$1" locked="${2:-}"
+    local name="backfill-${backfill}${locked:+-${locked}}"
     local suffix
     suffix="$(date +%s)-$$-${backfill}"
     local localpart="gapfill-${suffix}"
     USER_ID="@${localpart}:localhost"
     PASSWORD="pass-${suffix}"
-    ITEST_DB="axon_gapfill_${backfill}"
+    ITEST_DB="axon_gapfill_${backfill}${locked:+_locked}"
     DATABASE_URL="postgres://axon:axon@127.0.0.1:${POSTGRES_PORT}/${ITEST_DB}"
-    RUN_DIR="${RUN_ROOT}/backfill-${backfill}"
+    RUN_DIR="${RUN_ROOT}/${name}"
     AXON_EXTRA_ENV=("AXON_SYNC__BACKFILL_ENABLED=${backfill}")
     mkdir -p "$RUN_DIR"
     DATABASES+=("$ITEST_DB")
 
-    log "backfill_enabled=${backfill}: user, room and a few messages"
+    log "${name}: user, room and a few messages"
     recreate_db "$ITEST_DB"
     register_user "$localpart" "$PASSWORD" || die "user registration failed"
     HS_TOKEN="$(curl -fsS -XPOST "${HS_URL}/_matrix/client/v3/login" -H 'Content-Type: application/json' \
@@ -127,7 +155,7 @@ run_case() {
     send_messages "$INITIAL" initial
     info "room ${ROOM_ID}"
 
-    log "backfill_enabled=${backfill}: axon syncs the room"
+    log "${name}: axon syncs the room"
     run_axon
     wait_for_axon_http
     local token account_id
@@ -150,13 +178,33 @@ run_case() {
     fi
     stop_axon
 
-    log "backfill_enabled=${backfill}: ${BURST} messages while axon is down"
+    log "${name}: ${BURST} messages while axon is down"
     send_messages "$BURST" burst
     info "sent ${#SENT_IDS[@]} messages in all"
 
-    log "backfill_enabled=${backfill}: axon restarts; the room arrives limited"
-    run_axon
-    wait_for_axon_http
+    if [ -n "$locked" ]; then
+        log "${name}: axon restarts while the gap table is locked, then stops"
+        hold_gap_lock
+        wait_until "gap table locked" -eq 1 gap_lock_held
+        run_axon
+        wait_for_axon_http
+        wait_until "the hole's insert waiting on the lock" -ge 1 gap_inserts_waiting
+        # A later message while the insert waits. A watcher that let the SDK
+        # move on would store it, and the SDK would save its position past the
+        # limited response, so the restart below would never see the hole.
+        send_messages 1 during-lock
+        sleep 3
+        stop_axon
+        wait_until "gap table unlocked" -eq 0 gap_lock_held
+        log "${name}: axon restarts again"
+        run_axon
+        wait_for_axon_http
+        send_messages 1 after-restart
+    else
+        log "${name}: axon restarts; the room arrives limited"
+        run_axon
+        wait_for_axon_http
+    fi
     wait_until "every message stored" -eq "${#SENT_IDS[@]}" sent_stored
     grep -q "limited sync left a hole in the room's history" "${RUN_DIR}/axon.log" \
         || die "axon never recorded a hole, so the burst did not exercise the gap filler"
@@ -172,5 +220,6 @@ run_case() {
 
 run_case true
 run_case false
+run_case false restart-while-locked
 
-log "PASS — every message of a ${BURST}-message burst was stored, with backfill on and off"
+log "PASS — every message of a ${BURST}-message burst was stored: backfill on, off, and across a restart while the hole's insert was blocked"

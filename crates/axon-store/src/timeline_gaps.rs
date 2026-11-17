@@ -64,11 +64,11 @@ pub struct TimelineGap {
     /// The next page's `from`; `None` starts at the room's live end.
     pub from_token: Option<String>,
     /// The stop boundary. `None` only before the first-window check has
-    /// resolved a limited response that carried no `prev_batch`.
+    /// resolved a limited row's.
     pub stored_before: Option<DateTime<Utc>>,
     /// The first-window check has run and found a hole.
     pub batch_checked: bool,
-    /// A lag probe's extra stop: the room's lowest-id events when it was
+    /// A lag probe's extra stop: the room's lowest-id event when it was
     /// recorded.
     pub stop_event_ids: Vec<String>,
     pub pages_fetched: i32,
@@ -198,9 +198,12 @@ impl Store {
     }
 
     /// Record the hole a limited response left in `room_id`. With a
-    /// `prev_batch`, paging starts there and the boundary is the insert time;
-    /// without one, paging starts at the live end and the boundary is resolved
-    /// when the row is checked ([`check_timeline_gap`](Self::check_timeline_gap)).
+    /// `prev_batch`, paging starts there; without one, at the live end. Either
+    /// way the boundary is resolved when the row is checked
+    /// ([`check_timeline_gap`](Self::check_timeline_gap)), to the earliest
+    /// `received_at` among the batch's stored events: the events before the
+    /// hole were stored by an earlier response, so they are earlier still, and
+    /// the time does not depend on when this insert ran.
     pub async fn record_limited_gap(
         &self,
         account_id: Uuid,
@@ -210,8 +213,8 @@ impl Store {
     ) -> Result<i64, StoreError> {
         let (id,): (i64,) = sqlx_core::query_as::query_as(
             "INSERT INTO room_timeline_gaps \
-                 (account_id, room_id, origin, from_token, stored_before, batch_event_ids) \
-             VALUES ($1, $2, 'limited', $3, CASE WHEN $3 IS NULL THEN NULL ELSE now() END, $4) \
+                 (account_id, room_id, origin, from_token, batch_event_ids) \
+             VALUES ($1, $2, 'limited', $3, $4) \
              RETURNING id",
         )
         .bind(account_id)
@@ -249,9 +252,15 @@ impl Store {
 
     /// Record a lag probe for every room in `joined_room_ids` that stored an
     /// event after `mark`, returning the rooms probed. Each probe walks from
-    /// the live end back to an event stored before `mark.received_at`, or to one
-    /// of the room's `first_window` lowest-id events, whichever comes first
-    /// (ADR 0140 decision 3).
+    /// the live end back to an event stored before `mark.received_at`, or to
+    /// the room's lowest-id event, whichever comes first (ADR 0140 decision 3).
+    ///
+    /// The lowest-id event is the first event Axon stored in the room, so it
+    /// precedes every hole that a later response could leave, however short
+    /// the room's first window was. A room first seen during the lag stops
+    /// there instead of walking to its start. (Several lowest-id events would
+    /// not do: when the first window is shorter than that, they include events
+    /// of the later responses, above the holes.)
     ///
     /// Rooms are found by events with an `id` above `mark.max_event_id`, a
     /// primary-key range, and a `received_at` at or after the boundary. Every
@@ -262,7 +271,6 @@ impl Store {
         account_id: Uuid,
         mark: LagMark,
         joined_room_ids: &[String],
-        first_window: i64,
     ) -> Result<Vec<String>, StoreError> {
         let rooms: Vec<(String,)> = sqlx_core::query_as::query_as(
             "INSERT INTO room_timeline_gaps \
@@ -270,16 +278,15 @@ impl Store {
              SELECT $1, r.room_id, 'lag_probe', $2, true, \
                     ARRAY(SELECT f.event_id FROM events f \
                           WHERE f.account_id = $1 AND f.room_id = r.room_id \
-                          ORDER BY f.id LIMIT $4) \
+                          ORDER BY f.id LIMIT 1) \
              FROM (SELECT DISTINCT e.room_id FROM events e \
-                   WHERE e.id > $5 AND e.account_id = $1 AND e.received_at >= $2 \
+                   WHERE e.id > $4 AND e.account_id = $1 AND e.received_at >= $2 \
                      AND e.room_id = ANY($3)) r \
              RETURNING room_id",
         )
         .bind(account_id)
         .bind(mark.received_at)
         .bind(joined_room_ids)
-        .bind(first_window.max(1))
         .bind(mark.max_event_id)
         .fetch_all(&self.pool)
         .await?;
