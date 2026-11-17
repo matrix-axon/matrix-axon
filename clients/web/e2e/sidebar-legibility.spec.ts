@@ -221,7 +221,9 @@ test('arrow-key focus stays visible on the room links', async ({ page }) => {
 
 /**
  * The sidebar's narrowest width has to hold the Account select *and* the Rooms
- * button, however long the select's options get. `.room-controls` once wrapped
+ * button inside the pane, however long the select's options get. They sit in
+ * separate rows (the button in `.room-control-row`, the select beneath it), so
+ * this asserts containment, not adjacency. `.room-controls` once wrapped
  * as a column, so the widest item — the select, sized to its longest option —
  * set every row's width and pushed the Rooms button past the clipped pane. That
  * only happened once an unread count lengthened the options, so the fixture's
@@ -229,15 +231,17 @@ test('arrow-key focus stays visible on the room links', async ({ page }) => {
  * writes the text the app renders for them; the bug is pure layout, so the
  * rendered strings are what matter.
  */
-test('the narrowest sidebar keeps the Rooms button beside a long Account select', async ({
+test('the narrowest sidebar keeps the Rooms button and a long Account select inside the pane', async ({
   page,
 }) => {
   await signIn(page)
   await page.setViewportSize({ width: 1280, height: 720 })
+  // The settings envelope is flat (`stores/settings.ts`). An init script runs
+  // on every document load, so a later `goto` or reload re-applies this width.
   await page.addInitScript(() => {
     const raw = localStorage.getItem('axon.settings')
     const settings = raw ? JSON.parse(raw) : { version: 1 }
-    ;(settings.v1 ?? settings).sidebarWidth = 360 // SIDEBAR_WIDTH_MIN
+    settings.sidebarWidth = 360 // SIDEBAR_WIDTH_MIN
     localStorage.setItem('axon.settings', JSON.stringify(settings))
   })
   await page.goto('/')
@@ -247,6 +251,11 @@ test('the narrowest sidebar keeps the Rooms button beside a long Account select'
   await account.evaluate((select: HTMLSelectElement) => {
     select.options[0].textContent = 'All accounts (12 unread)'
     select.options[1].textContent = '@adam:bostoncoop.net (12 unread)'
+    // Chromium keeps the select's old intrinsic width until it is laid out
+    // afresh; the app renders these strings from the start, so match that.
+    select.style.display = 'none'
+    void select.offsetHeight
+    select.style.display = ''
   })
 
   const geometry = await page.evaluate(() => {

@@ -843,9 +843,15 @@ body {
    `min-width: 0` a flex item never shrinks below its content. `text-overflow`
    only applies to a box that is not `overflow: visible`, which is what WebKit
    computes for a select (Chromium and Firefox clip it already); left visible,
-   it still reports the long option as scrollable overflow of the pane. */
+   it still reports the long option as scrollable overflow of the pane. The
+   caption and the unread badge keep their size, so only the select yields. */
 .sidebar .account-select {
   min-width: 0;
+}
+
+.sidebar .account-select label,
+.sidebar .account-select .badge {
+  flex: none;
 }
 
 .sidebar .account-select select {
