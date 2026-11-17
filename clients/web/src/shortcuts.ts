@@ -435,7 +435,7 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
       { keys: KEYS.startDm, description: 'Start direct message' },
       {
         keys: KEYS.cycleFilter,
-        description: 'Cycle filter: all, DMs, groups, unread, favorites',
+        description: 'Cycle filter: all, DMs, groups, unread',
       },
       {
         keys: KEYS.cycleSort,
@@ -447,11 +447,11 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
       },
       {
         keys: KEYS.reorderFavorites,
-        description: 'Show or hide the favorite reordering controls',
+        description: 'Show or hide favorite reordering controls (Favs on)',
       },
       {
         keys: 'Alt-↑ / Alt-↓',
-        description: 'Move the focused room up or down in the favourite list',
+        description: 'Move the focused room in the favorite list (Favs on)',
       },
     ],
   },

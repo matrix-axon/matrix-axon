@@ -20,7 +20,7 @@ homeserver's own page and a code, reload resume, cancellation, and a prompt to
 verify the new device), theme +
 schema-versioned settings, history routing with the permanent deep-link
 shape `/:accountId/rooms/:roomId?thread=&event=` (signed off), the
-cross-account room list with TUI semantics (pinning ADR 0038, sort/filters
+cross-account room list (pinning ADR 0038, sort/filters
 ADR 0042, server-calculated titles for unnamed rooms per ADR 0118,
 server-derived room unread counts), the room
 timeline (cursor-paginated scroll-back, date jump, DOMPurify-sanitized
@@ -79,6 +79,13 @@ that paints before `/v1/rooms` answers and reconciles in place, marked
 "Updating…" until it does — room metadata only, no message bodies; on by
 default and switchable off under Settings → Room list, which also erases what
 was stored).
+
+The room list's **Favs** toggle keeps favorites at the top in their custom order while the remaining rooms follow the selected sort.
+Turn Favs off to sort every room together, including favorites.
+Favs combines with All, DM, Group, Unread, name, account, and space filters; it never hides nonfavorite rooms itself.
+Sort, category, Favs, name query, and account selection are saved locally and restored across reloads and browser sessions.
+The name query overrides the category until cleared.
+Enable Favs to reorder favorites with drag-and-drop, Alt+Up/Down, or the Reorder controls.
 
 Attachment cards show captions across their full width, with an icon-only Download control at the top right.
 Click or tap a previewable card, or activate its filename with Enter or Space, to open the shared media viewer; there is no separate Preview button.

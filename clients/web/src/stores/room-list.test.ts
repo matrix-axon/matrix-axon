@@ -253,6 +253,30 @@ describe('sortRooms (ADRs 0038/0042)', () => {
     sortRooms(input, [], 'az', title)
     expect(input).toEqual([beta, alpha])
   })
+
+  it.each(['recent', 'oldest', 'az', 'za'] as const)(
+    'ignores favorite tags and local pins when promotion is off: %s',
+    (sort) => {
+      const favoriteAlpha = {
+        ...alpha,
+        tags: [{ name: 'm.favourite', order: 0.1 }],
+      }
+      const favoriteGamma = {
+        ...gamma,
+        tags: [{ name: 'm.favourite', order: 0.9 }],
+      }
+      const plain = [alpha, beta, gamma]
+      expect(
+        sortRooms(
+          [favoriteAlpha, beta, favoriteGamma],
+          [roomKey(beta)],
+          sort,
+          title,
+          false,
+        ).map(title),
+      ).toEqual(sortRooms(plain, [], sort, title).map(title))
+    },
+  )
 })
 
 describe('filterRooms (ADR 0042)', () => {
@@ -272,7 +296,6 @@ describe('filterRooms (ADR 0042)', () => {
   const titles = new Map([[roomKey(dm), 'Bob']])
   const context = {
     hasUnread: (key: string) => key === roomKey(ops),
-    isPinned: (key: string) => key === roomKey(lounge),
     title: (r: RoomDto) => roomTitle(r, titles),
   }
 
@@ -284,7 +307,6 @@ describe('filterRooms (ADR 0042)', () => {
       lounge,
     ])
     expect(filterRooms(rooms, { kind: 'unread' }, context)).toEqual([ops])
-    expect(filterRooms(rooms, { kind: 'favorites' }, context)).toEqual([lounge])
   })
 
   it('name filter matches name, alias, topic, room id, and rendered title', () => {

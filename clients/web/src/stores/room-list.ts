@@ -9,6 +9,7 @@ export type MemberDto = components['schemas']['MemberDto']
  * (`clients/tui/src/app/rooms.rs`) so the two clients slice the list the same
  * way: the `is_direct` flag, room titles, favourite-aware sorting
  * (ADR 0038 / ADR 0103), and the filter modes (ADR 0042).
+ * Web makes favorite promotion optional and independent of the category.
  */
 
 /**
@@ -190,8 +191,8 @@ export function accountLabels(
 }
 
 /**
- * Order rooms with the favourite prefix first, then the tail by the active
- * sort (ADR 0042 / ADR 0103).
+ * Optionally promote favorites, then sort the remaining rooms by the active
+ * sort (ADR 0042 / ADR 0103). With promotion off, the sort applies to every room.
  *
  * The prefix is every `m.favourite` plus any not-yet-migrated local pin.
  * Among that prefix a lower order sorts higher. A favourite with no order
@@ -206,6 +207,7 @@ export function sortRooms(
   pinned: readonly string[],
   sort: RoomSort,
   title: (room: RoomDto) => string,
+  favoritesFirst = true,
 ): RoomDto[] {
   // Decorate–sort–undecorate (WCR-13): the comparator used to recompute
   // `roomKey` + a linear `pinned.indexOf` + `title().toLowerCase()` per
@@ -219,10 +221,10 @@ export function sortRooms(
     const key = roomKey(room)
     let group = 1
     let order = 0
-    if (isFavourite(room)) {
+    if (favoritesFirst && isFavourite(room)) {
       group = 0
       order = favouriteOrder(room) ?? Number.POSITIVE_INFINITY
-    } else {
+    } else if (favoritesFirst) {
       const localIndex = pinRank.get(key)
       if (localIndex !== undefined) {
         group = 0
@@ -259,7 +261,7 @@ export function sortRooms(
     .map((entry) => entry.room)
 }
 
-/** The active filter: a persisted category, or a session-only name query. */
+/** The active filter: a category, or a name query overriding that category. */
 export type ActiveFilter =
   { kind: RoomFilter } | { kind: 'name'; query: string }
 
@@ -273,7 +275,6 @@ export function filterRooms(
   filter: ActiveFilter,
   context: {
     hasUnread: (key: string, room: RoomDto) => boolean
-    isPinned: (key: string) => boolean
     title: (room: RoomDto) => string
   },
 ): RoomDto[] {
@@ -286,10 +287,6 @@ export function filterRooms(
       return rooms.filter(isLikelyDm)
     case 'groups':
       return rooms.filter((room) => !isLikelyDm(room))
-    case 'favorites':
-      return rooms.filter(
-        (room) => isFavourite(room) || context.isPinned(roomKey(room)),
-      )
     case 'name': {
       const query = filter.query.trim().toLowerCase()
       if (query === '') {

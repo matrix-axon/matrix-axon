@@ -25,6 +25,9 @@ describe('createSettingsStore', () => {
       sidebarWidth: 420,
       roomSort: 'recent',
       roomFilter: 'all',
+      favoritesFirst: true,
+      roomNameFilter: null,
+      roomAccountFilter: 'all',
       sidebarCollapsed: false,
       stateEvents: 'important',
       hideRedactedEvents: false,
@@ -491,11 +494,63 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     const first = createSettingsStore(storage)
     first.roomSort.value = 'az'
     first.roomFilter.value = 'dms'
+    first.favoritesFirst.value = false
+    first.roomNameFilter.value = 'Project'
+    first.roomAccountFilter.value = 'acct-1'
 
     const second = createSettingsStore(storage)
     expect(second.roomSort.value).toBe('az')
     expect(second.roomFilter.value).toBe('dms')
+    expect(second.favoritesFirst.value).toBe(false)
+    expect(second.roomNameFilter.value).toBe('Project')
+    expect(second.roomAccountFilter.value).toBe('acct-1')
   })
+
+  it.each([undefined, 'yes', true, false])(
+    'validates favorite promotion: %s',
+    (favoritesFirst) => {
+      const store = createSettingsStore(
+        memoryStorage({
+          'axon.settings': JSON.stringify({ version: 1, favoritesFirst }),
+        }),
+      )
+      expect(store.favoritesFirst.value).toBe(
+        typeof favoritesFirst === 'boolean' ? favoritesFirst : true,
+      )
+    },
+  )
+
+  it('migrates the old favorites-only filter to All with Favs on', () => {
+    const store = createSettingsStore(
+      memoryStorage({
+        'axon.settings': JSON.stringify({
+          version: 1,
+          roomSort: 'za',
+          roomFilter: 'favorites',
+        }),
+      }),
+    )
+    expect(store.roomFilter.value).toBe('all')
+    expect(store.favoritesFirst.value).toBe(true)
+    expect(store.roomSort.value).toBe('za')
+  })
+
+  it.each([undefined, 42, '', '  '])(
+    'defaults invalid or empty saved name/account filters: %s',
+    (value) => {
+      const store = createSettingsStore(
+        memoryStorage({
+          'axon.settings': JSON.stringify({
+            version: 1,
+            roomNameFilter: value,
+            roomAccountFilter: value,
+          }),
+        }),
+      )
+      expect(store.roomNameFilter.value).toBeNull()
+      expect(store.roomAccountFilter.value).toBe('all')
+    },
+  )
 })
 
 describe('applyTheme', () => {

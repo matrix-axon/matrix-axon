@@ -198,6 +198,8 @@ shows it.
   More than 1,000 children, incomplete walks, and recovery remain **not covered** by the pilot; focused TUI HTTP tests cover these paths without changing the smoke harness.
   Root reordering must also be demonstrated changing the web picker through the shared preference.
 - **Galleries in the TUI.** The TUI has no gallery grouping, so this is `n/a` rather than a demo gap.
+- **Web Favs toggle and room-list preference restoration.** The desktop `rooms` scene shows sort and category controls.
+  Combining the independent Favs toggle with another filter, disabling favorite promotion, and restoring sort/name/account choices after reload remain **not covered** by the recordings.
 - **Sort, filter, and the name filter on web mobile.** The controls are all
   there and all work; they are simply the same demonstration as the desktop
   take, on a third of the screen. The mobile scenes spend their budget on what

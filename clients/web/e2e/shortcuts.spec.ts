@@ -113,19 +113,17 @@ test('arrows rove the room list; Enter opens; Escape returns to the composer', a
   await expect(page).toHaveURL(/\/rooms\//)
 })
 
-test('Ctrl-Shift-Y cycles the filter in the TUI’s order', async ({ page }) => {
+test('Ctrl-Shift-Y cycles categories independently of Favs', async ({
+  page,
+}) => {
   await openRoom(page)
   const activeChip = () =>
-    page.locator('.chip.active').getAttribute('aria-label')
+    page
+      .locator('.chip.active:not([aria-label="Favorites"])')
+      .getAttribute('aria-label')
 
   expect(await activeChip()).toBe('All rooms')
-  for (const expected of [
-    'DMs',
-    'Groups',
-    'Unread',
-    'Favorites',
-    'All rooms',
-  ]) {
+  for (const expected of ['DMs', 'Groups', 'Unread', 'All rooms']) {
     await page.keyboard.press('Control+Shift+Y')
     expect(await activeChip()).toBe(expected)
   }

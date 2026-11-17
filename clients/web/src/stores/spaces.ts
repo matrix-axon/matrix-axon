@@ -18,7 +18,7 @@ export type SpaceChildDto = components['schemas']['SpaceChildDto']
 export interface SpacesStore {
   selected: Signal<string | null>
   /**
-   * Session-only account narrowing shared by the rail and the room list:
+   * Browser-local account narrowing shared by the rail and the room list:
    * `'all'` or an account id. The rail hides spaces the account has no rooms in.
    */
   accountFilter: Signal<string>
@@ -68,10 +68,10 @@ export function createSpacesStore(
   api: ApiClient,
   rooms: RoomsStore,
   live: LiveConnection,
+  accountFilter: Signal<string> = signal('all'),
 ): SpacesStore {
   const selected = signal<string | null>(null)
   const reordering = signal(false)
-  const accountFilter = signal('all')
   const children = signal<ReadonlyMap<string, readonly SpaceChildDto[]>>(
     new Map(),
   )

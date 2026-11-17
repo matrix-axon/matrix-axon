@@ -20,11 +20,10 @@ export type Theme = 'system' | 'light' | 'dark'
 export type RoomSort = 'recent' | 'oldest' | 'az' | 'za'
 
 /**
- * Room-list filter categories (ADR 0042). The name filter is deliberately
- * absent: `Name(query)` is session-only and persists as `all`, since
- * restoring a stale query string is surprising.
+ * Room-list filter categories (ADR 0042). Name queries and favorite promotion
+ * are stored separately from the category.
  */
-export type RoomFilter = 'all' | 'dms' | 'groups' | 'unread' | 'favorites'
+export type RoomFilter = 'all' | 'dms' | 'groups' | 'unread'
 
 /**
  * Timeline timestamp format. `12h` is the shipped default (kept from the
@@ -88,6 +87,12 @@ export interface SettingsV1 {
   roomSort: RoomSort
   /** Persisted room-list filter category (ADR 0042). */
   roomFilter: RoomFilter
+  /** Promote favorites in their manual order, independently of the category. */
+  favoritesFirst: boolean
+  /** Name query overrides the category; null uses the category. */
+  roomNameFilter: string | null
+  /** Account narrowing shared by the room list and space rail. */
+  roomAccountFilter: string
   /**
    * Whether the room-list sidebar is hidden (ADR 0062). Only consulted at
    * viewports wide enough for two panes; below that the route decides which
@@ -229,6 +234,9 @@ const DEFAULTS: SettingsV1 = {
   sidebarWidth: 420,
   roomSort: 'recent',
   roomFilter: 'all',
+  favoritesFirst: true,
+  roomNameFilter: null,
+  roomAccountFilter: 'all',
   sidebarCollapsed: false,
   stateEvents: 'important',
   hideRedactedEvents: false,
@@ -269,16 +277,14 @@ export const STATE_EVENT_VISIBILITIES: readonly StateEventVisibility[] = [
 export const ROOM_SORTS: readonly RoomSort[] = ['recent', 'oldest', 'az', 'za']
 
 /**
- * Cycle order for the filter shortcut, matching the TUI's `RoomFilter::CYCLE`
- * (`clients/tui/src/app.rs`). The name filter is deliberately outside the
- * cycle, exactly as in the TUI (ADR 0042).
+ * Category cycle for the filter shortcut. Favorite promotion is an independent
+ * toggle on web; the name filter stays outside this cycle.
  */
 export const ROOM_FILTERS: readonly RoomFilter[] = [
   'all',
   'dms',
   'groups',
   'unread',
-  'favorites',
 ]
 
 /** The next value after `current`, wrapping. Unknown values restart the cycle. */
@@ -373,6 +379,21 @@ function parse(
         : DEFAULTS.sidebarWidth,
     roomSort: oneOf(ROOM_SORTS, v1.roomSort, DEFAULTS.roomSort),
     roomFilter: oneOf(ROOM_FILTERS, v1.roomFilter, DEFAULTS.roomFilter),
+    // The legacy favorites-only category becomes All with promotion enabled
+    // by default. Keep the rest of the version 1 envelope intact.
+    favoritesFirst:
+      typeof v1.favoritesFirst === 'boolean'
+        ? v1.favoritesFirst
+        : DEFAULTS.favoritesFirst,
+    roomNameFilter:
+      typeof v1.roomNameFilter === 'string' && v1.roomNameFilter.trim() !== ''
+        ? v1.roomNameFilter
+        : null,
+    roomAccountFilter:
+      typeof v1.roomAccountFilter === 'string' &&
+      v1.roomAccountFilter.trim() !== ''
+        ? v1.roomAccountFilter
+        : DEFAULTS.roomAccountFilter,
     sidebarCollapsed:
       typeof v1.sidebarCollapsed === 'boolean'
         ? v1.sidebarCollapsed
@@ -469,6 +490,9 @@ export interface SettingsStore {
   sidebarWidth: Signal<number>
   roomSort: Signal<RoomSort>
   roomFilter: Signal<RoomFilter>
+  favoritesFirst: Signal<boolean>
+  roomNameFilter: Signal<string | null>
+  roomAccountFilter: Signal<string>
   sidebarCollapsed: Signal<boolean>
   stateEvents: Signal<StateEventVisibility>
   hideRedactedEvents: Signal<boolean>
@@ -537,6 +561,9 @@ export function createSettingsStore(
   const sidebarWidth = signal<number>(initial.sidebarWidth)
   const roomSort = signal<RoomSort>(initial.roomSort)
   const roomFilter = signal<RoomFilter>(initial.roomFilter)
+  const favoritesFirst = signal(initial.favoritesFirst)
+  const roomNameFilter = signal(initial.roomNameFilter)
+  const roomAccountFilter = signal(initial.roomAccountFilter)
   const sidebarCollapsed = signal<boolean>(initial.sidebarCollapsed)
   const stateEvents = signal<StateEventVisibility>(initial.stateEvents)
   const hideRedactedEvents = signal<boolean>(initial.hideRedactedEvents)
@@ -571,6 +598,9 @@ export function createSettingsStore(
       sidebarWidth: sidebarWidth.value,
       roomSort: roomSort.value,
       roomFilter: roomFilter.value,
+      favoritesFirst: favoritesFirst.value,
+      roomNameFilter: roomNameFilter.value,
+      roomAccountFilter: roomAccountFilter.value,
       sidebarCollapsed: sidebarCollapsed.value,
       stateEvents: stateEvents.value,
       hideRedactedEvents: hideRedactedEvents.value,
@@ -609,6 +639,9 @@ export function createSettingsStore(
     sidebarWidth,
     roomSort,
     roomFilter,
+    favoritesFirst,
+    roomNameFilter,
+    roomAccountFilter,
     sidebarCollapsed,
     stateEvents,
     hideRedactedEvents,

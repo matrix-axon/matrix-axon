@@ -156,7 +156,7 @@ describe('SHORTCUTS', () => {
     const rooms = SHORTCUTS.find((group) => group.group === 'Rooms')
     expect(rooms?.rows.map((row) => row.keys)).toContain(KEYS.reorderFavorites)
     expect(rooms?.rows.map((row) => row.description)).toContain(
-      'Move the focused room up or down in the favourite list',
+      'Move the focused room in the favorite list (Favs on)',
     )
   })
 

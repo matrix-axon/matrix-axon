@@ -1397,7 +1397,7 @@ function ShellChrome() {
       'mod+alt+shift+r': (event) => {
         // The room list is still on screen in single-pane chat. Utility pages
         // have no list to reorder.
-        if (mode === 'utility') return
+        if (mode === 'utility' || !settings.favoritesFirst.value) return
         event.preventDefault()
         favourites.reordering.value = !favourites.reordering.value
       },

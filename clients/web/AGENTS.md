@@ -21,6 +21,9 @@ before starting a milestone.
   `clients/tui/src/app/rooms.rs`; the HTML subset mirrors
   `clients/tui/src/html.rs`. When behavior is ambiguous, read the TUI
   source and match it — and leave a comment pointing at the Rust original.
+  Web intentionally uses Favs as an independent favorites-first toggle rather than a favorites-only category.
+  Sort, category, Favs, name query, and account narrowing persist in the local settings envelope.
+  `spaces.accountFilter` shares `settings.roomAccountFilter`; validate a restored account only after the active account list is known.
 - **Live testing:** message sends and other mutations against the live
   server go to the "Axon Testing" room only
   (`!SScJmZuEkBUnuydXdf:bostoncoop.net`). Everything else is a real account.
