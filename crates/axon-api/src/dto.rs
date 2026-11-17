@@ -52,11 +52,26 @@ impl LinkPreviewRequest {
 /// in the send shape, or `{"matched_url": …, "keep": true}` to copy the
 /// message's current preview for that link, image included, without uploading
 /// anything.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum EditPreviewRequest {
     Keep(KeepPreviewRequest),
     New(LinkPreviewRequest),
+}
+
+/// Dispatches on the `keep` key rather than trying each variant, so a
+/// malformed entry gets that shape's own error (an unknown field, a wrong
+/// type) instead of serde's generic "did not match any variant".
+impl<'de> Deserialize<'de> for EditPreviewRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let entry = if value.get("keep").is_some() {
+            KeepPreviewRequest::deserialize(value).map(Self::Keep)
+        } else {
+            LinkPreviewRequest::deserialize(value).map(Self::New)
+        };
+        entry.map_err(serde::de::Error::custom)
+    }
 }
 
 /// Keep the message's current preview for `matched_url`. A link whose current
@@ -2798,4 +2813,45 @@ pub struct PutPreferenceRequest {
 pub struct PutPreferenceResponse {
     /// When the write landed (server clock), RFC 3339.
     pub updated_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn edit_error(entry: serde_json::Value) -> String {
+        serde_json::from_value::<EditRequest>(
+            json!({"body": "https://a.example/", "url_previews": [entry]}),
+        )
+        .expect_err("a malformed entry is refused")
+        .to_string()
+    }
+
+    /// A malformed edit preview entry names its problem, by the shape its
+    /// `keep` key selects, instead of serde's generic untagged-enum message.
+    #[test]
+    fn a_malformed_edit_preview_entry_names_its_problem() {
+        let extra =
+            edit_error(json!({"matched_url": "https://a.example/", "keep": true, "title": "t"}));
+        assert!(extra.contains("unknown field `title`"), "{extra}");
+        let wrong_type = edit_error(json!({"matched_url": "https://a.example/", "keep": "yes"}));
+        assert!(wrong_type.contains("invalid type"), "{wrong_type}");
+        let new = edit_error(json!({"matched_url": "https://a.example/", "image": "x"}));
+        assert!(new.contains("unknown field `image`"), "{new}");
+
+        let parsed: EditRequest = serde_json::from_value(json!({
+            "body": "https://a.example/ https://b.example/",
+            "url_previews": [
+                {"matched_url": "https://a.example/", "keep": true},
+                {"matched_url": "https://b.example/", "title": "B"}
+            ]
+        }))
+        .unwrap();
+        assert!(matches!(
+            parsed.url_previews.as_deref(),
+            Some([EditPreviewRequest::Keep(_), EditPreviewRequest::New(_)])
+        ));
+    }
 }
