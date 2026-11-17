@@ -1686,6 +1686,26 @@ a.button-like {
   gap: 0.2rem;
 }
 
+.room-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.favorites-toggle {
+  border-radius: 6px;
+  padding: 0.18rem 0.48rem;
+  font-size: 0.8rem;
+}
+
+.favorites-toggle[aria-pressed='true'] {
+  background: var(--bg-raised);
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  box-shadow: inset 0 -2px var(--accent);
+}
+
 .chip {
   border-radius: 999px;
   padding: 0.18rem 0.48rem;

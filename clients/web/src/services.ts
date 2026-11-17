@@ -1864,7 +1864,13 @@ export function createServices(
     deviceState.deviceId,
     settings,
   )
-  const spaces = createSpacesStore(api, rooms, live)
+  const spaces = createSpacesStore(
+    api,
+    rooms,
+    live,
+    settings.roomAccountFilter,
+    accounts,
+  )
   const roomDetails = createRoomDetailsStore(api, live)
   const invites = createInvitesStore(api, rooms)
   const verification = createVerificationStore(api)

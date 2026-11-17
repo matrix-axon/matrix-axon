@@ -109,6 +109,7 @@ interface Harness {
   stale: Signal<boolean>
   loading: Signal<boolean>
   pinnedRooms: Signal<string[]>
+  favoritesFirst: Signal<boolean>
   accounts: Signal<readonly { account_id: string; state: string }[]>
   accountsLoading: Signal<boolean>
   accountsError: Signal<string | null>
@@ -123,6 +124,7 @@ function harness(initial: RoomDto[] = [], pinned: string[] = []): Harness {
   const stale = signal(false)
   const loading = signal(false)
   const pinnedRooms = signal<string[]>(pinned)
+  const favoritesFirst = signal(true)
   const accounts = signal<readonly { account_id: string; state: string }[]>([
     { account_id: ACCOUNT, state: 'active' },
     { account_id: OTHER, state: 'active' },
@@ -217,7 +219,7 @@ function harness(initial: RoomDto[] = [], pinned: string[] = []): Harness {
     api,
     live,
     rooms: list,
-    settings: { pinnedRooms },
+    settings: { pinnedRooms, favoritesFirst },
     accounts: { accounts, loading: accountsLoading, error: accountsError },
   })
 
@@ -228,6 +230,7 @@ function harness(initial: RoomDto[] = [], pinned: string[] = []): Harness {
     stale,
     loading,
     pinnedRooms,
+    favoritesFirst,
     accounts,
     accountsLoading,
     accountsError,
@@ -420,6 +423,25 @@ describe('ordersForInsertion', () => {
 })
 
 describe('createFavouriteStore', () => {
+  it('owns the reorder guard and clears mode when favorite promotion is disabled', () => {
+    const entry = room({
+      room_id: '!a:hs',
+      tags: [{ name: FAVOURITE_TAG, order: 0.5 }],
+    })
+    const env = harness([entry])
+    env.store.toggleReordering()
+    expect(env.store.reordering.value).toBe(true)
+    env.favoritesFirst.value = false
+    expect(env.store.canReorder.value).toBe(false)
+    expect(env.store.reordering.value).toBe(false)
+    env.store.toggleReordering()
+    env.store.move(keyOf(entry), 0, [keyOf(entry)], 0)
+    expect(env.store.reordering.value).toBe(false)
+    expect(env.rooms.value[0].tags).toEqual(entry.tags)
+    expect(recorded).toEqual([])
+    env.favoritesFirst.value = true
+    expect(env.store.reordering.value).toBe(false)
+  })
   it('does not upload local pins until start', async () => {
     const pinned = `${ACCOUNT}/!a:hs`
     const env = harness([room({ room_id: '!a:hs' })], [pinned])

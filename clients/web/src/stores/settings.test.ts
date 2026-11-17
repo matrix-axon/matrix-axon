@@ -1,21 +1,80 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { memoryStorage } from '../test/memory-storage'
 import {
   applyTheme,
+  connectSettingsPersistence,
   createSettingsStore,
   readStoredZoom,
   writeStoredZoom,
 } from './settings'
 
 describe('createSettingsStore', () => {
-  it('starts from defaults with empty storage and persists them', () => {
+  it('flushes a pending query on pagehide and visibilitychange', () => {
+    const storage = memoryStorage()
+    const store = createSettingsStore(storage)
+    const doc = new EventTarget() as Document
+    const win = new EventTarget() as Window
+    const disconnect = connectSettingsPersistence(store, doc, win)
+    store.roomNameFilter.value = 'last keystroke'
+    win.dispatchEvent(new Event('pagehide'))
+    expect(createSettingsStore(storage).roomNameFilter.value).toBe(
+      'last keystroke',
+    )
+    store.roomNameFilter.value = 'hidden'
+    doc.dispatchEvent(new Event('visibilitychange'))
+    expect(createSettingsStore(storage).roomNameFilter.value).toBe('hidden')
+    disconnect()
+  })
+  it('merges only changed fields so a stale tab preserves newer preferences', () => {
+    const storage = memoryStorage()
+    const first = createSettingsStore(storage)
+    const second = createSettingsStore(storage)
+    first.theme.value = 'dark'
+    first.roomSort.value = 'az'
+    first.favoritesFirst.value = false
+    first.sidebarWidth.value = 500
+    second.roomNameFilter.value = 'project'
+    second.flush()
+    const restored = createSettingsStore(storage)
+    expect(restored.theme.value).toBe('dark')
+    expect(restored.roomSort.value).toBe('az')
+    expect(restored.favoritesFirst.value).toBe(false)
+    expect(restored.sidebarWidth.value).toBe(500)
+    expect(restored.roomNameFilter.value).toBe('project')
+  })
+
+  it('debounces name-query writes and flushes the last input immediately on demand', () => {
+    vi.useFakeTimers()
+    try {
+      const storage = memoryStorage()
+      const store = createSettingsStore(storage)
+      const writes = vi.spyOn(storage, 'setItem')
+      store.roomNameFilter.value = 'p'
+      store.roomNameFilter.value = 'pr'
+      store.roomNameFilter.value = 'pro'
+      expect(writes).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(500)
+      expect(writes).toHaveBeenCalledTimes(1)
+      expect(createSettingsStore(storage).roomNameFilter.value).toBe('pro')
+      writes.mockClear()
+      store.roomNameFilter.value = 'project'
+      store.flush()
+      expect(writes).toHaveBeenCalledTimes(1)
+      expect(createSettingsStore(storage).roomNameFilter.value).toBe('project')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('loads defaults without writing and saves a complete envelope on change', () => {
     const storage = memoryStorage()
     const store = createSettingsStore(storage)
     expect(store.theme.value).toBe('system')
     expect(store.activeAccountId.value).toBeNull()
+    expect(storage.getItem('axon.settings')).toBeNull()
+    store.theme.value = 'light'
     expect(JSON.parse(storage.getItem('axon.settings')!)).toEqual({
       version: 1,
-      theme: 'system',
+      theme: 'light',
       timeFormat: '12h',
       activeAccountId: null,
       pinnedRooms: [],
@@ -25,6 +84,9 @@ describe('createSettingsStore', () => {
       sidebarWidth: 420,
       roomSort: 'recent',
       roomFilter: 'all',
+      favoritesFirst: true,
+      roomNameFilter: null,
+      roomAccountFilter: 'all',
       sidebarCollapsed: false,
       stateEvents: 'important',
       hideRedactedEvents: false,
@@ -44,6 +106,27 @@ describe('createSettingsStore', () => {
       pushDisclosure: 'activity',
       linkPreviews: 'off',
     })
+  })
+
+  it('does not replace a newer envelope written while reading the initial settings', () => {
+    const storage = memoryStorage()
+    const read = storage.getItem.bind(storage)
+    const newer = JSON.stringify({ version: 1, theme: 'dark', roomSort: 'az' })
+    vi.spyOn(storage, 'getItem').mockImplementationOnce((key) => {
+      const initial = read(key)
+      storage.setItem('axon.settings', newer)
+      return initial
+    })
+    const write = vi.spyOn(storage, 'setItem')
+    const store = createSettingsStore(storage)
+    // The simulated other tab's write is the only write during construction.
+    expect(write).toHaveBeenCalledTimes(1)
+    expect(read('axon.settings')).toBe(newer)
+    store.roomFilter.value = 'groups'
+    const restored = createSettingsStore(storage)
+    expect(restored.theme.value).toBe('dark')
+    expect(restored.roomSort.value).toBe('az')
+    expect(restored.roomFilter.value).toBe('groups')
   })
 
   it('round-trips changes through storage', () => {
@@ -229,10 +312,15 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     expect(store.stateEvents.value).toBe('all')
     // The migration must not cost the user their unrelated settings.
     expect(store.theme.value).toBe('dark')
-    // …and the legacy key is not written back.
+    // Loading is read-only; the next preference write normalizes the envelope
+    // and omits the legacy key while retaining the migrated value.
+    store.roomSort.value = 'az'
     expect(
       JSON.parse(storage.getItem('axon.settings')!).showStateEvents,
     ).toBeUndefined()
+    expect(JSON.parse(storage.getItem('axon.settings')!).stateEvents).toBe(
+      'all',
+    )
 
     expect(
       createSettingsStore(
@@ -491,11 +579,63 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     const first = createSettingsStore(storage)
     first.roomSort.value = 'az'
     first.roomFilter.value = 'dms'
+    first.favoritesFirst.value = false
+    first.roomNameFilter.value = 'Project'
+    first.roomAccountFilter.value = 'acct-1'
 
     const second = createSettingsStore(storage)
     expect(second.roomSort.value).toBe('az')
     expect(second.roomFilter.value).toBe('dms')
+    expect(second.favoritesFirst.value).toBe(false)
+    expect(second.roomNameFilter.value).toBe('Project')
+    expect(second.roomAccountFilter.value).toBe('acct-1')
   })
+
+  it.each([undefined, 'yes', true, false])(
+    'validates favorite promotion: %s',
+    (favoritesFirst) => {
+      const store = createSettingsStore(
+        memoryStorage({
+          'axon.settings': JSON.stringify({ version: 1, favoritesFirst }),
+        }),
+      )
+      expect(store.favoritesFirst.value).toBe(
+        typeof favoritesFirst === 'boolean' ? favoritesFirst : true,
+      )
+    },
+  )
+
+  it('migrates the old favorites-only filter to All with Favs on', () => {
+    const store = createSettingsStore(
+      memoryStorage({
+        'axon.settings': JSON.stringify({
+          version: 1,
+          roomSort: 'za',
+          roomFilter: 'favorites',
+        }),
+      }),
+    )
+    expect(store.roomFilter.value).toBe('all')
+    expect(store.favoritesFirst.value).toBe(true)
+    expect(store.roomSort.value).toBe('za')
+  })
+
+  it.each([undefined, 42, '', '  '])(
+    'defaults invalid or empty saved name/account filters: %s',
+    (value) => {
+      const store = createSettingsStore(
+        memoryStorage({
+          'axon.settings': JSON.stringify({
+            version: 1,
+            roomNameFilter: value,
+            roomAccountFilter: value,
+          }),
+        }),
+      )
+      expect(store.roomNameFilter.value).toBeNull()
+      expect(store.roomAccountFilter.value).toBe('all')
+    },
+  )
 })
 
 describe('applyTheme', () => {
