@@ -2758,8 +2758,8 @@ function Timeline({
       if (sentinel === null || typeof IntersectionObserver === 'undefined') {
         return
       }
-      // The sentinel is a direct child of the timeline scroller.
-      const root = sentinel.parentElement
+      // The sentinel's ref can run before the scroller's ref on mount.
+      const root = scroller.current ?? sentinel.closest('.timeline')
       if (root === null) {
         return
       }

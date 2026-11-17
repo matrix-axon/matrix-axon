@@ -43,10 +43,10 @@ test('the boot summary reports the cache winning the race', async ({
 
   // Keep the measured refresh pending until Playwright has seen the cache
   // paint. A timed delay can expire before the assertions inspect the page.
-  const roomsUrl = '**/v1/rooms'
+  const isRoomsUrl = (url: URL) => url.pathname === '/v1/rooms'
   const releaseRefresh = Promise.withResolvers<void>()
   await page.route(
-    roomsUrl,
+    isRoomsUrl,
     async (route) => {
       await releaseRefresh.promise
       await route.continue()
@@ -58,7 +58,9 @@ test('the boot summary reports the cache winning the race', async ({
     // Use the in-page reload so Navigation Timing records `reload` in every
     // engine. Register the request waiter before starting the reload.
     await Promise.all([
-      page.waitForRequest(roomsUrl, { timeout: 10_000 }),
+      page.waitForRequest((request) => isRoomsUrl(new URL(request.url())), {
+        timeout: 10_000,
+      }),
       reloadFromInsidePage(page),
     ])
     await expect(page.getByText('E2E Room')).toBeVisible()
