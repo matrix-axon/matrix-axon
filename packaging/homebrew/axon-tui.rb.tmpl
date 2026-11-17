@@ -68,8 +68,9 @@ class AxonTui < Formula
     if OS.linux?
       text += <<~EOS
 
-        This Linux binary is the GitHub Release zip built on ubuntu-latest.
-        A missing GLIBC symbol means the host is older than that zip.
+        This Linux binary is the GitHub Release zip built on ubuntu-22.04,
+        so it needs glibc 2.35 or newer. A missing GLIBC symbol means the
+        host is older than that.
       EOS
     end
     text

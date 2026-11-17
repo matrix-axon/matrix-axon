@@ -130,9 +130,9 @@ Tailscale is a caveat too: `tailscale serve --bg http://127.0.0.1:8080`.
 The menu-bar app is the common case; on a headless Mac mini, `brew install tailscale` is the formula, and the cask `tailscale-app` conflicts with that formula.
 The formula has no `depends_on "tailscale"`.
 
-Linuxbrew installs the x86_64 release zip from `cross-build.yml` (ubuntu-latest).
+Linuxbrew installs the x86_64 release zip from `cross-build.yml` (ubuntu-22.04).
 Linux arm64 has no zip in that workflow; use the Debian or RPM package there.
-The Linux zip's glibc is newer than those packages.
+The Linux zip and the packages are built on the same image, so they share a glibc 2.35 floor.
 
 Check the renderer without brew or a release.
 The test also runs `publish-tap.sh --dry-run`, which needs `--zip-dir` and `--tap-dir` and uses no network:

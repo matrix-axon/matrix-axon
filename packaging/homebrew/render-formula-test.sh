@@ -64,7 +64,7 @@ for needle in \
 	'tailscale-app' \
 	'pg_isready' \
 	'--print-token' \
-	'ubuntu-latest'; do
+	'ubuntu-22.04'; do
 	if ! grep -F -q -e "$needle" "$out"; then
 		echo "rendered formula is missing: $needle" >&2
 		exit 1
@@ -224,6 +224,16 @@ if grep -Fq 'GLIBC' "$work/tui-caveats-mac.txt"; then
 	echo "macOS axon-tui caveats mention the Linux glibc floor" >&2
 	exit 1
 fi
+# Both Linux caveats must name the image the zip is built on and its floor
+# (cross-build.yml's linux job), not a stale runner or glibc version.
+for caveats in "$work/caveats-linux.txt" "$work/tui-caveats-linux.txt"; do
+	grep -Fq 'ubuntu-22.04' "$caveats"
+	grep -Fq '2.35' "$caveats"
+	if grep -Fq 'ubuntu-latest' "$caveats"; then
+		echo "Linux caveats name ubuntu-latest, which is not what builds the zip" >&2
+		exit 1
+	fi
+done
 
 # Rebuild the copy-paste block and syntax-check it. The heredoc terminator
 # is the line whose entire contents are SQL.
