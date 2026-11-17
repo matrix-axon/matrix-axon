@@ -71,4 +71,11 @@ ignore = [
   # matrix-sdk depends indirectly on libsqlite3-sys, new sdk release is needed to update
   # tracked in https://github.com/matrix-org/matrix-rust-sdk/issues/7456
   { id = "RUSTSEC-2026-0459", reason = "matrix-sdk; no upgrade exists" },
+  # chrono is unmaintained (all versions; the maintainer soft-deprecated it in
+  # favour of jiff). oauth2 5.0.0 and matrix-sdk-ui 0.19.1 both depend on it
+  # unconditionally, so migrating our own use would not remove it from the graph.
+  # Upstream: https://github.com/ramosbugs/oauth2-rs/issues/351 (open, no
+  # matrix-sdk-ui issue yet). Exit: delete this entry once both drop chrono, then
+  # `cargo tree -i chrono` for stragglers (#1119).
+  { id = "RUSTSEC-2026-0543", reason = "chrono, via oauth2 and matrix-sdk-ui; no upgrade exists" },
 ]
