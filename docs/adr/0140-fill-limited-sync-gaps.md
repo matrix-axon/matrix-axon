@@ -185,7 +185,9 @@ Rooms first seen after the migration need no row, because their holes are record
 
 The pass runs only when no gap rows are open and ordinary backfill is idle, through the same gate and guards.
 It is persisted per page, and it is not repeated after it completes.
-`sync.history_verify_enabled` (default `true`) turns it off.
+The pass runs on its own after the upgrade, with nothing for a user or operator to do.
+Users should not need to know their history ever had holes in order to get it back.
+`sync.history_verify_enabled` (default `true`) turns it off, for an operator who must avoid the one-off load on the homeserver.
 
 On Adam's production account there are 2.47 M stored events across 15,388 rooms, so the pass is at most about 25,000 pages at the default page size.
 It is fewer in practice, because history stored by backfill is not re-read.
