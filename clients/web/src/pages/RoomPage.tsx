@@ -2460,7 +2460,6 @@ function Timeline({
   onMutation: () => void
 }) {
   const topSentinel = useRef<HTMLDivElement>(null)
-  const bottomSentinel = useRef<HTMLDivElement>(null)
   const scroller = useRef<HTMLDivElement>(null)
   const eventList = useRef<HTMLOListElement>(null)
   const lastOwnEventId = useRef<string | null>(null)
@@ -2751,26 +2750,35 @@ function Timeline({
     }
   }, [timeline])
 
-  // The forward mirror, live only after a jump: the bottom sentinel exists
-  // only while the slice is parked in history (`!atEnd`), so the effect
-  // re-runs on that flip — a mount-only observer would miss the ref.
+  // Attach when the sentinel mounts. After a cold jump, an effect keyed to
+  // atEnd can run before the sentinel ref is assigned and miss it entirely.
   const atEnd = timeline.atEnd.value
-  useEffect(() => {
-    if (typeof IntersectionObserver === 'undefined' || atEnd) {
-      return
-    }
-    const sentinel = bottomSentinel.current
-    if (sentinel === null) {
-      return
-    }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        void timeline.loadNewer()
+  const observeBottomSentinel = useCallback(
+    (sentinel: HTMLDivElement | null) => {
+      if (sentinel === null || typeof IntersectionObserver === 'undefined') {
+        return
       }
-    })
-    observer.observe(sentinel)
-    return () => observer.disconnect()
-  }, [timeline, atEnd])
+      // The sentinel is a direct child of the timeline scroller.
+      const root = sentinel.parentElement
+      if (root === null) {
+        return
+      }
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (
+            sentinel.isConnected &&
+            entries.some((entry) => entry.isIntersecting)
+          ) {
+            void timeline.loadNewer()
+          }
+        },
+        { root },
+      )
+      observer.observe(sentinel)
+      return () => observer.disconnect()
+    },
+    [timeline],
+  )
 
   // Each fresh page (initial load, date jump, post-send reload) remounts
   // this component (RoomPage swaps it for the "Loading…" text meanwhile),
@@ -3295,7 +3303,7 @@ function Timeline({
               probe — the one that discovers there is nothing newer and
               retires this affordance — can sit one row out of the viewport
               and never fire. */}
-          <div ref={bottomSentinel} />
+          <div ref={observeBottomSentinel} />
           <button
             type="button"
             class="timeline-edge"

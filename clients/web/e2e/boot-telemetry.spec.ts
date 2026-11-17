@@ -7,19 +7,6 @@ import { reloadFromInsidePage, signIn, waitForRoomListCache } from './helpers'
  * recording from a phone with no console, and a summary that quietly reports
  * `null` there would be indistinguishable from one that reports the truth.
  */
-// The mock is one process shared by every spec, so the hold must not outlive
-// this file — and it must be reset even when the test *fails*, or the delay
-// leaks into every spec that follows. A first version reset it on the happy
-// path only, and one failure here turned into failures three specs away.
-// Reset before each test as well, so a failed after-hook cannot leak it into
-// the next one (see `update-refresh.spec.ts`).
-test.beforeEach(async ({ page }) => {
-  await page.request.post('/__e2e/rooms-delay?hold=none')
-})
-test.afterEach(async ({ page }) => {
-  await page.request.post('/__e2e/rooms-delay?hold=none')
-})
-
 test('the boot summary reports the cache winning the race', async ({
   page,
 }) => {
@@ -54,21 +41,32 @@ test('the boot summary reports the cache winning the race', async ({
   // is instrumented from the start again.
   await page.evaluate(() => sessionStorage.clear())
 
-  // Hold the room list open so the cached arm has something to beat.
-  expect(
-    (await page.request.post('/__e2e/rooms-delay?hold=typical')).ok(),
-  ).toBe(true)
-  // In-page rather than `page.reload()`: the summary asserted below carries
-  // `nav`, which is the Navigation Timing type, and the driver's reload is
-  // reported as `navigate` under Firefox. See `reloadFromInsidePage`.
-  await reloadFromInsidePage(page)
-  await expect(page.getByText('E2E Room')).toBeVisible()
-  // Visible *then* hidden. Waiting only for hidden passes instantly when the
-  // affordance never appeared at all — a cold cache would sail through it, and
-  // the summary this test exists to read would not exist yet.
-  await expect(page.getByText('Updating…')).toBeVisible()
-  // The summary is emitted when the *refresh* settles, which the hold defers.
-  await expect(page.getByText('Updating…')).toBeHidden({ timeout: 10_000 })
+  // Keep the measured refresh pending until Playwright has seen the cache
+  // paint. A timed delay can expire before the assertions inspect the page.
+  const roomsUrl = '**/v1/rooms'
+  const releaseRefresh = Promise.withResolvers<void>()
+  await page.route(
+    roomsUrl,
+    async (route) => {
+      await releaseRefresh.promise
+      await route.continue()
+    },
+    { times: 1 },
+  )
+  const updating = page.getByText('Updating…')
+  try {
+    // Use the in-page reload so Navigation Timing records `reload` in every
+    // engine. Register the request waiter before starting the reload.
+    await Promise.all([
+      page.waitForRequest(roomsUrl, { timeout: 10_000 }),
+      reloadFromInsidePage(page),
+    ])
+    await expect(page.getByText('E2E Room')).toBeVisible()
+    await expect(updating).toBeVisible()
+  } finally {
+    releaseRefresh.resolve()
+  }
+  await expect(updating).toBeHidden({ timeout: 10_000 })
 
   const summary = () =>
     page.evaluate(() =>
