@@ -35,6 +35,15 @@ overrides:
   # allowing the build to pass pnpm audit.
   'zod': '^4.6.7'
 
+# audit warnings to ignore (at least temporarily)
+audit:
+  ignore:
+    # GHSA-fc5q-39xc-vjpf / CVE-2026-112366: picomatch vulnerable to ReDoS through
+    # single-branch repeated extglobs. There is no picomatch update available as of
+    # 2026-11-17. @ajkessel is watching upstream for a fix.
+    # See https://github.com/micromatch/picomatch/issues/247
+    - GHSA-fc5q-39xc-vjpf
+
 # Peer dependency suppression rules
 peerDependencyRules:
   allowedVersions:
