@@ -323,16 +323,39 @@ describe('preview edits (§ 8)', () => {
     expect(failures).toEqual([['changed', `now ${A} ${B}`]])
   })
 
-  it('reports a preview rejection', async () => {
+  it('reports a preview rejection of an edit with a new card', async () => {
     serveEdit(rejected(413, 'event_too_large'))
     const failures: string[] = []
     expect(
-      await makeStore().edit('$sent', `now ${A}`, {
-        linkPreviews: [],
+      await makeStore().edit('$sent', `now ${A} ${B}`, {
+        linkPreviews: [
+          { kind: 'keep', matchedUrl: A },
+          { kind: 'new', preview: preview(B, null) },
+        ],
         onPreviewFailure: (kind) => failures.push(kind),
       }),
     ).toBe(false)
     expect(failures).toEqual(['rejected'])
+  })
+
+  it('reports no preview rejection when no new card was sent', async () => {
+    // A 404 for a deleted message, or a 400 or 413 for the text, is not the
+    // previews' fault when the edit only kept the message's cards.
+    for (const [status, code, linkPreviews] of [
+      [404, 'not_found', [{ kind: 'keep', matchedUrl: A }]],
+      [400, 'bad_request', [{ kind: 'keep', matchedUrl: A }]],
+      [413, 'event_too_large', []],
+    ] as const) {
+      serveEdit(rejected(status, code))
+      const failures: string[] = []
+      expect(
+        await makeStore().edit('$sent', `now ${A}`, {
+          linkPreviews: [...linkPreviews],
+          onPreviewFailure: (kind) => failures.push(kind),
+        }),
+      ).toBe(false)
+      expect(failures, `${status}`).toEqual([])
+    }
   })
 
   it('reports nothing for a failure that is not about the previews', async () => {

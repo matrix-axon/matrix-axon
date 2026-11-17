@@ -1905,7 +1905,13 @@ export function createTimelineStore(
         if (previews !== undefined) {
           if (result.status === 409 && result.code === 'previews_changed')
             options.onPreviewFailure?.('changed', await refreshEvent(eventId))
-          else if (isPreviewRejection(result.status, result.code))
+          // Only a new card can be what the server refused: with `keep`
+          // entries alone, a 404 or 400 is the event or the text, and the
+          // failure is reported as any other edit's is.
+          else if (
+            previews.some((p) => p.kind === 'new') &&
+            isPreviewRejection(result.status, result.code)
+          )
             options.onPreviewFailure?.('rejected')
         }
         return false
