@@ -13,11 +13,13 @@ import {
 } from '../composer-link-previews'
 import { planLinkPreviews, type PreviewDraft } from '../link-preview-send'
 import {
+  MEDIA_MSGTYPES,
   messageCards,
   messagePreviewField,
   planEditPreviews,
   type EditLinkPreview,
   type EditPreviewDraft,
+  type EditPreviewSeed,
 } from '../edit-link-previews'
 import { linkIdentity } from '../preview-links'
 import type { ServerCapabilities } from '../stores/capabilities'
@@ -60,10 +62,15 @@ export type ComposerAction =
 /** What edit mode knows about the message's link previews. */
 export interface EditPreviewsState {
   /**
-   * The server keeps, removes and adds previews on an edit. Read once as
-   * edit mode opens: an answer that comes later counts from the next edit.
+   * The server keeps, removes and adds previews on an edit, as known when
+   * edit mode opened.
    */
   supported: boolean
+  /**
+   * Edit mode opened before the server answered. A yes that comes later
+   * upgrades this edit to cards, re-seeded from the message.
+   */
+  pending?: boolean
   /** Links discarded earlier in this edit, kept across a failed save. */
   discarded?: ReadonlySet<string>
   /** Links whose new cards the server refused, which get none again. */
@@ -71,13 +78,6 @@ export interface EditPreviewsState {
   /** Why edit mode reopened, shown with the banner. */
   notice?: string
 }
-
-const MEDIA_MSGTYPES: ReadonlySet<unknown> = new Set([
-  'm.image',
-  'm.file',
-  'm.audio',
-  'm.video',
-])
 
 export interface MessageComposerOptions {
   /** The store the composer sends into (room- or thread-scoped). */
@@ -176,19 +176,40 @@ export function useMessageComposer(options: MessageComposerOptions): {
   } = options
   const [action, setActionState] = useState<ComposerAction | null>(null)
   const capabilities = options.linkPreviews?.capabilities
-  // Edit mode reads the server's answer once, as it opens, and asks again
-  // when the answer is not known yet (ADR 0132 § 8).
+  // Edit mode reads the server's answer as it opens, and asks again when the
+  // answer is not known yet (ADR 0132 § 8).
   const setAction = useCallback(
     (next: ComposerAction | null) => {
       if (next?.kind === 'edit' && next.previews === undefined) {
         const known = capabilities?.editUrlPreviews.peek() ?? null
         if (known === null) capabilities?.refresh()
-        next = { ...next, previews: { supported: known === true } }
+        next = {
+          ...next,
+          previews: {
+            supported: known === true,
+            ...(known === null && { pending: true }),
+          },
+        }
       }
       setActionState(next)
     },
     [capabilities],
   )
+  // A yes that comes while such an edit is open upgrades it: a new action,
+  // so the composer re-seeds its cards from the message, keeping the text.
+  const editAnswer = capabilities?.editUrlPreviews.value ?? null
+  useEffect(() => {
+    if (
+      action?.kind !== 'edit' ||
+      action.previews?.pending !== true ||
+      editAnswer !== true
+    )
+      return
+    setActionState({
+      ...action,
+      previews: { ...action.previews, supported: true, pending: undefined },
+    })
+  }, [action, editAnswer])
   const editInlineEmoji = useMemo(
     () =>
       action?.kind === 'edit'
@@ -335,11 +356,28 @@ export function useMessageComposer(options: MessageComposerOptions): {
       previewsOn: sources !== undefined && linkPreviewsEnabled(sources),
       allowUnmarked,
     })
+  // The message an edit starts from, one object per opening of edit mode:
+  // the composer re-seeds its cards whenever this changes, including a
+  // reopen after a failed save whose text is unchanged.
+  const editSeed: EditPreviewSeed | undefined = useMemo(
+    () =>
+      action?.kind === 'edit'
+        ? {
+            originalText: action.event.body ?? '',
+            cards: editCards,
+            addNew: !MEDIA_MSGTYPES.has(action.event.content?.msgtype),
+            discarded: action.previews?.discarded,
+            refused: action.previews?.refused,
+          }
+        : undefined,
+    [action, editCards],
+  )
   // An edit against a server that keeps previews starts from the message's
   // cards, under any setting, since removing one fetches nothing (§ 8).
   const editLinkPreviews: ComposerLinkPreviewOptions | undefined =
     action?.kind !== 'edit' ||
     action.previews?.supported !== true ||
+    editSeed === undefined ||
     sources === undefined ||
     options.linkPreviews === undefined
       ? undefined
@@ -347,13 +385,7 @@ export function useMessageComposer(options: MessageComposerOptions): {
           sources,
           cache: options.linkPreviews.cache,
           edit: {
-            seed: {
-              originalText: action.event.body ?? '',
-              cards: editCards,
-              addNew: !MEDIA_MSGTYPES.has(action.event.content?.msgtype),
-              discarded: action.previews.discarded,
-              refused: action.previews.refused,
-            },
+            seed: editSeed,
             accountId,
             hasField: messagePreviewField(action.event.content).hasField,
           },
@@ -457,15 +489,18 @@ export function useMessageComposer(options: MessageComposerOptions): {
           current.previews === undefined
             ? undefined
             : { ...current.previews, discarded: draft?.discarded }
-        const refused = new Set(current.previews?.refused)
-        for (const card of draft?.cards ?? []) {
-          const identity = linkIdentity(card.matchedUrl)
-          if (identity !== null) refused.add(identity)
-        }
         const reason = failure as {
           kind: 'rejected' | 'changed'
           event?: EventDto
         } | null
+        // Only a rejection refuses the new cards; any other failure reopens
+        // with them, to be sent again.
+        const refused = new Set(current.previews?.refused)
+        if (reason?.kind === 'rejected')
+          for (const card of draft?.cards ?? []) {
+            const identity = linkIdentity(card.matchedUrl)
+            if (identity !== null) refused.add(identity)
+          }
         setAction({
           ...current,
           ...(reason?.kind === 'changed' &&

@@ -313,7 +313,7 @@ The web client's room and thread composers ([ADR 0132](adr/0132-composer-link-pr
 Settings → Link previews is per device: `off`, `device` or `device+homeserver`.
 The shell builds cards on the device with its restricted fetcher; a browser cannot, so it offers only `off` and the homeserver on request.
 The composer calls generation only from a card's **Try homeserver** button, once per link, never automatically.
-A plain `http://` link gets no card, since only HTTPS links do ([ADR 0132 section 1](adr/0132-composer-link-previews.md#1-the-composer-authors-bundled-previews-up-to-three-per-message)); while previews are on, a complete one the user added gets a short note saying so instead.
+A plain `http://` link gets no card, since only HTTPS links do ([ADR 0132 section 1](adr/0132-composer-link-previews.md#1-the-composer-authors-bundled-previews-up-to-three-per-message)); while previews are on, a complete one the user added gets a short note saying so instead, wherever an `https://` link would have got a card.
 It reads a generated thumbnail at once through the [recovery endpoint](#durable-thumbnail-recovery), keeps the bytes, and forgets the handle, which then expires; a failed read costs the card its image, never its text.
 
 What a send carries is decided against the formatted body being sent:
@@ -331,13 +331,14 @@ Any other failure keeps the cards, and Retry uploads their thumbnails again.
 The client waits for a `/send` carrying `url_previews` as long as for an upload (the five-second slot wait plus the upstream upload timeout), because that is how the server bounds it.
 
 Edit mode follows [ADR 0132 section 8](adr/0132-composer-link-previews.md#8-editing-a-message-with-previews), and only against a server whose `GET /v1/capabilities` reports `edit_url_previews`.
-The client asks once signed in; a `404` is kept for the session, and any other failure counts as no until edit mode next opens and asks again.
+The client asks once signed in and again on every reconnect, which is how a server upgrade shows; a `404` is kept until then, and any other failure counts as no until edit mode next opens and asks again.
+An edit opened before the answer comes shows no cards, and turns into one with cards, keeping its text, if the answer is yes.
 Against any other server, edit mode shows no cards, says that saving may remove them, and leaves the field out, as before.
 Edit mode shows the message's cards that the server would keep, under any setting, each with its X; deleting a link hides its card, and typing it back restores the card without a lookup unless it was discarded.
 Links the edit adds get cards under the setting while the edit has fewer than three cards, counting the message's; a media caption gets none.
 An edit sends `[]` for a spoiler when the message has a preview field, otherwise its kept cards as `{"matched_url", "keep": true}` and its new cards in text order; `[]` when a card was removed or, with previews on, a link was added; and otherwise leaves the field out, so the server carries the cards forward.
 The size check measures the whole replacement, dropping new images, then new cards, then the message's cards, from the end; a card dropped for size counts as removed.
-After `409 previews_changed`, edit mode reopens on the message as it now stands, keeping the typed text and discards; after a preview rejection it reopens without the new cards.
+After `409 previews_changed`, edit mode reopens on the message as it now stands, keeping the typed text and discards; after a preview rejection it reopens without the new cards. Either way the cards follow the reopened message, even when the text is unchanged.
 
 The server finds a `matched_url` only behind a lowercase `http://` or `https://`, so the composer lowercases each bare link's scheme before sending (`Https://` from a capitalized first word becomes `https://`), leaving code spans and blocks as written.
 

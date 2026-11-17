@@ -394,6 +394,8 @@ export function Composer({
   const [caret, setCaret] = useState(initialValue.length)
   /** The draft value this field is in sync with — the last `initialValue`. */
   const synced = useRef(initialValue)
+  /** The edit seed the cards were last reset with. */
+  const syncedSeed = useRef(linkPreviews?.edit?.seed)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const photoInput = useRef<HTMLInputElement>(null)
@@ -460,6 +462,7 @@ export function Composer({
     synced.current = initialValue
     syncedEmoji.current = initialEmojiKey
     setDraft(initialValue)
+    syncedSeed.current = editSeed.current
     previews.reset(initialValue, editSeed.current)
     setMarkerQuestion(false)
     setCaret(initialValue.length)
@@ -693,11 +696,19 @@ export function Composer({
   // a "clean" field adopts: empty, or still holding exactly the value we last
   // synced. Anything else is an unsynced local edit we must not clobber. This
   // is the TUI's `buffer_clean` rule (app/drafts.rs), so the two clients agree.
+  //
+  // An edit's cards follow its seed, not its text: a reopen after a failed
+  // save carries a new seed (the message as it now is, the links the server
+  // refused) whether or not the text changed or the field is clean (§ 8).
+  const seed = linkPreviews?.edit?.seed
   useEffect(() => {
+    const reseed = seed !== syncedSeed.current
+    syncedSeed.current = seed
     if (
       initialValue === synced.current &&
       initialEmojiKey === syncedEmoji.current
     ) {
+      if (reseed) previews.reset(draft, seed)
       return
     }
     const clean = draft === '' || draft === synced.current
@@ -712,9 +723,9 @@ export function Composer({
       emojiHistory.current = initialEmojiHistory(initialValue, inline.current)
       setDraft(initialValue)
       // A draft from elsewhere is restored, not typed (ADR 0132 § 5).
-      previews.reset(initialValue, editSeed.current)
-    }
-  }, [initialValue, initialEmojiKey, draft, previews])
+      previews.reset(initialValue, seed)
+    } else if (reseed) previews.reset(draft, seed)
+  }, [initialValue, initialEmojiKey, draft, previews, seed])
 
   // Focus when entering a reply/edit so typing can start immediately.
   useEffect(() => {

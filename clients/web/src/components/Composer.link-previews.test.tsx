@@ -15,6 +15,7 @@ import {
   type PreviewSources,
 } from '../composer-link-previews'
 import { LinkPreviewError, type DeviceLinkPreview } from '../platform'
+import { messageCards, type EditPreviewSeed } from '../edit-link-previews'
 
 /** The composer's link-preview cards (ADR 0132 § 5), driven as a user would. */
 
@@ -417,6 +418,57 @@ describe('Composer link previews', () => {
     expect(device).not.toHaveBeenCalled()
     type('see ')
     expect(note()).toBeNull()
+  })
+
+  it("re-seeds an edit's cards from a new seed, whatever the text", () => {
+    const { device } = deferredDevice()
+    const body = `see ${A}`
+    const seedWith = (titles: string[]): EditPreviewSeed => {
+      const content = {
+        msgtype: 'm.text',
+        body,
+        'm.url_previews': titles.map((title) => ({
+          'matrix:matched_url': A,
+          'og:title': title,
+        })),
+      }
+      return {
+        originalText: body,
+        cards: messageCards(content, body),
+        addNew: true,
+      }
+    }
+    const options = (seed: EditPreviewSeed): ComposerLinkPreviewOptions => ({
+      sources: { setting: 'device', device },
+      cache: createLinkPreviewCache(),
+      markerFits: async () => true,
+      edit: { seed, accountId: 'acct', hasField: true },
+    })
+    const view = (seed: EditPreviewSeed, initialValue = body) => (
+      <Composer
+        placeholder="Message"
+        initialValue={initialValue}
+        onSubmit={vi.fn(async () => true)}
+        linkPreviews={options(seed)}
+      />
+    )
+    const { rerender, getByRole } = render(view(seedWith(['Old article'])))
+    expect(screen.getByText('Old article')).toBeTruthy()
+
+    // A reopen after a 409: the same text, the message as it now is.
+    rerender(view(seedWith([])))
+    expect(cards()).toBeNull()
+
+    // A field the user typed in since keeps their text, and still re-seeds.
+    fireEvent.input(getByRole('textbox'), {
+      target: { value: `typed ${A} ` },
+    })
+    rerender(view(seedWith(['Restored article']), 'something else'))
+    expect((getByRole('textbox') as HTMLTextAreaElement).value).toBe(
+      `typed ${A} `,
+    )
+    expect(screen.getByText('Restored article')).toBeTruthy()
+    expect(device).not.toHaveBeenCalled()
   })
 
   it('makes no cards when previews are off', () => {

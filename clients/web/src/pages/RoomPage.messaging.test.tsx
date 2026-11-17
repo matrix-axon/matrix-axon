@@ -936,6 +936,86 @@ describe('editing link previews (ADR 0132 § 8)', () => {
     expect(queryByRole('list', { name: 'Link previews to send' })).toBeNull()
     expect(edits).toHaveLength(1)
   })
+
+  it('after 409 with the text unchanged, reopens on the new cards and saves without the stale one', async () => {
+    const plain = event('$mine', 200, {
+      sender: OWN_USER,
+      body: `see ${LINK}`,
+      content: { msgtype: 'm.text', body: `see ${LINK}`, 'm.url_previews': [] },
+    })
+    let conflict = true
+    const edits = serveEdit(
+      supported(),
+      () => {
+        if (!conflict) return HttpResponse.json({ data: { event_id: '$edit' } })
+        conflict = false
+        return HttpResponse.json(
+          { error: { code: 'previews_changed', message: 'changed' } },
+          { status: 409 },
+        )
+      },
+      plain,
+    )
+    const { textarea, findByRole, findByText, queryByRole, getByLabelText } =
+      await openEdit()
+    await findByRole('list', { name: 'Link previews to send' })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(1))
+    expect(edits[0].url_previews).toEqual([{ matched_url: LINK, keep: true }])
+    expect(
+      await findByText(
+        'This message’s link previews changed on another device. Check them and save again.',
+      ),
+    ).toBeTruthy()
+    await waitFor(() =>
+      expect(queryByRole('list', { name: 'Link previews to send' })).toBeNull(),
+    )
+    fireEvent.keyDown(getByLabelText('Message Ops'), { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(2))
+    expect(edits[1]).not.toHaveProperty('url_previews')
+  })
+
+  it('upgrades an edit opened before the server answered', async () => {
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    const edits = serveEdit(supported())
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/capabilities`, async () => {
+        await answered
+        return supported()
+      }),
+    )
+    const { textarea, findByRole, findByText, queryByText } = await openEdit(
+      `see ${LINK}`,
+      false,
+    )
+    expect(
+      await findByText('Saving this edit may remove its link previews.'),
+    ).toBeTruthy()
+    fireEvent.input(textarea, { target: { value: `now see ${LINK}` } })
+    answer()
+    const cards = await findByRole('list', { name: 'Link previews to send' })
+    expect(within(cards).getByText('The article')).toBeTruthy()
+    expect(
+      queryByText('Saving this edit may remove its link previews.'),
+    ).toBeNull()
+    expect(textarea.value).toBe(`now see ${LINK}`)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(1))
+    expect(edits[0].url_previews).toEqual([{ matched_url: LINK, keep: true }])
+  })
+
+  it('keeps a card whose link the user typed with an uppercase scheme', async () => {
+    const edits = serveEdit(supported())
+    const { textarea, findByRole } = await openEdit()
+    await findByRole('list', { name: 'Link previews to send' })
+    const upper = LINK.replace('https://', 'HTTPS://')
+    fireEvent.input(textarea, { target: { value: `now see ${upper}` } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(edits).toHaveLength(1))
+    expect(edits[0].body).toBe(`now see ${LINK}`)
+    expect(edits[0].url_previews).toEqual([{ matched_url: LINK, keep: true }])
+  })
 })
 
 describe('reactions', () => {

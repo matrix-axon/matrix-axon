@@ -260,7 +260,14 @@ export interface EditPreviewDraft extends PreviewDraft {
   opened: ReadonlySet<string>
 }
 
-const MEDIA_TYPES = new Set(['m.image', 'm.file', 'm.audio', 'm.video'])
+/** The msgtypes whose body is a caption: an edit keeps the media's fields,
+ *  and adds no cards (§ 8). */
+export const MEDIA_MSGTYPES: ReadonlySet<unknown> = new Set([
+  'm.image',
+  'm.file',
+  'm.audio',
+  'm.video',
+])
 
 /**
  * The replacement the server builds, close enough to measure: the new text
@@ -275,7 +282,7 @@ function replacement(
   const msgtype =
     typeof original.msgtype === 'string' ? original.msgtype : 'm.text'
   const base: Record<string, unknown> = { msgtype }
-  if (MEDIA_TYPES.has(msgtype)) {
+  if (MEDIA_MSGTYPES.has(msgtype)) {
     for (const key of ['url', 'file', 'info'])
       if (Object.hasOwn(original, key)) base[key] = original[key]
     base.filename = original.filename ?? original.body ?? ''
