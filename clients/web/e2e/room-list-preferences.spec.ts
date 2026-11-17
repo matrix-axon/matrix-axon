@@ -46,11 +46,30 @@ test('Favs combines with filters and restores every local preference after reloa
   await page.getByRole('button', { name: 'Groups', exact: true }).click()
   await expect(names).toHaveText(['Zulu', 'Beta', 'Alpha', 'Charlie', 'Other'])
 
-  const favs = page.getByRole('button', { name: 'Favorites', exact: true })
+  const favs = page.getByRole('button', { name: 'Favs', exact: true })
+  await expect(
+    page
+      .getByRole('group', { name: 'Filter', exact: true })
+      .getByRole('button', { name: 'Favs', exact: true }),
+  ).toHaveCount(0)
+  const toggleBox = await favs.boundingBox()
+  expect(toggleBox).not.toBeNull()
+  expect(toggleBox!.x).toBeGreaterThanOrEqual(0)
+  expect(toggleBox!.x + toggleBox!.width).toBeLessThanOrEqual(
+    page.viewportSize()!.width,
+  )
   await expect(favs).toHaveAttribute('aria-pressed', 'true')
+  await page
+    .getByRole('button', { name: 'Reorder favorites', exact: true })
+    .click()
   await favs.click()
   await expect(names).toHaveText(['Alpha', 'Beta', 'Charlie', 'Other', 'Zulu'])
   await expect(page.locator('.room-separator')).toHaveCount(0)
+  const link = page.locator('.room-link').first()
+  await expect
+    .poll(() => link.evaluate((node) => (node as HTMLAnchorElement).draggable))
+    .toBe(true)
+  expect(await link.getAttribute('draggable')).toBeNull()
 
   const account = page
     .locator('.room-controls')
@@ -75,8 +94,41 @@ test('Favs combines with filters and restores every local preference after reloa
   ).toHaveClass(/active/)
   await expect(names).toHaveText(['Alpha', 'Beta', 'Charlie', 'Zulu'])
   await favs.click()
+  await expect(page.locator('.room-reorder')).toHaveCount(0)
   await expect(names).toHaveText(['Zulu', 'Beta', 'Alpha', 'Charlie'])
   await page.evaluate(() => location.reload())
   await expect(favs).toHaveAttribute('aria-pressed', 'true')
   await expect(names).toHaveText(['Zulu', 'Beta', 'Alpha', 'Charlie'])
+})
+
+test('typing in a stale tab preserves another tab’s sort, Favs, and theme preferences', async ({
+  page,
+  context,
+}) => {
+  await signIn(page)
+  await page.goto('/')
+  await expect(page.getByText('E2E Room', { exact: true })).toBeVisible()
+  const other = await context.newPage()
+  await other.goto('/')
+  await expect(other.getByText('E2E Room', { exact: true })).toBeVisible()
+  await page
+    .getByRole('combobox', { name: 'Sort', exact: true })
+    .selectOption('az')
+  await page.getByRole('button', { name: 'Favs', exact: true }).click()
+  await page.goto('/settings')
+  await page.getByRole('radio', { name: 'Dark', exact: true }).check()
+  await other.getByRole('searchbox', { name: 'Filter by name' }).fill('E2E')
+  // This reload also verifies the pagehide flush inside the save debounce.
+  await other.evaluate(() => location.reload())
+  await expect(
+    other.getByRole('searchbox', { name: 'Filter by name' }),
+  ).toHaveValue('E2E')
+  await expect(
+    other.getByRole('combobox', { name: 'Sort', exact: true }),
+  ).toHaveValue('az')
+  await expect(
+    other.getByRole('button', { name: 'Favs', exact: true }),
+  ).toHaveAttribute('aria-pressed', 'false')
+  await expect(other.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await other.close()
 })

@@ -13,6 +13,7 @@ import { DEFAULT_ZOOM, parseZoom } from '../zoom'
  * parses); the version number bumps only on incompatible reshapes.
  */
 const STORAGE_KEY = 'axon.settings'
+const NAME_FILTER_SAVE_DELAY_MS = 400
 
 export type Theme = 'system' | 'light' | 'dark'
 
@@ -481,6 +482,8 @@ function parse(
 }
 
 export interface SettingsStore {
+  /** Flush pending name-query preferences on blur or page hide. */
+  flush(): void
   theme: Signal<Theme>
   activeAccountId: Signal<string | null>
   pinnedRooms: Signal<string[]>
@@ -548,10 +551,11 @@ export function createSettingsStore(
     linkPreviewsDefault = 'off',
   }: { linkPreviewsDefault?: LinkPreviewSetting } = {},
 ): SettingsStore {
-  const initial = parse(storage.getItem(STORAGE_KEY), {
+  const defaults = {
     ...DEFAULTS,
     linkPreviews: linkPreviewsDefault,
-  })
+  }
+  const initial = parse(storage.getItem(STORAGE_KEY), defaults)
   const theme = signal<Theme>(initial.theme)
   const activeAccountId = signal<string | null>(initial.activeAccountId)
   const pinnedRooms = signal<string[]>(initial.pinnedRooms)
@@ -585,6 +589,27 @@ export function createSettingsStore(
   const messageNotifications = signal<boolean>(initial.messageNotifications)
   const pushDisclosure = signal<PushDisclosure>(initial.pushDisclosure)
   const linkPreviews = signal<LinkPreviewSetting>(initial.linkPreviews)
+
+  let previous: SettingsV1 | null = null
+  let pending: Partial<SettingsV1> = {}
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+  function flush() {
+    if (saveTimer !== null) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    if (Object.keys(pending).length === 0) return
+    try {
+      // Merge this tab's changed fields into the latest stored envelope.
+      // A name query typed in a stale tab must not revert another tab's theme,
+      // sort, or sidebar preferences. No await separates the read and write.
+      const current = parse(storage.getItem(STORAGE_KEY), defaults)
+      storage.setItem(STORAGE_KEY, JSON.stringify({ ...current, ...pending }))
+      pending = {}
+    } catch {
+      // Storage is best-effort. Keep the patch for the next save or flush.
+    }
+  }
 
   effect(() => {
     const envelope: SettingsV1 = {
@@ -621,15 +646,23 @@ export function createSettingsStore(
       pushDisclosure: pushDisclosure.value,
       linkPreviews: linkPreviews.value,
     }
-    try {
-      storage.setItem(STORAGE_KEY, JSON.stringify(envelope))
-    } catch {
-      // Quota or storage-denied: settings are preferences — losing a persist
-      // must not throw into whatever signal write triggered this effect.
+    const changed = (Object.keys(envelope) as (keyof SettingsV1)[]).filter(
+      (key) => previous === null || !Object.is(previous[key], envelope[key]),
+    )
+    for (const key of changed) {
+      Object.assign(pending, { [key]: envelope[key] })
+    }
+    previous = envelope
+    if (changed.some((key) => key !== 'roomNameFilter')) {
+      flush()
+    } else if (changed.length > 0) {
+      if (saveTimer !== null) clearTimeout(saveTimer)
+      saveTimer = setTimeout(flush, NAME_FILTER_SAVE_DELAY_MS)
     }
   })
 
   return {
+    flush,
     theme,
     activeAccountId,
     pinnedRooms,
@@ -688,6 +721,22 @@ export function createSettingsStore(
         ...recentReactions.value.filter((k) => k !== trimmed),
       ].slice(0, MAX_RECENT_REACTIONS)
     },
+  }
+}
+
+/** Save a pending query before a browser discards or navigates away from a tab. */
+export function connectSettingsPersistence(
+  settings: Pick<SettingsStore, 'flush'>,
+  doc: Document = document,
+  win: Window = window,
+): () => void {
+  const flush = () => settings.flush()
+  doc.addEventListener('visibilitychange', flush)
+  win.addEventListener('pagehide', flush)
+  return () => {
+    doc.removeEventListener('visibilitychange', flush)
+    win.removeEventListener('pagehide', flush)
+    flush()
   }
 }
 

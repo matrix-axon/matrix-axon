@@ -118,9 +118,7 @@ test('Ctrl-Shift-Y cycles categories independently of Favs', async ({
 }) => {
   await openRoom(page)
   const activeChip = () =>
-    page
-      .locator('.chip.active:not([aria-label="Favorites"])')
-      .getAttribute('aria-label')
+    page.locator('.filter-group .chip.active').getAttribute('aria-label')
 
   expect(await activeChip()).toBe('All rooms')
   for (const expected of ['DMs', 'Groups', 'Unread', 'All rooms']) {

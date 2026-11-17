@@ -89,6 +89,7 @@ import {
 } from './shortcuts'
 import {
   applyTheme,
+  connectSettingsPersistence,
   SIDEBAR_WIDTH_MAX,
   SIDEBAR_WIDTH_MIN,
 } from './stores/settings'
@@ -192,6 +193,7 @@ export function App({
   )
 
   useEffect(() => applyTheme(svc.settings, document.documentElement), [svc])
+  useEffect(() => connectSettingsPersistence(svc.settings), [svc])
   // Above the sign-in gate, so the signed-out screen's links (the privacy
   // policy's) open in the browser too, not only the shell's.
   useExternalLinks(svc.platform)
@@ -1397,9 +1399,9 @@ function ShellChrome() {
       'mod+alt+shift+r': (event) => {
         // The room list is still on screen in single-pane chat. Utility pages
         // have no list to reorder.
-        if (mode === 'utility' || !settings.favoritesFirst.value) return
+        if (mode === 'utility') return
         event.preventDefault()
-        favourites.reordering.value = !favourites.reordering.value
+        favourites.toggleReordering()
       },
       'mod+alt+[': (event) => {
         if (mode === 'utility' || singlePane || !hasSpaces) return

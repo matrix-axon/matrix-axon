@@ -214,21 +214,24 @@ export function sortRooms(
   // *comparison* — O(n log n) string builds and pin scans on a
   // thousand-room list, re-run on every render of the list. Each room's
   // rank and sort key are computed exactly once here.
-  const pinRank = new Map(pinned.map((key, index) => [key, index]))
+  const pinRank = favoritesFirst
+    ? new Map(pinned.map((key, index) => [key, index]))
+    : null
   const localCount = pinned.length
   const alphabetical = sort === 'az' || sort === 'za'
   const decorated = rooms.map((room) => {
-    const key = roomKey(room)
     let group = 1
     let order = 0
-    if (favoritesFirst && isFavourite(room)) {
-      group = 0
-      order = favouriteOrder(room) ?? Number.POSITIVE_INFINITY
-    } else if (favoritesFirst) {
-      const localIndex = pinRank.get(key)
-      if (localIndex !== undefined) {
+    if (pinRank !== null) {
+      if (isFavourite(room)) {
         group = 0
-        order = localCount === 0 ? 0 : localIndex / localCount
+        order = favouriteOrder(room) ?? Number.POSITIVE_INFINITY
+      } else {
+        const localIndex = pinRank.get(roomKey(room))
+        if (localIndex !== undefined) {
+          group = 0
+          order = localIndex / localCount
+        }
       }
     }
     return {

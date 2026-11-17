@@ -85,7 +85,11 @@ Turn Favs off to sort every room together, including favorites.
 Favs combines with All, DM, Group, Unread, name, account, and space filters; it never hides nonfavorite rooms itself.
 Sort, category, Favs, name query, and account selection are saved locally and restored across reloads and browser sessions.
 The name query overrides the category until cleared.
+Its visible search field and clear control remain available after reload; a room opened by a link or notification may be outside that saved query.
+Name-query saves are debounced and flushed when the field loses focus or the page is hidden.
+If account availability is unknown or a saved account is unavailable, the list temporarily shows all available accounts and restores the choice when that account returns.
 Enable Favs to reorder favorites with drag-and-drop, Alt+Up/Down, or the Reorder controls.
+Turning Favs off exits reorder mode and retains native room-link dragging.
 
 Attachment cards show captions across their full width, with an icon-only Download control at the top right.
 Click or tap a previewable card, or activate its filename with Enter or Space, to open the shared media viewer; there is no separate Preview button.

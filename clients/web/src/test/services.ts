@@ -230,7 +230,13 @@ export function testServices(
   // Component tests opt in by calling `hydrate` (Settings does this itself).
   // Auto-hydrating every shared harness would add an unrelated preference GET
   // to hundreds of MSW tests that are deliberately scoped to another route.
-  const spaces = createSpacesStore(api, rooms, live, settings.roomAccountFilter)
+  const spaces = createSpacesStore(
+    api,
+    rooms,
+    live,
+    settings.roomAccountFilter,
+    accounts,
+  )
   const roomDetails = createRoomDetailsStore(api, live)
   const updates = createUpdateChecker({
     currentVersion: options.currentVersion ?? 'test-build',

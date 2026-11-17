@@ -123,7 +123,7 @@ export function RoomList() {
     (settings.roomNameFilter.value = value)
   // Browser-local account narrowing, always applied outside the category.
   // Shared with the space rail, which hides spaces the account has no rooms in.
-  const accountFilter = spaces.accountFilter.value
+  const accountFilter = spaces.effectiveAccountFilter.value
   const setAccountFilter = (value: string) =>
     (spaces.accountFilter.value = value)
   const filterInput = useRef<HTMLInputElement>(null)
@@ -236,6 +236,7 @@ export function RoomList() {
   const roomFilter = settings.roomFilter.value
   const roomSort = settings.roomSort.value
   const favoritesFirst = settings.favoritesFirst.value
+  const reordering = favourites.reordering.value
   const pinnedRooms = settings.pinnedRooms.value
   const roomTitles = rooms.titles.value
   const unreadKeys =
@@ -295,21 +296,6 @@ export function RoomList() {
     selectedSpaceAccount,
     selectedChildren,
     spaceScope,
-  ])
-  useEffect(() => {
-    if (
-      accountFilter !== 'all' &&
-      activeAccountsKnown &&
-      (!showAccountFilter || !activeAccountIds.has(accountFilter))
-    ) {
-      spaces.accountFilter.value = 'all'
-    }
-  }, [
-    accountFilter,
-    activeAccountsKnown,
-    activeAccountIds,
-    showAccountFilter,
-    spaces,
   ])
   const visibleKeys = useMemo(() => visible.map(roomKey), [visible])
   const favouriteCount = useMemo(
@@ -840,39 +826,40 @@ export function RoomList() {
       <ErrorBanner error={favourites.error} />
 
       <div class="room-controls">
-        {/* The chord cycles the group rather than activating any one chip, so
+        <div class="room-filter-row">
+          {/* The chord cycles the group rather than activating any one chip, so
             `aria-keyshortcuts` belongs here and not on the buttons. */}
-        <div
-          class="filter-group"
-          role="group"
-          aria-label="Filter"
-          aria-keyshortcuts={keyAria(KEYS.cycleFilter)}
-        >
-          {FILTERS.map(({ value, label, shortLabel }) => (
-            <button
-              key={value}
-              type="button"
-              aria-label={label}
-              title={`Show ${label} — ${hint('cycle filters', KEYS.cycleFilter)}`}
-              class={
-                nameQuery === null && settings.roomFilter.value === value
-                  ? 'chip active'
-                  : 'chip'
-              }
-              onClick={() => {
-                setNameQuery(null)
-                settings.roomFilter.value = value
-              }}
-            >
-              {shortLabel}
-            </button>
-          ))}
+          <div
+            class="filter-group"
+            role="group"
+            aria-label="Filter"
+            aria-keyshortcuts={keyAria(KEYS.cycleFilter)}
+          >
+            {FILTERS.map(({ value, label, shortLabel }) => (
+              <button
+                key={value}
+                type="button"
+                aria-label={label}
+                title={`Show ${label} — ${hint('cycle filters', KEYS.cycleFilter)}`}
+                class={
+                  nameQuery === null && settings.roomFilter.value === value
+                    ? 'chip active'
+                    : 'chip'
+                }
+                onClick={() => {
+                  setNameQuery(null)
+                  settings.roomFilter.value = value
+                }}
+              >
+                {shortLabel}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
-            aria-label="Favorites"
             aria-pressed={favoritesFirst}
             title="Keep favorites at the top in their custom order"
-            class={favoritesFirst ? 'chip active' : 'chip'}
+            class="favorites-toggle"
             onClick={() => (settings.favoritesFirst.value = !favoritesFirst)}
           >
             Favs
@@ -889,7 +876,10 @@ export function RoomList() {
             aria-keyshortcuts={keyAria(KEYS.filterRooms)}
             value={nameFilterValue}
             onInput={(event) => setNameQuery(event.currentTarget.value)}
-            onBlur={() => nameQuery?.trim() === '' && setNameQuery(null)}
+            onBlur={() => {
+              if (nameQuery?.trim() === '') setNameQuery(null)
+              settings.flush()
+            }}
             onKeyDown={onListKeyDown}
           />
           {nameFilterValue !== '' && (
@@ -910,32 +900,26 @@ export function RoomList() {
         <div class="room-control-row">
           <button
             type="button"
-            disabled={!favoritesFirst}
+            disabled={!favourites.canReorder.value}
             class={
-              favoritesFirst && favourites.reordering.value
-                ? 'room-reorder-toggle active'
-                : 'room-reorder-toggle'
+              reordering ? 'room-reorder-toggle active' : 'room-reorder-toggle'
             }
-            aria-pressed={favoritesFirst && favourites.reordering.value}
+            aria-pressed={reordering}
             title={hint(
               !favoritesFirst
                 ? 'Enable Favs to reorder favorites'
-                : favourites.reordering.value
+                : reordering
                   ? 'Done reordering favorites'
                   : 'Reorder favorites',
               KEYS.reorderFavorites,
             )}
             aria-label={
-              favoritesFirst && favourites.reordering.value
-                ? 'Done reordering favorites'
-                : 'Reorder favorites'
+              reordering ? 'Done reordering favorites' : 'Reorder favorites'
             }
             aria-keyshortcuts={keyAria(KEYS.reorderFavorites)}
-            onClick={() =>
-              (favourites.reordering.value = !favourites.reordering.value)
-            }
+            onClick={favourites.toggleReordering}
           >
-            {favoritesFirst && favourites.reordering.value ? 'Done' : 'Reorder'}
+            {reordering ? 'Done' : 'Reorder'}
           </button>
           <label class="sort-select">
             <span class="room-sort-label" aria-hidden="true">
@@ -1180,8 +1164,8 @@ export function RoomList() {
                 visibleKeys={visibleKeys}
                 favouriteCount={favouriteCount}
                 visibleLength={visible.length}
-                reordering={favoritesFirst && favourites.reordering.value}
-                canReorder={favoritesFirst}
+                reordering={reordering}
+                canReorder={favourites.canReorder.value}
                 listDragging={listDragging}
                 dragSource={() => dragKey.current}
                 onDragKey={(key) => {
@@ -1389,13 +1373,13 @@ function RoomRow({
     <li
       class={rule ? 'room-row rule' : 'room-row'}
       onDragOver={(event) => {
-        if (canReorder && listDragging) {
+        if (listDragging) {
           event.preventDefault()
         }
       }}
       onDrop={(event) => {
+        if (!listDragging) return
         event.preventDefault()
-        if (!canReorder) return
         const transferred = event.dataTransfer?.getData('text/plain') ?? ''
         const source = transferred !== '' ? transferred : dragSource()
         onDragKey(null)
@@ -1407,14 +1391,16 @@ function RoomRow({
       <a
         href={href}
         class="room-link"
-        draggable={canReorder}
+        draggable={canReorder || undefined}
+        ref={(link) => {
+          // Preact clears the reflected boolean property to false when this
+          // prop disappears. Remove its attribute to restore native link drag.
+          if (!canReorder) link?.removeAttribute('draggable')
+        }}
         data-index={index}
         data-room-key={key}
         onDragStart={(event) => {
-          if (!canReorder) {
-            event.preventDefault()
-            return
-          }
+          if (!canReorder) return
           onDragKey(key)
           event.dataTransfer?.setData('text/plain', key)
           if (event.dataTransfer !== null) {

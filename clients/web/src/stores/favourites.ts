@@ -1,4 +1,5 @@
 import {
+  computed,
   effect,
   signal,
   type ReadonlySignal,
@@ -65,8 +66,10 @@ export interface FavouriteRoomList {
 }
 
 export interface FavouriteStore {
-  /** Session-only. Reveals the per-row move buttons; drag works either way. */
+  canReorder: ReadonlySignal<boolean>
+  /** Session-only move controls; cleared whenever favorite promotion is off. */
   reordering: Signal<boolean>
+  toggleReordering(): void
   error: Signal<string | null>
   /**
    * False when `key` is not in the room list, so nothing was written.
@@ -401,7 +404,10 @@ export function createFavouriteStore(deps: {
   api: ApiClient
   live: LiveConnection
   rooms: FavouriteRoomList
-  settings: { pinnedRooms: Signal<string[]> }
+  settings: {
+    pinnedRooms: Signal<string[]>
+    favoritesFirst: ReadonlySignal<boolean>
+  }
   accounts: {
     accounts: ReadonlySignal<readonly { account_id: string; state: string }[]>
     loading: ReadonlySignal<boolean>
@@ -410,6 +416,10 @@ export function createFavouriteStore(deps: {
 }): FavouriteStore {
   const { api, live, rooms, settings, accounts } = deps
   const reordering = signal(false)
+  const canReorder = computed(() => settings.favoritesFirst.value)
+  effect(() => {
+    if (!canReorder.value && reordering.value) reordering.value = false
+  })
   const error = signal<string | null>(null)
   const armed = signal(false)
   const migrationState = signal<'idle' | 'pending' | 'inflight' | 'done'>(
@@ -814,6 +824,7 @@ export function createFavouriteStore(deps: {
     favouriteCount: number,
     options?: { debounce?: boolean },
   ): void {
+    if (!canReorder.peek()) return
     captureIfReady()
     const plan = planFavouriteMove(key, toIndex, visibleKeys, favouriteCount, {
       orderOf,
@@ -1025,7 +1036,11 @@ export function createFavouriteStore(deps: {
   })
 
   return {
+    canReorder,
     reordering,
+    toggleReordering() {
+      if (canReorder.peek()) reordering.value = !reordering.peek()
+    },
     error,
     pin,
     unpin,

@@ -12,6 +12,7 @@ import { apiErrorMessage, type ApiClient } from '../api/client'
 import type { LiveConnection } from './live-connection'
 import { roomKey, roomTitle, type RoomDto } from './room-list'
 import type { RoomsStore } from './rooms'
+import type { AccountsStore } from './accounts'
 
 export type SpaceChildDto = components['schemas']['SpaceChildDto']
 
@@ -22,6 +23,8 @@ export interface SpacesStore {
    * `'all'` or an account id. The rail hides spaces the account has no rooms in.
    */
   accountFilter: Signal<string>
+  /** Temporary fallback while the saved account is unknown or unavailable. */
+  effectiveAccountFilter: ReadonlySignal<string>
   visible: ReadonlySignal<readonly RoomDto[]>
   /**
    * Total unread notifications per space key, summed over the joined direct
@@ -69,9 +72,21 @@ export function createSpacesStore(
   rooms: RoomsStore,
   live: LiveConnection,
   accountFilter: Signal<string> = signal('all'),
+  accounts?: Pick<AccountsStore, 'accounts' | 'loading' | 'error'>,
 ): SpacesStore {
   const selected = signal<string | null>(null)
   const reordering = signal(false)
+  const effectiveAccountFilter = computed(() => {
+    const saved = accountFilter.value
+    if (accounts === undefined || saved === 'all') return saved
+    return !accounts.loading.value &&
+      accounts.error.value === null &&
+      accounts.accounts.value.some(
+        (account) => account.account_id === saved && account.state === 'active',
+      )
+      ? saved
+      : 'all'
+  })
   const children = signal<ReadonlyMap<string, readonly SpaceChildDto[]>>(
     new Map(),
   )
@@ -91,11 +106,11 @@ export function createSpacesStore(
   // Only a successful projection with no direct joined child room confirms emptiness.
   // Filtering and room sort do not participate in this decision.
   const visible = computed(() => {
-    // The account filter applies even when membership is unknown.
+    // Unknown account availability must not hide cached rooms or spaces.
     const scoped = joinedSpaces().filter(
       (space) =>
-        accountFilter.value === 'all' ||
-        space.account_id === accountFilter.value,
+        effectiveAccountFilter.value === 'all' ||
+        space.account_id === effectiveAccountFilter.value,
     )
     // Cached/unconfirmed room summaries cannot establish joined membership.
     if (rooms.stale.value || rooms.error.value !== null) return scoped
@@ -252,6 +267,7 @@ export function createSpacesStore(
   return {
     selected,
     accountFilter,
+    effectiveAccountFilter,
     visible,
     unread,
     children,

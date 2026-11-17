@@ -1,13 +1,70 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { memoryStorage } from '../test/memory-storage'
 import {
   applyTheme,
+  connectSettingsPersistence,
   createSettingsStore,
   readStoredZoom,
   writeStoredZoom,
 } from './settings'
 
 describe('createSettingsStore', () => {
+  it('flushes a pending query on pagehide and visibilitychange', () => {
+    const storage = memoryStorage()
+    const store = createSettingsStore(storage)
+    const doc = new EventTarget() as Document
+    const win = new EventTarget() as Window
+    const disconnect = connectSettingsPersistence(store, doc, win)
+    store.roomNameFilter.value = 'last keystroke'
+    win.dispatchEvent(new Event('pagehide'))
+    expect(createSettingsStore(storage).roomNameFilter.value).toBe(
+      'last keystroke',
+    )
+    store.roomNameFilter.value = 'hidden'
+    doc.dispatchEvent(new Event('visibilitychange'))
+    expect(createSettingsStore(storage).roomNameFilter.value).toBe('hidden')
+    disconnect()
+  })
+  it('merges only changed fields so a stale tab preserves newer preferences', () => {
+    const storage = memoryStorage()
+    const first = createSettingsStore(storage)
+    const second = createSettingsStore(storage)
+    first.theme.value = 'dark'
+    first.roomSort.value = 'az'
+    first.favoritesFirst.value = false
+    first.sidebarWidth.value = 500
+    second.roomNameFilter.value = 'project'
+    second.flush()
+    const restored = createSettingsStore(storage)
+    expect(restored.theme.value).toBe('dark')
+    expect(restored.roomSort.value).toBe('az')
+    expect(restored.favoritesFirst.value).toBe(false)
+    expect(restored.sidebarWidth.value).toBe(500)
+    expect(restored.roomNameFilter.value).toBe('project')
+  })
+
+  it('debounces name-query writes and flushes the last input immediately on demand', () => {
+    vi.useFakeTimers()
+    try {
+      const storage = memoryStorage()
+      const store = createSettingsStore(storage)
+      const writes = vi.spyOn(storage, 'setItem')
+      store.roomNameFilter.value = 'p'
+      store.roomNameFilter.value = 'pr'
+      store.roomNameFilter.value = 'pro'
+      expect(writes).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(500)
+      expect(writes).toHaveBeenCalledTimes(1)
+      expect(createSettingsStore(storage).roomNameFilter.value).toBe('pro')
+      writes.mockClear()
+      store.roomNameFilter.value = 'project'
+      store.flush()
+      expect(writes).toHaveBeenCalledTimes(1)
+      expect(createSettingsStore(storage).roomNameFilter.value).toBe('project')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('starts from defaults with empty storage and persists them', () => {
     const storage = memoryStorage()
     const store = createSettingsStore(storage)

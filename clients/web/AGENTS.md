@@ -23,7 +23,9 @@ before starting a milestone.
   source and match it — and leave a comment pointing at the Rust original.
   Web intentionally uses Favs as an independent favorites-first toggle rather than a favorites-only category.
   Sort, category, Favs, name query, and account narrowing persist in the local settings envelope.
-  `spaces.accountFilter` shares `settings.roomAccountFilter`; validate a restored account only after the active account list is known.
+  `spaces.accountFilter` shares `settings.roomAccountFilter`; `effectiveAccountFilter` falls back to All while account availability is unknown or the saved account is unavailable, without erasing the saved choice.
+  Settings writes merge only fields changed in this tab into the latest local envelope.
+  Name queries save after a short debounce and flush on blur, page hide, visibility changes, and App cleanup.
 - **Live testing:** message sends and other mutations against the live
   server go to the "Axon Testing" room only
   (`!SScJmZuEkBUnuydXdf:bostoncoop.net`). Everything else is a real account.

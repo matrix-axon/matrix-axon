@@ -773,7 +773,7 @@ describe('RoomList', () => {
       expect(titles()).toEqual(['Work', 'Ops', '#lounge:hs', 'Bob']),
     )
 
-    const favs = getByRole('button', { name: 'Favorites', exact: true })
+    const favs = getByRole('button', { name: 'Favs', exact: true })
     expect(favs.getAttribute('aria-pressed')).toBe('true')
     fireEvent.click(getByRole('button', { name: 'Groups', exact: true }))
     await waitFor(() => expect(titles()).toEqual(['Work', 'Ops', '#lounge:hs']))
@@ -783,7 +783,7 @@ describe('RoomList', () => {
     expect(container.querySelector('[role="separator"]')).toBeNull()
     expect(
       container.querySelector('.room-link')?.getAttribute('draggable'),
-    ).toBe('false')
+    ).toBeNull()
     expect(
       (
         getByRole('button', {
@@ -808,7 +808,7 @@ describe('RoomList', () => {
     )
   })
 
-  it('restores account narrowing while accounts load, then clears an unavailable account', async () => {
+  it('preserves account narrowing while temporarily showing all available accounts', async () => {
     const { services, findByText, queryByText } = renderPage(
       undefined,
       (services) => {
@@ -831,7 +831,59 @@ describe('RoomList', () => {
     )
     await services.accounts.refresh()
     await findByText('Ops')
-    expect(services.settings.roomAccountFilter.value).toBe('all')
+    expect(services.settings.roomAccountFilter.value).toBe(OTHER_ACCOUNT)
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({
+          data: [
+            makeAccount(ACCOUNT, '@me:example.org'),
+            makeAccount(OTHER_ACCOUNT, '@work:example.org'),
+          ],
+        }),
+      ),
+    )
+    await services.accounts.refresh()
+    await findByText('Work')
+    expect(queryByText('Ops')).toBeNull()
+  })
+
+  it('shows cached rooms without hidden account narrowing when the accounts request fails', async () => {
+    const { services, findByText, queryByRole } = renderPage(
+      undefined,
+      (services) => {
+        services.settings.roomAccountFilter.value = OTHER_ACCOUNT
+        server.use(
+          http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+            HttpResponse.json(
+              { error: { code: 'unavailable', message: 'offline' } },
+              { status: 503 },
+            ),
+          ),
+        )
+      },
+    )
+    await findByText('Ops')
+    await findByText('Work')
+    await waitFor(() => expect(services.accounts.error.value).not.toBeNull())
+    expect(queryByRole('combobox', { name: 'Account' })).toBeNull()
+    expect(services.settings.roomAccountFilter.value).toBe(OTHER_ACCOUNT)
+  })
+
+  it('clears reorder mode when Favs is disabled and preserves native link dragging', async () => {
+    const { services, findByText, getByRole, container } = renderPage()
+    await findByText('Ops')
+    fireEvent.click(
+      getByRole('button', { name: 'Reorder favorites', exact: true }),
+    )
+    expect(services.favourites.reordering.value).toBe(true)
+    fireEvent.click(getByRole('button', { name: 'Favs', exact: true }))
+    expect(services.favourites.reordering.value).toBe(false)
+    const link = container.querySelector('.room-link')!
+    const drag = new Event('dragstart', { bubbles: true, cancelable: true })
+    fireEvent(link, drag)
+    expect(drag.defaultPrevented).toBe(false)
+    fireEvent.click(getByRole('button', { name: 'Favs', exact: true }))
+    expect(services.favourites.reordering.value).toBe(false)
   })
 
   it('unread filter uses server-derived notification counts', async () => {

@@ -122,6 +122,16 @@ Unknown values fall back to defaults (`all` / recent activity). `Name(_)` is
 session-only — it persists as `all`, since restoring an arbitrary stale query
 string is surprising.
 
+#### Web amendment: persisted room-list preferences
+
+The web client intentionally differs from the TUI persistence decision above.
+At the user's explicit request, sort, category, Favs, name query, and account selection persist in browser-local settings across sessions.
+The restored name query remains visible in the search field with a clear control; it overrides the category until cleared.
+This deliberately preserves a narrowed room list even when a deep link or notification opens a room outside the query, so unread rooms outside that query remain hidden until the query is cleared.
+Favs is an independent favorites-first toggle, not a favorites-only category, and is outside the category shortcut cycle.
+An unknown or unavailable saved account uses an All-accounts fallback without overwriting the saved selection, so temporary account deactivation does not lose the preference.
+Name-query saves are debounced and flushed on blur or page hide; saves merge only fields changed by this tab into the latest local settings envelope to preserve unrelated changes from another tab.
+
 ### Not chosen
 
 - **Block DM/Group on the backend.** Deferring those two modes until ADR 0043
