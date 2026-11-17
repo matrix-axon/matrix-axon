@@ -218,3 +218,82 @@ test('arrow-key focus stays visible on the room links', async ({ page }) => {
   expect(outline.style).toBe('solid')
   expect(parseFloat(outline.width)).toBeGreaterThanOrEqual(2)
 })
+
+/**
+ * The sidebar's narrowest width has to hold the Account select *and* the Rooms
+ * button inside the pane, however long the select's options get. They sit in
+ * separate rows (the button in `.room-control-row`, the select beneath it), so
+ * this asserts containment, not adjacency. `.room-controls` once wrapped
+ * as a column, so the widest item — the select, sized to its longest option —
+ * set every row's width and pushed the Rooms button past the clipped pane. That
+ * only happened once an unread count lengthened the options, so the fixture's
+ * short ids never showed it. The mock backend has no unread counts, so this
+ * writes the text the app renders for them; the bug is pure layout, so the
+ * rendered strings are what matter.
+ */
+test('the narrowest sidebar keeps the Rooms button and a long Account select inside the pane', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  // The settings envelope is flat (`stores/settings.ts`). An init script runs
+  // on every document load, so a later `goto` or reload re-applies this width.
+  await page.addInitScript(() => {
+    const raw = localStorage.getItem('axon.settings')
+    const settings = raw ? JSON.parse(raw) : { version: 1 }
+    settings.sidebarWidth = 360 // SIDEBAR_WIDTH_MIN
+    localStorage.setItem('axon.settings', JSON.stringify(settings))
+  })
+  await page.goto('/')
+  await page.locator('a.room-link').first().waitFor()
+
+  const account = page.locator('.account-select select')
+  await account.evaluate((select: HTMLSelectElement) => {
+    select.options[0].textContent = 'All accounts (12 unread)'
+    select.options[1].textContent = '@adam:bostoncoop.net (12 unread)'
+    // Chromium keeps the select's old intrinsic width until it is laid out
+    // afresh; the app renders these strings from the start, so match that.
+    select.style.display = 'none'
+    void select.offsetHeight
+    select.style.display = ''
+  })
+
+  const geometry = await page.evaluate(() => {
+    const pane = document.querySelector('.room-list-pane')!
+    const paneBox = pane.getBoundingClientRect()
+    const rooms = document
+      .querySelector('.room-actions-menu summary')!
+      .getBoundingClientRect()
+    const selectEl = document.querySelector<HTMLSelectElement>(
+      '.account-select select',
+    )!
+    const select = selectEl.getBoundingClientRect()
+    // The select's natural width, measured on a detached-style clone so the
+    // check does not depend on how the live one was squeezed.
+    const clone = selectEl.cloneNode(true) as HTMLSelectElement
+    clone.style.cssText =
+      'position:absolute;visibility:hidden;flex:none;width:max-content;max-width:none'
+    selectEl.parentElement!.appendChild(clone)
+    const naturalWidth = clone.getBoundingClientRect().width
+    clone.remove()
+    return {
+      optionText: selectEl.options[1].textContent,
+      naturalWidth,
+      selectWidth: select.width,
+      sidebar: document.querySelector('.sidebar')!.getBoundingClientRect()
+        .width,
+      paneRight: paneBox.right,
+      roomsRight: rooms.right,
+      selectRight: select.right,
+      overflow: pane.scrollWidth - pane.clientWidth,
+    }
+  })
+  expect(geometry.sidebar).toBe(360) // really the narrowest
+  // The long text is still there, and really does not fit: a re-render that
+  // wrote the short labels back would otherwise leave this test vacuous.
+  expect(geometry.optionText).toBe('@adam:bostoncoop.net (12 unread)')
+  expect(geometry.naturalWidth).toBeGreaterThan(geometry.selectWidth)
+  expect(geometry.roomsRight).toBeLessThanOrEqual(geometry.paneRight)
+  expect(geometry.selectRight).toBeLessThanOrEqual(geometry.paneRight)
+  expect(geometry.overflow).toBe(0)
+})

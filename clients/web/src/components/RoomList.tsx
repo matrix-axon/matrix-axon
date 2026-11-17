@@ -1592,7 +1592,7 @@ function AccountSelect({
   // The badge sits beside the caption, not inside the <label>, so the select's
   // accessible name stays "Account"; `aria-describedby` announces the count.
   return (
-    <span class="sort-select">
+    <span class="sort-select account-select">
       <label for={selectId}>Account</label>
       {elsewhere > 0 && (
         <span
