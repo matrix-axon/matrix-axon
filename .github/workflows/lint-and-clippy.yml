@@ -87,6 +87,20 @@ jobs:
         shell: bash
         run: pre-commit run hook-filters --all-files --hook-stage pre-push
 
+      # Expensive hooks stay separate steps. Each one executes the hook entry
+      # through scripts/ci/run-hook-entry.py. This fails when a step's command
+      # is not that invocation, or when the step is turned off (#200).
+      - name: check-hook-commands
+        shell: bash
+        run: pre-commit run hook-commands --all-files --hook-stage pre-push
+
+      # scripts/check-liquid.sh says CI runs it over the whole tree through
+      # this hook. Cheap, and a brace that skipped the local hook still fails
+      # the required job.
+      - name: check-liquid
+        shell: bash
+        run: pre-commit run markdown-no-liquid --all-files --hook-stage pre-push
+
       # Whether this pull request changes anything the Rust gate below reads.
       # Everything above and `check-bundle-version` stays unconditional; only
       # the cache restore, rustfmt, clippy and the test suite -- the 20-30
@@ -137,15 +151,16 @@ jobs:
         shell: bash
         run: pre-commit run bundle-version --all-files --hook-stage pre-push
 
+      # The rustfmt, rust-clippy, and cargo-test hook entries. The runner
+      # reads them from .pre-commit-config.yaml, including clippy's env prefix.
       - name: Check formatting
         if: steps.rust-changed.outputs.changed == 'true'
-        run: cargo fmt --all --check
+        run: python3 scripts/ci/run-hook-entry.py rustfmt
 
       - name: Clippy
         if: steps.rust-changed.outputs.changed == 'true'
-        # Flag order matches the rust-clippy hook's `entry:` verbatim.
-        run: cargo clippy --all-features --all-targets -- -D warnings
+        run: python3 scripts/ci/run-hook-entry.py rust-clippy
 
       - name: Test
         if: steps.rust-changed.outputs.changed == 'true'
-        run: cargo test --all
+        run: python3 scripts/ci/run-hook-entry.py cargo-test

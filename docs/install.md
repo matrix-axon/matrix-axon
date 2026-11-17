@@ -91,9 +91,12 @@ Then sign in with a token — `docker compose exec axon-server axon-server token
 The one-time `/bootstrap/<code>` URL signs in the browser client, not the app, and minting a token consumes it — so do the browser sign-in first if you want both.
 Each release also carries `THIRDPARTY-axon-desktop.txt`, the full license disclosure for everything the app bundles.
 
+The Windows and Linux builds are x64 only, so on ARM use the browser client or build the shell yourself ([#455](https://github.com/matrix-axon/matrix-axon/issues/455)).
+
+
 #### macOS
 
-The macOS build is a universal binary, so Apple Silicon and Intel both run natively; the Windows and Linux builds are x64 only, so on ARM use the browser client or build the shell yourself ([#455](https://github.com/matrix-axon/matrix-axon/issues/455)).
+The macOS build is a universal binary, so Apple Silicon and Intel both run natively.
 The macOS build is signed with a Developer ID certificate and notarized by Apple, so it opens without a Gatekeeper warning.
 
 #### Windows
@@ -102,21 +105,29 @@ The Windows executables and installer are signed through Azure Artifact Signing 
 
 #### Linux
 
+The Linux builds are made on Ubuntu 22.04, so they need glibc 2.35 or newer (Debian 12 and Ubuntu 22.04 or later).
+The `.deb` also needs the system webview stack (`libwebkit2gtk-4.1-0` and `libsoup-3.0-0`), which `apt` installs for you on those releases.
+The AppImage bundles its own WebKitGTK, so it needs only a new enough glibc.
 The Linux builds are not signed, so some Linux desktops will warn the first time you run them.
-The Linux client can leverage system autocorrect/spell-checking for any dictionaries you have installed. For example, to have the client flag spelling errors in English and Finnish on an Ubuntu box, see the example below. You may need to adjust package versions for your distribution (e.g. `libgspell-1-2` or `libgspell-1-3`).
+
+The Linux client underlines misspelled words in the message composer, using whatever enchant dictionaries are installed.
+There is no autocorrect on Linux.
+WebKitGTK already pulls in enchant, so you normally only need a dictionary for each language you want checked.
+Package names vary by distribution and release.
+For example, to check English and Finnish on Debian or Ubuntu:
 
 ```sh
-# install spell checking support
-sudo apt install hunspell libenchant-2-2 libgspell-1-3
-# install English language libraries
-sudo apt install hunspell-en-us hunspell-en-gb
-# install Finnish language libraries
-sudo apt install libvoikko1 voikko-fi
-# set LANGUAGE below just for axon; include multiple languages with : as the delimiter
+# install English and Finnish dictionaries (hunspell is the simplest route)
+sudo apt install hunspell-en-us hunspell-en-gb hunspell-fi
+# set LANGUAGE just for axon; separate multiple languages with a colon
 LANGUAGE=fi:en_US axon
-# for AppImage rather than installed DEB package (fill in current version)
-LANGUAGE=fi:en_US ./Axon_<version>_amd64.AppImage
 ```
+
+The languages come from the locale, so a real locale must also be set (for example `LANG=en_US.UTF-8`).
+If `LANG` and `LC_ALL` are unset or `C`, `LANGUAGE` is ignored, nothing is underlined, and the app logs that the locale names no language.
+The locale is read at startup, so restart the app after changing it.
+An AppImage is launched the same way, as `LANGUAGE=fi:en_US ./Axon_<version>_amd64.AppImage`.
+The AppImage bundles its own WebKitGTK and enchant, which may not see your system dictionaries; this has not been verified.
 
 #### Building from source
 
