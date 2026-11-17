@@ -1810,6 +1810,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get server capabilities
+         * @description The optional features this server supports. A server without this route
+         *     supports none of them.
+         */
+        get: operations["get_capabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/devices/{device_id}/state/{namespace}": {
         parameters: {
             query?: never;
@@ -2620,6 +2641,20 @@ export interface components {
                 /** @description The provider being bound. */
                 provider: string;
                 status: components["schemas"]["BindStatusDto"];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_CapabilitiesDto: {
+            /**
+             * @description Optional features this server supports (`GET /v1/capabilities`). An older
+             *     server has no such route, and its `404` means none of them.
+             */
+            data: {
+                /**
+                 * @description An edit accepts `url_previews` and carries a message's previews forward
+                 *     when it omits them (ADR 0132 section 8).
+                 */
+                edit_url_previews: boolean;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -4255,6 +4290,17 @@ export interface components {
             state: string;
         };
         /**
+         * @description Optional features this server supports (`GET /v1/capabilities`). An older
+         *     server has no such route, and its `404` means none of them.
+         */
+        CapabilitiesDto: {
+            /**
+             * @description An edit accepts `url_previews` and carries a message's previews forward
+             *     when it omits them (ADR 0132 section 8).
+             */
+            edit_url_previews: boolean;
+        };
+        /**
          * @description Why a crawl failed or stopped early. Allowlisted; never upstream text.
          * @enum {string}
          */
@@ -4542,6 +4588,13 @@ export interface components {
          */
         DiscoveryStatus: "available" | "not_returned" | "forbidden" | "not_found";
         /**
+         * @description An entry of an edit's `url_previews` (ADR 0132 section 8): a new preview,
+         *     in the send shape, or `{"matched_url": …, "keep": true}` to copy the
+         *     message's current preview for that link, image included, without uploading
+         *     anything.
+         */
+        EditPreviewRequest: components["schemas"]["KeepPreviewRequest"] | components["schemas"]["LinkPreviewRequest"];
+        /**
          * @description Request body for editing a message (`PUT …/events/{event_id}`). Replaces the
          *     target event's text via an `m.replace` relation.
          *
@@ -4553,6 +4606,10 @@ export interface components {
          *     is the new *caption*: the media and its filename are kept, and an empty
          *     `body` (or one equal to the filename) removes the caption. Editing any other
          *     kind of message is a `400`.
+         *
+         *     Link previews (ADR 0132 section 8) go in the replacement's `m.new_content`,
+         *     with an explicit `[]` in its top-level fallback. Whether a server supports
+         *     `url_previews` here is `GET /v1/capabilities`' `edit_url_previews`.
          */
         EditRequest: {
             /**
@@ -4567,6 +4624,23 @@ export interface components {
             format?: string | null;
             /** @description The rendered HTML body. Must be paired with `format`. */
             formatted_body?: string | null;
+            /**
+             * @description Omitted or null: carry the message's current previews forward, keeping,
+             *     in order, those whose link is still a complete bare link in `body`.
+             *     A message with no preview field gets none; one with a field whose links
+             *     are all gone, or whose new formatted body has a spoiler, gets `[]`.
+             *     Carried previews degrade to fit the size budget: whole entries, last
+             *     first, then `[]`, then no field.
+             *
+             *     `[]`: no previews. A list: the whole set, at most 8, each a new preview
+             *     (with the send limits, and an optional `image_upload_id`) or a `keep`
+             *     entry. Every entry's link must be a complete bare link in `body`. As on
+             *     a send, a list is the client's choice: the spoiler rule above applies
+             *     only to carry-forward. The replacement must fit 40960 bytes and its
+             *     previews 32768, as on a send; overflow is a definite 413 before any
+             *     upload or dispatch.
+             */
+            url_previews?: components["schemas"]["EditPreviewRequest"][] | null;
         };
         /** @description One SAS emoji: the symbol and its short English description. */
         EmojiDto: {
@@ -4940,6 +5014,17 @@ export interface components {
              *     account's client has no direct path to.
              */
             server_names?: string[];
+        };
+        /**
+         * @description Keep the message's current preview for `matched_url`. A link whose current
+         *     preview fails the server's checks is left out; a link the message has no
+         *     preview for at all, because another device's edit removed it, is
+         *     `409 previews_changed`.
+         */
+        KeepPreviewRequest: {
+            /** @description Must be `true`. */
+            keep: boolean;
+            matched_url: string;
         };
         /** @description Request body for knocking on a room (`POST …/rooms/knock`; ADR 0068 M19c). */
         KnockRoomRequest: {
@@ -9486,7 +9571,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiResponse_SendResultDto"];
                 };
             };
-            /** @description Malformed request */
+            /** @description Malformed request, or invalid preview metadata or image */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -9508,6 +9593,33 @@ export interface operations {
             };
             /** @description Operation not permitted */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account, room or preview upload not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description previews_changed: a `keep` entry names a link the message has no preview for, because another device's edit removed it. Nothing was sent; reload the message and edit again. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description An edit that sets url_previews: event_too_large (40960-byte budget for the whole replacement), preview_too_large (32768-byte preview budget), or payload_too_large (thumbnail bytes). Nothing was sent. */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12256,6 +12368,37 @@ export interface operations {
             /** @description Upstream homeserver error sending the MAC */
             502: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_capabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description This server's optional features */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_CapabilitiesDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
                     [name: string]: unknown;
                 };
                 content: {

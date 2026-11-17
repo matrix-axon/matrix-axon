@@ -33,6 +33,7 @@ pub mod account_actions;
 pub mod accounts;
 pub mod bootstrap;
 mod bundled_previews;
+pub mod capabilities;
 pub mod device_state;
 pub mod devices;
 pub mod ephemeral;

@@ -280,6 +280,12 @@ pub fn router(state: AppState) -> Router {
         // Server status (M10): the backfill engine's disk-space health, so a
         // client can tell when backfill has paused.
         .route("/v1/status", get(routes::status::get_status))
+        // Optional features this server supports (ADR 0132 section 8); an
+        // older server's 404 means none.
+        .route(
+            "/v1/capabilities",
+            get(routes::capabilities::get_capabilities),
+        )
         // Device push tokens (ADR 0113). The body cap is inside the auth
         // layer, so a missing bearer is still 401 before the body is read.
         .route(

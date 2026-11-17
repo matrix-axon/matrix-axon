@@ -1369,7 +1369,10 @@ impl Store {
     /// Each JSON path is a separate branch so PostgreSQL can use the matching
     /// partial expression index rather than filtering every event for an
     /// account through one multi-way `OR`. The preview candidates share one
-    /// redaction filter outside their indexed UNION branches.
+    /// redaction filter outside their indexed UNION branches. A preview an
+    /// edit added is found in the replacement's `m.new_content`, and the
+    /// replacement is returned; it is refused once it or its target is
+    /// redacted.
     pub async fn get_event_by_mxc_url(
         &self,
         account_id: Uuid,
@@ -1380,6 +1383,39 @@ impl Store {
         }
         let reaction_visible = crate::event_visibility::media_room_is_visible("reaction");
         let reaction_redacted = crate::event_visibility::event_is_redacted("reaction");
+        // Previews an edit carries live in its `m.new_content` (ADR 0132
+        // section 8). One branch per spelling and image key, each matching a
+        // partial index on replacements; the edit is unusable once it or the
+        // message it replaces is redacted.
+        let edit_previews = [
+            ("m.url_previews", "$3", ""),
+            ("m.url_previews", "$4", ""),
+            ("m.url_previews", "$5", ""),
+            (
+                "com.beeper.linkpreviews",
+                "$3",
+                "AND NOT (content -> 'm.new_content' ? 'm.url_previews')",
+            ),
+            (
+                "com.beeper.linkpreviews",
+                "$4",
+                "AND NOT (content -> 'm.new_content' ? 'm.url_previews')",
+            ),
+            (
+                "com.beeper.linkpreviews",
+                "$5",
+                "AND NOT (content -> 'm.new_content' ? 'm.url_previews')",
+            ),
+        ]
+        .map(|(field, probe, alias)| {
+            format!(
+                "SELECT id, event_id, relates_to->>'event_id' AS target FROM events \
+                 WHERE account_id = $1 AND event_type = 'm.room.message' \
+                   AND relates_to->>'rel_type' = 'm.replace' \
+                   AND content->'m.new_content'->'{field}' @> {probe}::jsonb {alias}"
+            )
+        })
+        .join(" UNION ALL ");
         let sql = format!(
             "{} \
              WHERE e.account_id = $1 \
@@ -1449,6 +1485,13 @@ impl Store {
                        WHERE NOT EXISTS (SELECT 1 FROM events rr \
                            WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
                              AND rr.redacts = preview.event_id) \
+                       UNION ALL \
+                       SELECT edit.id, 3 AS priority FROM ( \
+                       {edit_previews} \
+                       ) edit \
+                       WHERE NOT EXISTS (SELECT 1 FROM events rr \
+                           WHERE rr.account_id = $1 AND rr.event_type = 'm.room.redaction' \
+                             AND rr.redacts IN (edit.event_id, edit.target)) \
                    ) media_matches \
                    ORDER BY priority ASC, id ASC \
                    LIMIT 1 \

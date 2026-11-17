@@ -238,7 +238,7 @@ fn gateway_to_fetch(err: GatewayError) -> FetchError {
         GatewayError::Undecryptable(msg) => FetchError::Undecryptable(msg),
         // Only message-send code constructs this variant. Treat a future
         // routing mistake as internal, not a media-size rejection or a panic.
-        GatewayError::EventTooLarge => {
+        GatewayError::EventTooLarge | GatewayError::PreviewsChanged => {
             FetchError::Internal("send-only gateway error reached media fetch adapter".into())
         }
     }

@@ -25,6 +25,9 @@ use uuid::Uuid;
 pub enum SendError {
     /// Definite pre-dispatch or explicit homeserver size rejection. -> 413.
     EventTooLarge,
+    /// An edit kept a link preview the message no longer has, because another
+    /// device's edit removed it (ADR 0132 section 8). Nothing was sent. → `409`.
+    PreviewsChanged,
     /// The addressed account or room doesn't exist / isn't joined. → `404`.
     NotFound(String),
     /// The operation isn't permitted (e.g. editing a message the account didn't
@@ -105,9 +108,11 @@ pub trait MessageSender: Send + Sync {
     ) -> Result<String, SendError>;
 
     /// Edit an existing message (`m.replace`); returns the replacement event id.
-    /// `formatted` sets rich text on the replacement (see [`send_message`]). The
-    /// replacement keeps the original's `msgtype`; for a media message `body` is
-    /// the new caption (see [`EditRequest`](crate::dto::EditRequest)).
+    /// `edit.formatted` sets rich text on the replacement (see [`send_message`]).
+    /// The replacement keeps the original's `msgtype`; for a media message
+    /// `edit.body` is the new caption (see [`EditRequest`](crate::dto::EditRequest)).
+    /// `edit.previews` and `edit.current` decide its link previews (ADR 0132
+    /// section 8); new entries' images are already claimed.
     ///
     /// [`send_message`]: MessageSender::send_message
     async fn edit(
@@ -115,8 +120,7 @@ pub trait MessageSender: Send + Sync {
         account_id: Uuid,
         room_id: &str,
         event_id: &str,
-        body: &str,
-        formatted: Option<Formatted<'_>>,
+        edit: axon_core::edit_preview::PreviewEdit<'_>,
     ) -> Result<String, SendError>;
 
     /// Redact an event, optionally with a reason; returns the redaction event id.

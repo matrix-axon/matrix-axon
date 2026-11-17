@@ -913,6 +913,7 @@ impl GateError for GatewayError {
             GatewayError::Timeout(_) => Outcome::TimedOut,
             GatewayError::Overloaded(_) => Outcome::Overloaded,
             GatewayError::EventTooLarge
+            | GatewayError::PreviewsChanged
             | GatewayError::MediaNotFound(_)
             | GatewayError::Forbidden(_)
             | GatewayError::Invalid(_)

@@ -42,6 +42,26 @@ fn bundled_preview_contract_is_additive_and_rejects_arbitrary_metadata() {
     }
 }
 
+#[test]
+fn edit_preview_contract_is_additive() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &spec["components"]["schemas"];
+    assert_eq!(
+        schemas["EditRequest"]["required"],
+        serde_json::json!(["body"])
+    );
+    assert_eq!(
+        schemas["EditRequest"]["properties"]["url_previews"]["maxItems"],
+        8
+    );
+    assert_eq!(schemas["KeepPreviewRequest"]["additionalProperties"], false);
+    let edit = &spec["paths"]["/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}"]["put"];
+    for status in ["409", "413"] {
+        assert!(edit["responses"].get(status).is_some(), "{status}");
+    }
+    assert!(spec["paths"]["/v1/capabilities"]["get"].is_object());
+}
+
 fn golden_path() -> PathBuf {
     // CARGO_MANIFEST_DIR is crates/axon-api; the spec lives at the repo root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openapi/openapi.json")
