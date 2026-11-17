@@ -100,4 +100,41 @@ describe('server capabilities (ADR 0132 § 8)', () => {
     expect(capabilities.editUrlPreviews.value).toBeNull()
     stop()
   })
+
+  it('asks again on a reconnect, which is how a server upgrade shows', async () => {
+    let status = 404
+    const asked = serve(() =>
+      status === 404
+        ? HttpResponse.json({ error: { code: 'not_found' } }, { status })
+        : status === 503
+          ? HttpResponse.json({ error: { code: 'x' } }, { status })
+          : HttpResponse.json({ data: { edit_url_previews: true } }),
+    )
+    const signedIn = signal(true)
+    const reconnects = signal(0)
+    const capabilities = make()
+    const stop = connectCapabilities(signedIn, capabilities, reconnects)
+    await settled()
+    expect(capabilities.editUrlPreviews.value).toBe(false)
+    // An older server's no is kept until the socket comes back...
+    capabilities.refresh()
+    await settled()
+    expect(asked()).toBe(1)
+    // ...and a failed re-check leaves it standing.
+    status = 503
+    reconnects.value = 1
+    await settled()
+    expect(capabilities.editUrlPreviews.value).toBe(false)
+    status = 200
+    reconnects.value = 2
+    await settled()
+    expect(capabilities.editUrlPreviews.value).toBe(true)
+    expect(asked()).toBe(3)
+    // Signed out, a reconnect asks nothing.
+    signedIn.value = false
+    reconnects.value = 3
+    await settled()
+    expect(asked()).toBe(3)
+    stop()
+  })
 })

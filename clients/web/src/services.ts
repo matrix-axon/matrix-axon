@@ -1999,7 +1999,7 @@ export function createServices(
   const linkPreviews = createLinkPreviewCache()
   connectLinkPreviewCacheReset(auth, linkPreviews)
   const capabilities = createServerCapabilities(api)
-  connectCapabilities(auth.signedIn, capabilities)
+  connectCapabilities(auth.signedIn, capabilities, live.reconnects)
   return {
     auth,
     api,
