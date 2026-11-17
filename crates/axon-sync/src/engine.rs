@@ -769,7 +769,7 @@ fn skip_departed_room_ingestion(ctx: &PersistContext, room: &Room) -> bool {
 /// Alongside the `events` row this writes the crypto sibling rows (ADR 0015): the
 /// ciphertext sibling for UTDs (the only events whose ciphertext the SDK hands
 /// us), and the crypto-provenance siblings from `enc_info` for decrypted events.
-async fn persist_timeline_event(
+pub(crate) async fn persist_timeline_event(
     ev: AnySyncTimelineEvent,
     room: Room,
     raw: RawEvent,
@@ -2159,6 +2159,37 @@ async fn run_account(
         },
     ));
 
+    // Holes that limited responses leave in stored history (ADR 0140): a
+    // second reader of the same broadcast, also subscribed before `start`. It
+    // only records rows, so it keeps up; the backfill task below pages them.
+    // It reads the database clock here, before any response is stored, as its
+    // lag boundary of last resort.
+    let gap_signal = Arc::new(backfill::gaps::GapSignal::default());
+    let gap_updates = client.subscribe_to_all_room_updates();
+    let gap_watcher = backfill::gaps::GapWatcher::new(
+        account.account_id,
+        store.clone(),
+        {
+            let client = client.clone();
+            Box::new(move || {
+                client
+                    .joined_rooms()
+                    .iter()
+                    .map(|room| room.room_id().to_string())
+                    .collect()
+            })
+        },
+        config.timeline_limit,
+        Arc::clone(&gap_signal),
+    )
+    .await;
+    let gap_watch_cancel = cancel.child_token();
+    let gap_watch_handle = tokio::spawn(backfill::gaps::watch(
+        gap_updates,
+        gap_watcher,
+        gap_watch_cancel.clone(),
+    ));
+
     // Supplementary responses only project allowlisted state; they never
     // mutate SDK rooms. See docs/custom-emoji.md for transport isolation and
     // load bounds.
@@ -2250,21 +2281,19 @@ async fn run_account(
     // History backfill (M10): a continuous, throttled background task that pages
     // each joined room's pre-existing history backward through the shared ingestion
     // path. Same child-token + join-handle lifecycle as the re-decryption queue, so
-    // it ends with this run and is drained cleanly below. Gated by config; `None`
-    // when disabled so there is nothing to drain.
+    // it ends with this run and is drained cleanly below. Spawned whatever
+    // `sync.backfill_enabled` says, because it also fills the holes the gap
+    // watcher records (ADR 0140); with backfill off it pages only those.
     let backfill_cancel = cancel.child_token();
-    let backfill_handle = if config.backfill_enabled {
-        Some(tokio::spawn(backfill::run(
-            client.clone(),
-            backfill_ctx.clone(),
-            BackfillParams::from_config(config),
-            backfill_health.clone(),
-            Arc::clone(&gate),
-            backfill_cancel.clone(),
-        )))
-    } else {
-        None
-    };
+    let backfill_handle = tokio::spawn(backfill::run(
+        client.clone(),
+        backfill_ctx.clone(),
+        BackfillParams::from_config(config),
+        backfill_health.clone(),
+        Arc::clone(&gate),
+        Arc::clone(&gap_signal),
+        backfill_cancel.clone(),
+    ));
 
     // Verification watcher (ADR 0026): keep the persisted `verified` flag tracking
     // the SDK's current cross-signing state. Same child-token + join-handle
@@ -2516,14 +2545,12 @@ async fn run_account(
         );
     }
     backfill_cancel.cancel();
-    if let Some(handle) = backfill_handle {
-        if let Err(err) = handle.await {
-            tracing::warn!(
-                account_id = %account.account_id,
-                error = %err,
-                "backfill task did not shut down cleanly"
-            );
-        }
+    if let Err(err) = backfill_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "backfill task did not shut down cleanly"
+        );
     }
     verify_cancel.cancel();
     if let Err(err) = verify_handle.await {
@@ -2539,6 +2566,14 @@ async fn run_account(
             account_id = %account.account_id,
             error = %err,
             "sender-trust watcher did not shut down cleanly"
+        );
+    }
+    gap_watch_cancel.cancel();
+    if let Err(err) = gap_watch_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "gap watcher did not shut down cleanly"
         );
     }
     room_updates_cancel.cancel();

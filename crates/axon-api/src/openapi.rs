@@ -252,6 +252,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::search::SearchSort,
         crate::dto::StatusDto,
         crate::dto::BackfillStatusDto,
+        crate::dto::HistoryGapsStatusDto,
         crate::dto::AccountBackfillDto,
         crate::dto::BuildInfoDto,
         crate::dto::AccountSyncStatusDto,

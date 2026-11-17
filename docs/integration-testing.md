@@ -74,6 +74,28 @@ Knobs (all optional, via env):
 The GitHub runner already has docker, docker compose, python3, and curl, and the default ports are free there, so the job is just "checkout → install Rust → run the script".
 It's slower than the lint/test lane because it pulls the Synapse and Postgres images, which is why it's a separate workflow.
 
+## Gap fill (ADR 0140)
+
+`scripts/gap-fill-test.sh` checks that a burst of more messages than the sync timeline limit is stored in full ([ADR 0140](adr/0140-fill-limited-sync-gaps.md)).
+It runs twice, with `sync.backfill_enabled` on and then off:
+
+1. A fresh user creates a plain room and sends five messages over the client-server API.
+2. A fresh axon logs the user in and stores them.
+   With backfill on, it waits until backfill has reached the room's start, so ordinary backfill has nothing left to page there.
+3. axon stops, and the user sends `BURST` (default 60) messages.
+4. axon restarts on the same SDK store.
+   Sliding sync resumes from its saved position, so the room arrives `limited` with only the newest events.
+   The script waits for every sent event to be stored, checks that axon logged a hole and closed every gap row, and reads `history_gaps.events_recovered` from `GET /v1/status`.
+
+```sh
+scripts/gap-fill-test.sh
+# Ports taken locally (a dev Synapse on 8008, say):
+POSTGRES_PORT=55432 SYNAPSE_PORT=18008 scripts/gap-fill-test.sh
+```
+
+It takes the same `POSTGRES_PORT`, `SYNAPSE_PORT`, `TIMEOUT` and `KEEP_UP` knobs as the re-decryption script, plus `BURST`, which must exceed 20.
+Choose the `gap-fill` suite in `.github/workflows/integration.yml` to run it in CI.
+
 ## Matrix OAuth QR interoperability (ADR 0097)
 
 The same manual integration workflow exposes five pinned Synapse + MAS lanes: `matrix-oauth-api`, `matrix-oauth-acquire`, `matrix-oauth-grant`, `matrix-oauth-browser`, and `matrix-oauth-unsupported`.

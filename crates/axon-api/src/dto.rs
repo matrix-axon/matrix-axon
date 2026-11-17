@@ -2340,6 +2340,9 @@ pub struct SearchPage {
 pub struct StatusDto {
     /// History-backfill engine status.
     pub backfill: BackfillStatusDto,
+    /// Holes that limited syncs left in stored room history, and their filling
+    /// (ADR 0140).
+    pub history_gaps: HistoryGapsStatusDto,
     /// The running binary's build identity.
     pub build: BuildInfoDto,
     /// Per-account sync-service status.
@@ -2749,6 +2752,43 @@ pub struct BackfillStatusDto {
     pub accounts: Vec<AccountBackfillDto>,
     /// False when progress could not be read; an empty list then means unavailable.
     pub progress_available: bool,
+}
+
+/// Holes that limited sliding-sync responses left in stored room history, across
+/// every account, and how many events filling them has recovered (ADR 0140).
+/// The backfill task pages them ahead of ordinary backfill, whether or not
+/// backfill is enabled.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HistoryGapsStatusDto {
+    /// Holes not yet closed, including parked ones and ones awaiting their
+    /// batch.
+    pub open: i64,
+    /// Of those, holes parked after repeated failures: they are retried only
+    /// about once a day (ADR 0121).
+    pub parked: i64,
+    /// Of those, holes whose limited batch has not been stored yet, so they
+    /// cannot yet be told apart from a room's first window.
+    pub awaiting_batch: i64,
+    /// Events that filling holes stored since the server started.
+    pub events_recovered: u64,
+    /// False when the hole counts could not be read; they are then zero.
+    pub available: bool,
+}
+
+impl HistoryGapsStatusDto {
+    /// Assemble from the store's counts (`None` when unreadable) and the
+    /// engine's recovered-event counter.
+    pub fn new(counts: Option<axon_store::HistoryGapCounts>, events_recovered: u64) -> Self {
+        let available = counts.is_some();
+        let counts = counts.unwrap_or_default();
+        HistoryGapsStatusDto {
+            open: counts.open,
+            parked: counts.parked,
+            awaiting_batch: counts.awaiting_batch,
+            events_recovered,
+            available,
+        }
+    }
 }
 
 /// One account's backfill progress (M10).

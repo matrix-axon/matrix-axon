@@ -35,6 +35,7 @@ mod search;
 mod space_discovery;
 mod spaces;
 mod state;
+mod timeline_gaps;
 mod tokens;
 mod unread;
 mod upstream_reconcile;
@@ -93,6 +94,9 @@ pub use spaces::{
 pub use state::{
     AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRedaction, RoomStateRow,
     RoomStateUpsert, UnappliedStateRedaction,
+};
+pub use timeline_gaps::{
+    GapCheck, GapOrigin, GapPageLookup, GapTotals, HistoryGapCounts, LagMark, TimelineGap,
 };
 pub use tokens::{
     IssuedOAuthTokenPair, IssuedToken, OAuthSession, Token, TokenRevocation, VerifiedToken,

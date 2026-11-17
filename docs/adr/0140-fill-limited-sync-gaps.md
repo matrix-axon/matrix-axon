@@ -1,7 +1,7 @@
 # ADR 0140 — Fill the holes that limited syncs leave in room history
 
-**Status:** Proposed. Amends [ADR 0043](0043-history-backfill-engine.md) (backfill extends history only behind the oldest stored event); supersedes nothing.
-This ADR is the plan only; implementation waits for its review.
+**Status:** Accepted. Amends [ADR 0043](0043-history-backfill-engine.md) (backfill extends history only behind the oldest stored event); supersedes nothing.
+Delivery step 1 is implemented; steps 2 and 3 are pending.
 Tracking issue: #1125.
 
 ## Context
@@ -80,6 +80,9 @@ CREATE INDEX room_timeline_gaps_room_idx ON room_timeline_gaps (account_id, room
 ```
 
 `updated_at` gets the shared `trigger_set_updated_at()` trigger.
+The implementation adds two columns to this sketch.
+`batch_checked` records that the first-window test below has run and found a hole, so it is not evaluated again on every sweep.
+`stop_event_ids` holds a lag probe's first-window stop (decision 3), taken when the probe is recorded.
 The surrogate key lets one room hold any number of holes and probes.
 It also means replacing `from_token` after each page can never collide with another row.
 The watcher only inserts rows, so it keeps up with the broadcast; the paging happens elsewhere (decision 2).

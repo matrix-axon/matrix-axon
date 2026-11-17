@@ -5967,6 +5967,8 @@ async fn status_degrades_when_progress_pool_is_unavailable() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["data"]["backfill"]["progress_available"], false);
     assert_eq!(json["data"]["backfill"]["accounts"], json!([]));
+    assert_eq!(json["data"]["history_gaps"]["available"], false);
+    assert_eq!(json["data"]["history_gaps"]["open"], 0);
     for field in ["build", "sync", "homeservers", "management", "push"] {
         assert!(json["data"].get(field).is_some(), "missing {field}");
     }
@@ -5974,6 +5976,13 @@ async fn status_degrades_when_progress_pool_is_unavailable() {
     let (status, _, json) = request_parts(&app, "GET", "/v1/status", None, Some(&bearer())).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["data"]["backfill"]["progress_available"], true);
+    assert_eq!(json["data"]["history_gaps"]["available"], true);
+    for field in ["open", "parked", "awaiting_batch", "events_recovered"] {
+        assert!(
+            json["data"]["history_gaps"][field].is_number(),
+            "history_gaps.{field}"
+        );
+    }
 }
 
 /// The homeserver load gates' in-memory state reaches `/v1/status` (ADR 0122),
