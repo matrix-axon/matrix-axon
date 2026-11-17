@@ -785,4 +785,22 @@ describe('the plain http:// note (§ 1)', () => {
     controller.edit(`was ${HTTP} and http://other.example.org/ `)
     expect(controller.plainHttp.value).toBe(true)
   })
+
+  it('is not raised where an https:// link would get no card either', () => {
+    // Three cards already: a fourth link of any scheme gets none.
+    const three = [1, 2, 3].map((n) => `https://n${n}.example.org/`).join(' ')
+    make(on)
+    controller.edit(`${three} ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(false)
+    // A media caption's edit adds no cards at all (§ 8).
+    controller = createComposerLinkPreviews(createLinkPreviewCache())
+    controller.reset('caption ', {
+      originalText: 'caption ',
+      cards: [],
+      addNew: false,
+    })
+    controller.configure(on, false)
+    controller.edit(`caption ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(false)
+  })
 })

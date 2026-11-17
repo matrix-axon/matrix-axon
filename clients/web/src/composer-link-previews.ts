@@ -529,7 +529,13 @@ export function createComposerLinkPreviews(
       ]
     })
     if (!sameCards(cards.peek(), next)) cards.value = next
+    // Only where an https:// link would get a card: not past the third, and
+    // not in a media caption's edit (§ 8).
+    const room = editing
+      ? addNew && wantedInEdit().length < MAX_COMPOSER_PREVIEWS
+      : slotted().length < MAX_COMPOSER_PREVIEWS
     const http =
+      room &&
       !suspended &&
       linkPreviewsEnabled(sources) &&
       plainHttpLinks(text, pasted).some(
