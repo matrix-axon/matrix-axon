@@ -390,6 +390,32 @@ async fn correct_image_content_type(resource: &mut MediaResource, declared: Stri
         .unwrap_or(declared)
 }
 
+/// The content that describes `mxc_url`. A preview image an edit added (ADR
+/// 0132 section 8) is described by the replacement's `m.new_content`: the
+/// fallback carries `[]` for previews, which would hide the image's encrypted
+/// descriptor and type. A replacement whose own content names the media, as an
+/// attachment, its thumbnail or a preview image, describes it itself, so an
+/// edited attachment never loses its descriptor to an `m.new_content` without
+/// one.
+fn describing_content(content: Value, mxc_url: &str) -> Value {
+    let names = |value: &Value| value.as_str() == Some(mxc_url);
+    let named_here = names(&content["url"])
+        || names(&content["file"]["url"])
+        || names(&content["info"]["thumbnail_url"])
+        || names(&content["info"]["thumbnail_file"]["url"])
+        || axon_core::link_preview::preview_for_mxc(&content, mxc_url).is_some();
+    match content.get("m.new_content") {
+        Some(new)
+            if !named_here
+                && content["m.relates_to"]["rel_type"] == "m.replace"
+                && new.is_object() =>
+        {
+            new.clone()
+        }
+        _ => content,
+    }
+}
+
 /// Resolve the event owning `mxc_url` and its content, failing closed (`404`)
 /// if the event is missing, or if its content is `NULL` (redacted or a
 /// not-yet-decrypted UTD event) — we cannot determine whether the media is
@@ -410,17 +436,7 @@ async fn resolve_media_content(
         })?;
         let raster_only = content["m.relates_to"]["rel_type"] == "m.annotation"
             && content["m.relates_to"]["key"].as_str() == Some(mxc_url);
-        // A replacement's media, a preview image an edit added among them
-        // (ADR 0132 section 8), is described by its `m.new_content`: its
-        // fallback carries `[]` for previews, which would hide the image's
-        // encrypted descriptor and type.
-        let content = match content.get("m.new_content") {
-            Some(new) if content["m.relates_to"]["rel_type"] == "m.replace" && new.is_object() => {
-                new.clone()
-            }
-            _ => content,
-        };
-        return Ok((content, raster_only));
+        return Ok((describing_content(content, mxc_url), raster_only));
     }
     if store
         .inline_message_authorizes_media(account_id, mxc_url)
@@ -642,6 +658,49 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// An edit-added preview image is described by `m.new_content`; an edited
+    /// attachment the replacement names itself keeps its own descriptor even
+    /// when `m.new_content` lacks one.
+    #[test]
+    fn a_replacement_uses_new_content_only_for_media_it_does_not_name() {
+        let attachment = json!({
+            "msgtype": "m.image",
+            "body": "* caption",
+            "file": {"url": "mxc://example.org/photo", "v": "v2"},
+            "info": {"mimetype": "image/png"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            "m.new_content": {"msgtype": "m.image", "body": "caption"}
+        });
+        let described = describing_content(attachment.clone(), "mxc://example.org/photo");
+        assert_eq!(described, attachment);
+        assert_eq!(
+            content_type_for_mxc(&described, "mxc://example.org/photo"),
+            "image/png"
+        );
+
+        let preview = json!({
+            "msgtype": "m.text",
+            "body": "* https://a.example/",
+            "m.url_previews": [],
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": "https://a.example/",
+                "m.url_previews": [{
+                    "matrix:matched_url": "https://a.example/",
+                    "og:image": "mxc://example.org/thumb",
+                    "og:image:type": "image/webp"
+                }]
+            }
+        });
+        let described = describing_content(preview.clone(), "mxc://example.org/thumb");
+        assert_eq!(described, preview["m.new_content"]);
+        assert_eq!(
+            content_type_for_mxc(&described, "mxc://example.org/thumb"),
+            "image/webp"
+        );
+    }
     use crate::media::{MediaError, MediaResource};
 
     #[test]
