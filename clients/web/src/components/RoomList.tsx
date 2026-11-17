@@ -858,7 +858,7 @@ export function RoomList() {
           <button
             type="button"
             aria-pressed={favoritesFirst}
-            title="Keep favorites at the top in their custom order"
+            title="Keep favs at top"
             class="favorites-toggle"
             onClick={() => (settings.favoritesFirst.value = !favoritesFirst)}
           >
