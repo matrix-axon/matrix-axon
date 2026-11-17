@@ -457,6 +457,22 @@ impl From<crate::trust::TrustError> for ApiError {
     }
 }
 
+impl From<crate::linked_events::LinkedEventError> for ApiError {
+    fn from(err: crate::linked_events::LinkedEventError) -> Self {
+        use crate::linked_events::LinkedEventError;
+        match err {
+            LinkedEventError::NotFound(msg) => ApiError::not_found(msg),
+            LinkedEventError::Invalid(msg) => ApiError::bad_request(msg),
+            LinkedEventError::NotActive(msg) => ApiError::conflict(msg),
+            LinkedEventError::Unavailable(msg) => ApiError::service_unavailable(msg),
+            LinkedEventError::Upstream(msg) => ApiError::bad_gateway(msg),
+            LinkedEventError::Timeout(msg) => ApiError::gateway_timeout(msg),
+            // The real cause is logged at the adapter boundary; return generic.
+            LinkedEventError::Internal => ApiError::internal(),
+        }
+    }
+}
+
 impl From<crate::devices::DeviceListError> for ApiError {
     fn from(err: crate::devices::DeviceListError) -> Self {
         use crate::devices::DeviceListError;

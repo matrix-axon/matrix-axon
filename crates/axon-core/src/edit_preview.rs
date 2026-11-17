@@ -18,6 +18,7 @@ use crate::link_preview::{
     MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_MEDIA_SOURCE_BYTES, MAX_MXC_LENGTH, MAX_PREVIEWS,
     MAX_PREVIEW_BYTES,
 };
+use crate::matrix_link::is_matrix_link;
 use crate::Formatted;
 
 /// One entry of an edit's explicit `url_previews` list.
@@ -172,7 +173,10 @@ fn entry_is_valid(entry: &Value) -> bool {
     let Some(url) = object.get("matrix:matched_url").and_then(Value::as_str) else {
         return false;
     };
+    // A Matrix link's preview is left out (ADR 0138 section 1): its card is
+    // the recipient's to build, so an edit never carries one forward.
     let link_ok = bounded(url, 4096)
+        && !is_matrix_link(url)
         && url::Url::parse(url).is_ok_and(|u| {
             matches!(u.scheme(), "http" | "https")
                 && u.username().is_empty()
@@ -381,6 +385,32 @@ mod tests {
 
     fn values(current: &CurrentPreviews) -> Vec<Value> {
         current.entries.iter().map(|e| e.value.clone()).collect()
+    }
+
+    #[test]
+    fn a_matrix_link_entry_is_left_out_and_never_carried_forward() {
+        // ADR 0138 section 1: a stale matrix.to card, sent by another client or
+        // before the ADR, goes on the first edit.
+        let link = "https://matrix.to/#/!room:example.org/$event";
+        let current = current_previews(&json!({"m.url_previews": [
+            card(link),
+            card("https://a.example/"),
+        ]}))
+        .unwrap();
+        assert_eq!(values(&current), vec![card("https://a.example/")]);
+        let body = format!("{link} https://a.example/");
+        assert_eq!(
+            carry_forward(Some(&current), &body, None),
+            Some(vec![card("https://a.example/")])
+        );
+        // A keep of it is left out, as a failing entry's is: the message names
+        // the link, so this is no `409`.
+        assert_eq!(resolve_keep(Some(&current), link), Ok(None));
+
+        // When it was the only entry, the message keeps its preview field, so
+        // carry-forward sends `[]`.
+        let only = current_previews(&json!({"m.url_previews": [card(link)]})).unwrap();
+        assert_eq!(carry_forward(Some(&only), link, None), Some(vec![]));
     }
 
     #[test]

@@ -21,7 +21,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::dto::ThumbnailQuery;
+use crate::dto::{MediaEventQuery, ThumbnailQuery};
+use crate::linked_events::{names_media, KeptMedia};
 use crate::media::{MediaError, MediaProxy, MediaResource};
 use crate::response::ApiError;
 
@@ -264,12 +265,13 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
         ("account_id" = Uuid, Path, description = "Axon account whose credentials are used for the download"),
         ("server_name" = String, Path, description = "Server-name component of the MXC URI (the part after `mxc://`)"),
         ("media_id" = String, Path, description = "Media-ID component of the MXC URI"),
+        MediaEventQuery,
     ),
     responses(
         (status = 200, description = "Full media bytes. `Content-Type` is derived from the event (inline-safe types only; else `application/octet-stream`), with `X-Content-Type-Options: nosniff`, `Accept-Ranges: bytes`, and `ETag` set."),
         (status = 206, description = "Partial media bytes for a satisfiable `Range` request (with `Content-Range`)."),
         (status = 304, description = "The `If-None-Match` entity tag matched; body omitted."),
-        (status = 400, description = "Syntactically invalid MXC URI components", body = crate::response::ErrorResponse),
+        (status = 400, description = "Syntactically invalid MXC URI components, or only one of `room_id` and `event_id`", body = crate::response::ErrorResponse),
         (status = 403, description = "The homeserver denied access to this media object", body = crate::response::ErrorResponse),
         (status = 404, description = "Account not found, or media not found on the homeserver", body = crate::response::ErrorResponse),
         (status = 413, description = "The media object exceeds the configured per-object cache limit", body = crate::response::ErrorResponse),
@@ -284,12 +286,15 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
 pub async fn get_media(
     State(proxy): State<Arc<dyn MediaProxy>>,
     State(store): State<Store>,
+    State(kept): State<Arc<KeptMedia>>,
     Path((account_id, server_name, media_id)): Path<(Uuid, String, String)>,
+    crate::extract::Query(scope): crate::extract::Query<MediaEventQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let mxc_url = format!("mxc://{server_name}/{media_id}");
 
-    let (content, raster_only) = resolve_media_content(&store, account_id, &mxc_url).await?;
+    let (content, raster_only) =
+        resolve_scoped_media_content(&store, &kept, account_id, &mxc_url, scope).await?;
 
     // Conditional GET: the entity tag is content-addressed (a hash of the MXC
     // URI) and needs no download, so answer `304` *before* fetching. This is
@@ -451,6 +456,60 @@ async fn resolve_media_content(
     Err(ApiError::from(MediaError::NotFound(mxc_url.to_owned())))
 }
 
+/// Resolve `mxc_url` for a request, scoped to one event when it names one
+/// (ADR 0138 section 4). `room_id` and `event_id` come together or not at
+/// all: one alone is a `400`, never a fall back to the unscoped resolution,
+/// which would undo the binding the scope exists for.
+async fn resolve_scoped_media_content(
+    store: &Store,
+    kept: &KeptMedia,
+    account_id: Uuid,
+    mxc_url: &str,
+    scope: MediaEventQuery,
+) -> Result<(Value, bool), ApiError> {
+    match (scope.room_id, scope.event_id) {
+        (None, None) => resolve_media_content(store, account_id, mxc_url).await,
+        (Some(room_id), Some(event_id)) => {
+            let content =
+                resolve_event_media_content(store, kept, account_id, &room_id, &event_id, mxc_url)
+                    .await?;
+            Ok((content, false))
+        }
+        _ => Err(ApiError::bad_request(
+            "room_id and event_id must be given together",
+        )),
+    }
+}
+
+/// Resolve `mxc_url` against one event alone: the stored event when the
+/// account has it, as the timeline shows it, and otherwise the media fields the
+/// linked-event route kept when it read the event from the homeserver. The
+/// event's content must name the URI in `url`, `file`, `info.thumbnail_url` or
+/// `info.thumbnail_file`, and the descriptor and MIME type come from it, so no
+/// other event naming the same URI can change how it is served. Anything else
+/// is a `404`, which a card answers by reading its event again.
+async fn resolve_event_media_content(
+    store: &Store,
+    kept: &KeptMedia,
+    account_id: Uuid,
+    room_id: &str,
+    event_id: &str,
+    mxc_url: &str,
+) -> Result<Value, ApiError> {
+    let not_found = || ApiError::from(MediaError::NotFound(mxc_url.to_owned()));
+    let content = match store.get_event(account_id, event_id).await? {
+        Some(row) if row.room_id == room_id => row.content.ok_or_else(not_found)?,
+        Some(_) => return Err(not_found()),
+        None => kept
+            .get(account_id, room_id, event_id)
+            .ok_or_else(not_found)?,
+    };
+    if !names_media(&content, mxc_url) {
+        return Err(not_found());
+    }
+    Ok(content)
+}
+
 /// Convert a [`MediaProxy`] failure into the response the client sees,
 /// logging a `MediaError::Internal` detail (with account/mxc context) first
 /// — the `500` body itself is generic, so the real cause must be logged
@@ -500,12 +559,13 @@ fn log_and_convert_media_error(
         ("server_name" = String, Path, description = "Server-name component of the MXC URI (the part after `mxc://`)"),
         ("media_id" = String, Path, description = "Media-ID component of the MXC URI"),
         ThumbnailQuery,
+        MediaEventQuery,
     ),
     responses(
         (status = 200, description = "Thumbnail bytes, generated by the homeserver. `Content-Type` is the original's declared MIME type, corrected by sniffing the returned bytes' magic number if the homeserver re-encoded to a different recognized image format (e.g. a PNG source thumbnailed to JPEG); `X-Content-Type-Options: nosniff`, `Accept-Ranges: bytes`, and `ETag` are set."),
         (status = 206, description = "Partial thumbnail bytes for a satisfiable `Range` request (with `Content-Range`)."),
         (status = 304, description = "The `If-None-Match` entity tag matched; body omitted."),
-        (status = 400, description = "Syntactically invalid MXC URI components, or the media is encrypted — a homeserver cannot thumbnail ciphertext it cannot decrypt", body = crate::response::ErrorResponse),
+        (status = 400, description = "Syntactically invalid MXC URI components, only one of `room_id` and `event_id`, or the media is encrypted — a homeserver cannot thumbnail ciphertext it cannot decrypt", body = crate::response::ErrorResponse),
         (status = 403, description = "The homeserver denied access to this media object", body = crate::response::ErrorResponse),
         (status = 404, description = "Account not found, or media not found on the homeserver", body = crate::response::ErrorResponse),
         (status = 413, description = "The thumbnail exceeds the configured per-object cache limit", body = crate::response::ErrorResponse),
@@ -519,13 +579,16 @@ fn log_and_convert_media_error(
 pub async fn get_media_thumbnail(
     State(proxy): State<Arc<dyn MediaProxy>>,
     State(store): State<Store>,
+    State(kept): State<Arc<KeptMedia>>,
     Path((account_id, server_name, media_id)): Path<(Uuid, String, String)>,
     crate::extract::Query(query): crate::extract::Query<ThumbnailQuery>,
+    crate::extract::Query(scope): crate::extract::Query<MediaEventQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let mxc_url = format!("mxc://{server_name}/{media_id}");
 
-    let (content, _) = resolve_media_content(&store, account_id, &mxc_url).await?;
+    let (content, _) =
+        resolve_scoped_media_content(&store, &kept, account_id, &mxc_url, scope).await?;
 
     let spec = resolve_thumbnail_spec(&content, &mxc_url, query)?;
 

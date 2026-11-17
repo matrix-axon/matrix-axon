@@ -12,6 +12,7 @@ pub mod error;
 pub mod image_pack;
 pub mod link_preview;
 pub mod live;
+pub mod matrix_link;
 pub mod media;
 pub mod message;
 pub mod power_levels;
