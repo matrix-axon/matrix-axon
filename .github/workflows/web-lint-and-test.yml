@@ -14,6 +14,9 @@ on:
       - "openapi/openapi.json"
       - "clients/web/**"
       - ".github/workflows/web-lint-and-test.yml"
+      # The job execs the web hook entries through this script. A pull
+      # request that edits only the runner must still run them.
+      - "scripts/ci/run-hook-entry.py"
 
 permissions:
   contents: read
@@ -42,26 +45,39 @@ jobs:
           cache: pnpm
           cache-dependency-path: clients/web/pnpm-lock.yaml
 
+      # The job directory is clients/web so the format step below stays the
+      # package prettier. These steps run the hook entry from the repo root;
+      # the entry already passes `pnpm --dir clients/web`.
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        working-directory: ${{ github.workspace }}
+        run: python3 scripts/ci/run-hook-entry.py web-install
 
       # The install above only warns about unmet peers. Mirrors the web-peers
       # pre-push hook; deliberate exceptions live in pnpm-workspace.yaml's
       # peerDependencyRules.
       - name: Check peer dependencies
-        run: pnpm peers check
+        working-directory: ${{ github.workspace }}
+        run: python3 scripts/ci/run-hook-entry.py web-peers
 
       - name: Check generated API client is in sync with openapi/openapi.json
-        run: pnpm check:api
+        working-directory: ${{ github.workspace }}
+        run: python3 scripts/ci/run-hook-entry.py web-api-schema
 
       - name: Lint
-        run: pnpm lint
+        working-directory: ${{ github.workspace }}
+        run: python3 scripts/ci/run-hook-entry.py web-lint
 
+      # Not the repo prettier hook. That hook vendors prettier and checks more
+      # than clients/web. This is the package's own check, reported on its own,
+      # and scripts/check-hook-commands.py pins this command. It stays in
+      # clients/web, which is the job's working-directory.
       - name: Check formatting
         run: pnpm format:check
 
       - name: Test
-        run: pnpm test
+        working-directory: ${{ github.workspace }}
+        run: python3 scripts/ci/run-hook-entry.py web-test
 
       - name: Build
-        run: pnpm build
+        working-directory: ${{ github.workspace }}
+        run: python3 scripts/ci/run-hook-entry.py web-build

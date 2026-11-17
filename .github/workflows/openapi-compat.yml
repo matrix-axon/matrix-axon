@@ -26,14 +26,10 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # Same base choice as migrations-immutable.yml. The runner appends it to
+      # the openapi-compat hook entry.
       - name: OpenAPI spec has no unacknowledged breaking change
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          base="$BASE_SHA"
-          if [ -n "$BASE_REF" ] && git rev-parse --verify --quiet "origin/$BASE_REF^{commit}" >/dev/null; then
-            base="origin/$BASE_REF"
-          fi
-          echo "base: $base ($(git rev-parse --short "${base:-HEAD}"))"
-          scripts/check-openapi-compat.sh "$base"
+        run: python3 scripts/ci/run-hook-entry.py openapi-compat --pull-request-base

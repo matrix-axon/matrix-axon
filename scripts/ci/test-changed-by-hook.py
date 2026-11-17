@@ -260,10 +260,18 @@ class RealConfig(Base):
             "crates/axon-store/src/lib.rs",
             "Cargo.lock",
             ".github/workflows/lint-and-clippy.yml",
+            ".github/workflows/cross-build.yml",
+            "scripts/ci/run-hook-entry.py",
+            "scripts/check-hook-commands.py",
         ):
             with self.subTest(path=path):
                 self.repo.commit("the pull request", {path: "x\n"})
                 self.assertEqual(self.decide("rust-clippy"), "changed=true")
+
+    def test_desktop_workflow_is_a_shell_input(self) -> None:
+        self.pr(".github/workflows/desktop-build.yml")
+        self.assertEqual(self.decide("rust-clippy"), "changed=false")
+        self.assertEqual(self.decide("shell-clippy"), "changed=true")
 
     def test_docs_and_web_skip(self) -> None:
         self.pr("docs/guide.md", "clients/web/src/app.tsx", "scripts/ci/x.py")
