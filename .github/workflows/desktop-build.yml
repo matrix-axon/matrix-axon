@@ -230,7 +230,11 @@ jobs:
   linux:
     name: Build for Linux
     needs: checks
-    runs-on: ubuntu-latest
+    # Pinned to the oldest supported runner, not `ubuntu-latest`: the binary
+    # requires the glibc of the machine that built it. 22.04 (glibc 2.35) keeps
+    # the .deb and AppImage runnable on Debian 12 (2.36) and Ubuntu 22.04+, the
+    # same floor as package.yml. Do not bump without checking Debian stable.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     if: >-
       ${{ github.event_name != 'pull_request'
@@ -277,8 +281,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             clients/web/src-tauri/target
-          key: desktop-linux-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
-          restore-keys: desktop-linux-cargo-
+          # The runner image is part of the key: cargo fingerprints do not track
+          # system libraries, so a `target/` cached from another image (24.04)
+          # would be reused against the wrong glibc and webkit2gtk, defeating
+          # the glibc floor this job's pin exists to guarantee.
+          key: desktop-linux-jammy-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: desktop-linux-jammy-cargo-
 
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
@@ -298,6 +306,13 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # Fails if a runner-image change pulls the shell binary above glibc 2.35,
+      # the Ubuntu 22.04 version and the floor install.md states. Only the
+      # shell itself is checked; the AppImage's bundled libraries come from
+      # this same image.
+      - name: Assert the shell runs on glibc 2.35
+        run: scripts/assert-glibc-floor.sh 2.35 clients/web/src-tauri/target/release/axon
 
       - name: Collect artifacts
         run: |
