@@ -1187,9 +1187,11 @@ pub struct EditRequest {
     ///
     /// `[]`: no previews. A list: the whole set, at most 8, each a new preview
     /// (with the send limits, and an optional `image_upload_id`) or a `keep`
-    /// entry. Every entry's link must be a complete bare link in `body`. The
-    /// replacement must fit 40960 bytes and its previews 32768, as on a send;
-    /// overflow is a definite 413 before any upload or dispatch.
+    /// entry. Every entry's link must be a complete bare link in `body`. As on
+    /// a send, a list is the client's choice: the spoiler rule above applies
+    /// only to carry-forward. The replacement must fit 40960 bytes and its
+    /// previews 32768, as on a send; overflow is a definite 413 before any
+    /// upload or dispatch.
     #[serde(default, deserialize_with = "deserialize_previews")]
     #[schema(max_items = 8)]
     pub url_previews: Option<Vec<EditPreviewRequest>>,

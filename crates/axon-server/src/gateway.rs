@@ -263,7 +263,10 @@ impl MessageSender for GatewayAdapter {
         edit: axon_core::edit_preview::PreviewEdit<'_>,
     ) -> Result<String, SendError> {
         // An edit that sets its previews is bounded like a preview send, which
-        // is how a client sizes its own deadline for it.
+        // is how a client sizes its own deadline for it: by whether the request
+        // carries `url_previews`, not by whether it uploads, exactly as
+        // `send_with_previews` is. Carry-forward reads nothing from the
+        // network, so an edit that omits the field keeps the mutation bound.
         if edit.previews.is_some() {
             return self
                 .with_upload_timeout(

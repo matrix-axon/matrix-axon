@@ -99,6 +99,7 @@ A current entry is used only if it passes the checks a new entry does, with only
   Every entry's link must be a complete bare link in the new body, and destinations must be distinct.
   A kept link whose current entry fails the checks is left out, and a list left with no entries is sent as `[]`.
   A kept link the message has no entry for at all, because another device's edit removed it, is `409 previews_changed`, and nothing is sent.
+  The server does not apply the spoiler rule to a list, as it does not to a send: the list is the client's choice, and the web composer sends `[]` when the new text has a spoiler.
 
 The 40 KiB content budget covers the whole replacement event, which carries the body twice, and the 32 KiB preview budget covers `m.new_content`'s list.
 An edit that sets the field and does not fit is a definite `413`, as on a send, and uses the same upload slots, image limits, encryption checks and upload deadline when it has new images.
