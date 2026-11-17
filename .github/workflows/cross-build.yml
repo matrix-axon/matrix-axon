@@ -4,11 +4,12 @@ name: Cross-platform build
 # its own GitHub-hosted runner (native compilation, no cross/osxcross):
 #   - Linux (x86_64-unknown-linux-gnu) — ubuntu-22.04, native. Pinned, not
 #     ubuntu-latest, so the binaries link glibc 2.35 or older and run on
-#     Debian 12 and Ubuntu 22.04+, the same floor as package.yml's .deb/.rpm
-#     and desktop-build.yml's Linux job. ubuntu-latest (24.04, glibc 2.39)
-#     produces binaries that fail on Debian 12 with `GLIBC_2.39 not found`.
-#     When GitHub retires the ubuntu-22.04 image, move all three workflows
-#     together, and raise the floor in docs/install.md if it rises.
+#     Debian 12 and Ubuntu 22.04+, the same floor as package.yml's .deb/.rpm.
+#     ubuntu-latest (24.04, glibc 2.39) produces binaries that fail on
+#     Debian 12 with `GLIBC_2.39 not found`. desktop-build.yml's Linux job
+#     should be kept on the same image. When GitHub retires ubuntu-22.04,
+#     move every Linux build that ships to users together, and raise the
+#     floor in docs/install.md if it rises.
 #   - Windows (x86_64-pc-windows-msvc) — windows-latest, native
 #   - macOS, Intel + Apple Silicon (x86_64-apple-darwin, aarch64-apple-darwin)
 #     — macos-latest, native, cross-compiling the Intel slice via rustup's
@@ -479,7 +480,7 @@ jobs:
       - name: Assert the binaries run on glibc 2.35
         run: |
           BIN=target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}
-          scripts/assert-glibc-floor.sh 2.35 $BIN/axon-server $BIN/axon-tui
+          scripts/assert-glibc-floor.sh 2.35 "$BIN/axon-server" "$BIN/axon-tui"
 
       - name: Zip binaries
         run: |

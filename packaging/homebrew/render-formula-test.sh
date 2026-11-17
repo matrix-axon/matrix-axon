@@ -64,7 +64,7 @@ for needle in \
 	'tailscale-app' \
 	'pg_isready' \
 	'--print-token' \
-	'ubuntu-latest'; do
+	'ubuntu-22.04'; do
 	if ! grep -F -q -e "$needle" "$out"; then
 		echo "rendered formula is missing: $needle" >&2
 		exit 1
