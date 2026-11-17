@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "licenseFile": "../../../LICENSE.md",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "bundle/windows/header.bmp",
+        "sidebarImage": "bundle/windows/sidebar.bmp",
+        "installerHooks": "bundle/windows/installer-hooks.nsh"
+      }
+    }
+  }
+}
