@@ -1313,6 +1313,14 @@ function RoomRow({
   const count = rooms.unreadCount(key)
   const title = roomTitle(room, rooms.titles.value)
   const href = `/${room.account_id}/rooms/${encodeURIComponent(room.room_id)}`
+  const setRoomLink = useCallback(
+    (link: HTMLAnchorElement | null) => {
+      // Preact clears the reflected boolean property to false when this
+      // prop disappears. Remove its attribute to restore native link drag.
+      if (!canReorder) link?.removeAttribute('draggable')
+    },
+    [canReorder],
+  )
   const suppressNextClick = useRef(false)
   const suppressClickTimer = useRef<number | null>(null)
   const touchTap = useRef<{
@@ -1392,11 +1400,7 @@ function RoomRow({
         href={href}
         class="room-link"
         draggable={canReorder || undefined}
-        ref={(link) => {
-          // Preact clears the reflected boolean property to false when this
-          // prop disappears. Remove its attribute to restore native link drag.
-          if (!canReorder) link?.removeAttribute('draggable')
-        }}
+        ref={setRoomLink}
         data-index={index}
         data-room-key={key}
         onDragStart={(event) => {

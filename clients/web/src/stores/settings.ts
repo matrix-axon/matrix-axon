@@ -539,7 +539,7 @@ export interface SettingsStore {
 }
 
 /**
- * Load settings and keep every change persisted. Storage is injectable for
+ * Load settings without writing, then persist preference changes. Storage is injectable for
  * tests (jsdom under Node 25 has no working `localStorage`).
  *
  * `linkPreviewsDefault` is the platform's default for a device that has
@@ -590,7 +590,7 @@ export function createSettingsStore(
   const pushDisclosure = signal<PushDisclosure>(initial.pushDisclosure)
   const linkPreviews = signal<LinkPreviewSetting>(initial.linkPreviews)
 
-  let previous: SettingsV1 | null = null
+  let previous: SettingsV1 = initial
   let pending: Partial<SettingsV1> = {}
   let saveTimer: ReturnType<typeof setTimeout> | null = null
   function flush() {
@@ -647,7 +647,7 @@ export function createSettingsStore(
       linkPreviews: linkPreviews.value,
     }
     const changed = (Object.keys(envelope) as (keyof SettingsV1)[]).filter(
-      (key) => previous === null || !Object.is(previous[key], envelope[key]),
+      (key) => !Object.is(previous[key], envelope[key]),
     )
     for (const key of changed) {
       Object.assign(pending, { [key]: envelope[key] })

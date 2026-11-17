@@ -25,6 +25,7 @@ before starting a milestone.
   Sort, category, Favs, name query, and account narrowing persist in the local settings envelope.
   `spaces.accountFilter` shares `settings.roomAccountFilter`; `effectiveAccountFilter` falls back to All while account availability is unknown or the saved account is unavailable, without erasing the saved choice.
   Settings writes merge only fields changed in this tab into the latest local envelope.
+  Loading settings is read-only; defaults and migrations normalize on the next preference write.
   Name queries save after a short debounce and flush on blur, page hide, visibility changes, and App cleanup.
 - **Live testing:** message sends and other mutations against the live
   server go to the "Axon Testing" room only

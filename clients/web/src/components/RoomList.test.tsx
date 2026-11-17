@@ -886,6 +886,20 @@ describe('RoomList', () => {
     expect(services.favourites.reordering.value).toBe(false)
   })
 
+  it('keeps the native drag ref stable when an unpromoted room row updates', async () => {
+    const { services, findByText, getByRole, container } = renderPage()
+    await findByText('Ops')
+    fireEvent.click(getByRole('button', { name: 'Favs', exact: true }))
+    const link = [
+      ...container.querySelectorAll<HTMLAnchorElement>('.room-link'),
+    ].find((node) => node.dataset.roomKey === `${ACCOUNT}/!ops:hs`)!
+    await waitFor(() => expect(link.getAttribute('draggable')).toBeNull())
+    const remove = vi.spyOn(link, 'removeAttribute')
+    services.rooms.noteUnreadCounts(ACCOUNT, '!ops:hs', 4, 0)
+    await findByText('4')
+    expect(remove).not.toHaveBeenCalledWith('draggable')
+  })
+
   it('unread filter uses server-derived notification counts', async () => {
     const unreadOps = { ...OPS, notification_count: 1 }
     const { findByText, getByRole, queryByText } = renderPage([unreadOps, DM])

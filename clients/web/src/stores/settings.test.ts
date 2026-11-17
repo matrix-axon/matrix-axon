@@ -65,14 +65,16 @@ describe('createSettingsStore', () => {
       vi.useRealTimers()
     }
   })
-  it('starts from defaults with empty storage and persists them', () => {
+  it('loads defaults without writing and saves a complete envelope on change', () => {
     const storage = memoryStorage()
     const store = createSettingsStore(storage)
     expect(store.theme.value).toBe('system')
     expect(store.activeAccountId.value).toBeNull()
+    expect(storage.getItem('axon.settings')).toBeNull()
+    store.theme.value = 'light'
     expect(JSON.parse(storage.getItem('axon.settings')!)).toEqual({
       version: 1,
-      theme: 'system',
+      theme: 'light',
       timeFormat: '12h',
       activeAccountId: null,
       pinnedRooms: [],
@@ -104,6 +106,27 @@ describe('createSettingsStore', () => {
       pushDisclosure: 'activity',
       linkPreviews: 'off',
     })
+  })
+
+  it('does not replace a newer envelope written while reading the initial settings', () => {
+    const storage = memoryStorage()
+    const read = storage.getItem.bind(storage)
+    const newer = JSON.stringify({ version: 1, theme: 'dark', roomSort: 'az' })
+    vi.spyOn(storage, 'getItem').mockImplementationOnce((key) => {
+      const initial = read(key)
+      storage.setItem('axon.settings', newer)
+      return initial
+    })
+    const write = vi.spyOn(storage, 'setItem')
+    const store = createSettingsStore(storage)
+    // The simulated other tab's write is the only write during construction.
+    expect(write).toHaveBeenCalledTimes(1)
+    expect(read('axon.settings')).toBe(newer)
+    store.roomFilter.value = 'groups'
+    const restored = createSettingsStore(storage)
+    expect(restored.theme.value).toBe('dark')
+    expect(restored.roomSort.value).toBe('az')
+    expect(restored.roomFilter.value).toBe('groups')
   })
 
   it('round-trips changes through storage', () => {
@@ -289,10 +312,15 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     expect(store.stateEvents.value).toBe('all')
     // The migration must not cost the user their unrelated settings.
     expect(store.theme.value).toBe('dark')
-    // …and the legacy key is not written back.
+    // Loading is read-only; the next preference write normalizes the envelope
+    // and omits the legacy key while retaining the migrated value.
+    store.roomSort.value = 'az'
     expect(
       JSON.parse(storage.getItem('axon.settings')!).showStateEvents,
     ).toBeUndefined()
+    expect(JSON.parse(storage.getItem('axon.settings')!).stateEvents).toBe(
+      'all',
+    )
 
     expect(
       createSettingsStore(
