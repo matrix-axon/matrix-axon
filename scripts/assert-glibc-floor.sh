@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Assert that Linux binaries need no glibc symbol version newer than a ceiling.
-# Release pipelines run this on every Linux binary they ship, so a build that
+# A release job runs this on the Linux binaries it builds, so a build that
 # lands on a newer runner image (ubuntu-latest) fails here, not on a user's
-# Debian 12 box with `GLIBC_2.39 not found`.
+# Debian 12 box with `GLIBC_2.39 not found`. It checks only the files its
+# caller passes; each job names what it covers.
 #
 # Usage: scripts/assert-glibc-floor.sh <max version, e.g. 2.35> <binary>...
 #
@@ -20,7 +21,9 @@ shift
 fail=0
 for bin in "$@"; do
 	[ -f "$bin" ] || { echo "no such binary: $bin" >&2; exit 1; }
-	syms=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -u)
+	# `|| true`: under pipefail a non-ELF file (objdump fails) or a static/musl
+	# binary (grep finds nothing) would abort here, before the message below.
+	syms=$({ objdump -T "$bin" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -u; } || true)
 	[ -n "$syms" ] || { echo "$bin: no GLIBC symbol versions found; wrong file?" >&2; exit 1; }
 	highest=$(printf '%s\n' "$syms" | sed 's/^GLIBC_//' | sort -V | tail -n 1)
 	too_new=$(printf '%s\n%s\n' "$max" "$highest" | sort -V | tail -n 1)
