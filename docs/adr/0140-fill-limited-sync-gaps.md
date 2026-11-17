@@ -65,7 +65,7 @@ CREATE TABLE room_timeline_gaps (
     origin                TEXT        NOT NULL
                           CHECK (origin IN ('limited', 'lag_probe', 'token_rejected')),
     from_token            TEXT,                  -- next page's `from`; NULL = the live end
-    stored_before         TIMESTAMPTZ NOT NULL,  -- the stop boundary (decision 2)
+    stored_before         TIMESTAMPTZ,           -- the stop boundary (decision 2); NULL until resolved
     batch_event_ids       TEXT[]      NOT NULL DEFAULT '{}',  -- the limited batch (decision 1)
     detected_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     pages_fetched         INTEGER     NOT NULL DEFAULT 0,
@@ -87,7 +87,8 @@ Recording is durable, so a restart, a crash or a supervised account restart neve
 
 A limited response with a `prev_batch` gets an `origin = 'limited'` row.
 Its `from_token` is that `prev_batch` and its `stored_before` is the insert time.
-A limited response without a `prev_batch` gets a row that starts from the live end (`from_token` NULL), with the margin of decision 3.
+A limited response without a `prev_batch` gets a row that starts from the live end (`from_token` NULL).
+Its `stored_before` stays NULL until the filler picks it up, and is then set to the earliest `received_at` among the batch's stored events.
 `batch_event_ids` holds the ids of the limited batch's events, at most `timeline_limit` of them; the first-window test below uses it.
 `sync.timeline_limit` is validated to be at least 1 at startup, so a limited response always carries events for the handler to store.
 Events can still all be dropped when they fail to parse.
@@ -111,10 +112,17 @@ The SDK sends the broadcast before the response's handlers run, but the watcher 
 By the time it reads the broadcast, this response's batch, or a later response's events, may already be stored.
 That would make a first window look like a hole and page the whole room.
 
-The filler evaluates the test when it first picks a row up, at least 60 s after `detected_at`, by which time the response's handlers have long finished.
-If none of the batch's events was stored (all failed to parse), the row is dropped and logged at `WARN`.
+**When a row is picked up.**
+There is no fixed wait.
+A row is picked up as soon as at least one of its batch's events is stored, which is normally moments after it is inserted, because the response's own handlers store the batch.
+The first stored batch event fixes the batch's earliest `received_at`, so the test's answer is settled from then on.
+Until one is stored, the row is skipped and re-checked on each sweep.
+It is not dropped on its first check, so slow handlers under database pressure delay it rather than lose it.
+A row whose batch still has no stored event 10 minutes after `detected_at` has a batch that will never be stored (all of it failed to parse).
+It is dropped and logged at `WARN` with the room and `from_token`.
 Such a row is either a first window or a hole whose newest events are unreadable, and paging it could walk the whole room.
-The management re-verify action of decision 7 covers the second case.
+The management re-verify action of decision 7 is the intended recovery for the second case.
+`history_gaps.awaiting_batch` in `/v1/status` counts rows still waiting.
 Every other row is paged, whatever the backfill settings, including one for a room whose backfill cursor is already behind the hole, since backfill never walks forward to it.
 
 ### 2. Fill each hole by paging back until history stored before it
@@ -148,8 +156,9 @@ H1 is filled from its own row, and events of H1 that H2's walk already stored do
 
 Failures follow ADR 0121: each failed page is classified, backed off with `retry_at`, and parked after repeated failure, with the state on the gap row.
 A `400` for a saved token (one the homeserver no longer honours) restarts the row from the live end.
-It sets `origin = 'token_rejected'` and `from_token` to NULL, and moves `stored_before` back by the margin of decision 3.
-The row's limited batch may have been stored a moment after the row was inserted, and the margin keeps it from counting as history before the hole.
+It sets `origin = 'token_rejected'` and `from_token` to NULL, and sets `stored_before` to the earliest `received_at` among the batch's stored events.
+The walk from the live end then passes through the batch and everything stored after it, and stops at the first event stored before the batch.
+That is the history before the hole.
 Because the stop rule is the same in both modes, the restart survives a crash after its first page.
 
 **Scheduling.**
@@ -168,15 +177,27 @@ The SDK sends a response's broadcast before its timeline handlers run, and finis
 So any response that fell out of the 32-slot channel had already stored its events.
 Rooms with a lost hole are therefore rooms that stored events while the broadcast was lagging.
 
-The watcher notes when it processed each update, on its own monotonic clock.
-On lag, it computes the boundary in the database's clock, so the two clocks are never compared directly:
-`stored_before = db now() − (time since the last processed update) − margin`, with a margin of 60 s.
-It then records an `origin = 'lag_probe'` row, starting from the live end, for every joined room with an event whose `received_at` is at or after that boundary.
+The boundary comes from the stored rows, not from any clock the watcher keeps.
+The watcher remembers the event ids of the last few updates it processed that carried timeline events.
+It also reads the database clock once when it subscribes, before the sync service starts.
+On lag, `stored_before` is the latest `received_at` among the stored events of the newest remembered update that has any.
+If none of them has a stored event, `stored_before` is that subscription time.
+
+This holds however far behind the watcher was.
+The lost responses came after that update, and the SDK finished that update's handlers before it took them.
+So every event a lost response stored has a later `received_at` than any event of that update.
+A stalled watcher, the condition that causes a lag in the first place, therefore cannot move the boundary into the lag window.
+It needs no margin: falling back to an older update or to the subscription time only moves the boundary earlier, which makes walks longer, never wrong.
+
+The watcher then records an `origin = 'lag_probe'` row, starting from the live end, for every joined room with an event whose `received_at` is at or after the boundary.
 Each probe walks back through everything stored during the lag, filling every hole in that window, however many there are.
-It stops at the first page holding an event stored before the lag.
+It stops at the first page holding an event stored before the boundary.
 A probe that finds nothing missing costs one or two pages.
-A boundary set too early only makes the walk longer, never wrong, which is why the margin errs that way.
-The lag is logged at `WARN` with the number of rooms probed.
+
+A room first seen during the lag has nothing stored before the boundary, and its probe would walk to the room's start.
+So a probe also closes at the first page holding any of the room's lowest-`id` events, its first window, as the verification pass does (decision 4).
+History before a room's first window stays backfill's job.
+The lag is logged at `WARN` with the boundary and the number of rooms probed.
 
 One case is not covered: a lagged limited response whose every event failed to store (for example, all failed to parse).
 That room stored nothing during the lag, so it is not probed.
@@ -285,7 +306,7 @@ Events the filler then stores get `id`s above the purge watermark, so the purge 
   Detecting a hole logs at `INFO` with `prev_batch` and the batch's oldest event id; dropping a first window logs at `DEBUG`.
   Each page logs at `DEBUG` with its `inserted` and `already_stored` counts.
   Closing a hole logs at `INFO` with `pages_fetched` and `events_recovered`.
-- `GET /v1/status` gains `history_gaps: {open, parked, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_complete, events_recovered}` beside the existing `backfill` block.
+- `GET /v1/status` gains `history_gaps: {open, parked, awaiting_batch, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_complete, events_recovered}` beside the existing `backfill` block.
 - The management API ([ADR 0109](0109-management-api.md)) gains an action that re-queues the verification pass for one room or a whole account, so an operator can re-verify after a suspected loss without SQL.
   A re-queued room takes its stop points and counts from the room's rows at that time.
 - A non-zero `events_recovered` from the verification pass is itself evidence of past loss; it is logged at `WARN` once per room with the count.
@@ -331,8 +352,10 @@ All server-side (`crates/`), in this order:
 
 1. Gap table, the detecting watcher with its lag probe, the `timeline_limit` validation, the filler inside the backfill task, and that task's spawn whatever `backfill_enabled` says (decisions 1–3, 6, and the logging and status of 7).
    Verified by a Synapse integration test that sends more than `timeline_limit` events between two syncs and asserts every one is stored, with backfill both on and off.
-   Unit tests cover nested holes, a token rejection restarted from the live end with a crash after its first page, and a lag window with two holes in it.
+   Unit tests cover nested holes, a token rejection restarted from the live end with a crash after its first page, and a lag window with two holes in it, including a lag while the watcher was stalled for longer than the lag and a room first seen during the lag.
    They also cover the first-window test when the watcher reads the broadcast after this response's handlers, or a later response's, have stored their events, with backfill on and off.
 2. The verification pass, its table and seeding migration, its config switch, its interleaving with backfill, and the management action (decisions 4 and 7).
    Tests cover each stop point, including a first window that `/messages` never returns.
+   Before it ships, it is run against a copy of production data, recording how often the room-start fallback fires.
+   If that fallback fires because stored rows are absent from `/messages`, the count backstop counts only events the pager can return.
 3. `history_rev`, the `timeline.history_filled` frame and their OpenAPI entries (decision 5), followed by separate web and TUI PRs to consume them.
