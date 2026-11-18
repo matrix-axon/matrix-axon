@@ -141,8 +141,10 @@ The download runs as its own task, detached from the request that started it.
 The upstream body has to be exactly as long as promised, because unencrypted media has no hash to catch a truncated file:
 
 - The request sends `Accept-Encoding: identity`.
+  matrix-sdk turns on reqwest's `gzip` feature, so a `gzip` response is decoded transparently anyway.
+  reqwest then drops the `Content-Encoding` and `Content-Length` headers, and the download goes ahead as one of unknown length.
   A response with any other `Content-Encoding` fails the download as `Upstream`.
-  Axon's reqwest is built without decompression features, so an encoded body would otherwise be cached still compressed, with a `Content-Length` that is not the media's length.
+  reqwest cannot decode those encodings, so the body would otherwise be cached still compressed, with a `Content-Length` that is not the media's length.
 - A body that ends before its `Content-Length`, or runs past it, fails the download.
   The staging file is never promoted, and every response still reading the object is aborted, exactly as for a hash mismatch in section 4.
   A chunked body counts as complete only when hyper reports a clean end of stream, so a connection dropped mid-chunk is also a failure.
@@ -189,7 +191,9 @@ The limits change with it:
 - A new `max_stream_bytes` (default 2 GiB) replaces `max_object_bytes` for the streaming path only.
   `max_object_bytes` was protecting process memory, and a streamed object no longer passes through memory.
   An object over `max_stream_bytes` is refused with `too_large` before the body is read, when `Content-Length` says so, or when the running total passes it.
-  Startup rejects a configuration whose `max_stream_bytes` exceeds `max_bytes` minus `max_object_bytes`, because an object the limit allows could then never fit beside the room kept for buffered media (below).
+  An object the limit allows must be able to fit beside the room kept for buffered media (below), so the limit is bounded by `max_bytes` minus `max_object_bytes`.
+  When `max_stream_bytes` is unset, its 2 GiB default is lowered to that bound, so a deployment with a smaller cache keeps booting after the upgrade.
+  An explicit `max_stream_bytes` above the bound is rejected at startup.
 - A streamed download reserves its space in the LRU before it reads the body.
   The order is fixed: the stream permit first, then the upstream request until its headers arrive, then the reservation.
   The reservation needs the `Content-Length` from those headers, so it cannot come first.
@@ -283,12 +287,12 @@ A `<video>` cannot carry a bearer header, so the server issues a URL that stands
   The checks require that the account still exists and that this event is still stored with its content.
   Redaction leaves the content `NULL`, which already fails closed with `404`.
   So a ticket stops working on its next request once its account is removed or the resolved event is redacted, rather than serving for up to 12 hours.
+  Room membership is not checked, which matches the bearer route: `get_media` does not check it either.
   - The event checked is the one the URI resolves to, not necessarily the one the user opened.
     If two events share a URI and only the newer one is redacted, the ticket keeps working, as the bearer route does.
   - Media authorized only by an image pack or an inline message has no owning event.
     `resolve_media_content` serves it as a sniffed raster image (`raster_only`), never as `video/*` or `audio/*`, so the mint refuses a ticket for it.
     Every ticketed object therefore has an owning event.
-  Room membership is not checked, which matches the bearer route: `get_media` does not check it either.
 - The table holds at most 4096 tickets and drops the least recently used past that.
   Each issuing token holds at most 32 live tickets, and a 33rd evicts that token's own least recently used ticket.
   So one client minting tickets in a loop churns only its own tickets and cannot evict other users' tickets out of the shared table.
