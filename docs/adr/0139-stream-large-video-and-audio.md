@@ -1,6 +1,6 @@
 # ADR 0139 — Stream large video and audio media
 
-**Status:** Proposed. This ADR is the plan only; implementation waits for its review.
+**Status:** Accepted; phase 1 (section 3) is implemented in [PR 1157](https://github.com/matrix-axon/matrix-axon/pull/1157), and phases 2 to 5 are not yet started. Part of [issue 22](https://github.com/matrix-axon/matrix-axon/issues/22).
 
 ## Context
 
