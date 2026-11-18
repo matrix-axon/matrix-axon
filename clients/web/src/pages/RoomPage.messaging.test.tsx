@@ -4283,3 +4283,83 @@ describe('sending media (M-W8.5, ADR 0065)', () => {
     expect(await waitFor(() => getByText('cat.png'))).toBeTruthy()
   })
 })
+
+describe('thread linked-event notice', () => {
+  // The thread timeline route ignores `at_ts` (#1146): it serves the newest
+  // page, so an older reply missing from it proves nothing. Neither the panel
+  // nor the room stream (which never renders thread replies) may accuse it.
+  it('does not accuse a linked reply that is older than the thread page', async () => {
+    server.use(
+      http.get(EVENTS_PATH, ({ params }) =>
+        HttpResponse.json({
+          data:
+            params.eventId === '$reply'
+              ? event('$reply', 200, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                })
+              : event(params.eventId as string, 100),
+        }),
+      ),
+    )
+    const { findByLabelText, queryByRole } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root&event=%24reply`,
+    )
+    await findByLabelText('Thread')
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(queryByRole('alert')).toBeNull()
+  })
+
+  it('explains a linked reply hidden because deleted messages are hidden', async () => {
+    const deletedReply = event('$gone-reply', 200, {
+      relates_to: { rel_type: 'm.thread', event_id: '$root' },
+      redacted: true,
+    })
+    server.use(
+      http.get(EVENTS_PATH, ({ params }) =>
+        HttpResponse.json({
+          data:
+            params.eventId === '$gone-reply'
+              ? deletedReply
+              : event(params.eventId as string, 100),
+        }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: { events: [deletedReply], next_cursor: null },
+          }),
+      ),
+    )
+    const { findByLabelText, services } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root&event=%24gone-reply`,
+    )
+    services.settings.hideRedactedEvents.value = true
+    const panel = await findByLabelText('Thread')
+    const alert = await within(panel).findByRole('alert')
+    expect(alert.textContent).toContain('The linked message was deleted')
+
+    fireEvent.click(within(alert).getByRole('button', { name: 'Dismiss' }))
+    await waitFor(() => expect(within(panel).queryByRole('alert')).toBeNull())
+  })
+
+  it('explains a thread link whose root Axon does not have', async () => {
+    server.use(
+      http.get(EVENTS_PATH, ({ params }) =>
+        params.eventId === '$ghost'
+          ? new HttpResponse(null, { status: 404 })
+          : HttpResponse.json({ data: event(params.eventId as string, 0) }),
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$other', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24ghost`,
+    )
+    const panel = await findByLabelText('Thread')
+    expect((await within(panel).findByRole('alert')).textContent).toContain(
+      "This thread's first message isn't available",
+    )
+  })
+})

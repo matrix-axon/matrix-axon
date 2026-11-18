@@ -36,6 +36,11 @@ import {
   type SubmittedPreviews,
 } from './Composer'
 import { ErrorBanner } from './ErrorBanner'
+import {
+  LINKED_EVENT_MESSAGES,
+  LINKED_THREAD_ROOT_MISSING,
+  LinkedEventNotice,
+} from './LinkedEventNotice'
 import { Fragment } from 'preact'
 import { MediaViewerProvider } from '../media/media-viewer'
 import { MediaGalleryRow } from './MediaGalleryRow'
@@ -232,6 +237,22 @@ export function ThreadPanel({
   const targetEventId =
     highlightedEventId ??
     (typeof location.query.event === 'string' ? location.query.event : null)
+  /** The thread's root is verified absent: the server answered 404 for it. */
+  const [rootMissing, setRootMissing] = useState(false)
+  useEffect(() => {
+    setRootMissing(false)
+  }, [rootId])
+  /** The linked reply whose "deleted" notice the user dismissed. */
+  const [dismissedHiddenTarget, setDismissedHiddenTarget] = useState<
+    string | null
+  >(null)
+  // Reset with the rest of the panel's notice state: a dismissal lasts while
+  // its link and thread are current, as on the room page.
+  useEffect(() => {
+    setDismissedHiddenTarget((current) =>
+      current === targetEventId ? current : null,
+    )
+  }, [rootId, targetEventId])
 
   // The full root always stays in the scrollable thread. Once it has scrolled
   // out of view, a compact overlay replaces it at the top of the scrollport.
@@ -362,10 +383,16 @@ export function ThreadPanel({
           if (cancelled) {
             return
           }
+          // A 404 here is RoomPage's to report: it runs the same lookup for
+          // the same `?event=`, verifies the target absent and drops it.
           if (data === undefined || threadRootId(data.data) !== rootId) {
             void thread.loadLatest()
             return
           }
+          // No "not on this page" notice after the jump: the thread timeline
+          // route does not honour `at_ts` and serves its newest page, so a
+          // reply older than that page is absent from a page that was never
+          // bounded at its timestamp. Absence here proves nothing (#1146).
           void thread.jumpTo(data.data.origin_ts)
         }),
     )
@@ -385,6 +412,18 @@ export function ThreadPanel({
    */
   const isVisibleEvent = (event: TimelineEvent): boolean =>
     !hiddenByRedaction(event, hideRedacted, NO_THREAD_ROOTS)
+  /**
+   * A linked reply that is loaded but filtered out by "hide deleted messages"
+   * has no row to reveal, so the jump would silently show nothing. The room
+   * page leaves thread replies to this panel.
+   */
+  const hiddenTarget =
+    targetEventId !== null &&
+    targetEventId !== rootId &&
+    targetEventId !== dismissedHiddenTarget &&
+    thread.events.value.some(
+      (event) => event.event_id === targetEventId && !isVisibleEvent(event),
+    )
   const visibleEvents = thread.events.value.filter(isVisibleEvent)
 
   /**
@@ -607,8 +646,17 @@ export function ThreadPanel({
         .GET('/v1/accounts/{account_id}/events/{event_id}', {
           params: { path: { account_id: accountId, event_id: rootId } },
         })
-        .then(({ data }) => {
-          if (!cancelled && data !== undefined && !rootRefreshed.current) {
+        .then(({ data, response }) => {
+          if (cancelled) {
+            return
+          }
+          if (data === undefined) {
+            if (response.status === 404) {
+              setRootMissing(true)
+            }
+            return
+          }
+          if (!rootRefreshed.current) {
             setRoot((current) => current ?? data.data)
           }
         }),
@@ -720,6 +768,22 @@ export function ThreadPanel({
       </div>
 
       <ErrorBanner error={thread.error} />
+      <LinkedEventNotice
+        message={
+          hiddenTarget
+            ? LINKED_EVENT_MESSAGES.deleted
+            : rootMissing && root === undefined
+              ? LINKED_THREAD_ROOT_MISSING
+              : null
+        }
+        onDismiss={() => {
+          if (hiddenTarget) {
+            setDismissedHiddenTarget(targetEventId)
+          } else {
+            setRootMissing(false)
+          }
+        }}
+      />
 
       <div
         class="thread-timeline"

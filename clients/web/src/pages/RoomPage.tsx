@@ -18,6 +18,11 @@ import { Composer } from '../components/Composer'
 import type { ComposerAutocompleteOption } from '../components/Composer'
 import { ErrorBanner } from '../components/ErrorBanner'
 import {
+  LINKED_EVENT_MESSAGES,
+  LinkedEventNotice,
+  type LinkedEventProblem,
+} from '../components/LinkedEventNotice'
+import {
   canonicalReactionKey,
   isEditable,
   isReactable,
@@ -468,6 +473,85 @@ export function RoomPage() {
   )
   /** The anchor *this stream* is parked on, if any. */
   const streamAnchor = anchorIsOpenThreadReply ? null : highlighted
+  // A followed event link that could not be satisfied, and the event it is
+  // about. Kept in state rather than derived because dropping a dead anchor
+  // clears `highlighted` itself — that notice has to outlive the URL that
+  // caused it.
+  const [linkProblem, setLinkProblem] = useState<{
+    eventId: string
+    problem: LinkedEventProblem
+  } | null>(null)
+  /**
+   * The anchor `dropUnsatisfiableAnchor` stripped off the URL. Only that drop
+   * may leave a notice standing once `highlighted` goes null; any other
+   * same-room navigation that loses `?event=` (closing a thread, opening room
+   * information) takes the notice with it.
+   */
+  const droppedAnchor = useRef<string | null>(null)
+  /** The anchor whose derived "hidden" notice the user dismissed. */
+  const [dismissedHiddenTarget, setDismissedHiddenTarget] = useState<
+    string | null
+  >(null)
+  // The page does not remount across a room switch (ADR 0085): a notice about
+  // one room's link must not follow the user into the next room.
+  useEffect(() => {
+    droppedAnchor.current = null
+    setLinkProblem(null)
+    setDismissedHiddenTarget(null)
+  }, [accountId, roomId])
+  // A notice belongs to its own anchor: a new link replaces it, and so does
+  // leaving the anchor by any route other than the verified-absent drop.
+  useEffect(() => {
+    setLinkProblem((current) =>
+      current === null ||
+      current.eventId === highlighted ||
+      (highlighted === null && droppedAnchor.current === current.eventId)
+        ? current
+        : null,
+    )
+    // A dismissal lasts while its link is the current one. Leaving it and
+    // following it again is a fresh request, and gets the notice again.
+    setDismissedHiddenTarget((current) =>
+      current === highlighted ? current : null,
+    )
+  }, [highlighted])
+  /**
+   * The link target is loaded but this view will not render it — a deleted
+   * message under "hide deleted messages", or an event kind the state-event
+   * setting filters out. Without this the jump "works" yet shows nothing.
+   * Thread replies are excluded: the thread panel owns their reveal.
+   */
+  const hiddenTargetProblem = useMemo((): LinkedEventProblem | null => {
+    if (highlighted === null) {
+      return null
+    }
+    const target = timeline.events.value.find(
+      (event) => event.event_id === highlighted,
+    )
+    if (target === undefined || threadRootId(target) !== null) {
+      return null
+    }
+    const visibility = timelineEventVisibility(target)
+    return visibility === 'shown'
+      ? null
+      : visibility === 'redacted'
+        ? 'deleted'
+        : 'filtered'
+  }, [highlighted, timeline.events.value, timelineEventVisibility])
+  // A notice about an event that has since arrived (live frame, head merge,
+  // a later page) is stale: retract it. Rendering the row is the answer.
+  useEffect(() => {
+    if (
+      linkProblem !== null &&
+      timelineContainsEvent(timeline.events.value, linkProblem.eventId)
+    ) {
+      setLinkProblem(null)
+    }
+  }, [linkProblem, timeline.events.value])
+  const shownLinkProblem =
+    linkProblem?.problem ??
+    (dismissedHiddenTarget === highlighted ? null : hiddenTargetProblem)
+
   // Whether this view may claim read state at all — the invariant the three
   // effects below share (see `clients/web/AGENTS.md`). Derived once rather than
   // re-stated per effect, so another condition is added in one place instead of
@@ -734,6 +818,13 @@ export function RoomPage() {
       if (!isCurrent()) {
         return
       }
+      // Verified absent: tell the user why the link landed on the newest
+      // messages instead of on its target.
+      // (The invoking effect bails on a null anchor; this keeps the type.)
+      if (highlighted !== null) {
+        droppedAnchor.current = highlighted
+        setLinkProblem({ eventId: highlighted, problem: 'missing' })
+      }
       location.route(
         withoutQueryParam(
           `${window.location.pathname}${window.location.search}`,
@@ -820,7 +911,21 @@ export function RoomPage() {
               // room in history behind a thread the reader was looking at.
               return
             }
-            await timeline.jumpTo(data.data.origin_ts)
+            const outcome = await timeline.jumpTo(data.data.origin_ts)
+            // The server has the event, but the page around its timestamp came
+            // back without it. Only *this* jump's applied page answers that: a
+            // failed jump owns its own error banner, and a superseded one (a
+            // reconnect head load racing a cold deep link) left some other
+            // slice behind — `timeline.error` is null for both, so it is not
+            // the signal. A thread reply never has a main-stream row.
+            if (
+              rootId === null &&
+              outcome === 'applied' &&
+              isCurrent() &&
+              !timelineContainsEvent(timeline.events.peek(), highlighted)
+            ) {
+              setLinkProblem({ eventId: highlighted, problem: 'unplaced' })
+            }
           },
           // A rejected lookup — offline, timeout, DNS — proves nothing about the
           // anchor either. Load the tail and leave the URL alone so a retry or a
@@ -2272,6 +2377,17 @@ export function RoomPage() {
       </header>
 
       <ErrorBanner error={timeline.error} />
+      <LinkedEventNotice
+        message={
+          shownLinkProblem === null
+            ? null
+            : LINKED_EVENT_MESSAGES[shownLinkProblem]
+        }
+        onDismiss={() => {
+          setLinkProblem(null)
+          setDismissedHiddenTarget(highlighted)
+        }}
+      />
 
       {/* Row, so the thread panel sits beside the stream and shrinks it
           rather than covering it (ADR 0062). Below the three-pane breakpoint
