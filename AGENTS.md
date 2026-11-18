@@ -26,84 +26,6 @@ See `docs/mvp/prd.md` for the full product description.
 | `scripts/integration-test.sh`  | One-command end-to-end re-decryption test: seeds an encrypted room + key backup via `axon-itest`, runs axon as a fresh device, and asserts UTDs back-fill. Runnable in CI on demand via `.github/workflows/integration.yml` (manual `workflow_dispatch`).                                                                                        |
 | `scripts/matrix-oauth-test.sh` | ADR 0097 black-box and real interoperability lanes against pinned Synapse + MAS: API boundaries, acquisition, fresh SDK-device grant, and unsupported capability. Runs on demand via `integration.yml` or `smoke.yml` (notifies the dev room), and after `main` pushes/nightly via `smoke.yml`; secret-bearing runs upload no artifacts.         |
 
-## Directory layout
-
-```text
-matrix-axon/
-  Cargo.toml                 # workspace
-  AGENTS.md                  # this file
-  CLAUDE.md                  # one-line pointer to this file
-  crates/
-    axon-server/             # binary; wires components together
-    axon-core/               # shared types, errors, config
-    axon-store/              # Postgres + sqlx; event store, account data
-    axon-sync/               # matrix-rust-sdk sync engine wrapper
-    axon-crypto/             # RESERVED STUB — verification lives in axon-sync (ADR 0027)
-    axon-search/             # Tantivy index
-    axon-media/              # media proxy + disk-cache backend
-    axon-api/                # axum HTTP + WS handlers, OpenAPI (utoipa)
-    axon-itest/              # dev-only: integration-test seeder (the `seed` binary)
-    axon-test-support/       # dev-only: in-memory signing fixtures shared by server tests
-  clients/
-    tui/                     # axon-tui — terminal client for the Axon API, should grow to support all API endpoints as they are enabled
-    web/                     # axon-web (Vite + Preact + TS, ADR 0046) — alpha client
-  smoke/                     # black-box smoke harnesses (depend on no axon-* crate; ADR 0025)
-    tui/                     # axon-smoke-tui — PTY-drives the real axon-tui against an in-process API stub
-                             # also ships axon-demo-tui — the ADR 0086 demo pilot (not a test, not a gate)
-    server/                  # axon-smoke-server — black-box API/WS smoke against a real stack
-    matrix-oauth/            # ADR 0097 black-box + real Synapse/MAS/SDK QR interoperability
-    local-stack/             # axon-smoke-local-stack — boots Synapse + Postgres + axon; writes a JSON manifest
-      corpus/                # declarative demo content (ADR 0086); rendered by `up --corpus`
-        demo.toml            # personas, spaces, rooms, messages — relative timestamps
-        media/               # CC0 avatars (committed) + photos (generated placeholders, not committed)
-  openapi/                   # OpenAPI 3.1 spec (source of truth)
-  docs/
-    mvp/                     # PRD, tech spec, implementation spec (frozen at MVP ship)
-    adr/                     # architecture decision records
-    README.md                # index of the guides below and beside it
-    install.md building.md server-admin.md technical-reference.md   # user and operator guides
-    self-hosting.md          # produced in Milestone 13 (deployment docs; still pending)
-  docker-compose.yml         # Postgres 16 for dev; Synapse under `integration` profile
-  packaging/                 # nFPM .deb/.rpm, and the Homebrew formula and cask templates
-  scripts/
-    integration-test.sh      # end-to-end E2EE re-decryption test vs local Synapse
-  .github/workflows/         # public repo: GitHub-hosted runners have free minutes, so most workflows trigger on push or release (via new tag); a few stay manual-dispatch only for other reasons (expensive/manual runs)
-    api-docs.yml             # build the Pages site: homepage + API reference at https://matrix-axon.github.io/matrix-axon/api.html
-    check-environment.yml    # local-runner environment check
-    cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows; on tags, publishes the Homebrew formulas and cask; every server binary carries the web client (ADR 0116); Windows executables are Authenticode-signed when the `ARTIFACT_SIGNING_*` repo variables exist (ADR 0119)
-    lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
-    lint-and-test.yml        # cargo fmt + clippy + test
-    package.yml              # nFPM .deb/.rpm (amd64 on ubuntu-22.04, arm64 on ubuntu-22.04-arm); tag uploads to GitHub Releases; the binary carries the web client (ADR 0116)
-    embed-web.yml            # builds the web client into axon-server, runs the Postgres-gated router tests, then boots the binary and fetches the bundle back (ADR 0116)
-    release-plz.yml          # on main (push, or manual dispatch): opens the release PR that bumps the Cargo version, and tags its merge (ADR 0106, release-plz.toml)
-    release-notes.yml        # draft release notes grouped by PR label while the release PR is open; publishes them on the tag and opens the CHANGELOG.md PR (ADR 0108, .github/release.yml)
-    integration.yml          # selectable E2EE re-decryption and Matrix OAuth QR real-service suites
-    matrix-oauth.yml         # reusable Matrix OAuth QR real-service workflow used by integration and smoke
-    smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)
-    postgres-tests.yml       # nightly + on demand, never on PRs: every `#[ignore]`d Postgres-backed test via scripts/postgres-tests.sh (one fresh database per test target)
-  .github/actions/           # actions relied on by the workflows
-    check-environment/       # check environment on local runners before proceeding
-    web-bundle/              # build clients/web and export AXON_WEB_DIST, for any job that builds axon-server with `embed-web`
-```
-
-## Crates
-
-Each crate's own `Cargo.toml` `description` is the source of truth;
-this table is the orientation copy.
-
-| Crate               | Purpose                                                                                                                           |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `axon-core`         | Shared types, errors, and configuration.                                                                                          |
-| `axon-store`        | Postgres-backed event store, room state, and account data.                                                                        |
-| `axon-sync`         | matrix-rust-sdk sync-engine wrapper (Simplified Sliding Sync); owns verification and all crypto-adjacent logic.                   |
-| `axon-crypto`       | Reserved stub — stays empty; verification lives in `axon-sync` (ADR 0027; see the "`axon-crypto` stays a stub" convention below). |
-| `axon-search`       | Tantivy full-text search index, populated on event ingestion.                                                                     |
-| `axon-media`        | Media proxy with a bounded on-disk LRU cache for `mxc://` URLs.                                                                   |
-| `axon-api`          | axum HTTP + WebSocket handlers; OpenAPI spec via utoipa.                                                                          |
-| `axon-server`       | The `axon` binary — wires the crates together and owns the process.                                                               |
-| `axon-itest`        | Dev-only end-to-end integration-test seeder (plays a verified Matrix client).                                                     |
-| `axon-test-support` | Dev-only in-memory signing fixtures shared by Axon server tests.                                                                  |
-
 ## Key conventions
 
 - **One human per Axon process.**
@@ -156,6 +78,7 @@ this table is the orientation copy.
   Drift between spec and generated stubs is a bug.
   Evolve `/v1/` additively — an independently-distributed `axon-tui` binary can run against a server for a long time without upgrading. `scripts/check-openapi-compat.sh` (CI: `openapi-compat`) fails a PR that breaks compatibility; a deliberate exception declares itself with an `API-Breaking-Change: <reason>` commit trailer (ADR 0099).
 - **Component separation:** the code is separated into three silos: `crates/` (server-side infrastructure), `clients/` (client-side infrastructure, separated into `tui` and `web`), and `smoke/` (testing infrastructure).
+  The `smoke/` harnesses are black-box: they depend on no `axon-*` crate (ADR 0025).
   Behavioral changes — anything that changes logic, functionality, or intent — must stay within a single silo per commit/PR.
   Typically, changes to the `web` and `tui` clients should be separate PRs except where a global change impacts both clients.
   If a behavioral server change breaks client compatibility, ship the server change on its own; don't bundle a client-side fix into the same PR even to keep `main` working, even temporarily — open a separate, immediate follow-up PR for the client side.
