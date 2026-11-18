@@ -77,11 +77,21 @@ export function matrixToRoomReferenceLink(
   return matrixToLink(roomId, server === null ? (options.via ?? []) : [server])
 }
 
-export function matrixToEventLink(roomId: string, eventId: string): string {
+/**
+ * A matrix.to link to an event. `via` names the servers to join through, as
+ * the link it was read from gave them; without any, the room id's own server
+ * is used where it has one.
+ */
+export function matrixToEventLink(
+  roomId: string,
+  eventId: string,
+  via: readonly string[] = [],
+): string {
   let href = `${MATRIX_TO_ORIGIN}/#/${encodeURIComponent(roomId)}/${encodeURIComponent(eventId)}`
   const server = serverNameFromRoomId(roomId)
-  if (server !== null) {
-    href += `?via=${encodeURIComponent(server)}`
+  const servers = via.length > 0 ? via : server === null ? [] : [server]
+  if (servers.length > 0) {
+    href += `?${servers.map((name) => `via=${encodeURIComponent(name)}`).join('&')}`
   }
   return href
 }
@@ -105,6 +115,8 @@ export function isMatrixLink(raw: string): boolean {
 export interface LinkedEventTarget {
   roomId: string
   eventId: string
+  /** The link's `via` servers, for joining the room from its card. */
+  via: readonly string[]
 }
 
 /**
@@ -120,7 +132,11 @@ export function linkedEventTarget(
   const target = parseRoomLinkTarget(href)
   if (target === null || target.eventId === null) return null
   if (target.roomIdOrAlias.startsWith('!')) {
-    return { roomId: target.roomIdOrAlias, eventId: target.eventId }
+    return {
+      roomId: target.roomIdOrAlias,
+      eventId: target.eventId,
+      via: target.serverNames,
+    }
   }
   const ids = new Set(
     context.rooms
@@ -132,7 +148,11 @@ export function linkedEventTarget(
       .map((room) => room.room_id),
   )
   if (ids.size !== 1) return null
-  return { roomId: [...ids][0], eventId: target.eventId }
+  return {
+    roomId: [...ids][0],
+    eventId: target.eventId,
+    via: target.serverNames,
+  }
 }
 
 export function resolveMatrixToRoomLink(

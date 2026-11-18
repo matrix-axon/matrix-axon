@@ -132,9 +132,9 @@ describe('linkedEventTargets (ADR 0138 § 2)', () => {
         context,
       ),
     ).toEqual([
-      { roomId: '!a:hs', eventId: '$one' },
-      { roomId: '!b:hs', eventId: '$two' },
-      { roomId: '!c:hs', eventId: '$three' },
+      { roomId: '!a:hs', eventId: '$one', via: [] },
+      { roomId: '!b:hs', eventId: '$two', via: [] },
+      { roomId: '!c:hs', eventId: '$three', via: [] },
     ])
   })
 
@@ -146,7 +146,7 @@ describe('linkedEventTargets (ADR 0138 § 2)', () => {
     }
     expect(
       linkedEventTargets({ event_id: '$m', content, body: 'x' }, context),
-    ).toEqual([{ roomId: '!a:hs', eventId: '$shown' }])
+    ).toEqual([{ roomId: '!a:hs', eventId: '$shown', via: [] }])
   })
 
   it('drops a plain reply fallback and a message with a spoiler', () => {
@@ -164,7 +164,7 @@ describe('linkedEventTargets (ADR 0138 § 2)', () => {
         },
         context,
       ),
-    ).toEqual([{ roomId: '!a:hs', eventId: '$shown' }])
+    ).toEqual([{ roomId: '!a:hs', eventId: '$shown', via: [] }])
     expect(
       linkedEventTargets(
         {

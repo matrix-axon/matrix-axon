@@ -235,19 +235,23 @@ describe('linkedEventTarget', () => {
         'https://matrix.to/#/!elsewhere:example.org/$event?via=example.org',
         context,
       ),
-    ).toEqual({ roomId: '!elsewhere:example.org', eventId: '$event' })
+    ).toEqual({
+      roomId: '!elsewhere:example.org',
+      eventId: '$event',
+      via: ['example.org'],
+    })
     expect(
       linkedEventTarget(
         'matrix:roomid/%21known:example.org/e/%24event',
         context,
       ),
-    ).toEqual({ roomId: '!known:example.org', eventId: '$event' })
+    ).toEqual({ roomId: '!known:example.org', eventId: '$event', via: [] })
   })
 
   it('resolves an alias only through the account rooms', () => {
     expect(
       linkedEventTarget('https://matrix.to/#/#known:example.org/$e', context),
-    ).toEqual({ roomId: '!known:example.org', eventId: '$e' })
+    ).toEqual({ roomId: '!known:example.org', eventId: '$e', via: [] })
     expect(
       linkedEventTarget('https://matrix.to/#/#theirs:example.org/$e', context),
     ).toBeNull()

@@ -40,6 +40,14 @@ export interface LinkedEventCache {
     eventId: string,
     options?: { fresh?: boolean },
   ): Promise<LinkedEventResult>
+  /**
+   * Whether a card's image was given up on this session: still a 404 after
+   * its event was read again (§ 4). `key` names the account, room, event and
+   * `mxc://` URI.
+   */
+  imageExhausted(key: string): boolean
+  /** Remember that a card's image is not to be asked for again. */
+  exhaustImage(key: string): void
   clear(): void
 }
 
@@ -49,6 +57,7 @@ export function createLinkedEventCache(api: ApiClient): LinkedEventCache {
     string,
     { promise: Promise<LinkedEventResult>; fresh: boolean }
   >()
+  const exhausted = new Set<string>()
   let generation = 0
 
   function request(
@@ -101,12 +110,48 @@ export function createLinkedEventCache(api: ApiClient): LinkedEventCache {
       if (pending !== undefined) return pending.promise
       return request(key, accountId, roomId, eventId, false)
     },
+    imageExhausted(key) {
+      return exhausted.has(key)
+    },
+    exhaustImage(key) {
+      exhausted.delete(key)
+      exhausted.add(key)
+      while (exhausted.size > MAX_CACHED) {
+        exhausted.delete(exhausted.values().next().value!)
+      }
+    },
     clear() {
       generation += 1
       settled.clear()
       inflight.clear()
+      exhausted.clear()
     },
   }
+}
+
+/**
+ * A linked event's text with its spoilers withheld, for its card: the
+ * formatted body as plain text, each spoiler replaced by `[spoiler]` and the
+ * reply fallback left out. `null` when the formatted body has no spoiler, so
+ * the plain body (or a media caption) serves as it is.
+ */
+export function textWithSpoilersWithheld(content: unknown): string | null {
+  const fields = (content ?? {}) as Record<string, unknown>
+  if (
+    fields.format !== 'org.matrix.custom.html' ||
+    typeof fields.formatted_body !== 'string' ||
+    !/data-mx-spoiler/i.test(fields.formatted_body)
+  )
+    return null
+  const template = document.createElement('template')
+  template.innerHTML = renderMatrixHtml(fields.formatted_body)
+  const root = template.content
+  for (const reply of root.querySelectorAll('mx-reply')) reply.remove()
+  for (const spoiler of root.querySelectorAll('[data-mx-spoiler], .spoiler'))
+    spoiler.replaceWith('[spoiler]')
+  for (const breakLine of root.querySelectorAll('br'))
+    breakLine.replaceWith(' ')
+  return (root.textContent ?? '').replace(/\s+/g, ' ').trim()
 }
 
 /** A message, as far as choosing its Matrix-link cards needs it. */

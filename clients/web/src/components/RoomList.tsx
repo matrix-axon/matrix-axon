@@ -46,6 +46,7 @@ import {
   type RoomSort,
 } from '../stores/settings'
 import { rowWindow, scrollToReveal } from './virtual-window'
+import { scrollParentOf } from '../scroll-parent'
 
 const FILTERS: { value: RoomFilter; label: string; shortLabel: string }[] = [
   { value: 'all', label: 'All rooms', shortLabel: 'All' },
@@ -76,22 +77,6 @@ const ASSUMED_VIEWPORT = 1200
 const TOUCH_TAP_SLOP_PX = 10
 
 const EMPTY_UNREAD_KEYS: ReadonlySet<string> = new Set()
-
-/** The nearest scrolling ancestor, or `null` when nothing scrolls (a
- *  layout-less test environment, or the list rendered outside the sidebar). */
-function scrollParentOf(element: HTMLElement | null): HTMLElement | null {
-  for (
-    let node = element?.parentElement ?? null;
-    node !== null;
-    node = node.parentElement
-  ) {
-    const { overflowY } = getComputedStyle(node)
-    if (overflowY === 'auto' || overflowY === 'scroll') {
-      return node
-    }
-  }
-  return null
-}
 
 /**
  * The room list (ADR 0046, M-W4): optional favorites section in custom

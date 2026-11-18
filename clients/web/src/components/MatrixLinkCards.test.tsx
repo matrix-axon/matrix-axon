@@ -1,7 +1,15 @@
 import { render, screen, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { ServicesContext } from '../services'
 import type { TimelineEvent } from '../stores/timeline'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -203,7 +211,7 @@ describe('Matrix-link cards (ADR 0138)', () => {
         },
       ),
     )
-    view()
+    const services = view()
     await waitFor(() => expect(media).toBe(2))
     expect(reads).toHaveLength(2)
     // No further reads or image requests: the card stays without its image.
@@ -212,5 +220,150 @@ describe('Matrix-link cards (ADR 0138)', () => {
     expect(reads).toHaveLength(2)
     expect(screen.getByText('@bob:hs')).toBeTruthy()
     expect(document.querySelector('.matrix-link-card-image')).toBeNull()
+    // Shown again this session, the card asks for neither again.
+    view(message(), services)
+    await waitFor(() =>
+      expect(document.querySelectorAll('.matrix-link-card')).toHaveLength(2),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(media).toBe(2)
+    expect(reads).toHaveLength(2)
+  })
+
+  it('keeps the card, without its image, when the re-read fails for now', async () => {
+    const image = linked({
+      content: {
+        msgtype: 'm.image',
+        body: 'A caption',
+        filename: 'cat.png',
+        url: 'mxc://hs/cat',
+        info: { mimetype: 'image/png' },
+      },
+      body: 'A caption',
+    })
+    let read = 0
+    const reads = serve(() => {
+      read += 1
+      return read === 1
+        ? HttpResponse.json({ data: image })
+        : HttpResponse.json({ error: { code: 'upstream' } }, { status: 503 })
+    })
+    let media = 0
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/media/:account/:server/:media/thumbnail`,
+        () => {
+          media += 1
+          return HttpResponse.json(
+            { error: { code: 'not_found' } },
+            { status: 404 },
+          )
+        },
+      ),
+    )
+    view()
+    await waitFor(() => expect(reads).toHaveLength(2))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(screen.getByText('A caption')).toBeTruthy()
+    expect(document.querySelector('.matrix-link-card-image')).toBeNull()
+    // The image is asked for again only after a read that succeeded.
+    expect(media).toBe(1)
+  })
+
+  it("keeps the linked message's spoilers hidden", async () => {
+    let answer = linked({
+      content: {
+        msgtype: 'm.text',
+        body: 'The ending: Bruce dies',
+        format: 'org.matrix.custom.html',
+        formatted_body: 'The ending: <span data-mx-spoiler>Bruce dies</span>',
+      },
+      body: 'The ending: Bruce dies',
+    })
+    serve(() => HttpResponse.json({ data: answer }))
+    view()
+    expect(await screen.findByText('The ending: [spoiler]')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('Bruce dies')
+
+    answer = linked({
+      event_id: '$caption',
+      content: {
+        msgtype: 'm.file',
+        body: 'Read after the film',
+        filename: 'notes.txt',
+        format: 'org.matrix.custom.html',
+        formatted_body: '<span data-mx-spoiler>Read after the film</span>',
+        url: 'mxc://hs/notes',
+        info: { mimetype: 'text/plain' },
+      },
+      body: 'Read after the film',
+    })
+    view(message('See https://matrix.to/#/!other%3Ahs/%24caption?via=hs'))
+    expect(await screen.findByText('notes.txt: [spoiler]')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('Read after the film')
+  })
+
+  it("joins through the link's own via servers", async () => {
+    serve(() => HttpResponse.json({ data: linked({ room_id: '!opaque' }) }))
+    view(
+      message(
+        'See https://matrix.to/#/!opaque/%24linked?via=remote.example&via=other.example',
+      ),
+    )
+    await screen.findByText('The linked message')
+    const card = document.querySelector<HTMLAnchorElement>('.matrix-link-card')!
+    expect(card.href).toBe(
+      'https://matrix.to/#/!opaque/%24linked?via=remote.example&via=other.example',
+    )
+  })
+
+  it("prefetches a screen's height ahead within the timeline's scroller", async () => {
+    const observers: {
+      callback: IntersectionObserverCallback
+      options?: IntersectionObserverInit
+    }[] = []
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(
+          callback: IntersectionObserverCallback,
+          options?: IntersectionObserverInit,
+        ) {
+          observers.push({ callback, options })
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+        takeRecords() {
+          return []
+        }
+      },
+    )
+    try {
+      const seen = serve(() => HttpResponse.json({ data: linked() }))
+      const scroller = document.createElement('div')
+      scroller.style.overflowY = 'auto'
+      document.body.append(scroller)
+      render(
+        <ServicesContext.Provider value={testServices({ token: 't' })}>
+          <EventBody event={message()} />
+        </ServicesContext.Provider>,
+        { container: scroller },
+      )
+      const card = observers.find(
+        ({ options }) => options?.rootMargin === '100% 0px',
+      )!
+      expect(card.options?.root).toBe(scroller)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(seen).toEqual([])
+      card.callback(
+        [{ isIntersecting: true } as IntersectionObserverEntry],
+        {} as IntersectionObserver,
+      )
+      await screen.findByText('The linked message')
+      expect(seen).toEqual(['!other:hs $linked'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
