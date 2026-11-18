@@ -246,6 +246,13 @@ export function ThreadPanel({
   const [dismissedHiddenTarget, setDismissedHiddenTarget] = useState<
     string | null
   >(null)
+  // Reset with the rest of the panel's notice state: a dismissal lasts while
+  // its link and thread are current, as on the room page.
+  useEffect(() => {
+    setDismissedHiddenTarget((current) =>
+      current === targetEventId ? current : null,
+    )
+  }, [rootId, targetEventId])
 
   // The full root always stays in the scrollable thread. Once it has scrolled
   // out of view, a compact overlay replaces it at the top of the scrollport.

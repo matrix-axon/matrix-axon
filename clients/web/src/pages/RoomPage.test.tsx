@@ -5544,6 +5544,74 @@ describe('RoomPage linked-event notice', () => {
     await waitFor(() => expect(queryByRole('alert')).toBeNull())
   })
 
+  it('explains a target the state-event setting filters out', async () => {
+    const topic = event('$topic', T0 - DAY, {
+      type: 'm.room.topic',
+      state_key: '',
+      body: null,
+      content: { topic: 'New topic' },
+    })
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () => HttpResponse.json({ data: topic })),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: { events: [event('$tail', T0), topic], next_cursor: null },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24topic`,
+    )
+    const services = testServices()
+    services.settings.stateEvents.value = 'hidden'
+    const { findByRole } = render(routedRoomPage(services))
+    expect((await findByRole('alert')).textContent).toContain(
+      "The linked event isn't shown in the timeline with your current settings.",
+    )
+  })
+
+  it('shows a dismissed hidden-target notice again when the link is followed again', async () => {
+    const deleted = { ...event('$deleted', T0 - DAY), redacted: true }
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () => HttpResponse.json({ data: deleted })),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: { events: [event('$tail', T0), deleted], next_cursor: null },
+        }),
+      ),
+    )
+    const { findByRole, queryByRole } = openLink('$deleted', true)
+    fireEvent.click(
+      within(await findByRole('alert')).getByRole('button', {
+        name: 'Dismiss',
+      }),
+    )
+    expect(queryByRole('alert')).toBeNull()
+
+    const go = (search: string) => {
+      window.history.pushState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}${search}`,
+      )
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }
+    go('')
+    await waitFor(() => expect(window.location.search).toBe(''))
+    go('?event=%24deleted')
+    expect((await findByRole('alert')).textContent).toContain(
+      'The linked message was deleted',
+    )
+  })
+
   it('explains a target hidden because deleted messages are hidden', async () => {
     const deleted = { ...event('$deleted', T0 - DAY), redacted: true }
     server.use(

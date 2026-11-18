@@ -488,11 +488,16 @@ export function RoomPage() {
    * information) takes the notice with it.
    */
   const droppedAnchor = useRef<string | null>(null)
+  /** The anchor whose derived "hidden" notice the user dismissed. */
+  const [dismissedHiddenTarget, setDismissedHiddenTarget] = useState<
+    string | null
+  >(null)
   // The page does not remount across a room switch (ADR 0085): a notice about
   // one room's link must not follow the user into the next room.
   useEffect(() => {
     droppedAnchor.current = null
     setLinkProblem(null)
+    setDismissedHiddenTarget(null)
   }, [accountId, roomId])
   // A notice belongs to its own anchor: a new link replaces it, and so does
   // leaving the anchor by any route other than the verified-absent drop.
@@ -504,11 +509,12 @@ export function RoomPage() {
         ? current
         : null,
     )
+    // A dismissal lasts while its link is the current one. Leaving it and
+    // following it again is a fresh request, and gets the notice again.
+    setDismissedHiddenTarget((current) =>
+      current === highlighted ? current : null,
+    )
   }, [highlighted])
-  /** The anchor whose derived "hidden" notice the user dismissed. */
-  const [dismissedHiddenTarget, setDismissedHiddenTarget] = useState<
-    string | null
-  >(null)
   /**
    * The link target is loaded but this view will not render it — a deleted
    * message under "hide deleted messages", or an event kind the state-event
