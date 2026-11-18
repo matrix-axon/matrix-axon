@@ -160,11 +160,13 @@ pub(crate) async fn fetch<H: Hop>(
         });
     }
     let content_type = content_type.unwrap_or_else(|| "text/html".to_owned());
-    if !content_type.starts_with("text/html") && !content_type.starts_with("application/xhtml+xml")
-    {
+    if !page::is_html(&content_type) {
         return Err(Failure::PreviewUnavailable);
     }
-    let page = page::parse(&response.body, &content_type)?;
+    let page = match response.page {
+        Some(page) => page,
+        None => page::parse(&response.body, &content_type)?,
+    };
     let mut fetched = Fetched {
         url: response.url.to_string(),
         title: page.title,

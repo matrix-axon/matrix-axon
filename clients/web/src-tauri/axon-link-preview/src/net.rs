@@ -14,6 +14,7 @@ use crate::address::Address;
 use crate::dns::{self, Dns};
 use crate::error::{Failure, Result};
 use crate::http::{self, Kind, Parser};
+use crate::page::Page;
 use crate::url_check::{self, Checked};
 use crate::Cancel;
 use std::collections::HashMap;
@@ -45,6 +46,8 @@ pub(crate) struct Response {
     pub(crate) status: u16,
     pub(crate) headers: HashMap<String, String>,
     pub(crate) body: Vec<u8>,
+    /// Metadata already parsed at the initial HTML budget.
+    pub(crate) page: Option<Page>,
     pub(crate) url: Url,
 }
 
@@ -327,11 +330,12 @@ pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
         };
         let eof = read == 0;
         if parser.append(&buffer[..read], eof)? {
-            let (status, headers, body) = parser.into_parts();
+            let (status, headers, body, page) = parser.into_parts();
             return Ok(Response {
                 status,
                 headers,
                 body,
+                page,
                 url,
             });
         }

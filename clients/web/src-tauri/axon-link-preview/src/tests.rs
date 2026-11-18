@@ -677,6 +677,7 @@ fn response(status: u16, headers: &[(&str, &str)], body: &[u8], url: &url::Url) 
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect(),
         body: body.to_vec(),
+        page: None,
         url: url.clone(),
     }
 }
@@ -1463,6 +1464,65 @@ async fn a_lookup_end_to_end_over_tls() {
         let lower = request.to_ascii_lowercase();
         assert!(!lower.contains("cookie") && !lower.contains("authorization"));
     }
+}
+
+#[tokio::test]
+async fn early_metadata_finishes_without_waiting_past_the_initial_budget() {
+    const REQUEST: &[u8] = b"GET / HTTP/1.1\r\n\r\n";
+    let (client, mut server) = tokio::io::duplex(1024);
+    let mut html = b"<html><head><title>Early title</title><script>".to_vec();
+    html.resize(crate::http::INITIAL_HEAD_BYTES, b' ');
+    let serve = async {
+        let mut received = [0; REQUEST.len()];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, REQUEST);
+        server
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 1000000\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        server.write_all(&html).await.unwrap();
+        // Keep the body open. The client must finish without any more bytes.
+        assert_eq!(server.read(&mut [0; 1]).await.unwrap(), 0);
+    };
+    let read = net::read_response(
+        client,
+        REQUEST,
+        Resource::Page,
+        "https://page.example.org/".parse().unwrap(),
+    );
+    let (_, result) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(serve, read) })
+            .await
+            .unwrap();
+    let response = result.unwrap();
+    assert_eq!(response.body.len(), crate::http::INITIAL_HEAD_BYTES);
+    assert_eq!(response.page.unwrap().title.as_deref(), Some("Early title"));
+}
+
+#[tokio::test]
+async fn a_lookup_reads_late_metadata_on_the_same_connection() {
+    let mut html = b"<html><head><script>".to_vec();
+    html.resize(774 * 1024, b' ');
+    html.extend_from_slice(
+        b"</script><meta property='og:title' content='Late title'><meta property='og:description' content='Late description'></head>",
+    );
+    html.resize(2 * 1024 * 1024, b' ');
+    let (port, requests) = https_server(HashMap::from([("/", ok("text/html", &html))])).await;
+    let (network, _) = network(port);
+    let preview = preview::lookup(
+        &network,
+        "https://page.example.org/",
+        Instant::now() + preview::DEADLINE,
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview.title.as_deref(), Some("Late title"));
+    assert_eq!(preview.description.as_deref(), Some("Late description"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -14,7 +14,6 @@
 //! `src/incoming-share/fixtures/preview-boundary.json`.
 
 use crate::error::{Failure, Result};
-use crate::http::HEAD_BYTES;
 use html5ever::tendril::TendrilSink;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
@@ -23,6 +22,8 @@ pub(crate) const TITLE_LIMIT: usize = 300;
 pub(crate) const DESCRIPTION_LIMIT: usize = 1000;
 pub(crate) const SITE_NAME_LIMIT: usize = 120;
 const IMAGE_URL_LIMIT: usize = 4096;
+/// The most HTML the previewer will read and parse.
+pub(crate) const MAX_HEAD_BYTES: usize = 1024 * 1024;
 /// Only the bytes before the 513th `<` are parsed, which bounds the tree.
 const MAX_TAGS: usize = 512;
 
@@ -32,6 +33,19 @@ pub(crate) struct Page {
     pub(crate) description: Option<String>,
     pub(crate) site_name: Option<String>,
     pub(crate) image: Option<String>,
+}
+
+impl Page {
+    pub(crate) fn has_metadata(&self) -> bool {
+        self.title.is_some()
+            || self.description.is_some()
+            || self.site_name.is_some()
+            || self.image.is_some()
+    }
+}
+
+pub(crate) fn is_html(content_type: &str) -> bool {
+    content_type.starts_with("text/html") || content_type.starts_with("application/xhtml+xml")
 }
 
 /// `TextShare.previewField`: a value longer than `limit` UTF-16 code units,
@@ -87,7 +101,12 @@ fn windows_1252(data: &[u8]) -> Option<String> {
 }
 
 pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
-    if data.len() > HEAD_BYTES {
+    parse_prefix(data, content_type).map(|(page, _)| page)
+}
+
+/// Returns the metadata and whether the tag budget prevents parsing more bytes.
+pub(crate) fn parse_prefix(data: &[u8], content_type: &str) -> Result<(Page, bool)> {
+    if data.len() > MAX_HEAD_BYTES {
         return Err(Failure::Quota);
     }
     // Bound the tree, and its recursive destruction, before building it: a
@@ -95,8 +114,8 @@ pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
     // the bound. Preview tags come early in a head (on 36 measured pages, all
     // of them within the first 160 `<`), so a heavy page keeps its metadata
     // rather than losing its card. A tag the cut ends is dropped whole.
-    let data = &data[..tag_bound(data)];
-    let html = decode(data, content_type);
+    let end = tag_bound(data);
+    let html = decode(&data[..end], content_type);
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(html);
     let mut elements = Vec::new();
     collect_elements(&dom.document, &mut elements);
@@ -116,7 +135,7 @@ pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
         TITLE_LIMIT,
     )
     .or_else(|| preview_field(Some(&document_title(&elements)), TITLE_LIMIT));
-    Ok(Page {
+    let page = Page {
         title,
         description: content(
             &[
@@ -136,7 +155,8 @@ pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
             ],
             IMAGE_URL_LIMIT,
         ),
-    })
+    };
+    Ok((page, end < data.len()))
 }
 
 /// Where the bytes allowed to reach the parser end: just before the

@@ -1,16 +1,18 @@
 //! A bounded HTTP/1.1 response collector, ported from `PreviewHTTPParser.swift`.
 //!
 //! `httparse` reads each header block; this handles body framing. A page is
-//! collected only until its `<head>` ends, or `<body` starts, or 256 KiB. An
+//! collected until its head ends or it reaches 256 KiB with metadata.
+//! An empty HTML preview can continue up to 1 MiB on the same response. An
 //! image needs its complete body, at most 2 MiB. Compressed responses, folded
 //! headers, conflicting framing and more than five interim responses are all
 //! refused.
 
 use crate::error::{Failure, Result};
+use crate::page::{self, Page, MAX_HEAD_BYTES};
 use std::collections::HashMap;
 
-/// A page is read until its head ends, or this many bytes.
-pub(crate) const HEAD_BYTES: usize = 256 * 1024;
+/// Check for metadata at this offset before reading any farther.
+pub(crate) const INITIAL_HEAD_BYTES: usize = 256 * 1024;
 /// The response head, including every interim response.
 pub(crate) const HEADER_BYTES: usize = 32 * 1024;
 /// An image, as the server's upload contract allows (`ShareLimits.thumbnailBytes`).
@@ -45,6 +47,7 @@ pub(crate) struct Parser {
     status: u16,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+    page: Option<Page>,
     pending: Vec<u8>,
     length: Option<usize>,
     chunked: bool,
@@ -89,6 +92,7 @@ impl Parser {
             status: 0,
             headers: HashMap::new(),
             body: Vec::new(),
+            page: None,
             pending: Vec::new(),
             length: None,
             chunked: false,
@@ -104,24 +108,23 @@ impl Parser {
         self.status
     }
 
-    pub(crate) fn into_parts(self) -> (u16, HashMap<String, String>, Vec<u8>) {
-        (self.status, self.headers, self.body)
+    pub(crate) fn into_parts(self) -> (u16, HashMap<String, String>, Vec<u8>, Option<Page>) {
+        (self.status, self.headers, self.body, self.page)
     }
 
     /// A page that is really an image is held to the image's rules.
     fn prefix(&self) -> bool {
         self.kind == Kind::Page
-            && !self
-                .headers
-                .get("content-type")
-                .map(|value| value.to_ascii_lowercase())
-                .unwrap_or_default()
-                .starts_with("image/")
+            && !self.headers.get("content-type").is_some_and(|value| {
+                value
+                    .get(..6)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+            })
     }
 
     fn limit(&self) -> usize {
         if self.prefix() {
-            HEAD_BYTES
+            MAX_HEAD_BYTES
         } else {
             THUMBNAIL_BYTES
         }
@@ -362,21 +365,53 @@ impl Parser {
     }
 
     fn collect(&mut self, data: &[u8]) -> Result<usize> {
-        let prefix = self.prefix();
         let wanted = data.len().min(self.limit() - self.body.len());
-        if !prefix && wanted != data.len() {
-            return Err(Failure::Quota);
+        if !self.prefix() {
+            if wanted != data.len() {
+                return Err(Failure::Quota);
+            }
+            self.body.extend_from_slice(data);
+            return Ok(wanted);
         }
-        self.body.extend_from_slice(&data[..wanted]);
-        if prefix {
-            // Only the new tail, so a large head is not rescanned per read.
-            let start = self.body.len().saturating_sub(wanted + 8);
-            let tail = &self.body[start..];
-            if ends_head(tail) || self.body.len() == HEAD_BYTES {
-                self.finished = true;
+
+        // Check the initial budget at exactly the same offset regardless of
+        // how a socket read or HTTP chunk straddles it.
+        let first = wanted.min(INITIAL_HEAD_BYTES.saturating_sub(self.body.len()));
+        let (initial, rest) = data[..wanted].split_at(first);
+        if !initial.is_empty() {
+            self.finished = self.append_head(initial)
+                || (self.body.len() == INITIAL_HEAD_BYTES && self.stop_at_initial_budget()?);
+            if self.finished || rest.is_empty() {
+                return Ok(first);
             }
         }
+        self.finished = self.append_head(rest) || self.body.len() == MAX_HEAD_BYTES;
         Ok(wanted)
+    }
+
+    fn append_head(&mut self, data: &[u8]) -> bool {
+        // Only scan new bytes and the overlap for a split marker.
+        let start = self.body.len().saturating_sub(6);
+        self.body.extend_from_slice(data);
+        ends_head(&self.body[start..])
+    }
+
+    fn stop_at_initial_budget(&mut self) -> Result<bool> {
+        let content_type = self
+            .headers
+            .get("content-type")
+            .map(|value| value.to_ascii_lowercase());
+        let content_type = content_type.as_deref().unwrap_or("text/html");
+        if !page::is_html(content_type) {
+            return Ok(true);
+        }
+        let (page, tag_limit_reached) = page::parse_prefix(&self.body, content_type)?;
+        if page.has_metadata() || tag_limit_reached {
+            self.page = Some(page);
+            return Ok(true);
+        }
+        crate::log::event("device_preview_html_extended");
+        Ok(false)
     }
 }
 
@@ -467,12 +502,30 @@ mod tests {
     }
 
     #[test]
+    fn a_page_without_metadata_stops_at_the_hard_limit_inside_a_chunk() {
+        let mut parser = Parser::new(Kind::Page);
+        assert!(!parser
+            .append(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n200000\r\n",
+                false
+            )
+            .unwrap());
+        let blank = [b' '; READ_BYTES];
+        for _ in 1..MAX_HEAD_BYTES / READ_BYTES {
+            assert!(!parser.append(&blank, false).unwrap());
+        }
+        assert!(parser.append(&blank, false).unwrap());
+        let (_, _, body, _) = parser.into_parts();
+        assert_eq!(body.len(), MAX_HEAD_BYTES);
+    }
+
+    #[test]
     fn redirects_finish_at_their_head_and_other_statuses_fail() {
         let mut parser = Parser::new(Kind::Page);
         assert!(parser
             .append(b"HTTP/1.1 302 Found\r\nLocation: /next\r\n\r\n", false)
             .unwrap());
-        let (status, headers, _) = parser.into_parts();
+        let (status, headers, _, _) = parser.into_parts();
         assert_eq!(status, 302);
         assert_eq!(headers["location"], "/next");
         let mut parser = Parser::new(Kind::Page);
