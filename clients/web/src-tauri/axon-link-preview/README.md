@@ -28,10 +28,10 @@ The network and metadata rules are shared with the Share Extension's Swift reade
 | Time        | `preview.rs`: one 25-second deadline for the page, its redirects and its image; cancellable throughout                                                                              |
 | Concurrency | `lib.rs`: two lookups at once across the app, 16 registered; one 25 s deadline from before the wait for a slot; decodes and Windows DNS calls have small bounded pools of their own |
 
-Tauri reads HTML until `</head` or `<body` followed by a tag-name boundary, the end of the response, or 256 KiB.
-At 256 KiB it checks for metadata and reuses the result if it stops there.
-If that check yields no metadata and the tag budget allows more parsing, only then does it read farther on the same connection, up to 1 MiB.
-The Swift reader caps its HTML head at 256 KiB.
+Both readers stop at `</head` or `<body` followed by a tag-name boundary, the end of the response, or an initial 256 KiB checkpoint.
+At the checkpoint a bounded probe checks for a usable description or image reference.
+A title alone or an unfinished title can extend the read on the same connection, for at most four more seconds and up to 1 MiB.
+The reader stops the continuation if it exceeds the tag budget and parses the collected head once.
 
 `src/incoming-share/fixtures/preview-boundary.json` holds the cases both readers
 must agree on: URLs, address scope, operator NAT64 mappings, RFC 6052 vectors,

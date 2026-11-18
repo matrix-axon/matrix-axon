@@ -45,6 +45,28 @@ final class BoundaryFixtureTests: XCTestCase {
       let text: String
       let ends: Bool
     }
+    struct HeadReadLimits: Decodable {
+      let initial: Int
+      let maximum: Int
+      let tags: Int
+    }
+    struct HeadRead: Decodable {
+      let name: String
+      let contentType: String?
+      let start: String
+      let padTo: Int
+      let tail: String
+      let `repeat`: String?
+      let repetitions: Int?
+      let repeatAfterPadding: Bool?
+      let trailingSpaces: Int?
+      let stop: String
+      let title: String?
+      let description: String?
+      let image: String?
+    }
+    let headReadLimits: HeadReadLimits
+    let headReads: [HeadRead]
     let rejectedBeforeDNS: [String]
     let headEnds: [HeadEnd]
     let addresses: Addresses
@@ -160,6 +182,78 @@ final class BoundaryFixtureTests: XCTestCase {
     XCTAssertFalse(
       try parser.append(Data("HTTP/1.1 200 OK\r\n\r\n<title>T</title><bodyguard><body".utf8)))
     XCTAssertTrue(try parser.append(Data(">".utf8)))
+  }
+
+  func testHeadReads() throws {
+    let url = try XCTUnwrap(URL(string: "https://page.example.org/"))
+    let fixture = try fixture()
+    XCTAssertEqual(RestrictedPreview.initialHeadBytes, fixture.headReadLimits.initial)
+    XCTAssertEqual(RestrictedPreview.maxHeadBytes, fixture.headReadLimits.maximum)
+    XCTAssertEqual(RestrictedPreview.maxTags, fixture.headReadLimits.tags)
+    for entry in fixture.headReads {
+      let repeated = String(repeating: entry.repeat ?? "", count: entry.repetitions ?? 0)
+      var body = Data(entry.start.utf8)
+      if entry.repeatAfterPadding != true { body.append(contentsOf: repeated.utf8) }
+      body.append(Data(repeating: 32, count: entry.padTo - body.count))
+      body.append(contentsOf: entry.tail.utf8)
+      if entry.repeatAfterPadding == true { body.append(contentsOf: repeated.utf8) }
+      body.append(Data(repeating: 32, count: entry.trailingSpaces ?? 0))
+      let type = entry.contentType ?? "text/html"
+      let head = "HTTP/1.1 200 OK\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\n\r\n"
+      var wire = Data(head.utf8)
+      wire.append(body)
+      let now = DispatchTime.now()
+      var read = PreviewNetwork.ReadState(kind: .page)
+      var done = false
+      for start in stride(from: 0, to: wire.count, by: 16 * 1024) {
+        let end = min(start + 16 * 1024, wire.count)
+        done = try read.append(
+          wire[start..<end], eof: end == wire.count, now: now, deadline: now + 25)
+        if done { break }
+      }
+      XCTAssertTrue(done, entry.name)
+      let response = read.response(url: url)
+      let retained = response.body.count
+      switch entry.stop {
+      case "full": XCTAssertEqual(retained, body.count, entry.name)
+      case "initial": XCTAssertEqual(retained, RestrictedPreview.initialHeadBytes, entry.name)
+      case "hard": XCTAssertEqual(retained, RestrictedPreview.maxHeadBytes, entry.name)
+      case "headers": XCTAssertEqual(retained, 0, entry.name)
+      case "tagBudget":
+        XCTAssertTrue((entry.padTo..<(entry.padTo + 32 * 1024)).contains(retained), entry.name)
+      default: XCTFail(entry.name)
+      }
+      if case .html(let contentType) = response.media {
+        let page = try RestrictedPreview.parse(
+          response.body, contentType: contentType, cutoff: response.cutoff)
+        XCTAssertEqual(page.title, entry.title, entry.name)
+        XCTAssertEqual(page.description, entry.description, entry.name)
+        XCTAssertEqual(page.image, entry.image, entry.name)
+      } else {
+        XCTAssertEqual(response.media, .other, entry.name)
+        XCTAssertEqual(entry.stop, "headers", entry.name)
+      }
+    }
+  }
+
+  func testOptionalReadReturnsPrefixBeforeSharedDeadline() throws {
+    let now = DispatchTime.now()
+    let deadline = now + 25
+    let checkpoint = now + 9
+    let url = try XCTUnwrap(URL(string: "https://page.example.org/"))
+    var read = PreviewNetwork.ReadState(kind: .page)
+    let headers = Data("HTTP/1.1 200 OK\r\nContent-Length: 1100000\r\n\r\n".utf8)
+    XCTAssertFalse(try read.append(headers, eof: false, now: now, deadline: deadline))
+    let block = Data(repeating: 32, count: 16 * 1024)
+    for _ in 0..<16 {
+      XCTAssertFalse(try read.append(block, eof: false, now: checkpoint, deadline: deadline))
+    }
+    XCTAssertEqual(read.extensionDeadline, checkpoint + 4)
+    XCTAssertTrue(try read.append(Data(), eof: false, now: checkpoint + 4, deadline: deadline))
+    let response = read.response(url: url)
+    XCTAssertTrue(response.cutoff)
+    XCTAssertEqual(response.body.count, RestrictedPreview.initialHeadBytes)
+    XCTAssertNil(try RestrictedPreview.parse(response.body, cutoff: true).title)
   }
 
   func testMetadata() throws {

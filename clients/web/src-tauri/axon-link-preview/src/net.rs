@@ -14,7 +14,7 @@ use crate::address::Address;
 use crate::dns::{self, Dns};
 use crate::error::{Failure, Result};
 use crate::http::{self, Kind, Parser};
-use crate::page::Page;
+use crate::page::{self, INITIAL_HEAD_BYTES, MAX_HEAD_BYTES, MAX_TAGS};
 use crate::url_check::{self, Checked};
 use crate::Cancel;
 use std::collections::HashMap;
@@ -46,17 +46,9 @@ pub(crate) struct Response {
     pub(crate) status: u16,
     pub(crate) headers: HashMap<String, String>,
     pub(crate) body: Vec<u8>,
-    /// Metadata already parsed at the initial HTML budget.
-    pub(crate) page: Option<Page>,
+    pub(crate) media: http::Media,
+    pub(crate) cutoff: bool,
     pub(crate) url: Url,
-}
-
-impl Response {
-    pub(crate) fn content_type(&self) -> Option<String> {
-        self.headers
-            .get("content-type")
-            .map(|value| value.to_ascii_lowercase())
-    }
 }
 
 /// The two steps of a hop, separable so tests can stand in for either, as the
@@ -296,7 +288,14 @@ impl<D: Dns, C: Dial> Hop for Network<D, C> {
                 url_check::target(&checked.url),
                 url_check::authority(&checked.url, &checked.host),
             );
-            read_response(stream, request.as_bytes(), kind, checked.url.clone()).await
+            read_response(
+                stream,
+                request.as_bytes(),
+                kind,
+                checked.url.clone(),
+                deadline,
+            )
+            .await
         };
         match tokio::time::timeout_at(deadline, work).await {
             Ok(result) => result,
@@ -305,39 +304,80 @@ impl<D: Dns, C: Dial> Hop for Network<D, C> {
     }
 }
 
-/// Send `request` and collect the response with [`Parser`].
+/// Spend at most four more seconds on a larger head. Reserve time to finish
+/// parsing and start its image while the shared lookup deadline is still live.
+const HEAD_EXTENSION: Duration = Duration::from_secs(4);
+const HEAD_FINISH_RESERVE: Duration = Duration::from_secs(1);
+
+/// Send `request`, then decide whether to resume the collector at its HTML limit.
 pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     request: &[u8],
     kind: Kind,
     url: Url,
+    deadline: Instant,
 ) -> Result<Response> {
     stream
         .write_all(request)
         .await
         .map_err(|_| Failure::Unavailable)?;
     stream.flush().await.map_err(|_| Failure::Unavailable)?;
-    let mut parser = Parser::new(kind);
+    let mut parser = Parser::new(kind, INITIAL_HEAD_BYTES);
     let mut buffer = vec![0u8; http::READ_BYTES];
-    loop {
-        let read = match stream.read(&mut buffer).await {
+    let mut extension_timer = None;
+    let mut tags = 0;
+    let cutoff = loop {
+        let read = if let Some(timer) = extension_timer.as_mut() {
+            tokio::select! {
+                biased;
+                () = timer => {
+                    crate::log::event("device_preview_html_extension_timeout");
+                    break true;
+                }
+                result = stream.read(&mut buffer) => result,
+            }
+        } else {
+            stream.read(&mut buffer).await
+        };
+        let read = match read {
             Ok(read) => read,
-            // A server that closes without `close_notify` ends the body the
-            // way a plain close does. A truncated image then fails to decode,
-            // and a truncated head only loses metadata.
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => 0,
             Err(_) => return Err(Failure::Unavailable),
         };
         let eof = read == 0;
-        if parser.append(&buffer[..read], eof)? {
-            let (status, headers, body, page) = parser.into_parts();
-            return Ok(Response {
-                status,
-                headers,
-                body,
-                page,
-                url,
-            });
+        let previous = parser.body().len();
+        let mut done = parser.append(&buffer[..read], eof)?;
+        if parser.at_prefix_limit() && extension_timer.is_none() {
+            let http::Media::Html(content_type) = parser.media() else {
+                unreachable!("only HTML has a prefix limit");
+            };
+            let now = Instant::now();
+            let until = (now + HEAD_EXTENSION).min(deadline - HEAD_FINISH_RESERVE);
+            tags = parser.body().iter().filter(|&&byte| byte == b'<').count();
+            if until <= now
+                || tags > MAX_TAGS
+                || page::has_rich_metadata(parser.body(), content_type)?
+            {
+                break true;
+            }
+            crate::log::event("device_preview_html_extended");
+            extension_timer = Some(Box::pin(tokio::time::sleep_until(until)));
+            let previous = parser.body().len();
+            parser.extend_prefix(MAX_HEAD_BYTES);
+            // A socket read can already have bytes past the initial limit.
+            done = parser.append(&[], eof)?;
+            tags += parser.body()[previous..]
+                .iter()
+                .filter(|&&byte| byte == b'<')
+                .count();
+        } else if extension_timer.is_some() {
+            tags += parser.body()[previous..]
+                .iter()
+                .filter(|&&byte| byte == b'<')
+                .count();
+        }
+        if done || tags > MAX_TAGS {
+            break parser.at_prefix_limit() || tags > MAX_TAGS;
         }
         if eof {
             crate::log::event(&format!(
@@ -346,5 +386,14 @@ pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
             ));
             return Err(Failure::InvalidResponse);
         }
-    }
+    };
+    let (status, headers, body, media) = parser.into_parts();
+    Ok(Response {
+        status,
+        headers,
+        body,
+        media,
+        cutoff,
+        url,
+    })
 }

@@ -22,10 +22,11 @@ pub(crate) const TITLE_LIMIT: usize = 300;
 pub(crate) const DESCRIPTION_LIMIT: usize = 1000;
 pub(crate) const SITE_NAME_LIMIT: usize = 120;
 const IMAGE_URL_LIMIT: usize = 4096;
-/// The most HTML the previewer will read and parse.
+/// Initial HTML body budget, and the hard cap for the optional continuation.
+pub(crate) const INITIAL_HEAD_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_HEAD_BYTES: usize = 1024 * 1024;
 /// Only the bytes before the 513th `<` are parsed, which bounds the tree.
-const MAX_TAGS: usize = 512;
+pub(crate) const MAX_TAGS: usize = 512;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Page {
@@ -33,19 +34,6 @@ pub(crate) struct Page {
     pub(crate) description: Option<String>,
     pub(crate) site_name: Option<String>,
     pub(crate) image: Option<String>,
-}
-
-impl Page {
-    pub(crate) fn has_metadata(&self) -> bool {
-        self.title.is_some()
-            || self.description.is_some()
-            || self.site_name.is_some()
-            || self.image.is_some()
-    }
-}
-
-pub(crate) fn is_html(content_type: &str) -> bool {
-    content_type.starts_with("text/html") || content_type.starts_with("application/xhtml+xml")
 }
 
 /// `TextShare.previewField`: a value longer than `limit` UTF-16 code units,
@@ -100,12 +88,12 @@ fn windows_1252(data: &[u8]) -> Option<String> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
-    parse_prefix(data, content_type).map(|(page, _)| page)
+    parse_body(data, content_type, false)
 }
 
-/// Returns the metadata and whether the tag budget prevents parsing more bytes.
-pub(crate) fn parse_prefix(data: &[u8], content_type: &str) -> Result<(Page, bool)> {
+pub(crate) fn parse_body(data: &[u8], content_type: &str, cutoff: bool) -> Result<Page> {
     if data.len() > MAX_HEAD_BYTES {
         return Err(Failure::Quota);
     }
@@ -134,7 +122,11 @@ pub(crate) fn parse_prefix(data: &[u8], content_type: &str) -> Result<(Page, boo
         &[("property", "og:title"), ("name", "twitter:title")],
         TITLE_LIMIT,
     )
-    .or_else(|| preview_field(Some(&document_title(&elements)), TITLE_LIMIT));
+    .or_else(|| {
+        let title = preview_field(Some(&document_title(&elements)), TITLE_LIMIT)?;
+        (!(cutoff || end < data.len()) || head_probe(&data[..end], false).complete_title)
+            .then_some(title)
+    });
     let page = Page {
         title,
         description: content(
@@ -156,7 +148,7 @@ pub(crate) fn parse_prefix(data: &[u8], content_type: &str) -> Result<(Page, boo
             IMAGE_URL_LIMIT,
         ),
     };
-    Ok((page, end < data.len()))
+    Ok(page)
 }
 
 /// Where the bytes allowed to reach the parser end: just before the
@@ -167,6 +159,124 @@ fn tag_bound(data: &[u8]) -> usize {
         .filter(|(_, &byte)| byte == b'<')
         .nth(MAX_TAGS)
         .map_or(data.len(), |(index, _)| index)
+}
+
+/// At the checkpoint use a small fragment of complete meta tags. The full
+/// document goes through the tree builder only once, after collecting it.
+pub(crate) fn has_rich_metadata(data: &[u8], content_type: &str) -> Result<bool> {
+    let probe = head_probe(data, true);
+    if probe.open_title || probe.meta.is_empty() {
+        return Ok(false);
+    }
+    let page = parse_body(&probe.meta, content_type, false)?;
+    Ok(page.description.is_some() || page.image.is_some())
+}
+
+#[derive(Default)]
+struct HeadProbe {
+    meta: Vec<u8>,
+    complete_title: bool,
+    open_title: bool,
+}
+
+/// A conservative head scan. The HTML parser still owns field selection and
+/// attribute decoding. Skip raw text and comments so they cannot supply hints.
+fn head_probe(mut input: &[u8], collect_meta: bool) -> HeadProbe {
+    const PROBE_BYTES: usize = 16 * 1024;
+    let mut probe = HeadProbe::default();
+    let mut raw: Option<&[u8]> = None;
+    while let Some(start) = input.iter().position(|&byte| byte == b'<') {
+        input = &input[start..];
+        if let Some(name) = raw {
+            // Escaped script states cannot be inferred by this scan.
+            if name == b"script" && input.starts_with(b"<!--") {
+                break;
+            }
+            let end = 2 + name.len();
+            if !input.starts_with(b"</")
+                || !input
+                    .get(2..end)
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case(name))
+                || !input.get(end).is_some_and(|&byte| tag_boundary(byte))
+            {
+                input = &input[1..];
+                continue;
+            }
+            let Some(end) = tag_end(input) else { break };
+            if name == b"title" {
+                probe.complete_title = true;
+                probe.open_title = false;
+            }
+            raw = None;
+            input = &input[end..];
+            continue;
+        }
+        if input.starts_with(b"<!--") {
+            let Some(end) = input[4..].windows(3).position(|bytes| bytes == b"-->") else {
+                break;
+            };
+            input = &input[end + 7..];
+            continue;
+        }
+        let Some(end) = tag_end(input) else { break };
+        let name_end = input[1..end]
+            .iter()
+            .position(|&byte| tag_boundary(byte))
+            .unwrap()
+            + 1;
+        let name = &input[1..name_end];
+        if name.eq_ignore_ascii_case(b"meta") {
+            if collect_meta {
+                if probe.meta.len() + end > PROBE_BYTES {
+                    probe.meta.clear();
+                    break;
+                }
+                probe.meta.extend_from_slice(&input[..end]);
+            }
+        } else if name.eq_ignore_ascii_case(b"title") {
+            raw = Some(b"title");
+            probe.open_title = true;
+        } else if let Some(name) = [b"script".as_slice(), b"style", b"noframes", b"noscript"]
+            .into_iter()
+            .find(|expected| expected.eq_ignore_ascii_case(name))
+        {
+            raw = Some(name);
+        } else if ![
+            b"html".as_slice(),
+            b"head",
+            b"link",
+            b"base",
+            b"basefont",
+            b"bgsound",
+            b"!doctype",
+        ]
+        .iter()
+        .any(|expected| expected.eq_ignore_ascii_case(name))
+        {
+            // The scanner cannot interpret template, foreign or body elements.
+            break;
+        }
+        input = &input[end..];
+    }
+    probe
+}
+
+fn tag_boundary(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'/' | b'>')
+}
+
+/// Position after an unquoted closing bracket.
+fn tag_end(tag: &[u8]) -> Option<usize> {
+    let mut quote = None;
+    for (index, &byte) in tag.iter().enumerate().skip(1) {
+        match (quote, byte) {
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (Some(open), close) if open == close => quote = None,
+            (None, b'>') => return Some(index + 1),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Every element, in document order. Iterative, so a deep tree cannot

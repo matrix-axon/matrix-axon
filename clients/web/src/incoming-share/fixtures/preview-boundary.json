@@ -187,6 +187,81 @@
       "failure": "previewUnavailable"
     }
   ],
+  "headReadLimits": { "initial": 262144, "maximum": 1048576, "tags": 512 },
+  "headReads": [
+    {
+      "name": "late rich fields supplement an early document title",
+      "start": "<head><title>Early title</title><script>",
+      "padTo": 792576,
+      "tail": "</script><meta property='og:description' content='Late description'><meta property='og:image' content='/late.png'></head>",
+      "stop": "full",
+      "title": "Early title",
+      "description": "Late description",
+      "image": "/late.png"
+    },
+    {
+      "name": "a title crossing the checkpoint is collected whole",
+      "start": "<head><meta name='description' content='Early details'><title>Across",
+      "padTo": 262144,
+      "tail": "the boundary</title></head>",
+      "stop": "full",
+      "title": "Across the boundary",
+      "description": "Early details"
+    },
+    {
+      "name": "rich metadata stops the initial read",
+      "start": "<head><meta NAME='description' content='Early details'><title>Early title</title><script>",
+      "padTo": 310000,
+      "tail": "</script></head>",
+      "stop": "initial",
+      "title": "Early title",
+      "description": "Early details"
+    },
+    {
+      "name": "script and comment text do not count as rich metadata",
+      "start": "<head><!-- <meta name='description' content='Comment'> --><title>Early title</title><script>let html = \"<meta name='description' content='Script'>\";",
+      "padTo": 310000,
+      "tail": "</script><meta name='description' content='Real details'></head>",
+      "stop": "full",
+      "title": "Early title",
+      "description": "Real details"
+    },
+    {
+      "name": "tag budget exhausted before the checkpoint",
+      "start": "<head>",
+      "repeat": "<!--x-->",
+      "repetitions": 513,
+      "padTo": 310000,
+      "tail": "<title>Too many tags</title></head>",
+      "stop": "initial"
+    },
+    {
+      "name": "tag budget exhausted during the extension",
+      "start": "<head><script>",
+      "padTo": 300000,
+      "tail": "</script>",
+      "repeat": "<!--x-->",
+      "repetitions": 513,
+      "repeatAfterPadding": true,
+      "trailingSpaces": 750000,
+      "stop": "tagBudget"
+    },
+    {
+      "name": "non HTML stops at the headers",
+      "contentType": "APPLICATION/JSON",
+      "start": "",
+      "padTo": 310000,
+      "tail": "",
+      "stop": "headers"
+    },
+    {
+      "name": "hard cap discards an unfinished document title",
+      "start": "<head><title>Partial",
+      "padTo": 1100000,
+      "tail": " title</title></head>",
+      "stop": "hard"
+    }
+  ],
   "metadata": [
     {
       "name": "every field, entities decoded, subresources ignored",

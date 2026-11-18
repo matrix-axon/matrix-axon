@@ -3,7 +3,7 @@
 //! `DevicePreview.include` that do not touch the share store.
 
 use crate::error::{Failure, Kind, LookupError};
-use crate::http::{Kind as Resource, THUMBNAIL_BYTES};
+use crate::http::{Kind as Resource, Media, THUMBNAIL_BYTES};
 use crate::image::{self, Thumbnail};
 use crate::net::{self, Hop};
 use crate::page::{self, preview_field, DESCRIPTION_LIMIT, SITE_NAME_LIMIT, TITLE_LIMIT};
@@ -147,25 +147,19 @@ pub(crate) async fn fetch<H: Hop>(
     if cancel.is_cancelled() {
         return Err(Failure::Cancelled);
     }
-    let content_type = response.content_type();
-    if content_type
-        .as_deref()
-        .is_some_and(|kind| kind.starts_with("image/"))
-    {
-        return Ok(Fetched {
-            url: response.url.to_string(),
-            title: preview_field(last_path_component(&response.url).as_deref(), TITLE_LIMIT),
-            image: Some(response.body),
-            ..Fetched::default()
-        });
-    }
-    let content_type = content_type.unwrap_or_else(|| "text/html".to_owned());
-    if !page::is_html(&content_type) {
-        return Err(Failure::PreviewUnavailable);
-    }
-    let page = match response.page {
-        Some(page) => page,
-        None => page::parse(&response.body, &content_type)?,
+    let page = match response.media {
+        Media::Image => {
+            return Ok(Fetched {
+                url: response.url.to_string(),
+                title: preview_field(last_path_component(&response.url).as_deref(), TITLE_LIMIT),
+                image: Some(response.body),
+                ..Fetched::default()
+            });
+        }
+        Media::Html(content_type) => {
+            page::parse_body(&response.body, &content_type, response.cutoff)?
+        }
+        Media::Other => return Err(Failure::PreviewUnavailable),
     };
     let mut fetched = Fetched {
         url: response.url.to_string(),
@@ -205,7 +199,7 @@ pub(crate) async fn fetch<H: Hop>(
         && fetched.site_name.is_none()
         && fetched.image.is_none()
     {
-        return Err(Failure::PreviewUnavailable);
+        return Err(Failure::NoMetadata);
     }
     crate::log::event(&format!(
         "device_preview_fetched retained_bytes={}",

@@ -12,8 +12,8 @@
 //! - **Connection:** only to a validated address, TLS 1.2 or later verified
 //!   against the original name, no proxy ([`net`]).
 //! - **Responses:** status 200 only; 32 KiB of headers, a page until its head
-//!   ends or 256 KiB with metadata, up to 1 MiB otherwise, and an image up to
-//!   2 MiB ([`http`]).
+//!   ends or the 256 KiB checkpoint. The optional continuation adds at most
+//!   four seconds and caps the head at 1 MiB. Images cap at 2 MiB ([`http`]).
 //! - **Time and concurrency:** one 25-second deadline per lookup, cancellable
 //!   at any point, and at most two lookups running across the app.
 //!

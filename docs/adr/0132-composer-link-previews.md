@@ -97,9 +97,10 @@ It shares the network and metadata rules of the Swift reader in `incoming-share/
 - **Redirects:** followed by hand, at most six hops, each one validated as a new request.
 - **Responses:** only status 200 is used.
   Headers are capped at 32 KiB and an image at 2 MiB.
-  The Tauri reader stops at the end of the HTML head or checks the first 256 KiB for preview metadata, whichever comes first.
-  If that first check yields no metadata and the tag budget allows more parsing, it keeps reading the same response until the head ends, the response ends, or it reaches 1 MiB.
-  The Share Extension's Swift reader caps its HTML head at 256 KiB.
+  Both readers stop at the end of the HTML head or check the first 256 KiB for a usable description or preview image reference, whichever comes first.
+  A title alone, or a title still open at the checkpoint, allows the same response to continue until the head or response ends, the tag budget is exhausted, or the reader reaches 1 MiB.
+  The continuation has a four-second budget and leaves one second on the shared deadline for parsing and starting an image request.
+  When that optional budget expires, the reader extracts metadata from the bytes already received and drops any unfinished title.
   The head ends at `</head` or `<body` followed by whitespace, `/` or `>`; neither reader tokenizes, so one inside a script still ends it.
   Only the bytes before the 513th `<` are parsed, which bounds the tree.
   A heavier head keeps the metadata that came before the cut instead of losing its card; on 36 measured pages none passed 292 `<`, and every preview tag came within the first 160.
