@@ -88,6 +88,16 @@ pub(crate) fn body_urls(body: &str) -> HashSet<&str> {
         .collect()
 }
 
+/// A link's identity (ADR 0132 section 1): its WHATWG serialization, which is
+/// what the web composer's `new URL(url).href` produces, or the string itself
+/// when it does not parse (such an entry fails the other checks anyway). Two
+/// previews whose links share an identity name one destination twice.
+/// `clients/web/src/fixtures/link-identity.json` pins the two parsers to the
+/// same answers.
+pub(crate) fn link_identity(url: &str) -> String {
+    url::Url::parse(url).map_or_else(|_| url.to_owned(), |u| u.to_string())
+}
+
 pub fn validate_metadata(body: &str, previews: &[PreviewMetadata]) -> Result<(), PreviewError> {
     if previews.len() > MAX_PREVIEWS {
         return Err(PreviewError::Invalid);
@@ -106,7 +116,7 @@ pub fn validate_metadata(body: &str, previews: &[PreviewMetadata]) -> Result<(),
             || !url.username().is_empty()
             || url.password().is_some()
             || !urls.contains(p.matched_url.as_str())
-            || !seen.insert(url.to_string())
+            || !seen.insert(link_identity(&p.matched_url))
             || p.title.as_deref().is_some_and(|s| !bounded(s, 300))
             || p.description.as_deref().is_some_and(|s| !bounded(s, 1000))
             || p.site_name.as_deref().is_some_and(|s| !bounded(s, 120))
@@ -378,5 +388,73 @@ mod tests {
             Err(PreviewError::EventTooLarge)
         );
         assert!(preflight("hello", None, Relation::default(), &[], false).is_ok());
+    }
+
+    /// The web composer's link-identity cases (ADR 0132 delivery item 4). The
+    /// web tests check the same file against `new URL(url).href`, so a parser
+    /// difference fails a test here instead of a send.
+    #[derive(Deserialize)]
+    struct IdentityFixture {
+        cases: Vec<IdentityCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct IdentityCase {
+        name: String,
+        url: String,
+        href: String,
+    }
+
+    fn identity_cases() -> Vec<IdentityCase> {
+        let fixture: IdentityFixture = serde_json::from_str(include_str!(
+            "../../../clients/web/src/fixtures/link-identity.json"
+        ))
+        .expect("link-identity.json parses");
+        assert!(!fixture.cases.is_empty(), "link-identity.json has no cases");
+        fixture.cases
+    }
+
+    #[test]
+    fn link_identity_matches_the_web_fixture() {
+        for case in identity_cases() {
+            assert_eq!(link_identity(&case.url), case.href, "{}", case.name);
+            assert_eq!(link_identity(&case.href), case.href, "{} (href)", case.name);
+        }
+    }
+
+    /// Where a case's link and its serialization differ, a send that previews
+    /// both is rejected as naming one destination twice. Cases the body
+    /// tokenizer cannot match as typed (an upper-case scheme, trailing
+    /// punctuation) are left to the identity test above.
+    #[test]
+    fn previews_of_one_fixture_identity_are_duplicates() {
+        let trimmed = ['.', ',', ';', ':', '!', '?', ')', ']', '\'', '"'];
+        let mut checked = 0;
+        for case in identity_cases() {
+            let typed = |s: &str| {
+                (s.starts_with("https://") || s.starts_with("http://")) && !s.ends_with(trimmed)
+            };
+            if case.url == case.href || !typed(&case.url) || !typed(&case.href) {
+                continue;
+            }
+            let previews = [&case.url, &case.href].map(|url| PreviewMetadata {
+                matched_url: url.clone(),
+                ..Default::default()
+            });
+            let body = format!("{} {}", case.url, case.href);
+            assert!(
+                validate_metadata(&body, &previews[..1]).is_ok(),
+                "{}: one preview",
+                case.name
+            );
+            assert_eq!(
+                validate_metadata(&body, &previews),
+                Err(PreviewError::Invalid),
+                "{}",
+                case.name
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no fixture case exercised the duplicate check");
     }
 }
