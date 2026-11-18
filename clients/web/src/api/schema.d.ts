@@ -3087,10 +3087,26 @@ export interface components {
                 invite: number;
                 /** Format: int64 */
                 kick: number;
+                /**
+                 * @description The caller's own level, resolved with the room version's rules: use
+                 *     this, not `users[me] ?? users_default`, to decide what the caller may
+                 *     do (ADR 0137, issue 324).
+                 */
+                own_level: components["schemas"]["UserPowerLevelDto"];
+                /**
+                 * @description The room's creators, who hold an infinite level from room version 12
+                 *     onwards and are absent from `users` (ADR 0137, issue 324). Sorted;
+                 *     empty for an earlier room version.
+                 */
+                privileged_creators: string[];
                 /** Format: int64 */
                 redact: number;
                 /** Format: int64 */
                 state_default: number;
+                /**
+                 * @description Explicit per-user levels. From room version 12 a room's creators
+                 *     never appear here; see `privileged_creators`.
+                 */
                 users: {
                     [key: string]: number;
                 };
@@ -5028,6 +5044,12 @@ export interface components {
             username: string;
         };
         /**
+         * @description The string `"infinite"`: a room creator's level from room version 12
+         *     onwards.
+         * @enum {string}
+         */
+        InfinitePowerLevel: "infinite";
+        /**
          * @description A pending room invite (`GET /v1/invites`, ADR 0091). Identity is
          *     `(account_id, room_id)` — the same room invited to two accounts appears
          *     twice. Accept is `POST …/rooms/join`; reject is `POST …/rooms/{id}/leave`.
@@ -5587,10 +5609,26 @@ export interface components {
             invite: number;
             /** Format: int64 */
             kick: number;
+            /**
+             * @description The caller's own level, resolved with the room version's rules: use
+             *     this, not `users[me] ?? users_default`, to decide what the caller may
+             *     do (ADR 0137, issue 324).
+             */
+            own_level: components["schemas"]["UserPowerLevelDto"];
+            /**
+             * @description The room's creators, who hold an infinite level from room version 12
+             *     onwards and are absent from `users` (ADR 0137, issue 324). Sorted;
+             *     empty for an earlier room version.
+             */
+            privileged_creators: string[];
             /** Format: int64 */
             redact: number;
             /** Format: int64 */
             state_default: number;
+            /**
+             * @description Explicit per-user levels. From room version 12 a room's creators
+             *     never appear here; see `privileged_creators`.
+             */
             users: {
                 [key: string]: number;
             };
@@ -6736,6 +6774,12 @@ export interface components {
              */
             typing: boolean;
         };
+        /**
+         * @description A user's resolved power level (ADR 0137 decision 4): a JSON number, or
+         *     the string `"infinite"` for a room creator from room version 12 onwards.
+         *     Infinite compares above every number.
+         */
+        UserPowerLevelDto: number | components["schemas"]["InfinitePowerLevel"];
         /**
          * @description Why an event could not be decrypted (ADR 0136 decision 2).
          *

@@ -51,4 +51,27 @@ pub struct ResolvedPowerLevels {
     pub state_default: i64,
     pub users_default: i64,
     pub users: HashMap<String, i64>,
+    /// The room's creators, who hold an infinite level and never appear in
+    /// `users` from room version 12 onwards (ADR 0137 decision 4, issue 324).
+    /// Sorted, and empty for an earlier room version.
+    pub privileged_creators: Vec<String>,
+    /// The caller's own level, resolved with the room version's rules, so a
+    /// client need not know about creators to gate an edit.
+    pub own_level: ResolvedUserLevel,
+}
+
+/// One user's resolved power level: an integer, or infinite for a room
+/// creator from room version 12 onwards (ADR 0137 decision 4). Mirrors
+/// ruma's `UserPowerLevel`, which this crate cannot depend on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedUserLevel {
+    Int(i64),
+    Infinite,
+}
+
+impl Default for ResolvedUserLevel {
+    /// The spec's `users_default` when a room has no power-levels event.
+    fn default() -> Self {
+        ResolvedUserLevel::Int(0)
+    }
 }

@@ -18,6 +18,8 @@ function levels(extra: Partial<PowerLevelsDto> = {}): PowerLevelsDto {
     state_default: 50,
     users_default: 0,
     users: {},
+    privileged_creators: [],
+    own_level: 0,
     ...extra,
   }
 }

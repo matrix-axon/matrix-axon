@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomSummary, PublicRoomsPage,
-    ResolvedPowerLevels, RoomPreset,
+    ResolvedPowerLevels, ResolvedUserLevel, RoomPreset,
 };
 use axon_store::{
     Account, AccountState, DeviceStateRow, ReactionTally, RoomInvite, RoomSummary,
@@ -1594,7 +1594,17 @@ pub struct PowerLevelsDto {
     pub events_default: i64,
     pub state_default: i64,
     pub users_default: i64,
+    /// Explicit per-user levels. From room version 12 a room's creators
+    /// never appear here; see `privileged_creators`.
     pub users: HashMap<String, i64>,
+    /// The room's creators, who hold an infinite level from room version 12
+    /// onwards and are absent from `users` (ADR 0137, issue 324). Sorted;
+    /// empty for an earlier room version.
+    pub privileged_creators: Vec<String>,
+    /// The caller's own level, resolved with the room version's rules: use
+    /// this, not `users[me] ?? users_default`, to decide what the caller may
+    /// do (ADR 0137, issue 324).
+    pub own_level: UserPowerLevelDto,
 }
 
 impl From<ResolvedPowerLevels> for PowerLevelsDto {
@@ -1608,6 +1618,37 @@ impl From<ResolvedPowerLevels> for PowerLevelsDto {
             state_default: resolved.state_default,
             users_default: resolved.users_default,
             users: resolved.users,
+            privileged_creators: resolved.privileged_creators,
+            own_level: resolved.own_level.into(),
+        }
+    }
+}
+
+/// A user's resolved power level (ADR 0137 decision 4): a JSON number, or
+/// the string `"infinite"` for a room creator from room version 12 onwards.
+/// Infinite compares above every number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum UserPowerLevelDto {
+    Level(i64),
+    Infinite(InfinitePowerLevel),
+}
+
+/// The string `"infinite"`: a room creator's level from room version 12
+/// onwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+pub enum InfinitePowerLevel {
+    #[serde(rename = "infinite")]
+    Infinite,
+}
+
+impl From<ResolvedUserLevel> for UserPowerLevelDto {
+    fn from(level: ResolvedUserLevel) -> Self {
+        match level {
+            ResolvedUserLevel::Int(level) => UserPowerLevelDto::Level(level),
+            ResolvedUserLevel::Infinite => {
+                UserPowerLevelDto::Infinite(InfinitePowerLevel::Infinite)
+            }
         }
     }
 }

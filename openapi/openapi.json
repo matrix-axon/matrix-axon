@@ -11548,7 +11548,9 @@
               "events_default",
               "state_default",
               "users_default",
-              "users"
+              "users",
+              "privileged_creators",
+              "own_level"
             ],
             "properties": {
               "ban": {
@@ -11567,6 +11569,17 @@
                 "type": "integer",
                 "format": "int64"
               },
+              "own_level": {
+                "$ref": "#/components/schemas/UserPowerLevelDto",
+                "description": "The caller's own level, resolved with the room version's rules: use\nthis, not `users[me] ?? users_default`, to decide what the caller may\ndo (ADR 0137, issue 324)."
+              },
+              "privileged_creators": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The room's creators, who hold an infinite level from room version 12\nonwards and are absent from `users` (ADR 0137, issue 324). Sorted;\nempty for an earlier room version."
+              },
               "redact": {
                 "type": "integer",
                 "format": "int64"
@@ -11577,6 +11590,7 @@
               },
               "users": {
                 "type": "object",
+                "description": "Explicit per-user levels. From room version 12 a room's creators\nnever appear here; see `privileged_creators`.",
                 "additionalProperties": {
                   "type": "integer",
                   "format": "int64"
@@ -15539,6 +15553,13 @@
           }
         }
       },
+      "InfinitePowerLevel": {
+        "type": "string",
+        "description": "The string `\"infinite\"`: a room creator's level from room version 12\nonwards.",
+        "enum": [
+          "infinite"
+        ]
+      },
       "InviteDto": {
         "type": "object",
         "description": "A pending room invite (`GET /v1/invites`, ADR 0091). Identity is\n`(account_id, room_id)` — the same room invited to two accounts appears\ntwice. Accept is `POST …/rooms/join`; reject is `POST …/rooms/{id}/leave`.",
@@ -16557,7 +16578,9 @@
           "events_default",
           "state_default",
           "users_default",
-          "users"
+          "users",
+          "privileged_creators",
+          "own_level"
         ],
         "properties": {
           "ban": {
@@ -16576,6 +16599,17 @@
             "type": "integer",
             "format": "int64"
           },
+          "own_level": {
+            "$ref": "#/components/schemas/UserPowerLevelDto",
+            "description": "The caller's own level, resolved with the room version's rules: use\nthis, not `users[me] ?? users_default`, to decide what the caller may\ndo (ADR 0137, issue 324)."
+          },
+          "privileged_creators": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The room's creators, who hold an infinite level from room version 12\nonwards and are absent from `users` (ADR 0137, issue 324). Sorted;\nempty for an earlier room version."
+          },
           "redact": {
             "type": "integer",
             "format": "int64"
@@ -16586,6 +16620,7 @@
           },
           "users": {
             "type": "object",
+            "description": "Explicit per-user levels. From room version 12 a room's creators\nnever appear here; see `privileged_creators`.",
             "additionalProperties": {
               "type": "integer",
               "format": "int64"
@@ -18596,6 +18631,18 @@
             "description": "Whether the account is now typing in this room. Setting `false` clears\nan active typing indicator early instead of waiting for it to expire."
           }
         }
+      },
+      "UserPowerLevelDto": {
+        "oneOf": [
+          {
+            "type": "integer",
+            "format": "int64"
+          },
+          {
+            "$ref": "#/components/schemas/InfinitePowerLevel"
+          }
+        ],
+        "description": "A user's resolved power level (ADR 0137 decision 4): a JSON number, or\nthe string `\"infinite\"` for a room creator from room version 12 onwards.\nInfinite compares above every number."
       },
       "UtdReasonDto": {
         "type": "object",

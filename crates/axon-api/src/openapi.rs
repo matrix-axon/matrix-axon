@@ -326,6 +326,8 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::SetRoomTagRequest,
         crate::dto::PowerLevelChangesRequest,
         crate::dto::PowerLevelsDto,
+        crate::dto::UserPowerLevelDto,
+        crate::dto::InfinitePowerLevel,
         crate::dto::SetDisplayNameRequest,
         crate::dto::SetAccountAvatarRequest,
         crate::dto::MatrixProfileDto,

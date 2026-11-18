@@ -88,6 +88,7 @@ In particular, an unknown encryption snapshot does not mean "unencrypted," and a
 For available creation state, the enclosing `sender` provides the create-event sender when a room version omits the `creator` content field.
 A creation predecessor can omit `event_id`; its `room_id` remains available.
 Power levels describe configured state, with legacy decimal strings and floats normalized to integers (floats truncate toward zero); they are not resolved permissions and must not drive authorization decisions.
+For resolved levels, `GET …/rooms/{room_id}/power_levels` returns the caller's `own_level` and the room's `privileged_creators`, applying the room version's rules: from room version 12 a creator's level is `"infinite"` and the creator never appears in `users` ([ADR 0137](adr/0137-complete-member-list-and-resolved-roles.md) decision 4).
 Legacy normalization currently does not consult the room version; [issue 632](https://github.com/matrix-axon/matrix-axon/issues/632) tracks version-aware validation or diagnostics.
 Unknown condition types retain their `type` and optional `room_id`; extension-specific payloads are not exposed by this typed read.
 Redaction evidence is independent of content availability, consistent with [Matrix redaction semantics](https://spec.matrix.org/v1.19/client-server-api/#redactions).
