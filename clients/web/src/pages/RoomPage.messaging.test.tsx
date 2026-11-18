@@ -4283,3 +4283,48 @@ describe('sending media (M-W8.5, ADR 0065)', () => {
     expect(await waitFor(() => getByText('cat.png'))).toBeTruthy()
   })
 })
+
+describe('thread linked-event notice', () => {
+  it('explains a linked reply the thread page does not contain, once, in the panel', async () => {
+    server.use(
+      http.get(EVENTS_PATH, ({ params }) =>
+        HttpResponse.json({
+          data:
+            params.eventId === '$reply'
+              ? event('$reply', 200, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                })
+              : event(params.eventId as string, 100),
+        }),
+      ),
+    )
+    const { findByLabelText, findAllByRole } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root&event=%24reply`,
+    )
+    const panel = await findByLabelText('Thread')
+    const alert = await within(panel).findByRole('alert')
+    expect(alert.textContent).toContain("The linked message isn't available")
+    // The room stream must not also accuse a reply it never renders.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(await findAllByRole('alert')).toHaveLength(1)
+  })
+
+  it('explains a thread link whose root Axon does not have', async () => {
+    server.use(
+      http.get(EVENTS_PATH, ({ params }) =>
+        params.eventId === '$ghost'
+          ? new HttpResponse(null, { status: 404 })
+          : HttpResponse.json({ data: event(params.eventId as string, 0) }),
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$other', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24ghost`,
+    )
+    const panel = await findByLabelText('Thread')
+    expect((await within(panel).findByRole('alert')).textContent).toContain(
+      "This thread's first message isn't available",
+    )
+  })
+})

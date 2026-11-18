@@ -5338,3 +5338,134 @@ describe('RoomPage reconnect gap-fill', () => {
     await waitFor(() => expect(headLoads()).toBe(1))
   })
 })
+
+/**
+ * A followed event link (matrix.to, `matrix:` handler, search hit) that cannot
+ * land on its target must say so instead of silently showing the newest
+ * messages.
+ */
+describe('RoomPage linked-event notice', () => {
+  const LOOKUP_PATH = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`
+
+  function openLink(eventId: string, hideRedacted = false) {
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=${encodeURIComponent(eventId)}`,
+    )
+    const services = testServices()
+    services.settings.hideRedactedEvents.value = hideRedacted
+    return render(routedRoomPage(services))
+  }
+
+  it('explains a link to an event Axon does not have', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () => new HttpResponse(null, { status: 404 })),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: { events: [event('$tail', T0)], next_cursor: null },
+        }),
+      ),
+    )
+    const { findByRole, findByText, queryByRole } = openLink('$gone')
+    await findByText('body of $tail')
+
+    const alert = await findByRole('alert')
+    expect(alert.textContent).toContain("The linked message isn't available")
+    // The dead anchor is still dropped; the notice outlives it.
+    await waitFor(() => expect(window.location.search).not.toContain('event='))
+    expect(queryByRole('alert')).toBeTruthy()
+
+    fireEvent.click(within(alert).getByRole('button', { name: 'Dismiss' }))
+    expect(queryByRole('alert')).toBeNull()
+  })
+
+  it('does not accuse the event when the lookup fails for another reason', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () => new HttpResponse(null, { status: 503 })),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: { events: [event('$tail', T0)], next_cursor: null },
+        }),
+      ),
+    )
+    const { findByText, queryByText } = openLink('$maybe')
+    await findByText('body of $tail')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(queryByText(/linked message isn't available/)).toBeNull()
+    expect(window.location.search).toContain('event=%24maybe')
+  })
+
+  it('does not show a notice when a 404 target is in the loaded slice', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () => new HttpResponse(null, { status: 404 })),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$tail', T0), event('$here', T0 - 1000)],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    const { container, findByText, queryByText } = openLink('$here')
+    await findByText('body of $here')
+    await waitFor(() =>
+      expect(container.querySelector('.event-row.highlighted')).toBeTruthy(),
+    )
+    expect(queryByText(/linked message isn't available/)).toBeNull()
+  })
+
+  it('explains a jump that lands on a page without the target', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () =>
+        HttpResponse.json({ data: event('$elusive', T0 - 5 * DAY) }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$neighbour', T0 - 5 * DAY)],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    const { findByRole } = openLink('$elusive')
+    expect((await findByRole('alert')).textContent).toContain(
+      "The linked message isn't available",
+    )
+  })
+
+  it('explains a target hidden because deleted messages are hidden', async () => {
+    const deleted = { ...event('$deleted', T0 - DAY), redacted: true }
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () => HttpResponse.json({ data: deleted })),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: { events: [event('$tail', T0), deleted], next_cursor: null },
+        }),
+      ),
+    )
+    const { findByRole, queryByRole } = openLink('$deleted', true)
+    const alert = await findByRole('alert')
+    expect(alert.textContent).toContain('The linked message was deleted')
+
+    fireEvent.click(within(alert).getByRole('button', { name: 'Dismiss' }))
+    expect(queryByRole('alert')).toBeNull()
+  })
+})

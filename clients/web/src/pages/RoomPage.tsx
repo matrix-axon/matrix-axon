@@ -18,6 +18,11 @@ import { Composer } from '../components/Composer'
 import type { ComposerAutocompleteOption } from '../components/Composer'
 import { ErrorBanner } from '../components/ErrorBanner'
 import {
+  LINKED_EVENT_MESSAGES,
+  LinkedEventNotice,
+  type LinkedEventProblem,
+} from '../components/LinkedEventNotice'
+import {
   canonicalReactionKey,
   isEditable,
   isReactable,
@@ -468,6 +473,54 @@ export function RoomPage() {
   )
   /** The anchor *this stream* is parked on, if any. */
   const streamAnchor = anchorIsOpenThreadReply ? null : highlighted
+  // A followed event link that could not be satisfied (verified absent). Kept
+  // in state rather than derived because dropping the dead anchor clears
+  // `highlighted` itself — the notice has to outlive the URL that caused it.
+  const [linkProblem, setLinkProblem] = useState<LinkedEventProblem | null>(
+    null,
+  )
+  // The page does not remount across a room switch (ADR 0085): a notice about
+  // one room's link must not follow the user into the next room, and a new
+  // link replaces whatever the previous one reported.
+  useEffect(() => {
+    setLinkProblem(null)
+  }, [accountId, roomId])
+  useEffect(() => {
+    if (highlighted !== null) {
+      setLinkProblem(null)
+    }
+  }, [highlighted])
+  /** The anchor whose derived "hidden" notice the user dismissed. */
+  const [dismissedHiddenTarget, setDismissedHiddenTarget] = useState<
+    string | null
+  >(null)
+  /**
+   * The link target is loaded but this view will not render it — a deleted
+   * message under "hide deleted messages", or an event kind the state-event
+   * setting filters out. Without this the jump "works" yet shows nothing.
+   * Thread replies are excluded: the thread panel owns their reveal.
+   */
+  const hiddenTargetProblem = useMemo((): LinkedEventProblem | null => {
+    if (highlighted === null) {
+      return null
+    }
+    const target = timeline.events.value.find(
+      (event) => event.event_id === highlighted,
+    )
+    if (target === undefined || threadRootId(target) !== null) {
+      return null
+    }
+    const visibility = timelineEventVisibility(target)
+    return visibility === 'shown'
+      ? null
+      : visibility === 'redacted'
+        ? 'deleted'
+        : 'filtered'
+  }, [highlighted, timeline.events.value, timelineEventVisibility])
+  const shownLinkProblem =
+    linkProblem ??
+    (dismissedHiddenTarget === highlighted ? null : hiddenTargetProblem)
+
   // Whether this view may claim read state at all — the invariant the three
   // effects below share (see `clients/web/AGENTS.md`). Derived once rather than
   // re-stated per effect, so another condition is added in one place instead of
@@ -734,6 +787,9 @@ export function RoomPage() {
       if (!isCurrent()) {
         return
       }
+      // Verified absent: tell the user why the link landed on the newest
+      // messages instead of on its target.
+      setLinkProblem('missing')
       location.route(
         withoutQueryParam(
           `${window.location.pathname}${window.location.search}`,
@@ -821,6 +877,19 @@ export function RoomPage() {
               return
             }
             await timeline.jumpTo(data.data.origin_ts)
+            // The server knows the event, but the page around its timestamp
+            // came back without it. A failed jump owns its own error banner;
+            // a successful one that still misses the target must say so. A
+            // thread reply never has a main-stream row — the open thread
+            // panel reports its own miss.
+            if (
+              rootId === null &&
+              isCurrent() &&
+              timeline.error.peek() === null &&
+              !timelineContainsEvent(timeline.events.peek(), highlighted)
+            ) {
+              setLinkProblem('missing')
+            }
           },
           // A rejected lookup — offline, timeout, DNS — proves nothing about the
           // anchor either. Load the tail and leave the URL alone so a retry or a
@@ -2272,6 +2341,17 @@ export function RoomPage() {
       </header>
 
       <ErrorBanner error={timeline.error} />
+      <LinkedEventNotice
+        message={
+          shownLinkProblem === null
+            ? null
+            : LINKED_EVENT_MESSAGES[shownLinkProblem]
+        }
+        onDismiss={() => {
+          setLinkProblem(null)
+          setDismissedHiddenTarget(highlighted)
+        }}
+      />
 
       {/* Row, so the thread panel sits beside the stream and shrinks it
           rather than covering it (ADR 0062). Below the three-pane breakpoint

@@ -36,6 +36,11 @@ import {
   type SubmittedPreviews,
 } from './Composer'
 import { ErrorBanner } from './ErrorBanner'
+import {
+  LINKED_EVENT_MESSAGES,
+  LINKED_THREAD_ROOT_MISSING,
+  LinkedEventNotice,
+} from './LinkedEventNotice'
 import { Fragment } from 'preact'
 import { MediaViewerProvider } from '../media/media-viewer'
 import { MediaGalleryRow } from './MediaGalleryRow'
@@ -232,6 +237,16 @@ export function ThreadPanel({
   const targetEventId =
     highlightedEventId ??
     (typeof location.query.event === 'string' ? location.query.event : null)
+  /** Why a linked reply could not be revealed (see `LinkedEventNotice`). */
+  const [targetMissing, setTargetMissing] = useState(false)
+  /** The thread's root is verified absent: the server answered 404 for it. */
+  const [rootMissing, setRootMissing] = useState(false)
+  useEffect(() => {
+    setTargetMissing(false)
+  }, [rootId, targetEventId])
+  useEffect(() => {
+    setRootMissing(false)
+  }, [rootId])
 
   // The full root always stays in the scrollable thread. Once it has scrolled
   // out of view, a compact overlay replaces it at the top of the scrollport.
@@ -358,15 +373,28 @@ export function ThreadPanel({
             path: { account_id: accountId, event_id: targetEventId },
           },
         })
-        .then(({ data }) => {
+        .then(async ({ data }) => {
           if (cancelled) {
             return
           }
+          // A 404 here is RoomPage's to report: it runs the same lookup for
+          // the same `?event=`, verifies the target absent and drops it.
           if (data === undefined || threadRootId(data.data) !== rootId) {
             void thread.loadLatest()
             return
           }
-          void thread.jumpTo(data.data.origin_ts)
+          await thread.jumpTo(data.data.origin_ts)
+          // The server has the reply, but the page around its timestamp came
+          // back without it: say so rather than show an unhighlighted thread.
+          if (
+            !cancelled &&
+            thread.error.peek() === null &&
+            !thread.events
+              .peek()
+              .some((event) => event.event_id === targetEventId)
+          ) {
+            setTargetMissing(true)
+          }
         }),
     )
     return () => {
@@ -607,8 +635,17 @@ export function ThreadPanel({
         .GET('/v1/accounts/{account_id}/events/{event_id}', {
           params: { path: { account_id: accountId, event_id: rootId } },
         })
-        .then(({ data }) => {
-          if (!cancelled && data !== undefined && !rootRefreshed.current) {
+        .then(({ data, response }) => {
+          if (cancelled) {
+            return
+          }
+          if (data === undefined) {
+            if (response.status === 404) {
+              setRootMissing(true)
+            }
+            return
+          }
+          if (!rootRefreshed.current) {
             setRoot((current) => current ?? data.data)
           }
         }),
@@ -720,6 +757,19 @@ export function ThreadPanel({
       </div>
 
       <ErrorBanner error={thread.error} />
+      <LinkedEventNotice
+        message={
+          targetMissing
+            ? LINKED_EVENT_MESSAGES.missing
+            : rootMissing && root === undefined
+              ? LINKED_THREAD_ROOT_MISSING
+              : null
+        }
+        onDismiss={() => {
+          setTargetMissing(false)
+          setRootMissing(false)
+        }}
+      />
 
       <div
         class="thread-timeline"
