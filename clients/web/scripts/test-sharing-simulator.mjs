@@ -188,7 +188,8 @@ const project = {
   },
 }
 writeFileSync(join(output, 'project.yml'), JSON.stringify(project))
-run('xcodegen', ['generate', '--spec', join(output, 'project.yml')], 30_000)
+// Generous: a loaded shared runner has exceeded 30 s here and died ETIMEDOUT.
+run('xcodegen', ['generate', '--spec', join(output, 'project.yml')], 180_000)
 console.log(
   `Testing on ${device.name}. Results: ${join(output, 'results.xcresult')}`,
 )
