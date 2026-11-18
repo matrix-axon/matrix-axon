@@ -3517,6 +3517,76 @@ describe('RoomPage', () => {
     )
   })
 
+  it('a cold thread-reply deep link leaves the room stream pinned to its tail', async () => {
+    // A thread notification's own URL: `?thread=<root>&event=<reply>`. The
+    // stream cannot render the reply, so once the lookup says it belongs to
+    // the open thread the stream drops it as an anchor (`streamAnchor`): no
+    // jump toward the reply, and `Timeline` sees `highlighted` go to `null`
+    // and pins to its tail like a plain `?thread=` open (PR #1145 review).
+    const reply = event('$reply', T0 - 1_000, {
+      relates_to: { rel_type: 'm.thread', event_id: '$root' },
+      body: 'inside the thread',
+      content: { msgtype: 'm.text', body: 'inside the thread' },
+    })
+    const jumps: string[] = []
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: reply }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, ({ request }) => {
+        const atTs = new URL(request.url).searchParams.get('at_ts')
+        if (atTs !== null) {
+          jumps.push(atTs)
+        }
+        return HttpResponse.json({
+          data: {
+            events: [event('$latest', T0), reply, event('$root', T0 - 2_000)],
+            next_cursor: null,
+          },
+        })
+      }),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({ data: { events: [reply], next_cursor: null } }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root&event=%24reply`,
+    )
+    const services = testServices()
+    const { container, findByText } = render(routedRoomPage(services))
+    await findByText('body of $latest')
+    await findByText('inside the thread')
+
+    const stream = container.querySelector<HTMLElement>(
+      '.room-stream > .timeline',
+    )!
+    let scrollHeight = 100
+    setTimelineScrollGeometry(stream, {
+      clientHeight: 50,
+      scrollHeight: () => scrollHeight,
+    })
+    stream.scrollTop = 50
+
+    // A new main-timeline message arrives: a pinned stream follows it down.
+    scrollHeight = 160
+    services.timelines
+      .acquire(ACCOUNT, ROOM)
+      .ingestLive(event('$newer', T0 + 1_000))
+    await findByText('body of $newer')
+
+    await waitFor(() => expect(stream.scrollTop).toBe(160))
+    expect(jumps).toEqual([])
+    // The anchor still belongs to the thread panel.
+    expect(window.location.search).toBe('?thread=%24root&event=%24reply')
+  })
+
   it('a dead-anchor lookup cannot mutate an unrelated page after RoomPage unmounts', async () => {
     let releaseLookup!: () => void
     const heldLookup = new Promise<void>((resolve) => {

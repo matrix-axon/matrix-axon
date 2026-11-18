@@ -941,19 +941,29 @@ describe('a thread notification tap claims the thread once its newest reply is s
       }
     }
     vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
-    return (isIntersecting: boolean): boolean => {
-      const marker = observers
-        .filter(
-          ({ target }) =>
-            target?.isConnected === true &&
-            target.classList.contains('timeline-newest-seen'),
+    const fire =
+      (matches: (target: Element) => boolean) =>
+      (isIntersecting: boolean): boolean => {
+        const observer = observers
+          .filter(
+            ({ target }) => target?.isConnected === true && matches(target),
+          )
+          .at(-1)
+        observer?.callback(
+          [{ isIntersecting } as IntersectionObserverEntry],
+          null as unknown as IntersectionObserver,
         )
-        .at(-1)
-      marker?.callback(
-        [{ isIntersecting } as IntersectionObserverEntry],
-        null as unknown as IntersectionObserver,
-      )
-      return marker !== undefined
+        return observer !== undefined
+      }
+    return {
+      showMarker: fire((target) =>
+        target.classList.contains('timeline-newest-seen'),
+      ),
+      /** The panel's forward sentinel: the element right above its button. */
+      showSentinel: fire(
+        (target) =>
+          target.nextElementSibling?.textContent === 'Load newer replies',
+      ),
     }
   }
 
@@ -966,7 +976,7 @@ describe('a thread notification tap claims the thread once its newest reply is s
    * here) is what tells it nothing newer exists.
    */
   async function tapNewestReply() {
-    const showMarker = installIntersectionObserver()
+    const { showMarker } = installIntersectionObserver()
     let roomJump: ReturnType<typeof vi.spyOn> | null = null
     const view = renderRoom({
       query: `?thread=${encodeURIComponent(ROOT)}&event=${encodeURIComponent(REPLY_2.event_id)}`,
@@ -1015,5 +1025,38 @@ describe('a thread notification tap claims the thread once its newest reply is s
     expect(
       services.deviceState.threadReadMarker(ACCOUNT, ROOM, ROOT),
     ).toBeNull()
+  })
+
+  it('walks forward from a jump when its bottom sentinel comes into view', async () => {
+    // The forward sentinel on its own, without the button (PR #1145 review):
+    // a panel opened on an older reply jumps there, parks short of the tail,
+    // and the sentinel's observer is what finds out nothing newer exists.
+    const { showSentinel } = installIntersectionObserver()
+    let threadReads = 0
+    const view = renderRoom({
+      query: `?thread=${encodeURIComponent(ROOT)}&event=${encodeURIComponent(REPLY_1.event_id)}`,
+    })
+    server.use(
+      http.get(threadTimelinePath(ROOT), () => {
+        threadReads += 1
+        return HttpResponse.json({
+          data: { events: [REPLY_2, REPLY_1], next_cursor: null },
+        })
+      }),
+    )
+    await view.findByText(`body of ${REPLY_1.event_id}`)
+    await view.findByRole('button', { name: 'Load newer replies' })
+    const before = threadReads
+
+    expect(showSentinel(true)).toBe(true)
+
+    await waitFor(() =>
+      expect(
+        view.queryByRole('button', { name: 'Load newer replies' }),
+      ).toBeNull(),
+    )
+    // One arrival, one forward read: the sentinel pages only while it is on
+    // screen, so it never walks a long thread unattended.
+    expect(threadReads - before).toBe(1)
   })
 })

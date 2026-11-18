@@ -57,16 +57,28 @@ export function anchorCaughtUp(view: {
 }
 
 /**
+ * How many frames a report waits for the view's reveal before giving up. The
+ * reveal is a layout effect, so it normally lands before the first callback;
+ * this covers a reveal that waits on a row arriving a few renders later.
+ */
+const REVEAL_WAIT_FRAMES = 30
+
+/**
  * Watch `marker` (an element just past the view's list) and call `onSeen` when
  * it is on screen within `root`, the view's scroller. Returns the disconnect.
  *
  * Attach a fresh observer per newest rendered id: a new observer's first
  * callback reports the current state rather than waiting for a change, so an
- * arrival that is already on screen is reported at once. The callback waits on
+ * arrival that is already on screen is reported at once. The report waits on
  * `ready` — the view's reveal of its anchor — and re-measures live geometry,
  * because intersections are computed at frame boundaries and a report taken
  * while mount effects were still moving the scroller would claim a bottom the
  * reader was never shown.
+ *
+ * Waiting is per frame, not "drop and hope": the observer only calls back on a
+ * *change*, so a report dropped because the reveal had not finished would never
+ * come again while the marker sat still on screen (PR #1145 review). Each frame
+ * re-measures, so a marker that left the screen meanwhile is not reported.
  */
 export function observeNewestSeen(
   marker: Element,
@@ -77,23 +89,44 @@ export function observeNewestSeen(
   if (typeof IntersectionObserver === 'undefined') {
     return () => {}
   }
+  let frame: number | null = null
+  const onScreen = () => {
+    const bounds = root.getBoundingClientRect()
+    const rect = marker.getBoundingClientRect()
+    return rect.top <= bounds.bottom + 2 && rect.bottom >= bounds.top
+  }
+  const report = (framesLeft: number) => {
+    frame = null
+    if (!marker.isConnected) {
+      return
+    }
+    if (!ready()) {
+      if (framesLeft > 0) {
+        frame = requestAnimationFrame(() => report(framesLeft - 1))
+      }
+      return
+    }
+    if (onScreen()) {
+      onSeen()
+    }
+  }
   const observer = new IntersectionObserver(
     (entries) => {
-      if (
-        !marker.isConnected ||
-        !entries.some((entry) => entry.isIntersecting) ||
-        !ready()
-      ) {
-        return
+      if (frame !== null) {
+        cancelAnimationFrame(frame)
+        frame = null
       }
-      const bounds = root.getBoundingClientRect()
-      const rect = marker.getBoundingClientRect()
-      if (rect.top <= bounds.bottom + 2 && rect.bottom >= bounds.top) {
-        onSeen()
+      if (entries.some((entry) => entry.isIntersecting)) {
+        report(REVEAL_WAIT_FRAMES)
       }
     },
     { root },
   )
   observer.observe(marker)
-  return () => observer.disconnect()
+  return () => {
+    observer.disconnect()
+    if (frame !== null) {
+      cancelAnimationFrame(frame)
+    }
+  }
 }
