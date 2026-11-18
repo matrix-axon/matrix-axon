@@ -90,6 +90,22 @@ describe('the linked-event cache (ADR 0138 § 5)', () => {
     expect(GET).toHaveBeenCalledTimes(2)
   })
 
+  it('never lets an older read replace a fresh one that finished first', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const { api } = fakeApi([() => held.then(ok), status(404)])
+    const cache = createLinkedEventCache(api)
+    const older = cache.read('acct', '!room:hs', '$linked')
+    expect(
+      await cache.read('acct', '!room:hs', '$linked', { fresh: true }),
+    ).toEqual({ kind: 'gone' })
+    release()
+    expect((await older).kind).toBe('event')
+    expect(await cache.read('acct', '!room:hs', '$linked')).toEqual({
+      kind: 'gone',
+    })
+  })
+
   it('forgets everything on clear, including a read in flight', async () => {
     let release!: () => void
     const held = new Promise<void>((resolve) => (release = resolve))

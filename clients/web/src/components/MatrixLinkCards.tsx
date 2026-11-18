@@ -3,6 +3,7 @@ import { formatTimelineDay } from '../calendar-day'
 import {
   linkedEventTargets,
   textWithSpoilersWithheld,
+  withoutReplyFallback,
   type LinkedEvent,
   type LinkedEventResult,
 } from '../linked-events'
@@ -202,10 +203,17 @@ function CardBody({
     event.sender_trust === null || event.sender_trust === undefined
       ? undefined
       : TRUST_NOTICES[event.sender_trust]
-  const media =
-    event.redacted || event.content === null
-      ? null
-      : parseMedia(event as unknown as EventDto)
+  const media = useMemo(
+    () =>
+      event.redacted || event.content === null
+        ? null
+        : parseMedia(event as unknown as EventDto),
+    [event],
+  )
+  const text = useMemo(
+    () => cardText(event, media, sender),
+    [event, media, sender],
+  )
   return (
     <>
       <a
@@ -242,7 +250,7 @@ function CardBody({
             retry={imageRetry}
           />
         )}
-        <span class="matrix-link-card-text">{cardText(event, media)}</span>
+        <span class="matrix-link-card-text">{text}</span>
       </a>
       {joinError !== null && (
         <span class="event-copy-status error" role="alert">
@@ -284,10 +292,14 @@ function cardHref(
   return localRoomHref(accountId, event.room_id, event.event_id)
 }
 
-/** Up to three lines of the message's text, as plain text (no nesting). */
+/**
+ * Up to three lines of the message's text, as plain text (no nesting).
+ * `sender` is the name the card's header gives the sender, for an emote.
+ */
 export function cardText(
   event: LinkedEvent,
   media: ParsedMedia | null,
+  sender: string = event.sender,
 ): string {
   if (event.redacted) return 'Message deleted'
   if (event.content === null || event.content === undefined)
@@ -302,9 +314,16 @@ export function cardText(
       : `${media.filename}: ${caption}`
   }
   const msgtype = (event.content as { msgtype?: unknown }).msgtype
-  const body = withheld ?? event.body?.trim() ?? ''
+  // Without an older client's quoted reply fallback, so the card's lines go
+  // to the reply itself.
+  const body =
+    withheld ??
+    withoutReplyFallback(
+      event.body ?? '',
+      event.content as Record<string, unknown>,
+    ).trim()
   if (event.type === 'm.room.message' && body !== '') {
-    return msgtype === 'm.emote' ? `* ${event.sender} ${body}` : body
+    return msgtype === 'm.emote' ? `* ${sender} ${body}` : body
   }
   return typeof msgtype === 'string'
     ? `${event.type} (${msgtype})`

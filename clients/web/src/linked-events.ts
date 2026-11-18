@@ -58,6 +58,10 @@ export function createLinkedEventCache(api: ApiClient): LinkedEventCache {
     { promise: Promise<LinkedEventResult>; fresh: boolean }
   >()
   const exhausted = new Set<string>()
+  /** The latest request started for each key, so an older one finishing
+   *  after it cannot replace its result. */
+  const latest = new Map<string, number>()
+  let sequence = 0
   let generation = 0
 
   function request(
@@ -68,6 +72,8 @@ export function createLinkedEventCache(api: ApiClient): LinkedEventCache {
     fresh: boolean,
   ): Promise<LinkedEventResult> {
     const started = generation
+    const order = ++sequence
+    latest.set(key, order)
     const promise = api
       .GET('/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}', {
         params: {
@@ -83,7 +89,9 @@ export function createLinkedEventCache(api: ApiClient): LinkedEventCache {
       .catch((): LinkedEventResult => ({ kind: 'transient' }))
       .then((result) => {
         if (inflight.get(key)?.promise === promise) inflight.delete(key)
-        if (started === generation && result.kind !== 'transient') {
+        const newest = latest.get(key) === order
+        if (newest) latest.delete(key)
+        if (started === generation && newest && result.kind !== 'transient') {
           settled.delete(key)
           settled.set(key, result)
           while (settled.size > MAX_CACHED) {
@@ -125,6 +133,7 @@ export function createLinkedEventCache(api: ApiClient): LinkedEventCache {
       settled.clear()
       inflight.clear()
       exhausted.clear()
+      latest.clear()
     },
   }
 }
@@ -211,7 +220,7 @@ export function linkedEventTargets(
  * A plain-text reply's body without the `> ` lines an older client quoted
  * the replied-to message in, and the blank line after them.
  */
-function withoutReplyFallback(
+export function withoutReplyFallback(
   body: string,
   content: Record<string, unknown>,
 ): string {

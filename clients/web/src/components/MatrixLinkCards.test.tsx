@@ -303,6 +303,46 @@ describe('Matrix-link cards (ADR 0138)', () => {
     expect(document.body.textContent).not.toContain('Read after the film')
   })
 
+  it("shows a reply's own text, not its quoted fallback", async () => {
+    const body = '> <@carol:hs> The quoted message\n\nThe reply itself'
+    serve(() =>
+      HttpResponse.json({
+        data: linked({
+          content: {
+            msgtype: 'm.text',
+            body,
+            'm.relates_to': { 'm.in_reply_to': { event_id: '$quoted' } },
+          },
+          body,
+        }),
+      }),
+    )
+    view()
+    expect(await screen.findByText('The reply itself')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('The quoted message')
+  })
+
+  it('names an emote by the name the header gives its sender', async () => {
+    serve(() =>
+      HttpResponse.json({
+        data: linked({
+          room_id: '!room:hs',
+          content: { msgtype: 'm.emote', body: 'waves' },
+          body: 'waves',
+        }),
+      }),
+    )
+    render(
+      <ServicesContext.Provider value={testServices({ token: 't' })}>
+        <EventBody
+          event={message('See https://matrix.to/#/!room%3Ahs/%24linked?via=hs')}
+          resolveName={(userId) => (userId === '@bob:hs' ? 'Bob' : userId)}
+        />
+      </ServicesContext.Provider>,
+    )
+    expect(await screen.findByText('* Bob waves')).toBeTruthy()
+  })
+
   it("joins through the link's own via servers", async () => {
     serve(() => HttpResponse.json({ data: linked({ room_id: '!opaque' }) }))
     view(
