@@ -118,11 +118,17 @@ function roomPillTitle(roomLink: {
     : 'Open existing room'
 }
 
-function routeRoomPillClick(
+/**
+ * Route a click on a room link inside the app: a local link navigates, and a
+ * Matrix link to a room the account has not joined joins it first. Shared with
+ * Matrix-link cards (`MatrixLinkCards`), which pass their own `selector`.
+ */
+export function routeRoomPillClick(
   event: MouseEvent,
   accountId: string,
   rooms: RoomsStore,
   onError: (message: string) => void,
+  selector = 'a.room-pill',
 ): boolean {
   if (
     event.defaultPrevented ||
@@ -134,7 +140,7 @@ function routeRoomPillClick(
   ) {
     return false
   }
-  const anchor = (event.target as Element | null)?.closest?.('a.room-pill')
+  const anchor = (event.target as Element | null)?.closest?.(selector)
   if (!(anchor instanceof HTMLAnchorElement)) {
     return false
   }

@@ -639,6 +639,15 @@ describe('editing a message (§ 8)', () => {
     expect(controller.snapshot().kept).toEqual([HTTP])
   })
 
+  it("leaves out a Matrix-link card the message carries, as the server's edit check does (ADR 0138 § 1)", () => {
+    const MATRIX = 'https://matrix.to/#/!room:example.org/$event'
+    const { device } = deviceSource()
+    editing({ setting: 'device', device }, `see ${MATRIX} `, [MATRIX])
+    expect(statuses()).toEqual([])
+    expect(controller.snapshot().kept).toEqual([])
+    expect(device).not.toHaveBeenCalled()
+  })
+
   it('hides a card whose link is deleted, and brings it back without a lookup', () => {
     const { device } = deviceSource()
     editing({ setting: 'device', device }, `see ${A} `, [A])

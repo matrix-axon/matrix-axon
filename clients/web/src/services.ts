@@ -111,6 +111,7 @@ import {
   createLinkPreviewCache,
   type LinkPreviewCache,
 } from './composer-link-previews'
+import { createLinkedEventCache, type LinkedEventCache } from './linked-events'
 import {
   createRoomDetailsStore,
   type RoomDetailsStore,
@@ -215,6 +216,11 @@ export interface AppServices {
   linkPreviews: LinkPreviewCache
   /** What this Axon server supports (ADR 0132 § 8), asked once signed in. */
   capabilities: ServerCapabilities
+  /**
+   * Matrix-link card reads for the session (ADR 0138 § 5), shared by every
+   * timeline and wiped on sign-out by `connectLinkedEventCacheReset`.
+   */
+  linkedEvents: LinkedEventCache
   /**
    * The room the user is currently viewing (`accountId/roomId`), or `null`.
    * Set by `RoomPage`; `RoomList` reads it to mark the open row.
@@ -1643,6 +1649,16 @@ export function connectLinkPreviewCacheReset(
   })
 }
 
+/** Forget every Matrix-link card read when the session ends. */
+export function connectLinkedEventCacheReset(
+  auth: CompositeAuthProvider,
+  linkedEvents: LinkedEventCache,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) linkedEvents.clear()
+  })
+}
+
 /** Route raw Matrix ephemeral passthrough frames into the web overlay store. */
 export function connectEphemeralPassthrough(
   live: LiveConnection,
@@ -2000,6 +2016,8 @@ export function createServices(
   connectLinkPreviewCacheReset(auth, linkPreviews)
   const capabilities = createServerCapabilities(api)
   connectCapabilities(auth.signedIn, capabilities, live.reconnects)
+  const linkedEvents = createLinkedEventCache(api)
+  connectLinkedEventCacheReset(auth, linkedEvents)
   return {
     auth,
     api,
@@ -2011,6 +2029,7 @@ export function createServices(
     attachments,
     linkPreviews,
     capabilities,
+    linkedEvents,
     settings,
     timelineMediaExpanded: signal(true),
     accounts,

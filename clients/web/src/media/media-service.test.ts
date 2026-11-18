@@ -185,6 +185,31 @@ describe('createMediaService.acquire', () => {
     expect(thumbAgain.result).toEqual({ ok: true, url: 'blob:1', format: null })
   })
 
+  it('names the event a request is for, and caches it apart (ADR 0138 § 4)', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(
+        `${BASE_URL}/v1/media/:account/:server/:media`,
+        ({ request }) => {
+          seen.push(new URL(request.url).search)
+          return new HttpResponse(PNG, {
+            headers: { 'content-type': 'image/png' },
+          })
+        },
+      ),
+    )
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const event = { roomId: '!room:hs', eventId: '$event' }
+
+    const plain = await media.acquire(ACCOUNT, 'mxc://hs/scoped')
+    const scoped = await media.acquire(ACCOUNT, 'mxc://hs/scoped', { event })
+    const again = await media.acquire(ACCOUNT, 'mxc://hs/scoped', { event })
+
+    expect(seen).toEqual(['', '?room_id=%21room%3Ahs&event_id=%24event'])
+    expect(scoped.result).not.toEqual(plain.result)
+    expect(again.result).toEqual(scoped.result)
+  })
+
   it('keeps a released blob available below the cap', async () => {
     serveBytes()
     const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })

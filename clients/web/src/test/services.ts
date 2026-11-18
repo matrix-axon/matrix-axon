@@ -21,6 +21,7 @@ import {
   connectReadMarkers,
   connectAttachmentReset,
   connectLinkPreviewCacheReset,
+  connectLinkedEventCacheReset,
   connectThreadReadMarkers,
   connectTimelineCacheReset,
   connectUnreadCounts,
@@ -51,6 +52,7 @@ import { createRoomsStore } from '../stores/rooms'
 import { createSearchStore } from '../stores/search'
 import { createSettingsStore } from '../stores/settings'
 import { createLinkPreviewCache } from '../composer-link-previews'
+import { createLinkedEventCache } from '../linked-events'
 import { createRoomDetailsStore } from '../stores/room-details'
 import { createSpacesStore } from '../stores/spaces'
 import {
@@ -283,6 +285,8 @@ export function testServices(
   // Not asked at sign-in here, so a test makes no request it did not
   // handle; one that needs an answer calls `refresh` against its handler.
   const capabilities = createServerCapabilities(api)
+  const linkedEvents = createLinkedEventCache(api)
+  connectLinkedEventCacheReset(auth, linkedEvents)
   return {
     auth,
     api,
@@ -294,6 +298,7 @@ export function testServices(
     attachments,
     linkPreviews,
     capabilities,
+    linkedEvents,
     settings,
     timelineMediaExpanded: signal(true),
     accounts,

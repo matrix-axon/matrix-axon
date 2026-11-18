@@ -163,6 +163,22 @@ function LinkPreviewSettings() {
         sent without one carries a marker asking other apps not to preview it.
         This setting applies to this device only.
       </p>
+      <label class="setting-row">
+        <input
+          type="checkbox"
+          checked={settings.matrixLinkCards.value}
+          onChange={(event) =>
+            (settings.matrixLinkCards.value = event.currentTarget.checked)
+          }
+        />
+        Show messages that Matrix links point to
+      </label>
+      <p class="muted setting-detail">
+        A link to a Matrix message gets a card showing that message, when your
+        account can read it. This device asks your homeserver for it, so anyone
+        who posts such a link in a room you share can make this device ask. Off,
+        the links stay as links. This device only.
+      </p>
     </section>
   )
 }

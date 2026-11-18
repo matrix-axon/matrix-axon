@@ -43,6 +43,20 @@ describe('parseLinkPreviews', () => {
     expect(parseLinkPreviews(content, url)).toEqual([])
   })
 
+  it('never shows a bundled preview of a Matrix link (ADR 0138 § 6)', () => {
+    const link = 'https://matrix.to/#/!room:example.org/$event'
+    const previews = parseLinkPreviews(
+      {
+        'm.url_previews': [
+          { 'matrix:matched_url': link, 'og:title': 'matrix.to' },
+          { 'matrix:matched_url': url, 'og:title': 'Article' },
+        ],
+      },
+      `${link} ${url}`,
+    )
+    expect(previews.map((p) => p.url)).toEqual([url])
+  })
+
   it('requires an actual matching body URL, not a substring of a different URL', () => {
     for (const body of [
       null,

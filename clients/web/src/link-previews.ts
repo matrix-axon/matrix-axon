@@ -1,4 +1,5 @@
 import { matchUrls } from './html/linkify'
+import { isMatrixLink } from './matrix-to'
 import { mxcToPath } from './media/parse-media'
 
 /** No keys or arbitrary source fields escape the event parser. */
@@ -160,7 +161,10 @@ export function parseLinkPreviews(
     if (
       typeof matched !== 'string' ||
       matched.length > MAX_URL_LENGTH ||
-      !bodyUrls.has(matched)
+      !bodyUrls.has(matched) ||
+      // The matrix.to page's head, or the sender's own claim about a message:
+      // never shown (ADR 0138 § 6). The recipient's own card replaces it.
+      isMatrixLink(matched)
     )
       continue
     let url: URL

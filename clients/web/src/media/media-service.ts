@@ -92,6 +92,14 @@ export interface ThumbnailRequest {
 
 export interface MediaRequestOptions {
   thumbnail?: ThumbnailRequest
+  /**
+   * The event the media is for (ADR 0138 § 4). The server then resolves the
+   * URI against that one event, stored or kept from a linked-event read, and
+   * serves it only if the event names it. A Matrix-link card's media needs
+   * it: the linked event is often not in Axon's store. Part of the cache key,
+   * because another event may describe the same URI differently.
+   */
+  event?: { roomId: string; eventId: string }
   /** Optional hard response-byte ceiling for small bundled preview images. */
   maxBytes?: number
   /**
@@ -457,7 +465,10 @@ export function createMediaService(deps: {
     const thumbnail = options?.thumbnail
     // A re-typed fetch yields a different blob than the raw one, so it needs
     // its own cache slot even though it hits the same proxy URL.
-    const type = `${options?.maxBytes ?? ''}\0${options?.contentType ?? ''}`
+    const event = options?.event
+    const type = `${options?.maxBytes ?? ''}\0${options?.contentType ?? ''}${
+      event === undefined ? '' : `\0event\0${event.roomId}\0${event.eventId}`
+    }`
     if (thumbnail === undefined) {
       return `${accountId}\0full\0${type}\0${mxc}`
     }
@@ -479,8 +490,14 @@ export function createMediaService(deps: {
       path.serverName,
     )}/${encodeURIComponent(path.mediaId)}`
     const thumbnail = options?.thumbnail
+    const event = options?.event
+    const scope = new URLSearchParams()
+    if (event !== undefined) {
+      scope.set('room_id', event.roomId)
+      scope.set('event_id', event.eventId)
+    }
     if (thumbnail === undefined) {
-      return base
+      return event === undefined ? base : `${base}?${scope.toString()}`
     }
     const params = new URLSearchParams({
       width: String(thumbnail.width),
@@ -489,6 +506,7 @@ export function createMediaService(deps: {
     if (thumbnail.method !== undefined) {
       params.set('method', thumbnail.method)
     }
+    for (const [key, value] of scope) params.set(key, value)
     return `${base}/thumbnail?${params.toString()}`
   }
 

@@ -8,6 +8,7 @@ import { FormattedBody } from './FormattedBody'
 import { MediaAttachment } from './MediaAttachment'
 import { MediaImage } from './MediaImage'
 import { LinkPreviews } from './LinkPreviews'
+import { MatrixLinkCards } from './MatrixLinkCards'
 
 function MediaBody({
   event,
@@ -149,13 +150,18 @@ export function EventBody({
     return <UtdPlaceholder />
   }
 
+  // Bundled previews, then the cards this client builds for the message's
+  // Matrix links (ADR 0138), which collapse with them.
   const previews =
     expanded && showLinkPreviews && event.type === 'm.room.message' ? (
-      <LinkPreviews
-        accountId={event.account_id}
-        content={event.content}
-        body={event.body}
-      />
+      <>
+        <LinkPreviews
+          accountId={event.account_id}
+          content={event.content}
+          body={event.body}
+        />
+        <MatrixLinkCards event={event} resolveName={resolveName} />
+      </>
     ) : null
 
   if (resolved !== null) {
