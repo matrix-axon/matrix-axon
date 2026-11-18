@@ -78,6 +78,7 @@ See `docs/mvp/prd.md` for the full product description.
   Drift between spec and generated stubs is a bug.
   Evolve `/v1/` additively — an independently-distributed `axon-tui` binary can run against a server for a long time without upgrading. `scripts/check-openapi-compat.sh` (CI: `openapi-compat`) fails a PR that breaks compatibility; a deliberate exception declares itself with an `API-Breaking-Change: <reason>` commit trailer (ADR 0099).
 - **Component separation:** the code is separated into three silos: `crates/` (server-side infrastructure), `clients/` (client-side infrastructure, separated into `tui` and `web`), and `smoke/` (testing infrastructure).
+  The `smoke/` harnesses are black-box: they depend on no `axon-*` crate (ADR 0025).
   Behavioral changes — anything that changes logic, functionality, or intent — must stay within a single silo per commit/PR.
   Typically, changes to the `web` and `tui` clients should be separate PRs except where a global change impacts both clients.
   If a behavioral server change breaks client compatibility, ship the server change on its own; don't bundle a client-side fix into the same PR even to keep `main` working, even temporarily — open a separate, immediate follow-up PR for the client side.
