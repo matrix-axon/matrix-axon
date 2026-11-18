@@ -6,10 +6,14 @@
 //! the error translation live here. `axon-api`, `axon-media`, and `axon-sync`
 //! never depend on each other's ports.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
-use axon_api::{MediaError, MediaProxy, MediaResource};
-use axon_media::{FetchError, MediaCache, MediaCacheError};
+use axon_api::{GrowingResource, GrowingSource, MediaBody, MediaError, MediaProxy, MediaResource};
+use axon_media::{FetchError, GrowingMedia, MediaCache, MediaCacheError};
 use axon_sync::SdkMediaProxy;
+use bytes::Bytes;
+use futures_util::stream::BoxStream;
 use uuid::Uuid;
 
 /// Serves media through the on-disk LRU cache, downloading through the SDK
@@ -36,6 +40,29 @@ fn to_api_resource(resource: axon_media::MediaResource) -> MediaResource {
     }
 }
 
+/// A streamed download still running in the cache, read through the API's
+/// [`GrowingSource`] port (ADR 0139).
+struct CacheGrowing(GrowingMedia);
+
+#[async_trait]
+impl GrowingSource for CacheGrowing {
+    fn known_len(&self) -> Option<u64> {
+        self.0.known_len()
+    }
+
+    async fn wait_for_len(&mut self, wait: Duration) -> Result<Option<u64>, MediaError> {
+        self.0.wait_for_len(wait).await.map_err(map_err)
+    }
+
+    fn into_body(
+        self: Box<Self>,
+        start: u64,
+        end: Option<u64>,
+    ) -> BoxStream<'static, std::io::Result<Bytes>> {
+        self.0.into_body(start, end)
+    }
+}
+
 /// Map a cache/fetch error onto the API-layer media error. The fetcher's
 /// `FetchError` was already collapsed from `axon-sync`'s `GatewayError`; a
 /// too-large object is reported as an upstream failure (we won't proxy it), and
@@ -53,9 +80,10 @@ fn map_err(err: MediaCacheError) -> MediaError {
             FetchError::Undecryptable(msg) => MediaError::Undecryptable(msg),
         },
         MediaCacheError::TooLarge { len, cap } => MediaError::TooLarge(format!(
-            "media object too large to proxy ({len} bytes; per-object limit is {cap} bytes)"
+            "media object too large to proxy ({len} bytes; the limit is {cap} bytes)"
         )),
         MediaCacheError::Io(e) => MediaError::Internal(e.to_string()),
+        MediaCacheError::Busy(msg) => MediaError::Busy(msg),
     }
 }
 
@@ -76,6 +104,28 @@ impl MediaProxy for CachingMediaProxy {
 
     fn etag(&self, mxc_url: &str, encrypted_file: Option<&serde_json::Value>) -> String {
         axon_media::etag_for_media(mxc_url, encrypted_file)
+    }
+
+    async fn get_media_stream(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<serde_json::Value>,
+    ) -> Result<MediaBody, MediaError> {
+        let body = self
+            .cache
+            .get_or_stream(account_id, mxc_url, encrypted_file, &self.fetcher)
+            .await
+            .map_err(map_err)?;
+        Ok(match body {
+            axon_media::MediaBody::Complete(resource) => {
+                MediaBody::Complete(to_api_resource(resource))
+            }
+            axon_media::MediaBody::Growing(media) => MediaBody::Growing(GrowingResource {
+                etag: media.etag.clone(),
+                source: Box::new(CacheGrowing(media)),
+            }),
+        })
     }
 
     async fn get_thumbnail(

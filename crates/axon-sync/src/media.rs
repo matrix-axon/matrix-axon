@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axon_core::media::{ThumbnailMethod, ThumbnailSpec};
-use axon_media::{FetchError, MediaFetcher};
+use axon_media::{FetchError, MediaFetcher, MediaStream};
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings};
 use matrix_sdk::ruma::{
     api::client::media::get_content_thumbnail::v3::Method as SdkThumbnailMethod,
@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use crate::error::GatewayError;
 use crate::manager::ClientManager;
+use crate::media_stream::{self, StreamDecryptor};
 
 /// Downloads MXC media through an account's live SDK client, on behalf of the
 /// `axon-media` cache.
@@ -92,6 +93,35 @@ impl SdkMediaProxy {
             .map_err(|error| classify_download_error(mxc_url, encrypted, error))?;
 
         Ok(data)
+    }
+
+    /// Open a streamed download of `mxc_url` (ADR 0139), for video and audio.
+    ///
+    /// The descriptor is parsed and checked exactly as [`download`] checks it,
+    /// and before any network work: a descriptor ruma cannot parse is
+    /// `Invalid` (`400`), and one that is not `v2` or has no SHA-256 hash is
+    /// `Undecryptable` (`422`). Unlike [`download`] there is no timeout here;
+    /// the `axon-media` cache bounds the headers and every body read.
+    ///
+    /// [`download`]: Self::download
+    async fn download_stream(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<serde_json::Value>,
+    ) -> Result<MediaStream, GatewayError> {
+        axon_media::parse_mxc(mxc_url)
+            .ok_or_else(|| GatewayError::Invalid(format!("invalid MXC URI: {mxc_url}")))?;
+        let decryptor = match encrypted_file {
+            Some(file_json) => {
+                let file: EncryptedFile = serde_json::from_value(file_json)
+                    .map_err(|e| GatewayError::Invalid(format!("invalid encrypted file: {e}")))?;
+                Some(StreamDecryptor::new(&file)?)
+            }
+            None => None,
+        };
+        let client = self.manager.get_or_connect(account_id).await?;
+        media_stream::open(&client, mxc_url, decryptor).await
     }
 
     /// Request a homeserver-generated thumbnail of `mxc_url` at `spec`'s
@@ -169,6 +199,17 @@ impl MediaFetcher for SdkMediaProxy {
         spec: ThumbnailSpec,
     ) -> Result<Vec<u8>, FetchError> {
         self.download_thumbnail(account_id, mxc_url, spec)
+            .await
+            .map_err(gateway_to_fetch)
+    }
+
+    async fn fetch_stream(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<serde_json::Value>,
+    ) -> Result<MediaStream, FetchError> {
+        self.download_stream(account_id, mxc_url, encrypted_file)
             .await
             .map_err(gateway_to_fetch)
     }

@@ -401,6 +401,8 @@ version = "0.1.29"
 dependencies = [
  "async-trait",
  "axon-core",
+ "bytes",
+ "futures-util",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -441,6 +443,7 @@ dependencies = [
  "axon-sync",
  "axon-test-support",
  "axum",
+ "bytes",
  "chrono",
  "clap",
  "crc",
@@ -551,13 +554,16 @@ dependencies = [
 name = "axon-sync"
 version = "0.1.29"
 dependencies = [
+ "aes",
  "async-trait",
  "axon-core",
  "axon-media",
  "axon-search",
  "axon-store",
  "axum",
+ "bytes",
  "chrono",
+ "ctr",
  "fs4",
  "futures-util",
  "jsonwebtoken",

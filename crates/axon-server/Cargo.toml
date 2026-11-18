@@ -36,6 +36,8 @@ axum  = { workspace = true }
 anyhow = { workspace = true }
 # Implements axon-api's async MessageSender trait for the gateway adapter.
 async-trait = { workspace = true }
+# `GrowingSource::into_body` hands the API a stream of `Bytes` (ADR 0139).
+bytes = { workspace = true }
 uuid = { workspace = true }
 # Subcommand parsing for the `axon` binary (`axon token …`, M7b).
 clap = { workspace = true }

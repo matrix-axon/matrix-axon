@@ -16,14 +16,14 @@ use async_trait::async_trait;
 use axon_api::{
     AccountActionsSender, AccountLifecycle, ApiError, AuthedToken, BackupAction, CurrentTrust,
     DeleteError, DeviceInfo, DeviceList, DeviceListError, DeviceListService, EphemeralSender,
-    FlowStage, FlowSummary, Formatted, LeaveOutcome, LoginError, LogoutError, MediaAttachment,
-    MediaError, MediaProxy, MediaResource, MemberProfile, MemberProfileError, MemberProfileService,
-    MembershipSender, MessageSender, PowerLevelsSender, RecoverError, RecoverResult,
-    RedecryptUtdsError, RedecryptUtdsStats, Relation, RoomEntrySender, RoomSettingsSender,
-    SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
-    SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
-    SyncStateProvider, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, UploadStream,
-    VerificationService, VerifyError,
+    FlowStage, FlowSummary, Formatted, GrowingResource, GrowingSource, LeaveOutcome, LoginError,
+    LogoutError, MediaAttachment, MediaBody, MediaError, MediaProxy, MediaResource, MemberProfile,
+    MemberProfileError, MemberProfileService, MembershipSender, MessageSender, PowerLevelsSender,
+    RecoverError, RecoverResult, RedecryptUtdsError, RedecryptUtdsStats, Relation, RoomEntrySender,
+    RoomSettingsSender, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams,
+    SendError, SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload,
+    StagedUploadService, SyncStateProvider, TokenVerifier, TrustBundle, TrustError, TrustSnapshot,
+    UploadStream, VerificationService, VerifyError,
 };
 use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
@@ -1942,6 +1942,15 @@ impl MediaProxy for StubMediaProxy {
         format!("stub-{mxc_url}-{}", encrypted_file.is_some())
     }
 
+    async fn get_media_stream(
+        &self,
+        _account_id: Uuid,
+        _mxc_url: &str,
+        _encrypted_file: Option<serde_json::Value>,
+    ) -> Result<MediaBody, MediaError> {
+        Err(MediaError::NotFound("stub: no media".to_owned()))
+    }
+
     async fn get_thumbnail(
         &self,
         _account_id: Uuid,
@@ -1994,15 +2003,64 @@ pub struct ThumbnailCall {
 #[derive(Clone)]
 pub enum MediaOutcome {
     Ok(Vec<u8>),
+    /// A streamed download still running (ADR 0139). `get_media_stream`
+    /// returns it as growing; the buffered calls return the bytes whole.
+    Growing(GrowingOutcome),
     Forbidden(String),
     NotConnected(String),
+    Busy(String),
     Undecryptable(String),
+}
+
+/// How a [`FakeGrowing`] reports its length.
+#[derive(Clone)]
+pub struct GrowingOutcome {
+    pub data: Vec<u8>,
+    /// The homeserver declared a `Content-Length`.
+    pub declared: bool,
+    /// For an undeclared length: whether waiting learns it (the download
+    /// finishes in time) or the wait runs out.
+    pub learned: bool,
+    /// The download fails while a request waits for its length.
+    pub fails: bool,
+}
+
+/// A download in flight whose bytes are all already written.
+struct FakeGrowing(GrowingOutcome);
+
+#[async_trait]
+impl GrowingSource for FakeGrowing {
+    fn known_len(&self) -> Option<u64> {
+        self.0.declared.then_some(self.0.data.len() as u64)
+    }
+
+    async fn wait_for_len(
+        &mut self,
+        _wait: std::time::Duration,
+    ) -> Result<Option<u64>, MediaError> {
+        if self.0.fails {
+            return Err(MediaError::Undecryptable("hash mismatch".to_owned()));
+        }
+        Ok((self.0.declared || self.0.learned).then_some(self.0.data.len() as u64))
+    }
+
+    fn into_body(
+        self: Box<Self>,
+        start: u64,
+        end: Option<u64>,
+    ) -> futures_util::stream::BoxStream<'static, std::io::Result<bytes::Bytes>> {
+        let end = end.map_or(self.0.data.len(), |end| end as usize);
+        let chunk = bytes::Bytes::copy_from_slice(&self.0.data[start as usize..end]);
+        futures_util::stream::iter([Ok(chunk)]).boxed()
+    }
 }
 
 /// A configurable media proxy for route-level status and call-path tests.
 pub struct ConfiguredMediaProxy {
     outcome: MediaOutcome,
     calls: Mutex<Vec<MediaCall>>,
+    /// Calls that took the streamed path (video and audio, ADR 0139).
+    stream_calls: Mutex<Vec<MediaCall>>,
     thumbnail_calls: Mutex<Vec<ThumbnailCall>>,
 }
 
@@ -2011,20 +2069,34 @@ impl ConfiguredMediaProxy {
         Self {
             outcome: MediaOutcome::Ok(data.to_vec()),
             calls: Mutex::new(Vec::new()),
+            stream_calls: Mutex::new(Vec::new()),
             thumbnail_calls: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn growing(outcome: GrowingOutcome) -> Self {
+        Self::failing(MediaOutcome::Growing(outcome))
     }
 
     pub fn failing(outcome: MediaOutcome) -> Self {
         Self {
             outcome,
             calls: Mutex::new(Vec::new()),
+            stream_calls: Mutex::new(Vec::new()),
             thumbnail_calls: Mutex::new(Vec::new()),
         }
     }
 
+    /// Every full-media call, buffered or streamed.
     pub fn calls(&self) -> Vec<MediaCall> {
-        self.calls.lock().unwrap().clone()
+        let mut calls = self.calls.lock().unwrap().clone();
+        calls.extend(self.stream_calls.lock().unwrap().iter().cloned());
+        calls
+    }
+
+    /// Only the calls that took the streamed path.
+    pub fn stream_calls(&self) -> Vec<MediaCall> {
+        self.stream_calls.lock().unwrap().clone()
     }
 
     pub fn thumbnail_calls(&self) -> Vec<ThumbnailCall> {
@@ -2037,8 +2109,10 @@ impl ConfiguredMediaProxy {
     async fn resource_from_outcome(&self) -> Result<MediaResource, MediaError> {
         match &self.outcome {
             MediaOutcome::Ok(data) => Ok(media_resource_from(data).await),
+            MediaOutcome::Growing(growing) => Ok(media_resource_from(&growing.data).await),
             MediaOutcome::Forbidden(message) => Err(MediaError::Forbidden(message.clone())),
             MediaOutcome::NotConnected(message) => Err(MediaError::NotConnected(message.clone())),
+            MediaOutcome::Busy(message) => Err(MediaError::Busy(message.clone())),
             MediaOutcome::Undecryptable(message) => Err(MediaError::Undecryptable(message.clone())),
         }
     }
@@ -2065,6 +2139,26 @@ impl MediaProxy for ConfiguredMediaProxy {
             None => format!("configured-{mxc_url}"),
             Some(file) => format!("configured-{mxc_url}-{file}"),
         }
+    }
+
+    async fn get_media_stream(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<serde_json::Value>,
+    ) -> Result<MediaBody, MediaError> {
+        self.stream_calls.lock().unwrap().push(MediaCall {
+            account_id,
+            mxc_url: mxc_url.to_owned(),
+            encrypted_file,
+        });
+        if let MediaOutcome::Growing(growing) = &self.outcome {
+            return Ok(MediaBody::Growing(GrowingResource {
+                etag: "growing-etag".to_owned(),
+                source: Box::new(FakeGrowing(growing.clone())),
+            }));
+        }
+        self.resource_from_outcome().await.map(MediaBody::Complete)
     }
 
     async fn get_thumbnail(

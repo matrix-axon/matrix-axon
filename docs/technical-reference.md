@@ -215,6 +215,26 @@ Holes that existed before this release have no rows, so a one-time verification 
 
 `scripts/gap-fill-test.sh` exercises the whole path against a local Synapse ([integration testing](integration-testing.md#gap-fill-adr-0140)).
 
+## Media streaming
+
+Video and audio (`video/*` and `audio/*` by the event's `info.mimetype`) stream from the homeserver as they arrive ([ADR 0139](adr/0139-stream-large-video-and-audio.md)).
+The first bytes leave Axon as soon as the first chunk arrives, encrypted attachments are decrypted chunk by chunk, and the object is cached once it has been verified.
+Images, files and thumbnails keep the buffered path, which checks an encrypted attachment's hash before serving any byte.
+
+A streamed object's SHA-256 can only be checked after its last byte, so a response withholds the object's last 64 KiB until then and is aborted, not finished, if the check fails.
+A failed check is remembered for 10 minutes, so a retry gets `422 media_undecryptable` at once.
+
+| Setting (`[media]`)      | Default | Meaning                                                                                                                          |
+| ------------------------ | ------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `fetch_timeout_secs`     | 60      | Deadline for a stream slot plus the homeserver's response headers; past it, a retryable `503`. Bounds a whole buffered download. |
+| `stall_timeout_secs`     | 30      | Cancels a streamed download that delivers no bytes for this long. A stream has no total-duration limit.                          |
+| `max_concurrent_streams` | 4       | Streamed downloads open to the homeserver at once, separate from `max_concurrent_downloads` for buffered media.                  |
+| `max_stream_bytes`       | 2 GiB   | Largest streamed object (`413` above it). Must not exceed `max_bytes - max_object_bytes`; unset, it is lowered to that bound.    |
+
+A streamed download reserves its declared length in the cache before reading its body, and runs to completion even if the viewer goes away.
+When the other streams' reservations leave no room, the request gets a retryable `503` rather than waiting.
+Clients keep their own limits: the web client and the shells still buffer a whole object until ADR 0139's later phases land, and the TUI still refuses media over 20 MiB.
+
 ## Environment variables
 
 Two kinds of `AXON_`-prefixed environment variables exist:

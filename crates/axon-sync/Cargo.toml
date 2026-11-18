@@ -44,8 +44,13 @@ fs4 = { workspace = true }
 async-trait = { workspace = true }
 # APNs JWT (ES256) and the FCM service-account assertion (RS256).
 jsonwebtoken = { workspace = true }
-# Collapse id: first 32 hex characters of the SHA-256 of the room id.
+# Collapse id: first 32 hex characters of the SHA-256 of the room id. Also the
+# ciphertext hash of a streamed encrypted attachment (ADR 0139).
 sha2 = { workspace = true }
+# Streamed decryption of encrypted attachments (ADR 0139).
+aes = { workspace = true }
+ctr = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 # DB-gated lifecycle tests: seed/clean account rows directly through the pool

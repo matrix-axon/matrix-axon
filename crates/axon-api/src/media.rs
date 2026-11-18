@@ -6,7 +6,11 @@
 //! port by `axon-server`. So this crate stays free of `axon-sync` and
 //! `matrix-sdk`: handlers speak only [`MediaProxy`] and plain types.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::stream::BoxStream;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -25,6 +29,10 @@ pub enum MediaError {
     Forbidden(String),
     /// The account is not yet reachable; caller should retry. → `503`.
     NotConnected(String),
+    /// A streamed download could not start now — no stream slot or upstream
+    /// answer in time, or no cache room beside the other streams — and the
+    /// caller should retry (ADR 0139). → `503`.
+    Busy(String),
     /// The homeserver was unreachable or failed the request. → `502`.
     Upstream(String),
     /// The object exceeds a configured size limit and is refused. A terminal
@@ -51,7 +59,7 @@ impl From<MediaError> for crate::response::ApiError {
             MediaError::AccountNotFound(msg) | MediaError::NotFound(msg) => Self::not_found(msg),
             MediaError::Invalid(msg) => Self::bad_request(msg),
             MediaError::Forbidden(msg) => Self::forbidden(msg),
-            MediaError::NotConnected(msg) => Self::service_unavailable(msg),
+            MediaError::NotConnected(msg) | MediaError::Busy(msg) => Self::service_unavailable(msg),
             MediaError::Upstream(msg) => Self::bad_gateway(msg),
             MediaError::TooLarge(msg) => Self::payload_too_large(msg),
             MediaError::Internal(_) => Self::internal(),
@@ -74,6 +82,44 @@ pub struct MediaResource {
     /// A stable, content-addressed entity tag for `ETag` / `If-None-Match`.
     /// MXC content is immutable, so this never changes for a given URI.
     pub etag: String,
+}
+
+/// What [`MediaProxy::get_media_stream`] resolves to.
+pub enum MediaBody {
+    /// The object is complete on disk.
+    Complete(MediaResource),
+    /// The object's streamed download is still running (ADR 0139).
+    Growing(GrowingResource),
+}
+
+/// A media object still arriving from the homeserver, served as it arrives.
+pub struct GrowingResource {
+    /// The same content-addressed entity tag a complete object carries.
+    pub etag: String,
+    pub source: Box<dyn GrowingSource>,
+}
+
+/// Reads a media object whose download is still running (ADR 0139 section 3).
+#[async_trait]
+pub trait GrowingSource: Send {
+    /// The object's length, if the homeserver declared one or the download
+    /// has finished.
+    fn known_len(&self) -> Option<u64>;
+
+    /// Wait up to `wait` for the length to be known. `Ok(None)` means it is
+    /// still unknown; a download that fails meanwhile returns its error.
+    async fn wait_for_len(&mut self, wait: Duration) -> Result<Option<u64>, MediaError>;
+
+    /// The bytes from `start` up to `end` (exclusive), or to the object's end,
+    /// as the download writes them. The stream ends cleanly only when the
+    /// range has been read and, where the range reaches the object's last
+    /// bytes, the download has been verified; otherwise it ends in an error,
+    /// which aborts the response.
+    fn into_body(
+        self: Box<Self>,
+        start: u64,
+        end: Option<u64>,
+    ) -> BoxStream<'static, std::io::Result<Bytes>>;
 }
 
 /// Fetches media from a homeserver on behalf of an account (caching it on
@@ -101,6 +147,17 @@ pub trait MediaProxy: Send + Sync {
     /// yields different bytes. The handler uses it to answer a conditional GET
     /// (`If-None-Match`) with `304` before triggering a fetch on a cache miss.
     fn etag(&self, mxc_url: &str, encrypted_file: Option<&Value>) -> String;
+
+    /// The streamed sibling of [`get_media`](Self::get_media), for video and
+    /// audio (ADR 0139): resolves to the complete object when it is cached,
+    /// or to a [`GrowingResource`] that serves the object while its download
+    /// runs.
+    async fn get_media_stream(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<Value>,
+    ) -> Result<MediaBody, MediaError>;
 
     /// Resolve a homeserver-generated thumbnail of `mxc_url` at `spec`'s
     /// dimensions/method, using the given account's credentials.

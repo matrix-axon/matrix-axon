@@ -41,6 +41,7 @@ mod matrix_oauth_device_grant;
 mod matrix_oauth_flow;
 mod matrix_oauth_grant;
 mod media;
+mod media_stream;
 mod preview_generation;
 pub use preview_generation::{AcquiredPreview, HomeserverPreviewGenerator, PreviewFailure};
 mod member_counts;

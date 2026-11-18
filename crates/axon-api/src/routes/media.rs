@@ -10,6 +10,7 @@
 
 use std::io::SeekFrom;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axon_store::Store;
 use axum::body::Body;
@@ -23,7 +24,7 @@ use uuid::Uuid;
 
 use crate::dto::{MediaEventQuery, ThumbnailQuery};
 use crate::linked_events::{names_media, KeptMedia};
-use crate::media::{MediaError, MediaProxy, MediaResource};
+use crate::media::{GrowingResource, MediaBody, MediaError, MediaProxy, MediaResource};
 use crate::response::ApiError;
 
 /// Dimension clamp bounds for the thumbnail route — a requested `width`/
@@ -258,6 +259,15 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
 /// MSC4027 custom reaction key.
 /// The response body is the raw media bytes, streamed from the on-disk cache
 /// with range-request and conditional-GET support.
+///
+/// Video and audio (`video/*`, `audio/*`) are served while they download
+/// (ADR 0139): the response starts once the first bytes have arrived, and a
+/// range past the downloaded point waits for it. Such a response withholds
+/// the object's last 64 KiB until the download has been verified, and is
+/// aborted rather than finished if verification fails. When the homeserver
+/// declared no length, a request without `Range` gets a `200` with no
+/// `Content-Length` or `Accept-Ranges`; a request with `Range` waits up to
+/// 10 s for the download to finish, then gets that same `200`.
 #[utoipa::path(
     get,
     path = "/v1/media/{account_id}/{server_name}/{media_id}",
@@ -274,12 +284,12 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
         (status = 400, description = "Syntactically invalid MXC URI components, or only one of `room_id` and `event_id`", body = crate::response::ErrorResponse),
         (status = 403, description = "The homeserver denied access to this media object", body = crate::response::ErrorResponse),
         (status = 404, description = "Account not found, or media not found on the homeserver", body = crate::response::ErrorResponse),
-        (status = 413, description = "The media object exceeds the configured per-object cache limit", body = crate::response::ErrorResponse),
+        (status = 413, description = "The media object exceeds the configured size limit: `max_object_bytes`, or `max_stream_bytes` for video and audio", body = crate::response::ErrorResponse),
         (status = 416, description = "The requested `Range` is not satisfiable (with `Content-Range: bytes */len`).", body = crate::response::ErrorResponse),
-        (status = 422, description = "The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help.", body = crate::response::ErrorResponse),
+        (status = 422, description = "The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help. For video and audio, which stream before their hash is checked, a hash mismatch instead aborts the response before its last 64 KiB, and the next request gets this `422`.", body = crate::response::ErrorResponse),
         (status = 500, description = "Internal media-metadata lookup failure", body = crate::response::ErrorResponse),
         (status = 502, description = "The homeserver was unreachable or returned an error", body = crate::response::ErrorResponse),
-        (status = 503, description = "The account's homeserver connection is not currently established", body = crate::response::ErrorResponse),
+        (status = 503, description = "The account's homeserver connection is not currently established, or a video or audio stream could not start yet (no stream slot or upstream answer within `fetch_timeout_secs`, or no cache room beside other streams). Retryable.", body = crate::response::ErrorResponse),
     ),
     tag = "media",
 )]
@@ -311,6 +321,24 @@ pub async fn get_media(
     }
 
     let content_type = content_type_for_mxc(&content, &mxc_url);
+    let range = header_str(&headers, header::RANGE);
+
+    // Video and audio stream from the homeserver as they arrive (ADR 0139).
+    // `raster_only` media carries no trusted type and is never one of them.
+    if !raster_only && is_streamed_type(&content_type) {
+        let body = proxy
+            .get_media_stream(account_id, &mxc_url, encrypted_file)
+            .await
+            .map_err(|err| log_and_convert_media_error(account_id, &mxc_url, "get_media", err))?;
+        return match body {
+            MediaBody::Complete(resource) => {
+                serve_media(account_id, resource, content_type, range, etag).await
+            }
+            MediaBody::Growing(media) => {
+                serve_growing(account_id, &mxc_url, media, content_type, range, etag).await
+            }
+        };
+    }
 
     let mut resource = proxy
         .get_media(account_id, &mxc_url, encrypted_file)
@@ -325,8 +353,113 @@ pub async fn get_media(
         content_type
     };
 
-    let range = header_str(&headers, header::RANGE);
     serve_media(account_id, resource, content_type, range, etag).await
+}
+
+/// Whether a served type streams from the homeserver as it arrives (ADR 0139
+/// section 2). Only video and audio: a damaged frame is the worst a decoder
+/// makes of bytes served before their hash check, which images and documents
+/// do not share.
+fn is_streamed_type(content_type: &str) -> bool {
+    content_type.starts_with("video/") || content_type.starts_with("audio/")
+}
+
+/// How long a ranged request waits for an object whose length the homeserver
+/// did not declare (ADR 0139 section 3): long enough for a small object to
+/// finish, short enough that no player or proxy gives up first.
+const UNKNOWN_LENGTH_RANGE_WAIT: Duration = Duration::from_secs(10);
+
+/// Serve an object whose streamed download is still running (ADR 0139
+/// section 3).
+///
+/// With a known length this answers exactly as [`serve_media`] does, and the
+/// body follows the download. With the length unknown, a request without
+/// `Range` gets a `200` with a chunked body and no `Accept-Ranges`. A request
+/// with `Range` first waits up to [`UNKNOWN_LENGTH_RANGE_WAIT`] for the
+/// download to finish, then is answered like any other range; past that it
+/// gets the same `200`, ignoring the range, which RFC 9110 allows. So every
+/// `206` carries a known total length.
+async fn serve_growing(
+    account_id: Uuid,
+    mxc_url: &str,
+    mut media: GrowingResource,
+    content_type: String,
+    range: Option<String>,
+    etag: String,
+) -> Result<Response, ApiError> {
+    let mut len = media.source.known_len();
+    if len.is_none() && range.is_some() {
+        len = media
+            .source
+            .wait_for_len(UNKNOWN_LENGTH_RANGE_WAIT)
+            .await
+            .map_err(|err| log_and_convert_media_error(account_id, mxc_url, "get_media", err))?;
+    }
+
+    let Some(len) = len else {
+        let body = Body::from_stream(media.source.into_body(0, None));
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(header::ETAG, &etag)
+            .body(body)
+            .expect("valid 200 response"));
+    };
+
+    match parse_range(range.as_deref(), len) {
+        RangeSpec::Unsatisfiable => Ok(range_not_satisfiable(len, &etag)),
+        RangeSpec::Satisfiable { start, end } => {
+            let body = Body::from_stream(media.source.into_body(start, Some(end + 1)));
+            Ok(Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, end - start + 1)
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                .header(header::ETAG, &etag)
+                .body(body)
+                .expect("valid 206 response"))
+        }
+        RangeSpec::Full => {
+            let body = Body::from_stream(media.source.into_body(0, Some(len)));
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, len)
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                .header(header::ETAG, &etag)
+                .body(body)
+                .expect("valid 200 response"))
+        }
+    }
+}
+
+/// The `416` for a range outside a `len`-byte object, with the range headers
+/// layered over the shared JSON error envelope (advertised by the OpenAPI
+/// spec for this status).
+fn range_not_satisfiable(len: u64, etag: &str) -> Response {
+    let mut response = ApiError::range_not_satisfiable(format!(
+        "requested range is not satisfiable for a {len}-byte resource"
+    ))
+    .into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_RANGE,
+        HeaderValue::from_str(&format!("bytes */{len}")).expect("valid header value"),
+    );
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(etag).expect("valid header value"),
+    );
+    response
 }
 
 /// Validate a thumbnail request against the resolved event content, producing
@@ -650,32 +783,7 @@ async fn serve_media(
     etag: String,
 ) -> Result<Response, ApiError> {
     match parse_range(range.as_deref(), resource.len) {
-        RangeSpec::Unsatisfiable => {
-            // Reuse the shared JSON error envelope (advertised by the OpenAPI
-            // spec for this status) rather than an empty body, then layer the
-            // range-specific headers on top.
-            let mut response = ApiError::range_not_satisfiable(format!(
-                "requested range is not satisfiable for a {}-byte resource",
-                resource.len
-            ))
-            .into_response();
-            let headers = response.headers_mut();
-            headers.insert(
-                header::CONTENT_RANGE,
-                HeaderValue::from_str(&format!("bytes */{}", resource.len))
-                    .expect("valid header value"),
-            );
-            headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-            headers.insert(
-                header::X_CONTENT_TYPE_OPTIONS,
-                HeaderValue::from_static("nosniff"),
-            );
-            headers.insert(
-                header::ETAG,
-                HeaderValue::from_str(&etag).expect("valid header value"),
-            );
-            Ok(response)
-        }
+        RangeSpec::Unsatisfiable => Ok(range_not_satisfiable(resource.len, &etag)),
 
         RangeSpec::Satisfiable { start, end } => {
             resource
