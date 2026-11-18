@@ -188,8 +188,18 @@ const project = {
   },
 }
 writeFileSync(join(output, 'project.yml'), JSON.stringify(project))
-// Generous: a loaded shared runner has exceeded 30 s here and died ETIMEDOUT.
-run('xcodegen', ['generate', '--spec', join(output, 'project.yml')], 180_000)
+// A loaded shared runner has exceeded 30 s here and died ETIMEDOUT. Project
+// generation is idempotent, so retry that infrastructure timeout once; the
+// test suites below are never retried, and any other failure propagates.
+const generate = () =>
+  run('xcodegen', ['generate', '--spec', join(output, 'project.yml')], 120_000)
+try {
+  generate()
+} catch (error) {
+  if (error?.code !== 'ETIMEDOUT') throw error
+  console.warn('::warning::xcodegen timed out; retrying once')
+  generate()
+}
 console.log(
   `Testing on ${device.name}. Results: ${join(output, 'results.xcresult')}`,
 )

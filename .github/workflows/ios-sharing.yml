@@ -24,14 +24,16 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# A newer push to the same PR makes the older macOS run moot; main runs finish.
+# A newer push to the same PR makes the older macOS run moot. Every other run
+# gets its own group, because a shared group would still replace a pending run.
 concurrency:
-  group: ios-sharing-${{ github.ref }}
+  group: ios-sharing-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   native:
     runs-on: macos-latest
-    timeout-minutes: 30
+    # Observed passing runs take 16-24 min; leave room for one xcodegen retry.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
@@ -51,13 +53,7 @@ jobs:
       - name: Install simulator test project generator
         run: brew install xcodegen
       - name: Run native tests and real share-sheet activation under iOS Simulator
-        # Shared macOS runners sometimes stall booting the simulator, so one
-        # retry; a real test failure fails both attempts and still fails CI.
-        run: |
-          node clients/web/scripts/test-sharing-simulator.mjs || {
-            echo '::warning::Simulator step failed once; retrying'
-            node clients/web/scripts/test-sharing-simulator.mjs
-          }
+        run: node clients/web/scripts/test-sharing-simulator.mjs
       - name: Compile shared module with iOS extension API restrictions
         working-directory: clients/web/src-tauri/incoming-share
         run: |

@@ -12,18 +12,34 @@ final class PreviewResolutionTests: XCTestCase {
 
   func testSlowDiscoveryKeepsPublicAWithinSharedBudget() throws {
     let missing = ShareIntakeResult<PreviewNetwork.Address?>()
-    let start = Date()
     let addresses = try PreviewNetwork.resolvedAddresses(
       [answer("1.1.1.1"), missing], deadline: .now() + 0.02, cancellation: ShareCancellation())
     XCTAssertEqual(addresses.map(\.text), ["1.1.1.1"])
-    // The 20 ms deadline must not wait on the unanswered lookup; the bound is
-    // loose because a loaded CI VM measured 1.6 s here.
-    XCTAssertLessThan(Date().timeIntervalSince(start), 10)
     XCTAssertThrowsError(
       try PreviewNetwork.resolvedAddresses(
         [missing, answer("64:ff9b::c000:aa")], deadline: .now() + 0.01,
         cancellation: ShareCancellation())
     ) { XCTAssertEqual($0 as? ShareFailure, .expired) }
+  }
+
+  // Deterministic by outcome, not elapsed time: both lookups must share one
+  // absolute deadline. With the deadline already spent, an optional answer that
+  // arrives later must be ignored; a lookup that restarted its own wait would
+  // pick it up. The control proves the same answer is used when time allows.
+  func testOptionalDiscoveryCannotRestartTheSharedDeadline() throws {
+    let probe = "64:ff9b::c000:aa"
+    let control = try PreviewNetwork.resolvedAddresses(
+      [answer("1.1.1.1"), answer(probe)], deadline: .now() + 5, cancellation: ShareCancellation())
+    XCTAssertEqual(control.count, 2, "control: a timely discovery answer is used")
+
+    let late = ShareIntakeResult<PreviewNetwork.Address?>()
+    DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+      late.finish(.success(PreviewNetwork.Address.parse(probe)))
+    }
+    let spent = DispatchTime(uptimeNanoseconds: 1)
+    let addresses = try PreviewNetwork.resolvedAddresses(
+      [answer("1.1.1.1"), late], deadline: spent, cancellation: ShareCancellation())
+    XCTAssertEqual(addresses.map(\.text), ["1.1.1.1"])
   }
 
   func testNoPublicAFailsAndCancellationDoesNotReturnPartialResults() throws {
