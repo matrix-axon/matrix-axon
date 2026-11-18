@@ -5443,9 +5443,105 @@ describe('RoomPage linked-event notice', () => {
       ),
     )
     const { findByRole } = openLink('$elusive')
-    expect((await findByRole('alert')).textContent).toContain(
-      "The linked message isn't available",
+    const text = (await findByRole('alert')).textContent
+    // Axon just returned the event by id: it must not be told it may not exist.
+    expect(text).toContain("Couldn't show the linked message. Axon has it")
+    expect(text).not.toContain('no copy')
+  })
+
+  it('does not report a miss for a jump a later slice load superseded', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () =>
+        HttpResponse.json({ data: event('$raced', T0 - 5 * DAY) }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: { events: [event('$tail', T0)], next_cursor: null },
+        }),
+      ),
     )
+    const services = testServices()
+    const timeline = services.timelines.acquire(ACCOUNT, ROOM)
+    // A reconnect head load won the generation race: the jump fetched fine,
+    // `error` is null, and the slice is not the timestamp page.
+    const jumpTo = vi
+      .spyOn(timeline, 'jumpTo')
+      .mockImplementation(async () => 'superseded')
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24raced`,
+    )
+    const { queryByRole } = render(routedRoomPage(services))
+    await waitFor(() => expect(jumpTo).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(queryByRole('alert')).toBeNull()
+  })
+
+  it('retracts the notice when the missing event arrives later', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () => new HttpResponse(null, { status: 404 })),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: { events: [event('$tail', T0)], next_cursor: null },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24late-sync`,
+    )
+    const services = testServices()
+    const { findByRole, findByText, queryByRole } = render(
+      routedRoomPage(services),
+    )
+    await findByRole('alert')
+    await waitFor(() => expect(window.location.search).not.toContain('event='))
+
+    // "May not have synced yet" — and now it has.
+    services.timelines
+      .acquire(ACCOUNT, ROOM)
+      .ingestLive(event('$late-sync', T0 + 1000))
+    await findByText('body of $late-sync')
+    await waitFor(() => expect(queryByRole('alert')).toBeNull())
+  })
+
+  it('clears a jump-miss notice when a same-room navigation drops the link', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(LOOKUP_PATH, () =>
+        HttpResponse.json({ data: event('$elusive', T0 - 5 * DAY) }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$neighbour', T0 - 5 * DAY)],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    const { findByRole, queryByRole } = openLink('$elusive')
+    await findByRole('alert')
+
+    // Closing a thread or opening room information replaces the URL with the
+    // bare room path, as here.
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() => expect(queryByRole('alert')).toBeNull())
   })
 
   it('explains a target hidden because deleted messages are hidden', async () => {

@@ -237,16 +237,15 @@ export function ThreadPanel({
   const targetEventId =
     highlightedEventId ??
     (typeof location.query.event === 'string' ? location.query.event : null)
-  /** Why a linked reply could not be revealed (see `LinkedEventNotice`). */
-  const [targetMissing, setTargetMissing] = useState(false)
   /** The thread's root is verified absent: the server answered 404 for it. */
   const [rootMissing, setRootMissing] = useState(false)
   useEffect(() => {
-    setTargetMissing(false)
-  }, [rootId, targetEventId])
-  useEffect(() => {
     setRootMissing(false)
   }, [rootId])
+  /** The linked reply whose "deleted" notice the user dismissed. */
+  const [dismissedHiddenTarget, setDismissedHiddenTarget] = useState<
+    string | null
+  >(null)
 
   // The full root always stays in the scrollable thread. Once it has scrolled
   // out of view, a compact overlay replaces it at the top of the scrollport.
@@ -373,7 +372,7 @@ export function ThreadPanel({
             path: { account_id: accountId, event_id: targetEventId },
           },
         })
-        .then(async ({ data }) => {
+        .then(({ data }) => {
           if (cancelled) {
             return
           }
@@ -383,18 +382,11 @@ export function ThreadPanel({
             void thread.loadLatest()
             return
           }
-          await thread.jumpTo(data.data.origin_ts)
-          // The server has the reply, but the page around its timestamp came
-          // back without it: say so rather than show an unhighlighted thread.
-          if (
-            !cancelled &&
-            thread.error.peek() === null &&
-            !thread.events
-              .peek()
-              .some((event) => event.event_id === targetEventId)
-          ) {
-            setTargetMissing(true)
-          }
+          // No "not on this page" notice after the jump: the thread timeline
+          // route does not honour `at_ts` and serves its newest page, so a
+          // reply older than that page is absent from a page that was never
+          // bounded at its timestamp. Absence here proves nothing (#1146).
+          void thread.jumpTo(data.data.origin_ts)
         }),
     )
     return () => {
@@ -413,6 +405,18 @@ export function ThreadPanel({
    */
   const isVisibleEvent = (event: TimelineEvent): boolean =>
     !hiddenByRedaction(event, hideRedacted, NO_THREAD_ROOTS)
+  /**
+   * A linked reply that is loaded but filtered out by "hide deleted messages"
+   * has no row to reveal, so the jump would silently show nothing. The room
+   * page leaves thread replies to this panel.
+   */
+  const hiddenTarget =
+    targetEventId !== null &&
+    targetEventId !== rootId &&
+    targetEventId !== dismissedHiddenTarget &&
+    thread.events.value.some(
+      (event) => event.event_id === targetEventId && !isVisibleEvent(event),
+    )
   const visibleEvents = thread.events.value.filter(isVisibleEvent)
 
   /**
@@ -759,15 +763,18 @@ export function ThreadPanel({
       <ErrorBanner error={thread.error} />
       <LinkedEventNotice
         message={
-          targetMissing
-            ? LINKED_EVENT_MESSAGES.missing
+          hiddenTarget
+            ? LINKED_EVENT_MESSAGES.deleted
             : rootMissing && root === undefined
               ? LINKED_THREAD_ROOT_MISSING
               : null
         }
         onDismiss={() => {
-          setTargetMissing(false)
-          setRootMissing(false)
+          if (hiddenTarget) {
+            setDismissedHiddenTarget(targetEventId)
+          } else {
+            setRootMissing(false)
+          }
         }}
       />
 

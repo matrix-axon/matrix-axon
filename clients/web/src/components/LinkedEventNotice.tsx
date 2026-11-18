@@ -7,12 +7,18 @@
  * `missing` is only ever set once the target is verified absent: the server
  * answered 404 for it *and* it is not in the loaded slice. A 5xx, a rate limit
  * or an offline lookup says nothing about the event and must not accuse it.
+ *
+ * `unplaced` is the opposite case: the by-id read *returned* the event, but the
+ * applied page around its timestamp did not include it. Axon has the event, so
+ * it must not be told it may not exist.
  */
-export type LinkedEventProblem = 'missing' | 'deleted' | 'filtered'
+export type LinkedEventProblem = 'missing' | 'unplaced' | 'deleted' | 'filtered'
 
 export const LINKED_EVENT_MESSAGES: Record<LinkedEventProblem, string> = {
   missing:
     "The linked message isn't available. Axon has no copy of it: it may be older than the history this account can see in the room, or it may not have synced yet.",
+  unplaced:
+    "Couldn't show the linked message. Axon has it, but it wasn't among the messages loaded around the time it was sent.",
   deleted:
     'The linked message was deleted, and deleted messages are hidden by your settings.',
   filtered:

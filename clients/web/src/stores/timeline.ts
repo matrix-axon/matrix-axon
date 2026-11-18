@@ -223,8 +223,11 @@ export interface TimelineStore {
   /**
    * Date jump (`at_ts`): replace the slice with the page at or before the
    * timestamp. Scroll-back continues from there; `loadNewer` walks forward.
+   * Resolves to whether *this* jump's page was applied, as `loadLatest` does:
+   * a caller asking "did the page contain X?" must not read a superseded or
+   * failed jump's slice as the answer.
    */
-  jumpTo(atTs: number): Promise<void>
+  jumpTo(atTs: number): Promise<HeadLoadOutcome>
   /**
    * Calendar-day jump: find the page closest to the start of the selected day,
    * starting from that day's end and walking older pages only as far as needed.
@@ -1772,7 +1775,7 @@ export function createTimelineStore(
       // a jump near the present costs one `loadNewer` that comes back empty
       // and flips this back, which is cheaper than ever faking contiguity.
       reachedEnd.value = false
-      await replaceSlice({ at_ts: atTs })
+      return replaceSlice({ at_ts: atTs })
     },
     jumpToDate: (
       startTs: number,
