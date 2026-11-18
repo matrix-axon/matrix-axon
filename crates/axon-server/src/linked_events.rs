@@ -29,11 +29,13 @@ fn map_err(err: SyncLinkedEventError) -> LinkedEventError {
         SyncLinkedEventError::TimedOut => {
             LinkedEventError::Timeout("the homeserver did not answer in time".to_owned())
         }
-        SyncLinkedEventError::Upstream(msg) => LinkedEventError::Upstream(msg),
-        SyncLinkedEventError::Store(msg) => {
-            tracing::error!(error = %msg, "store error reading a linked event");
-            LinkedEventError::Internal
+        // The detail (which can name the homeserver's URL) is logged by the
+        // reader; the client gets a fixed message, as on the 500 path.
+        SyncLinkedEventError::Upstream(_) => {
+            LinkedEventError::Upstream("the homeserver could not serve this event".to_owned())
         }
+        // Logged, with its ids, by the reader.
+        SyncLinkedEventError::Store(_) => LinkedEventError::Internal,
     }
 }
 

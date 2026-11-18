@@ -128,17 +128,42 @@ impl Default for KeptMedia {
 #[derive(Default)]
 struct AccountKept {
     entries: HashMap<(String, String), Kept>,
+    /// Events whose latest applied read found no media, or no event, so an
+    /// older read still in flight cannot restore media over that answer. Kept
+    /// apart from `entries` and capped on their own, so refusals (a link to a
+    /// room the account was never in) never push out media a card is showing.
+    withdrawn: HashMap<(String, String), Withdrawn>,
     /// Bumped on every keep and use, to order entries by recency.
     clock: u64,
 }
 
 struct Kept {
-    /// `None` records that the latest applied read found no media, or no
-    /// event, so an older read's media is not restored over it.
-    media: Option<Value>,
+    media: Value,
     ticket: u64,
     kept_at: Instant,
     used: u64,
+}
+
+struct Withdrawn {
+    ticket: u64,
+    at: Instant,
+}
+
+impl AccountKept {
+    /// The ticket of the latest read applied for `key`, kept or withdrawn.
+    fn applied_ticket(&self, key: &(String, String)) -> Option<u64> {
+        self.entries
+            .get(key)
+            .map(|kept| kept.ticket)
+            .or_else(|| self.withdrawn.get(key).map(|gone| gone.ticket))
+    }
+
+    fn expire(&mut self, now: Instant) {
+        self.entries
+            .retain(|_, kept| now.duration_since(kept.kept_at) < KEPT_FOR);
+        self.withdrawn
+            .retain(|_, gone| now.duration_since(gone.at) < KEPT_FOR);
+    }
 }
 
 impl KeptMedia {
@@ -190,14 +215,32 @@ impl KeptMedia {
         let mut state = self.lock();
         state.sweep(now);
         let account = state.accounts.entry(account_id).or_default();
-        if let Some(existing) = account.entries.get(&key) {
-            if existing.ticket > ticket {
-                return;
-            }
+        if account
+            .applied_ticket(&key)
+            .is_some_and(|applied| applied > ticket)
+        {
+            return;
         }
-        account
-            .entries
-            .retain(|_, kept| now.duration_since(kept.kept_at) < KEPT_FOR);
+        account.expire(now);
+        let Some(media) = media else {
+            account.entries.remove(&key);
+            if !account.withdrawn.contains_key(&key) && account.withdrawn.len() >= KEPT_PER_ACCOUNT
+            {
+                // The oldest withdrawal is the one least likely to have an
+                // older read still in flight behind it.
+                if let Some(oldest) = account
+                    .withdrawn
+                    .iter()
+                    .min_by_key(|(_, gone)| gone.ticket)
+                    .map(|(key, _)| key.clone())
+                {
+                    account.withdrawn.remove(&oldest);
+                }
+            }
+            account.withdrawn.insert(key, Withdrawn { ticket, at: now });
+            return;
+        };
+        account.withdrawn.remove(&key);
         if !account.entries.contains_key(&key) && account.entries.len() >= KEPT_PER_ACCOUNT {
             if let Some(oldest) = account
                 .entries
@@ -241,7 +284,7 @@ impl KeptMedia {
         let used = account.clock;
         let kept = account.entries.get_mut(&key)?;
         kept.used = used;
-        kept.media.clone()
+        Some(kept.media.clone())
     }
 
     #[cfg(test)]
@@ -250,6 +293,14 @@ impl KeptMedia {
             .accounts
             .get(&account_id)
             .map_or(0, |account| account.entries.len())
+    }
+
+    #[cfg(test)]
+    fn withdrawn(&self, account_id: Uuid) -> usize {
+        self.lock()
+            .accounts
+            .get(&account_id)
+            .map_or(0, |account| account.withdrawn.len())
     }
 }
 
@@ -262,10 +313,8 @@ impl KeptState {
         }
         self.swept_at = now;
         self.accounts.retain(|_, account| {
-            account
-                .entries
-                .retain(|_, kept| now.duration_since(kept.kept_at) < KEPT_FOR);
-            !account.entries.is_empty()
+            account.expire(now);
+            !account.entries.is_empty() || !account.withdrawn.is_empty()
         });
     }
 }
@@ -554,5 +603,35 @@ mod tests {
         assert!(kept.get_at(now, busy, "!r", "$new").is_some());
         assert!(kept.get_at(now, quiet, "!r", "$q").is_some());
         assert_eq!(kept.entries(busy), KEPT_PER_ACCOUNT);
+    }
+
+    #[test]
+    fn refusals_never_push_out_kept_media() {
+        let kept = KeptMedia::default();
+        let account = Uuid::new_v4();
+        let now = Instant::now();
+        let media = media_fields(&image("mxc://example.org/a"));
+        kept.apply_at(now, kept.ticket(), account, "!r", "$shown", media);
+        // Links to rooms the account was never in: every read is refused.
+        let mut last = 0;
+        for n in 0..KEPT_PER_ACCOUNT * 2 {
+            last = kept.ticket();
+            kept.apply_at(now, last, account, "!unknown", &format!("${n}"), None);
+        }
+        assert!(kept.get_at(now, account, "!r", "$shown").is_some());
+        assert_eq!(kept.entries(account), 1);
+        assert_eq!(kept.withdrawn(account), KEPT_PER_ACCOUNT);
+        // The newest withdrawals are the ones kept: an older read of the
+        // last refused event still cannot restore its media.
+        let newest = format!("${}", KEPT_PER_ACCOUNT * 2 - 1);
+        kept.apply_at(
+            now,
+            last - 1,
+            account,
+            "!unknown",
+            &newest,
+            media_fields(&image("mxc://example.org/a")),
+        );
+        assert!(kept.get_at(now, account, "!unknown", &newest).is_none());
     }
 }

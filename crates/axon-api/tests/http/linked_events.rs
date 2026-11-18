@@ -455,6 +455,59 @@ async fn edit(
     .await
 }
 
+/// A stored card shows its applied edit's content, and the scoped media route
+/// resolves against the same content: the media the edit names is served, and
+/// the media it replaced is not this event's any more.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_stored_events_edited_media_is_served_through_that_event() {
+    let store = store().await;
+    let account_id = account(&store).await;
+    let room = format!("!cards-{}:localhost", Uuid::new_v4());
+    let (original_id, edited_id) = (
+        Uuid::new_v4().simple().to_string(),
+        Uuid::new_v4().simple().to_string(),
+    );
+    let original_mxc = format!("mxc://example.org/{original_id}");
+    let edited_mxc = format!("mxc://example.org/{edited_id}");
+    let event =
+        insert_media_event(&store, account_id, &room, &original_mxc, Some("image/png")).await;
+    insert_relation(
+        &store,
+        account_id,
+        &room,
+        "@alice:localhost",
+        1_700_000_001_000,
+        "m.room.message",
+        json!({
+            "msgtype": "m.image",
+            "body": "* image.webp",
+            "url": edited_mxc,
+            "m.new_content": {
+                "msgtype": "m.image",
+                "body": "image.webp",
+                "url": edited_mxc,
+                "info": {"mimetype": "image/webp"},
+            },
+        }),
+        json!({"rel_type": "m.replace", "event_id": event}),
+    )
+    .await;
+    let app = app(store, never(), Arc::new(ConfiguredMediaProxy::ok(b"bytes")));
+    let media_uri = |media_id: &str| {
+        format!(
+            "/v1/media/{account_id}/example.org/{media_id}?room_id={room}&event_id={}",
+            event.replace('$', "%24")
+        )
+    };
+
+    let (status, headers, _) = get_media_bytes(&app, &media_uri(&edited_id), None).await;
+    assert_eq!(status, StatusCode::OK, "the edit names it");
+    assert_eq!(headers["content-type"], "image/webp");
+    let (status, _, _) = get_media_bytes(&app, &media_uri(&original_id), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "the edit replaced it");
+}
+
 /// A stored card shows the edit's text, so it carries the edit's own verdict:
 /// an identity change on the edit is not hidden behind the original's.
 #[tokio::test]

@@ -500,6 +500,10 @@ async fn resolve_event_media_content(
 ) -> Result<Value, ApiError> {
     let not_found = || ApiError::from(MediaError::NotFound(mxc_url.to_owned()));
     let content = match store.get_event(account_id, event_id).await? {
+        // `get_event` reads the row as the timeline shows it, its latest valid
+        // edit applied, so this is the content the card shows: an edit that
+        // names new media serves it, and media it replaced is no longer this
+        // event's, as on the kept path.
         Some(row) if row.room_id == room_id => row.content.ok_or_else(not_found)?,
         Some(_) => return Err(not_found()),
         None => kept

@@ -118,7 +118,67 @@ impl LinkedEventReader {
     }
 
     /// Read `event_id` in `room_id` from the account's homeserver.
+    ///
+    /// Logs each outcome, so an operator can tell a card outage (busy,
+    /// not connected) from a homeserver problem (timed out, upstream): the
+    /// expected answers at `debug`, the homeserver's failures at `warn`.
     pub async fn read(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<LinkedEvent, LinkedEventError> {
+        let result = self.read_unlogged(account_id, room_id, event_id).await;
+        match &result {
+            Ok(event) if event.content.is_none() && !event.redacted => tracing::debug!(
+                account_id = %account_id,
+                room_id,
+                event_id,
+                "linked event: read from the homeserver, could not be decrypted"
+            ),
+            Ok(event) => tracing::debug!(
+                account_id = %account_id,
+                room_id,
+                event_id,
+                redacted = event.redacted,
+                edited = event.edited,
+                "linked event: read from the homeserver"
+            ),
+            Err(
+                err @ (LinkedEventError::NotFound
+                | LinkedEventError::Invalid(_)
+                | LinkedEventError::UnknownAccount(_)
+                | LinkedEventError::NotActive(_)
+                | LinkedEventError::NotConnected(_)
+                | LinkedEventError::Busy),
+            ) => tracing::debug!(
+                account_id = %account_id,
+                room_id,
+                event_id,
+                error = %err,
+                "linked event: not read"
+            ),
+            Err(err @ (LinkedEventError::TimedOut | LinkedEventError::Upstream(_))) => {
+                tracing::warn!(
+                    account_id = %account_id,
+                    room_id,
+                    event_id,
+                    error = %err,
+                    "linked event: the homeserver failed"
+                )
+            }
+            Err(err @ LinkedEventError::Store(_)) => tracing::error!(
+                account_id = %account_id,
+                room_id,
+                event_id,
+                error = %err,
+                "linked event: store error"
+            ),
+        }
+        result
+    }
+
+    async fn read_unlogged(
         &self,
         account_id: Uuid,
         room_id: &str,
@@ -178,7 +238,13 @@ impl LinkedEventReader {
             }
         };
 
-        // Decryption is local work, after the permit and slot are returned.
+        // Decryption runs after the permit and slot are returned. It is
+        // mostly local, but for a missing session the SDK may start a
+        // backup-key download: a homeserver request outside the gate permit
+        // and the deadline above, and this await has no timeout of its own.
+        // That is accepted (the SDK de-duplicates and backs off those
+        // downloads, and backfill and live sync start the same ones far more
+        // often), not overlooked.
         let server_json: Value = serde_json::from_str(raw.json().get())
             .map_err(|err| LinkedEventError::Upstream(format!("unreadable event: {err}")))?;
         let original = decrypted(crate::backfill::decrypt_paged_event(&room, raw).await);
