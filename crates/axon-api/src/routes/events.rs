@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::dto::{EventDto, LinkedEventDto, ReactionDto, VerificationBundleDto};
 use crate::extract::Path;
-use crate::linked_events::{KeptMedia, LinkedEventSource};
+use crate::linked_events::{KeptMedia, LinkedEventError, LinkedEventSource};
 use crate::response::{ApiError, ApiResponse};
 use crate::trust::SenderTrustService;
 
@@ -86,18 +86,42 @@ pub async fn get_linked_event(
                 "event {event_id} not found in room {room_id}"
             )));
         }
-        return Ok(ApiResponse::new(LinkedEventDto::from_row(row)));
+        let mut dto = LinkedEventDto::from_row(row);
+        if dto.edited {
+            // The card shows the edit's text, so it carries the edit's own
+            // verdict, not the original's (which is what the timeline row has).
+            // An edit that vanished between the two reads leaves no verdict.
+            let edit = store.applied_edit(account_id, &event_id).await?;
+            dto.sender_trust = None;
+            if let Some(edit) = edit {
+                dto.content = Some(edit.content);
+                dto.body = edit.body;
+                dto.sender_trust = edit.sender_trust;
+            }
+        }
+        return Ok(ApiResponse::new(dto));
     }
-    let mut event = source.read(account_id, &room_id, &event_id).await?;
+    // Taken before the read, so a slower, older read can never overwrite what a
+    // newer one decided.
+    let ticket = kept.ticket();
+    let mut event = match source.read(account_id, &room_id, &event_id).await {
+        Ok(event) => event,
+        Err(err) => {
+            // A definitive "nothing to show" withdraws what an earlier read
+            // kept; a transient failure leaves it.
+            if matches!(err, LinkedEventError::NotFound(_)) {
+                kept.forget(ticket, account_id, &room_id, &event_id);
+            }
+            return Err(err.into());
+        }
+    };
     event.room_id = room_id;
     // Keeping nothing also drops what an earlier read kept, so an edit that
     // removed the image, or a redaction, stops it being served.
-    kept.keep(
-        account_id,
-        &event.room_id,
-        &event.event_id,
-        event.content.as_ref().unwrap_or(&serde_json::Value::Null),
-    );
+    match &event.content {
+        Some(content) => kept.keep(ticket, account_id, &event.room_id, &event_id, content),
+        None => kept.forget(ticket, account_id, &event.room_id, &event_id),
+    }
     Ok(ApiResponse::new(LinkedEventDto::from_fetched(event)))
 }
 

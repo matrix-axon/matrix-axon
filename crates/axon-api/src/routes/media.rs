@@ -296,18 +296,20 @@ pub async fn get_media(
     let (content, raster_only) =
         resolve_scoped_media_content(&store, &kept, account_id, &mxc_url, scope).await?;
 
+    let encrypted_file = encrypted_file_for_mxc(&content, &mxc_url);
+
     // Conditional GET: the entity tag is content-addressed (a hash of the MXC
-    // URI) and needs no download, so answer `304` *before* fetching. This is
-    // safe here because the fail-closed event checks above have already passed
-    // (the event exists and is decrypted), so a matching tag means the client
-    // already holds the current bytes.
-    let etag = format!("\"{}\"", proxy.etag(&mxc_url));
+    // URI, and of the descriptor that decrypts it, since another descriptor
+    // yields other bytes) and needs no download, so answer `304` *before*
+    // fetching. This is safe here because the fail-closed event checks above
+    // have already passed (the event exists and is decrypted), so a matching
+    // tag means the client already holds the current bytes.
+    let etag = format!("\"{}\"", proxy.etag(&mxc_url, encrypted_file.as_ref()));
     let if_none_match = header_str(&headers, header::IF_NONE_MATCH);
     if if_none_match_matches(if_none_match.as_deref(), &etag) {
         return Ok(not_modified(&etag));
     }
 
-    let encrypted_file = encrypted_file_for_mxc(&content, &mxc_url);
     let content_type = content_type_for_mxc(&content, &mxc_url);
 
     let mut resource = proxy

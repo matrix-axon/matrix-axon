@@ -5,6 +5,7 @@
 use super::*;
 
 use axon_api::{FetchedEvent, LinkedEventError, LinkedEventSource};
+use axon_store::EventCrypto;
 
 /// A linked-event source that answers from a fixed result and records reads.
 struct StubSource {
@@ -408,4 +409,170 @@ async fn a_thumbnail_is_served_through_a_fetched_event() {
     let (status, _, _) = get_media_bytes(&app, &path, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(media.thumbnail_calls().len(), 1);
+}
+
+async fn record_trust(store: &Store, account_id: Uuid, event_id: &str, verdict: &str) {
+    store
+        .upsert_event_crypto(&EventCrypto {
+            account_id,
+            event_id,
+            session_id: Some("session"),
+            curve25519_key: Some("CURVE"),
+            ed25519_key: Some("ED"),
+            forwarded: false,
+            forwarder_user_id: None,
+            forwarder_device_id: None,
+            device_id: Some("DEVICE"),
+            verification_state: "unverified",
+            sender_trust: Some(verdict),
+        })
+        .await
+        .expect("record trust");
+}
+
+async fn edit(
+    store: &Store,
+    account_id: Uuid,
+    room: &str,
+    target: &str,
+    ts: i64,
+    body: &str,
+) -> String {
+    insert_relation(
+        store,
+        account_id,
+        room,
+        "@alice:localhost",
+        ts,
+        "m.room.message",
+        json!({
+            "msgtype": "m.text",
+            "body": format!("* {body}"),
+            "m.new_content": {"msgtype": "m.text", "body": body},
+        }),
+        json!({"rel_type": "m.replace", "event_id": target}),
+    )
+    .await
+}
+
+/// A stored card shows the edit's text, so it carries the edit's own verdict:
+/// an identity change on the edit is not hidden behind the original's.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_stored_edits_own_trust_verdict_is_returned() {
+    let store = store().await;
+    let account_id = account(&store).await;
+    let room = format!("!cards-{}:localhost", Uuid::new_v4());
+    let original = insert_message(&store, account_id, &room, 1_000, "first").await;
+    record_trust(&store, account_id, &original, "verified").await;
+    let first_edit = edit(&store, account_id, &room, &original, 2_000, "second").await;
+    record_trust(&store, account_id, &first_edit, "verification_violation").await;
+    let app = app(store.clone(), never(), Arc::new(StubMediaProxy));
+
+    let (status, body) = get(&app, &uri(account_id, &room, &original)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["body"], "second");
+    assert_eq!(body["data"]["edited"], true);
+    assert_eq!(body["data"]["sender_trust"], "verification_violation");
+
+    // A later edit with no recorded verdict (sent unencrypted, say) has none.
+    edit(&store, account_id, &room, &original, 3_000, "third").await;
+    let (status, body) = get(&app, &uri(account_id, &room, &original)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["body"], "third");
+    assert_eq!(body["data"]["sender_trust"], Value::Null);
+
+    // An unedited event keeps its own verdict.
+    let plain = insert_message(&store, account_id, &room, 4_000, "plain").await;
+    record_trust(&store, account_id, &plain, "verified").await;
+    let (_, body) = get(&app, &uri(account_id, &room, &plain)).await;
+    assert_eq!(body["data"]["sender_trust"], "verified");
+}
+
+/// A fresh read that finds the event gone withdraws its kept media; a
+/// transient failure does not.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_refused_refresh_withdraws_kept_media_and_a_transient_one_does_not() {
+    let store = store().await;
+    let account_id = account(&store).await;
+    let media_id = Uuid::new_v4().simple().to_string();
+    let mxc = format!("mxc://example.org/{media_id}");
+    let room = format!("!cards-{}:localhost", Uuid::new_v4());
+    let answer = Arc::new(Mutex::new(Some(Ok::<(), ()>(()))));
+    let (answer_room, answer_mxc, current) = (room.clone(), mxc.clone(), Arc::clone(&answer));
+    let source = StubSource::new(move || match *current.lock().unwrap() {
+        Some(Ok(())) => Ok(fetched(
+            &answer_room,
+            "$img:localhost",
+            image(&answer_mxc, "image/png"),
+        )),
+        Some(Err(())) => Err(LinkedEventError::Upstream("blip".into())),
+        None => Err(LinkedEventError::NotFound("gone".into())),
+    });
+    let app = app(store, source, Arc::new(ConfiguredMediaProxy::ok(b"png")));
+    let media = format!(
+        "/v1/media/{account_id}/example.org/{media_id}?room_id={room}&event_id=%24img:localhost"
+    );
+    let card = uri(account_id, &room, "$img:localhost");
+
+    let (status, _) = get(&app, &card).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(get_media_bytes(&app, &media, None).await.0, StatusCode::OK);
+
+    *answer.lock().unwrap() = Some(Err(()));
+    assert_eq!(get(&app, &card).await.0, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        get_media_bytes(&app, &media, None).await.0,
+        StatusCode::OK,
+        "a blip keeps it"
+    );
+
+    *answer.lock().unwrap() = None;
+    assert_eq!(get(&app, &card).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        get_media_bytes(&app, &media, None).await.0,
+        StatusCode::NOT_FOUND,
+        "a refusal withdraws it"
+    );
+}
+
+/// The entity tag names the representation: the same URI described by two
+/// events with different descriptors gets two tags.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn the_entity_tag_follows_the_events_descriptor() {
+    let store = store().await;
+    let account_id = account(&store).await;
+    let media_id = Uuid::new_v4().simple().to_string();
+    let mxc = format!("mxc://example.org/{media_id}");
+    let room = format!("!cards-{}:localhost", Uuid::new_v4());
+    let file = |k: &str| json!({"url": mxc, "key": {"k": k}, "iv": "i", "hashes": {"sha256": "h"}, "v": "v2"});
+    let mut tags = Vec::new();
+    for (n, k) in ["one", "two"].into_iter().enumerate() {
+        let event_id = insert_relation(
+            &store,
+            account_id,
+            &room,
+            "@alice:localhost",
+            n as i64,
+            "m.room.message",
+            json!({"msgtype": "m.image", "body": "x.png", "file": file(k), "info": {"mimetype": "image/png"}}),
+            json!({}),
+        )
+        .await;
+        let app = app(
+            store.clone(),
+            never(),
+            Arc::new(ConfiguredMediaProxy::ok(b"png")),
+        );
+        let path = format!(
+            "/v1/media/{account_id}/example.org/{media_id}?room_id={room}&event_id={}",
+            event_id.replace('$', "%24")
+        );
+        let (status, headers, _) = get_media_bytes(&app, &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        tags.push(headers["etag"].to_str().unwrap().to_owned());
+    }
+    assert_ne!(tags[0], tags[1]);
 }

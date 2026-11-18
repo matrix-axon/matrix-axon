@@ -10,8 +10,8 @@
 mod cache;
 
 pub use cache::{
-    etag_for, etag_for_thumbnail, FetchError, MediaCache, MediaCacheError, MediaCacheHandle,
-    MediaFetcher, MediaResource,
+    etag_for, etag_for_media, etag_for_thumbnail, FetchError, MediaCache, MediaCacheError,
+    MediaCacheHandle, MediaFetcher, MediaResource,
 };
 
 pub use axon_core::media::parse_mxc;

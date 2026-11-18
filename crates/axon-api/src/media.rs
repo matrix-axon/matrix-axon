@@ -94,11 +94,13 @@ pub trait MediaProxy: Send + Sync {
         encrypted_file: Option<Value>,
     ) -> Result<MediaResource, MediaError>;
 
-    /// The stable entity tag for `mxc_url`, computed **without** any download.
-    /// MXC content is immutable, so this is content-addressed (a hash of the
-    /// URI). The handler uses it to answer a conditional GET (`If-None-Match`)
-    /// with `304` before triggering a fetch on a cache miss.
-    fn etag(&self, mxc_url: &str) -> String;
+    /// The stable entity tag for `mxc_url` served through `encrypted_file`
+    /// (or as plaintext when `None`), computed **without** any download. MXC
+    /// content is immutable, so this is content-addressed: a hash of the URI,
+    /// and of the descriptor when there is one, since a different descriptor
+    /// yields different bytes. The handler uses it to answer a conditional GET
+    /// (`If-None-Match`) with `304` before triggering a fetch on a cache miss.
+    fn etag(&self, mxc_url: &str, encrypted_file: Option<&Value>) -> String;
 
     /// Resolve a homeserver-generated thumbnail of `mxc_url` at `spec`'s
     /// dimensions/method, using the given account's credentials.
