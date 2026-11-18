@@ -59,6 +59,11 @@ import {
   type TimelineRow,
 } from '../timeline/group-media-runs'
 import { viewMayClaimReadState } from '../timeline/arrival-order'
+import {
+  anchorCaughtUp,
+  observeNewestSeen as watchNewestSeen,
+  type NewestSeen,
+} from '../timeline/newest-seen'
 import { hiddenByRedaction } from '../timeline/visibility'
 import { computeRoomReceipt } from '../timeline/room-receipt'
 import {
@@ -310,23 +315,208 @@ export function RoomPage() {
   const roomBody = useRef<HTMLDivElement>(null)
   /** Scopes the media viewer's focus-restore lookup to this room's rows. */
   const roomStream = useRef<HTMLDivElement>(null)
+  // Thread members live in the panel, not the main timeline (TUI parity);
+  // state events are tiered behind the visibility setting, and bodyless
+  // unsupported events are developer diagnostics rather than ordinary timeline
+  // content.
+  //
+  // Redaction is the one exclusion a *read position* does not have to honour,
+  // so it gets its own verdict instead of being folded in with the rest.
+  // `'redacted'` means "not rendered, but still nameable": the content is gone,
+  // so acknowledging the event withholds nothing the user has not seen. Without
+  // that distinction a message redacted moments after it arrives is unreachable
+  // — it leaves the timeline, the bodyless `m.room.redaction` behind it is
+  // dropped too, and the receipt has nothing above it to name, so the
+  // homeserver's notification count for the room can never be cleared (#337).
+  //
+  // The redaction test moved below the state-event tiers to report its verdict
+  // apart from theirs. That is not a behaviour change for rendering — both
+  // answers still hide the row — and `isUnsupportedBodylessEvent` excludes
+  // redacted events itself, so nothing above reorders around it.
+  // The redacted roots the hide-redacted setting must not hide: those whose
+  // thread still has replies. Derived and keyed by value so the visibility
+  // memos below change identity only when the verdict could — not on every
+  // summaries refresh, and not at all while the setting is off.
+  const threadSummaries = threads.summaries.value
+  const liveRootsKey = useMemo(
+    () =>
+      hideRedacted
+        ? timeline.events.value
+            .filter(
+              (event) =>
+                event.redacted &&
+                (threadSummaries.get(event.event_id)?.reply_count ?? 0) > 0,
+            )
+            .map((event) => event.event_id)
+            .sort()
+            .join('\n')
+        : '',
+    [hideRedacted, timeline.events.value, threadSummaries],
+  )
+  const liveThreadRoots = useMemo(
+    () => new Set(liveRootsKey === '' ? [] : liveRootsKey.split('\n')),
+    [liveRootsKey],
+  )
+  const timelineEventVisibility = useCallback(
+    (event: TimelineEvent): 'shown' | 'redacted' | 'hidden' => {
+      if (threadRootId(event) !== null) {
+        return 'hidden'
+      }
+      if (!settings.developerMode.value && isUnsupportedBodylessEvent(event)) {
+        return 'hidden'
+      }
+      const renderable =
+        !isStateEvent(event) ||
+        stateEvents === 'all' ||
+        // The `important` tier is membership only, and only when there is
+        // something to say: a member event whose profile fields are unchanged
+        // is routine re-sync traffic with no notice to render (ADR 0083).
+        (stateEvents === 'important' &&
+          stateEventTier(event) === 'important' &&
+          stateEventNotice(event) !== null)
+      if (!renderable) {
+        return 'hidden'
+      }
+      return hiddenByRedaction(event, hideRedacted, liveThreadRoots)
+        ? 'redacted'
+        : 'shown'
+    },
+    [hideRedacted, settings.developerMode.value, stateEvents, liveThreadRoots],
+  )
+  /** The rendering question, for the callers that only ask that one. */
+  const isVisibleTimelineEvent = useCallback(
+    (event: TimelineEvent): boolean =>
+      timelineEventVisibility(event) === 'shown',
+    [timelineEventVisibility],
+  )
+
+  /**
+   * Memoised on the values the filter actually reads, not on render.
+   *
+   * A fresh `.filter()` per render is cheap on its own, but it is the input to
+   * `groupMediaRuns` below and to the media viewer's `imageSequence` — both of
+   * which walk every event through `parseMedia`. Handing them a new array
+   * identity on every render made both re-run on every `RoomPage` render, over
+   * up to `RETAINED_EVENT_LIMIT` events, including renders caused by things
+   * with no bearing on the timeline's contents at all: opening the reaction
+   * picker, the jump dialog, the room-info panel.
+   *
+   * One walk produces both sets, rather than `visible` and the read-position
+   * candidates filtering the slice independently — that duplicated pass is
+   * what this memo exists to avoid (review), and it is the reason the two
+   * cannot simply be separate filters now that they disagree about redaction.
+   */
+  const { visible, acknowledgeable } = useMemo(() => {
+    const visible: TimelineEvent[] = []
+    const acknowledgeable: TimelineEvent[] = []
+    for (const event of timeline.events.value) {
+      const visibility = timelineEventVisibility(event)
+      if (visibility === 'hidden') {
+        continue
+      }
+      if (visibility === 'shown') {
+        visible.push(event)
+      }
+      acknowledgeable.push(event)
+    }
+    return { visible, acknowledgeable }
+  }, [timeline.events.value, timelineEventVisibility])
+
   const highlighted = typeof query.event === 'string' ? query.event : null
+  const openThread = typeof query.thread === 'string' ? query.thread : null
+  /** Account and room: the page does not remount across either (ADR 0085). */
+  const viewScope = `${accountId}\0${roomId}`
+  /**
+   * An `?event=` naming a reply in the thread that is open beside this stream —
+   * the shape a thread notification tap lands on (`notificationHref`). The room
+   * stream cannot render a thread member at all, so the anchor is the thread
+   * panel's business: this stream loads the live end exactly as for a plain
+   * `?thread=` open, and gates read state the same way. Treating it as this
+   * stream's anchor kept every room claim shut for the visit, the receipt the
+   * thread panel names through `mayNameRoomReceipt` included.
+   *
+   * Known from the loaded slice (thread members are in it, hidden) or from the
+   * deep-link lookup; until either says so the anchor stays this stream's,
+   * which is the direction that claims nothing.
+   */
+  const [resolvedThreadAnchor, setResolvedThreadAnchor] = useState<{
+    scope: string
+    eventId: string
+    rootId: string
+  } | null>(null)
+  const anchorIsOpenThreadReply = useMemo(
+    () =>
+      highlighted !== null &&
+      openThread !== null &&
+      highlighted !== openThread &&
+      ((resolvedThreadAnchor !== null &&
+        resolvedThreadAnchor.scope === viewScope &&
+        resolvedThreadAnchor.eventId === highlighted &&
+        resolvedThreadAnchor.rootId === openThread) ||
+        timeline.events.value.some(
+          (event) =>
+            event.event_id === highlighted &&
+            threadRootId(event) === openThread,
+        )),
+    [
+      highlighted,
+      openThread,
+      resolvedThreadAnchor,
+      viewScope,
+      timeline.events.value,
+    ],
+  )
+  /** The anchor *this stream* is parked on, if any. */
+  const streamAnchor = anchorIsOpenThreadReply ? null : highlighted
   // Whether this view may claim read state at all — the invariant the three
   // effects below share (see `clients/web/AGENTS.md`). Derived once rather than
   // re-stated per effect, so another condition is added in one place instead of
   // three (PR review).
-  /** Not parked on a permalink or a search hit. */
-  const unanchored = highlighted === null
+  /**
+   * The newest rendered event an anchored view has shown the reader the bottom
+   * of, as reported by `Timeline` (`onNewestSeen`); the release rule itself is
+   * `anchorCaughtUp` in `timeline/newest-seen.ts`, shared with the thread panel.
+   *
+   * A notification tap opens the room through `?event=`, and that anchor is
+   * usually the room's newest message: the view lands on the live end with the
+   * message on screen, yet every claim below stayed shut for the whole visit
+   * because the URL still named an anchor — the badge cleared only after
+   * switching away and back. Once this view has reached the live end and put its
+   * newest row's bottom on screen, it has shown everything an unanchored open
+   * would have, so it may claim the same.
+   */
+  const [anchoredNewestSeen, setAnchoredNewestSeen] =
+    useState<NewestSeen | null>(null)
+  const onNewestSeen = useCallback(
+    (eventId: string) => {
+      if (streamAnchor !== null) {
+        setAnchoredNewestSeen({
+          scope: viewScope,
+          anchor: streamAnchor,
+          eventId,
+        })
+      }
+    },
+    [viewScope, streamAnchor],
+  )
+  const streamCaughtUp = anchorCaughtUp({
+    seen: anchoredNewestSeen,
+    scope: viewScope,
+    anchor: streamAnchor,
+    atEnd: timeline.atEnd.value,
+    newestRenderedId: visible.at(-1)?.event_id ?? null,
+  })
+  /** Not parked on a permalink or a search hit (or caught up past one). */
+  const unanchored = streamAnchor === null || streamCaughtUp
   /** …and the loaded slice reaches the live end, so the newest events are shown. */
   const showingNewestEvents = viewMayClaimReadState({
-    anchoredTo: highlighted,
+    anchoredTo: unanchored ? null : streamAnchor,
     atEnd: timeline.atEnd.value,
     // The room stream's own loading term stays with each claim site rather than
     // here: the summary-derived marker deliberately fires for a slice that has
     // loaded but is missing the newest event, which is not the same question.
     loading: false,
   })
-  const openThread = typeof query.thread === 'string' ? query.thread : null
   const seenThread = useRef(openThread)
   useEffect(() => {
     const previous = seenThread.current
@@ -611,11 +801,23 @@ export function RoomPage() {
             // straight there instead of jumping the main timeline toward the
             // reply's timestamp, which would land near the thread root but
             // never open the thread (or reveal the reply itself).
-            if (rootId !== null && rootId !== openThread) {
-              location.route(
-                localThreadEventHref(accountId, roomId, rootId, highlighted),
-                true,
-              )
+            if (rootId !== null) {
+              setResolvedThreadAnchor({
+                scope: `${accountId}\0${roomId}`,
+                eventId: highlighted,
+                rootId,
+              })
+              if (rootId !== openThread) {
+                location.route(
+                  localThreadEventHref(accountId, roomId, rootId, highlighted),
+                  true,
+                )
+              }
+              // Already open (a thread notification's own URL): the panel
+              // resolves and reveals the reply, and this stream stays at the
+              // live end the mount effect loaded — as it does once the route
+              // above lands. Jumping it toward the reply's timestamp parked the
+              // room in history behind a thread the reader was looking at.
               return
             }
             await timeline.jumpTo(data.data.origin_ts)
@@ -668,11 +870,13 @@ export function RoomPage() {
   // quick mobile switches — which is why this reads the *summary* rather than
   // waiting for the timeline effect below.
   //
-  // Anchored loads (`?event=`) and slices parked short of the live end (for
-  // example after jump-to-date) are excluded: this marker is cross-device (ADR
-  // 0048), and a sibling device turns it straight into a zeroed badge
-  // (`connectReadMarkers`). Advancing it from either view would mark a room read
-  // *everywhere* from a view that never showed the summary's newest event.
+  // Gated on `showingNewestEvents`, so anchored loads (`?event=`) that have not
+  // caught up past their anchor (`anchorCaughtUp`) and slices parked short of
+  // the live end (for example after jump-to-date) are excluded: this marker is
+  // cross-device (ADR 0048), and a sibling device turns it straight into a
+  // zeroed badge (`connectReadMarkers`). Advancing it from either view would
+  // mark a room read *everywhere* from a view that never showed the summary's
+  // newest event.
   useEffect(() => {
     // The slice must have *loaded*, not merely be at its live end. The room list
     // is restored from IndexedDB (ADR 0085 phase 2) and is on screen before the
@@ -744,14 +948,15 @@ export function RoomPage() {
 
   useEffect(() => {
     // Clear the badge optimistically, since opening a room normally does read
-    // it and the receipt makes that true a moment later — but *only* when this
-    // page is not anchored to a specific event. With `?event=` the view opens
-    // parked in history (a search hit, a permalink), the server correctly
-    // refuses to advance the read receipt past what was displayed (ADR 0089),
-    // and zeroing here would claim messages below the anchor as read: the
-    // badge disappears for the session and returns on the next load, which is
-    // worse than never clearing. The timeline effect below picks the room up
-    // once the view actually reaches the live end.
+    // it and the receipt makes that true a moment later — but *only* while
+    // `unanchored`: the stream is not parked on an anchor of its own, or has
+    // caught up past it (`anchorCaughtUp`: at the live end with the newest row's
+    // bottom on screen, which is where a notification tap lands). An anchor not
+    // yet caught up opens parked in history (a search hit, a permalink), the
+    // server correctly refuses to advance the read receipt past what was
+    // displayed (ADR 0089), and zeroing here would claim messages below the
+    // anchor as read: the badge disappears for the session and returns on the
+    // next load, which is worse than never clearing.
     //
     // It also waits on this room's threads being known read. Opening a room does
     // not read its threads, so clearing here left the user looking at a room
@@ -763,113 +968,6 @@ export function RoomPage() {
       rooms.noteUnreadCounts(accountId, roomId, 0, 0)
     }
   }, [unanchored, roomHasNoKnownUnreadThreads, rooms, accountId, roomId])
-
-  // Thread members live in the panel, not the main timeline (TUI parity);
-  // state events are tiered behind the visibility setting, and bodyless
-  // unsupported events are developer diagnostics rather than ordinary timeline
-  // content.
-  //
-  // Redaction is the one exclusion a *read position* does not have to honour,
-  // so it gets its own verdict instead of being folded in with the rest.
-  // `'redacted'` means "not rendered, but still nameable": the content is gone,
-  // so acknowledging the event withholds nothing the user has not seen. Without
-  // that distinction a message redacted moments after it arrives is unreachable
-  // — it leaves the timeline, the bodyless `m.room.redaction` behind it is
-  // dropped too, and the receipt has nothing above it to name, so the
-  // homeserver's notification count for the room can never be cleared (#337).
-  //
-  // The redaction test moved below the state-event tiers to report its verdict
-  // apart from theirs. That is not a behaviour change for rendering — both
-  // answers still hide the row — and `isUnsupportedBodylessEvent` excludes
-  // redacted events itself, so nothing above reorders around it.
-  // The redacted roots the hide-redacted setting must not hide: those whose
-  // thread still has replies. Derived and keyed by value so the visibility
-  // memos below change identity only when the verdict could — not on every
-  // summaries refresh, and not at all while the setting is off.
-  const threadSummaries = threads.summaries.value
-  const liveRootsKey = useMemo(
-    () =>
-      hideRedacted
-        ? timeline.events.value
-            .filter(
-              (event) =>
-                event.redacted &&
-                (threadSummaries.get(event.event_id)?.reply_count ?? 0) > 0,
-            )
-            .map((event) => event.event_id)
-            .sort()
-            .join('\n')
-        : '',
-    [hideRedacted, timeline.events.value, threadSummaries],
-  )
-  const liveThreadRoots = useMemo(
-    () => new Set(liveRootsKey === '' ? [] : liveRootsKey.split('\n')),
-    [liveRootsKey],
-  )
-  const timelineEventVisibility = useCallback(
-    (event: TimelineEvent): 'shown' | 'redacted' | 'hidden' => {
-      if (threadRootId(event) !== null) {
-        return 'hidden'
-      }
-      if (!settings.developerMode.value && isUnsupportedBodylessEvent(event)) {
-        return 'hidden'
-      }
-      const renderable =
-        !isStateEvent(event) ||
-        stateEvents === 'all' ||
-        // The `important` tier is membership only, and only when there is
-        // something to say: a member event whose profile fields are unchanged
-        // is routine re-sync traffic with no notice to render (ADR 0083).
-        (stateEvents === 'important' &&
-          stateEventTier(event) === 'important' &&
-          stateEventNotice(event) !== null)
-      if (!renderable) {
-        return 'hidden'
-      }
-      return hiddenByRedaction(event, hideRedacted, liveThreadRoots)
-        ? 'redacted'
-        : 'shown'
-    },
-    [hideRedacted, settings.developerMode.value, stateEvents, liveThreadRoots],
-  )
-  /** The rendering question, for the callers that only ask that one. */
-  const isVisibleTimelineEvent = useCallback(
-    (event: TimelineEvent): boolean =>
-      timelineEventVisibility(event) === 'shown',
-    [timelineEventVisibility],
-  )
-
-  /**
-   * Memoised on the values the filter actually reads, not on render.
-   *
-   * A fresh `.filter()` per render is cheap on its own, but it is the input to
-   * `groupMediaRuns` below and to the media viewer's `imageSequence` — both of
-   * which walk every event through `parseMedia`. Handing them a new array
-   * identity on every render made both re-run on every `RoomPage` render, over
-   * up to `RETAINED_EVENT_LIMIT` events, including renders caused by things
-   * with no bearing on the timeline's contents at all: opening the reaction
-   * picker, the jump dialog, the room-info panel.
-   *
-   * One walk produces both sets, rather than `visible` and the read-position
-   * candidates filtering the slice independently — that duplicated pass is
-   * what this memo exists to avoid (review), and it is the reason the two
-   * cannot simply be separate filters now that they disagree about redaction.
-   */
-  const { visible, acknowledgeable } = useMemo(() => {
-    const visible: TimelineEvent[] = []
-    const acknowledgeable: TimelineEvent[] = []
-    for (const event of timeline.events.value) {
-      const visibility = timelineEventVisibility(event)
-      if (visibility === 'hidden') {
-        continue
-      }
-      if (visibility === 'shown') {
-        visible.push(event)
-      }
-      acknowledgeable.push(event)
-    }
-    return { visible, acknowledgeable }
-  }, [timeline.events.value, timelineEventVisibility])
 
   /**
    * The events this view may claim a read position through, in display order
@@ -1089,10 +1187,12 @@ export function RoomPage() {
   // is still looking at history. `highlighted` alone is not enough either — it
   // says nothing about a plain scroll-back that has paged away from the live end.
   //
-  // The cost is that an anchored view never marks the room read, even after
-  // scrolling to the bottom; reopening the room normally does. That matches how
-  // other Matrix clients treat permalinks, and erring the other way silently
-  // consumes unread messages.
+  // An anchored view is released from that only once it has *shown* the live
+  // end: `anchorCaughtUp` needs `atEnd` plus the reader having had the newest
+  // rendered row's bottom on screen. That is how a notification tap — which
+  // lands through `?event=` on what is usually the newest message — marks the
+  // room read without a room switch; a view parked in history still claims
+  // nothing, since erring the other way silently consumes unread messages.
   //
   // The gate above answers "may this view claim anything?". Which *event* is
   // named is a second, independent question, and the two consumers below answer
@@ -2230,9 +2330,12 @@ export function RoomPage() {
                 accountId={accountId}
                 ownUserId={ownUserId}
                 ephemeral={ephemeral}
-                highlighted={highlighted}
+                // The stream's own anchor: a reply in the open thread has no
+                // row here, and must not stop this stream pinning its tail.
+                highlighted={streamAnchor}
                 dateJumpStart={dateJumpStart}
                 onDateJumpAnchored={() => setDateJumpStart(null)}
+                onNewestSeen={onNewestSeen}
                 settings={settings}
                 messageGesturePreferences={messageGestures.preferences.value}
                 reactionPickerEventId={reactionPickerEventId}
@@ -2427,6 +2530,7 @@ function Timeline({
   highlighted,
   dateJumpStart,
   onDateJumpAnchored,
+  onNewestSeen,
   settings,
   messageGesturePreferences,
   reactionPickerEventId,
@@ -2451,6 +2555,12 @@ function Timeline({
   highlighted: string | null
   dateJumpStart: number | null
   onDateJumpAnchored: () => void
+  /**
+   * An anchored (`?event=`) view at the live end has put the bottom of its
+   * newest row — this event — on screen. Lets RoomPage release the anchor's
+   * read-state gate (a notification tap lands this way).
+   */
+  onNewestSeen: (eventId: string) => void
   settings: SettingsStore
   messageGesturePreferences: MessageGesturePreferences | null
   reactionPickerEventId: string | null
@@ -3098,6 +3208,32 @@ function Timeline({
     centerHighlightedRow(scroller.current, highlighted)
   }, [highlighted, visible])
 
+  // An anchored view never pins to its bottom, so nothing else says whether the
+  // reader has seen the newest row — and RoomPage's read-state gate stays shut
+  // until something does (a notification tap lands exactly here). A marker just
+  // past the list intersects the scroller when the newest row's bottom edge is
+  // on screen. Keyed on the newest row's id (a fresh observer per arrival) and
+  // gated on the anchor's own reveal — `observeNewestSeen` says why.
+  const newestVisibleId = visible.at(-1)?.event_id ?? null
+  const observeNewestSeen = useCallback(
+    (marker: HTMLDivElement | null) => {
+      if (marker === null || newestVisibleId === null) {
+        return
+      }
+      const root = scroller.current ?? marker.closest('.timeline')
+      if (root === null) {
+        return
+      }
+      return watchNewestSeen(
+        marker,
+        root,
+        () => highlighted !== null && revealed.current === highlighted,
+        () => onNewestSeen(newestVisibleId),
+      )
+    },
+    [newestVisibleId, highlighted, onNewestSeen],
+  )
+
   // A highlighted row can be centered correctly and then drift out of view
   // when row heights settle: thread buttons hydrate, images decode, or
   // formatted bodies resize. While a search/deep-link target is active, keep
@@ -3298,6 +3434,13 @@ function Timeline({
           ))}
         </ol>
       </div>
+      {highlighted !== null && atEnd && (
+        <div
+          class="timeline-newest-seen"
+          ref={observeNewestSeen}
+          aria-hidden="true"
+        />
+      )}
       {!atEnd && (
         <>
           {/* Sentinel above the button, not below: anything that reveals the

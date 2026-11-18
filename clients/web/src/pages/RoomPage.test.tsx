@@ -3517,6 +3517,76 @@ describe('RoomPage', () => {
     )
   })
 
+  it('a cold thread-reply deep link leaves the room stream pinned to its tail', async () => {
+    // A thread notification's own URL: `?thread=<root>&event=<reply>`. The
+    // stream cannot render the reply, so once the lookup says it belongs to
+    // the open thread the stream drops it as an anchor (`streamAnchor`): no
+    // jump toward the reply, and `Timeline` sees `highlighted` go to `null`
+    // and pins to its tail like a plain `?thread=` open (PR #1145 review).
+    const reply = event('$reply', T0 - 1_000, {
+      relates_to: { rel_type: 'm.thread', event_id: '$root' },
+      body: 'inside the thread',
+      content: { msgtype: 'm.text', body: 'inside the thread' },
+    })
+    const jumps: string[] = []
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: reply }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, ({ request }) => {
+        const atTs = new URL(request.url).searchParams.get('at_ts')
+        if (atTs !== null) {
+          jumps.push(atTs)
+        }
+        return HttpResponse.json({
+          data: {
+            events: [event('$latest', T0), reply, event('$root', T0 - 2_000)],
+            next_cursor: null,
+          },
+        })
+      }),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({ data: { events: [reply], next_cursor: null } }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root&event=%24reply`,
+    )
+    const services = testServices()
+    const { container, findByText } = render(routedRoomPage(services))
+    await findByText('body of $latest')
+    await findByText('inside the thread')
+
+    const stream = container.querySelector<HTMLElement>(
+      '.room-stream > .timeline',
+    )!
+    let scrollHeight = 100
+    setTimelineScrollGeometry(stream, {
+      clientHeight: 50,
+      scrollHeight: () => scrollHeight,
+    })
+    stream.scrollTop = 50
+
+    // A new main-timeline message arrives: a pinned stream follows it down.
+    scrollHeight = 160
+    services.timelines
+      .acquire(ACCOUNT, ROOM)
+      .ingestLive(event('$newer', T0 + 1_000))
+    await findByText('body of $newer')
+
+    await waitFor(() => expect(stream.scrollTop).toBe(160))
+    expect(jumps).toEqual([])
+    // The anchor still belongs to the thread panel.
+    expect(window.location.search).toBe('?thread=%24root&event=%24reply')
+  })
+
   it('a dead-anchor lookup cannot mutate an unrelated page after RoomPage unmounts', async () => {
     let releaseLookup!: () => void
     const heldLookup = new Promise<void>((resolve) => {
@@ -4001,6 +4071,209 @@ describe('RoomPage', () => {
       // Nothing, even though the head has been gap-filled behind the anchor —
       // which is why `atEnd` alone can't gate this.
       expect(mine()).toEqual([])
+    })
+  })
+
+  describe('a notification tap marks the room read once its newest message is seen', () => {
+    /**
+     * jsdom has no `IntersectionObserver`; this one records each observer with
+     * its target so a test can answer for the newest-seen marker alone
+     * (`.timeline-newest-seen`) without waking the paging sentinels. Element rects are all zero in jsdom, so the marker's own
+     * geometry re-check passes and `isIntersecting` is the thing under test.
+     */
+    function installIntersectionObserver() {
+      const observers: {
+        callback: IntersectionObserverCallback
+        target: Element | null
+      }[] = []
+      class FakeIntersectionObserver {
+        private readonly record: (typeof observers)[number]
+        constructor(callback: IntersectionObserverCallback) {
+          this.record = { callback, target: null }
+          observers.push(this.record)
+        }
+        observe(target: Element) {
+          this.record.target = target
+        }
+        disconnect() {
+          this.record.target = null
+        }
+        unobserve() {}
+        takeRecords() {
+          return []
+        }
+      }
+      vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
+      /** Report the live marker observer's state; `false` if none is attached. */
+      return (isIntersecting: boolean): boolean => {
+        const marker = observers
+          .filter(
+            ({ target }) =>
+              target?.isConnected === true &&
+              target.classList.contains('timeline-newest-seen'),
+          )
+          .at(-1)
+        marker?.callback(
+          [{ isIntersecting } as IntersectionObserverEntry],
+          null as unknown as IntersectionObserver,
+        )
+        return marker !== undefined
+      }
+    }
+
+    afterEach(() => vi.unstubAllGlobals())
+
+    /**
+     * What `notificationHref` builds for a main-timeline message:
+     * `?event=<the notified message>`, which is the room's newest event.
+     */
+    function notificationTap(tag: string) {
+      const older = `$older-${tag}`
+      const tapped = `$tapped-${tag}`
+      const all = [
+        event(older, T0 - 60_000, { body: `body of ${older}` }),
+        event(tapped, T0, { body: `body of ${tapped}` }),
+      ]
+      const reads: string[] = []
+      server.use(
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`,
+          async ({ request }) => {
+            const body = (await request.json()) as { event_id: string }
+            reads.push(body.event_id)
+            return HttpResponse.json({ data: {} })
+          },
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          () => HttpResponse.json({ data: all[1] }),
+        ),
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({
+            data: [
+              {
+                account_id: ACCOUNT,
+                account_user_id: '@me:hs',
+                room_id: ROOM,
+                name: 'Ops',
+                topic: null,
+                avatar_url: null,
+                canonical_alias: null,
+                last_activity_ts: T0,
+                last_event_id: tapped,
+              },
+            ],
+          }),
+        ),
+        http.get(TIMELINE_PATH, ({ request }) => {
+          const atTs = new URL(request.url).searchParams.get('at_ts')
+          let pool = [...all].sort((a, b) => b.origin_ts - a.origin_ts)
+          if (atTs !== null) {
+            pool = pool.filter((e) => e.origin_ts <= Number(atTs))
+          }
+          return HttpResponse.json({
+            data: { events: pool, next_cursor: null },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=${encodeURIComponent(tapped)}`,
+      )
+      const showMarker = installIntersectionObserver()
+      const services = testServices()
+      const cleared = vi.spyOn(services.rooms, 'noteUnreadCounts')
+      const view = render(routedRoomPage(services))
+      /**
+       * Land the tap: the jump page ends at the target, and the slice learns it
+       * is the live end from the forward probe the bottom sentinel's own
+       * observer fires in a browser. Pressing the button is that probe.
+       */
+      const landed = async () => {
+        await view.findByText(`body of ${tapped}`)
+        fireEvent.click(
+          await view.findByRole('button', { name: 'Load newer messages' }),
+        )
+        await waitFor(() =>
+          expect(
+            view.queryByRole('button', { name: 'Load newer messages' }),
+          ).toBeNull(),
+        )
+      }
+      return { services, reads, cleared, showMarker, tapped, landed, ...view }
+    }
+
+    it('claims the room read once the newest row has been on screen', async () => {
+      const { services, reads, cleared, showMarker, tapped, landed } =
+        notificationTap('seen')
+      await landed()
+
+      await waitFor(() => expect(showMarker(true)).toBe(true))
+
+      // All three claims an ordinary open makes: the badge, the cross-device
+      // marker, and the homeserver receipt.
+      await waitFor(() =>
+        expect(cleared).toHaveBeenCalledWith(ACCOUNT, ROOM, 0, 0),
+      )
+      await waitFor(() =>
+        expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+          eventId: tapped,
+          originTs: T0,
+        }),
+      )
+      await waitFor(() => expect(reads).toContain(tapped), {
+        timeout: RECEIPT_DEBOUNCE_MS + 1000,
+      })
+      // The anchor stays: the highlight is what the tap was for.
+      expect(window.location.search).toContain('event=')
+    })
+
+    it('claims nothing while the newest row has not been on screen', async () => {
+      const { services, reads, cleared, showMarker, landed } =
+        notificationTap('unseen')
+      await landed()
+
+      await waitFor(() => expect(showMarker(false)).toBe(true))
+      await new Promise((resolve) =>
+        setTimeout(resolve, RECEIPT_DEBOUNCE_MS + 150),
+      )
+
+      expect(cleared).not.toHaveBeenCalledWith(ACCOUNT, ROOM, 0, 0)
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toBeNull()
+      expect(reads).toEqual([])
+    })
+
+    it('does not claim a message that arrives after the bottom was seen', async () => {
+      const { services, reads, showMarker, tapped, landed, findByText } =
+        notificationTap('later')
+      await landed()
+      await waitFor(() => expect(showMarker(true)).toBe(true))
+      await waitFor(() => expect(reads).toContain(tapped), {
+        timeout: RECEIPT_DEBOUNCE_MS + 1000,
+      })
+
+      // A newer message lands below the fold: an anchored view does not pin to
+      // its bottom, so the reader has not seen it.
+      const later = '$later-later'
+      services.timelines
+        .acquire(ACCOUNT, ROOM)
+        .ingestLive(event(later, T0 + 1_000, { body: `body of ${later}` }))
+      await findByText(`body of ${later}`)
+      await waitFor(() => expect(showMarker(false)).toBe(true))
+      await new Promise((resolve) =>
+        setTimeout(resolve, RECEIPT_DEBOUNCE_MS + 150),
+      )
+      expect(reads).not.toContain(later)
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)?.eventId).toBe(
+        tapped,
+      )
+
+      // Scrolling it into view releases the gate for it too.
+      showMarker(true)
+      await waitFor(() => expect(reads).toContain(later), {
+        timeout: RECEIPT_DEBOUNCE_MS + 1000,
+      })
     })
   })
 

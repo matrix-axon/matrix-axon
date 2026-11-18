@@ -307,28 +307,45 @@ before starting a milestone.
   claim read state — the optimistic badge clear on mount, the summary-derived
   cross-device marker, the timeline-driven marker + receipt, and the thread
   panel's marker + receipt (ADR 0096, below). **Every one of them is gated on the
-  view actually showing the room's newest events**, and the gates are not
-  interchangeable: the optimistic badge clear checks `highlighted === null`
-  (an `?event=` landing is parked in history by definition), while both marker
-  effects need `highlighted === null` _and_ `timeline.atEnd`. The second half
-  matters even without an event anchor: jump-to-date parks the slice in history
-  without changing the URL. Conversely, once a room summary is known the head
-  gets gap-filled, so a view anchored five days back can have the newest events
-  loaded and `atEnd` true. Removing any of these gates makes the
-  client claim messages as read that it never displayed: the badge vanishes for
-  the session and returns on reload (`POST …/read` is a verbatim pass-through —
-  the receipt lands, naming an event that does not cover the unread tail, and the
-  server-derived count is recomputed from it, ADR 0089), and the marker is
-  cross-device, so `connectReadMarkers` zeroes the badge on your _other_ devices
-  too. The accepted cost is that an
-  anchored view never marks the room read even after scrolling to the bottom;
-  reopening the room normally does. The two conditions are derived once as
-  `unanchored` / `showingNewestEvents` rather than restated per effect — add a
-  new condition there, not in three places. The corollary caught in review: an
-  anchor the server cannot resolve **must be dropped from the URL**
-  (`dropUnsatisfiableAnchor`), because a lingering dead `?event=` leaves every one
-  of these gates closed for the room's whole visit while the user reads the
-  newest messages.
+  view actually showing the room's newest events**, through two conditions
+  derived once in `RoomPage` rather than restated per effect — add a new
+  condition there, not in three places:
+  - `unanchored` gates the optimistic badge clear: the stream is not parked on
+    an `?event=` anchor, _or_ it has caught up past one (`anchorCaughtUp`,
+    below).
+  - `showingNewestEvents` gates both marker effects: `unanchored` _and_
+    `timeline.atEnd`. The second half matters even without an anchor:
+    jump-to-date parks the slice in history without changing the URL.
+    Conversely, once a room summary is known the head gets gap-filled, so a
+    view anchored five days back can have the newest events loaded and `atEnd`
+    true — which is why `atEnd` alone never releases an anchor.
+
+  Removing any of these gates makes the client claim messages as read that it
+  never displayed: the badge vanishes for the session and returns on reload
+  (`POST …/read` is a verbatim pass-through — the receipt lands, naming an event
+  that does not cover the unread tail, and the server-derived count is
+  recomputed from it, ADR 0089), and the marker is cross-device, so
+  `connectReadMarkers` zeroes the badge on your _other_ devices too.
+
+  **The only release for an anchored view is `anchorCaughtUp`**
+  (`timeline/newest-seen.ts`, shared by the room stream and the thread panel):
+  the slice is at the live end _and_ the view's `.timeline-newest-seen` marker —
+  the bottom edge of the newest rendered row — has been on screen, after the
+  anchor's own reveal, for the current scope, anchor and newest event id. That is
+  how a notification tap (`notificationHref`: `?event=` on what is usually the
+  newest message, plus `?thread=` for a thread reply) marks the room or thread
+  read without a room switch, and how scrolling down from a search hit does. Do
+  not widen it to `atEnd` alone. Two corollaries:
+  - An `?event=` naming a reply in the **open thread** is the panel's anchor,
+    not the stream's (`streamAnchor`): the stream cannot render it, loads the
+    live end as for a plain `?thread=`, and must not jump toward the reply.
+    Treating it as the stream's anchor kept the room gate — and so the receipt
+    the panel names through `mayNameRoomReceipt` — shut for the visit.
+  - An anchor the server cannot resolve **must be dropped from the URL**
+    (`dropUnsatisfiableAnchor`), because a lingering dead `?event=` leaves every
+    one of these gates closed for the room's whole visit while the user reads
+    the newest messages.
+
 - **Which event is named** is a separate question from the gates above, and the
   timeline effect answers it twice from one candidate set (ADR 0089). The
   cross-device marker is a display-order artifact and names the **display-last**
