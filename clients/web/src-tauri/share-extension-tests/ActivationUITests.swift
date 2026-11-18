@@ -1,5 +1,9 @@
 import XCTest
 
+// Existence waits are ceilings, not delays, so they cost nothing when the UI is
+// prompt. Shared CI simulators run these tests about twice as slowly as a
+// laptop (490 s against 261 s), and a 5 s wait for the system share sheet
+// failed one hosted run, so no existence wait here is shorter than 20 s.
 final class ActivationUITests: XCTestCase {
   override func setUp() { continueAfterFailure = false }
 
@@ -7,7 +11,7 @@ final class ActivationUITests: XCTestCase {
     app.terminate()
     app.launch()
     let source = app.buttons[name]
-    XCTAssertTrue(source.waitForExistence(timeout: 8))
+    XCTAssertTrue(source.waitForExistence(timeout: 20))
     source.tap()
   }
   private func receiver(in app: XCUIApplication) -> XCUIElement {
@@ -18,7 +22,7 @@ final class ActivationUITests: XCTestCase {
     let more = app.descendants(matching: .any)
       .matching(NSPredicate(format: "label == 'More' OR label == 'More Apps'")).firstMatch
     let cell = app.cells.matching(identifier: "shareCell").firstMatch
-    XCTAssertTrue(cell.waitForExistence(timeout: 5))
+    XCTAssertTrue(cell.waitForExistence(timeout: 20))
     let y = cell.frame.midY
     for _ in 0..<8 {
       if more.exists && more.isHittable { break }
@@ -29,7 +33,7 @@ final class ActivationUITests: XCTestCase {
     }
     XCTAssertTrue(more.exists && more.isHittable)
     more.tap()
-    XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 20))
   }
   func testTextURLsAndPhotosExposeTheRealComposerWithoutCredentials() {
     let app = XCUIApplication()
@@ -47,7 +51,7 @@ final class ActivationUITests: XCTestCase {
       XCTAssertTrue(target.exists && target.isHittable, "Missing receiver for \(name)")
       target.tap()
       let composer = app.navigationBars["Share to Axon"]
-      XCTAssertTrue(composer.waitForExistence(timeout: 10))
+      XCTAssertTrue(composer.waitForExistence(timeout: 20))
       // The test extension deliberately has no shared Keychain configuration.
       // It must not send, access a real account, or stage under another identity.
       let send = app.buttons["share-send"]
@@ -87,7 +91,7 @@ final class ActivationUITests: XCTestCase {
     let app = XCUIApplication()
     chooseSource("source-photo-size", app: app)
     let all = app.buttons["share-photo-size-all"]
-    XCTAssertTrue(all.waitForExistence(timeout: 15))
+    XCTAssertTrue(all.waitForExistence(timeout: 20))
     reveal(all, app: app)
     all.tap()
     app.buttons["Small (640 px)"].firstMatch.tap()
@@ -111,7 +115,7 @@ final class ActivationUITests: XCTestCase {
     let app = XCUIApplication()
     chooseSource("source-photo-size-single", app: app)
     let filename = app.textFields.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-filename-'" )).firstMatch
-    XCTAssertTrue(filename.waitForExistence(timeout: 15))
+    XCTAssertTrue(filename.waitForExistence(timeout: 20))
     reveal(filename, app: app)
     let original = filename.value as? String ?? ""
     XCTAssertFalse(original.isEmpty)
@@ -121,14 +125,14 @@ final class ActivationUITests: XCTestCase {
     XCTAssertFalse(app.navigationBars["Rename photo"].exists)
     filename.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count) + "Coast holiday.heic")
     app.buttons["share-photo-filename-done"].tap()
-    XCTAssertTrue(app.images["Photo: Coast holiday.heic"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.images["Photo: Coast holiday.heic"].waitForExistence(timeout: 20))
     XCTAssertEqual(filename.value as? String, "Coast holiday.heic")
     XCTAssertFalse(app.buttons["share-photo-filename-save"].exists)
     let remove = app.buttons["Remove photo"].firstMatch
     reveal(remove, app: app, down: true)
     remove.tap()
     let empty = app.staticTexts["share-validation-message"]
-    XCTAssertTrue(empty.waitForExistence(timeout: 5))
+    XCTAssertTrue(empty.waitForExistence(timeout: 20))
     XCTAssertEqual(empty.label, "Nothing to send.")
     XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label == 'Nothing to send.'")).count, 1)
     XCTAssertFalse(app.buttons["share-send"].isEnabled)
@@ -141,7 +145,7 @@ final class ActivationUITests: XCTestCase {
     let app = XCUIApplication()
     chooseSource("source-photo-size", app: app)
     let master = app.textViews["share-master-caption"]
-    XCTAssertTrue(master.waitForExistence(timeout: 15))
+    XCTAssertTrue(master.waitForExistence(timeout: 20))
     reveal(master, app: app)
     master.tap()
     master.typeText("Together")
@@ -154,7 +158,7 @@ final class ActivationUITests: XCTestCase {
     reveal(reorder, app: app, down: true)
     reorder.tap()
     let handles = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Reorder' AND identifier != 'share-photo-reorder'"))
-    XCTAssertTrue(handles.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(handles.firstMatch.waitForExistence(timeout: 20), app.debugDescription)
     // With 44-point filename controls, the first compact row began at y=742
     // and the second was below the 874-point viewport, outside the AX snapshot.
     if handles.count < 2 { app.swipeUp() }
@@ -175,7 +179,7 @@ final class ActivationUITests: XCTestCase {
     let remove = app.buttons["Remove photo"].firstMatch
     reveal(remove, app: app)
     remove.tap()
-    XCTAssertTrue(fields.firstMatch.waitForExistence(timeout: 10))
+    XCTAssertTrue(fields.firstMatch.waitForExistence(timeout: 20))
     XCTAssertEqual(fields.count, 1)
     XCTAssertFalse(reorder.exists)
     XCTAssertEqual(fields.firstMatch.value as? String, "Together")
@@ -187,7 +191,7 @@ final class ActivationUITests: XCTestCase {
     let app = XCUIApplication()
     chooseSource("source-photo-size", app: app)
     let fields = app.textViews.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-caption-'"))
-    XCTAssertTrue(fields.firstMatch.waitForExistence(timeout: 15))
+    XCTAssertTrue(fields.firstMatch.waitForExistence(timeout: 20))
     XCTAssertFalse(app.textViews["Message text"].exists)
     // Form materializes the visible row only: the initial AX query reported
     // one editor for two photos. Scroll before looking up the other row.
@@ -254,7 +258,7 @@ final class ActivationUITests: XCTestCase {
   func testSinglePhotoHasItsOwnSizeMenuWithoutABatchControl() {
     let app = XCUIApplication()
     chooseSource("source-photo-size-single", app: app)
-    XCTAssertTrue(app.staticTexts["share-photo-upload-total"].waitForExistence(timeout: 15))
+    XCTAssertTrue(app.staticTexts["share-photo-upload-total"].waitForExistence(timeout: 20))
     XCTAssertFalse(app.buttons["share-photo-size-all"].exists)
     let first = app.buttons.matching(
       NSPredicate(format: "identifier BEGINSWITH 'share-photo-size-item-'")
