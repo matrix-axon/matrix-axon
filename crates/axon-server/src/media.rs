@@ -74,8 +74,8 @@ impl MediaProxy for CachingMediaProxy {
             .map_err(map_err)
     }
 
-    fn etag(&self, mxc_url: &str) -> String {
-        axon_media::etag_for(mxc_url)
+    fn etag(&self, mxc_url: &str, encrypted_file: Option<&serde_json::Value>) -> String {
+        axon_media::etag_for_media(mxc_url, encrypted_file)
     }
 
     async fn get_thumbnail(

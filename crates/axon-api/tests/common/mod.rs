@@ -1938,8 +1938,8 @@ impl MediaProxy for StubMediaProxy {
         Err(MediaError::NotFound("stub: no media".to_owned()))
     }
 
-    fn etag(&self, mxc_url: &str) -> String {
-        format!("stub-{mxc_url}")
+    fn etag(&self, mxc_url: &str, encrypted_file: Option<&serde_json::Value>) -> String {
+        format!("stub-{mxc_url}-{}", encrypted_file.is_some())
     }
 
     async fn get_thumbnail(
@@ -2060,8 +2060,11 @@ impl MediaProxy for ConfiguredMediaProxy {
         self.resource_from_outcome().await
     }
 
-    fn etag(&self, mxc_url: &str) -> String {
-        format!("configured-{mxc_url}")
+    fn etag(&self, mxc_url: &str, encrypted_file: Option<&serde_json::Value>) -> String {
+        match encrypted_file {
+            None => format!("configured-{mxc_url}"),
+            Some(file) => format!("configured-{mxc_url}-{file}"),
+        }
     }
 
     async fn get_thumbnail(

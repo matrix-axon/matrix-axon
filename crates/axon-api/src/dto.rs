@@ -556,6 +556,98 @@ impl From<axon_core::LiveEvent> for EventDto {
     }
 }
 
+/// Where a [`LinkedEventDto`] was read from.
+#[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedEventSourceDto {
+    /// Axon's store, which held the event for this account.
+    Store,
+    /// The account's homeserver. Not stored by Axon.
+    Homeserver,
+}
+
+/// One linked event, as a Matrix-link card shows it (ADR 0138 section 3): its
+/// latest valid edit applied and its redaction masked, as the timeline shows
+/// it. Deliberately not an [`EventDto`]: an event read from the homeserver has
+/// no arrival order or reactions.
+#[derive(Debug, Serialize, ToSchema, PartialEq)]
+pub struct LinkedEventDto {
+    /// Matrix event ID.
+    pub event_id: String,
+    /// Matrix room ID.
+    pub room_id: String,
+    /// Matrix user ID of the sender.
+    pub sender: String,
+    /// `origin_server_ts` in milliseconds.
+    pub origin_ts: i64,
+    /// Matrix event type, e.g. `m.room.message`. `m.room.encrypted` for an
+    /// event that could not be decrypted.
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Decrypted `content`, the latest valid edit's when `edited`. `null` for
+    /// an event that could not be decrypted and for a redacted one.
+    #[schema(value_type = Option<Object>)]
+    pub content: Option<Value>,
+    /// Plaintext body. `null` when absent or masked by redaction.
+    pub body: Option<String>,
+    /// The event's own `m.relates_to` object, if any (a thread reply's
+    /// `m.thread`, say). An edit does not change it.
+    #[schema(value_type = Option<Object>)]
+    pub relates_to: Option<Value>,
+    /// `true` when the event has been redacted; `content` and `body` are then
+    /// `null`.
+    pub redacted: bool,
+    /// `true` when a valid edit was applied. An event read from the homeserver
+    /// is shown edited only when the homeserver bundled its latest edit
+    /// (Matrix 1.7, MSC3925).
+    pub edited: bool,
+    /// The sender-trust verdict, with the values and meaning it has on
+    /// [`EventDto`], and the applied edit's when `edited`. `null` for an
+    /// unencrypted event, one that could not be decrypted, and a redacted one.
+    pub sender_trust: Option<String>,
+    /// Where the event was read from.
+    pub source: LinkedEventSourceDto,
+}
+
+impl LinkedEventDto {
+    /// A stored event, as the timeline shows it.
+    pub fn from_row(row: TimelineRow) -> Self {
+        let redacted = row.redaction_event_id.is_some();
+        LinkedEventDto {
+            event_id: row.event_id,
+            room_id: row.room_id,
+            sender: row.sender,
+            origin_ts: row.origin_ts,
+            r#type: row.event_type,
+            content: row.content,
+            body: row.decrypted_body_text,
+            relates_to: row.relates_to,
+            redacted,
+            edited: row.edited,
+            sender_trust: if redacted { None } else { row.sender_trust },
+            source: LinkedEventSourceDto::Store,
+        }
+    }
+
+    /// An event read from the homeserver.
+    pub fn from_fetched(event: crate::linked_events::FetchedEvent) -> Self {
+        LinkedEventDto {
+            event_id: event.event_id,
+            room_id: event.room_id,
+            sender: event.sender,
+            origin_ts: event.origin_ts,
+            r#type: event.event_type,
+            content: event.content,
+            body: event.body,
+            relates_to: event.relates_to,
+            redacted: event.redacted,
+            edited: event.edited,
+            sender_trust: event.sender_trust,
+            source: LinkedEventSourceDto::Homeserver,
+        }
+    }
+}
+
 impl EventDto {
     /// Map a store [`TimelineRow`] into the wire DTO. `account_id` is threaded in
     /// from the request path because the store row doesn't carry it.
@@ -1689,6 +1781,20 @@ pub struct ThumbnailQuery {
     /// Resizing method; defaults to `scale` (the Matrix spec default) when
     /// omitted.
     pub method: Option<ThumbnailMethodDto>,
+}
+
+/// Optional query parameters naming the event a media request is for (ADR
+/// 0138 section 4). Given together, the route resolves the `mxc://` URI
+/// against that one event, stored or kept from a linked-event read, and serves
+/// it only if that event's content names it. Given neither, the route resolves
+/// the URI as before. One without the other is a `400`.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct MediaEventQuery {
+    /// The room of the event the media is for. Requires `event_id`.
+    pub room_id: Option<String>,
+    /// The event the media is for. Requires `room_id`.
+    pub event_id: Option<String>,
 }
 
 /// Wire-shape mirror of [`axon_core::media::ThumbnailMethod`] — kept separate

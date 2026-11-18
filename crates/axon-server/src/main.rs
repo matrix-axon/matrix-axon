@@ -15,6 +15,7 @@ mod gateway;
 mod init;
 mod inline_media;
 mod lifecycle;
+mod linked_events;
 mod matrix_oauth_acquire;
 mod matrix_oauth_browser;
 mod matrix_oauth_grant;
@@ -48,6 +49,7 @@ use crate::cli::{Cli, Command};
 use crate::devices::DeviceAdapter;
 use crate::gateway::{GatewayAdapter, GatewayTimeouts};
 use crate::lifecycle::LifecycleAdapter;
+use crate::linked_events::LinkedEventAdapter;
 use crate::matrix_oauth_acquire::MatrixOAuthAcquireAdapter;
 use crate::matrix_oauth_browser::MatrixOAuthBrowserAdapter;
 use crate::matrix_oauth_grant::MatrixOAuthGrantAdapter;
@@ -403,6 +405,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         rustc_version: env!("AXON_RUSTC_VERSION").to_owned(),
     })
     .with_member_profiles(member_profiles)
+    // Matrix-link cards (ADR 0138): built once, so every read shares the
+    // reader's process-wide cap.
+    .with_linked_events(Arc::new(LinkedEventAdapter(sync_engine.linked_events())))
     .with_preview_generator(Arc::new(preview_generation::PreviewGenerationService::new(
         sync_engine
             .preview_generator()

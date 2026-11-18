@@ -31,6 +31,7 @@ mod error;
 mod gateway;
 mod homeserver_gate;
 mod lifecycle;
+mod linked_event;
 mod manager;
 mod matrix_oauth;
 mod matrix_oauth_acquire;
@@ -65,6 +66,7 @@ pub use error::{GatewayError, SyncError};
 pub use gateway::{LeaveOutcome as GatewayLeaveOutcome, SdkGateway};
 pub use homeserver_gate::{BreakerSnapshot, GateSnapshot, HomeserverGates, InteractiveCall};
 pub use lifecycle::{AccountLifecycle, LifecycleError};
+pub use linked_event::{LinkedEvent, LinkedEventError, LinkedEventReader};
 pub use matrix_oauth::MatrixOAuthRegistrationManager;
 pub use matrix_oauth_acquire::{
     MatrixOAuthAcquireEngine, MatrixOAuthAcquireError, MatrixOAuthAcquirePresentation,

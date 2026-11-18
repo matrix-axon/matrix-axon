@@ -480,6 +480,17 @@ impl SyncEngine {
         crate::trust::SenderTrustEngine::new(self.store.clone(), self.manager.clone())
     }
 
+    /// The linked-event reader, for the API layer's Matrix-link card route (ADR
+    /// 0138 section 3). Build it once: its clones share the process-wide cap on
+    /// card reads in flight. Read-only, no lifecycle lock.
+    pub fn linked_events(&self) -> crate::linked_event::LinkedEventReader {
+        crate::linked_event::LinkedEventReader::new(
+            self.store.clone(),
+            self.manager.clone(),
+            self.manager.homeserver_gates(),
+        )
+    }
+
     /// The runtime device-list port, for the API layer's device-picker route
     /// (M16, ADR 0060). `axon-server` wraps this in an adapter implementing
     /// its `DeviceListService` port. Shares this engine's store and client

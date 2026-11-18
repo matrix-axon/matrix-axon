@@ -22,6 +22,7 @@ mod dto;
 mod extract;
 mod homeserver_status;
 mod lifecycle;
+mod linked_events;
 mod matrix_oauth_acquire;
 mod matrix_oauth_browser;
 mod matrix_oauth_grant;
@@ -64,6 +65,7 @@ pub use lifecycle::{
     AccountLifecycle, BackupAction, DeleteError, LoginError, LogoutError, RecoverError,
     RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
 };
+pub use linked_events::{FetchedEvent, KeptMedia, LinkedEventError, LinkedEventSource};
 pub use matrix_oauth_acquire::{
     MatrixOAuthQrAcquireService, MatrixOAuthQrError, MatrixOAuthQrFlowDto,
     MatrixOAuthQrPresentation, MatrixOAuthQrStage,
@@ -410,7 +412,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}",
-            put(routes::messages::edit_message).delete(routes::messages::redact_event),
+            get(routes::events::get_linked_event)
+                .put(routes::messages::edit_message)
+                .delete(routes::messages::redact_event),
         )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions",

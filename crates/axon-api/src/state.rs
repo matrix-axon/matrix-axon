@@ -134,6 +134,16 @@ pub struct AppState {
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `verify`.
     pub trust: Arc<dyn SenderTrustService>,
+    /// Linked-event port for Matrix-link cards (ADR 0138 section 3): reads an
+    /// event the store does not have from the account's homeserver. Defaults
+    /// to one that never asks, so only stored events have cards; the binary
+    /// injects an adapter over the sync engine via
+    /// [`with_linked_events`](Self::with_linked_events).
+    pub linked_events: Arc<dyn crate::linked_events::LinkedEventSource>,
+    /// The media fields of events the linked-event route read from the
+    /// homeserver, for the media routes' `room_id`/`event_id` scope (ADR 0138
+    /// section 4).
+    pub kept_media: Arc<crate::linked_events::KeptMedia>,
     /// Device-list port for the `GET /v1/accounts/{id}/devices` handler (M16,
     /// ADR 0060). Injected by the binary via an adapter over the sync engine,
     /// same as `trust`.
@@ -410,6 +420,8 @@ impl AppState {
             matrix_oauth_grant: Arc::new(NoopMatrixOAuthQrGrant),
             verify,
             trust,
+            linked_events: Arc::new(crate::linked_events::NoLinkedEventSource),
+            kept_media: Arc::new(crate::linked_events::KeptMedia::default()),
             devices,
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
@@ -599,6 +611,15 @@ impl AppState {
     /// these routes keep the default no-op.
     pub fn with_account_actions(mut self, account_actions: Arc<dyn AccountActionsSender>) -> Self {
         self.account_actions = account_actions;
+        self
+    }
+
+    /// Inject the linked-event port (ADR 0138 section 3).
+    pub fn with_linked_events(
+        mut self,
+        source: Arc<dyn crate::linked_events::LinkedEventSource>,
+    ) -> Self {
+        self.linked_events = source;
         self
     }
 
@@ -1160,6 +1181,18 @@ impl FromRef<AppState> for Arc<dyn VerificationService> {
 impl FromRef<AppState> for Arc<dyn SenderTrustService> {
     fn from_ref(state: &AppState) -> Arc<dyn SenderTrustService> {
         state.trust.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn crate::linked_events::LinkedEventSource> {
+    fn from_ref(state: &AppState) -> Arc<dyn crate::linked_events::LinkedEventSource> {
+        state.linked_events.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<crate::linked_events::KeptMedia> {
+    fn from_ref(state: &AppState) -> Arc<crate::linked_events::KeptMedia> {
+        state.kept_media.clone()
     }
 }
 

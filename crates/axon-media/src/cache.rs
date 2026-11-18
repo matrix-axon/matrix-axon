@@ -303,7 +303,8 @@ impl MediaCache {
         }
     }
 
-    /// Return the media for `(account_id, mxc_url)`, downloading through
+    /// Return the media for `(account_id, mxc_url)` in the representation
+    /// `encrypted_file` selects (see [`etag_for_media`]), downloading through
     /// `fetcher` on a miss. Concurrent callers for the same key share one
     /// download. Bumps the entry's LRU position on a hit; on a miss caches the
     /// bytes (subject to the per-object cap) and evicts LRU entries if the byte
@@ -315,7 +316,7 @@ impl MediaCache {
         encrypted_file: Option<Value>,
         fetcher: &dyn MediaFetcher,
     ) -> Result<MediaResource, MediaCacheError> {
-        let hash = etag_for(mxc_url);
+        let hash = etag_for_media(mxc_url, encrypted_file.as_ref());
         self.get_or_fetch_keyed(account_id, &hash, || {
             fetcher.fetch(account_id, mxc_url, encrypted_file)
         })
@@ -907,6 +908,23 @@ pub fn etag_for(mxc_url: &str) -> String {
     hash_hex(mxc_url)
 }
 
+/// The cache key and entity tag for one *representation* of an MXC object:
+/// [`etag_for`] when it is served as plaintext, and otherwise one bound to a
+/// digest of the encrypted-file descriptor that decrypts it. The bytes Axon
+/// serves depend on that choice, and each event naming the URI makes it, so
+/// two events that describe one URI differently (ADR 0138 section 4) never
+/// share a cached object, a single-flight download or a validator. Plaintext
+/// keeps the bare key, so existing plaintext entries stay valid.
+pub fn etag_for_media(mxc_url: &str, encrypted_file: Option<&Value>) -> String {
+    match encrypted_file {
+        None => etag_for(mxc_url),
+        Some(descriptor) => {
+            let descriptor = serde_json::to_string(descriptor).unwrap_or_default();
+            hash_hex(&format!("enc:{mxc_url}:{}", hash_hex(&descriptor)))
+        }
+    }
+}
+
 /// The stable, content-addressed cache-key/entity-tag for a thumbnail variant
 /// of `mxc_url` at `spec`'s dimensions/method — the thumbnail-aware sibling of
 /// [`etag_for`]. The `"thumb:"`-prefixed preimage guarantees this can never
@@ -1187,6 +1205,82 @@ mod tests {
 
         // Second call was a cache hit — no extra fetch.
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Serves bytes that name the representation it was asked for, the way a
+    /// real fetch's bytes depend on the descriptor that decrypts them.
+    struct RepresentationFetcher {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MediaFetcher for RepresentationFetcher {
+        async fn fetch(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            encrypted_file: Option<Value>,
+        ) -> Result<Vec<u8>, FetchError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(match encrypted_file {
+                None => b"plaintext".to_vec(),
+                Some(file) => file["key"]["k"].as_str().unwrap_or("?").as_bytes().to_vec(),
+            })
+        }
+
+        async fn fetch_thumbnail(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _spec: ThumbnailSpec,
+        ) -> Result<Vec<u8>, FetchError> {
+            unreachable!("not used")
+        }
+    }
+
+    /// ADR 0138 section 4: two events naming one URI with different
+    /// descriptors, or one plaintext and one encrypted, never share a cached
+    /// object or an entity tag; one descriptor is still a hit.
+    #[tokio::test]
+    async fn each_representation_of_a_uri_is_cached_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+            .await
+            .unwrap();
+        let account = Uuid::new_v4();
+        let fetcher = RepresentationFetcher {
+            calls: AtomicUsize::new(0),
+        };
+        let url = "mxc://s/shared";
+        let file = |k: &str| serde_json::json!({"url": url, "key": {"k": k}, "iv": "i", "hashes": {"sha256": "h"}, "v": "v2"});
+
+        for (descriptor, expected) in [
+            (Some(file("first")), b"first".to_vec()),
+            (Some(file("second")), b"second".to_vec()),
+            (None, b"plaintext".to_vec()),
+            (Some(file("first")), b"first".to_vec()),
+        ] {
+            let mut resource = cache
+                .get_or_fetch(account, url, descriptor, &fetcher)
+                .await
+                .unwrap();
+            assert_eq!(read_all(&mut resource).await, expected);
+        }
+        assert_eq!(
+            fetcher.calls.load(Ordering::SeqCst),
+            3,
+            "the repeat was a hit"
+        );
+
+        let tags = [
+            etag_for_media(url, None),
+            etag_for_media(url, Some(&file("first"))),
+            etag_for_media(url, Some(&file("second"))),
+        ];
+        assert_eq!(tags[0], etag_for(url), "plaintext keeps its old key");
+        assert_ne!(tags[0], tags[1]);
+        assert_ne!(tags[1], tags[2]);
+        assert_eq!(tags[1], etag_for_media(url, Some(&file("first"))));
     }
 
     fn thumb_spec(width: u32, height: u32, method: ThumbnailMethod) -> ThumbnailSpec {

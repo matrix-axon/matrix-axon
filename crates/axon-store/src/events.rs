@@ -233,6 +233,28 @@ pub struct TimelineRow {
     pub reactions: Option<Value>,
 }
 
+/// The edit a timeline read applies to an event: see
+/// [`Store::applied_edit`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedEdit {
+    /// The edit's `m.new_content`.
+    pub content: Value,
+    /// `m.new_content.body`, if a string.
+    pub body: Option<String>,
+    /// The edit's own sender-trust verdict, if one was recorded.
+    pub sender_trust: Option<String>,
+}
+
+impl sqlx_core::from_row::FromRow<'_, PgRow> for AppliedEdit {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        Ok(AppliedEdit {
+            content: row.try_get("content")?,
+            body: row.try_get("body")?,
+            sender_trust: row.try_get("sender_trust")?,
+        })
+    }
+}
+
 impl TimelineRow {
     /// The cursor pointing at this row, for fetching the next (older) page.
     pub fn cursor(&self) -> TimelineCursor {
@@ -312,7 +334,8 @@ pub(crate) fn latest_edit_lateral() -> String {
     let redacted = crate::event_visibility::event_is_redacted("ev");
     format!(
         "LEFT JOIN LATERAL ( \
-         SELECT ev.content->'m.new_content' AS new_content, \
+         SELECT ev.event_id AS edit_event_id, \
+                ev.content->'m.new_content' AS new_content, \
                 ev.content->'m.new_content'->>'body' AS new_body, \
                 ev.origin_ts AS latest_edit_ts, ev.inline_media_urls, \
                 COUNT(*) OVER () AS edit_count \
@@ -1160,6 +1183,36 @@ impl Store {
         .bind(event_id)
         .fetch_optional(&self.pool)
         .await?;
+        Ok(row)
+    }
+
+    /// The edit a timeline read applies to `event_id`, the latest valid one by
+    /// the M8 rules, with the sender-trust verdict recorded for the edit
+    /// itself rather than for the original (ADR 0138 section 3). `None` when no
+    /// valid edit applies or the event is redacted. Its `sender_trust` is
+    /// `None` when the edit carries no verdict, an unencrypted edit say.
+    pub async fn applied_edit(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+    ) -> Result<Option<AppliedEdit>, StoreError> {
+        let latest_edit = latest_edit_lateral();
+        let root_redaction = crate::event_visibility::redaction_matches("rr", "e");
+        let sql = format!(
+            "SELECT edit.new_content AS content, edit.new_body AS body, sd.sender_trust \
+             FROM events e \
+             {latest_edit} \
+             LEFT JOIN event_sender_device_keys sd \
+                 ON sd.account_id = e.account_id AND sd.event_id = edit.edit_event_id \
+             WHERE e.account_id = $1 AND e.event_id = $2 \
+               AND edit.edit_event_id IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM events rr WHERE {root_redaction})"
+        );
+        let row = sqlx_core::query_as::query_as::<Postgres, AppliedEdit>(&sql)
+            .bind(account_id)
+            .bind(event_id)
+            .fetch_optional(&self.read_pool)
+            .await?;
         Ok(row)
     }
 

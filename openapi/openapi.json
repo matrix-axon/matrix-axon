@@ -4026,6 +4026,134 @@
       }
     },
     "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Get a linked event",
+        "description": "Read one event in one room for a Matrix-link card (ADR 0138 section 3).\nAn event stored for this account and this room comes from the store, as\nthe timeline shows it; a stored event in another room is a 404, since event\nids are unique and the link is wrong. Otherwise, for a room the account has\njoined or left, the account's homeserver is asked, and its answer is\ndecrypted, judged and returned without being stored; its media fields are\nkept for an hour, so the media routes can serve its image when the request\nnames this event (`room_id` and `event_id`). Any other room, and a\nhomeserver `404 M_NOT_FOUND` or `403 M_FORBIDDEN`, is a 404. The homeserver\nread waits for capacity at most a few seconds before answering 503; a 502,\n503 or 504 is transient.",
+        "operationId": "get_linked_event",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Matrix event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_LinkedEventDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed room or event id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account, or nothing this account can show for the event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is not active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The homeserver failed. Transient",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The account is not connected, or no capacity for the read. Transient",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The homeserver did not answer in time. Transient",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "put": {
         "tags": [
           "messages"
@@ -8972,6 +9100,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "description": "The room of the event the media is for. Requires `event_id`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "description": "The event the media is for. Requires `room_id`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8985,7 +9131,7 @@
             "description": "The `If-None-Match` entity tag matched; body omitted."
           },
           "400": {
-            "description": "Syntactically invalid MXC URI components",
+            "description": "Syntactically invalid MXC URI components, or only one of `room_id` and `event_id`",
             "content": {
               "application/json": {
                 "schema": {
@@ -9162,6 +9308,24 @@
             "schema": {
               "$ref": "#/components/schemas/ThumbnailMethodDto"
             }
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "description": "The room of the event the media is for. Requires `event_id`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "description": "The event the media is for. Requires `room_id`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -9175,7 +9339,7 @@
             "description": "The `If-None-Match` entity tag matched; body omitted."
           },
           "400": {
-            "description": "Syntactically invalid MXC URI components, or the media is encrypted — a homeserver cannot thumbnail ciphertext it cannot decrypt",
+            "description": "Syntactically invalid MXC URI components, only one of `room_id` and `event_id`, or the media is encrypted — a homeserver cannot thumbnail ciphertext it cannot decrypt",
             "content": {
               "application/json": {
                 "schema": {
@@ -11011,6 +11175,92 @@
               },
               "thumbnail_status": {
                 "$ref": "#/components/schemas/PreviewThumbnailStatus"
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_LinkedEventDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One linked event, as a Matrix-link card shows it (ADR 0138 section 3): its\nlatest valid edit applied and its redaction masked, as the timeline shows\nit. Deliberately not an [`EventDto`]: an event read from the homeserver has\nno arrival order or reactions.",
+            "required": [
+              "event_id",
+              "room_id",
+              "sender",
+              "origin_ts",
+              "type",
+              "redacted",
+              "edited",
+              "source"
+            ],
+            "properties": {
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Plaintext body. `null` when absent or masked by redaction."
+              },
+              "content": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Decrypted `content`, the latest valid edit's when `edited`. `null` for\nan event that could not be decrypted and for a redacted one."
+              },
+              "edited": {
+                "type": "boolean",
+                "description": "`true` when a valid edit was applied. An event read from the homeserver\nis shown edited only when the homeserver bundled its latest edit\n(Matrix 1.7, MSC3925)."
+              },
+              "event_id": {
+                "type": "string",
+                "description": "Matrix event ID."
+              },
+              "origin_ts": {
+                "type": "integer",
+                "format": "int64",
+                "description": "`origin_server_ts` in milliseconds."
+              },
+              "redacted": {
+                "type": "boolean",
+                "description": "`true` when the event has been redacted; `content` and `body` are then\n`null`."
+              },
+              "relates_to": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The event's own `m.relates_to` object, if any (a thread reply's\n`m.thread`, say). An edit does not change it."
+              },
+              "room_id": {
+                "type": "string",
+                "description": "Matrix room ID."
+              },
+              "sender": {
+                "type": "string",
+                "description": "Matrix user ID of the sender."
+              },
+              "sender_trust": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The sender-trust verdict, with the values and meaning it has on\n[`EventDto`], and the applied edit's when `edited`. `null` for an\nunencrypted event, one that could not be decrypted, and a redacted one."
+              },
+              "source": {
+                "$ref": "#/components/schemas/LinkedEventSourceDto",
+                "description": "Where the event was read from."
+              },
+              "type": {
+                "type": "string",
+                "description": "Matrix event type, e.g. `m.room.message`. `m.room.encrypted` for an\nevent that could not be decrypted."
               }
             }
           }
@@ -15491,6 +15741,91 @@
           }
         },
         "additionalProperties": false
+      },
+      "LinkedEventDto": {
+        "type": "object",
+        "description": "One linked event, as a Matrix-link card shows it (ADR 0138 section 3): its\nlatest valid edit applied and its redaction masked, as the timeline shows\nit. Deliberately not an [`EventDto`]: an event read from the homeserver has\nno arrival order or reactions.",
+        "required": [
+          "event_id",
+          "room_id",
+          "sender",
+          "origin_ts",
+          "type",
+          "redacted",
+          "edited",
+          "source"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Plaintext body. `null` when absent or masked by redaction."
+          },
+          "content": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Decrypted `content`, the latest valid edit's when `edited`. `null` for\nan event that could not be decrypted and for a redacted one."
+          },
+          "edited": {
+            "type": "boolean",
+            "description": "`true` when a valid edit was applied. An event read from the homeserver\nis shown edited only when the homeserver bundled its latest edit\n(Matrix 1.7, MSC3925)."
+          },
+          "event_id": {
+            "type": "string",
+            "description": "Matrix event ID."
+          },
+          "origin_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`origin_server_ts` in milliseconds."
+          },
+          "redacted": {
+            "type": "boolean",
+            "description": "`true` when the event has been redacted; `content` and `body` are then\n`null`."
+          },
+          "relates_to": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The event's own `m.relates_to` object, if any (a thread reply's\n`m.thread`, say). An edit does not change it."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "Matrix room ID."
+          },
+          "sender": {
+            "type": "string",
+            "description": "Matrix user ID of the sender."
+          },
+          "sender_trust": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sender-trust verdict, with the values and meaning it has on\n[`EventDto`], and the applied edit's when `edited`. `null` for an\nunencrypted event, one that could not be decrypted, and a redacted one."
+          },
+          "source": {
+            "$ref": "#/components/schemas/LinkedEventSourceDto",
+            "description": "Where the event was read from."
+          },
+          "type": {
+            "type": "string",
+            "description": "Matrix event type, e.g. `m.room.message`. `m.room.encrypted` for an\nevent that could not be decrypted."
+          }
+        }
+      },
+      "LinkedEventSourceDto": {
+        "type": "string",
+        "description": "Where a [`LinkedEventDto`] was read from.",
+        "enum": [
+          "store",
+          "homeserver"
+        ]
       },
       "LocalAliasesDetailDto": {
         "type": "object",

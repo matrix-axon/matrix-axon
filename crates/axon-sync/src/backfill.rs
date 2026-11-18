@@ -529,7 +529,10 @@ fn timing_out(state: Option<&RoomBackfillState>) -> bool {
 /// An event whose keys haven't arrived yet comes back as a UTD `TimelineEvent`
 /// rather than an error, exactly as on the live path; the re-decryption queue
 /// back-fills it once keys arrive.
-async fn decrypt_paged_event(room: &matrix_sdk::Room, raw: Raw<AnyTimelineEvent>) -> TimelineEvent {
+pub(crate) async fn decrypt_paged_event(
+    room: &matrix_sdk::Room,
+    raw: Raw<AnyTimelineEvent>,
+) -> TimelineEvent {
     if needs_decryption(&raw) {
         if let Ok(event) = room.decrypt_event(raw.cast_ref_unchecked(), None).await {
             return event;

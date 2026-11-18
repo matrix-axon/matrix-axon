@@ -8,8 +8,9 @@ use axon_store::Store;
 use axum::extract::State;
 use uuid::Uuid;
 
-use crate::dto::{EventDto, ReactionDto, VerificationBundleDto};
+use crate::dto::{EventDto, LinkedEventDto, ReactionDto, VerificationBundleDto};
 use crate::extract::Path;
+use crate::linked_events::{KeptMedia, LinkedEventError, LinkedEventSource};
 use crate::response::{ApiError, ApiResponse};
 use crate::trust::SenderTrustService;
 
@@ -39,6 +40,89 @@ pub async fn get_event(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("event {event_id} not found")))?;
     Ok(ApiResponse::new(EventDto::from_row(account_id, row)))
+}
+
+/// Get a linked event
+///
+/// Read one event in one room for a Matrix-link card (ADR 0138 section 3).
+/// An event stored for this account and this room comes from the store, as
+/// the timeline shows it; a stored event in another room is a 404, since event
+/// ids are unique and the link is wrong. Otherwise, for a room the account has
+/// joined or left, the account's homeserver is asked, and its answer is
+/// decrypted, judged and returned without being stored; its media fields are
+/// kept for an hour, so the media routes can serve its image when the request
+/// names this event (`room_id` and `event_id`). Any other room, and a
+/// homeserver `404 M_NOT_FOUND` or `403 M_FORBIDDEN`, is a 404. The homeserver
+/// read waits for capacity at most a few seconds before answering 503; a 502,
+/// 503 or 504 is transient.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+        ("room_id" = String, Path, description = "Matrix room id"),
+        ("event_id" = String, Path, description = "Matrix event id"),
+    ),
+    responses(
+        (status = 200, description = "The event", body = ApiResponse<LinkedEventDto>),
+        (status = 400, description = "Malformed room or event id", body = crate::response::ErrorResponse),
+        (status = 404, description = "No such account, or nothing this account can show for the event", body = crate::response::ErrorResponse),
+        (status = 409, description = "The account is not active", body = crate::response::ErrorResponse),
+        (status = 502, description = "The homeserver failed. Transient", body = crate::response::ErrorResponse),
+        (status = 503, description = "The account is not connected, or no capacity for the read. Transient", body = crate::response::ErrorResponse),
+        (status = 504, description = "The homeserver did not answer in time. Transient", body = crate::response::ErrorResponse),
+    ),
+    tag = "events",
+)]
+pub async fn get_linked_event(
+    State(store): State<Store>,
+    State(source): State<Arc<dyn LinkedEventSource>>,
+    State(kept): State<Arc<KeptMedia>>,
+    Path((account_id, room_id, event_id)): Path<(Uuid, String, String)>,
+) -> Result<ApiResponse<LinkedEventDto>, ApiError> {
+    if let Some(row) = store.get_event(account_id, &event_id).await? {
+        if row.room_id != room_id {
+            return Err(ApiError::not_found(format!(
+                "event {event_id} not found in room {room_id}"
+            )));
+        }
+        let mut dto = LinkedEventDto::from_row(row);
+        if dto.edited {
+            // The card shows the edit's text, so it carries the edit's own
+            // verdict, not the original's (which is what the timeline row has).
+            // An edit that vanished between the two reads leaves no verdict.
+            let edit = store.applied_edit(account_id, &event_id).await?;
+            dto.sender_trust = None;
+            if let Some(edit) = edit {
+                dto.content = Some(edit.content);
+                dto.body = edit.body;
+                dto.sender_trust = edit.sender_trust;
+            }
+        }
+        return Ok(ApiResponse::new(dto));
+    }
+    // Taken before the read, so a slower, older read can never overwrite what a
+    // newer one decided.
+    let ticket = kept.ticket();
+    let mut event = match source.read(account_id, &room_id, &event_id).await {
+        Ok(event) => event,
+        Err(err) => {
+            // A definitive "nothing to show" withdraws what an earlier read
+            // kept; a transient failure leaves it.
+            if matches!(err, LinkedEventError::NotFound(_)) {
+                kept.forget(ticket, account_id, &room_id, &event_id);
+            }
+            return Err(err.into());
+        }
+    };
+    event.room_id = room_id;
+    // Keeping nothing also drops what an earlier read kept, so an edit that
+    // removed the image, or a redaction, stops it being served.
+    match &event.content {
+        Some(content) => kept.keep(ticket, account_id, &event.room_id, &event_id, content),
+        None => kept.forget(ticket, account_id, &event.room_id, &event_id),
+    }
+    Ok(ApiResponse::new(LinkedEventDto::from_fetched(event)))
 }
 
 /// Get an event's verification bundle

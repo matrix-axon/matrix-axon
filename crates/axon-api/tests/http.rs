@@ -19,6 +19,8 @@
 mod common;
 #[path = "http/image_packs.rs"]
 mod image_packs;
+#[path = "http/linked_events.rs"]
+mod linked_events;
 #[path = "http/room_details.rs"]
 mod room_details;
 #[path = "http/room_previews.rs"]

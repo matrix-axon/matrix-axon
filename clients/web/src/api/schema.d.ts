@@ -964,7 +964,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Get a linked event
+         * @description Read one event in one room for a Matrix-link card (ADR 0138 section 3).
+         *     An event stored for this account and this room comes from the store, as
+         *     the timeline shows it; a stored event in another room is a 404, since event
+         *     ids are unique and the link is wrong. Otherwise, for a room the account has
+         *     joined or left, the account's homeserver is asked, and its answer is
+         *     decrypted, judged and returned without being stored; its media fields are
+         *     kept for an hour, so the media routes can serve its image when the request
+         *     names this event (`room_id` and `event_id`). Any other room, and a
+         *     homeserver `404 M_NOT_FOUND` or `403 M_FORBIDDEN`, is a 404. The homeserver
+         *     read waits for capacity at most a few seconds before answering 503; a 502,
+         *     503 or 504 is transient.
+         */
+        get: operations["get_linked_event"];
         /**
          * Edit a message
          * @description Edit an existing message (sends an `m.replace`).
@@ -2874,6 +2888,64 @@ export interface components {
                  */
                 status: components["schemas"]["PreviewGenerationStatus"];
                 thumbnail_status: components["schemas"]["PreviewThumbnailStatus"];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_LinkedEventDto: {
+            /**
+             * @description One linked event, as a Matrix-link card shows it (ADR 0138 section 3): its
+             *     latest valid edit applied and its redaction masked, as the timeline shows
+             *     it. Deliberately not an [`EventDto`]: an event read from the homeserver has
+             *     no arrival order or reactions.
+             */
+            data: {
+                /** @description Plaintext body. `null` when absent or masked by redaction. */
+                body?: string | null;
+                /**
+                 * @description Decrypted `content`, the latest valid edit's when `edited`. `null` for
+                 *     an event that could not be decrypted and for a redacted one.
+                 */
+                content?: Record<string, never> | null;
+                /**
+                 * @description `true` when a valid edit was applied. An event read from the homeserver
+                 *     is shown edited only when the homeserver bundled its latest edit
+                 *     (Matrix 1.7, MSC3925).
+                 */
+                edited: boolean;
+                /** @description Matrix event ID. */
+                event_id: string;
+                /**
+                 * Format: int64
+                 * @description `origin_server_ts` in milliseconds.
+                 */
+                origin_ts: number;
+                /**
+                 * @description `true` when the event has been redacted; `content` and `body` are then
+                 *     `null`.
+                 */
+                redacted: boolean;
+                /**
+                 * @description The event's own `m.relates_to` object, if any (a thread reply's
+                 *     `m.thread`, say). An edit does not change it.
+                 */
+                relates_to?: Record<string, never> | null;
+                /** @description Matrix room ID. */
+                room_id: string;
+                /** @description Matrix user ID of the sender. */
+                sender: string;
+                /**
+                 * @description The sender-trust verdict, with the values and meaning it has on
+                 *     [`EventDto`], and the applied edit's when `edited`. `null` for an
+                 *     unencrypted event, one that could not be decrypted, and a redacted one.
+                 */
+                sender_trust?: string | null;
+                /** @description Where the event was read from. */
+                source: components["schemas"]["LinkedEventSourceDto"];
+                /**
+                 * @description Matrix event type, e.g. `m.room.message`. `m.room.encrypted` for an
+                 *     event that could not be decrypted.
+                 */
+                type: string;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -5058,6 +5130,66 @@ export interface components {
             site_name?: string | null;
             title?: string | null;
         };
+        /**
+         * @description One linked event, as a Matrix-link card shows it (ADR 0138 section 3): its
+         *     latest valid edit applied and its redaction masked, as the timeline shows
+         *     it. Deliberately not an [`EventDto`]: an event read from the homeserver has
+         *     no arrival order or reactions.
+         */
+        LinkedEventDto: {
+            /** @description Plaintext body. `null` when absent or masked by redaction. */
+            body?: string | null;
+            /**
+             * @description Decrypted `content`, the latest valid edit's when `edited`. `null` for
+             *     an event that could not be decrypted and for a redacted one.
+             */
+            content?: Record<string, never> | null;
+            /**
+             * @description `true` when a valid edit was applied. An event read from the homeserver
+             *     is shown edited only when the homeserver bundled its latest edit
+             *     (Matrix 1.7, MSC3925).
+             */
+            edited: boolean;
+            /** @description Matrix event ID. */
+            event_id: string;
+            /**
+             * Format: int64
+             * @description `origin_server_ts` in milliseconds.
+             */
+            origin_ts: number;
+            /**
+             * @description `true` when the event has been redacted; `content` and `body` are then
+             *     `null`.
+             */
+            redacted: boolean;
+            /**
+             * @description The event's own `m.relates_to` object, if any (a thread reply's
+             *     `m.thread`, say). An edit does not change it.
+             */
+            relates_to?: Record<string, never> | null;
+            /** @description Matrix room ID. */
+            room_id: string;
+            /** @description Matrix user ID of the sender. */
+            sender: string;
+            /**
+             * @description The sender-trust verdict, with the values and meaning it has on
+             *     [`EventDto`], and the applied edit's when `edited`. `null` for an
+             *     unencrypted event, one that could not be decrypted, and a redacted one.
+             */
+            sender_trust?: string | null;
+            /** @description Where the event was read from. */
+            source: components["schemas"]["LinkedEventSourceDto"];
+            /**
+             * @description Matrix event type, e.g. `m.room.message`. `m.room.encrypted` for an
+             *     event that could not be decrypted.
+             */
+            type: string;
+        };
+        /**
+         * @description Where a [`LinkedEventDto`] was read from.
+         * @enum {string}
+         */
+        LinkedEventSourceDto: "store" | "homeserver";
         /**
          * @description The aliases the account's homeserver maintains for the room (`GET
          *     /rooms/{roomId}/aliases`). Distinct from the advertised aliases in
@@ -9542,6 +9674,98 @@ export interface operations {
             };
         };
     };
+    get_linked_event: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+                /** @description Matrix event id */
+                event_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The event */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_LinkedEventDto"];
+                };
+            };
+            /** @description Malformed room or event id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such account, or nothing this account can show for the event */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The account is not active */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver failed. Transient */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The account is not connected, or no capacity for the read. Transient */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver did not answer in time. Transient */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     edit_message: {
         parameters: {
             query?: never;
@@ -12972,7 +13196,12 @@ export interface operations {
     };
     get_media: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The room of the event the media is for. Requires `event_id`. */
+                room_id?: string;
+                /** @description The event the media is for. Requires `room_id`. */
+                event_id?: string;
+            };
             header?: never;
             path: {
                 /** @description Axon account whose credentials are used for the download */
@@ -13007,7 +13236,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Syntactically invalid MXC URI components */
+            /** @description Syntactically invalid MXC URI components, or only one of `room_id` and `event_id` */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -13117,6 +13346,10 @@ export interface operations {
                  *     omitted.
                  */
                 method?: components["schemas"]["ThumbnailMethodDto"];
+                /** @description The room of the event the media is for. Requires `event_id`. */
+                room_id?: string;
+                /** @description The event the media is for. Requires `room_id`. */
+                event_id?: string;
             };
             header?: never;
             path: {
@@ -13152,7 +13385,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Syntactically invalid MXC URI components, or the media is encrypted — a homeserver cannot thumbnail ciphertext it cannot decrypt */
+            /** @description Syntactically invalid MXC URI components, only one of `room_id` and `event_id`, or the media is encrypted — a homeserver cannot thumbnail ciphertext it cannot decrypt */
             400: {
                 headers: {
                     [name: string]: unknown;
