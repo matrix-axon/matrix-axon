@@ -4004,6 +4004,209 @@ describe('RoomPage', () => {
     })
   })
 
+  describe('a notification tap marks the room read once its newest message is seen', () => {
+    /**
+     * jsdom has no `IntersectionObserver`; this one records each observer with
+     * its target so a test can answer for the newest-seen marker alone
+     * (`.timeline-newest-seen`) without waking the paging sentinels. Element rects are all zero in jsdom, so the marker's own
+     * geometry re-check passes and `isIntersecting` is the thing under test.
+     */
+    function installIntersectionObserver() {
+      const observers: {
+        callback: IntersectionObserverCallback
+        target: Element | null
+      }[] = []
+      class FakeIntersectionObserver {
+        private readonly record: (typeof observers)[number]
+        constructor(callback: IntersectionObserverCallback) {
+          this.record = { callback, target: null }
+          observers.push(this.record)
+        }
+        observe(target: Element) {
+          this.record.target = target
+        }
+        disconnect() {
+          this.record.target = null
+        }
+        unobserve() {}
+        takeRecords() {
+          return []
+        }
+      }
+      vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
+      /** Report the live marker observer's state; `false` if none is attached. */
+      return (isIntersecting: boolean): boolean => {
+        const marker = observers
+          .filter(
+            ({ target }) =>
+              target?.isConnected === true &&
+              target.classList.contains('timeline-newest-seen'),
+          )
+          .at(-1)
+        marker?.callback(
+          [{ isIntersecting } as IntersectionObserverEntry],
+          null as unknown as IntersectionObserver,
+        )
+        return marker !== undefined
+      }
+    }
+
+    afterEach(() => vi.unstubAllGlobals())
+
+    /**
+     * What `notificationHref` builds for a main-timeline message:
+     * `?event=<the notified message>`, which is the room's newest event.
+     */
+    function notificationTap(tag: string) {
+      const older = `$older-${tag}`
+      const tapped = `$tapped-${tag}`
+      const all = [
+        event(older, T0 - 60_000, { body: `body of ${older}` }),
+        event(tapped, T0, { body: `body of ${tapped}` }),
+      ]
+      const reads: string[] = []
+      server.use(
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`,
+          async ({ request }) => {
+            const body = (await request.json()) as { event_id: string }
+            reads.push(body.event_id)
+            return HttpResponse.json({ data: {} })
+          },
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          () => HttpResponse.json({ data: all[1] }),
+        ),
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({
+            data: [
+              {
+                account_id: ACCOUNT,
+                account_user_id: '@me:hs',
+                room_id: ROOM,
+                name: 'Ops',
+                topic: null,
+                avatar_url: null,
+                canonical_alias: null,
+                last_activity_ts: T0,
+                last_event_id: tapped,
+              },
+            ],
+          }),
+        ),
+        http.get(TIMELINE_PATH, ({ request }) => {
+          const atTs = new URL(request.url).searchParams.get('at_ts')
+          let pool = [...all].sort((a, b) => b.origin_ts - a.origin_ts)
+          if (atTs !== null) {
+            pool = pool.filter((e) => e.origin_ts <= Number(atTs))
+          }
+          return HttpResponse.json({
+            data: { events: pool, next_cursor: null },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=${encodeURIComponent(tapped)}`,
+      )
+      const showMarker = installIntersectionObserver()
+      const services = testServices()
+      const cleared = vi.spyOn(services.rooms, 'noteUnreadCounts')
+      const view = render(routedRoomPage(services))
+      /**
+       * Land the tap: the jump page ends at the target, and the slice learns it
+       * is the live end from the forward probe the bottom sentinel's own
+       * observer fires in a browser. Pressing the button is that probe.
+       */
+      const landed = async () => {
+        await view.findByText(`body of ${tapped}`)
+        fireEvent.click(
+          await view.findByRole('button', { name: 'Load newer messages' }),
+        )
+        await waitFor(() =>
+          expect(
+            view.queryByRole('button', { name: 'Load newer messages' }),
+          ).toBeNull(),
+        )
+      }
+      return { services, reads, cleared, showMarker, tapped, landed, ...view }
+    }
+
+    it('claims the room read once the newest row has been on screen', async () => {
+      const { services, reads, cleared, showMarker, tapped, landed } =
+        notificationTap('seen')
+      await landed()
+
+      await waitFor(() => expect(showMarker(true)).toBe(true))
+
+      // All three claims an ordinary open makes: the badge, the cross-device
+      // marker, and the homeserver receipt.
+      await waitFor(() =>
+        expect(cleared).toHaveBeenCalledWith(ACCOUNT, ROOM, 0, 0),
+      )
+      await waitFor(() =>
+        expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+          eventId: tapped,
+          originTs: T0,
+        }),
+      )
+      await waitFor(() => expect(reads).toContain(tapped), {
+        timeout: RECEIPT_DEBOUNCE_MS + 1000,
+      })
+      // The anchor stays: the highlight is what the tap was for.
+      expect(window.location.search).toContain('event=')
+    })
+
+    it('claims nothing while the newest row has not been on screen', async () => {
+      const { services, reads, cleared, showMarker, landed } =
+        notificationTap('unseen')
+      await landed()
+
+      await waitFor(() => expect(showMarker(false)).toBe(true))
+      await new Promise((resolve) =>
+        setTimeout(resolve, RECEIPT_DEBOUNCE_MS + 150),
+      )
+
+      expect(cleared).not.toHaveBeenCalledWith(ACCOUNT, ROOM, 0, 0)
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toBeNull()
+      expect(reads).toEqual([])
+    })
+
+    it('does not claim a message that arrives after the bottom was seen', async () => {
+      const { services, reads, showMarker, tapped, landed, findByText } =
+        notificationTap('later')
+      await landed()
+      await waitFor(() => expect(showMarker(true)).toBe(true))
+      await waitFor(() => expect(reads).toContain(tapped), {
+        timeout: RECEIPT_DEBOUNCE_MS + 1000,
+      })
+
+      // A newer message lands below the fold: an anchored view does not pin to
+      // its bottom, so the reader has not seen it.
+      const later = '$later-later'
+      services.timelines
+        .acquire(ACCOUNT, ROOM)
+        .ingestLive(event(later, T0 + 1_000, { body: `body of ${later}` }))
+      await findByText(`body of ${later}`)
+      await waitFor(() => expect(showMarker(false)).toBe(true))
+      await new Promise((resolve) =>
+        setTimeout(resolve, RECEIPT_DEBOUNCE_MS + 150),
+      )
+      expect(reads).not.toContain(later)
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)?.eventId).toBe(
+        tapped,
+      )
+
+      // Scrolling it into view releases the gate for it too.
+      showMarker(true)
+      await waitFor(() => expect(reads).toContain(later), {
+        timeout: RECEIPT_DEBOUNCE_MS + 1000,
+      })
+    })
+  })
+
   describe('the receipt names the arrival-newest event (ADR 0089)', () => {
     /**
      * The LinkedIn portal that prompted ADR 0089, with its real numbers. A

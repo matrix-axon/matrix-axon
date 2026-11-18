@@ -26,6 +26,11 @@ import {
 } from '../timeline/arrival-order'
 import { hiddenByRedaction, NO_THREAD_ROOTS } from '../timeline/visibility'
 import {
+  anchorCaughtUp,
+  observeNewestSeen,
+  type NewestSeen,
+} from '../timeline/newest-seen'
+import {
   Composer,
   type ComposerAutocompleteOption,
   type SubmittedPreviews,
@@ -220,6 +225,8 @@ export function ThreadPanel({
   /** Scopes the viewer's focus-restore lookup to this panel's own rows. */
   const threadListRef = useRef<HTMLOListElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
+  /** The panel's scroller — the root the bottom-edge observers measure in. */
+  const scrollerRef = useRef<HTMLDivElement>(null)
   const [rootPinned, setRootPinned] = useState(false)
   const revealedEventId = useRef<string | null>(null)
   const targetEventId =
@@ -374,9 +381,88 @@ export function ThreadPanel({
    * needed here for the same reasons they are there — `highlightedEventId` opens
    * the panel on an old reply and `jumpTo` parks the slice below the tail, while
    * a live-end slice says nothing about an anchor the panel is still resolving.
+   * As there, `caughtUp` is the only release for an anchored panel.
    */
+  const isVisibleEvent = (event: TimelineEvent): boolean =>
+    !hiddenByRedaction(event, hideRedacted, NO_THREAD_ROOTS)
+  const visibleEvents = thread.events.value.filter(isVisibleEvent)
+
+  /**
+   * The newest reply an anchored panel has shown the reader the bottom of — the
+   * thread half of the notification-tap fix (`timeline/newest-seen.ts`). A tap
+   * on a thread reply opens `?thread=<root>&event=<reply>`, usually the newest
+   * reply; without this the panel stayed anchored, and claimed nothing, for as
+   * long as it was open.
+   */
+  const viewScope = `${accountId}\0${roomId}\0${rootId}`
+  const [newestSeen, setNewestSeen] = useState<NewestSeen | null>(null)
+  const newestRenderedId = visibleEvents.at(-1)?.event_id ?? null
+  const caughtUp = anchorCaughtUp({
+    seen: newestSeen,
+    scope: viewScope,
+    anchor: targetEventId,
+    atEnd: thread.atEnd.value,
+    newestRenderedId,
+  })
+  /** Reports the newest row's bottom on screen; see `observeNewestSeen`. */
+  const watchNewestSeen = useCallback(
+    (marker: HTMLDivElement | null) => {
+      const root = scrollerRef.current
+      if (
+        marker === null ||
+        root === null ||
+        targetEventId === null ||
+        newestRenderedId === null
+      ) {
+        return
+      }
+      const anchor = targetEventId
+      const eventId = newestRenderedId
+      return observeNewestSeen(
+        marker,
+        root,
+        () => revealedEventId.current === anchor,
+        () => setNewestSeen({ scope: viewScope, anchor, eventId }),
+      )
+    },
+    [targetEventId, newestRenderedId, viewScope],
+  )
+  /**
+   * Walk forward from a jump. `jumpTo` parks the slice short of the tail
+   * (`atEnd` false) and only `loadNewer` flips it back, so a panel opened on a
+   * reply — even the newest one — otherwise never learned it was at the live
+   * end, and could never claim the thread read. Same shape as the room
+   * stream's bottom sentinel.
+   */
+  const watchBottomSentinel = useCallback(
+    (sentinel: HTMLDivElement | null) => {
+      const root = scrollerRef.current
+      if (
+        sentinel === null ||
+        root === null ||
+        typeof IntersectionObserver === 'undefined'
+      ) {
+        return
+      }
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (
+            sentinel.isConnected &&
+            entries.some((entry) => entry.isIntersecting)
+          ) {
+            void thread.loadNewer()
+          }
+        },
+        { root },
+      )
+      observer.observe(sentinel)
+      return () => observer.disconnect()
+    },
+    [thread],
+  )
+
   const showingNewestReplies = viewMayClaimReadState({
-    anchoredTo: targetEventId,
+    anchoredTo: caughtUp ? null : targetEventId,
     atEnd: thread.atEnd.value,
     loading: thread.loading.value,
   })
@@ -386,8 +472,9 @@ export function ThreadPanel({
     // (#154). Everything below this line is a claim: the thread marker is
     // cross-device, `markThreadRead` clears the unread-threads entry outright,
     // and the receipt is a homeserver-visible acknowledgement of the whole room
-    // up to its target. A panel opened on a deep link is parked in history by
-    // definition and has displayed none of that.
+    // up to its target. A panel opened on a deep link has displayed none of that
+    // until it catches up past its anchor (`caughtUp`: at the live end with the
+    // newest reply's bottom on screen, which is where a notification tap lands).
     if (!showingNewestReplies) {
       return
     }
@@ -531,10 +618,6 @@ export function ThreadPanel({
     }
   }, [api, accountId, rootId, root])
 
-  const isVisibleEvent = (event: TimelineEvent): boolean =>
-    !hiddenByRedaction(event, hideRedacted, NO_THREAD_ROOTS)
-  const visibleEvents = thread.events.value.filter(isVisibleEvent)
-
   /**
    * `ArrowUp` on an empty thread composer edits the newest message we can edit
    * *in this thread* (ADR 0078), as the room composer does for the room.
@@ -638,7 +721,11 @@ export function ThreadPanel({
 
       <ErrorBanner error={thread.error} />
 
-      <div class="thread-timeline" onScroll={handleThreadScroll}>
+      <div
+        class="thread-timeline"
+        ref={scrollerRef}
+        onScroll={handleThreadScroll}
+      >
         {rootPinned && (
           <div class="thread-root-preview">
             <ThreadRoot
@@ -784,6 +871,30 @@ export function ThreadPanel({
                 </ol>
               </div>
             </MediaViewerProvider>
+            {targetEventId !== null && thread.atEnd.value && (
+              <div
+                class="timeline-newest-seen"
+                ref={watchNewestSeen}
+                aria-hidden="true"
+              />
+            )}
+            {!thread.atEnd.value && (
+              <>
+                {/* Above the button, as in the room stream: whatever reveals
+                    the button reveals the sentinel too. */}
+                <div ref={watchBottomSentinel} />
+                <button
+                  type="button"
+                  class="timeline-edge"
+                  disabled={thread.loadingNewer.value}
+                  onClick={() => void thread.loadNewer()}
+                >
+                  {thread.loadingNewer.value
+                    ? 'Loading…'
+                    : 'Load newer replies'}
+                </button>
+              </>
+            )}
           </>
         )}
       </div>
