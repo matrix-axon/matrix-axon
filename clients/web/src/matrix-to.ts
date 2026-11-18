@@ -77,13 +77,82 @@ export function matrixToRoomReferenceLink(
   return matrixToLink(roomId, server === null ? (options.via ?? []) : [server])
 }
 
-export function matrixToEventLink(roomId: string, eventId: string): string {
+/**
+ * A matrix.to link to an event. `via` names the servers to join through, as
+ * the link it was read from gave them; without any, the room id's own server
+ * is used where it has one.
+ */
+export function matrixToEventLink(
+  roomId: string,
+  eventId: string,
+  via: readonly string[] = [],
+): string {
   let href = `${MATRIX_TO_ORIGIN}/#/${encodeURIComponent(roomId)}/${encodeURIComponent(eventId)}`
   const server = serverNameFromRoomId(roomId)
-  if (server !== null) {
-    href += `?via=${encodeURIComponent(server)}`
+  const servers = via.length > 0 ? via : server === null ? [] : [server]
+  if (servers.length > 0) {
+    href += `?${servers.map((name) => `via=${encodeURIComponent(name)}`).join('&')}`
   }
   return href
+}
+
+/**
+ * Whether `raw` is a Matrix link (ADR 0138 § 1): any link whose origin is
+ * `https://matrix.to`, and any `matrix:` URI, whatever it points at. The
+ * sender builds no card for one; the recipient's client builds its own
+ * (`MatrixLinkCards`). Mirrored by `is_matrix_link` in `axon-core`.
+ */
+export function isMatrixLink(raw: string): boolean {
+  if (/^matrix:/i.test(raw)) return true
+  try {
+    return new URL(raw).origin === MATRIX_TO_ORIGIN
+  } catch {
+    return false
+  }
+}
+
+/** An event a Matrix link points at, named by room id (ADR 0138 § 2). */
+export interface LinkedEventTarget {
+  roomId: string
+  eventId: string
+  /** The link's `via` servers, for joining the room from its card. */
+  via: readonly string[]
+}
+
+/**
+ * The event a Matrix link points at, or `null` for a link to a user, to a room
+ * without an event, or to an alias none of the account's rooms has as its
+ * canonical alias. A room id names the room whether or not the account is in
+ * it; whether the event can be read is the server's to say.
+ */
+export function linkedEventTarget(
+  href: string,
+  context: { accountId: string; rooms: readonly RoomDto[] },
+): LinkedEventTarget | null {
+  const target = parseRoomLinkTarget(href)
+  if (target === null || target.eventId === null) return null
+  if (target.roomIdOrAlias.startsWith('!')) {
+    return {
+      roomId: target.roomIdOrAlias,
+      eventId: target.eventId,
+      via: target.serverNames,
+    }
+  }
+  const ids = new Set(
+    context.rooms
+      .filter(
+        (room) =>
+          room.account_id === context.accountId &&
+          room.canonical_alias === target.roomIdOrAlias,
+      )
+      .map((room) => room.room_id),
+  )
+  if (ids.size !== 1) return null
+  return {
+    roomId: [...ids][0],
+    eventId: target.eventId,
+    via: target.serverNames,
+  }
 }
 
 export function resolveMatrixToRoomLink(

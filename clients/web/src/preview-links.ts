@@ -1,4 +1,5 @@
 import { matchUrls } from './html/linkify'
+import { isMatrixLink } from './matrix-to'
 
 /**
  * The links a preview may be built for, and how two of them are compared
@@ -73,11 +74,17 @@ export function isPreviewLink(raw: string): boolean {
   }
 }
 
-/** Every bare link in `text` that passes {@link isPreviewLink}, in text order. */
+/**
+ * Every bare link in `text` that passes {@link isPreviewLink} and is not a
+ * Matrix link, in text order: the links the sender may build a card for. A
+ * Matrix link's card is the recipient's to build (ADR 0138 § 1), so it is left
+ * out here and not in `isPreviewLink`, which the native readers mirror rule
+ * for rule.
+ */
 export function nativePreviewLinks(text: string): string[] {
   return matchUrls(text)
     .map(({ url }) => url)
-    .filter(isPreviewLink)
+    .filter((url) => isPreviewLink(url) && !isMatrixLink(url))
 }
 
 /**

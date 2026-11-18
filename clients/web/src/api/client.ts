@@ -105,6 +105,13 @@ const AXON_UPSTREAM_UPLOAD_MS = 60_000
 const AXON_PREVIEW_GENERATION_MS = 25_000
 
 /**
+ * A Matrix-link card's event read (ADR 0138 § 3): axon waits up to 5 s for
+ * capacity, then bounds the homeserver request at 15 s
+ * (`crates/axon-sync/src/linked_event.rs`).
+ */
+const AXON_LINKED_EVENT_MS = 5_000 + 15_000
+
+/**
  * The calls axon bounds more loosely than `API_REQUEST_TIMEOUT_MS`, each given
  * axon's deadline plus `PAST_AXON_MS` (issues 872 and 879).
  *
@@ -160,6 +167,8 @@ export const AXON_DEADLINES_MS: RouteDeadlines = {
     AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
   'POST /v1/accounts/{account_id}/link-previews/generate':
     AXON_PREVIEW_GENERATION_MS + PAST_AXON_MS,
+  'GET /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}':
+    AXON_LINKED_EVENT_MS + PAST_AXON_MS,
 }
 
 /**

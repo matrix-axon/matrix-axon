@@ -222,6 +222,15 @@ export interface SettingsV1 {
    * `device` in the shell, which has a fetcher, and `off` in a browser.
    */
   linkPreviews: LinkPreviewSetting
+  /**
+   * Matrix-link cards (ADR 0138 § 2): this device reads the event a received
+   * Matrix link points at, through the account's homeserver, and shows it
+   * under the message. Per device, like `linkPreviews`, and separate from it:
+   * that setting governs fetches that reach other sites or disclose a link
+   * before it is sent, while any sender in a shared room can make this one
+   * read events.
+   */
+  matrixLinkCards: boolean
 }
 
 const DEFAULTS: SettingsV1 = {
@@ -257,6 +266,7 @@ const DEFAULTS: SettingsV1 = {
   messageNotifications: false,
   pushDisclosure: 'activity',
   linkPreviews: 'off',
+  matrixLinkCards: true,
 }
 
 const MAX_RECENT_REACTIONS = 3
@@ -464,6 +474,10 @@ function parse(
       typeof v1.cacheRoomList === 'boolean'
         ? v1.cacheRoomList
         : DEFAULTS.cacheRoomList,
+    matrixLinkCards:
+      typeof v1.matrixLinkCards === 'boolean'
+        ? v1.matrixLinkCards
+        : DEFAULTS.matrixLinkCards,
     messageNotifications:
       typeof v1.messageNotifications === 'boolean'
         ? v1.messageNotifications
@@ -512,6 +526,7 @@ export interface SettingsStore {
   pageScrollReset: Signal<boolean>
   appBadgeEnabled: Signal<boolean>
   cacheRoomList: Signal<boolean>
+  matrixLinkCards: Signal<boolean>
   messageNotifications: Signal<boolean>
   /** What a remote banner may say. Default `activity`. */
   pushDisclosure: Signal<PushDisclosure>
@@ -586,6 +601,7 @@ export function createSettingsStore(
   const pageScrollReset = signal<boolean>(initial.pageScrollReset)
   const appBadgeEnabled = signal<boolean>(initial.appBadgeEnabled)
   const cacheRoomList = signal<boolean>(initial.cacheRoomList)
+  const matrixLinkCards = signal<boolean>(initial.matrixLinkCards)
   const messageNotifications = signal<boolean>(initial.messageNotifications)
   const pushDisclosure = signal<PushDisclosure>(initial.pushDisclosure)
   const linkPreviews = signal<LinkPreviewSetting>(initial.linkPreviews)
@@ -642,6 +658,7 @@ export function createSettingsStore(
       pageScrollReset: pageScrollReset.value,
       appBadgeEnabled: appBadgeEnabled.value,
       cacheRoomList: cacheRoomList.value,
+      matrixLinkCards: matrixLinkCards.value,
       messageNotifications: messageNotifications.value,
       pushDisclosure: pushDisclosure.value,
       linkPreviews: linkPreviews.value,
@@ -691,6 +708,7 @@ export function createSettingsStore(
     pageScrollReset,
     appBadgeEnabled,
     cacheRoomList,
+    matrixLinkCards,
     messageNotifications,
     pushDisclosure,
     linkPreviews,

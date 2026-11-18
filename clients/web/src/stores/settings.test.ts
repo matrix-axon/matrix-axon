@@ -105,6 +105,7 @@ describe('createSettingsStore', () => {
       messageNotifications: false,
       pushDisclosure: 'activity',
       linkPreviews: 'off',
+      matrixLinkCards: true,
     })
   })
 

@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  isMatrixLink,
+  linkedEventTarget,
   matrixToRoomReferenceLink,
   parseMatrixRoomReference,
 } from './matrix-to'
+import type { RoomDto } from './stores/room-list'
 
 describe('matrixToRoomReferenceLink', () => {
   it('adds via hints for room IDs without an embedded server name', () => {
@@ -187,5 +190,80 @@ describe('parseMatrixRoomReference', () => {
     ).toBeNull()
     expect(parseMatrixRoomReference('matrix:u/alice:example.org')).toBeNull()
     expect(parseMatrixRoomReference('not a room')).toBeNull()
+  })
+})
+
+describe('isMatrixLink', () => {
+  it.each([
+    'https://matrix.to/#/!room:example.org/$event',
+    'https://matrix.to/#/@alice:example.org',
+    'https://MATRIX.to/#/#room:example.org',
+    'matrix:roomid/room:example.org/e/event',
+    'MATRIX:u/alice:example.org',
+  ])('is true for %s', (url) => {
+    expect(isMatrixLink(url)).toBe(true)
+  })
+  it.each([
+    'http://matrix.to/#/!room:example.org',
+    'https://matrix.to:8443/#/!room:example.org',
+    'https://www.matrix.to/#/!room:example.org',
+    'https://matrix.org/',
+    'not a link',
+  ])('is false for %s', (url) => {
+    expect(isMatrixLink(url)).toBe(false)
+  })
+})
+
+describe('linkedEventTarget', () => {
+  const rooms = [
+    {
+      account_id: 'acct',
+      room_id: '!known:example.org',
+      canonical_alias: '#known:example.org',
+    },
+    {
+      account_id: 'other',
+      room_id: '!theirs:example.org',
+      canonical_alias: '#theirs:example.org',
+    },
+  ] as RoomDto[]
+  const context = { accountId: 'acct', rooms }
+
+  it('names an event by room id, known to the account or not', () => {
+    expect(
+      linkedEventTarget(
+        'https://matrix.to/#/!elsewhere:example.org/$event?via=example.org',
+        context,
+      ),
+    ).toEqual({
+      roomId: '!elsewhere:example.org',
+      eventId: '$event',
+      via: ['example.org'],
+    })
+    expect(
+      linkedEventTarget(
+        'matrix:roomid/%21known:example.org/e/%24event',
+        context,
+      ),
+    ).toEqual({ roomId: '!known:example.org', eventId: '$event', via: [] })
+  })
+
+  it('resolves an alias only through the account rooms', () => {
+    expect(
+      linkedEventTarget('https://matrix.to/#/#known:example.org/$e', context),
+    ).toEqual({ roomId: '!known:example.org', eventId: '$e', via: [] })
+    expect(
+      linkedEventTarget('https://matrix.to/#/#theirs:example.org/$e', context),
+    ).toBeNull()
+  })
+
+  it('has no target for users, rooms without an event, or other links', () => {
+    for (const href of [
+      'https://matrix.to/#/@alice:example.org',
+      'https://matrix.to/#/!known:example.org',
+      'https://example.org/#/!known:example.org/$e',
+    ]) {
+      expect(linkedEventTarget(href, context)).toBeNull()
+    }
   })
 })

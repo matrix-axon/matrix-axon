@@ -13,6 +13,7 @@ import {
   type DeviceLinkPreview,
   type LinkPreviewFailure,
 } from './platform'
+import { isMatrixLink } from './matrix-to'
 import {
   isPreviewLink,
   linkIdentity,
@@ -253,6 +254,9 @@ function scan(
     // `matched_url` is the text the server finds in the body.
     const url = match.url.replace(/^https?:/i, (scheme) => scheme.toLowerCase())
     const { end } = match
+    // A Matrix link gets no card and no lookup (ADR 0138 § 1), not even one
+    // an edited message already carries: the server drops those from an edit.
+    if (isMatrixLink(url)) continue
     const identity = linkIdentity(url)
     if (identity === null) continue
     if (!isPreviewLink(url) && !kept.has(identity)) continue

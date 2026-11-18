@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { matchUrls } from './html/linkify'
 import {
+  isPreviewLink,
   linkIdentity,
   nativePreviewLinks,
   PREVIEW_FIELD_LIMITS,
@@ -9,14 +11,25 @@ import cases from './incoming-share/fixtures/device-preview-urls.json'
 import identity from './fixtures/link-identity.json'
 
 describe('portable native preview URLs', () => {
+  // The fixture describes `isPreviewLink` alone, the boundary the native
+  // readers mirror; the Matrix-link rule is web-only (ADR 0138 § 1).
   it.each(cases)(
     'matches native static eligibility for $url',
     ({ url, eligible }) => {
-      expect(nativePreviewLinks(`Keep this link ${url}`).includes(url)).toBe(
-        eligible,
-      )
+      const links = matchUrls(`Keep this link ${url}`).map(({ url }) => url)
+      expect(links.filter(isPreviewLink).includes(url)).toBe(eligible)
     },
   )
+  it.each([
+    'https://matrix.to/#/!room:example.org/$event',
+    'https://matrix.to/#/#room:example.org',
+    'https://matrix.to/#/@alice:example.org',
+  ])('gives the sender no card for the Matrix link %s', (url) => {
+    expect(isPreviewLink(url)).toBe(true)
+    expect(nativePreviewLinks(`See ${url} and https://example.org/a`)).toEqual([
+      'https://example.org/a',
+    ])
+  })
   it.each([
     'http://example.org/article',
     'https://example.org/é',
