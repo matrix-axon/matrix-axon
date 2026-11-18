@@ -3542,6 +3542,14 @@ a.utd-recover:hover {
   font-size: 0.85rem;
 }
 
+/* What saving an edit does to its link previews (ADR 0132 § 8). */
+.composer-banner-note {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 /* ---- media send (M-W8.5, ADR 0065) ---- */
 
 .composer-attachment {
@@ -3713,6 +3721,15 @@ span.composer-attachment-thumb {
   background: var(--bg);
 }
 
+/* A message's own card in the edit composer (ADR 0132 § 8): the space is
+   held while its image loads from the media proxy, which also gives the
+   lazy loader a box to watch. */
+.composer-link-preview-thumb-slot {
+  flex: 0 0 auto;
+  width: 3.5rem;
+  height: 3.5rem;
+}
+
 .composer-link-preview-text {
   display: flex;
   flex-direction: column;
@@ -3764,6 +3781,13 @@ span.composer-attachment-thumb {
 .composer-link-preview-marker {
   margin: 0 0 0.4rem;
   font-size: 0.85rem;
+}
+
+/* Why a plain http:// link has no card (ADR 0132 § 1). */
+.composer-link-preview-note {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 
 /* Visually hidden, but still clickable via the paperclip's `.click()` and

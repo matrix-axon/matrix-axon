@@ -258,3 +258,113 @@ describe('preview sends', () => {
     expect(store.events.value[0].localEcho?.previewsRejected).toBeUndefined()
   })
 })
+
+describe('preview edits (§ 8)', () => {
+  const EDIT_PATH = `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId`
+
+  function serveEdit(answer: () => Response) {
+    const edits: Record<string, unknown>[] = []
+    let uploads = 0
+    server.use(
+      http.post(UPLOAD_PATH, () => {
+        uploads += 1
+        return HttpResponse.json({
+          data: { upload_id: `00000000-0000-4000-8000-00000000000${uploads}` },
+        })
+      }),
+      http.put(EDIT_PATH, async ({ request }) => {
+        edits.push((await request.json()) as Record<string, unknown>)
+        return answer()
+      }),
+      http.get(EVENTS_PATH, () =>
+        HttpResponse.json({ data: confirmed(`now ${A} ${B}`) }),
+      ),
+    )
+    return { edits, uploads: () => uploads }
+  }
+
+  it('sends keep entries and new cards, uploading only new thumbnails', async () => {
+    const { edits, uploads } = serveEdit(ok)
+    const store = makeStore()
+    expect(
+      await store.edit('$sent', `now ${A} ${B}`, {
+        linkPreviews: [
+          { kind: 'keep', matchedUrl: A },
+          { kind: 'new', preview: preview(B, new Uint8Array([7])) },
+        ],
+      }),
+    ).toBe(true)
+    expect(uploads()).toBe(1)
+    expect(edits[0].url_previews).toEqual([
+      { matched_url: A, keep: true },
+      {
+        matched_url: B,
+        title: `About ${B}`,
+        image_upload_id: '00000000-0000-4000-8000-000000000001',
+      },
+    ])
+  })
+
+  it('leaves the field out without previews, so the server carries them', async () => {
+    const { edits } = serveEdit(ok)
+    await makeStore().edit('$sent', 'plain')
+    expect(edits[0]).not.toHaveProperty('url_previews')
+  })
+
+  it('reports 409 previews_changed with the message as it now stands', async () => {
+    serveEdit(rejected(409, 'previews_changed'))
+    const failures: [string, string | null | undefined][] = []
+    expect(
+      await makeStore().edit('$sent', `now ${A}`, {
+        linkPreviews: [{ kind: 'keep', matchedUrl: A }],
+        onPreviewFailure: (kind, event) => failures.push([kind, event?.body]),
+      }),
+    ).toBe(false)
+    expect(failures).toEqual([['changed', `now ${A} ${B}`]])
+  })
+
+  it('reports a preview rejection of an edit with a new card', async () => {
+    serveEdit(rejected(413, 'event_too_large'))
+    const failures: string[] = []
+    expect(
+      await makeStore().edit('$sent', `now ${A} ${B}`, {
+        linkPreviews: [
+          { kind: 'keep', matchedUrl: A },
+          { kind: 'new', preview: preview(B, null) },
+        ],
+        onPreviewFailure: (kind) => failures.push(kind),
+      }),
+    ).toBe(false)
+    expect(failures).toEqual(['rejected'])
+  })
+
+  it('reports no preview rejection when no new card was sent', async () => {
+    // A 404 for a deleted message, or a 400 or 413 for the text, is not the
+    // previews' fault when the edit only kept the message's cards.
+    for (const [status, code, linkPreviews] of [
+      [404, 'not_found', [{ kind: 'keep', matchedUrl: A }]],
+      [400, 'bad_request', [{ kind: 'keep', matchedUrl: A }]],
+      [413, 'event_too_large', []],
+    ] as const) {
+      serveEdit(rejected(status, code))
+      const failures: string[] = []
+      expect(
+        await makeStore().edit('$sent', `now ${A}`, {
+          linkPreviews: [...linkPreviews],
+          onPreviewFailure: (kind) => failures.push(kind),
+        }),
+      ).toBe(false)
+      expect(failures, `${status}`).toEqual([])
+    }
+  })
+
+  it('reports nothing for a failure that is not about the previews', async () => {
+    serveEdit(rejected(502, 'bad_gateway'))
+    const failures: string[] = []
+    await makeStore().edit('$sent', `now ${A}`, {
+      linkPreviews: [],
+      onPreviewFailure: (kind) => failures.push(kind),
+    })
+    expect(failures).toEqual([])
+  })
+})

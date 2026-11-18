@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals'
+import { createServerCapabilities } from '../stores/capabilities'
 import { createApiClient } from '../api/client'
 import { createCompositeAuthProvider } from '../auth/composite'
 import type { OAuthProviderConfig } from '../auth/oauth'
@@ -279,6 +280,9 @@ export function testServices(
   connectAttachmentReset(auth, attachments)
   const linkPreviews = createLinkPreviewCache()
   connectLinkPreviewCacheReset(auth, linkPreviews)
+  // Not asked at sign-in here, so a test makes no request it did not
+  // handle; one that needs an answer calls `refresh` against its handler.
+  const capabilities = createServerCapabilities(api)
   return {
     auth,
     api,
@@ -289,6 +293,7 @@ export function testServices(
     telemetry,
     attachments,
     linkPreviews,
+    capabilities,
     settings,
     timelineMediaExpanded: signal(true),
     accounts,

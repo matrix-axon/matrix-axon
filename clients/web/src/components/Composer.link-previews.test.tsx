@@ -15,6 +15,7 @@ import {
   type PreviewSources,
 } from '../composer-link-previews'
 import { LinkPreviewError, type DeviceLinkPreview } from '../platform'
+import { messageCards, type EditPreviewSeed } from '../edit-link-previews'
 
 /** The composer's link-preview cards (ADR 0132 § 5), driven as a user would. */
 
@@ -118,6 +119,8 @@ describe('Composer link previews', () => {
           },
         ],
         discarded: new Set(),
+        kept: [],
+        opened: new Set(),
       },
       allowUnmarked: false,
     })
@@ -151,6 +154,8 @@ describe('Composer link previews', () => {
           },
         ],
         discarded: new Set(),
+        kept: [],
+        opened: new Set(),
       },
       allowUnmarked: false,
     })
@@ -193,7 +198,12 @@ describe('Composer link previews', () => {
     // A discarded link in the body waits for the marker check (§ 6).
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith(A, undefined, {
-        draft: { cards: [], discarded: new Set([A]) },
+        draft: {
+          cards: [],
+          discarded: new Set([A]),
+          kept: [],
+          opened: new Set(),
+        },
         allowUnmarked: false,
       }),
     )
@@ -349,13 +359,20 @@ describe('Composer link previews', () => {
     expect(markerFits).toHaveBeenCalledWith(`${A} ${B}`, undefined, {
       cards: [],
       discarded: new Set([A]),
+      kept: [],
+      opened: new Set(),
     })
     expect(onSubmit).not.toHaveBeenCalled()
     expect(textarea.value).toBe(`${A} ${B} `)
 
     fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }))
     expect(onSubmit).toHaveBeenCalledWith(`${A} ${B}`, undefined, {
-      draft: { cards: [], discarded: new Set([A]) },
+      draft: {
+        cards: [],
+        discarded: new Set([A]),
+        kept: [],
+        opened: new Set(),
+      },
       allowUnmarked: true,
     })
     expect(textarea.value).toBe('')
@@ -390,6 +407,70 @@ describe('Composer link previews', () => {
     expect(onSubmit).toHaveBeenCalledTimes(1)
   })
 
+  it('says why a plain http:// link has no card', () => {
+    const { device } = deferredDevice()
+    const { type } = setup({ sources: { setting: 'device', device } })
+    const note = () => screen.queryByText('Only https:// links are previewed')
+    type('see http://plain.example.org/page')
+    expect(note()).toBeNull()
+    type('see http://plain.example.org/page ')
+    expect(note()).toBeTruthy()
+    expect(device).not.toHaveBeenCalled()
+    type('see ')
+    expect(note()).toBeNull()
+  })
+
+  it("re-seeds an edit's cards from a new seed, whatever the text", () => {
+    const { device } = deferredDevice()
+    const body = `see ${A}`
+    const seedWith = (titles: string[]): EditPreviewSeed => {
+      const content = {
+        msgtype: 'm.text',
+        body,
+        'm.url_previews': titles.map((title) => ({
+          'matrix:matched_url': A,
+          'og:title': title,
+        })),
+      }
+      return {
+        originalText: body,
+        cards: messageCards(content, body),
+        addNew: true,
+      }
+    }
+    const options = (seed: EditPreviewSeed): ComposerLinkPreviewOptions => ({
+      sources: { setting: 'device', device },
+      cache: createLinkPreviewCache(),
+      markerFits: async () => true,
+      edit: { seed, accountId: 'acct', hasField: true },
+    })
+    const view = (seed: EditPreviewSeed, initialValue = body) => (
+      <Composer
+        placeholder="Message"
+        initialValue={initialValue}
+        onSubmit={vi.fn(async () => true)}
+        linkPreviews={options(seed)}
+      />
+    )
+    const { rerender, getByRole } = render(view(seedWith(['Old article'])))
+    expect(screen.getByText('Old article')).toBeTruthy()
+
+    // A reopen after a 409: the same text, the message as it now is.
+    rerender(view(seedWith([])))
+    expect(cards()).toBeNull()
+
+    // A field the user typed in since keeps their text, and still re-seeds.
+    fireEvent.input(getByRole('textbox'), {
+      target: { value: `typed ${A} ` },
+    })
+    rerender(view(seedWith(['Restored article']), 'something else'))
+    expect((getByRole('textbox') as HTMLTextAreaElement).value).toBe(
+      `typed ${A} `,
+    )
+    expect(screen.getByText('Restored article')).toBeTruthy()
+    expect(device).not.toHaveBeenCalled()
+  })
+
   it('makes no cards when previews are off', () => {
     const { device } = deferredDevice()
     const { paste, send, onSubmit } = setup({
@@ -400,7 +481,7 @@ describe('Composer link previews', () => {
     send()
     // Still a preview-authoring composer: the parent decides the field.
     expect(onSubmit).toHaveBeenCalledWith(A, undefined, {
-      draft: { cards: [], discarded: new Set() },
+      draft: { cards: [], discarded: new Set(), kept: [], opened: new Set() },
       allowUnmarked: false,
     })
   })

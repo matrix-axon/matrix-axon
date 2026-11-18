@@ -257,10 +257,10 @@ _Added 2026-11-12; revised 2026-11-13 and 2026-11-16 after review._
 
 > **Amended by [ADR 0138](0138-matrix-link-previews.md) § 1.** A Matrix link is not an eligible link here either: the rules below are applied as if the body's Matrix links were not in it.
 > A current entry whose matched link is a Matrix link is left out, as an entry that fails the checks below is.
-Until this section, saving any edit erased the message's cards.
-The server builds the replacement's `m.new_content` from the new text alone, and the store shows an edited message from its latest `m.new_content` (`TIMELINE_SELECT` in `axon-store`), so the cards disappeared for Axon readers, and for every client that applies edits.
-There was also no way to remove one card and keep the rest.
-MSC4095 says nothing about edits, `m.new_content`, or reusing a preview's image in another event, so the rules below are Axon's.
+> Until this section, saving any edit erased the message's cards.
+> The server builds the replacement's `m.new_content` from the new text alone, and the store shows an edited message from its latest `m.new_content` (`TIMELINE_SELECT` in `axon-store`), so the cards disappeared for Axon readers, and for every client that applies edits.
+> There was also no way to remove one card and keep the rest.
+> MSC4095 says nothing about edits, `m.new_content`, or reusing a preview's image in another event, so the rules below are Axon's.
 
 **Where an edit's previews go.**
 In `m.new_content`, which is what the store and edit-aware clients show.
@@ -345,17 +345,20 @@ The first rule that matches decides the field:
 1. **The new text contains a spoiler:** `[]` if the message has a preview field now, otherwise omit the field.
    Omitting matches section 6's rule 1 for a send: a message that never had previews gets none authored for a spoiler, and recipients' clients decide as they do today.
    Sending `[]` for a message that has a field is what the server's carry-forward would do anyway; the composer sends it explicitly so the spoiler does not depend on carry-forward, and the message keeps its "no previews" marker.
-2. **At least one card kept and ready**, kept from the message or new, after the size check: send those cards, in text order, the kept ones as `keep` entries.
-3. **A message card was removed, or, with previews on, the edit added an eligible link:** send `[]`.
+2. **Every card the message opened with is kept, none is new, and they all fit:** omit the field, and the server carries them forward.
+   The result is the same when nothing changed elsewhere, and when another device changed the previews meanwhile, the server carries forward what the message has now instead of answering `409 previews_changed`, so a plain text edit never meets that conflict.
+   When the kept cards do not all fit, rule 3 decides, so the size check and the marker question below still apply.
+3. **At least one card kept and ready**, kept from the message or new, after the size check: send those cards, in text order, the kept ones as `keep` entries.
+4. **A message card was removed, or, with previews on, the edit added an eligible link:** send `[]`.
    An added link counts whether or not its card survived: a link pasted into a message that had no preview field, and then discarded, gives `[]`, as it would in a new message.
-4. **Otherwise:** omit the field, and the server carries the message's previews forward.
+5. **Otherwise:** omit the field, and the server carries the message's previews forward.
 
-Rule 4 covers only edits that leave the message's cards and links alone: a message sent with previews off, or before previews existed, does not gain a `[]` from an edit to unrelated text.
+Rule 5 covers only edits that leave the message's cards and links alone: a message sent with previews off, or before previews existed, does not gain a `[]` from an edit to unrelated text.
 
 The size check is section 6's, applied to the replacement's shape.
 It degrades in this order: new cards' images, last first; then new cards, last first; then message cards, last first.
 A message card's image is not dropped on its own, because a kept entry is copied whole.
-A card dropped for size counts as removed, so rule 3 sends `[]` rather than leaving the server to carry the dropped cards forward.
+A card dropped for size counts as removed, so rule 4 sends `[]` rather than leaving the server to carry the dropped cards forward.
 If even `[]` does not fit, the edit can only omit the field.
 When the message has a preview field now, or a discarded link is in the body, the composer first asks the question section 6 asks, since the message would lose its marker.
 Omitting the field is then safe to send, because the server's carry-forward degrades to fit, ending with no field.
@@ -392,9 +395,9 @@ An edit that carries previews uses the same 70-second client deadline as a send 
       Android 7 to 9 have no typed query in the NDK, so device previews there fail as unavailable.
     - Windows: `DnsQuery_W` with `DNS_TYPE_A` or `DNS_TYPE_AAAA`.
     - Linux: a single-question DNS client in the plugin, sending to the servers in `/etc/resolv.conf`.
-    `hickory-resolver` was set aside: on Android and iOS it would bypass Private DNS, VPN resolvers and encrypted-DNS profiles, and it would have to find nameservers those platforms do not expose.
-    The tests prove the rule for the resolver logic every backend shares, on every platform, and for the Linux client on the wire, against a DNS server on the loopback that records each question.
-    What the Apple, Android and Windows calls send is checked by packet capture, with the steps in `clients/web/src-tauri/axon-link-preview/README.md`.
+      `hickory-resolver` was set aside: on Android and iOS it would bypass Private DNS, VPN resolvers and encrypted-DNS profiles, and it would have to find nameservers those platforms do not expose.
+      The tests prove the rule for the resolver logic every backend shares, on every platform, and for the Linux client on the wire, against a DNS server on the loopback that records each question.
+      What the Apple, Android and Windows calls send is checked by packet capture, with the steps in `clients/web/src-tauri/axon-link-preview/README.md`.
   - No TLS crate: `rustls` 0.23 with the ring provider, `tokio-rustls` and `webpki-roots` were already present, and rustls takes the server name separately from the socket.
 - Two implementations of the fetch boundary exist, held together by a shared fixture.
 - Once the server change (Delivery item 5) is deployed, an edit keeps a message's cards unless the editor removes them (section 8), in every client, because the server carries them forward.

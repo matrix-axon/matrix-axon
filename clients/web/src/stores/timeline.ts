@@ -22,6 +22,7 @@ import {
   wirePreview,
   type OutgoingLinkPreview,
 } from '../link-preview-send'
+import { wireEditPreviews, type EditLinkPreview } from '../edit-link-previews'
 
 export type SendProgress = (
   state: 'dispatching' | 'sent' | 'failed' | 'unknown',
@@ -273,11 +274,25 @@ export interface TimelineStore {
   retrySend(localId: string): Promise<boolean>
   /** Discard a failed local echo without retrying. */
   discardSend(localId: string): void
-  /** Replace an event's text (`m.replace`). */
+  /**
+   * Replace an event's text (`m.replace`). `linkPreviews` sets the edit's
+   * previews (ADR 0132 § 8), new cards' thumbnails uploaded for this attempt;
+   * absent, the server carries the message's previews forward. When the
+   * server refuses them, `onPreviewFailure` hears why: `rejected` for § 6's
+   * table, or `changed` for `409 previews_changed`, with the message as it
+   * now stands when it could be read.
+   */
   edit(
     eventId: string,
     body: string,
-    options?: { formattedBody?: string | null },
+    options?: {
+      formattedBody?: string | null
+      linkPreviews?: readonly EditLinkPreview[]
+      onPreviewFailure?: (
+        kind: 'rejected' | 'changed',
+        event?: EventDto,
+      ) => void
+    },
   ): Promise<boolean>
   /** Redact an event. */
   redact(eventId: string): Promise<boolean>
@@ -1072,7 +1087,7 @@ export function createTimelineStore(
    * redactions, and reaction toggles become visible without resetting the
    * user's scroll-back position.
    */
-  async function refreshEvent(eventId: string): Promise<void> {
+  async function refreshEvent(eventId: string): Promise<EventDto | undefined> {
     // Best-effort by contract: the mutation already succeeded, so a refetch
     // that fails (miss *or* network drop) leaves the stale row for the next
     // live frame or page read to heal — it must never reject the mutation's
@@ -1097,6 +1112,7 @@ export function createTimelineStore(
     events.value = events.value.map((event) =>
       event.event_id === eventId ? fresh : event,
     )
+    return fresh
   }
 
   function ingestLive(event: EventDto): void {
@@ -1853,22 +1869,55 @@ export function createTimelineStore(
     },
 
     async edit(eventId, body, options = {}) {
-      const ok = await mutate(() =>
-        api.PUT('/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}', {
-          params: {
-            path: {
-              account_id: accountId,
-              room_id: roomId,
-              event_id: eventId,
+      const previews = options.linkPreviews
+      const result = await mutateWithResult(async () => {
+        const urlPreviews =
+          previews === undefined
+            ? undefined
+            : wireEditPreviews(
+                previews,
+                await stagePreviews(
+                  previews.flatMap((p) =>
+                    p.kind === 'new' ? [p.preview] : [],
+                  ),
+                ).then((staged) =>
+                  staged.map((p) => p.image_upload_id ?? null),
+                ),
+              )
+        return api.PUT(
+          '/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}',
+          {
+            params: {
+              path: {
+                account_id: accountId,
+                room_id: roomId,
+                event_id: eventId,
+              },
+            },
+            body: {
+              ...formattedParts(body, options.formattedBody),
+              ...(urlPreviews !== undefined && { url_previews: urlPreviews }),
             },
           },
-          body: formattedParts(body, options.formattedBody),
-        }),
-      )
-      if (ok) {
-        await refreshEvent(eventId)
+        )
+      })
+      if (!result.ok) {
+        if (previews !== undefined) {
+          if (result.status === 409 && result.code === 'previews_changed')
+            options.onPreviewFailure?.('changed', await refreshEvent(eventId))
+          // Only a new card can be what the server refused: with `keep`
+          // entries alone, a 404 or 400 is the event or the text, and the
+          // failure is reported as any other edit's is.
+          else if (
+            previews.some((p) => p.kind === 'new') &&
+            isPreviewRejection(result.status, result.code)
+          )
+            options.onPreviewFailure?.('rejected')
+        }
+        return false
       }
-      return ok
+      await refreshEvent(eventId)
+      return true
     },
 
     async redact(eventId) {

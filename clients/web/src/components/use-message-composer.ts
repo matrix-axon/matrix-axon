@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'preact/hooks'
+import { useCallback, useEffect, useMemo, useState } from 'preact/hooks'
 import type { ApiClient } from '../api/client'
 import type {
   ComposerAutocompleteOption,
@@ -12,6 +12,17 @@ import {
   type PreviewSources,
 } from '../composer-link-previews'
 import { planLinkPreviews, type PreviewDraft } from '../link-preview-send'
+import {
+  MEDIA_MSGTYPES,
+  messageCards,
+  messagePreviewField,
+  planEditPreviews,
+  type EditLinkPreview,
+  type EditPreviewDraft,
+  type EditPreviewSeed,
+} from '../edit-link-previews'
+import { linkIdentity } from '../preview-links'
+import type { ServerCapabilities } from '../stores/capabilities'
 import type { LinkPreviewSetting } from '../stores/settings'
 import {
   inlineEmojiFromEvent,
@@ -44,7 +55,29 @@ export type ComposerAction =
       event: EventDto
       draft?: string
       inlineEmoji?: readonly InlineEmojiReference[]
+      /** Edit-mode link previews (ADR 0132 § 8), decided as edit mode opens. */
+      previews?: EditPreviewsState
     }
+
+/** What edit mode knows about the message's link previews. */
+export interface EditPreviewsState {
+  /**
+   * The server keeps, removes and adds previews on an edit, as known when
+   * edit mode opened.
+   */
+  supported: boolean
+  /**
+   * Edit mode opened before the server answered. A yes that comes later
+   * upgrades this edit to cards, re-seeded from the message.
+   */
+  pending?: boolean
+  /** Links discarded earlier in this edit, kept across a failed save. */
+  discarded?: ReadonlySet<string>
+  /** Links whose new cards the server refused, which get none again. */
+  refused?: ReadonlySet<string>
+  /** Why edit mode reopened, shown with the banner. */
+  notice?: string
+}
 
 export interface MessageComposerOptions {
   /** The store the composer sends into (room- or thread-scoped). */
@@ -85,6 +118,8 @@ export interface MessageComposerOptions {
     device?: Platform['linkPreview']
     api: ApiClient
     cache: LinkPreviewCache
+    /** Whether the server keeps previews on an edit (ADR 0132 § 8). */
+    capabilities?: ServerCapabilities
   }
 }
 
@@ -99,7 +134,9 @@ export interface MessageComposerOptions {
 export function useMessageComposer(options: MessageComposerOptions): {
   action: ComposerAction | null
   setAction: (action: ComposerAction | null) => void
-  banner: { label: string; excerpt: string; onCancel: () => void } | undefined
+  banner:
+    | { label: string; excerpt: string; note?: string; onCancel: () => void }
+    | undefined
   /** False in edit mode: an edit replaces text, not media. */
   attachable: boolean
   attachments: AttachmentBatch
@@ -137,7 +174,42 @@ export function useMessageComposer(options: MessageComposerOptions): {
     ownUserId,
     onMutation,
   } = options
-  const [action, setAction] = useState<ComposerAction | null>(null)
+  const [action, setActionState] = useState<ComposerAction | null>(null)
+  const capabilities = options.linkPreviews?.capabilities
+  // Edit mode reads the server's answer as it opens, and asks again when the
+  // answer is not known yet (ADR 0132 § 8).
+  const setAction = useCallback(
+    (next: ComposerAction | null) => {
+      if (next?.kind === 'edit' && next.previews === undefined) {
+        const known = capabilities?.editUrlPreviews.peek() ?? null
+        if (known === null) capabilities?.refresh()
+        next = {
+          ...next,
+          previews: {
+            supported: known === true,
+            ...(known === null && { pending: true }),
+          },
+        }
+      }
+      setActionState(next)
+    },
+    [capabilities],
+  )
+  // A yes that comes while such an edit is open upgrades it: a new action,
+  // so the composer re-seeds its cards from the message, keeping the text.
+  const editAnswer = capabilities?.editUrlPreviews.value ?? null
+  useEffect(() => {
+    if (
+      action?.kind !== 'edit' ||
+      action.previews?.pending !== true ||
+      editAnswer !== true
+    )
+      return
+    setActionState({
+      ...action,
+      previews: { ...action.previews, supported: true, pending: undefined },
+    })
+  }, [action, editAnswer])
   const editInlineEmoji = useMemo(
     () =>
       action?.kind === 'edit'
@@ -180,12 +252,27 @@ export function useMessageComposer(options: MessageComposerOptions): {
     }
   }, [])
 
+  const editCards = useMemo(
+    () =>
+      action?.kind === 'edit'
+        ? messageCards(action.event.content, action.event.body)
+        : [],
+    [action],
+  )
+  const editNote =
+    action?.kind !== 'edit'
+      ? undefined
+      : (action.previews?.notice ??
+        (action.previews?.supported !== true && editCards.length > 0
+          ? 'Saving this edit may remove its link previews.'
+          : undefined))
   const banner =
     action === null
       ? undefined
       : {
           label: action.kind === 'reply' ? 'Replying to' : 'Editing',
           excerpt: `${action.event.sender}: ${(action.event.body ?? '').slice(0, 80)}`,
+          ...(editNote !== undefined && { note: editNote }),
           onCancel: () => setAction(null),
         }
 
@@ -251,27 +338,87 @@ export function useMessageComposer(options: MessageComposerOptions): {
           device: options.linkPreviews.device,
           homeserver,
         }
-  // Off, an edit, or no source for the setting: the composer authors no
-  // previews, so a send leaves the field out exactly as before (§ 6 rule 1).
-  const composerLinkPreviews: ComposerLinkPreviewOptions | undefined =
+  /** The edit's request as `planEditPreviews` measures it. */
+  const editRequest = (event: EventDto, formatted: FormattedMessageParts) => ({
+    eventId: event.event_id,
+    body: formatted.body,
+    formattedBody: formatted.formatted_body ?? null,
+    content: event.content,
+  })
+  const planEdit = (
+    event: EventDto,
+    formatted: FormattedMessageParts,
+    draft: EditPreviewDraft,
+    allowUnmarked = false,
+  ) =>
+    planEditPreviews(editRequest(event, formatted), draft, {
+      originalText: event.body ?? '',
+      previewsOn: sources !== undefined && linkPreviewsEnabled(sources),
+      allowUnmarked,
+    })
+  // The message an edit starts from, one object per opening of edit mode:
+  // the composer re-seeds its cards whenever this changes, including a
+  // reopen after a failed save whose text is unchanged.
+  const editSeed: EditPreviewSeed | undefined = useMemo(
+    () =>
+      action?.kind === 'edit'
+        ? {
+            originalText: action.event.body ?? '',
+            cards: editCards,
+            addNew: !MEDIA_MSGTYPES.has(action.event.content?.msgtype),
+            discarded: action.previews?.discarded,
+            refused: action.previews?.refused,
+          }
+        : undefined,
+    [action, editCards],
+  )
+  // An edit against a server that keeps previews starts from the message's
+  // cards, under any setting, since removing one fetches nothing (§ 8).
+  const editLinkPreviews: ComposerLinkPreviewOptions | undefined =
+    action?.kind !== 'edit' ||
+    action.previews?.supported !== true ||
+    editSeed === undefined ||
     sources === undefined ||
-    options.linkPreviews === undefined ||
-    action?.kind === 'edit' ||
-    !linkPreviewsEnabled(sources)
+    options.linkPreviews === undefined
       ? undefined
       : {
           sources,
           cache: options.linkPreviews.cache,
+          edit: {
+            seed: editSeed,
+            accountId,
+            hasField: messagePreviewField(action.event.content).hasField,
+          },
           markerFits: async (body, inlineEmoji, draft) => {
-            const replyTo =
-              action?.kind === 'reply' ? action.event.event_id : undefined
             const formatted = await formatComposerBody(body, inlineEmoji)
             return (
-              planPreviews(formatted, replyTo, draft).kind !==
+              planEdit(action.event, formatted, draft).kind !==
               'too-long-for-marker'
             )
           },
         }
+  // Off, an edit, or no source for the setting: the composer authors no
+  // previews, so a send leaves the field out exactly as before (§ 6 rule 1).
+  const composerLinkPreviews: ComposerLinkPreviewOptions | undefined =
+    action?.kind === 'edit'
+      ? editLinkPreviews
+      : sources === undefined ||
+          options.linkPreviews === undefined ||
+          !linkPreviewsEnabled(sources)
+        ? undefined
+        : {
+            sources,
+            cache: options.linkPreviews.cache,
+            markerFits: async (body, inlineEmoji, draft) => {
+              const replyTo =
+                action?.kind === 'reply' ? action.event.event_id : undefined
+              const formatted = await formatComposerBody(body, inlineEmoji)
+              return (
+                planPreviews(formatted, replyTo, draft).kind !==
+                'too-long-for-marker'
+              )
+            },
+          }
 
   const submitMessage = async (
     body: string,
@@ -307,14 +454,77 @@ export function useMessageComposer(options: MessageComposerOptions): {
     }
     const formatted = await formatComposerBody(body, inlineEmoji)
     if (current?.kind === 'edit') {
+      // Previews only against a server that keeps them; otherwise the field
+      // is left out, as before ADR 0132 § 8.
+      const draft = previews?.draft
+      const plan =
+        current.previews?.supported === true && draft !== undefined
+          ? planEdit(current.event, formatted, draft, previews?.allowUnmarked)
+          : ({ kind: 'omit' } as const)
+      const linkPreviews: EditLinkPreview[] | undefined =
+        plan.kind === 'send'
+          ? plan.previews
+          : // Asked before saving, so this is a race with the formatter.
+            // Keep the marker: never drop it, or expose a link, unasked.
+            plan.kind === 'too-long-for-marker'
+            ? []
+            : undefined
+      let failure: { kind: 'rejected' | 'changed'; event?: EventDto } | null =
+        null
       const ok = await timeline.edit(current.event.event_id, formatted.body, {
         formattedBody: formatted.formatted_body ?? null,
+        ...(linkPreviews !== undefined && {
+          linkPreviews,
+          onPreviewFailure: (kind, event) => {
+            failure = { kind, event }
+          },
+        }),
       })
       if (!ok) {
         // A failed edit has no retryable echo (sends do), so re-open edit
         // mode carrying the text the user typed — the error banner alone
-        // would silently discard it (WCR-10).
-        setAction({ ...current, draft: body, inlineEmoji: inlineEmoji ?? [] })
+        // would silently discard it (WCR-10) — and, with previews, the
+        // links the user discarded.
+        const reopened: EditPreviewsState | undefined =
+          current.previews === undefined
+            ? undefined
+            : { ...current.previews, discarded: draft?.discarded }
+        const reason = failure as {
+          kind: 'rejected' | 'changed'
+          event?: EventDto
+        } | null
+        // Only a rejection refuses the new cards; any other failure reopens
+        // with them, to be sent again.
+        const refused = new Set(current.previews?.refused)
+        if (reason?.kind === 'rejected')
+          for (const card of draft?.cards ?? []) {
+            const identity = linkIdentity(card.matchedUrl)
+            if (identity !== null) refused.add(identity)
+          }
+        setAction({
+          ...current,
+          ...(reason?.kind === 'changed' &&
+            reason.event !== undefined && { event: reason.event }),
+          draft: body,
+          inlineEmoji: inlineEmoji ?? [],
+          previews:
+            reopened === undefined
+              ? undefined
+              : reason?.kind === 'rejected'
+                ? {
+                    ...reopened,
+                    refused,
+                    notice:
+                      'The server refused the new link previews. Save again to keep the rest.',
+                  }
+                : reason?.kind === 'changed'
+                  ? {
+                      ...reopened,
+                      notice:
+                        'This message’s link previews changed on another device. Check them and save again.',
+                    }
+                  : reopened,
+        })
       }
       if (ok) onMutation?.()
       return ok

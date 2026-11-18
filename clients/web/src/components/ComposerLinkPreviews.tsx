@@ -5,7 +5,7 @@ import {
   type ComposerPreviewCard,
 } from '../composer-link-previews'
 import type { PreviewThumbnail } from '../link-preview-send'
-import { LinkPreviewText } from './LinkPreviews'
+import { LinkPreviewText, MessagePreviewThumb } from './LinkPreviews'
 
 /** An object url for a card's thumbnail bytes, revoked with the card. */
 function useThumbnailUrl(image: PreviewThumbnail | null): string | null {
@@ -26,15 +26,33 @@ function useThumbnailUrl(image: PreviewThumbnail | null): string | null {
 
 function CardBody({
   card,
+  accountId,
   children,
 }: {
   card: ComposerPreviewCard
+  /** Whose media a message's own card reads its image as. */
+  accountId?: string
   /** The card's action, below its text. */
   children?: ComponentChildren
 }) {
   const { state } = card
   const ready = state.status === 'ready' ? state.result : null
   const thumbnail = useThumbnailUrl(ready?.image ?? null)
+  if (state.status === 'kept')
+    return (
+      <>
+        {state.preview.image !== null && accountId !== undefined && (
+          <MessagePreviewThumb
+            accountId={accountId}
+            image={state.preview.image}
+          />
+        )}
+        <span class="composer-link-preview-text">
+          <LinkPreviewText preview={state.preview} />
+          {children}
+        </span>
+      </>
+    )
   if (ready !== null)
     return (
       <>
@@ -85,10 +103,13 @@ function CardBody({
  */
 export function ComposerLinkPreviews({
   cards,
+  accountId,
   onDiscard,
   onAskHomeserver,
 }: {
   cards: readonly ComposerPreviewCard[]
+  /** The account an edited message's cards load their images as. */
+  accountId?: string
   onDiscard(identity: string): void
   onAskHomeserver(identity: string): void
 }) {
@@ -103,7 +124,7 @@ export function ComposerLinkPreviews({
             card.state.status === 'waiting' || card.state.status === 'loading'
           }
         >
-          <CardBody card={card}>
+          <CardBody card={card} accountId={accountId}>
             {card.canAskHomeserver && (
               <button
                 type="button"

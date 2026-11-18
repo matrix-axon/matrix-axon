@@ -939,6 +939,10 @@ async function handleApi(req, res, url) {
     res.writeHead(204).end()
     return
   }
+  // A current server: edits keep, remove and add link previews (ADR 0132 § 8).
+  if (method === 'GET' && pathname === '/v1/capabilities') {
+    return json(res, { data: { edit_url_previews: true } })
+  }
   if (method === 'GET' && pathname === '/v1/status') {
     return json(res, {
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },

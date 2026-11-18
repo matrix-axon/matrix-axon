@@ -184,6 +184,7 @@ export function ThreadPanel({
     messageGestures,
     attachments: staging,
     linkPreviews: linkPreviewCache,
+    capabilities,
     platform,
   } = useServices()
   const location = useLocation()
@@ -297,6 +298,7 @@ export function ThreadPanel({
       device: platform.linkPreview,
       api,
       cache: linkPreviewCache,
+      capabilities,
     },
   })
 

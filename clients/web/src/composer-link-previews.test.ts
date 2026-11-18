@@ -591,3 +591,242 @@ describe('homeserverLinkPreview', () => {
     )
   })
 })
+
+describe('editing a message (§ 8)', () => {
+  const card = (url: string) => ({
+    url,
+    hostname: new URL(url).hostname,
+    title: `Card ${url}`,
+    description: null,
+    siteName: null,
+    image: null,
+  })
+
+  function editing(
+    sources: PreviewSources,
+    text: string,
+    cards: string[],
+    { addNew = true, discarded = [] as string[] } = {},
+  ) {
+    controller = createComposerLinkPreviews(createLinkPreviewCache())
+    controller.reset(text, {
+      originalText: text,
+      cards: cards.map(card),
+      addNew,
+      discarded: new Set(discarded),
+    })
+    controller.configure(sources, false)
+    return controller
+  }
+
+  it("shows the message's cards under any setting, and fetches nothing", () => {
+    const { device } = deviceSource()
+    editing({ setting: 'off', device }, `see ${A} and ${B} `, [A])
+    expect(statuses()).toEqual([[A, 'kept']])
+    expect(device).not.toHaveBeenCalled()
+    expect(controller.snapshot()).toEqual({
+      cards: [],
+      kept: [A],
+      opened: new Set([A]),
+      discarded: new Set(),
+    })
+  })
+
+  it('shows a card whose link new lookups would refuse', () => {
+    const HTTP = 'http://plain.example.org/page'
+    editing({ setting: 'off' }, `see ${HTTP} `, [HTTP])
+    expect(statuses()).toEqual([[HTTP, 'kept']])
+    expect(controller.snapshot().kept).toEqual([HTTP])
+  })
+
+  it('hides a card whose link is deleted, and brings it back without a lookup', () => {
+    const { device } = deviceSource()
+    editing({ setting: 'device', device }, `see ${A} `, [A])
+    controller.edit('see ')
+    expect(statuses()).toEqual([])
+    expect(controller.snapshot().kept).toEqual([])
+    controller.edit(`see ${A} `, true)
+    expect(statuses()).toEqual([[A, 'kept']])
+    expect(device).not.toHaveBeenCalled()
+  })
+
+  it('remembers a card discarded with its X for the rest of the edit', () => {
+    editing({ setting: 'off' }, `see ${A} `, [A])
+    controller.discard(A)
+    controller.edit('see ')
+    controller.edit(`see ${A} `, true)
+    expect(statuses()).toEqual([])
+    expect(controller.snapshot()).toMatchObject({
+      kept: [],
+      opened: new Set([A]),
+      discarded: new Set([A]),
+    })
+    expect(controller.hasDiscardedLink(`${A} `)).toBe(true)
+  })
+
+  it('carries discards into a reopened edit', () => {
+    editing({ setting: 'off' }, `see ${A} `, [A], { discarded: [A] })
+    expect(statuses()).toEqual([])
+  })
+
+  it('adds new cards in text order while the edit has fewer than three', () => {
+    const { device, calls } = deviceSource()
+    editing({ setting: 'device', device }, `${A} ${B} `, [A, B])
+    controller.edit(`${A} ${C} ${B} ${D} `, true)
+    // Two of the message's cards leave room for one new one.
+    expect(statuses()).toEqual([
+      [A, 'kept'],
+      [C, 'loading'],
+      [B, 'kept'],
+    ])
+    expect(calls.map((c) => c.url)).toEqual([C])
+    // Removing one of the message's cards makes room for the next link.
+    controller.discard(A)
+    expect(statuses()).toEqual([
+      [C, 'loading'],
+      [B, 'kept'],
+      [D, 'loading'],
+    ])
+  })
+
+  it('never drops a card for the count, and adds none past three', () => {
+    const { device } = deviceSource()
+    editing({ setting: 'device', device }, `${A} ${B} ${C} ${D} `, [A, B, C, D])
+    expect(statuses().map(([, status]) => status)).toEqual([
+      'kept',
+      'kept',
+      'kept',
+      'kept',
+    ])
+    controller.edit(`${A} ${B} ${C} ${D} https://e.example.org/ `, true)
+    expect(statuses()).toHaveLength(4)
+    expect(device).not.toHaveBeenCalled()
+  })
+
+  it("never adds the message's own links, even typed again", () => {
+    const { device } = deviceSource()
+    editing({ setting: 'device', device }, `see ${A} `, [])
+    controller.edit('see ')
+    controller.edit(`see ${A} `, true)
+    expect(statuses()).toEqual([])
+    expect(device).not.toHaveBeenCalled()
+  })
+
+  it('adds no new cards to a media caption', () => {
+    const { device } = deviceSource()
+    editing({ setting: 'device', device }, `${A} `, [A], { addNew: false })
+    controller.edit(`${A} ${B} `, true)
+    expect(statuses()).toEqual([[A, 'kept']])
+    expect(device).not.toHaveBeenCalled()
+  })
+
+  it("keeps the message's cards when the setting changes", () => {
+    const { device } = deviceSource()
+    editing({ setting: 'device', device }, `${A} `, [A])
+    controller.configure({ setting: 'off' }, false)
+    expect(statuses()).toEqual([[A, 'kept']])
+  })
+
+  it('a re-seed keeps the draft and its pasted links, which stay complete', async () => {
+    // An edit opened before the server answered, upgraded once it did: the
+    // user had already pasted a link with nothing after it.
+    const { device, calls } = deviceSource()
+    const sources: PreviewSources = { setting: 'device', device }
+    make(sources, `was ${A} `)
+    controller.edit(`was ${A} and ${B}`, true)
+    expect(statuses()).toEqual([[B, 'loading']])
+    controller.reseed({
+      originalText: `was ${A} `,
+      cards: [card(A)],
+      addNew: true,
+    })
+    expect(statuses()).toEqual([
+      [A, 'kept'],
+      [B, 'loading'],
+    ])
+    calls.at(-1)!.resolve(devicePreview(B))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(statuses()).toEqual([
+      [A, 'kept'],
+      [B, 'ready'],
+    ])
+    expect(controller.snapshot().opened).toEqual(new Set([A]))
+  })
+
+  it('a new draft leaves edit mode', () => {
+    editing({ setting: 'off' }, `${A} `, [A])
+    expect(controller.take().kept).toEqual([A])
+    controller.edit(`${A} `)
+    expect(statuses()).toEqual([])
+    expect(controller.snapshot().opened).toEqual(new Set())
+  })
+})
+
+describe('the plain http:// note (§ 1)', () => {
+  const HTTP = 'http://plain.example.org/page'
+  const on: PreviewSources = { setting: 'device', device: vi.fn() }
+
+  it('is raised by a complete typed or pasted http:// link', () => {
+    make(on)
+    controller.edit(`see ${HTTP}`)
+    expect(controller.plainHttp.value).toBe(false)
+    controller.edit(`see ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(true)
+    controller.edit(`see `)
+    expect(controller.plainHttp.value).toBe(false)
+    controller.edit(`see ${HTTP}`, true)
+    expect(controller.plainHttp.value).toBe(true)
+  })
+
+  it('is not raised by an https:// link, or with previews off or suspended', () => {
+    make(on)
+    controller.edit(`${A} `)
+    expect(controller.plainHttp.value).toBe(false)
+    make({ setting: 'off' })
+    controller.edit(`${HTTP} `)
+    expect(controller.plainHttp.value).toBe(false)
+    make(on)
+    controller.edit(`${HTTP} `)
+    controller.configure(on, true)
+    expect(controller.plainHttp.value).toBe(false)
+  })
+
+  it('is not raised by a restored draft until the link is typed again', () => {
+    make(on, `draft ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(false)
+    controller.edit('draft ')
+    controller.edit(`draft ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(true)
+  })
+
+  it("is not raised by the edited message's own links, only by added ones", () => {
+    controller = createComposerLinkPreviews(createLinkPreviewCache())
+    controller.reset(`was ${HTTP} `, {
+      originalText: `was ${HTTP} `,
+      cards: [],
+      addNew: true,
+    })
+    controller.configure(on, false)
+    expect(controller.plainHttp.value).toBe(false)
+    controller.edit(`was ${HTTP} and http://other.example.org/ `)
+    expect(controller.plainHttp.value).toBe(true)
+  })
+
+  it('is not raised where an https:// link would get no card either', () => {
+    // Three cards already: a fourth link of any scheme gets none.
+    const three = [1, 2, 3].map((n) => `https://n${n}.example.org/`).join(' ')
+    make(on)
+    controller.edit(`${three} ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(false)
+    // A media caption's edit adds no cards at all (§ 8).
+    controller = createComposerLinkPreviews(createLinkPreviewCache())
+    controller.reset('caption ', {
+      originalText: 'caption ',
+      cards: [],
+      addNew: false,
+    })
+    controller.configure(on, false)
+    controller.edit(`caption ${HTTP} `)
+    expect(controller.plainHttp.value).toBe(false)
+  })
+})

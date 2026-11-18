@@ -1,4 +1,9 @@
 import { effect, signal, untracked, type Signal } from '@preact/signals'
+import {
+  connectCapabilities,
+  createServerCapabilities,
+  type ServerCapabilities,
+} from './stores/capabilities'
 import { createContext } from 'preact'
 import { useContext } from 'preact/hooks'
 import { exec } from 'preact-iso/router'
@@ -208,6 +213,8 @@ export interface AppServices {
    * by `connectLinkPreviewCacheReset`.
    */
   linkPreviews: LinkPreviewCache
+  /** What this Axon server supports (ADR 0132 § 8), asked once signed in. */
+  capabilities: ServerCapabilities
   /**
    * The room the user is currently viewing (`accountId/roomId`), or `null`.
    * Set by `RoomPage`; `RoomList` reads it to mark the open row.
@@ -1991,6 +1998,8 @@ export function createServices(
   connectAttachmentReset(auth, attachments)
   const linkPreviews = createLinkPreviewCache()
   connectLinkPreviewCacheReset(auth, linkPreviews)
+  const capabilities = createServerCapabilities(api)
+  connectCapabilities(auth.signedIn, capabilities, live.reconnects)
   return {
     auth,
     api,
@@ -2001,6 +2010,7 @@ export function createServices(
     telemetry,
     attachments,
     linkPreviews,
+    capabilities,
     settings,
     timelineMediaExpanded: signal(true),
     accounts,
