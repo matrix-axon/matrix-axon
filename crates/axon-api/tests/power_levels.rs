@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axon_api::{AppState, PowerLevelsSender};
-use axon_core::{PowerLevelChanges, ResolvedPowerLevels};
+use axon_core::{PowerLevelChanges, ResolvedPowerLevels, ResolvedUserLevel};
 use axon_store::Store;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -229,6 +229,8 @@ async fn get_power_levels_routes_to_sender_and_returns_resolved_levels() {
         state_default: 50,
         users_default: 0,
         users,
+        privileged_creators: Vec::new(),
+        own_level: ResolvedUserLevel::Int(100),
     };
     let stub = Arc::new(StubPowerLevels::with_read(resolved));
     let app = app(store, stub.clone());
@@ -256,6 +258,8 @@ async fn get_power_levels_routes_to_sender_and_returns_resolved_levels() {
             "state_default": 50,
             "users_default": 0,
             "users": { "@alice:example.org": 100 },
+            "privileged_creators": [],
+            "own_level": 100,
         })
     );
     assert_eq!(
@@ -265,6 +269,45 @@ async fn get_power_levels_routes_to_sender_and_returns_resolved_levels() {
             room_id: room_id.to_owned(),
         }]
     );
+}
+
+/// Issue 324: a room-version-12 creator is absent from `users`, so the read
+/// must say who the creators are and that the caller is one, as the string
+/// `"infinite"` rather than a number a client could mistake for a real level.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_power_levels_reports_a_v12_creator_as_infinite() {
+    let store = store().await;
+    let resolved = ResolvedPowerLevels {
+        ban: 50,
+        invite: 0,
+        kick: 50,
+        redact: 50,
+        events_default: 0,
+        state_default: 50,
+        users_default: 0,
+        users: HashMap::new(),
+        privileged_creators: vec!["@alice:example.org".to_owned()],
+        own_level: ResolvedUserLevel::Infinite,
+    };
+    let app = app(store, Arc::new(StubPowerLevels::with_read(resolved)));
+
+    let account_id = Uuid::new_v4();
+    let (status, body) = send(
+        &app,
+        "GET",
+        &format!("/v1/accounts/{account_id}/rooms/!room:localhost/power_levels"),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["users"], json!({}));
+    assert_eq!(
+        body["data"]["privileged_creators"],
+        json!(["@alice:example.org"])
+    );
+    assert_eq!(body["data"]["own_level"], json!("infinite"));
 }
 
 #[tokio::test]

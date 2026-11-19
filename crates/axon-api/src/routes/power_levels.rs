@@ -37,7 +37,7 @@ use crate::sender::PowerLevelsSender;
     request_body = PowerLevelChangesRequest,
     responses(
         (status = 200, description = "Power levels set", body = ApiResponse<serde_json::Value>),
-        (status = 400, description = "Malformed request, or the change would strand the caller below the level needed to self-correct (set acknowledge_self_demotion to proceed anyway)", body = crate::response::ErrorResponse),
+        (status = 400, description = "Malformed request; `users` names a room creator, whose level is infinite from room version 12 and cannot be set; or the change would strand the caller below the level needed to self-correct (set acknowledge_self_demotion to proceed anyway)", body = crate::response::ErrorResponse),
         (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 404, description = "Account or room not found", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
