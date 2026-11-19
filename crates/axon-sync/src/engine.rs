@@ -480,6 +480,15 @@ impl SyncEngine {
         crate::trust::SenderTrustEngine::new(self.store.clone(), self.manager.clone())
     }
 
+    /// Room-member identity warnings and account-scoped acknowledgement actions.
+    pub fn room_identity(&self) -> crate::RoomIdentityEngine {
+        crate::RoomIdentityEngine {
+            store: self.store.clone(),
+            manager: self.manager.clone(),
+            locks: self.locks.clone(),
+        }
+    }
+
     /// The linked-event reader, for the API layer's Matrix-link card route (ADR
     /// 0138 section 3). Build it once: its clones share the process-wide cap on
     /// card reads in flight. Read-only, no lifecycle lock.
@@ -2190,6 +2199,16 @@ async fn run_account(
         room_details.clone(),
     ));
 
+    let room_identity_cancel = cancel.child_token();
+    let room_identity_handle = tokio::spawn(crate::room_identity::watch(
+        client.clone(),
+        account.account_id,
+        manager.room_identity_changes(),
+        room_details.clone(),
+        gate.clone(),
+        room_identity_cancel.clone(),
+    ));
+
     // Room-detail acquisition (ADR 0126): one paced worker per account run,
     // behind the homeserver gate. Reads reach it through the registration.
     // If its HTTP client cannot initialize, the account runs without it and
@@ -2565,6 +2584,10 @@ async fn run_account(
     state_redaction_cancel.cancel();
     if let Err(err) = state_redaction_handle.await {
         tracing::warn!(account_id = %account.account_id, error = %err, "state redaction worker did not shut down cleanly");
+    }
+    room_identity_cancel.cancel();
+    if let Err(err) = room_identity_handle.await {
+        tracing::warn!(account_id = %account.account_id, error = %err, "room identity watcher did not shut down cleanly");
     }
     // After every producer above has stopped, so their last changes go out.
     room_details_cancel.cancel();

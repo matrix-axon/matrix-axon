@@ -54,6 +54,7 @@ pub mod preferences;
 pub mod preview_generation;
 pub mod push;
 pub mod room_entry;
+pub mod room_identity;
 pub mod room_metadata;
 pub mod room_settings;
 pub mod rooms;

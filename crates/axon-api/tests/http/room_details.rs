@@ -826,3 +826,103 @@ async fn an_unsupported_summary_endpoint_falls_back_to_a_crawl_of_a_linking_spac
     get(&f.app, &f.discovery(CHILD)).await;
     assert_eq!(f.acquirer.take(), [RoomDetailJob::Summary]);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_info_and_account_actions_share_the_identity_warning_contract() {
+    use axon_api::{ApiError, RoomIdentityService};
+    use axon_core::{IdentityChangeKind, RoomIdentityChange};
+
+    struct IdentityFixture {
+        account_id: Uuid,
+        room_id: String,
+        calls: Mutex<Vec<(String, String, IdentityChangeKind)>>,
+    }
+
+    #[async_trait]
+    impl RoomIdentityService for IdentityFixture {
+        async fn warnings(
+            &self,
+            account_id: Uuid,
+            room_id: &str,
+        ) -> Option<Vec<RoomIdentityChange>> {
+            (account_id == self.account_id && room_id == self.room_id).then(|| {
+                vec![RoomIdentityChange {
+                    user_id: "@peer:localhost".to_owned(),
+                    kind: IdentityChangeKind::PinViolation,
+                    fingerprint: "a".repeat(64),
+                }]
+            })
+        }
+
+        async fn resolve(
+            &self,
+            account_id: Uuid,
+            user_id: &str,
+            fingerprint: &str,
+            kind: IdentityChangeKind,
+        ) -> Result<(), ApiError> {
+            assert_eq!(account_id, self.account_id);
+            self.calls
+                .lock()
+                .unwrap()
+                .push((user_id.to_owned(), fingerprint.to_owned(), kind));
+            Ok(())
+        }
+    }
+
+    let f = joined_room().await;
+    let service = Arc::new(IdentityFixture {
+        account_id: f.account_id,
+        room_id: f.room_id.clone(),
+        calls: Mutex::new(Vec::new()),
+    });
+    let app = axon_api::router(read_state(f.store.clone()).with_room_identity(service.clone()));
+    let info = format!("/v1/accounts/{}/rooms/{}/info", f.account_id, f.room_id);
+    let (status, body) = get(&app, &info).await;
+    assert_eq!(status, StatusCode::OK);
+    let fingerprint = "a".repeat(64);
+    assert_eq!(
+        body["data"]["identity_changes"],
+        json!([{
+            "user_id": "@peer:localhost", "kind": "pin_violation", "fingerprint": fingerprint
+        }])
+    );
+    let (_, unknown) = get(
+        &app,
+        &format!(
+            "/v1/accounts/{}/rooms/!unknown:localhost/info",
+            f.account_id
+        ),
+    )
+    .await;
+    assert_eq!(unknown["data"]["identity_changes"], Value::Null);
+
+    for action in ["accept", "withdraw_verification"] {
+        let path = format!(
+            "/v1/accounts/{}/users/%40peer%3Alocalhost/identity/{action}",
+            f.account_id
+        );
+        let input = json!({"fingerprint": fingerprint});
+        let (status, _) = request(&app, "POST", &path, Some(input.clone()), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = request(&app, "POST", &path, Some(input), Some(&bearer())).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(
+        *service.calls.lock().unwrap(),
+        [
+            (
+                "@peer:localhost".to_owned(),
+                fingerprint.clone(),
+                IdentityChangeKind::PinViolation
+            ),
+            (
+                "@peer:localhost".to_owned(),
+                fingerprint,
+                IdentityChangeKind::VerificationViolation
+            ),
+        ]
+    );
+    f.store.delete_account_row(f.account_id).await.unwrap();
+}

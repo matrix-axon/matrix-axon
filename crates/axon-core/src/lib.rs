@@ -42,7 +42,9 @@ pub use push::{
     ApnsPushConfig, FcmPushConfig, LoadedApns, LoadedFcm, PushConfig, PushKeySource, PushMaterial,
     ResolvedApns, ResolvedFcm,
 };
-pub use room_details::{JobActivity, RoomDetailJob, RoomDetailSource};
+pub use room_details::{
+    IdentityChangeKind, JobActivity, RoomDetailJob, RoomDetailSource, RoomIdentityChange,
+};
 pub use room_entry::{CreateRoomRequest, RoomPreset};
 pub use secret::{generate_opaque_secret, hash_secret};
 pub use utd_reason::{UtdReason, UtdReasonKind};

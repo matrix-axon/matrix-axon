@@ -16,9 +16,8 @@
 //! notification counts are per-room counters, not an ephemeral event.
 //! `room_display_name.changed` carries a room's newly stored SDK-calculated
 //! display name (ADR 0118).
-//! `room_details.changed` names which per-room reads to repeat — `metadata`,
-//! `member_counts`, `homeserver_details` — after a real change; it carries no
-//! values (ADR 0126).
+//! `room_details.changed` names which per-room reads to repeat when their
+//! values or availability change (ADR 0126).
 //! `invite.added` / `invite.removed` carry the pending-invite inbox (ADR 0091).
 //! `account_data.changed` carries persisted Matrix account data (`m.tag`,
 //! `m.direct`, …; ADR 0103). `preferences.changed` carries instance-wide
@@ -278,9 +277,10 @@ struct RoomDetailsFramePayload {
     room_id: String,
     /// `metadata` (`GET …/metadata`), `member_counts` (`GET …/info`),
     /// `homeserver_details` (`GET …/homeserver_details`),
-    /// `space_hierarchy` (`GET …/space/hierarchy` of this room, a space), and
-    /// `discovery` (`GET …/discovery` of this room, an unjoined room), in
-    /// that order; never empty. Clients ignore values they do not know.
+    /// `space_hierarchy` (`GET …/space/hierarchy` of this room, a space),
+    /// `discovery` (`GET …/discovery` of this room, an unjoined room), and
+    /// `identity_changes` (`GET …/info`), in that order.
+    /// Clients ignore values they do not know.
     sources: Vec<&'static str>,
 }
 
@@ -292,6 +292,7 @@ fn room_detail_source(source: RoomDetailSource) -> &'static str {
         RoomDetailSource::HomeserverDetails => "homeserver_details",
         RoomDetailSource::SpaceHierarchy => "space_hierarchy",
         RoomDetailSource::Discovery => "discovery",
+        RoomDetailSource::IdentityChanges => "identity_changes",
     }
 }
 
@@ -1002,6 +1003,7 @@ mod tests {
             account_id,
             room_id: "!r:localhost".to_owned(),
             sources: [
+                RoomDetailSource::IdentityChanges,
                 RoomDetailSource::Discovery,
                 RoomDetailSource::SpaceHierarchy,
                 RoomDetailSource::HomeserverDetails,
@@ -1014,7 +1016,7 @@ mod tests {
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(
             v["payload"],
-            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details", "space_hierarchy", "discovery"]})
+            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details", "space_hierarchy", "discovery", "identity_changes"]})
         );
     }
 

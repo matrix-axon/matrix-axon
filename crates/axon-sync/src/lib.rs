@@ -51,6 +51,7 @@ mod push;
 mod reconcile;
 mod redecrypt;
 mod room_details;
+mod room_identity;
 mod room_sweep;
 mod state_redaction;
 mod supplementary_state;
@@ -81,6 +82,7 @@ pub use matrix_oauth_grant::{
 pub use media::SdkMediaProxy;
 pub use member_profiles::{MemberProfile, MemberProfileEngine, MemberProfileError};
 pub use redecrypt::RedecryptSummary;
+pub use room_identity::{RoomIdentityEngine, RoomIdentityError};
 pub use sync_health::{AccountSyncStatus, SyncHealth, SyncState};
 pub use trust::{CurrentTrust, SenderTrustEngine, TrustBundle, TrustError, TrustSnapshot};
 pub use verification::{FlowStage, FlowState, VerificationEngine, VerifyError};

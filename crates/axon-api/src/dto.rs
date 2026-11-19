@@ -1105,6 +1105,10 @@ pub struct RoomInfoDto {
     /// A `room_details.changed` frame naming `member_counts` follows each
     /// change the reconciler stores or clears.
     pub member_counts: Option<RoomMemberCountsDto>,
+    /// Room-member identity warnings. An empty list means none are known.
+    /// Null means the room is unobserved or ineligible for identity tracking.
+    /// Re-read after `room_details.changed` names `identity_changes`, and on reconnect.
+    pub identity_changes: Option<Vec<crate::RoomIdentityChangeDto>>,
     /// `m.room.join_rules` `content.join_rule`
     /// (`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…).
     pub join_rule: Option<String>,
