@@ -310,6 +310,15 @@ impl MediaCache {
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         tokio::fs::create_dir_all(&tmp_dir).await?;
 
+        if !cfg.streams_media() {
+            tracing::warn!(
+                max_bytes = cfg.max_bytes,
+                max_object_bytes = cfg.max_object_bytes,
+                "media.max_bytes leaves less than media.max_object_bytes for streams; \
+                 video and audio are buffered instead of streamed",
+            );
+        }
+
         let inner = Arc::new(Inner {
             cache_dir,
             tmp_dir,
@@ -318,6 +327,7 @@ impl MediaCache {
             max_object_bytes: cfg.max_object_bytes,
             downloads: Semaphore::new(cfg.max_concurrent_downloads.max(1)),
             streams: Arc::new(Semaphore::new(cfg.max_concurrent_streams.max(1))),
+            streams_media: cfg.streams_media(),
             fetch_timeout: Duration::from_secs(cfg.fetch_timeout_secs),
             stall_timeout: Duration::from_secs(cfg.stall_timeout_secs.max(1)),
             stream_byte_limit: cfg.stream_byte_limit(),
@@ -403,6 +413,10 @@ impl MediaCache {
     /// headers, both within `fetch_timeout_secs` of this call, then a cache
     /// reservation for the declared length, tried once. Missing the deadline
     /// or the reservation is [`MediaCacheError::Busy`].
+    ///
+    /// When the configuration leaves streams too little room
+    /// (`MediaConfig::streams_media`), this is
+    /// [`get_or_fetch`](Self::get_or_fetch) instead, always `Complete`.
     pub async fn get_or_stream(
         &self,
         account_id: Uuid,
@@ -410,6 +424,12 @@ impl MediaCache {
         encrypted_file: Option<Value>,
         fetcher: &dyn MediaFetcher,
     ) -> Result<MediaBody, MediaCacheError> {
+        if !self.inner.streams_media {
+            return self
+                .get_or_fetch(account_id, mxc_url, encrypted_file, fetcher)
+                .await
+                .map(MediaBody::Complete);
+        }
         let deadline = Instant::now() + self.inner.fetch_timeout;
         let hash = etag_for_media(mxc_url, encrypted_file.as_ref());
         let key: Key = (account_id, hash.clone());
@@ -526,6 +546,9 @@ struct Inner {
     /// stream holds its permit for minutes. `Arc` so the download task can
     /// own its permit.
     streams: Arc<Semaphore>,
+    /// Whether video and audio stream at all (`MediaConfig::streams_media`);
+    /// when not, [`MediaCache::get_or_stream`] buffers them as before.
+    streams_media: bool,
     /// Deadline for a stream's permit plus its upstream response headers,
     /// measured from when the request arrives (`fetch_timeout_secs`).
     fetch_timeout: Duration,

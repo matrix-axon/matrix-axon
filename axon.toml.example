@@ -217,7 +217,8 @@ request_timeout_secs = 15
 # stream is cancelled after stall_timeout_secs with no bytes, at most
 # max_concurrent_streams are open at once, and objects over max_stream_bytes
 # are refused. max_stream_bytes must not exceed max_bytes - max_object_bytes;
-# unset, it is 2 GiB lowered to that bound.
+# unset, it is 2 GiB lowered to that bound, and if that leaves less than
+# max_object_bytes, video and audio are buffered instead of streamed.
 # stall_timeout_secs = 30
 # max_concurrent_streams = 4
 # max_stream_bytes = 2147483648

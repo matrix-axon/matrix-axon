@@ -1271,6 +1271,11 @@ impl MediaConfig {
         // A streamed object larger than the reservable room could never be
         // reserved at all, so an explicit setting above it is a mistake.
         if let Some(max_stream_bytes) = self.max_stream_bytes {
+            if max_stream_bytes == 0 {
+                return Err(ConfigError::Validation(
+                    "media.max_stream_bytes must be positive".into(),
+                ));
+            }
             let room = self.stream_reservation_room();
             if max_stream_bytes > room {
                 return Err(ConfigError::Validation(format!(
@@ -1296,6 +1301,19 @@ impl MediaConfig {
     pub fn stream_byte_limit(&self) -> u64 {
         self.max_stream_bytes
             .unwrap_or_else(|| DEFAULT_MEDIA_MAX_STREAM_BYTES.min(self.stream_reservation_room()))
+    }
+
+    /// Whether video and audio stream (ADR 0139) or stay on the buffered path
+    /// they used before streaming.
+    ///
+    /// An explicit `max_stream_bytes` always streams, under that limit. Unset,
+    /// they stream only when the derived limit admits at least
+    /// `max_object_bytes`, which the buffered path serves. Otherwise, in a
+    /// cache smaller than about twice `max_object_bytes`, streaming would
+    /// refuse objects the buffered path serves, or with no room at all refuse
+    /// every one, so they stay buffered.
+    pub fn streams_media(&self) -> bool {
+        self.max_stream_bytes.is_some() || self.stream_byte_limit() >= self.max_object_bytes
     }
 }
 
@@ -2078,6 +2096,7 @@ mod tests {
             jail.set_env("AXON_MEDIA__MAX_BYTES", "1073741824");
             let config = Config::load(None).expect("a shrunken cache still boots");
             assert_eq!(config.media.stream_byte_limit(), 924 * 1024 * 1024);
+            assert!(config.media.streams_media());
             Ok(())
         });
     }
@@ -2103,10 +2122,37 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_too_small_for_streams_keeps_video_buffered() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            // 150 MiB cache, 100 MiB buffered objects: a 50 MiB stream limit
+            // would refuse videos the buffered path serves.
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "157286400");
+            let config = Config::load(None).expect("boots");
+            assert!(!config.media.streams_media());
+
+            // No room at all: every stream would be refused.
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "1048576");
+            let config = Config::load(None).expect("boots");
+            assert_eq!(config.media.stream_byte_limit(), 0);
+            assert!(!config.media.streams_media());
+
+            // An explicit limit is the operator's choice, and streams.
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "157286400");
+            jail.set_env("AXON_MEDIA__MAX_STREAM_BYTES", "52428800");
+            let config = Config::load(None).expect("50 MiB fits");
+            assert!(config.media.streams_media());
+            Ok(())
+        });
+    }
+
+    #[test]
     fn stream_concurrency_and_stall_timeout_must_be_positive() {
         for (name, value) in [
             ("AXON_MEDIA__MAX_CONCURRENT_STREAMS", "0"),
             ("AXON_MEDIA__STALL_TIMEOUT_SECS", "0"),
+            ("AXON_MEDIA__MAX_STREAM_BYTES", "0"),
         ] {
             figment::Jail::expect_with(|jail| {
                 jail.clear_env();

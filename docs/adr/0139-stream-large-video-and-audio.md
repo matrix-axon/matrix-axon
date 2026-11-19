@@ -193,6 +193,7 @@ The limits change with it:
   An object over `max_stream_bytes` is refused with `too_large` before the body is read, when `Content-Length` says so, or when the running total passes it.
   An object the limit allows must be able to fit beside the room kept for buffered media (below), so the limit is bounded by `max_bytes` minus `max_object_bytes`.
   When `max_stream_bytes` is unset, its 2 GiB default is lowered to that bound, so a deployment with a smaller cache keeps booting after the upgrade.
+  If that leaves the limit below `max_object_bytes`, streaming would refuse objects the buffered path serves, so video and audio stay on the buffered path and startup logs a warning.
   An explicit `max_stream_bytes` above the bound is rejected at startup.
 - A streamed download reserves its space in the LRU before it reads the body.
   The order is fixed: the stream permit first, then the upstream request until its headers arrive, then the reservation.

@@ -660,3 +660,16 @@ async fn a_panicking_download_leaves_nothing_behind() {
     assert_eq!(all, data);
     assert_eq!(h.fetcher.calls(), 1, "the retry started its own download");
 }
+
+/// A cache too small to stream beside buffered media (`streams_media` is
+/// false) serves video and audio through the buffered path, as before
+/// streaming, instead of refusing them.
+#[tokio::test]
+async fn a_cache_too_small_for_streams_buffers_instead() {
+    let h = Harness::with(|cfg| cfg.max_bytes = 3 << 19).await;
+    match h.get("mxc://s/small", None).await.expect("served") {
+        MediaBody::Complete(resource) => assert_eq!(resource.len, 1 << 20),
+        MediaBody::Growing(_) => panic!("expected the buffered path"),
+    }
+    assert_eq!(h.fetcher.calls(), 0, "no stream was opened");
+}
