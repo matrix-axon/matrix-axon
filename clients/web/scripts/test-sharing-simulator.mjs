@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -198,6 +198,11 @@ try {
 } catch (error) {
   if (error?.code !== 'ETIMEDOUT') throw error
   console.warn('::warning::xcodegen timed out; retrying once')
+  // SIGTERM can leave a half-written project; start the retry from nothing.
+  rmSync(join(output, 'SharingFoundationTests.xcodeproj'), {
+    recursive: true,
+    force: true,
+  })
   generate()
 }
 console.log(

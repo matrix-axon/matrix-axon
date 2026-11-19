@@ -33,6 +33,9 @@ final class PreviewResolutionTests: XCTestCase {
     XCTAssertEqual(control.count, 2, "control: a timely discovery answer is used")
 
     let late = ShareIntakeResult<PreviewNetwork.Address?>()
+    // The answer lands after 1 s, so this only catches a restarted wait longer
+    // than that (production restarts at 4 s). It cannot tell a lookup that
+    // never waits from one that waits and discards the result: see #1163.
     DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
       late.finish(.success(PreviewNetwork.Address.parse(probe)))
     }
