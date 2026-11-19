@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -188,7 +188,23 @@ const project = {
   },
 }
 writeFileSync(join(output, 'project.yml'), JSON.stringify(project))
-run('xcodegen', ['generate', '--spec', join(output, 'project.yml')], 30_000)
+// A loaded shared runner has exceeded 30 s here and died ETIMEDOUT. Project
+// generation is idempotent, so retry that infrastructure timeout once; the
+// test suites below are never retried, and any other failure propagates.
+const generate = () =>
+  run('xcodegen', ['generate', '--spec', join(output, 'project.yml')], 120_000)
+try {
+  generate()
+} catch (error) {
+  if (error?.code !== 'ETIMEDOUT') throw error
+  console.warn('::warning::xcodegen timed out; retrying once')
+  // SIGTERM can leave a half-written project; start the retry from nothing.
+  rmSync(join(output, 'SharingFoundationTests.xcodeproj'), {
+    recursive: true,
+    force: true,
+  })
+  generate()
+}
 console.log(
   `Testing on ${device.name}. Results: ${join(output, 'results.xcresult')}`,
 )

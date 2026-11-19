@@ -24,10 +24,16 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# A newer push to the same PR makes the older macOS run moot. Every other run
+# gets its own group, because a shared group would still replace a pending run.
+concurrency:
+  group: ios-sharing-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   native:
     runs-on: macos-latest
-    timeout-minutes: 30
+    # Observed passing runs take 16-24 min; leave room for one xcodegen retry.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
