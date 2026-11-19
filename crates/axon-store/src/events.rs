@@ -894,8 +894,7 @@ impl Store {
                    utd_reason = NULL, utd_reason_detail = NULL \
                WHERE account_id = $1 AND event_id = $2 AND room_id = $8 AND content IS NULL \
                RETURNING account_id, event_id, room_id, origin_ts, id, \
-                         relates_to, redacts, decrypted_body_text, sender, event_type, raw_event, \
-                         (xmax = 0) AS created \
+                         relates_to, redacts, decrypted_body_text, sender, event_type, raw_event \
              ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), proofs AS ( {proofs} ) \
              {SEARCH_FANOUT_TAIL}"
         );

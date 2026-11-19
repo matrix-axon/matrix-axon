@@ -383,8 +383,8 @@ async fn purge_and_account_deletion_remove_gap_rows() {
 
 /// Review finding (#1143): a gap page counts what it recovered from its own
 /// writes, so an upsert reports whether it created the row. And an event
-/// Postgres can never accept is a permanent refusal, which a pager skips
-/// rather than retrying the page for good.
+/// Postgres can never accept is a rejection of its values, which a pager
+/// skips rather than retrying the page for good.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn an_upsert_reports_creation_and_a_nul_escape_is_permanent() {
@@ -423,6 +423,103 @@ async fn an_upsert_reports_creation_and_a_nul_escape_is_permanent() {
         .upsert_event_outcome(&event("$nul", "a\u{0}b"))
         .await
         .expect_err("jsonb rejects a NUL");
-    assert!(!err.is_transient(), "{err}");
+    assert!(err.is_value_rejection(), "{err}");
+    store.delete_account_row(account_id).await.expect("cleanup");
+}
+
+/// Review finding (#1143): a token rejection never moves a resolved boundary
+/// later. With the batch's earliest event gone (purged, say), the remaining
+/// events' minimum is later, and the restarted walk would stop on events
+/// stored inside the hole.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_token_rejection_never_moves_the_boundary_later() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "gaps-least").await;
+    let room_id = room();
+    store_events(&store, account_id, &room_id, 2).await;
+    let batch = store_events(&store, account_id, &room_id, 3).await;
+    let id = store
+        .record_limited_gap(account_id, &room_id, None, &batch)
+        .await
+        .expect("record");
+    assert_eq!(
+        store.check_timeline_gap(id, WAIT).await.expect("check"),
+        GapCheck::Hole
+    );
+    let resolved = gap(&store, account_id, id)
+        .await
+        .expect("row")
+        .stored_before
+        .expect("resolved");
+    sqlx_core::query::query("DELETE FROM events WHERE account_id = $1 AND event_id = $2")
+        .bind(account_id)
+        .bind(&batch[0])
+        .execute(&pool)
+        .await
+        .expect("drop the batch's first event");
+    store
+        .record_timeline_gap_failure(
+            id,
+            RoomBackfillFailure {
+                kind: "rejected",
+                retry_after: Duration::ZERO,
+                parked: false,
+                clear_token: true,
+                timed_out: false,
+            },
+        )
+        .await
+        .expect("failure");
+    let row = gap(&store, account_id, id).await.expect("row");
+    assert_eq!(row.origin, GapOrigin::TokenRejected);
+    assert_eq!(row.stored_before, Some(resolved), "kept, not moved later");
+    store.delete_account_row(account_id).await.expect("cleanup");
+}
+
+/// Review finding (#1143): `received_at` is stamped when the row is inserted,
+/// after the room's write lock, not when its transaction started. An event
+/// that waited on the lock is not stamped earlier than the write it waited
+/// for.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn received_at_is_taken_after_the_room_lock() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "gaps-clock").await;
+    let room_id = room();
+    // Hold the room's write lock, as another write to the room would.
+    let mut blocker = pool.begin().await.expect("begin");
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 895))")
+        .bind(format!("{account_id}:{room_id}"))
+        .execute(&mut *blocker)
+        .await
+        .expect("take the room lock");
+    let write = {
+        let store = store.clone();
+        let room_id = room_id.clone();
+        tokio::spawn(async move { insert_message(&store, account_id, &room_id, 1, "m").await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (released,): (chrono::DateTime<chrono::Utc>,) =
+        sqlx_core::query_as::query_as("SELECT clock_timestamp()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("clock");
+    blocker.commit().await.expect("release");
+    let event_id = write.await.expect("write");
+    let (received_at,): (chrono::DateTime<chrono::Utc>,) = sqlx_core::query_as::query_as(
+        "SELECT received_at FROM events WHERE account_id = $1 AND event_id = $2",
+    )
+    .bind(account_id)
+    .bind(&event_id)
+    .fetch_one(&pool)
+    .await
+    .expect("stored");
+    assert!(
+        received_at >= released,
+        "stamped {received_at}, before the lock was released at {released}"
+    );
     store.delete_account_row(account_id).await.expect("cleanup");
 }

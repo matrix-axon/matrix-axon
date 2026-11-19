@@ -57,26 +57,24 @@ impl StoreError {
         matches!(self, Self::Sqlx(sqlx_core::Error::Database(error)) if error.is_unique_violation())
     }
 
-    /// Whether the same statement can succeed if it is simply tried again: the
-    /// database was unreachable, overloaded, shutting down, or lost a race
-    /// (deadlock, serialization failure, lock or statement timeout). Anything
-    /// else, such as a value the database rejects (a `\u0000` escape in a
-    /// `jsonb`, SQLSTATE 22P05) or a constraint violation, fails the same way on
-    /// every attempt.
-    pub fn is_transient(&self) -> bool {
-        match self {
-            Self::Sqlx(error) => match error {
-                sqlx_core::Error::PoolTimedOut
-                | sqlx_core::Error::PoolClosed
-                | sqlx_core::Error::Io(_)
-                | sqlx_core::Error::Tls(_)
-                | sqlx_core::Error::Protocol(_)
-                | sqlx_core::Error::WorkerCrashed => true,
-                sqlx_core::Error::Database(error) => transient_sqlstate(error.code().as_deref()),
-                _ => false,
-            },
-            _ => false,
-        }
+    /// Whether the database refused the statement because of the values it
+    /// carried, so the same values fail on every attempt while other writes
+    /// succeed: a data exception such as a `\u0000` escape in a `jsonb`
+    /// (SQLSTATE class 22, here 22P05), a constraint violation (23), or a
+    /// value past a size limit (54).
+    ///
+    /// Every other error is `false`, including deterministic ones that are not
+    /// about the values (a protocol or TLS failure, a missing column). A caller
+    /// that skips a write on `true` and retries it otherwise loses only the
+    /// one row it could never store, while an error that would fail every
+    /// write, such as a broken connection setup or a schema mismatch, holds
+    /// its place instead of skipping everything it touches.
+    pub fn is_value_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlx(sqlx_core::Error::Database(error))
+                if value_rejection_sqlstate(error.code().as_deref())
+        )
     }
 
     /// Allowlisted diagnostic category, never SQL detail, values, or source text.
@@ -99,19 +97,12 @@ impl StoreError {
     }
 }
 
-/// The SQLSTATEs [`StoreError::is_transient`] retries: connection exceptions
-/// (08), transaction rollbacks such as deadlocks and serialization failures
-/// (40), insufficient resources such as a full disk or too many connections
-/// (53), operator intervention such as a statement timeout or a shutdown (57),
-/// system errors such as an I/O failure (58), and a lock timeout (55P03).
-fn transient_sqlstate(code: Option<&str>) -> bool {
-    let Some(code) = code else {
-        return false;
-    };
-    code == "55P03"
-        || code
-            .get(..2)
-            .is_some_and(|class| matches!(class, "08" | "40" | "53" | "57" | "58"))
+/// The SQLSTATE classes [`StoreError::is_value_rejection`] covers: data
+/// exceptions (22), integrity constraint violations (23), and program limits
+/// exceeded, such as a row or index entry too large (54).
+fn value_rejection_sqlstate(code: Option<&str>) -> bool {
+    code.and_then(|code| code.get(..2))
+        .is_some_and(|class| matches!(class, "22" | "23" | "54"))
 }
 
 fn sqlstate_reason(code: Option<&str>) -> &'static str {
@@ -159,22 +150,35 @@ mod tests {
     }
 
     #[test]
-    fn only_errors_a_retry_can_clear_are_transient() {
+    fn only_errors_about_the_values_are_value_rejections() {
         for code in [
-            "08006", "40P01", "40001", "53100", "53300", "55P03", "57014", "57P01", "58030",
+            "22P05", "22021", "22001", "23505", "23503", "23514", "54000",
         ] {
-            assert!(transient_sqlstate(Some(code)), "{code} is transient");
+            assert!(
+                value_rejection_sqlstate(Some(code)),
+                "{code} rejects the values"
+            );
         }
+        // Failures that would refuse any write: hold, don't skip.
         for code in [
-            "22P05", "22021", "23505", "23503", "42703", "54000", "XX000", "P0001",
+            "08006", "40P01", "40001", "42703", "42P01", "53100", "55P03", "57014", "58030",
+            "XX000", "P0001",
         ] {
-            assert!(!transient_sqlstate(Some(code)), "{code} is permanent");
+            assert!(
+                !value_rejection_sqlstate(Some(code)),
+                "{code} is not about the values"
+            );
         }
-        assert!(!transient_sqlstate(None));
-        assert!(!transient_sqlstate(Some("5")));
-        assert!(StoreError::Sqlx(sqlx_core::Error::PoolTimedOut).is_transient());
-        assert!(StoreError::Sqlx(sqlx_core::Error::PoolClosed).is_transient());
-        assert!(!StoreError::Sqlx(sqlx_core::Error::RowNotFound).is_transient());
-        assert!(!StoreError::EmbeddedMigration("x".into()).is_transient());
+        assert!(!value_rejection_sqlstate(None));
+        assert!(!value_rejection_sqlstate(Some("2")));
+        for error in [
+            sqlx_core::Error::PoolTimedOut,
+            sqlx_core::Error::PoolClosed,
+            sqlx_core::Error::Protocol("unexpected message".into()),
+            sqlx_core::Error::RowNotFound,
+        ] {
+            assert!(!StoreError::Sqlx(error).is_value_rejection());
+        }
+        assert!(!StoreError::EmbeddedMigration("x".into()).is_value_rejection());
     }
 }

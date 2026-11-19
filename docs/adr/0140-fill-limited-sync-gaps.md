@@ -48,6 +48,9 @@ A busy room while sync is slow, a reconnect after an outage, and a room coming b
   [ADR 0121](0121-slow-homeserver-backfill-and-mutation-timeouts.md) classifies failed pages, backs them off persistently and parks rooms that keep failing.
 - **Timeline reads order by `origin_ts`, then `id`** (`crates/axon-store/src/events.rs`), so an older event stored late still appears in its place.
 - **`events.received_at`** is the time a row was first stored, from the database clock; `ON CONFLICT DO NOTHING` never changes it.
+  Step 1 changed its default from `now()`, the transaction's start, to `clock_timestamp()`, read when the row is inserted.
+  `upsert_event` takes the room's write lock after its transaction starts, so with `now()` an event that waited on the lock was stamped earlier than events committed before it in the same room.
+  Now, within a room, `received_at` follows commit order.
 - **Backfill runs only when enabled.** `run_account` spawns `backfill::run` only when `sync.backfill_enabled` is true.
 
 ## Decision
@@ -169,7 +172,7 @@ H1 is filled from its own row, and events of H1 that H2's walk already stored do
 
 Failures follow ADR 0121: each failed page is classified, backed off with `retry_at`, and parked after repeated failure, with the state on the gap row.
 A `400` for a saved token (one the homeserver no longer honours) restarts the row from the live end.
-It sets `origin = 'token_rejected'` and `from_token` to NULL, and sets `stored_before` to the earliest `received_at` among the batch's stored events.
+It sets `origin = 'token_rejected'` and `from_token` to NULL, and sets `stored_before` to the earliest `received_at` among the batch's stored events, unless the boundary already resolved is earlier: it never moves later, which a purged batch event could otherwise cause.
 The walk from the live end then passes through the batch and everything stored after it, and stops at the first event stored before the batch.
 That is the history before the hole.
 Because the stop rule is the same in both modes, the restart survives a crash after its first page.

@@ -747,15 +747,15 @@ struct InjectedFailures {
     table: &'static str,
 }
 
-/// A deadlock: a transient refusal, which the next attempt can clear.
+/// A deadlock: a refusal that is not about the event, so the page is held.
 const TRANSIENT: &str = "40P01";
 
-/// What Postgres raises for a `\u0000` escape in a `jsonb`: a permanent
-/// refusal, which every attempt meets again.
+/// What Postgres raises for a `\u0000` escape in a `jsonb`: a rejection of
+/// the event's values, which every attempt meets again, so it is skipped.
 const PERMANENT: &str = "22P05";
 
 impl InjectedFailures {
-    /// Refuse inserts with a transient error.
+    /// Refuse inserts with an error that holds the page ([`TRANSIENT`]).
     async fn install(store: &Store, table: &'static str, when: &str, times: u32) -> Self {
         Self::install_with(store, table, "INSERT", TRANSIENT, when, times).await
     }

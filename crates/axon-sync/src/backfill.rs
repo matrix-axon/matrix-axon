@@ -136,12 +136,12 @@ enum PageFailure {
     /// Anything else — a transport error, a `5xx`, a `429`. Retry the same token
     /// after a growing delay, then park.
     Retryable,
-    /// The homeserver served the page, but the store failed transiently while
-    /// it was written or its progress saved: an event on it could not be
-    /// written ([`EventWriteFailed`]), or a gap row's lookup or update failed.
-    /// Moving past the page could lose an event for good, so the same token is
+    /// The homeserver served the page, but the store failed while it was
+    /// written or its progress saved: an event on it could not be written
+    /// ([`EventWriteFailed`]), or a gap row's lookup or update failed. Moving
+    /// past the page could lose an event for good, so the same token is
     /// retried after a growing delay, as for [`Retryable`](Self::Retryable),
-    /// then parked. An event the store refuses on every attempt is skipped
+    /// then parked. An event whose values the database rejects is skipped
     /// rather than counted here, so it cannot hold a cursor for good.
     StoreWrite,
 }
@@ -487,6 +487,7 @@ pub(crate) async fn run(
         // delivered (ADR 0140 decision 2).
         gaps.take();
         let gap_pass = filler.fill().await;
+        let mut last_fill = tokio::time::Instant::now();
         if cancel.is_cancelled() {
             return;
         }
@@ -557,9 +558,11 @@ pub(crate) async fn run(
             // A hole recorded during this sweep goes ahead of the next ordinary
             // page, rather than waiting for the sweep to end, which on a large
             // account can take hours. Rows still waiting (for their batch, or
-            // a backoff) are re-checked here too.
-            if gaps.take() || gap_pass.pending() {
+            // a backoff) are re-checked here too, but not after every page.
+            let recorded = gaps.take();
+            if gaps_due(recorded, gap_pass, last_fill.elapsed()) {
                 gap_pass = filler.fill().await;
+                last_fill = tokio::time::Instant::now();
                 progressed |= gap_pass.progressed;
             }
         }
@@ -572,6 +575,14 @@ pub(crate) async fn run(
             idle(&params, &gaps, gap_pass, &cancel).await;
         }
     }
+}
+
+/// Whether to page gap rows between two ordinary pages: at once when a hole
+/// was recorded, and otherwise at most every [`gaps::AWAITING_RECHECK`] while a
+/// row waits for its batch or a backoff. Re-checking after every page would
+/// cost a row listing, and a batch check per waiting row, per ordinary page.
+fn gaps_due(recorded: bool, pass: gaps::GapPass, since_last_fill: Duration) -> bool {
+    recorded || (pass.pending() && since_last_fill >= gaps::AWAITING_RECHECK)
 }
 
 /// Wait for the next sweep: `idle_poll`, or less while a gap row awaits its
@@ -755,9 +766,9 @@ enum Written {
     /// Cancelled part way. What was written stays, and is idempotent to write
     /// again.
     Abandoned,
-    /// Every event was attempted, but `failed` could not be written because the
-    /// store failed transiently. The page must be fetched again: its token
-    /// stays where it was.
+    /// Every event was attempted, but `failed` could not be written
+    /// ([`EventWriteFailed`]). The page must be fetched again: its token stays
+    /// where it was.
     StoreFailed {
         failed: usize,
         inserted: usize,
@@ -974,6 +985,32 @@ mod tests {
 
     fn raw(json: &str) -> Raw<AnyTimelineEvent> {
         serde_json::from_str(json).expect("fixture")
+    }
+
+    /// Review finding (#1143): a row waiting for its batch or a backoff is
+    /// re-checked at most every `AWAITING_RECHECK`, not after every ordinary
+    /// page; a newly recorded hole is paged at once.
+    #[test]
+    fn waiting_gap_rows_are_rechecked_on_an_interval() {
+        let idle = gaps::GapPass::default();
+        let waiting = gaps::GapPass {
+            awaiting_batch: true,
+            ..gaps::GapPass::default()
+        };
+        let backing_off = gaps::GapPass {
+            backing_off: true,
+            ..gaps::GapPass::default()
+        };
+        let soon = gaps::AWAITING_RECHECK / 4;
+        assert!(
+            gaps_due(true, idle, Duration::ZERO),
+            "a new hole goes first"
+        );
+        assert!(!gaps_due(false, idle, Duration::from_secs(3600)));
+        for pass in [waiting, backing_off] {
+            assert!(!gaps_due(false, pass, soon), "not after every page");
+            assert!(gaps_due(false, pass, gaps::AWAITING_RECHECK));
+        }
     }
 
     #[test]

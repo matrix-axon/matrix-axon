@@ -732,12 +732,14 @@ pub(crate) struct PersistContext {
     pub(crate) gaps: Option<Arc<crate::backfill::gaps::GapRecorder>>,
 }
 
-/// An event row that [`persist_event_core`] could not write because of a
-/// transient store error ([`axon_store::StoreError::is_transient`]): the
-/// database was unreachable, overloaded, or lost a race. The event is missing,
-/// so a pager must fetch its page again rather than move past it. An event the
-/// store refuses on every attempt is logged and skipped instead, as one that
-/// does not parse is, so it cannot pin a pager's cursor for good.
+/// An event row that [`persist_event_core`] could not write, for any reason
+/// but the database rejecting the event's own values: the database was
+/// unreachable, overloaded, lost a race, or failed in a way that would refuse
+/// any write. The event is missing, so a pager must fetch its page again
+/// rather than move past it. An event whose values the database rejects
+/// ([`axon_store::StoreError::is_value_rejection`]) fails on every attempt,
+/// so it is logged and skipped instead, as one that does not parse is, and
+/// cannot pin a pager's cursor for good.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EventWriteFailed;
 
@@ -851,8 +853,8 @@ pub(crate) async fn persist_timeline_event(
 /// SDK's reason for it, for the caller to record with the rest of its page in
 /// one write ([`redecrypt::record_utd_reasons`]). An event skipped because it
 /// can never be stored (it does not parse, its room was purged, or the store
-/// refuses it on every attempt) is an empty [`Persisted`]. A transient write
-/// failure is [`EventWriteFailed`].
+/// rejects its values) is an empty [`Persisted`]. Any other failed write is
+/// [`EventWriteFailed`].
 ///
 /// There is no per-row re-check here, unlike the live path: a backfill can
 /// store thousands of permanently undecryptable rows, and each re-check would
@@ -926,8 +928,8 @@ enum UtdCheck<'a> {
 ///
 /// On the live path a UTD's failure reason is recorded before the emit, so the
 /// frame carries it. On the backfill path it is returned, with the stored row,
-/// for the caller to record. An event-row write that failed transiently is
-/// [`EventWriteFailed`]; one the store refuses on every attempt is logged at
+/// for the caller to record. A failed event-row write is [`EventWriteFailed`],
+/// unless the database rejected the event's values: that one is logged at
 /// ERROR and skipped.
 async fn persist_event_core(
     ctx: &PersistContext,
@@ -1016,7 +1018,7 @@ async fn persist_event_core(
     // Don't write sibling rows if the event row didn't land — they FK to it.
     let (arrival_order, created) = match ctx.store.upsert_event_outcome(&new_ev).await {
         Ok(upserted) => (upserted.arrival_order, upserted.created),
-        Err(err) if err.is_transient() => {
+        Err(err) if !err.is_value_rejection() => {
             tracing::warn!(
                 account_id = %ctx.account_id,
                 event_id = %event_id,
@@ -1026,14 +1028,15 @@ async fn persist_event_core(
             return Err(EventWriteFailed);
         }
         Err(err) => {
-            // A retry fails the same way, so a pager must not wait for it: the
-            // event is lost, as one that does not parse is.
+            // The database rejects this event's values, so a retry fails the
+            // same way and a pager must not wait for it: the event is lost, as
+            // one that does not parse is.
             tracing::error!(
                 account_id = %ctx.account_id,
                 event_id = %event_id,
                 room_id = %room_id,
                 error = %err,
-                "the store refuses this event on every attempt; skipping it"
+                "the store rejects this event's values; skipping it"
             );
             return Ok(Persisted::default());
         }

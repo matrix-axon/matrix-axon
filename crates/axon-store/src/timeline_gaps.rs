@@ -448,8 +448,11 @@ impl Store {
     /// (ADR 0140 decision 2): its origin becomes `token_rejected` and its
     /// boundary the earliest `received_at` among the batch's stored events, so
     /// the walk passes through the batch and everything stored after it and
-    /// stops at the history before the hole. A lag probe has no batch and keeps
-    /// its boundary, which already means the same.
+    /// stops at the history before the hole. The boundary only ever moves
+    /// earlier: if batch events were purged since it was resolved, the
+    /// remaining ones' minimum could be later, and the walk would stop early
+    /// on events stored inside the hole. A lag probe has no batch and keeps its
+    /// boundary, which already means the same.
     pub async fn record_timeline_gap_failure(
         &self,
         gap_id: i64,
@@ -463,7 +466,7 @@ impl Store {
                  parked = $4, \
                  origin = CASE WHEN $5 THEN 'token_rejected' ELSE g.origin END, \
                  from_token = CASE WHEN $5 THEN NULL ELSE g.from_token END, \
-                 stored_before = CASE WHEN $5 THEN COALESCE( \
+                 stored_before = CASE WHEN $5 THEN LEAST( \
                      (SELECT min(e.received_at) FROM events e \
                       WHERE e.account_id = g.account_id \
                         AND e.event_id = ANY(g.batch_event_ids)), \
