@@ -125,6 +125,62 @@ async fn revoked_token_no_longer_verifies() {
     );
 }
 
+/// The lookup by id a stream ticket re-checks on every use (ADR 0139 section
+/// 5): live exactly while the token would verify, and a read that leaves
+/// `last_used_at` alone.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn token_is_live_follows_revocation_and_expiry_without_touching_it() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let last_used = |id: uuid::Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx_core::query_scalar::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
+                "SELECT last_used_at FROM tokens WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("last_used_at")
+        }
+    };
+
+    assert!(!store
+        .token_is_live(uuid::Uuid::new_v4())
+        .await
+        .expect("unknown id"));
+
+    let revoked = store.issue_token("live-then-revoked").await.expect("issue");
+    assert!(store.token_is_live(revoked.id).await.expect("live"));
+    assert_eq!(last_used(revoked.id).await, None, "a read, not a use");
+    assert!(store.revoke_token(revoked.id).await.expect("revoke"));
+    assert!(!store.token_is_live(revoked.id).await.expect("revoked"));
+
+    let expired = store.issue_token("live-then-expired").await.expect("issue");
+    sqlx_core::query::query(
+        "UPDATE tokens SET expires_at = now() + interval '1 hour' WHERE id = $1",
+    )
+    .bind(expired.id)
+    .execute(&pool)
+    .await
+    .expect("set a future expiry");
+    assert!(store.token_is_live(expired.id).await.expect("not yet"));
+    sqlx_core::query::query(
+        "UPDATE tokens SET expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(expired.id)
+    .execute(&pool)
+    .await
+    .expect("expire");
+    assert!(!store.token_is_live(expired.id).await.expect("expired"));
+
+    store
+        .revoke_token(expired.id)
+        .await
+        .expect("cleanup revoke");
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn first_credential_bootstrap_mints_only_once() {
