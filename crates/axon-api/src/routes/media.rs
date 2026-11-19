@@ -306,44 +306,69 @@ pub async fn get_media(
     let (content, raster_only) =
         resolve_scoped_media_content(&store, &kept, account_id, &mxc_url, scope).await?;
 
-    let encrypted_file = encrypted_file_for_mxc(&content, &mxc_url);
+    serve_resolved(
+        proxy.as_ref(),
+        account_id,
+        &mxc_url,
+        content,
+        raster_only,
+        &headers,
+        "get_media",
+    )
+    .await
+}
+
+/// Serve `mxc_url` once its owning content has been resolved and checked:
+/// the shared second half of [`get_media`] and the stream-ticket route, so
+/// the two answer conditional and ranged requests identically. `route` names
+/// the caller in the log.
+async fn serve_resolved(
+    proxy: &dyn MediaProxy,
+    account_id: Uuid,
+    mxc_url: &str,
+    content: Value,
+    raster_only: bool,
+    headers: &HeaderMap,
+    route: &'static str,
+) -> Result<Response, ApiError> {
+    let encrypted_file = encrypted_file_for_mxc(&content, mxc_url);
 
     // Conditional GET: the entity tag is content-addressed (a hash of the MXC
     // URI, and of the descriptor that decrypts it, since another descriptor
     // yields other bytes) and needs no download, so answer `304` *before*
-    // fetching. This is safe here because the fail-closed event checks above
+    // fetching. This is safe here because the caller's fail-closed event checks
     // have already passed (the event exists and is decrypted), so a matching
     // tag means the client already holds the current bytes.
-    let etag = format!("\"{}\"", proxy.etag(&mxc_url, encrypted_file.as_ref()));
-    let if_none_match = header_str(&headers, header::IF_NONE_MATCH);
+    let etag = format!("\"{}\"", proxy.etag(mxc_url, encrypted_file.as_ref()));
+    let if_none_match = header_str(headers, header::IF_NONE_MATCH);
     if if_none_match_matches(if_none_match.as_deref(), &etag) {
         return Ok(not_modified(&etag));
     }
 
-    let content_type = content_type_for_mxc(&content, &mxc_url);
-    let range = header_str(&headers, header::RANGE);
+    let content_type = content_type_for_mxc(&content, mxc_url);
+    let range = header_str(headers, header::RANGE);
 
     // Video and audio stream from the homeserver as they arrive (ADR 0139).
     // `raster_only` media carries no trusted type and is never one of them.
     if !raster_only && is_streamed_type(&content_type) {
         let body = proxy
-            .get_media_stream(account_id, &mxc_url, encrypted_file)
+            .get_media_stream(account_id, mxc_url, encrypted_file)
             .await
-            .map_err(|err| log_and_convert_media_error(account_id, &mxc_url, "get_media", err))?;
+            .map_err(|err| log_and_convert_media_error(account_id, mxc_url, route, err))?;
         return match body {
             MediaBody::Complete(resource) => {
                 serve_media(account_id, resource, content_type, range, etag).await
             }
             MediaBody::Growing(media) => {
-                serve_growing(account_id, &mxc_url, media, content_type, range, etag).await
+                serve_growing(account_id, mxc_url, route, media, content_type, range, etag).await
             }
         };
     }
 
     let mut resource = proxy
-        .get_media(account_id, &mxc_url, encrypted_file)
+        .get_media(account_id, mxc_url, encrypted_file)
         .await
-        .map_err(|err| log_and_convert_media_error(account_id, &mxc_url, "get_media", err))?;
+        .map_err(|err| log_and_convert_media_error(account_id, mxc_url, route, err))?;
 
     // Reaction keys carry no MIME metadata. Recognize only safe raster magic;
     // HTML/SVG and unrecognized objects retain the octet-stream/nosniff fallback.
@@ -382,6 +407,7 @@ const UNKNOWN_LENGTH_RANGE_WAIT: Duration = Duration::from_secs(10);
 async fn serve_growing(
     account_id: Uuid,
     mxc_url: &str,
+    route: &'static str,
     mut media: GrowingResource,
     content_type: String,
     range: Option<String>,
@@ -393,7 +419,7 @@ async fn serve_growing(
             .source
             .wait_for_len(UNKNOWN_LENGTH_RANGE_WAIT)
             .await
-            .map_err(|err| log_and_convert_media_error(account_id, mxc_url, "get_media", err))?;
+            .map_err(|err| log_and_convert_media_error(account_id, mxc_url, route, err))?;
     }
 
     let Some(len) = len else {
