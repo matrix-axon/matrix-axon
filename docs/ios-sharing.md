@@ -148,7 +148,9 @@ Every page, redirect, and selected-image request requires HTTPS and resolves to 
 The TLS socket connects to that numeric address while certificate and hostname validation still use the original DNS name, preventing a second unchecked DNS resolution.
 There are at most six requests in each redirect chain, and no cookies, credentials, referrers, proxy fetches, JavaScript, frames, stylesheets, or arbitrary subresources are used.
 Certificate validation disables auxiliary certificate-network fetches so attacker-controlled AIA/OCSP URLs cannot create unchecked requests; sites with incomplete certificate chains may therefore lack previews.
-The transport accepts bounded HTTP/1.1 framing, requests identity encoding, caps headers at 32 KiB and chunks at 4,096, and stops HTML after the head or 256 KiB.
+The transport accepts bounded HTTP/1.1 framing, requests identity encoding, and caps headers at 32 KiB and chunks at 4,096.
+It reads the HTML head with an initial 256 KiB budget.
+If the probe finds neither a usable description nor an image reference, or a title is unfinished, it can continue on the same response for up to four seconds, subject to a 1 MiB cap, the tag budget, and the shared lookup deadline.
 The inert SwiftSoup parser admits at most 512 potential tags before building its tree; unsupported or over-complex pages retain plain-link sending.
 Selected images must complete within 2 MiB; ImageIO inspects dimensions against four million pixels before Axon decodes or converts them.
 Generic public image formats such as TIFF/HEIC are converted to a bounded JPEG when needed for the existing upload contract.

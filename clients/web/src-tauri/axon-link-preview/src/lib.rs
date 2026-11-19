@@ -1,9 +1,8 @@
 //! Link previews built on this device, for the composer (ADR 0132 § 3).
 //!
 //! One restricted reader for the shell on macOS, Windows, Linux, iOS and
-//! Android. It enforces the boundary of the Share Extension's Swift reader
-//! (`incoming-share/Sources/AxonIncomingShare/PreviewNetwork.swift`) rule for
-//! rule; `src/incoming-share/fixtures/preview-boundary.json` holds the cases
+//! Android. It shares the Share Extension Swift reader's network and metadata
+//! rules; `src/incoming-share/fixtures/preview-boundary.json` holds the cases
 //! both test suites must agree on.
 //!
 //! - **Hosts:** HTTPS, a public-looking DNS name ([`url_check`]), checked
@@ -13,7 +12,8 @@
 //! - **Connection:** only to a validated address, TLS 1.2 or later verified
 //!   against the original name, no proxy ([`net`]).
 //! - **Responses:** status 200 only; 32 KiB of headers, a page until its head
-//!   ends or 256 KiB, an image up to 2 MiB ([`http`]).
+//!   ends or the 256 KiB checkpoint. The optional continuation adds at most
+//!   four seconds and caps the head at 1 MiB. Images cap at 2 MiB ([`http`]).
 //! - **Time and concurrency:** one 25-second deadline per lookup, cancellable
 //!   at any point, and at most two lookups running across the app.
 //!

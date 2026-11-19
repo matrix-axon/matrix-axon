@@ -2,7 +2,7 @@ import Foundation
 
 public enum ShareFailure: String, Error, Codable {
   case unavailable, invalid, quota, stale, busy, missingFile, expired, authentication, invalidation,
-    httpsRequired, cancelled, previewUnavailable, invalidResponse, pendingLimit, previewBusy,
+    httpsRequired, cancelled, previewUnavailable, noPreviewMetadata, invalidResponse, pendingLimit, previewBusy,
     transferBusy, sending, publicIPv4Required, photoResizeUnsupported
 }
 
