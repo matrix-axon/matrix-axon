@@ -32,12 +32,12 @@ export function MediaAttachment({
   /** Keep filenames, captions, and downloads without a preview card. */
   compact?: boolean
 }) {
-  const { media: service, platform } = useServices()
+  const { media: service, platform, streamTickets } = useServices()
   const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
 
-  const plan = previewPlan(media)
+  const plan = previewPlan(media, { streaming: streamTickets.available })
   // A lightbox preview is not a disclosure: it takes over the viewport and is
   // dismissed from there, so the button opens it and never reads "Hide".
   const tiled = !compact && (plan?.kind === 'video' || plan?.kind === 'pdf')

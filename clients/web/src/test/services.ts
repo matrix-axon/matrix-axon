@@ -39,6 +39,7 @@ import { createDeviceStateStore } from '../stores/device-state'
 import { createEphemeralStore } from '../stores/ephemeral'
 import { createEphemeralSender } from '../stores/ephemeral-sender'
 import { createMediaService } from '../media/media-service'
+import { createStreamTickets } from '../media/stream-ticket'
 import { createLiveConnection } from '../stores/live-connection'
 import { createFavouriteStore } from '../stores/favourites'
 import { createMessageGestureStore } from '../stores/message-gestures'
@@ -291,6 +292,11 @@ export function testServices(
     auth,
     api,
     media,
+    streamTickets: createStreamTickets({
+      api,
+      baseUrl: TEST_BASE_URL,
+      platform: { ...browserPlatform(), ...options.platform },
+    }),
     updates,
     timelines,
     cache,

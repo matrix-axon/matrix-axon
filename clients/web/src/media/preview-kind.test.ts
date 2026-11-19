@@ -179,7 +179,11 @@ describe('previewPlan re-typing', () => {
         size: 2_360_866,
       }),
     )
-    expect(plan).toEqual({ kind: 'video', contentType: 'video/quicktime' })
+    expect(plan).toEqual({
+      kind: 'video',
+      contentType: 'video/quicktime',
+      stream: false,
+    })
   })
 
   it('types a generic-mimetype voice memo from its extension', () => {
@@ -193,7 +197,11 @@ describe('previewPlan re-typing', () => {
         size: 19_191,
       }),
     )
-    expect(plan).toEqual({ kind: 'audio', contentType: 'audio/mp4' })
+    expect(plan).toEqual({
+      kind: 'audio',
+      contentType: 'audio/mp4',
+      stream: false,
+    })
   })
 
   it('never re-types to something that could carry active content', () => {
@@ -204,5 +212,66 @@ describe('previewPlan re-typing', () => {
         previewPlan(media({ filename, mimetype: 'application/octet-stream' })),
       ).toBeNull()
     }
+  })
+
+  describe('streaming (ADR 0139 § 6)', () => {
+    const video = (overrides: Partial<ParsedMedia> = {}) =>
+      media({
+        kind: 'video',
+        filename: 'clip.mp4',
+        mimetype: 'video/mp4',
+        ...overrides,
+      })
+    const streamed = (parsed: ParsedMedia) =>
+      previewPlan(parsed, { streaming: true })
+
+    it('streams video and audio the proxy serves as their own type', () => {
+      expect(streamed(video())).toEqual({
+        kind: 'video',
+        contentType: null,
+        stream: true,
+      })
+      expect(
+        streamed(
+          media({ kind: 'audio', filename: 'a.ogg', mimetype: 'audio/ogg' }),
+        )?.stream,
+      ).toBe(true)
+    })
+
+    it('never streams where the platform cannot', () => {
+      expect(previewPlan(video())?.stream).toBe(false)
+      expect(previewPlan(video(), { streaming: false })?.stream).toBe(false)
+    })
+
+    it('lifts the size ceiling only for a plan that streams', () => {
+      const huge = video({ size: 1024 * 1024 * 1024 })
+      expect(streamed(huge)).toEqual({
+        kind: 'video',
+        contentType: null,
+        stream: true,
+      })
+      // The blob path still buffers the whole object, so it keeps its cap.
+      expect(previewPlan(huge)).toBeNull()
+    })
+
+    it('keeps the blob path for a type the proxy would not serve as media', () => {
+      // Each of these is served as application/octet-stream
+      // (`sanitize_mime`/`is_inline_safe`), which the ticket route refuses —
+      // so the blob path re-types it, and its ceiling stays.
+      for (const mimetype of [
+        'application/octet-stream',
+        'video/mp4; codecs="avc1"',
+        'Video/MP4',
+      ]) {
+        const plan = streamed(video({ mimetype, size: 200 * 1024 * 1024 }))
+        expect(plan).toBeNull()
+        expect(streamed(video({ mimetype }))?.stream).toBe(false)
+      }
+    })
+
+    it('never streams a pdf or text file', () => {
+      expect(streamed(media())?.stream).toBe(false)
+      expect(streamed(media({ mimetype: 'text/plain' }))?.stream).toBe(false)
+    })
   })
 })

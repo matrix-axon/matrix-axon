@@ -71,6 +71,7 @@ import {
   type EphemeralSender,
 } from './stores/ephemeral-sender'
 import { createMediaService, type MediaService } from './media/media-service'
+import { createStreamTickets, type StreamTickets } from './media/stream-ticket'
 import {
   createLiveConnection,
   type LiveConnection,
@@ -181,6 +182,8 @@ export interface AppServices {
   /** Outbound read receipts + typing notices to the homeserver (ADR 0067/0068). */
   ephemeralSender: EphemeralSender
   media: MediaService
+  /** Stream tickets for video and audio previews (ADR 0139 § 6). */
+  streamTickets: StreamTickets
   /**
    * Watches the origin for a newer web build (ADR 0087). Detection only — the
    * reload policy lives in `startAutoRefresh` (`src/update-refresh.ts`).
@@ -1734,6 +1737,7 @@ export function createServices(
   })
   const api = createApiClient(auth, baseUrl, platform)
   const media = createMediaService({ auth, baseUrl, platform })
+  const streamTickets = createStreamTickets({ api, baseUrl, platform })
   // Deliberately *not* `apiBaseUrl()`: the manifest describes the web bundle,
   // which is served by the document's own origin even in a cross-origin
   // deployment where the API lives elsewhere (`VITE_AXON_SERVER_URL`).
@@ -2022,6 +2026,7 @@ export function createServices(
     auth,
     api,
     media,
+    streamTickets,
     updates,
     timelines,
     cache,

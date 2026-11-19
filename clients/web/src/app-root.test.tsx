@@ -190,6 +190,7 @@ describe('AppRoot wiring the transport into the app', () => {
       onDeepLink: null,
       onNativeFileDrop: null,
       defaultApiBaseUrl: null,
+      mediaStreamSrc: null,
       // A packaged build, like the one this simulates.
       updatesFromOrigin: false,
       browserCanAdoptApp: false,

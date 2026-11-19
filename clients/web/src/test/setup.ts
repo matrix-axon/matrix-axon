@@ -57,3 +57,18 @@ if (typeof URL.createObjectURL !== 'function') {
   URL.createObjectURL = () => `blob:mock/${counter++}`
   URL.revokeObjectURL = () => {}
 }
+
+/**
+ * jsdom implements no media playback: `HTMLMediaElement`'s `play`, `pause` and
+ * `load` only report "Not implemented" to the console. The stream-ticket
+ * player (ADR 0139 § 6) calls them to stop a closed preview's download and to
+ * resume after a ticket is replaced, so they are quiet no-ops here; a test
+ * that asserts on them spies on the prototype.
+ */
+for (const method of ['play', 'pause', 'load'] as const) {
+  Object.defineProperty(HTMLMediaElement.prototype, method, {
+    configurable: true,
+    writable: true,
+    value: method === 'play' ? () => Promise.resolve() : () => {},
+  })
+}

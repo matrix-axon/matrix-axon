@@ -13,6 +13,8 @@ import { Lightbox } from './Lightbox'
 import { MediaCaption } from './MediaCaption'
 import { PdfViewer } from './PdfViewer'
 import { MediaDownloadButton } from './MediaDownloadButton'
+import { MediaPlayer } from './MediaPlayer'
+import { StreamPreview } from './StreamPreview'
 
 /**
  * The on-demand body of an attachment preview (ADR 0072): a native player for
@@ -20,7 +22,9 @@ import { MediaDownloadButton } from './MediaDownloadButton'
  * text file. Rendered only after the user asks — `MediaAttachment` mounts this
  * when opened, so nothing is fetched by merely scrolling past the card.
  *
- * The bytes come through `useMediaBlob`, so the object URL is refcounted and
+ * Audio and video the server will stream play from a stream-ticket URL (ADR
+ * 0139 § 6), so the browser fetches them with its own range requests. Every
+ * other body comes through `useMediaBlob`, so the object URL is refcounted and
  * released when the viewer closes and this unmounts. `fetchBlobUrl` would be
  * wrong here: it is uncached and caller-revoked, which suits the transient
  * Download anchor and not a player that may be re-opened.
@@ -49,20 +53,44 @@ export function MediaPreview({
   // Text wants a string, not an object URL, and takes a different service call
   // — so it is a sibling component rather than a branch below, keeping the
   // hooks of each path unconditional.
+  const kind = plan.kind
+  const blob = () =>
+    kind === 'text' ? null : (
+      <BlobPreview
+        accountId={accountId}
+        media={media}
+        kind={kind}
+        contentType={plan.contentType}
+      />
+    )
   const body =
-    plan.kind === 'text' ? (
+    kind === 'text' ? (
       <TextPreview
         accountId={accountId}
         mxcUrl={media.url!}
         filename={media.filename}
       />
-    ) : (
-      <BlobPreview
+    ) : plan.stream && (kind === 'audio' || kind === 'video') ? (
+      <StreamPreview
         accountId={accountId}
         media={media}
-        kind={plan.kind}
-        contentType={plan.contentType}
+        kind={kind}
+        fallback={() =>
+          // The server refused to stream it. The blob path buffers the whole
+          // object in the page, so it keeps the ceiling streaming lifted.
+          media.size !== undefined && media.size > previewSizeCeiling(kind) ? (
+            <div class="lightbox-media">
+              <p class="local-echo-status error">
+                {media.filename} is too large to play here — use Download.
+              </p>
+            </div>
+          ) : (
+            blob()
+          )
+        }
       />
+    ) : (
+      blob()
     )
   return (
     <Lightbox
@@ -137,32 +165,14 @@ function BlobPreview({
         another app.
       </p>
     )
-  } else if (kind === 'audio') {
+  } else if (kind === 'audio' || kind === 'video') {
     body = (
-      <audio
-        class="media-player"
-        controls
-        preload="metadata"
+      <MediaPlayer
+        kind={kind}
         src={state.url}
-        onError={() => setUnplayable(true)}
-      >
-        <track kind="captions" />
-      </audio>
-    )
-  } else if (kind === 'video') {
-    body = (
-      <video
-        class="lightbox-player"
-        controls
-        autoPlay
-        playsInline
-        preload="metadata"
         poster={poster.state.status === 'ready' ? poster.state.url : undefined}
-        src={state.url}
         onError={() => setUnplayable(true)}
-      >
-        <track kind="captions" />
-      </video>
+      />
     )
   } else {
     // Drawn with pdf.js rather than embedded in an `<iframe>`: iOS Safari

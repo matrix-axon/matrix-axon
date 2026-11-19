@@ -41,6 +41,22 @@ function serveMedia(body: string, contentType: string) {
   )
 }
 
+/** Issue a stream ticket, which video and audio play from (ADR 0139 § 6). */
+function serveTicket() {
+  server.use(
+    http.post(
+      `${TEST_BASE_URL}/v1/media/:account/:server/:media/stream-ticket`,
+      () =>
+        HttpResponse.json({
+          data: {
+            path: '/v1/media-stream/ticket',
+            expires_at: '2099-01-01T00:00:00Z',
+          },
+        }),
+    ),
+  )
+}
+
 function renderAttachment(parsed: ParsedMedia) {
   return render(
     <ServicesContext.Provider value={testServices()}>
@@ -128,7 +144,7 @@ describe('attachment media preview', () => {
   })
 
   it('opens a video in the lightbox', async () => {
-    serveMedia('ftyp', 'video/mp4')
+    serveTicket()
     const { getByRole } = renderAttachment(
       media({ kind: 'video', filename: 'clip.mp4', mimetype: 'video/mp4' }),
     )
@@ -140,7 +156,7 @@ describe('attachment media preview', () => {
   })
 
   it('opens audio in the shared preview dialog and releases it on close', async () => {
-    serveMedia('ID3', 'audio/mpeg')
+    serveTicket()
     const { getByRole } = renderAttachment(
       media({ kind: 'audio', filename: 'voice.mp3', mimetype: 'audio/mpeg' }),
     )
@@ -165,7 +181,7 @@ describe('attachment media preview', () => {
   })
 
   it('closes the lightbox on a tap beside the media', async () => {
-    serveMedia('ftyp', 'video/mp4')
+    serveTicket()
     const { getByRole } = renderAttachment(
       media({ kind: 'video', filename: 'clip.mp4', mimetype: 'video/mp4' }),
     )
@@ -181,7 +197,7 @@ describe('attachment media preview', () => {
   })
 
   it('does not close when the media itself is clicked', async () => {
-    serveMedia('ftyp', 'video/mp4')
+    serveTicket()
     const { getByRole } = renderAttachment(
       media({ kind: 'video', filename: 'clip.mp4', mimetype: 'video/mp4' }),
     )
