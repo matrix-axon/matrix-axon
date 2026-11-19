@@ -289,7 +289,7 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
         (status = 422, description = "The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help. For video and audio, which stream before their hash is checked, a hash mismatch instead aborts the response before its last 64 KiB, and the next request gets this `422`.", body = crate::response::ErrorResponse),
         (status = 500, description = "Internal media-metadata lookup failure", body = crate::response::ErrorResponse),
         (status = 502, description = "The homeserver was unreachable or returned an error", body = crate::response::ErrorResponse),
-        (status = 503, description = "The account's homeserver connection is not currently established, or a video or audio stream could not start yet (no stream slot or upstream answer within `fetch_timeout_secs`, or no cache room beside other streams). Retryable.", body = crate::response::ErrorResponse),
+        (status = 503, description = "The account's homeserver connection is not currently established, or a video or audio stream could not start yet (no stream slot or upstream answer within `fetch_timeout_secs`, or no cache room beside other streams). Retryable; a stream that could not start carries `Retry-After`.", body = crate::response::ErrorResponse),
     ),
     tag = "media",
 )]

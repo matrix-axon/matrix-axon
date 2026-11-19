@@ -53,13 +53,22 @@ pub enum MediaError {
     Undecryptable(String),
 }
 
+/// The `Retry-After` on a [`MediaError::Busy`] `503`, in seconds. A stream
+/// slot or cache room frees when another stream finishes, which takes seconds
+/// at least; a player retrying at once would only queue again behind the same
+/// full pool.
+pub const BUSY_RETRY_AFTER_SECS: u32 = 5;
+
 impl From<MediaError> for crate::response::ApiError {
     fn from(err: MediaError) -> Self {
         match err {
             MediaError::AccountNotFound(msg) | MediaError::NotFound(msg) => Self::not_found(msg),
             MediaError::Invalid(msg) => Self::bad_request(msg),
             MediaError::Forbidden(msg) => Self::forbidden(msg),
-            MediaError::NotConnected(msg) | MediaError::Busy(msg) => Self::service_unavailable(msg),
+            MediaError::NotConnected(msg) => Self::service_unavailable(msg),
+            MediaError::Busy(msg) => {
+                Self::service_unavailable(msg).with_retry_after(BUSY_RETRY_AFTER_SECS)
+            }
             MediaError::Upstream(msg) => Self::bad_gateway(msg),
             MediaError::TooLarge(msg) => Self::payload_too_large(msg),
             MediaError::Internal(_) => Self::internal(),

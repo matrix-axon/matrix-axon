@@ -13603,7 +13603,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The account's homeserver connection is not currently established, or a video or audio stream could not start yet (no stream slot or upstream answer within `fetch_timeout_secs`, or no cache room beside other streams). Retryable. */
+            /** @description The account's homeserver connection is not currently established, or a video or audio stream could not start yet (no stream slot or upstream answer within `fetch_timeout_secs`, or no cache room beside other streams). Retryable; a stream that could not start carries `Retry-After`. */
             503: {
                 headers: {
                     [name: string]: unknown;

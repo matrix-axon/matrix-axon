@@ -233,11 +233,13 @@ A failed check is remembered for 10 minutes, so a retry gets `422 media_undecryp
 
 A streamed download reserves its declared length in the cache before reading its body, and runs to completion even if the viewer goes away.
 When the other streams' reservations leave no room, the request gets a retryable `503` rather than waiting.
+A `503` for a stream that could not start, for want of a slot, an upstream answer or room, carries `Retry-After: 5`.
 
 Two configurations change this:
 
 - **A small cache.** With `max_stream_bytes` unset and a cache smaller than about twice `max_object_bytes`, the stream limit would fall below `max_object_bytes`. Streaming would then refuse objects the buffered path serves, so video and audio stay on the buffered path and startup logs a warning. An explicit `max_stream_bytes` always streams.
 - **A disabled cache** (`enabled = false`). Video and audio still stream, and requests made while a download runs share it, but nothing is kept afterwards. Each later request downloads the object again, as a buffered object does with the cache disabled.
+  `max_bytes` still bounds the staging files that streams in flight hold, so the `max_stream_bytes` check and the small-cache fallback above apply as they do with the cache on.
 
 Clients keep their own limits: the web client and the shells still buffer a whole object until ADR 0139's later phases land, and the TUI still refuses media over 20 MiB.
 

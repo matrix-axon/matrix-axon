@@ -844,29 +844,35 @@ impl Inner {
         failed.insert(key, Instant::now());
     }
 
-    /// The object as it already exists: a cache hit, or a streamed download
-    /// already running. A download that has already failed returns its error.
+    /// The object as it already exists: a streamed download already running,
+    /// or a cache hit. A download that has already failed returns its error.
+    ///
+    /// The running download is checked first. A download leaves
+    /// `Inner::streaming` only after it is promoted into the cache, so a miss
+    /// there followed by a cache check can't miss both. In the other order, a
+    /// promotion landing between the two checks would start a second download
+    /// of the whole object.
     async fn join_existing(&self, key: &Key) -> Result<Option<MediaBody>, MediaCacheError> {
-        if self.enabled {
-            if let Some(resource) = self.try_hit(key.0, &key.1).await {
-                return Ok(Some(MediaBody::Complete(resource)));
-            }
-        }
         let partial = self
             .streaming
             .lock()
             .expect("streaming mutex")
             .get(key)
             .cloned();
-        let Some(partial) = partial else {
-            return Ok(None);
-        };
-        if let Some(failure) = partial.failure() {
-            return Err(failure.into_error());
+        if let Some(partial) = partial {
+            if let Some(failure) = partial.failure() {
+                return Err(failure.into_error());
+            }
+            return Ok(Some(MediaBody::Growing(
+                partial.reader(key.1.clone(), self.open_handle_guard()),
+            )));
         }
-        Ok(Some(MediaBody::Growing(
-            partial.reader(key.1.clone(), self.open_handle_guard()),
-        )))
+        if self.enabled {
+            if let Some(resource) = self.try_hit(key.0, &key.1).await {
+                return Ok(Some(MediaBody::Complete(resource)));
+            }
+        }
+        Ok(None)
     }
 
     /// Open the upstream stream, reserve its space and start the download
@@ -908,16 +914,9 @@ impl Inner {
             }
         }
 
-        // Then the reservation, tried once. On failure the permit and the
-        // upstream connection both drop here, so no permit waits for room.
-        let Some((reservation, victims)) = Reservation::try_new(self, stream.len.unwrap_or(0))
-        else {
-            return Err(MediaCacheError::Busy(
-                "media cache has no room beside the other streams in flight".to_owned(),
-            ));
-        };
-        self.remove_files(victims).await;
-
+        // The staging file before the reservation: reserving evicts entries,
+        // and a file that then could not be created (ENOSPC, EMFILE) would
+        // have drained the cache for nothing.
         let staging = self.tmp_dir.join(Uuid::new_v4().to_string());
         let writer = tokio::fs::File::create(&staging)
             .await
@@ -929,6 +928,17 @@ impl Inner {
                 return Err(MediaCacheError::Io(e));
             }
         };
+
+        // Then the reservation, tried once. On failure the permit and the
+        // upstream connection both drop here, so no permit waits for room.
+        let Some((reservation, victims)) = Reservation::try_new(self, stream.len.unwrap_or(0))
+        else {
+            let _ = tokio::fs::remove_file(&staging).await;
+            return Err(MediaCacheError::Busy(
+                "media cache has no room beside the other streams in flight".to_owned(),
+            ));
+        };
+        self.remove_files(victims).await;
 
         let (progress, watch) = watch::channel(Progress::started(stream.len));
         let partial = Arc::new(Partial::new(reader, watch));

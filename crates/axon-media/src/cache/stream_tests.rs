@@ -503,9 +503,14 @@ async fn a_stream_that_cannot_reserve_room_is_busy() {
     let _second = h.fetcher.script(Some(2 << 20));
     let error = h.get("mxc://s/second", None).await.expect_err("no room");
     assert!(matches!(error, MediaCacheError::Busy(_)), "{error}");
-    // The refused stream released its permit and reserved nothing.
+    // The refused stream released its permit, reserved nothing, and left no
+    // staging file beside the first stream's.
     assert_eq!(h.reserved(), 2 << 20);
     assert_eq!(h.cache.inner.streams.available_permits(), 3);
+    assert_eq!(
+        std::fs::read_dir(&h.cache.inner.tmp_dir).unwrap().count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -524,6 +529,32 @@ async fn a_reservation_evicts_completed_entries() {
     let index = h.cache.inner.index.lock().unwrap();
     assert!(index.total_bytes + index.reserved <= 4 << 20);
     assert_eq!(index.total_bytes, 2 << 20, "the oldest entry was evicted");
+}
+
+#[tokio::test]
+async fn a_staging_file_that_cannot_be_created_evicts_nothing() {
+    let h = Harness::with(|cfg| cfg.max_bytes = 4 << 20).await;
+    for url in ["mxc://s/a", "mxc://s/b", "mxc://s/c"] {
+        h.cache
+            .get_or_fetch(h.account, url, None, h.fetcher.as_ref())
+            .await
+            .unwrap();
+    }
+    // Stands in for ENOSPC or EMFILE: creating the staging file fails.
+    std::fs::remove_dir_all(&h.cache.inner.tmp_dir).unwrap();
+
+    let _feed = h.fetcher.script(Some(2 << 20));
+    let error = h
+        .get("mxc://s/video", None)
+        .await
+        .expect_err("no staging file");
+    assert!(matches!(error, MediaCacheError::Io(_)), "{error}");
+    assert_eq!(h.reserved(), 0);
+    assert_eq!(
+        h.cache.stats().total_bytes,
+        3 << 20,
+        "nothing was evicted for a stream that never started"
+    );
 }
 
 #[tokio::test]

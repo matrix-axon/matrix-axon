@@ -3290,14 +3290,15 @@ async fn video_and_audio_are_served_while_they_download() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    // A stream that cannot start yet is a retryable 503.
-    let ((status, _, body), _) = fetch(
+    // A stream that cannot start yet is a retryable 503 that names a wait.
+    let ((status, headers, body), _) = fetch(
         ConfiguredMediaProxy::failing(MediaOutcome::Busy("no stream slot".to_owned())),
         video.clone(),
         None,
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(headers.get("retry-after").unwrap(), "5");
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["error"]["code"], "service_unavailable");
 

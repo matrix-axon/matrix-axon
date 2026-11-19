@@ -552,8 +552,10 @@ pub struct MediaConfig {
     #[serde(default = "default_media_uploads_dir")]
     pub uploads_dir: PathBuf,
     /// Total cache size cap, in bytes. When a fetch would push the cache over
-    /// this, least-recently-used entries are evicted until it fits. Defaults to
-    /// 5 GiB.
+    /// this, least-recently-used entries are evicted until it fits. With the
+    /// cache disabled it still bounds the staging files of video and audio
+    /// streams in flight (ADR 0139), so the stream-room checks apply either
+    /// way. Defaults to 5 GiB.
     #[serde(default = "default_media_max_bytes")]
     pub max_bytes: u64,
     /// Per-object size cap, in bytes. A single media object larger than this is

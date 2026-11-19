@@ -27,6 +27,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
+use uuid::Uuid;
 
 use crate::error::GatewayError;
 
@@ -107,19 +108,36 @@ impl StreamDecryptor {
 /// Wrap a ciphertext stream so it yields plaintext. Its last item is an
 /// `Undecryptable` error when the ciphertext hash does not match; a clean end
 /// means it did.
+///
+/// A body that ends cleanly before its declared length `len` is cut short,
+/// not tampered with, so it ends with a transient `Upstream` error and gets no
+/// hash verdict. A hash verdict would be `Undecryptable`, which the cache
+/// remembers and refuses retries of for 10 minutes. An unknown-length body
+/// can't be checked this way, but a truncated chunked or gzip body is already
+/// a transport error.
 pub(crate) fn decrypting(
     body: BoxStream<'static, Result<Bytes, FetchError>>,
     decryptor: StreamDecryptor,
+    len: Option<u64>,
 ) -> BoxStream<'static, Result<Bytes, FetchError>> {
-    stream::unfold(Some((body, decryptor)), |state| async move {
-        let (mut body, mut decryptor) = state?;
+    stream::unfold(Some((body, decryptor, 0u64)), move |state| async move {
+        let (mut body, mut decryptor, seen) = state?;
         match body.next().await {
             Some(Ok(chunk)) => {
+                let seen = seen + chunk.len() as u64;
                 let plaintext = decryptor.decrypt(&chunk);
-                Some((Ok(plaintext), Some((body, decryptor))))
+                Some((Ok(plaintext), Some((body, decryptor, seen))))
             }
             Some(Err(error)) => Some((Err(error), None)),
-            None => decryptor.verify().err().map(|error| (Err(error), None)),
+            None => match len {
+                Some(len) if seen != len => Some((
+                    Err(FetchError::Upstream(format!(
+                        "media body ended at {seen} of its {len} bytes"
+                    ))),
+                    None,
+                )),
+                _ => decryptor.verify().err().map(|error| (Err(error), None)),
+            },
         }
     })
     .boxed()
@@ -147,10 +165,12 @@ pub(crate) fn download_url(
     Some(url)
 }
 
-/// Open a streamed download of `mxc_url`, decrypting with `decryptor` when
-/// the media is encrypted. Returns once the response headers have arrived.
+/// Open `account_id`'s streamed download of `mxc_url`, decrypting with
+/// `decryptor` when the media is encrypted. Returns once the response headers
+/// have arrived.
 pub(crate) async fn open(
     client: &Client,
+    account_id: Uuid,
     mxc_url: &str,
     decryptor: Option<StreamDecryptor>,
 ) -> Result<MediaStream, GatewayError> {
@@ -209,6 +229,7 @@ pub(crate) async fn open(
             let backoff = RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
             let delay = error.retry_after.unwrap_or(backoff).min(MAX_RETRY_DELAY);
             tracing::debug!(
+                %account_id,
                 mxc = %mxc_url,
                 %status,
                 attempt,
@@ -248,12 +269,16 @@ pub(crate) async fn open(
     let len = response.content_length();
     if len.is_none() {
         // ADR 0139 asks whether Synapse ever omits it; this is the record.
-        tracing::info!(mxc = %mxc_url, "homeserver sent media without a Content-Length");
+        tracing::info!(
+            %account_id,
+            mxc = %mxc_url,
+            "homeserver sent media without a Content-Length"
+        );
     }
 
     let body = body_stream(response);
     let body = match decryptor {
-        Some(decryptor) => decrypting(body, decryptor),
+        Some(decryptor) => decrypting(body, decryptor, len),
         None => body,
     };
     Ok(MediaStream { len, body })
@@ -418,7 +443,12 @@ mod tests {
 
         // 1000 is not a multiple of the 16-byte AES block, so the counter
         // must carry across chunk boundaries.
-        let (out, error) = drain(decrypting(chunks(&ciphertext, 1000), decryptor)).await;
+        let (out, error) = drain(decrypting(
+            chunks(&ciphertext, 1000),
+            decryptor,
+            Some(ciphertext.len() as u64),
+        ))
+        .await;
         assert!(error.is_none(), "{error:?}");
         assert_eq!(out, plaintext);
     }
@@ -430,7 +460,12 @@ mod tests {
         let mut tampered = ciphertext.clone();
         tampered[5_000] ^= 1;
         let decryptor = StreamDecryptor::new(&descriptor(hash)).unwrap();
-        let (_, error) = drain(decrypting(chunks(&tampered, 4096), decryptor)).await;
+        let (_, error) = drain(decrypting(
+            chunks(&tampered, 4096),
+            decryptor,
+            Some(tampered.len() as u64),
+        ))
+        .await;
         assert!(matches!(error, Some(FetchError::Undecryptable(_))));
     }
 
@@ -438,7 +473,7 @@ mod tests {
     async fn a_hash_mismatch_is_the_last_item_and_undecryptable() {
         let ciphertext = encrypt(&[1; 4096]);
         let decryptor = StreamDecryptor::new(&descriptor([0; 32])).unwrap();
-        let (out, error) = drain(decrypting(chunks(&ciphertext, 1024), decryptor)).await;
+        let (out, error) = drain(decrypting(chunks(&ciphertext, 1024), decryptor, None)).await;
         assert_eq!(
             out.len(),
             4096,
@@ -448,13 +483,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_body_cut_short_is_transient_not_undecryptable() {
+        // The hash of a truncated body can never match. Reporting that as
+        // `Undecryptable` would make the cache refuse retries for 10 minutes.
+        let ciphertext = encrypt(&[3; 8192]);
+        let hash: [u8; 32] = Sha256::digest(&ciphertext).into();
+        let decryptor = StreamDecryptor::new(&descriptor(hash)).unwrap();
+        let short = &ciphertext[..5000];
+        let (out, error) = drain(decrypting(
+            chunks(short, 1024),
+            decryptor,
+            Some(ciphertext.len() as u64),
+        ))
+        .await;
+        assert_eq!(out.len(), 5000);
+        assert!(
+            matches!(&error, Some(FetchError::Upstream(message)) if message.contains("5000 of its 8192")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn an_upstream_error_ends_the_stream_without_a_verdict() {
         let decryptor = StreamDecryptor::new(&descriptor([0; 32])).unwrap();
         let body: Vec<Result<Bytes, FetchError>> = vec![
             Ok(Bytes::from_static(&[1; 32])),
             Err(FetchError::Upstream("reset".into())),
         ];
-        let (_, error) = drain(decrypting(stream::iter(body).boxed(), decryptor)).await;
+        let (_, error) = drain(decrypting(stream::iter(body).boxed(), decryptor, None)).await;
         assert!(matches!(error, Some(FetchError::Upstream(_))));
     }
 
@@ -633,7 +689,13 @@ mod tests {
     }
 
     async fn open_plain(client: &Client, media_id: &str) -> Result<MediaStream, GatewayError> {
-        open(client, &format!("mxc://example.org/{media_id}"), None).await
+        open(
+            client,
+            Uuid::nil(),
+            &format!("mxc://example.org/{media_id}"),
+            None,
+        )
+        .await
     }
 
     #[tokio::test]

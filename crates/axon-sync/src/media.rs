@@ -121,7 +121,7 @@ impl SdkMediaProxy {
             None => None,
         };
         let client = self.manager.get_or_connect(account_id).await?;
-        media_stream::open(&client, mxc_url, decryptor).await
+        media_stream::open(&client, account_id, mxc_url, decryptor).await
     }
 
     /// Request a homeserver-generated thumbnail of `mxc_url` at `spec`'s
