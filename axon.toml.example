@@ -103,7 +103,9 @@ level = "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error"
 # data_dir = "axon-data/sync"
 # Per-room timeline window the sliding-sync list requests. The matrix-sdk default
 # is 1 (latest event only); raising it makes each room archive its last N events,
-# giving the timeline read real depth to page through. Default 20.
+# giving the timeline read real depth to page through. A busier room than this
+# between two responses leaves a hole that the backfill task fills (ADR 0140).
+# Must be at least 1. Default 20.
 timeline_limit = 20
 # Capacity of the live-event bus feeding the /v1/ws WebSocket: how many recent
 # events the bus holds for a connected client before a client that can't keep up

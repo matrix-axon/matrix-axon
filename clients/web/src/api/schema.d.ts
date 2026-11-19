@@ -2412,7 +2412,8 @@ export interface paths {
         /**
          * Get backfill status
          * @description Report backfill status: the disk-space valve state (live free space, whether
-         *     paused) plus per-account backfill progress; per-account sync-service status;
+         *     paused) plus per-account backfill progress; the holes limited syncs left in
+         *     stored history and their filling (ADR 0140); per-account sync-service status;
          *     each homeserver's load gate for background requests (ADR 0122);
          *     the running build's identity; whether the management API is served; and
          *     which push providers loaded a key.
@@ -3453,6 +3454,11 @@ export interface components {
                 backfill: components["schemas"]["BackfillStatusDto"];
                 /** @description The running binary's build identity. */
                 build: components["schemas"]["BuildInfoDto"];
+                /**
+                 * @description Holes that limited syncs left in stored room history, and their filling
+                 *     (ADR 0140).
+                 */
+                history_gaps: components["schemas"]["HistoryGapsStatusDto"];
                 /** @description Each homeserver's load gate for axon's background requests (ADR 0122). */
                 homeservers: components["schemas"]["HomeserverGateDto"][];
                 /** @description The management API's availability (ADR 0109). */
@@ -4950,6 +4956,39 @@ export interface components {
              */
             status: components["schemas"]["PreviewGenerationStatus"];
             thumbnail_status: components["schemas"]["PreviewThumbnailStatus"];
+        };
+        /**
+         * @description Holes that limited sliding-sync responses left in stored room history, across
+         *     every account, and how many events filling them has recovered (ADR 0140).
+         *     The backfill task pages them ahead of ordinary backfill, whether or not
+         *     backfill is enabled.
+         */
+        HistoryGapsStatusDto: {
+            /** @description False when the hole counts could not be read; they are then zero. */
+            available: boolean;
+            /**
+             * Format: int64
+             * @description Of those, holes whose limited batch has not been stored yet, so they
+             *     cannot yet be told apart from a room's first window.
+             */
+            awaiting_batch: number;
+            /**
+             * Format: int64
+             * @description Events that filling holes stored since the server started.
+             */
+            events_recovered: number;
+            /**
+             * Format: int64
+             * @description Holes not yet closed, including parked ones and ones awaiting their
+             *     batch.
+             */
+            open: number;
+            /**
+             * Format: int64
+             * @description Of those, holes parked after repeated failures: they are retried only
+             *     about once a day (ADR 0121).
+             */
+            parked: number;
         };
         /**
          * @description A homeserver gate's circuit breaker on the wire (ADR 0122).
@@ -6641,6 +6680,11 @@ export interface components {
             backfill: components["schemas"]["BackfillStatusDto"];
             /** @description The running binary's build identity. */
             build: components["schemas"]["BuildInfoDto"];
+            /**
+             * @description Holes that limited syncs left in stored room history, and their filling
+             *     (ADR 0140).
+             */
+            history_gaps: components["schemas"]["HistoryGapsStatusDto"];
             /** @description Each homeserver's load gate for axon's background requests (ADR 0122). */
             homeservers: components["schemas"]["HomeserverGateDto"][];
             /** @description The management API's availability (ADR 0109). */

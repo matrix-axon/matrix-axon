@@ -11,8 +11,8 @@
 //! * [`Store::purge_room`] — the destructive "forget this room" path used by the
 //!   optional purge-on-leave behavior (ADR 0044): delete every stored trace of a
 //!   room for one account (events, state, room account-data, backfill cursor,
-//!   and the ADR 0095 `room_summaries` row) and enqueue the room's search
-//!   documents for removal.
+//!   ADR 0140 gap rows, and the ADR 0095 `room_summaries` row) and enqueue the
+//!   room's search documents for removal.
 
 use sqlx_core::from_row::FromRow;
 use sqlx_core::row::Row;
@@ -346,9 +346,14 @@ impl Store {
         // Re-derive activity from remaining events, including a later rejoin.
         self.rebuild_room_summaries_for(account_id, Some(room_id))
             .await?;
+        // The room's gap rows (ADR 0140 decision 6) go under the same preserve
+        // guard as its backfill cursor, so holes recorded after a rejoin survive.
         sqlx_core::query::query(
             "WITH del_backfill AS ( \
                 DELETE FROM room_backfill WHERE account_id = $1 AND room_id = $2 \
+                AND NOT preserve_room_after_purge($1, $2, $3) \
+             ), del_gaps AS ( \
+                DELETE FROM room_timeline_gaps WHERE account_id = $1 AND room_id = $2 \
                 AND NOT preserve_room_after_purge($1, $2, $3) \
              ) DELETE FROM room_purge_intents WHERE account_id = $1 AND room_id = $2 \
              AND through_event_id = $3",

@@ -2,6 +2,8 @@ name: Integration test
 
 # Real-service integration suites that are too expensive for the unit/lint lane.
 # The original lane covers the M3c re-decryption queue and encrypted media proxy.
+# The gap-fill lane covers ADR 0140: a burst larger than the sync timeline
+# limit is stored in full, with history backfill on and off.
 # Pinned Synapse + MAS cover the ADR 0097 API, acquisition, grant, and
 # unsupported Matrix OAuth QR lanes and the ADR 0117 browser sign-in lane.
 # This workflow selects them manually; smoke.yml also runs all five after
@@ -17,6 +19,7 @@ on:
         default: redecryption
         options:
           - redecryption
+          - gap-fill
           - matrix-oauth-api
           - matrix-oauth-acquire
           - matrix-oauth-grant
@@ -60,8 +63,34 @@ jobs:
         env:
           TIMEOUT: 180
 
+  gap-fill:
+    if: inputs.suite == 'gap-fill' || inputs.suite == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Same compose stack and default ports as the re-decryption lane.
+      - name: Run gap-fill test
+        run: scripts/gap-fill-test.sh
+        env:
+          TIMEOUT: 180
+
   matrix-oauth:
-    if: inputs.suite != 'redecryption'
+    if: inputs.suite != 'redecryption' && inputs.suite != 'gap-fill'
     uses: ./.github/workflows/matrix-oauth.yml
     with:
       suite: ${{ inputs.suite }}

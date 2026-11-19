@@ -476,6 +476,7 @@ mod tests {
             purge_on_leave: false,
             state_redaction_tx,
             room_details: room_details.clone(),
+            gaps: None,
         };
         // The supplementary transport's projection; the SDK never sees these.
         for (event_type, event_id, content) in [
@@ -721,6 +722,7 @@ mod tests {
             purge_on_leave: false,
             state_redaction_tx,
             room_details: room_details.clone(),
+            gaps: None,
         };
         // Ordinary message redactions and normal initial state do not enqueue
         // a full room scan. A current singleton target does enqueue one.

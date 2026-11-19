@@ -50,6 +50,10 @@
 //! every time its hold ends, and keeps the gate shut for every other caller
 //! (ADR 0122's amendment of 2026-11-12, #1037).
 //!
+//! The same task fills the holes that limited syncs leave in stored history
+//! ([`gaps`], ADR 0140), ahead of ordinary pages and whatever
+//! `sync.backfill_enabled` says: with backfill off it pages only those.
+//!
 //! A disk-space safety valve ([`BackfillHealth`]) pauses paging when free space on
 //! the guarded filesystem (`sync.backfill_disk_guard_path`, default the sync data
 //! dir) is low — backfill grows storage unbounded ("to room start"), so it must
@@ -57,7 +61,7 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,9 +77,11 @@ use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::Client;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{persist_backfilled_event, PersistContext};
+use crate::engine::{persist_backfilled_event, EventWriteFailed, PersistContext};
 use crate::homeserver_gate::{is_fast, GateError, HomeserverGate, Outcome, TIMEOUT_HOLD};
 use crate::redecrypt::{paged_utd_session_id, recheck_backfilled_sessions, KeyArrivalWatch};
+
+pub(crate) mod gaps;
 
 /// The filesystem the disk-space valve guards: the configured override, else the
 /// sync data dir. Shared by the valve (`disk_ok`) and the live `GET /v1/status`
@@ -130,6 +136,14 @@ enum PageFailure {
     /// Anything else — a transport error, a `5xx`, a `429`. Retry the same token
     /// after a growing delay, then park.
     Retryable,
+    /// The homeserver served the page, but the store failed while it was
+    /// written or its progress saved: an event on it could not be written
+    /// ([`EventWriteFailed`]), or a gap row's lookup or update failed. Moving
+    /// past the page could lose an event for good, so the same token is
+    /// retried after a growing delay, as for [`Retryable`](Self::Retryable),
+    /// then parked. An event whose values the database rejects is skipped
+    /// rather than counted here, so it cannot hold a cursor for good.
+    StoreWrite,
 }
 
 impl PageFailure {
@@ -140,6 +154,7 @@ impl PageFailure {
             PageFailure::Inaccessible => "inaccessible",
             PageFailure::TimedOut => "timed_out",
             PageFailure::Retryable => "retryable",
+            PageFailure::StoreWrite => "store_write",
         }
     }
 
@@ -209,7 +224,9 @@ fn failure_record(
         PageFailure::Rejected if prior_rejections > 0 => (PARK_FOR, true, true),
         PageFailure::Rejected => (Duration::ZERO, false, true),
         PageFailure::Inaccessible => (PARK_FOR, true, false),
-        PageFailure::TimedOut | PageFailure::Retryable if failures >= PARK_AFTER => {
+        PageFailure::TimedOut | PageFailure::Retryable | PageFailure::StoreWrite
+            if failures >= PARK_AFTER =>
+        {
             (PARK_FOR, true, false)
         }
         PageFailure::TimedOut => (
@@ -217,7 +234,7 @@ fn failure_record(
             false,
             false,
         ),
-        PageFailure::Retryable => (retry_delay(failures), false, false),
+        PageFailure::Retryable | PageFailure::StoreWrite => (retry_delay(failures), false, false),
     };
     RoomBackfillFailure {
         kind: failure.as_str(),
@@ -300,6 +317,9 @@ pub struct BackfillHealth {
 #[derive(Default)]
 struct BackfillHealthInner {
     paused_low_disk: AtomicBool,
+    /// Events gap pages inserted since the process started (ADR 0140), across
+    /// every account.
+    gap_events_recovered: AtomicU64,
     /// The filesystem whose free space is reported at `GET /v1/status`. `None`
     /// (test/default handles) reports 0 free.
     guard_path: Option<PathBuf>,
@@ -312,6 +332,7 @@ impl BackfillHealth {
         Self {
             inner: Arc::new(BackfillHealthInner {
                 paused_low_disk: AtomicBool::new(false),
+                gap_events_recovered: AtomicU64::new(0),
                 guard_path,
             }),
         }
@@ -334,6 +355,17 @@ impl BackfillHealth {
             .unwrap_or(0)
     }
 
+    /// Events that gap pages inserted since the process started (ADR 0140).
+    pub fn gap_events_recovered(&self) -> u64 {
+        self.inner.gap_events_recovered.load(Ordering::Relaxed)
+    }
+
+    fn add_gap_events_recovered(&self, inserted: u64) {
+        self.inner
+            .gap_events_recovered
+            .fetch_add(inserted, Ordering::Relaxed);
+    }
+
     /// Set the paused flag, returning the previous value so the caller can detect
     /// (and log) a transition.
     fn set_paused(&self, paused: bool) -> bool {
@@ -344,6 +376,9 @@ impl BackfillHealth {
 /// Runtime knobs for the backfill task, derived from [`SyncConfig`].
 #[derive(Clone)]
 pub(crate) struct BackfillParams {
+    /// `sync.backfill_enabled`: walk `room_backfill`. Gap rows are paged
+    /// either way (ADR 0140).
+    enabled: bool,
     page_size: u32,
     /// Per-room event cap (0 = unbounded / "to room start").
     target_depth: u64,
@@ -360,6 +395,7 @@ pub(crate) struct BackfillParams {
 impl BackfillParams {
     pub(crate) fn from_config(config: &SyncConfig) -> Self {
         Self {
+            enabled: config.backfill_enabled,
             page_size: config.backfill_page_size.max(1),
             target_depth: config.backfill_target_depth,
             throttle: Duration::from_millis(config.backfill_throttle_ms),
@@ -412,21 +448,54 @@ fn disk_ok(params: &BackfillParams, health: &BackfillHealth, account_id: uuid::U
     !paused
 }
 
-/// Run the backfill engine for one account until `cancel` fires.
+/// Run the backfill task for one account until `cancel` fires.
+///
+/// The task first pages the account's open gap rows (ADR 0140), and keeps
+/// them ahead of ordinary backfill: after each ordinary page, any hole
+/// recorded meanwhile is paged before the next one. With `backfill_enabled`
+/// off, the task pages gap rows only and never walks `room_backfill`.
 pub(crate) async fn run(
     client: Client,
     ctx: PersistContext,
     params: BackfillParams,
     health: BackfillHealth,
     gate: Arc<HomeserverGate>,
+    gaps: Arc<gaps::GapSignal>,
     cancel: CancellationToken,
 ) {
     let account_id = ctx.account_id;
-    tracing::debug!(account_id = %account_id, "history backfill task started");
+    tracing::debug!(
+        account_id = %account_id,
+        backfill_enabled = params.enabled,
+        "history backfill task started"
+    );
+    let filler = gaps::Filler {
+        client: &client,
+        ctx: &ctx,
+        params: &params,
+        health: &health,
+        gate: &gate,
+        cancel: &cancel,
+    };
 
     loop {
         if cancel.is_cancelled() {
             return;
+        }
+
+        // Holes first: they cover recent history that live sync should have
+        // delivered (ADR 0140 decision 2).
+        gaps.take();
+        let gap_pass = filler.fill().await;
+        let mut last_fill = tokio::time::Instant::now();
+        if cancel.is_cancelled() {
+            return;
+        }
+        if !params.enabled {
+            if !gap_pass.progressed {
+                idle(&params, &gaps, gap_pass, &cancel).await;
+            }
+            continue;
         }
 
         // Load every room's cursor once per sweep (one query) rather than a lookup
@@ -438,15 +507,13 @@ pub(crate) async fn run(
                 // would look new, page from its live end, and overwrite its saved
                 // deeper token with a shallower one (ADR 0121).
                 tracing::warn!(account_id = %account_id, error = %err, "backfill: list cursors failed; skipping this sweep");
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(params.idle_poll) => {}
-                }
+                idle(&params, &gaps, gap_pass, &cancel).await;
                 continue;
             }
         };
 
-        let mut progressed = false;
+        let mut progressed = gap_pass.progressed;
+        let mut gap_pass = gap_pass;
         for room in sweep_order(client.joined_rooms(), &cursors) {
             if cancel.is_cancelled() {
                 return;
@@ -488,6 +555,16 @@ pub(crate) async fn run(
                     record_failure(&ctx, &room_id, state, failure).await;
                 }
             }
+            // A hole recorded during this sweep goes ahead of the next ordinary
+            // page, rather than waiting for the sweep to end, which on a large
+            // account can take hours. Rows still waiting (for their batch, or
+            // a backoff) are re-checked here too, but not after every page.
+            let recorded = gaps.take();
+            if gaps_due(recorded, gap_pass, last_fill.elapsed()) {
+                gap_pass = filler.fill().await;
+                last_fill = tokio::time::Instant::now();
+                progressed |= gap_pass.progressed;
+            }
         }
 
         // Nothing advanced this pass (every room complete/capped, paused, or
@@ -495,11 +572,36 @@ pub(crate) async fn run(
         // are picked up without a restart, and it caps the cursor-read cadence for
         // a fully-backfilled account at one sweep per `idle_poll`.
         if !progressed {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(params.idle_poll) => {}
-            }
+            idle(&params, &gaps, gap_pass, &cancel).await;
         }
+    }
+}
+
+/// Whether to page gap rows between two ordinary pages: at once when a hole
+/// was recorded, and otherwise at most every [`gaps::AWAITING_RECHECK`] while a
+/// row waits for its batch or a backoff. Re-checking after every page would
+/// cost a row listing, and a batch check per waiting row, per ordinary page.
+fn gaps_due(recorded: bool, pass: gaps::GapPass, since_last_fill: Duration) -> bool {
+    recorded || (pass.pending() && since_last_fill >= gaps::AWAITING_RECHECK)
+}
+
+/// Wait for the next sweep: `idle_poll`, or less while a gap row awaits its
+/// batch, and no longer than the watcher's next recorded hole.
+async fn idle(
+    params: &BackfillParams,
+    gaps: &gaps::GapSignal,
+    pass: gaps::GapPass,
+    cancel: &CancellationToken,
+) {
+    let wait = if pass.awaiting_batch {
+        params.idle_poll.min(gaps::AWAITING_RECHECK)
+    } else {
+        params.idle_poll
+    };
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = gaps.recorded() => {}
+        _ = tokio::time::sleep(wait) => {}
     }
 }
 
@@ -654,6 +756,98 @@ async fn send_page(
         .await?)
 }
 
+/// Whether [`write_page`] wrote the whole page. `inserted` counts the rows the
+/// page's own writes created, not events another writer stored meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Written {
+    Complete {
+        inserted: usize,
+    },
+    /// Cancelled part way. What was written stays, and is idempotent to write
+    /// again.
+    Abandoned,
+    /// Every event was attempted, but `failed` could not be written
+    /// ([`EventWriteFailed`]). The page must be fetched again: its token stays
+    /// where it was.
+    StoreFailed {
+        failed: usize,
+        inserted: usize,
+    },
+}
+
+/// Persist one fetched page through the live ingestion path, then record its
+/// UTD reasons and re-check the sessions whose keys arrived meanwhile. Shared
+/// by ordinary backfill pages and gap pages (ADR 0140).
+async fn write_page(
+    ctx: &PersistContext,
+    room: &matrix_sdk::Room,
+    events: &[TimelineEvent],
+    key_arrivals: KeyArrivalWatch,
+    cancel: &CancellationToken,
+) -> Written {
+    let account_id = ctx.account_id;
+    // UTD reasons for the page, written in one statement after it (ADR 0136
+    // decision 2), including when the page is abandoned part way.
+    let mut utd_reasons = Vec::new();
+    let mut abandoned = false;
+    // The megolm sessions of the page's UTDs, for the re-check below. Read
+    // from the paged events, not the stored rows, so a UTD whose row already
+    // existed (or failed to write) is still covered.
+    let mut utd_sessions = BTreeSet::new();
+    // Events that could not be written. The rest of the page is still written
+    // (idempotently), and the caller fetches it again.
+    let mut failed_writes = 0;
+    let mut inserted = 0;
+    for tev in events {
+        if cancel.is_cancelled() {
+            abandoned = true;
+            break;
+        }
+        if let Some(session_id) = paged_utd_session_id(tev) {
+            utd_sessions.insert(session_id);
+        }
+        match persist_backfilled_event(ctx, room, tev).await {
+            Ok(persisted) => {
+                inserted += usize::from(persisted.created);
+                utd_reasons.extend(persisted.utd);
+            }
+            Err(EventWriteFailed) => failed_writes += 1,
+        }
+    }
+    if !utd_reasons.is_empty() {
+        let batch: Vec<_> = utd_reasons
+            .iter()
+            .map(|(row, reason)| (row, reason.clone()))
+            .collect();
+        crate::redecrypt::record_utd_reasons(&ctx.store, account_id, &batch).await;
+    }
+    if abandoned {
+        return Written::Abandoned;
+    }
+    // A key that landed while the page was being decrypted and written may
+    // have been drained before its rows existed (#947). After the reasons
+    // above, so a row that still fails keeps the re-check's newer reason.
+    if !utd_sessions.is_empty() {
+        recheck_backfilled_sessions(
+            room,
+            &ctx.store,
+            account_id,
+            &utd_sessions,
+            key_arrivals,
+            ctx.index.as_ref(),
+            cancel,
+        )
+        .await;
+    }
+    if failed_writes > 0 {
+        return Written::StoreFailed {
+            failed: failed_writes,
+            inserted,
+        };
+    }
+    Written::Complete { inserted }
+}
+
 /// Page one room one step older and persist the results, resuming from the saved
 /// token (or the live timeline end when there is none — a first page, or after
 /// the homeserver rejected the token).
@@ -732,50 +926,14 @@ async fn backfill_room_page(
         },
     };
 
-    // UTD reasons for the page, written in one statement after it (ADR 0136
-    // decision 2), including when the page is abandoned part way.
-    let mut utd_reasons = Vec::new();
-    let mut abandoned = false;
-    // The megolm sessions of the page's UTDs, for the re-check below. Read
-    // from the paged events, not the stored rows, so a UTD whose row already
-    // existed (or failed to write) is still covered.
-    let mut utd_sessions = BTreeSet::new();
-    for tev in &events {
-        if cancel.is_cancelled() {
-            abandoned = true;
-            break;
+    match write_page(ctx, room, &events, key_arrivals, cancel).await {
+        Written::Complete { .. } => {}
+        Written::Abandoned => return PageOutcome::Abandoned,
+        // Saving the cursor would move past events that are not stored.
+        Written::StoreFailed { failed, .. } => {
+            tracing::warn!(account_id = %account_id, room_id = %room_id, failed, "backfill: events on the page could not be stored; keeping the cursor to fetch it again");
+            return PageOutcome::Failed(PageFailure::StoreWrite);
         }
-        if let Some(session_id) = paged_utd_session_id(tev) {
-            utd_sessions.insert(session_id);
-        }
-        if let Some(utd) = persist_backfilled_event(ctx, room, tev).await {
-            utd_reasons.push(utd);
-        }
-    }
-    if !utd_reasons.is_empty() {
-        let batch: Vec<_> = utd_reasons
-            .iter()
-            .map(|(row, reason)| (row, reason.clone()))
-            .collect();
-        crate::redecrypt::record_utd_reasons(&ctx.store, account_id, &batch).await;
-    }
-    if abandoned {
-        return PageOutcome::Abandoned;
-    }
-    // A key that landed while the page was being decrypted and written may
-    // have been drained before its rows existed (#947). After the reasons
-    // above, so a row that still fails keeps the re-check's newer reason.
-    if !utd_sessions.is_empty() {
-        recheck_backfilled_sessions(
-            room,
-            &ctx.store,
-            account_id,
-            &utd_sessions,
-            key_arrivals,
-            ctx.index.as_ref(),
-            cancel,
-        )
-        .await;
     }
 
     let fetched = events.len();
@@ -827,6 +985,32 @@ mod tests {
 
     fn raw(json: &str) -> Raw<AnyTimelineEvent> {
         serde_json::from_str(json).expect("fixture")
+    }
+
+    /// Review finding (#1143): a row waiting for its batch or a backoff is
+    /// re-checked at most every `AWAITING_RECHECK`, not after every ordinary
+    /// page; a newly recorded hole is paged at once.
+    #[test]
+    fn waiting_gap_rows_are_rechecked_on_an_interval() {
+        let idle = gaps::GapPass::default();
+        let waiting = gaps::GapPass {
+            awaiting_batch: true,
+            ..gaps::GapPass::default()
+        };
+        let backing_off = gaps::GapPass {
+            backing_off: true,
+            ..gaps::GapPass::default()
+        };
+        let soon = gaps::AWAITING_RECHECK / 4;
+        assert!(
+            gaps_due(true, idle, Duration::ZERO),
+            "a new hole goes first"
+        );
+        assert!(!gaps_due(false, idle, Duration::from_secs(3600)));
+        for pass in [waiting, backing_off] {
+            assert!(!gaps_due(false, pass, soon), "not after every page");
+            assert!(gaps_due(false, pass, gaps::AWAITING_RECHECK));
+        }
     }
 
     #[test]
@@ -1002,6 +1186,19 @@ mod tests {
         let other = failure_record(PageFailure::Retryable, 0, 0, 3);
         assert!(!other.timed_out);
         assert_eq!(other.retry_after, retry_delay(1));
+    }
+
+    /// A page the store could not fully write is retried on the same token,
+    /// backing off like a retryable homeserver failure, then parked.
+    #[test]
+    fn a_store_write_failure_backs_off_on_the_same_token_then_parks() {
+        let first = failure_record(PageFailure::StoreWrite, 0, 0, 0);
+        assert_eq!(first.kind, "store_write");
+        assert!(!first.clear_token && !first.parked && !first.timed_out);
+        assert_eq!(first.retry_after, retry_delay(1));
+        let fifth = failure_record(PageFailure::StoreWrite, PARK_AFTER - 1, 0, 0);
+        assert!(fifth.parked && !fifth.clear_token);
+        assert_eq!(fifth.retry_after, PARK_FOR);
     }
 
     #[test]

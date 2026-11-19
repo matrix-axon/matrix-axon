@@ -726,6 +726,32 @@ pub(crate) struct PersistContext {
     /// Coalesces `room_details.changed` frames for metadata state changes
     /// (ADR 0126).
     pub(crate) room_details: crate::room_details::RoomDetailsChanges,
+    /// The account run's gap recorder (ADR 0140), drained by
+    /// [`persist_timeline_event`] before it stores an event. `None` where no
+    /// live sync runs, such as most tests.
+    pub(crate) gaps: Option<Arc<crate::backfill::gaps::GapRecorder>>,
+}
+
+/// An event row that [`persist_event_core`] could not write, for any reason
+/// but the database rejecting the event's own values: the database was
+/// unreachable, overloaded, lost a race, or failed in a way that would refuse
+/// any write. The event is missing, so a pager must fetch its page again
+/// rather than move past it. An event whose values the database rejects
+/// ([`axon_store::StoreError::is_value_rejection`]) fails on every attempt,
+/// so it is logged and skipped instead, as one that does not parse is, and
+/// cannot pin a pager's cursor for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EventWriteFailed;
+
+/// What [`persist_event_core`] did with an event it did not fail to write.
+#[derive(Debug, Default)]
+pub(crate) struct Persisted {
+    /// Whether this call inserted the event's row. `false` for an event already
+    /// stored, and for one skipped because it can never be stored.
+    pub(crate) created: bool,
+    /// A backfilled UTD's stored row and the SDK's reason for it, for the
+    /// caller to record with the rest of its page.
+    pub(crate) utd: Option<(axon_store::PendingUtd, axon_core::UtdReason)>,
 }
 
 /// Parse an event's raw JSON text into a [`serde_json::Value`], logging (with
@@ -769,13 +795,22 @@ fn skip_departed_room_ingestion(ctx: &PersistContext, room: &Room) -> bool {
 /// Alongside the `events` row this writes the crypto sibling rows (ADR 0015): the
 /// ciphertext sibling for UTDs (the only events whose ciphertext the SDK hands
 /// us), and the crypto-provenance siblings from `enc_info` for decrypted events.
-async fn persist_timeline_event(
+pub(crate) async fn persist_timeline_event(
     ev: AnySyncTimelineEvent,
     room: Room,
     raw: RawEvent,
     enc_info: Option<EncryptionInfo>,
     Ctx(ctx): Ctx<PersistContext>,
 ) {
+    // Record this response's holes before storing any of its events: the SDK
+    // has already broadcast it, and saves its position only after this
+    // handler returns, so the rows are durable before a restart could resume
+    // past them (ADR 0140).
+    if let Some(gaps) = &ctx.gaps {
+        let client = room.client();
+        gaps.drain(&|| crate::backfill::gaps::joined_room_ids(&client))
+            .await;
+    }
     // The SDK updates room membership before dispatching a sync batch. Do not
     // retain its departure/trailing events after the state handler captures a purge
     // watermark, even if the worker has already finished deleting room state.
@@ -814,9 +849,12 @@ async fn persist_timeline_event(
 /// as a UTD, exactly as on the live path; the re-decryption queue back-fills it
 /// once keys arrive.
 ///
-/// Returns the stored UTD row and the SDK's reason for it, for the caller to
-/// record with the rest of its page in one write
-/// ([`redecrypt::record_utd_reasons`]). `None` for anything else.
+/// Returns whether the row was inserted and, for a UTD, the stored row and the
+/// SDK's reason for it, for the caller to record with the rest of its page in
+/// one write ([`redecrypt::record_utd_reasons`]). An event skipped because it
+/// can never be stored (it does not parse, its room was purged, or the store
+/// rejects its values) is an empty [`Persisted`]. Any other failed write is
+/// [`EventWriteFailed`].
 ///
 /// There is no per-row re-check here, unlike the live path: a backfill can
 /// store thousands of permanently undecryptable rows, and each re-check would
@@ -829,9 +867,9 @@ pub(crate) async fn persist_backfilled_event(
     ctx: &PersistContext,
     room: &Room,
     tev: &matrix_sdk::deserialized_responses::TimelineEvent,
-) -> Option<(axon_store::PendingUtd, axon_core::UtdReason)> {
+) -> Result<Persisted, EventWriteFailed> {
     if skip_departed_room_ingestion(ctx, room) {
-        return None;
+        return Ok(Persisted::default());
     }
     let raw = tev.raw();
     let ev: AnySyncTimelineEvent = match raw.deserialize() {
@@ -842,10 +880,12 @@ pub(crate) async fn persist_backfilled_event(
                 error = %err,
                 "failed to deserialize backfilled event; skipping"
             );
-            return None;
+            return Ok(Persisted::default());
         }
     };
-    let raw_val = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event")?;
+    let Some(raw_val) = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event") else {
+        return Ok(Persisted::default());
+    };
     // The paged event already carries the SDK's failure reason.
     persist_event_core(
         ctx,
@@ -888,7 +928,9 @@ enum UtdCheck<'a> {
 ///
 /// On the live path a UTD's failure reason is recorded before the emit, so the
 /// frame carries it. On the backfill path it is returned, with the stored row,
-/// for the caller to record.
+/// for the caller to record. A failed event-row write is [`EventWriteFailed`],
+/// unless the database rejected the event's values: that one is logged at
+/// ERROR and skipped.
 async fn persist_event_core(
     ctx: &PersistContext,
     ev: &AnySyncTimelineEvent,
@@ -896,7 +938,7 @@ async fn persist_event_core(
     room_id: &str,
     enc_info: Option<&EncryptionInfo>,
     utd: UtdCheck<'_>,
-) -> Option<(axon_store::PendingUtd, axon_core::UtdReason)> {
+) -> Result<Persisted, EventWriteFailed> {
     // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
     let event_type: String = raw_val
         .get("type")
@@ -973,17 +1015,30 @@ async fn persist_event_core(
 
     // The returned id is the event's arrival order, which the live frame carries
     // so a `/v1/ws` subscriber and a later timeline read agree on it (ADR 0089).
-    let arrival_order = match ctx.store.upsert_event(&new_ev).await {
-        Ok(arrival_order) => arrival_order,
-        Err(err) => {
-            // Don't write sibling rows if the event row didn't land — they FK to it.
+    // Don't write sibling rows if the event row didn't land — they FK to it.
+    let (arrival_order, created) = match ctx.store.upsert_event_outcome(&new_ev).await {
+        Ok(upserted) => (upserted.arrival_order, upserted.created),
+        Err(err) if !err.is_value_rejection() => {
             tracing::warn!(
                 account_id = %ctx.account_id,
                 event_id = %event_id,
                 error = %err,
                 "failed to persist event"
             );
-            return None;
+            return Err(EventWriteFailed);
+        }
+        Err(err) => {
+            // The database rejects this event's values, so a retry fails the
+            // same way and a pager must not wait for it: the event is lost, as
+            // one that does not parse is.
+            tracing::error!(
+                account_id = %ctx.account_id,
+                event_id = %event_id,
+                room_id = %room_id,
+                error = %err,
+                "the store rejects this event's values; skipping it"
+            );
+            return Ok(Persisted::default());
         }
     };
     tracing::debug!(
@@ -1034,7 +1089,12 @@ async fn persist_event_core(
             }
         }
         // Every stored UTD, session id or not: the SDK already classified it.
-        (Some(row), UtdCheck::Known(Some(reason))) => return Some((row, reason)),
+        (Some(row), UtdCheck::Known(Some(reason))) => {
+            return Ok(Persisted {
+                created,
+                utd: Some((row, reason)),
+            })
+        }
         _ => None,
     };
 
@@ -1064,7 +1124,7 @@ async fn persist_event_core(
             utd_reason,
         }));
     }
-    None
+    Ok(Persisted { created, utd: None })
 }
 
 /// Write the crypto sibling rows for an event already persisted to `events`.
@@ -1960,6 +2020,23 @@ async fn run_account(
         room_details.clone(),
         room_details_cancel.clone(),
     ));
+    // Holes that limited responses leave in stored history (ADR 0140). The
+    // recorder has its own subscription to the room-update broadcast, taken
+    // before the sync service starts, and the ingestion handler below drains
+    // it before storing anything, so each hole's row commits before the SDK
+    // saves its position past the response. It reads the database clock here,
+    // before any response is stored, as its lag boundary of last resort.
+    let gap_signal = Arc::new(backfill::gaps::GapSignal::default());
+    let gap_recorder = Arc::new(backfill::gaps::GapRecorder::new(
+        client.subscribe_to_all_room_updates(),
+        backfill::gaps::GapWatcher::new(
+            account.account_id,
+            store.clone(),
+            config.timeline_limit,
+            Arc::clone(&gap_signal),
+        )
+        .await,
+    ));
     let persist_ctx = PersistContext {
         store: store.clone(),
         account_id: account.account_id,
@@ -1969,6 +2046,7 @@ async fn run_account(
         purge_on_leave: config.purge_on_leave,
         state_redaction_tx,
         room_details: room_details.clone(),
+        gaps: Some(Arc::clone(&gap_recorder)),
     };
     // Clone before the handler context takes ownership: the backfill task persists
     // paged events through the same path (M10), reusing this context.
@@ -2159,6 +2237,16 @@ async fn run_account(
         },
     ));
 
+    // The gap recorder's drain task, beside the ingestion handler that drains
+    // it: it empties the broadcast between live events and retries refused
+    // rows (ADR 0140).
+    let gap_watch_cancel = cancel.child_token();
+    let gap_watch_handle = tokio::spawn(backfill::gaps::watch(
+        Arc::clone(&gap_recorder),
+        client.clone(),
+        gap_watch_cancel.clone(),
+    ));
+
     // Supplementary responses only project allowlisted state; they never
     // mutate SDK rooms. See docs/custom-emoji.md for transport isolation and
     // load bounds.
@@ -2250,21 +2338,19 @@ async fn run_account(
     // History backfill (M10): a continuous, throttled background task that pages
     // each joined room's pre-existing history backward through the shared ingestion
     // path. Same child-token + join-handle lifecycle as the re-decryption queue, so
-    // it ends with this run and is drained cleanly below. Gated by config; `None`
-    // when disabled so there is nothing to drain.
+    // it ends with this run and is drained cleanly below. Spawned whatever
+    // `sync.backfill_enabled` says, because it also fills the holes the gap
+    // watcher records (ADR 0140); with backfill off it pages only those.
     let backfill_cancel = cancel.child_token();
-    let backfill_handle = if config.backfill_enabled {
-        Some(tokio::spawn(backfill::run(
-            client.clone(),
-            backfill_ctx.clone(),
-            BackfillParams::from_config(config),
-            backfill_health.clone(),
-            Arc::clone(&gate),
-            backfill_cancel.clone(),
-        )))
-    } else {
-        None
-    };
+    let backfill_handle = tokio::spawn(backfill::run(
+        client.clone(),
+        backfill_ctx.clone(),
+        BackfillParams::from_config(config),
+        backfill_health.clone(),
+        Arc::clone(&gate),
+        Arc::clone(&gap_signal),
+        backfill_cancel.clone(),
+    ));
 
     // Verification watcher (ADR 0026): keep the persisted `verified` flag tracking
     // the SDK's current cross-signing state. Same child-token + join-handle
@@ -2516,14 +2602,12 @@ async fn run_account(
         );
     }
     backfill_cancel.cancel();
-    if let Some(handle) = backfill_handle {
-        if let Err(err) = handle.await {
-            tracing::warn!(
-                account_id = %account.account_id,
-                error = %err,
-                "backfill task did not shut down cleanly"
-            );
-        }
+    if let Err(err) = backfill_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "backfill task did not shut down cleanly"
+        );
     }
     verify_cancel.cancel();
     if let Err(err) = verify_handle.await {
@@ -2539,6 +2623,14 @@ async fn run_account(
             account_id = %account.account_id,
             error = %err,
             "sender-trust watcher did not shut down cleanly"
+        );
+    }
+    gap_watch_cancel.cancel();
+    if let Err(err) = gap_watch_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "gap watcher did not shut down cleanly"
         );
     }
     room_updates_cancel.cancel();
@@ -4992,6 +5084,7 @@ mod purge_ingestion_tests {
                     purge_on_leave,
                     state_redaction_tx,
                     room_details,
+                    gaps: None,
                 });
                 client.add_event_handler(
                     move |ev: AnySyncTimelineEvent,
