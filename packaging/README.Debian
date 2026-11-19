@@ -94,6 +94,12 @@ All three files proxy every path to 127.0.0.1:8080, so the web client
 and the API stay on one address. That matters: the web client only
 talks to the address it was loaded from.
 
+The nginx and Apache files log video and audio stream requests
+(/v1/media-stream/<ticket>) with the ticket replaced, because a ticket
+lets anyone who reads it play that file. If you already run your own
+site for this server, copy their logging lines into it. The Caddy file
+keeps no access log; if you add one, use the filter shown in it.
+
 The install output lists the commands for whichever of these it found
 on the machine, once. They are not printed again on an upgrade or a
 reconfigure; the same commands are at the top of each site file.

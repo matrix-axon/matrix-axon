@@ -17,12 +17,18 @@ use uuid::Uuid;
 pub const TICKET_IDLE: Duration = Duration::from_secs(30 * 60);
 /// A ticket expires this long after it was issued, however often it is used.
 pub const TICKET_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
-/// The most tickets the table holds. Past it the least recently used goes.
+/// The most tickets the table holds, a memory bound. Past it the least
+/// recently used ticket goes, whoever holds it. With
+/// [`MAX_TICKETS_PER_SESSION`] that takes 128 credential sessions holding
+/// live tickets at once, and every session is a sign-in or an
+/// operator-minted token.
 pub const MAX_TICKETS: usize = 4096;
-/// The most live tickets one issuing token holds. Its next one evicts its own
-/// least recently used ticket, so a client minting in a loop churns only its
-/// own tickets and never pushes other users' out of the shared table.
-pub const MAX_TICKETS_PER_TOKEN: usize = 32;
+/// The most live tickets one credential session holds. Its next one evicts
+/// its own least recently used ticket, so a client minting in a loop churns
+/// only its own tickets. Keyed on the session, not the token: an OAuth
+/// session's refresh mints a new access token but keeps its session, so
+/// refreshing does not grant a fresh allowance.
+pub const MAX_TICKETS_PER_SESSION: usize = 32;
 
 /// What a ticket was issued for. Carries no event id: the route resolves the
 /// event from the MXC URI on every use, exactly as the bearer media route does.
@@ -34,7 +40,7 @@ pub struct StreamTicket {
     pub mxc_url: String,
     /// The bearer token that issued the ticket, re-checked on every use.
     pub token_id: Uuid,
-    /// That token's credential session, for the log.
+    /// That token's credential session, which the per-session cap counts.
     pub session_id: Uuid,
 }
 
@@ -92,14 +98,14 @@ impl StreamTickets {
         let mut state = self.lock();
         state.entries.retain(|_, entry| entry.live_at(now));
 
-        // The token's own cap first: a token at its cap replaces one of its
-        // own tickets, so it never takes a slot from anyone else's.
-        let token_id = ticket.token_id;
+        // The session's own cap first: a session at its cap replaces one of
+        // its own tickets, so it never takes a slot from anyone else's.
+        let session_id = ticket.session_id;
         let owned = state
             .entries
             .iter()
-            .filter(|(_, entry)| entry.ticket.token_id == token_id);
-        if owned.clone().count() >= MAX_TICKETS_PER_TOKEN {
+            .filter(|(_, entry)| entry.ticket.session_id == session_id);
+        if owned.clone().count() >= MAX_TICKETS_PER_SESSION {
             let oldest = owned
                 .min_by_key(|(_, entry)| entry.used)
                 .map(|(key, _)| key.clone());
@@ -163,12 +169,17 @@ impl StreamTickets {
 mod tests {
     use super::*;
 
+    /// A ticket from a non-expiring token, whose session is its own id.
     fn ticket(token_id: Uuid) -> StreamTicket {
+        in_session(token_id, token_id)
+    }
+
+    fn in_session(token_id: Uuid, session_id: Uuid) -> StreamTicket {
         StreamTicket {
             account_id: Uuid::new_v4(),
             mxc_url: format!("mxc://example.org/{}", Uuid::new_v4().simple()),
             token_id,
-            session_id: token_id,
+            session_id,
         }
     }
 
@@ -245,12 +256,12 @@ mod tests {
     }
 
     #[test]
-    fn a_token_past_its_cap_evicts_its_own_least_recently_used_ticket() {
+    fn a_session_past_its_cap_evicts_its_own_least_recently_used_ticket() {
         let tickets = StreamTickets::default();
         let now = Instant::now();
         let token = Uuid::new_v4();
         let other = tickets.issue_at(ticket(Uuid::new_v4()), now);
-        let mine: Vec<String> = (0..MAX_TICKETS_PER_TOKEN)
+        let mine: Vec<String> = (0..MAX_TICKETS_PER_SESSION)
             .map(|_| tickets.issue_at(ticket(token), now))
             .collect();
         // Use the oldest, so the second-oldest is now the least recent.
@@ -258,7 +269,7 @@ mod tests {
 
         tickets.issue_at(ticket(token), now);
 
-        assert_eq!(tickets.len(), MAX_TICKETS_PER_TOKEN + 1);
+        assert_eq!(tickets.len(), MAX_TICKETS_PER_SESSION + 1);
         assert!(
             tickets.redeem_at(&mine[1], now).is_none(),
             "own LRU evicted"
@@ -271,6 +282,29 @@ mod tests {
             tickets.redeem_at(&other, now).is_some(),
             "another token's ticket is untouched, though it is older"
         );
+    }
+
+    /// An OAuth refresh mints a new access token in the same session. Its
+    /// tickets count against the allowance the session already used.
+    #[test]
+    fn a_refreshed_token_shares_its_session_cap() {
+        let tickets = StreamTickets::default();
+        let now = Instant::now();
+        let session = Uuid::new_v4();
+        let other = tickets.issue_at(ticket(Uuid::new_v4()), now);
+        let before: Vec<String> = (0..MAX_TICKETS_PER_SESSION)
+            .map(|_| tickets.issue_at(in_session(Uuid::new_v4(), session), now))
+            .collect();
+
+        let refreshed = Uuid::new_v4();
+        tickets.issue_at(in_session(refreshed, session), now);
+
+        assert_eq!(tickets.len(), MAX_TICKETS_PER_SESSION + 1);
+        assert!(
+            tickets.redeem_at(&before[0], now).is_none(),
+            "own LRU evicted"
+        );
+        assert!(tickets.redeem_at(&other, now).is_some());
     }
 
     #[test]

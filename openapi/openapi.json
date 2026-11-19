@@ -9462,7 +9462,7 @@
           "media"
         ],
         "summary": "Issue a stream ticket",
-        "description": "Issue a URL that serves one video or audio object without a bearer header,\nfor a `<video>` or `<audio>` element to load (ADR 0139 section 5). The\nobject is checked exactly as `GET /v1/media/{account_id}/{server_name}/{media_id}`\nchecks it without `room_id` and `event_id`: the account, the stored event\nthat owns the URI, and the type that route would serve it as.\n\nThe ticket works only while the bearer token that issued it would, and\nonly while the owning event is still stored with its content. It is held in\nmemory, so a restart ends it. One token holds at most 32 live tickets;\nissuing another ends that token's least recently used one.",
+        "description": "Issue a URL that serves one video or audio object without a bearer header,\nfor a `<video>` or `<audio>` element to load (ADR 0139 section 5). The\nobject is checked exactly as `GET /v1/media/{account_id}/{server_name}/{media_id}`\nchecks it without `room_id` and `event_id`: the account, the stored event\nthat owns the URI, and the type that route would serve it as.\n\nThe ticket works only while the bearer token that issued it would, and\nonly while the owning event is still stored with its content. It is held in\nmemory, so a restart ends it. One credential session holds at most 32 live\ntickets, across the access tokens an OAuth refresh mints; issuing another\nends that session's least recently used one.",
         "operationId": "create_stream_ticket",
         "parameters": [
           {

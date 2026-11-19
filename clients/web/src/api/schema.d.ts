@@ -2198,8 +2198,9 @@ export interface paths {
          *
          *     The ticket works only while the bearer token that issued it would, and
          *     only while the owning event is still stored with its content. It is held in
-         *     memory, so a restart ends it. One token holds at most 32 live tickets;
-         *     issuing another ends that token's least recently used one.
+         *     memory, so a restart ends it. One credential session holds at most 32 live
+         *     tickets, across the access tokens an OAuth refresh mints; issuing another
+         *     ends that session's least recently used one.
          */
         post: operations["create_stream_ticket"];
         delete?: never;

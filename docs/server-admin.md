@@ -136,3 +136,4 @@ Axon serves plain HTTP.
 For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of it and keep Axon bound to loopback (the default).
 Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set.
 The `caddy` profile in the full `deploy/` stack automates this — see [deploy/README.md](../deploy/README.md).
+A proxy that keeps an access log must keep video and audio stream tickets out of it; see [Stream tickets](technical-reference.md#stream-tickets).
