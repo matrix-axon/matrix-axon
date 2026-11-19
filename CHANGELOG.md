@@ -3,6 +3,37 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.30 - 2026-11-19
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(sync): verify stored room history once against the homeserver (ADR 0140 step 2) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1175
+* feat(server): stream large video and audio from the homeserver (ADR 0139 phase 1) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1157
+* feat(server): stream tickets for video and audio (ADR 0139 phase 2) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1174
+#### Bug Fixes
+* fix(web): restore automatic forward paging after a timeline jump by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1135
+* fix(web): mark a room or thread read once a notification tap shows its newest message by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1145
+* fix(web): say when a linked event cannot be opened by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1147
+* fix(desktop): keep macOS from App Napping a backgrounded shell by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1159
+* fix(sync): fill the holes limited syncs leave in room history (ADR 0140 step 1) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1143
+* fix(web): recover link previews from large HTML heads by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1160
+#### Documentation
+* docs(adr): ADR 0139 — stream large video and audio by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1105
+* docs: trim derivable directory layout and crates table from AGENTS.md by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1136
+#### Build and CI
+* ci(ios): reduce ios-sharing flakes on shared macOS runners by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1156
+#### Other Changes
+* minor tweak to fix prettier on install.md by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1134
+* feat(web): link previews in edit mode (ADR 0132 delivery item 6) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1117
+* feat(server): read linked events for Matrix-link cards (ADR 0138) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1141
+* feat(web): Matrix-link cards built by the recipient (ADR 0138) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1144
+* feat(server): resolve creator privilege and own level on /power_levels (ADR 0137, #324) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1155
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.29...v0.1.30
+
 ## v0.1.29 - 2026-11-17
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
