@@ -343,7 +343,9 @@ After `409 previews_changed`, edit mode reopens on the message as it now stands,
 The server finds a `matched_url` only behind a lowercase `http://` or `https://`, so the composer lowercases each bare link's scheme before sending (`Https://` from a capitalized first word becomes `https://`), leaving code spans and blocks as written.
 
 Link identity is the WHATWG URL serialization in the composer and the `url` crate's on the server.
-`clients/web/src/fixtures/link-identity.json` lists the cases, such as host case, default ports, empty paths, fragments and percent-encoding, and the web tests check `new URL(...).href` against it.
+`clients/web/src/fixtures/link-identity.json` lists the cases, such as host case, default ports, empty paths, fragments and percent-encoding.
+Both sides test against it: the web tests check `new URL(...).href`, and an `axon-core` test checks the server's `link_identity` and its duplicate-preview rejection.
+A change to the fixture therefore has to hold for both parsers; run `cargo test -p axon-core` as well as the web tests.
 
 ### Durable thumbnail recovery
 
