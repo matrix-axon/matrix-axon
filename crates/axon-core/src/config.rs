@@ -284,7 +284,8 @@ pub struct SyncConfig {
     /// this is only a cold-start latency knob — the shallow window a room shows
     /// the instant it syncs — not the history bound: the backfill engine extends
     /// each room back toward its start in the background (ADR 0015, ADR 0043).
-    /// Defaults to 20.
+    /// A busier room than this between two responses leaves a hole that the
+    /// backfill task fills (ADR 0140). Must be at least 1. Defaults to 20.
     #[serde(default = "default_timeline_limit")]
     pub timeline_limit: u32,
     /// Capacity of the live-event broadcast bus that feeds the `/v1/ws`
@@ -371,7 +372,9 @@ pub struct SyncConfig {
     pub room_entry_timeout_secs: u64,
     /// Enable the M10 history-backfill engine: a continuous, throttled background
     /// task that pages each joined room's pre-existing history backward through
-    /// the same ingestion path as live sync (ADR 0043). Defaults to `true`.
+    /// the same ingestion path as live sync (ADR 0043). When `false`, the task
+    /// still runs, but only fills the holes that limited syncs leave (ADR 0140).
+    /// Defaults to `true`.
     #[serde(default = "default_backfill_enabled")]
     pub backfill_enabled: bool,
     /// When `true`, the boot-time UTD re-decryption sweep retries every pending
@@ -1136,6 +1139,22 @@ impl Default for LogConfig {
     }
 }
 
+impl SyncConfig {
+    /// Validate the sync settings that a running engine relies on.
+    ///
+    /// `timeline_limit` must be at least 1: a limited sliding-sync response then
+    /// always carries events, so the hole it leaves can be told from the room's
+    /// first window by those events' storage times (ADR 0140 decision 1).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.timeline_limit == 0 {
+            return Err(ConfigError::Validation(
+                "sync.timeline_limit must be at least 1".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
@@ -1265,6 +1284,9 @@ impl Config {
             problems.push(error.validation_detail());
         }
         if let Err(error) = config.push.validate() {
+            problems.push(error.validation_detail());
+        }
+        if let Err(error) = config.sync.validate() {
             problems.push(error.validation_detail());
         }
         if !problems.is_empty() {
@@ -1443,6 +1465,28 @@ mod tests {
             assert_eq!(config.database.timeouts.maintenance_statement_secs, 240);
             assert_eq!(config.database.timeouts.migration_statement_secs, 1200);
             assert_eq!(config.database.timeouts.idle_transaction_secs, 40);
+            Ok(())
+        });
+    }
+
+    /// ADR 0140 decision 1: a zero window would let a limited response carry
+    /// no events, and the first-window test needs them.
+    #[test]
+    fn a_zero_timeline_limit_is_rejected_at_load() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "axon.toml",
+                "[database]\nurl = 'postgres://test@localhost/test'\n[sync]\ntimeline_limit = 0",
+            )?;
+            let err = Config::load(Some(Path::new("axon.toml"))).expect_err("zero accepted");
+            assert!(
+                err.to_string()
+                    .contains("sync.timeline_limit must be at least 1"),
+                "{err}"
+            );
+            jail.set_env("AXON_SYNC__TIMELINE_LIMIT", "1");
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("one is valid");
+            assert_eq!(config.sync.timeline_limit, 1);
             Ok(())
         });
     }

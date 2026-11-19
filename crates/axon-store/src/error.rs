@@ -57,6 +57,26 @@ impl StoreError {
         matches!(self, Self::Sqlx(sqlx_core::Error::Database(error)) if error.is_unique_violation())
     }
 
+    /// Whether the database refused the statement because of the values it
+    /// carried, so the same values fail on every attempt while other writes
+    /// succeed: a data exception such as a `\u0000` escape in a `jsonb`
+    /// (SQLSTATE class 22, here 22P05), a constraint violation (23), or a
+    /// value past a size limit (54).
+    ///
+    /// Every other error is `false`, including deterministic ones that are not
+    /// about the values (a protocol or TLS failure, a missing column). A caller
+    /// that skips a write on `true` and retries it otherwise loses only the
+    /// one row it could never store, while an error that would fail every
+    /// write, such as a broken connection setup or a schema mismatch, holds
+    /// its place instead of skipping everything it touches.
+    pub fn is_value_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlx(sqlx_core::Error::Database(error))
+                if value_rejection_sqlstate(error.code().as_deref())
+        )
+    }
+
     /// Allowlisted diagnostic category, never SQL detail, values, or source text.
     pub fn diagnostic_reason(&self) -> &'static str {
         match self {
@@ -75,6 +95,14 @@ impl StoreError {
             Self::OAuthSessionNotCurrent => "oauth_session_not_current",
         }
     }
+}
+
+/// The SQLSTATE classes [`StoreError::is_value_rejection`] covers: data
+/// exceptions (22), integrity constraint violations (23), and program limits
+/// exceeded, such as a row or index entry too large (54).
+fn value_rejection_sqlstate(code: Option<&str>) -> bool {
+    code.and_then(|code| code.get(..2))
+        .is_some_and(|class| matches!(class, "22" | "23" | "54"))
 }
 
 fn sqlstate_reason(code: Option<&str>) -> &'static str {
@@ -119,5 +147,38 @@ mod tests {
             StoreError::EmbeddedMigration("untrusted detail".into()).diagnostic_reason(),
             "database_migration"
         );
+    }
+
+    #[test]
+    fn only_errors_about_the_values_are_value_rejections() {
+        for code in [
+            "22P05", "22021", "22001", "23505", "23503", "23514", "54000",
+        ] {
+            assert!(
+                value_rejection_sqlstate(Some(code)),
+                "{code} rejects the values"
+            );
+        }
+        // Failures that would refuse any write: hold, don't skip.
+        for code in [
+            "08006", "40P01", "40001", "42703", "42P01", "53100", "55P03", "57014", "58030",
+            "XX000", "P0001",
+        ] {
+            assert!(
+                !value_rejection_sqlstate(Some(code)),
+                "{code} is not about the values"
+            );
+        }
+        assert!(!value_rejection_sqlstate(None));
+        assert!(!value_rejection_sqlstate(Some("2")));
+        for error in [
+            sqlx_core::Error::PoolTimedOut,
+            sqlx_core::Error::PoolClosed,
+            sqlx_core::Error::Protocol("unexpected message".into()),
+            sqlx_core::Error::RowNotFound,
+        ] {
+            assert!(!StoreError::Sqlx(error).is_value_rejection());
+        }
+        assert!(!StoreError::EmbeddedMigration("x".into()).is_value_rejection());
     }
 }

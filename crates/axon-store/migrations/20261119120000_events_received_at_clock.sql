@@ -1,0 +1,11 @@
+-- ADR 0140: `events.received_at` is the storage time the gap filler's
+-- first-window test and stop rule compare. `now()` is the transaction's start,
+-- and `upsert_event` takes the room's write lock (`lock_redaction_scope`)
+-- after its transaction starts. An event that waited on that lock was
+-- therefore stamped earlier than events committed before it in the same room,
+-- which could misplace a hole's boundary. `clock_timestamp()` is read when the
+-- row is inserted, after the lock, so within a room `received_at` follows
+-- commit order.
+--
+-- Changing a column default rewrites nothing; existing rows keep their values.
+ALTER TABLE events ALTER COLUMN received_at SET DEFAULT clock_timestamp();

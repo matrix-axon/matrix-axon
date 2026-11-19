@@ -14,6 +14,8 @@ pub struct BackfillStatusSnapshot {
     pub paused_low_disk: bool,
     /// Free bytes last observed on the guarded filesystem.
     pub free_bytes: u64,
+    /// Events that gap pages inserted since the process started (ADR 0140).
+    pub gap_events_recovered: u64,
 }
 
 /// Port exposing the backfill engine's disk-space health to `GET /v1/status`.
@@ -31,6 +33,7 @@ impl BackfillStatusProvider for NoBackfillStatus {
         BackfillStatusSnapshot {
             paused_low_disk: false,
             free_bytes: 0,
+            gap_events_recovered: 0,
         }
     }
 }

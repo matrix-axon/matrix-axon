@@ -29,6 +29,7 @@ impl BackfillStatusProvider for BackfillStatusAdapter {
         BackfillStatusSnapshot {
             paused_low_disk: self.0.paused_low_disk(),
             free_bytes: self.0.free_bytes(),
+            gap_events_recovered: self.0.gap_events_recovered(),
         }
     }
 }

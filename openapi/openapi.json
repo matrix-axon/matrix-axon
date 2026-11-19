@@ -10446,7 +10446,7 @@
           "status"
         ],
         "summary": "Get backfill status",
-        "description": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\neach homeserver's load gate for background requests (ADR 0122);\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
+        "description": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; the holes limited syncs left in\nstored history and their filling (ADR 0140); per-account sync-service status;\neach homeserver's load gate for background requests (ADR 0122);\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
         "operationId": "get_status",
         "responses": {
           "200": {
@@ -12325,6 +12325,7 @@
             "description": "Server status (`GET /v1/status`, M10): the backfill engine's disk-space health\nplus per-account backfill progress, and the running build's identity.",
             "required": [
               "backfill",
+              "history_gaps",
               "build",
               "sync",
               "homeservers",
@@ -12339,6 +12340,10 @@
               "build": {
                 "$ref": "#/components/schemas/BuildInfoDto",
                 "description": "The running binary's build identity."
+              },
+              "history_gaps": {
+                "$ref": "#/components/schemas/HistoryGapsStatusDto",
+                "description": "Holes that limited syncs left in stored room history, and their filling\n(ADR 0140)."
               },
               "homeservers": {
                 "type": "array",
@@ -15425,6 +15430,44 @@
           }
         }
       },
+      "HistoryGapsStatusDto": {
+        "type": "object",
+        "description": "Holes that limited sliding-sync responses left in stored room history, across\nevery account, and how many events filling them has recovered (ADR 0140).\nThe backfill task pages them ahead of ordinary backfill, whether or not\nbackfill is enabled.",
+        "required": [
+          "open",
+          "parked",
+          "awaiting_batch",
+          "events_recovered",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "False when the hole counts could not be read; they are then zero."
+          },
+          "awaiting_batch": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, holes whose limited batch has not been stored yet, so they\ncannot yet be told apart from a room's first window."
+          },
+          "events_recovered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events that filling holes stored since the server started.",
+            "minimum": 0
+          },
+          "open": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Holes not yet closed, including parked ones and ones awaiting their\nbatch."
+          },
+          "parked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, holes parked after repeated failures: they are retried only\nabout once a day (ADR 0121)."
+          }
+        }
+      },
       "HomeserverBreakerDto": {
         "type": "string",
         "description": "A homeserver gate's circuit breaker on the wire (ADR 0122).",
@@ -18329,6 +18372,7 @@
         "description": "Server status (`GET /v1/status`, M10): the backfill engine's disk-space health\nplus per-account backfill progress, and the running build's identity.",
         "required": [
           "backfill",
+          "history_gaps",
           "build",
           "sync",
           "homeservers",
@@ -18343,6 +18387,10 @@
           "build": {
             "$ref": "#/components/schemas/BuildInfoDto",
             "description": "The running binary's build identity."
+          },
+          "history_gaps": {
+            "$ref": "#/components/schemas/HistoryGapsStatusDto",
+            "description": "Holes that limited syncs left in stored room history, and their filling\n(ADR 0140)."
           },
           "homeservers": {
             "type": "array",

@@ -13,8 +13,8 @@ use axum::extract::State;
 use crate::backfill::BackfillStatusProvider;
 use crate::build_info::BuildInfo;
 use crate::dto::{
-    AccountSyncStatusDto, BackfillStatusDto, HomeserverGateDto, ManagementStatusDto, PushStatusDto,
-    StatusDto,
+    AccountSyncStatusDto, BackfillStatusDto, HistoryGapsStatusDto, HomeserverGateDto,
+    ManagementStatusDto, PushStatusDto, StatusDto,
 };
 use crate::homeserver_status::HomeserverStatusProvider;
 use crate::response::{ApiError, ApiResponse};
@@ -24,7 +24,8 @@ use crate::sync_status::SyncStatusProvider;
 /// Get backfill status
 ///
 /// Report backfill status: the disk-space valve state (live free space, whether
-/// paused) plus per-account backfill progress; per-account sync-service status;
+/// paused) plus per-account backfill progress; the holes limited syncs left in
+/// stored history and their filling (ADR 0140); per-account sync-service status;
 /// each homeserver's load gate for background requests (ADR 0122);
 /// the running build's identity; whether the management API is served; and
 /// which push providers loaded a key.
@@ -45,20 +46,38 @@ pub async fn get_status(
     State(management): State<ManagementConfig>,
     State(push): State<Arc<PushMaterial>>,
 ) -> Result<ApiResponse<StatusDto>, ApiError> {
-    let backfill = match store.backfill_progress().await {
-        Ok(progress) => BackfillStatusDto::new(backfill_provider.snapshot(), progress),
+    let backfill_snapshot = backfill_provider.snapshot();
+    // Both read the isolated status pool; concurrently, so a saturated pool
+    // costs one acquisition deadline rather than two.
+    let (gap_counts, progress) =
+        futures_util::future::join(store.history_gap_counts(), store.backfill_progress()).await;
+    let gap_counts = match gap_counts {
+        Ok(counts) => Some(counts),
+        Err(error) => {
+            tracing::warn!(
+                reason = error.diagnostic_reason(),
+                "status history gap counts unavailable"
+            );
+            None
+        }
+    };
+    let history_gaps =
+        HistoryGapsStatusDto::new(gap_counts, backfill_snapshot.gap_events_recovered);
+    let backfill = match progress {
+        Ok(progress) => BackfillStatusDto::new(backfill_snapshot, progress),
         Err(error) => {
             tracing::warn!(
                 reason = error.diagnostic_reason(),
                 "status progress unavailable"
             );
-            let mut snapshot = BackfillStatusDto::new(backfill_provider.snapshot(), Vec::new());
+            let mut snapshot = BackfillStatusDto::new(backfill_snapshot, Vec::new());
             snapshot.progress_available = false;
             snapshot
         }
     };
     Ok(ApiResponse::new(StatusDto {
         backfill,
+        history_gaps,
         sync: sync_provider
             .snapshot()
             .into_iter()
