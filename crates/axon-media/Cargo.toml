@@ -10,7 +10,10 @@ publish = false
 [dependencies]
 axon-core = { workspace = true }
 
-tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt", "macros"] }
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt", "macros", "time"] }
+# A streamed download's body (ADR 0139): chunks arrive as `Bytes` in a boxed stream.
+bytes = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
 uuid = { workspace = true, features = ["v4"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

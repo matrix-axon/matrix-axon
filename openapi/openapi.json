@@ -9162,7 +9162,7 @@
           "media"
         ],
         "summary": "Download media",
-        "description": "Proxy an `mxc://` download through the account's homeserver connection.\n\nThe `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's media descriptor, member avatar, or\nMSC4027 custom reaction key.\nThe response body is the raw media bytes, streamed from the on-disk cache\nwith range-request and conditional-GET support.",
+        "description": "Proxy an `mxc://` download through the account's homeserver connection.\n\nThe `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's media descriptor, member avatar, or\nMSC4027 custom reaction key.\nThe response body is the raw media bytes, streamed from the on-disk cache\nwith range-request and conditional-GET support.\n\nVideo and audio (`video/*`, `audio/*`) are served while they download\n(ADR 0139): the response starts once the first bytes have arrived, and a\nrange past the downloaded point waits for it. Such a response withholds\nthe object's last 64 KiB until the download has been verified, and is\naborted rather than finished if verification fails. When the homeserver\ndeclared no length, a request without `Range` gets a `200` with no\n`Content-Length` or `Accept-Ranges`; a request with `Range` waits up to\n10 s for the download to finish, then gets that same `200`.",
         "operationId": "get_media",
         "parameters": [
           {
@@ -9271,7 +9271,7 @@
             }
           },
           "413": {
-            "description": "The media object exceeds the configured per-object cache limit",
+            "description": "The media object exceeds the configured size limit: `max_object_bytes`, or `max_stream_bytes` for video and audio",
             "content": {
               "application/json": {
                 "schema": {
@@ -9291,7 +9291,7 @@
             }
           },
           "422": {
-            "description": "The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help.",
+            "description": "The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help. For video and audio, which stream before their hash is checked, a hash mismatch instead aborts the response before its last 64 KiB, and the next request gets this `422`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9321,7 +9321,7 @@
             }
           },
           "503": {
-            "description": "The account's homeserver connection is not currently established",
+            "description": "The account's homeserver connection is not currently established, or a video or audio stream could not start yet (no stream slot or upstream answer within `fetch_timeout_secs`, or no cache room beside other streams). Retryable; a stream that could not start carries `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {

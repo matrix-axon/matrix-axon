@@ -552,8 +552,10 @@ pub struct MediaConfig {
     #[serde(default = "default_media_uploads_dir")]
     pub uploads_dir: PathBuf,
     /// Total cache size cap, in bytes. When a fetch would push the cache over
-    /// this, least-recently-used entries are evicted until it fits. Defaults to
-    /// 5 GiB.
+    /// this, least-recently-used entries are evicted until it fits. With the
+    /// cache disabled it still bounds the staging files of video and audio
+    /// streams in flight (ADR 0139), so the stream-room checks apply either
+    /// way. Defaults to 5 GiB.
     #[serde(default = "default_media_max_bytes")]
     pub max_bytes: u64,
     /// Per-object size cap, in bytes. A single media object larger than this is
@@ -562,21 +564,51 @@ pub struct MediaConfig {
     /// 100 MiB.
     #[serde(default = "default_media_max_object_bytes")]
     pub max_object_bytes: u64,
-    /// Per-request timeout for the upstream homeserver media download, in
-    /// seconds. Bounds a hung homeserver so a media request can't await
-    /// unbounded. **This bounds the entire download**, not just connection
-    /// setup (the SDK media API is a single call), so it must comfortably exceed
-    /// the time to transfer a `max_object_bytes` object over the operator's link
-    /// — raise it if large media over slow links is expected. Defaults to 60.
+    /// Upstream homeserver deadline for a media download, in seconds. Bounds a
+    /// hung homeserver so a media request can't await unbounded.
+    ///
+    /// For images, files and thumbnails (the buffered path) **this bounds the
+    /// entire download**, not just connection setup, so it must comfortably
+    /// exceed the time to transfer a `max_object_bytes` object over the
+    /// operator's link. For video and audio (the streamed path, ADR 0139) it
+    /// bounds only the wait for a stream permit plus the wait for the upstream
+    /// response headers, measured from when the request arrives; past it the
+    /// request fails with `503`. A streamed body is bounded by
+    /// `stall_timeout_secs` instead. Defaults to 60.
     #[serde(default = "default_media_fetch_timeout_secs")]
     pub fetch_timeout_secs: u64,
-    /// Maximum number of upstream media downloads in flight at once. Because the
-    /// media API is not streaming, each in-flight download buffers its whole
-    /// object in memory, so this caps aggregate download memory at roughly
-    /// `max_concurrent_downloads × max_object_bytes`; requests over the limit
-    /// queue rather than being rejected. Defaults to 16.
+    /// Maximum number of buffered upstream media downloads (images, files and
+    /// thumbnails) in flight at once. Because that path is not streaming, each
+    /// in-flight download buffers its whole object in memory, so this caps
+    /// aggregate download memory at roughly `max_concurrent_downloads ×
+    /// max_object_bytes`; requests over the limit queue rather than being
+    /// rejected. Streamed video and audio use `max_concurrent_streams`
+    /// instead. Defaults to 16.
     #[serde(default = "default_media_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
+    /// Cancel a streamed video or audio download that delivers no bytes for
+    /// this many seconds (ADR 0139). A streamed download has no total-duration
+    /// limit, so a large file over a slow link keeps going as long as bytes
+    /// keep arriving. Defaults to 30.
+    #[serde(default = "default_media_stall_timeout_secs")]
+    pub stall_timeout_secs: u64,
+    /// Maximum number of streamed video and audio downloads open to the
+    /// homeserver at once (ADR 0139). Separate from `max_concurrent_downloads`,
+    /// because a streamed download holds its permit for minutes and must not
+    /// queue images and avatars behind it. A request that cannot get a permit
+    /// within `fetch_timeout_secs` fails with a retryable `503`. Defaults to 4.
+    #[serde(default = "default_media_max_concurrent_streams")]
+    pub max_concurrent_streams: usize,
+    /// Largest video or audio object that is streamed, in bytes (ADR 0139). It
+    /// replaces `max_object_bytes` for the streamed path, whose bytes go to
+    /// disk as they arrive rather than through memory. Must not exceed
+    /// `max_bytes - max_object_bytes`, so a streamed object can always fit
+    /// beside the room kept for buffered media; startup rejects a larger value.
+    /// When unset it defaults to 2 GiB, lowered to that bound for a smaller
+    /// cache, so a deployment that shrank `max_bytes` keeps booting. Read it
+    /// through [`MediaConfig::stream_byte_limit`].
+    #[serde(default)]
+    pub max_stream_bytes: Option<u64>,
     /// Maximum accepted client upload body, in bytes. Enforced while streaming
     /// the request to the staging directory. Defaults to 100 MiB.
     #[serde(default = "default_media_max_upload_bytes")]
@@ -1109,6 +1141,18 @@ fn default_media_max_concurrent_downloads() -> usize {
     16
 }
 
+fn default_media_stall_timeout_secs() -> u64 {
+    30
+}
+
+fn default_media_max_concurrent_streams() -> usize {
+    4
+}
+
+/// The `max_stream_bytes` an operator gets by not setting it, before it is
+/// lowered to fit the cache (see [`MediaConfig::stream_byte_limit`]).
+const DEFAULT_MEDIA_MAX_STREAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 fn default_media_max_upload_bytes() -> u64 {
     100 * 1024 * 1024
 }
@@ -1213,6 +1257,68 @@ impl Default for SearchConfig {
     }
 }
 
+impl MediaConfig {
+    /// Validate the streamed-media limits (ADR 0139) before any cache opens.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.stall_timeout_secs == 0 {
+            return Err(ConfigError::Validation(
+                "media.stall_timeout_secs must be positive".into(),
+            ));
+        }
+        if self.max_concurrent_streams == 0 {
+            return Err(ConfigError::Validation(
+                "media.max_concurrent_streams must be positive".into(),
+            ));
+        }
+        // A streamed object larger than the reservable room could never be
+        // reserved at all, so an explicit setting above it is a mistake.
+        if let Some(max_stream_bytes) = self.max_stream_bytes {
+            if max_stream_bytes == 0 {
+                return Err(ConfigError::Validation(
+                    "media.max_stream_bytes must be positive".into(),
+                ));
+            }
+            let room = self.stream_reservation_room();
+            if max_stream_bytes > room {
+                return Err(ConfigError::Validation(format!(
+                    "media.max_stream_bytes ({max_stream_bytes}) must not exceed \
+                     media.max_bytes minus media.max_object_bytes ({room})"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The most that in-flight stream reservations may hold together:
+    /// `max_bytes - max_object_bytes`, so there is always room for one
+    /// buffered object beside them (ADR 0139 section 3).
+    pub fn stream_reservation_room(&self) -> u64 {
+        self.max_bytes.saturating_sub(self.max_object_bytes)
+    }
+
+    /// The largest video or audio object that is streamed: `max_stream_bytes`
+    /// when set (which [`validate`](Self::validate) keeps within
+    /// [`stream_reservation_room`](Self::stream_reservation_room)), else 2 GiB
+    /// lowered to that room.
+    pub fn stream_byte_limit(&self) -> u64 {
+        self.max_stream_bytes
+            .unwrap_or_else(|| DEFAULT_MEDIA_MAX_STREAM_BYTES.min(self.stream_reservation_room()))
+    }
+
+    /// Whether video and audio stream (ADR 0139) or stay on the buffered path
+    /// they used before streaming.
+    ///
+    /// An explicit `max_stream_bytes` always streams, under that limit. Unset,
+    /// they stream only when the derived limit admits at least
+    /// `max_object_bytes`, which the buffered path serves. Otherwise, in a
+    /// cache smaller than about twice `max_object_bytes`, streaming would
+    /// refuse objects the buffered path serves, or with no room at all refuse
+    /// every one, so they stay buffered.
+    pub fn streams_media(&self) -> bool {
+        self.max_stream_bytes.is_some() || self.stream_byte_limit() >= self.max_object_bytes
+    }
+}
+
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
@@ -1223,6 +1329,9 @@ impl Default for MediaConfig {
             max_object_bytes: default_media_max_object_bytes(),
             fetch_timeout_secs: default_media_fetch_timeout_secs(),
             max_concurrent_downloads: default_media_max_concurrent_downloads(),
+            stall_timeout_secs: default_media_stall_timeout_secs(),
+            max_concurrent_streams: default_media_max_concurrent_streams(),
+            max_stream_bytes: None,
             max_upload_bytes: default_media_max_upload_bytes(),
             upload_request_timeout_secs: default_media_upload_request_timeout_secs(),
             upstream_upload_timeout_secs: default_media_upstream_upload_timeout_secs(),
@@ -1301,6 +1410,9 @@ impl Config {
             problems.push(error.validation_detail());
         }
         if let Err(error) = config.sync.validate() {
+            problems.push(error.validation_detail());
+        }
+        if let Err(error) = config.media.validate() {
             problems.push(error.validation_detail());
         }
         if !problems.is_empty() {
@@ -1948,6 +2060,10 @@ mod tests {
             assert_eq!(config.media.max_object_bytes, 100 * 1024 * 1024);
             assert_eq!(config.media.fetch_timeout_secs, 60);
             assert_eq!(config.media.max_concurrent_downloads, 16);
+            assert_eq!(config.media.stall_timeout_secs, 30);
+            assert_eq!(config.media.max_concurrent_streams, 4);
+            assert_eq!(config.media.max_stream_bytes, None);
+            assert_eq!(config.media.stream_byte_limit(), 2 * 1024 * 1024 * 1024);
             assert_eq!(config.media.max_upload_bytes, 100 * 1024 * 1024);
             assert_eq!(config.media.upload_request_timeout_secs, 60);
             assert_eq!(config.media.upstream_upload_timeout_secs, 60);
@@ -1971,6 +2087,83 @@ mod tests {
             assert_eq!(config.media.max_upload_bytes, 4096);
             Ok(())
         });
+    }
+
+    #[test]
+    fn an_unset_stream_limit_shrinks_to_fit_a_small_cache() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            // 1 GiB cache, 100 MiB buffered objects: 924 MiB left for streams.
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "1073741824");
+            let config = Config::load(None).expect("a shrunken cache still boots");
+            assert_eq!(config.media.stream_byte_limit(), 924 * 1024 * 1024);
+            assert!(config.media.streams_media());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_explicit_stream_limit_must_fit_beside_buffered_media() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "1073741824");
+            jail.set_env("AXON_MEDIA__MAX_STREAM_BYTES", "1073741824");
+            let error = Config::load(None).expect_err("1 GiB cannot fit beside 100 MiB");
+            assert!(
+                error.to_string().contains("media.max_stream_bytes"),
+                "{error}"
+            );
+
+            jail.set_env("AXON_MEDIA__MAX_STREAM_BYTES", "524288000");
+            let config = Config::load(None).expect("500 MiB fits");
+            assert_eq!(config.media.stream_byte_limit(), 524_288_000);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_cache_too_small_for_streams_keeps_video_buffered() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            // 150 MiB cache, 100 MiB buffered objects: a 50 MiB stream limit
+            // would refuse videos the buffered path serves.
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "157286400");
+            let config = Config::load(None).expect("boots");
+            assert!(!config.media.streams_media());
+
+            // No room at all: every stream would be refused.
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "1048576");
+            let config = Config::load(None).expect("boots");
+            assert_eq!(config.media.stream_byte_limit(), 0);
+            assert!(!config.media.streams_media());
+
+            // An explicit limit is the operator's choice, and streams.
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "157286400");
+            jail.set_env("AXON_MEDIA__MAX_STREAM_BYTES", "52428800");
+            let config = Config::load(None).expect("50 MiB fits");
+            assert!(config.media.streams_media());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn stream_concurrency_and_stall_timeout_must_be_positive() {
+        for (name, value) in [
+            ("AXON_MEDIA__MAX_CONCURRENT_STREAMS", "0"),
+            ("AXON_MEDIA__STALL_TIMEOUT_SECS", "0"),
+            ("AXON_MEDIA__MAX_STREAM_BYTES", "0"),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.clear_env();
+                jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+                jail.set_env(name, value);
+                assert!(Config::load(None).is_err(), "accepted {name} = {value}");
+                Ok(())
+            });
+        }
     }
 
     #[test]

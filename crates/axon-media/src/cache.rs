@@ -25,12 +25,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::stream::{BoxStream, StreamExt};
 use serde_json::Value;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{watch, Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use uuid::Uuid;
+
+use crate::stream::{Failure, GrowingMedia, MediaStream, Outcome, Partial, Progress};
 
 use axon_core::config::MediaConfig;
 use axon_core::media::ThumbnailSpec;
@@ -38,7 +45,10 @@ use axon_core::media::ThumbnailSpec;
 /// What the injected downloader can report. The cache passes these through
 /// unchanged so the composition-root adapter maps them onto `axon-api`'s
 /// `MediaError` with the same translation it uses for other backend errors.
-#[derive(Debug, thiserror::Error)]
+///
+/// `Clone` because a streamed download's failure is handed to every request
+/// still reading it (ADR 0139).
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum FetchError {
     /// An internal adapter invariant failed. → `500`.
     #[error("internal media fetch error: {0}")]
@@ -95,6 +105,32 @@ pub trait MediaFetcher: Send + Sync {
         mxc_url: &str,
         spec: ThumbnailSpec,
     ) -> Result<Vec<u8>, FetchError>;
+
+    /// Open a streamed download of `mxc_url` (ADR 0139), for video and audio.
+    ///
+    /// Returns as soon as the homeserver's response headers have arrived; the
+    /// body then arrives through [`MediaStream::body`], decrypted chunk by
+    /// chunk when `encrypted_file` is set. A malformed descriptor fails here,
+    /// before any network work, exactly as [`fetch`](Self::fetch) fails it.
+    ///
+    /// The fetcher sets no deadline of its own: the cache bounds the wait for
+    /// the headers (`fetch_timeout_secs`) and each body read
+    /// (`stall_timeout_secs`), and checks the body's length.
+    async fn fetch_stream(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<Value>,
+    ) -> Result<MediaStream, FetchError>;
+}
+
+/// What [`MediaCache::get_or_stream`] resolves to.
+#[derive(Debug)]
+pub enum MediaBody {
+    /// The object is complete on disk: an ordinary cache hit.
+    Complete(MediaResource),
+    /// The object's streamed download is still running.
+    Growing(GrowingMedia),
 }
 
 /// A resolved media object, ready to serve. Holds an **open** file handle whose
@@ -121,7 +157,7 @@ pub struct MediaResource {
 /// request, so if a leak lives here rather than in matrix-rust-sdk or Tantivy,
 /// this count climbing and never coming back down is how it shows up.
 #[derive(Debug)]
-struct HandleGuard(Arc<AtomicUsize>);
+pub(crate) struct HandleGuard(Arc<AtomicUsize>);
 
 impl Drop for HandleGuard {
     fn drop(&mut self) {
@@ -211,6 +247,11 @@ pub enum MediaCacheError {
     /// it degrades to an uncached serve.
     #[error("media cache i/o error: {0}")]
     Io(#[source] std::io::Error),
+    /// A streamed download could not start now but may on retry (ADR 0139):
+    /// no stream permit or upstream headers within `fetch_timeout_secs`, or no
+    /// room left beside the other streams' cache reservations. → `503`.
+    #[error("media stream unavailable: {0}")]
+    Busy(String),
 }
 
 /// A cheap-to-clone handle exposing only the operations account-lifecycle
@@ -269,6 +310,15 @@ impl MediaCache {
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         tokio::fs::create_dir_all(&tmp_dir).await?;
 
+        if !cfg.streams_media() {
+            tracing::warn!(
+                max_bytes = cfg.max_bytes,
+                max_object_bytes = cfg.max_object_bytes,
+                "media.max_bytes leaves less than media.max_object_bytes for streams; \
+                 video and audio are buffered instead of streamed",
+            );
+        }
+
         let inner = Arc::new(Inner {
             cache_dir,
             tmp_dir,
@@ -276,6 +326,14 @@ impl MediaCache {
             max_bytes: cfg.max_bytes,
             max_object_bytes: cfg.max_object_bytes,
             downloads: Semaphore::new(cfg.max_concurrent_downloads.max(1)),
+            streams: Arc::new(Semaphore::new(cfg.max_concurrent_streams.max(1))),
+            streams_media: cfg.streams_media(),
+            fetch_timeout: Duration::from_secs(cfg.fetch_timeout_secs),
+            stall_timeout: Duration::from_secs(cfg.stall_timeout_secs.max(1)),
+            stream_byte_limit: cfg.stream_byte_limit(),
+            stream_room: cfg.stream_reservation_room(),
+            streaming: Mutex::new(HashMap::new()),
+            undecryptable: Mutex::new(HashMap::new()),
             index: Mutex::new(Index::default()),
             flight: Mutex::new(HashMap::new()),
             rebuild: Mutex::new(None),
@@ -340,6 +398,70 @@ impl MediaCache {
             fetcher.fetch_thumbnail(account_id, mxc_url, spec)
         })
         .await
+    }
+
+    /// The streamed sibling of [`get_or_fetch`](Self::get_or_fetch), for video
+    /// and audio (ADR 0139).
+    ///
+    /// A cache hit is [`MediaBody::Complete`]. Otherwise the request joins the
+    /// object's streamed download, starting it if none is running, and gets a
+    /// [`MediaBody::Growing`] reader that follows the download as it writes.
+    /// The download runs as its own task, to completion, whether or not anyone
+    /// is still reading, and is promoted into the cache once verified.
+    ///
+    /// Starting a download takes a stream permit, then the upstream response
+    /// headers, both within `fetch_timeout_secs` of this call, then a cache
+    /// reservation for the declared length, tried once. Missing the deadline
+    /// or the reservation is [`MediaCacheError::Busy`].
+    ///
+    /// When the configuration leaves streams too little room
+    /// (`MediaConfig::streams_media`), this is
+    /// [`get_or_fetch`](Self::get_or_fetch) instead, always `Complete`.
+    pub async fn get_or_stream(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<Value>,
+        fetcher: &dyn MediaFetcher,
+    ) -> Result<MediaBody, MediaCacheError> {
+        if !self.inner.streams_media {
+            return self
+                .get_or_fetch(account_id, mxc_url, encrypted_file, fetcher)
+                .await
+                .map(MediaBody::Complete);
+        }
+        let deadline = Instant::now() + self.inner.fetch_timeout;
+        let hash = etag_for_media(mxc_url, encrypted_file.as_ref());
+        let key: Key = (account_id, hash.clone());
+        let encrypted = encrypted_file.is_some();
+        if encrypted {
+            self.inner.check_undecryptable(&key)?;
+        }
+
+        if let Some(body) = self.inner.join_existing(&key).await? {
+            return Ok(body);
+        }
+
+        // Only one request starts a given download; the rest wait here, then
+        // join the download it started. Same drop order as
+        // `get_or_fetch_keyed`. The holder gives up by its own deadline, which
+        // is no later than a waiter's, but each waiter also bounds its own wait
+        // here, so no request outlives `fetch_timeout_secs` before it either
+        // joins a download or gets `Busy`.
+        let flight = FlightGuard::join(self.inner.clone(), account_id, &hash);
+        let Ok(_guard) = tokio::time::timeout_at(deadline, flight.slot().lock()).await else {
+            return Err(MediaCacheError::Busy(format!(
+                "another request for this media did not open its stream within {}s",
+                self.inner.fetch_timeout.as_secs()
+            )));
+        };
+        if let Some(body) = self.inner.join_existing(&key).await? {
+            return Ok(body);
+        }
+
+        self.inner
+            .start_stream(key, mxc_url, encrypted_file, fetcher, deadline)
+            .await
     }
 
     /// Shared single-flight/cache-or-fetch machinery for both
@@ -419,6 +541,34 @@ struct Inner {
     /// it, this is what keeps aggregate download memory bounded (≈ permits ×
     /// object size) under concurrent load for distinct keys.
     downloads: Semaphore,
+    /// Bounds how many streamed downloads are open to the homeserver at once
+    /// (`max_concurrent_streams`, ADR 0139). Separate from `downloads`, since a
+    /// stream holds its permit for minutes. `Arc` so the download task can
+    /// own its permit.
+    streams: Arc<Semaphore>,
+    /// Whether video and audio stream at all (`MediaConfig::streams_media`);
+    /// when not, [`MediaCache::get_or_stream`] buffers them as before.
+    streams_media: bool,
+    /// Deadline for a stream's permit plus its upstream response headers,
+    /// measured from when the request arrives (`fetch_timeout_secs`).
+    fetch_timeout: Duration,
+    /// Cancels a streamed download that delivers no bytes for this long.
+    stall_timeout: Duration,
+    /// Largest object that is streamed (`MediaConfig::stream_byte_limit`).
+    stream_byte_limit: u64,
+    /// The most in-flight stream reservations may hold together
+    /// (`max_bytes - max_object_bytes`), so a buffered object always fits.
+    stream_room: u64,
+    /// Streamed downloads in flight, shared by every request for their key.
+    /// An entry is removed only once its download has a verdict and, on
+    /// success, has been promoted into the cache, so a request always finds
+    /// either the running download or the finished file.
+    streaming: Mutex<HashMap<Key, Arc<Partial>>>,
+    /// When each encrypted object's streamed download failed its hash check
+    /// (ADR 0139 section 4). The key is the object's representation key
+    /// ([`etag_for_media`]), which binds the whole descriptor, so a failure
+    /// is remembered for that exact descriptor and no other.
+    undecryptable: Mutex<HashMap<Key, Instant>>,
     index: Mutex<Index>,
     flight: Mutex<HashMap<Key, Arc<AsyncMutex<()>>>>,
     /// Handle to the background boot-rebuild task (see [`MediaCache::open`]);
@@ -672,6 +822,198 @@ impl Inner {
         })
     }
 
+    /// Fail fast with `422` when this exact descriptor failed its hash check
+    /// within [`UNDECRYPTABLE_TTL`], instead of downloading it again to fail
+    /// the same way. A different descriptor for the same URI downloads anew.
+    fn check_undecryptable(&self, key: &Key) -> Result<(), MediaCacheError> {
+        let failed = self.undecryptable.lock().expect("undecryptable mutex");
+        match failed.get(key) {
+            Some(at) if at.elapsed() < UNDECRYPTABLE_TTL => {
+                Err(MediaCacheError::Fetch(FetchError::Undecryptable(
+                    "media failed its integrity check recently; not downloading it again yet"
+                        .to_owned(),
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn remember_undecryptable(&self, key: Key) {
+        let mut failed = self.undecryptable.lock().expect("undecryptable mutex");
+        failed.retain(|_, at| at.elapsed() < UNDECRYPTABLE_TTL);
+        failed.insert(key, Instant::now());
+    }
+
+    /// The object as it already exists: a streamed download already running,
+    /// or a cache hit. A download that has already failed returns its error.
+    ///
+    /// The running download is checked first. A download leaves
+    /// `Inner::streaming` only after it is promoted into the cache, so a miss
+    /// there followed by a cache check can't miss both. In the other order, a
+    /// promotion landing between the two checks would start a second download
+    /// of the whole object.
+    async fn join_existing(&self, key: &Key) -> Result<Option<MediaBody>, MediaCacheError> {
+        let partial = self
+            .streaming
+            .lock()
+            .expect("streaming mutex")
+            .get(key)
+            .cloned();
+        if let Some(partial) = partial {
+            if let Some(failure) = partial.failure() {
+                return Err(failure.into_error());
+            }
+            return Ok(Some(MediaBody::Growing(
+                partial.reader(key.1.clone(), self.open_handle_guard()),
+            )));
+        }
+        if self.enabled {
+            if let Some(resource) = self.try_hit(key.0, &key.1).await {
+                return Ok(Some(MediaBody::Complete(resource)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Open the upstream stream, reserve its space and start the download
+    /// task. The caller holds the key's single-flight slot.
+    async fn start_stream(
+        self: &Arc<Self>,
+        key: Key,
+        mxc_url: &str,
+        encrypted_file: Option<Value>,
+        fetcher: &dyn MediaFetcher,
+        deadline: Instant,
+    ) -> Result<MediaBody, MediaCacheError> {
+        // The permit first, then the upstream headers, under one deadline.
+        let opened = tokio::time::timeout_at(deadline, async {
+            let permit = self
+                .streams
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("stream semaphore never closed");
+            let stream = fetcher.fetch_stream(key.0, mxc_url, encrypted_file).await;
+            (permit, stream)
+        })
+        .await;
+        let Ok((permit, stream)) = opened else {
+            return Err(MediaCacheError::Busy(format!(
+                "no media stream opened within {}s",
+                self.fetch_timeout.as_secs()
+            )));
+        };
+        let stream = stream?;
+
+        if let Some(len) = stream.len {
+            if len > self.stream_byte_limit {
+                return Err(MediaCacheError::TooLarge {
+                    len,
+                    cap: self.stream_byte_limit,
+                });
+            }
+        }
+
+        // The staging file before the reservation: reserving evicts entries,
+        // and a file that then could not be created (ENOSPC, EMFILE) would
+        // have drained the cache for nothing.
+        let staging = self.tmp_dir.join(Uuid::new_v4().to_string());
+        let writer = tokio::fs::File::create(&staging)
+            .await
+            .map_err(MediaCacheError::Io)?;
+        let reader = match tokio::fs::File::open(&staging).await {
+            Ok(reader) => reader.into_std().await,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&staging).await;
+                return Err(MediaCacheError::Io(e));
+            }
+        };
+
+        // Then the reservation, tried once. On failure the permit and the
+        // upstream connection both drop here, so no permit waits for room.
+        let Some((reservation, victims)) = Reservation::try_new(self, stream.len.unwrap_or(0))
+        else {
+            let _ = tokio::fs::remove_file(&staging).await;
+            return Err(MediaCacheError::Busy(
+                "media cache has no room beside the other streams in flight".to_owned(),
+            ));
+        };
+        self.remove_files(victims).await;
+
+        let (progress, watch) = watch::channel(Progress::started(stream.len));
+        let partial = Arc::new(Partial::new(reader, watch));
+        self.streaming
+            .lock()
+            .expect("streaming mutex")
+            .insert(key.clone(), partial.clone());
+
+        let reader = partial.reader(key.1.clone(), self.open_handle_guard());
+        let cleanup = StreamCleanup {
+            inner: self.clone(),
+            key: key.clone(),
+            partial,
+            staging,
+            finished: false,
+        };
+        let task = StreamTask {
+            inner: self.clone(),
+            key,
+            mxc_url: mxc_url.to_owned(),
+            len: stream.len,
+            progress,
+            reservation,
+            cleanup,
+        };
+        tokio::spawn(task.run(stream.body, writer, permit));
+        Ok(MediaBody::Growing(reader))
+    }
+
+    async fn remove_files(&self, victims: Vec<Key>) {
+        for (account_id, hash) in victims {
+            self.remove_file(account_id, &hash).await;
+        }
+    }
+
+    /// Promote a verified streamed download into the cache, converting its
+    /// reservation into an ordinary entry. Mirrors the promotion half of
+    /// [`store_and_open`](Self::store_and_open), including its purge guard.
+    async fn promote_stream(&self, key: &Key, staging: &Path, reservation: Reservation, len: u64) {
+        if !self.enabled {
+            let _ = tokio::fs::remove_file(staging).await;
+            return;
+        }
+        let (account_id, hash) = (key.0, key.1.as_str());
+        let account_lock = self.account_lock(account_id);
+        let _account_guard = account_lock.lock().await;
+        if self
+            .purged
+            .lock()
+            .expect("purged mutex")
+            .contains(&account_id)
+        {
+            let _ = tokio::fs::remove_file(staging).await;
+            return;
+        }
+        let promoted = match tokio::fs::create_dir_all(self.account_dir(account_id)).await {
+            Ok(()) => tokio::fs::rename(staging, self.path_for(account_id, hash)).await,
+            Err(e) => Err(e),
+        };
+        match promoted {
+            Ok(()) => {
+                let victims = reservation.commit(account_id, hash, len);
+                self.remove_files(victims).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    %account_id,
+                    error = %e,
+                    "media cache write failed; streamed media served without caching",
+                );
+                let _ = tokio::fs::remove_file(staging).await;
+            }
+        }
+    }
+
     async fn remove_file(&self, account_id: Uuid, hash: &str) {
         let path = self.path_for(account_id, hash);
         if let Err(e) = tokio::fs::remove_file(&path).await {
@@ -794,6 +1136,9 @@ struct Index {
     /// Access order: seq → key, ascending. The first key is least-recently-used.
     order: BTreeMap<u64, Key>,
     total_bytes: u64,
+    /// Bytes reserved by streamed downloads still in flight (ADR 0139). They
+    /// count against `max_bytes` like entries, but are never evicted.
+    reserved: u64,
     next_seq: u64,
 }
 
@@ -849,11 +1194,25 @@ impl Index {
         }
     }
 
-    /// While over `max_bytes`, drop the least-recently-used entry and return the
-    /// keys whose files the caller must unlink.
+    /// Reserve `bytes` for a streamed download, evicting completed entries to
+    /// make room. `None` when the in-flight reservations would then exceed
+    /// `room`, which is what keeps one buffered object's worth of the cache
+    /// free beside them; within `room`, eviction can always make the space.
+    fn try_reserve(&mut self, bytes: u64, room: u64, max_bytes: u64) -> Option<Vec<Key>> {
+        let reserved = self.reserved.checked_add(bytes)?;
+        if reserved > room {
+            return None;
+        }
+        self.reserved = reserved;
+        Some(self.collect_evictions(max_bytes))
+    }
+
+    /// While entries plus reservations exceed `max_bytes`, drop the
+    /// least-recently-used entry and return the keys whose files the caller
+    /// must unlink.
     fn collect_evictions(&mut self, max_bytes: u64) -> Vec<(Uuid, String)> {
         let mut victims = Vec::new();
-        while self.total_bytes > max_bytes {
+        while self.total_bytes + self.reserved > max_bytes {
             let Some(seq) = self.order.keys().next().copied() else {
                 break;
             };
@@ -887,11 +1246,268 @@ impl Index {
     }
 }
 
+/// How long a failed hash check is remembered for an encrypted object, so a
+/// client's retry gets an immediate `422` (ADR 0139 section 4).
+const UNDECRYPTABLE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// A streamed download's share of the cache's byte cap, held from before its
+/// body is read until it is promoted (converted into an entry) or fails
+/// (released on drop).
+struct Reservation {
+    inner: Arc<Inner>,
+    bytes: u64,
+}
+
+impl Reservation {
+    /// Reserve `bytes`, returning the evicted entries to unlink. `None` when
+    /// there is no room beside the reservations already in flight.
+    fn try_new(inner: &Arc<Inner>, bytes: u64) -> Option<(Self, Vec<Key>)> {
+        let victims = inner.index.lock().expect("index mutex").try_reserve(
+            bytes,
+            inner.stream_room,
+            inner.max_bytes,
+        )?;
+        Some((
+            Self {
+                inner: inner.clone(),
+                bytes,
+            },
+            victims,
+        ))
+    }
+
+    /// Grow the reservation as a chunked body arrives.
+    fn grow(&mut self, bytes: u64) -> Option<Vec<Key>> {
+        let victims = self.inner.index.lock().expect("index mutex").try_reserve(
+            bytes,
+            self.inner.stream_room,
+            self.inner.max_bytes,
+        )?;
+        self.bytes += bytes;
+        Some(victims)
+    }
+
+    /// Convert the reservation into the cache entry for the promoted file.
+    fn commit(mut self, account_id: Uuid, hash: &str, len: u64) -> Vec<Key> {
+        let mut index = self.inner.index.lock().expect("index mutex");
+        index.reserved -= std::mem::take(&mut self.bytes);
+        index.record(account_id, hash.to_owned(), len);
+        index.collect_evictions(self.inner.max_bytes)
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            if let Ok(mut index) = self.inner.index.lock() {
+                index.reserved -= self.bytes;
+            }
+        }
+    }
+}
+
+/// One streamed download, run as its own task so it finishes whether or not
+/// the request that started it is still connected (ADR 0139 section 3).
+struct StreamTask {
+    inner: Arc<Inner>,
+    key: Key,
+    mxc_url: String,
+    /// The upstream `Content-Length`, if any.
+    len: Option<u64>,
+    progress: watch::Sender<Progress>,
+    /// Declared before `cleanup`, so an unwinding task releases its space
+    /// before it leaves `Inner::streaming`, as the normal paths do.
+    reservation: Reservation,
+    /// Removes this download from `Inner::streaming` and unlinks its staging
+    /// file if the task ends without a verdict.
+    cleanup: StreamCleanup,
+}
+
+impl StreamTask {
+    async fn run(
+        mut self,
+        mut body: BoxStream<'static, Result<Bytes, FetchError>>,
+        mut writer: tokio::fs::File,
+        permit: OwnedSemaphorePermit,
+    ) {
+        let result = self.pump(&mut body, &mut writer).await;
+        // The upstream connection closes here, and only then is the stream
+        // permit returned.
+        drop(body);
+        drop(permit);
+        drop(writer);
+
+        match result {
+            Ok(len) => {
+                // Readers may finish before the promotion: they hold their own
+                // handle on the staging file's inode.
+                self.progress.send_modify(|progress| {
+                    progress.written = len;
+                    progress.len = Some(len);
+                    progress.outcome = Outcome::Verified;
+                });
+                self.inner
+                    .promote_stream(&self.key, &self.cleanup.staging, self.reservation, len)
+                    .await;
+                self.cleanup.finish();
+            }
+            Err(failure) => {
+                let written = self.progress.borrow().written;
+                tracing::warn!(
+                    account_id = %self.key.0,
+                    mxc = %self.mxc_url,
+                    bytes = written,
+                    error = %failure,
+                    "streamed media download failed",
+                );
+                if matches!(failure, Failure::Fetch(FetchError::Undecryptable(_))) {
+                    self.inner.remember_undecryptable(self.key.clone());
+                }
+                self.progress
+                    .send_modify(|progress| progress.outcome = Outcome::Failed(failure));
+                // Release the space before the download leaves the map, so
+                // nothing sees a finished stream still holding a reservation.
+                drop(self.reservation);
+                self.cleanup.finish();
+                let _ = tokio::fs::remove_file(&self.cleanup.staging).await;
+            }
+        }
+    }
+
+    /// Copy the upstream body into the staging file, publishing progress after
+    /// every chunk. Returns the verified length.
+    async fn pump(
+        &mut self,
+        body: &mut BoxStream<'static, Result<Bytes, FetchError>>,
+        writer: &mut tokio::fs::File,
+    ) -> Result<u64, Failure> {
+        let limit = self.inner.stream_byte_limit;
+        let mut written: u64 = 0;
+        loop {
+            let next = tokio::time::timeout(self.inner.stall_timeout, body.next())
+                .await
+                .map_err(|_| {
+                    Failure::Fetch(FetchError::Upstream(format!(
+                        "media download stalled: no bytes for {}s",
+                        self.inner.stall_timeout.as_secs()
+                    )))
+                })?;
+            let chunk = match next {
+                None => break,
+                Some(Err(error)) => return Err(Failure::Fetch(error)),
+                Some(Ok(chunk)) => chunk,
+            };
+            let total = written + chunk.len() as u64;
+            if let Some(len) = self.len {
+                if total > len {
+                    return Err(Failure::Fetch(FetchError::Upstream(format!(
+                        "media body ran past its Content-Length of {len} bytes"
+                    ))));
+                }
+            }
+            if total > limit {
+                return Err(Failure::TooLarge {
+                    len: total,
+                    cap: limit,
+                });
+            }
+            if self.len.is_none() {
+                let victims = self.reservation.grow(chunk.len() as u64).ok_or_else(|| {
+                    Failure::Busy(
+                        "media cache has no room beside the other streams in flight".to_owned(),
+                    )
+                })?;
+                self.inner.remove_files(victims).await;
+            }
+            // `flush` waits for tokio's background write, so the bytes are in
+            // the file before any reader is told they are.
+            writer
+                .write_all(&chunk)
+                .await
+                .map_err(|e| Failure::Io(e.to_string()))?;
+            writer
+                .flush()
+                .await
+                .map_err(|e| Failure::Io(e.to_string()))?;
+            written = total;
+            self.progress
+                .send_modify(|progress| progress.written = written);
+        }
+        if let Some(len) = self.len {
+            if written != len {
+                return Err(Failure::Fetch(FetchError::Upstream(format!(
+                    "media body ended at {written} of its {len} bytes"
+                ))));
+            }
+        }
+        writer
+            .sync_all()
+            .await
+            .map_err(|e| Failure::Io(e.to_string()))?;
+        Ok(written)
+    }
+}
+
+/// A streamed download's place in `Inner::streaming` and its staging file.
+///
+/// The task's normal paths remove the entry with [`finish`](Self::finish). If
+/// the task instead ends without a verdict, because something in it panicked
+/// or the runtime dropped it, `Drop` removes the entry and unlinks the staging
+/// file. Without that, the dead download would stay in the map, every later
+/// request for the object would join it and fail ("media download ended
+/// without a verdict"), and the staging file would leak until restart.
+struct StreamCleanup {
+    inner: Arc<Inner>,
+    key: Key,
+    /// This download's entry, to remove exactly it.
+    partial: Arc<Partial>,
+    staging: PathBuf,
+    finished: bool,
+}
+
+impl StreamCleanup {
+    /// Remove the entry; the caller has already dealt with the staging file.
+    fn finish(&mut self) {
+        self.finished = true;
+        self.release();
+    }
+
+    /// Remove the download from `Inner::streaming`, if it is still the entry
+    /// for its key. Tolerates a poisoned map, since it also runs while a
+    /// panic unwinds.
+    fn release(&self) {
+        let mut streaming = match self.inner.streaming.lock() {
+            Ok(streaming) => streaming,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if streaming
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.partial))
+        {
+            streaming.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for StreamCleanup {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        tracing::warn!(
+            account_id = %self.key.0,
+            "streamed media download ended without a verdict; discarding it",
+        );
+        self.release();
+        // Synchronous, since `Drop` cannot await; one unlink is quick. The
+        // file may already have been promoted, and then this finds nothing.
+        let _ = std::fs::remove_file(&self.staging);
+    }
+}
+
 /// Write `data` to `path` (durably), then open it read-only and return the
 /// handle. Any error leaves nothing to clean up that the caller relies on.
 async fn write_and_open(path: &Path, data: &[u8]) -> std::io::Result<tokio::fs::File> {
-    use tokio::io::AsyncWriteExt;
-
     let mut file = tokio::fs::File::create(path).await?;
     file.write_all(data).await?;
     file.sync_all().await?;
@@ -950,6 +1566,9 @@ fn hash_hex(input: &str) -> String {
 }
 
 #[cfg(test)]
+mod stream_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axon_core::media::ThumbnailMethod;
@@ -1001,6 +1620,20 @@ mod tests {
             }
             Ok(self.payload.clone())
         }
+
+        async fn fetch_stream(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _encrypted_file: Option<Value>,
+        ) -> Result<MediaStream, FetchError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let chunk: Result<Bytes, FetchError> = Ok(Bytes::from(self.payload.clone()));
+            Ok(MediaStream {
+                len: Some(self.payload.len() as u64),
+                body: futures_util::stream::iter([chunk]).boxed(),
+            })
+        }
     }
 
     /// Signals once the fetch has been entered, then never completes — so a
@@ -1044,6 +1677,17 @@ mod tests {
             _spec: ThumbnailSpec,
         ) -> Result<Vec<u8>, FetchError> {
             self.stall().await
+        }
+
+        async fn fetch_stream(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _encrypted_file: Option<Value>,
+        ) -> Result<MediaStream, FetchError> {
+            self.stall()
+                .await
+                .map(|_| unreachable!("a stalled fetch never returns"))
         }
     }
 
@@ -1162,6 +1806,15 @@ mod tests {
         ) -> Result<Vec<u8>, FetchError> {
             Err(FetchError::NotFound("nope".into()))
         }
+
+        async fn fetch_stream(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _encrypted_file: Option<Value>,
+        ) -> Result<MediaStream, FetchError> {
+            Err(FetchError::NotFound("nope".into()))
+        }
     }
 
     fn config_in(dir: &Path, max_bytes: u64, max_object_bytes: u64, enabled: bool) -> MediaConfig {
@@ -1234,6 +1887,15 @@ mod tests {
             _mxc_url: &str,
             _spec: ThumbnailSpec,
         ) -> Result<Vec<u8>, FetchError> {
+            unreachable!("not used")
+        }
+
+        async fn fetch_stream(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _encrypted_file: Option<Value>,
+        ) -> Result<MediaStream, FetchError> {
             unreachable!("not used")
         }
     }

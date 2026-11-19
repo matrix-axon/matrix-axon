@@ -8,11 +8,13 @@
 //! adapts the pair onto the `axon-api` `MediaProxy` port.
 
 mod cache;
+mod stream;
 
 pub use cache::{
-    etag_for, etag_for_media, etag_for_thumbnail, FetchError, MediaCache, MediaCacheError,
-    MediaCacheHandle, MediaFetcher, MediaResource,
+    etag_for, etag_for_media, etag_for_thumbnail, FetchError, MediaBody, MediaCache,
+    MediaCacheError, MediaCacheHandle, MediaFetcher, MediaResource,
 };
+pub use stream::{GrowingMedia, MediaStream};
 
 pub use axon_core::media::parse_mxc;
 

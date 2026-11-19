@@ -77,7 +77,7 @@ pub use matrix_oauth_browser::{
 pub use matrix_oauth_grant::{
     MatrixOAuthQrGrantError, MatrixOAuthQrGrantFlowDto, MatrixOAuthQrGrantService,
 };
-pub use media::{MediaError, MediaProxy, MediaResource};
+pub use media::{GrowingResource, GrowingSource, MediaBody, MediaError, MediaProxy, MediaResource};
 pub use member_profiles::{
     MemberProfile, MemberProfileError, MemberProfileService, NoopMemberProfileService,
 };

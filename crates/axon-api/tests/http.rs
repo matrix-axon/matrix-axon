@@ -43,9 +43,9 @@ use axon_store::{
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
-    with_isolated_preference, ConfiguredMediaProxy, DeleteOutcome, ImportTokenCall, LoginCall,
-    LoginOutcome, LogoutOutcome, MediaOutcome, RecoverOutcome, RedecryptOutcome, StubDeviceList,
-    StubLifecycle, StubMediaProxy, StubMemberProfiles, StubSender, StubSyncState,
+    with_isolated_preference, ConfiguredMediaProxy, DeleteOutcome, GrowingOutcome, ImportTokenCall,
+    LoginCall, LoginOutcome, LogoutOutcome, MediaOutcome, RecoverOutcome, RedecryptOutcome,
+    StubDeviceList, StubLifecycle, StubMediaProxy, StubMemberProfiles, StubSender, StubSyncState,
     StubTokenVerifier, StubTrust, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
 };
 use serde_json::{json, Value};
@@ -3147,6 +3147,166 @@ async fn json_and_html_compress_when_the_client_asks() {
     assert_eq!(status, StatusCode::OK);
     assert!(headers.get("content-encoding").is_none());
     assert_eq!(bytes, br#"{"status":"ok"}"#);
+}
+
+/// Video and audio take the streamed path and answer a download still in
+/// flight by ADR 0139 section 3; images keep the buffered one.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn video_and_audio_are_served_while_they_download() {
+    const DATA: &[u8] = b"0123456789abcdef";
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@stream-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!stream-{}:localhost", Uuid::new_v4());
+    let uri_for = |mxc: &str| {
+        format!(
+            "/v1/media/{account_id}/{}",
+            mxc.trim_start_matches("mxc://")
+        )
+    };
+    let mut uris = std::collections::HashMap::new();
+    for mimetype in ["video/mp4", "audio/ogg", "image/png"] {
+        let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+        insert_media_event(&store, account_id, &room_id, &mxc, Some(mimetype)).await;
+        uris.insert(mimetype, uri_for(&mxc));
+    }
+    let video = uris["video/mp4"].clone();
+    let growing = |declared, learned, fails| GrowingOutcome {
+        data: DATA.to_vec(),
+        declared,
+        learned,
+        fails,
+    };
+    let fetch = |proxy: ConfiguredMediaProxy, uri: String, range: Option<&'static str>| {
+        let store = store.clone();
+        async move {
+            let proxy = Arc::new(proxy);
+            let app = media_app(store, proxy.clone());
+            let response = send_request(
+                &app,
+                "GET",
+                &uri,
+                None,
+                Some(&bearer()),
+                range.map(|range| ("range", range)),
+            )
+            .await;
+            (response, proxy)
+        }
+    };
+
+    // Only video and audio stream.
+    for (mimetype, streamed) in [("video/mp4", 1), ("audio/ogg", 1), ("image/png", 0)] {
+        let ((status, _, _), proxy) =
+            fetch(ConfiguredMediaProxy::ok(DATA), uris[mimetype].clone(), None).await;
+        assert_eq!(status, StatusCode::OK, "{mimetype}");
+        assert_eq!(proxy.stream_calls().len(), streamed, "{mimetype}");
+    }
+
+    // A declared length answers exactly as a complete object would.
+    let ((status, headers, body), _) = fetch(
+        ConfiguredMediaProxy::growing(growing(true, false, false)),
+        video.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-length"], "16");
+    assert_eq!(headers["accept-ranges"], "bytes");
+    assert_eq!(headers["content-type"], "video/mp4");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(body, DATA);
+
+    let ((status, headers, body), _) = fetch(
+        ConfiguredMediaProxy::growing(growing(true, false, false)),
+        video.clone(),
+        Some("bytes=2-5"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(headers["content-range"], "bytes 2-5/16");
+    assert_eq!(headers["content-length"], "4");
+    assert_eq!(body, b"2345");
+
+    let ((status, headers, _), _) = fetch(
+        ConfiguredMediaProxy::growing(growing(true, false, false)),
+        video.clone(),
+        Some("bytes=100-"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(headers["content-range"], "bytes */16");
+
+    // No declared length and no `Range`: a chunked 200 that offers no ranges.
+    let ((status, headers, body), _) = fetch(
+        ConfiguredMediaProxy::growing(growing(false, false, false)),
+        video.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("content-length").is_none(), "{headers:?}");
+    assert!(headers.get("accept-ranges").is_none(), "{headers:?}");
+    assert_eq!(body, DATA);
+
+    // With `Range`, the request waits for the length, so its 206 carries a
+    // known total...
+    let ((status, headers, body), _) = fetch(
+        ConfiguredMediaProxy::growing(growing(false, true, false)),
+        video.clone(),
+        Some("bytes=-4"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(headers["content-range"], "bytes 12-15/16");
+    assert_eq!(body, b"cdef");
+
+    // ...or, when the wait runs out, gets the whole body ignoring the range.
+    let ((status, headers, body), _) = fetch(
+        ConfiguredMediaProxy::growing(growing(false, false, false)),
+        video.clone(),
+        Some("bytes=2-5"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("content-range").is_none(), "{headers:?}");
+    assert!(headers.get("accept-ranges").is_none(), "{headers:?}");
+    assert_eq!(body, DATA);
+
+    // A download that fails while the request waits reports its failure.
+    let ((status, _, _), _) = fetch(
+        ConfiguredMediaProxy::growing(growing(false, false, true)),
+        video.clone(),
+        Some("bytes=0-"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A stream that cannot start yet is a retryable 503 that names a wait.
+    let ((status, headers, body), _) = fetch(
+        ConfiguredMediaProxy::failing(MediaOutcome::Busy("no stream slot".to_owned())),
+        video.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(headers.get("retry-after").unwrap(), "5");
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "service_unavailable");
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
 }
 
 /// A body large enough to clear the 32-byte compression floor, so a miss of

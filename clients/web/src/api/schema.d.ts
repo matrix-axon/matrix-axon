@@ -2132,6 +2132,15 @@ export interface paths {
          *     MSC4027 custom reaction key.
          *     The response body is the raw media bytes, streamed from the on-disk cache
          *     with range-request and conditional-GET support.
+         *
+         *     Video and audio (`video/*`, `audio/*`) are served while they download
+         *     (ADR 0139): the response starts once the first bytes have arrived, and a
+         *     range past the downloaded point waits for it. Such a response withholds
+         *     the object's last 64 KiB until the download has been verified, and is
+         *     aborted rather than finished if verification fails. When the homeserver
+         *     declared no length, a request without `Range` gets a `200` with no
+         *     `Content-Length` or `Accept-Ranges`; a request with `Range` waits up to
+         *     10 s for the download to finish, then gets that same `200`.
          */
         get: operations["get_media"];
         put?: never;
@@ -13549,7 +13558,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The media object exceeds the configured per-object cache limit */
+            /** @description The media object exceeds the configured size limit: `max_object_bytes`, or `max_stream_bytes` for video and audio */
             413: {
                 headers: {
                     [name: string]: unknown;
@@ -13567,7 +13576,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help. */
+            /** @description The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help. For video and audio, which stream before their hash is checked, a hash mismatch instead aborts the response before its last 64 KiB, and the next request gets this `422`. */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -13594,7 +13603,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The account's homeserver connection is not currently established */
+            /** @description The account's homeserver connection is not currently established, or a video or audio stream could not start yet (no stream slot or upstream answer within `fetch_timeout_secs`, or no cache room beside other streams). Retryable; a stream that could not start carries `Retry-After`. */
             503: {
                 headers: {
                     [name: string]: unknown;

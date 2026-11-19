@@ -204,6 +204,24 @@ request_timeout_secs = 15
 # %APPDATA%\axon-server\data\uploads). Override here or via
 # AXON_MEDIA__UPLOADS_DIR.
 # uploads_dir = "axon-data/uploads"
+# Total cache size cap, and the per-object cap for buffered media (images,
+# files, thumbnails), in bytes.
+# max_bytes = 5368709120
+# max_object_bytes = 104857600
+# Upstream deadline, in seconds. Bounds a whole buffered download; for streamed
+# video and audio (ADR 0139) it bounds only the wait for a stream slot plus the
+# homeserver's response headers, after which the request gets a retryable 503.
+# fetch_timeout_secs = 60
+# max_concurrent_downloads = 16
+# Video and audio stream from the homeserver as they arrive (ADR 0139). A
+# stream is cancelled after stall_timeout_secs with no bytes, at most
+# max_concurrent_streams are open at once, and objects over max_stream_bytes
+# are refused. max_stream_bytes must not exceed max_bytes - max_object_bytes;
+# unset, it is 2 GiB lowered to that bound, and if that leaves less than
+# max_object_bytes, video and audio are buffered instead of streamed.
+# stall_timeout_secs = 30
+# max_concurrent_streams = 4
+# max_stream_bytes = 2147483648
 # max_upload_bytes = 104857600
 # upload_request_timeout_secs = 60
 # upstream_upload_timeout_secs = 60

@@ -69,6 +69,9 @@ pub struct ErrorResponse {
 pub struct ApiError {
     status: StatusCode,
     body: ErrorResponse,
+    /// Seconds for a `Retry-After` header, on a retryable error that names a
+    /// wait.
+    retry_after: Option<u32>,
 }
 
 impl ApiError {
@@ -90,7 +93,15 @@ impl ApiError {
                     message: message.into(),
                 },
             },
+            retry_after: None,
         }
+    }
+
+    /// Ask the caller to wait `seconds` before retrying, as a `Retry-After`
+    /// header.
+    pub(crate) fn with_retry_after(mut self, seconds: u32) -> Self {
+        self.retry_after = Some(seconds);
+        self
     }
 
     /// `404 Not Found` — the addressed resource does not exist.
@@ -280,7 +291,13 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(self.body)).into_response()
+        let mut response = (self.status, Json(self.body)).into_response();
+        if let Some(seconds) = self.retry_after {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
