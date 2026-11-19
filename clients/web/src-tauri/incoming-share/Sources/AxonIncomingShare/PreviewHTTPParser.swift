@@ -8,6 +8,8 @@ struct PreviewHTTPParser {
   private(set) var status = 0
   private(set) var headers: [String: String] = [:]
   private(set) var body = Data()
+  private(set) var media = PreviewNetwork.Media.other
+  private var prefixLimit: Int
   private var pending = Data()
   private let kind: PreviewNetwork.Kind
   private var length: Int?
@@ -18,10 +20,21 @@ struct PreviewHTTPParser {
   private var interim = 0
   private var finished = false
   private var prefix: Bool {
-    kind == .page && !(headers["content-type"] ?? "").lowercased().hasPrefix("image/")
+    if kind == .page, case .html = media { return true }
+    return false
   }
-  private var limit: Int { prefix ? PreviewNetwork.headBytes : ShareLimits.thumbnailBytes }
-  init(kind: PreviewNetwork.Kind) { self.kind = kind }
+  private var limit: Int { prefix ? prefixLimit : ShareLimits.thumbnailBytes }
+  var atPrefixLimit: Bool { !finished && prefix && body.count == prefixLimit }
+
+  init(kind: PreviewNetwork.Kind, prefixLimit: Int = RestrictedPreview.initialHeadBytes) {
+    self.kind = kind
+    self.prefixLimit = prefixLimit
+  }
+
+  mutating func extendPrefix(to limit: Int) {
+    assert(atPrefixLimit && limit > prefixLimit)
+    prefixLimit = limit
+  }
 
   mutating func append(_ data: Data, eof: Bool = false) throws -> Bool {
     guard !finished else { return true }
@@ -76,6 +89,7 @@ struct PreviewHTTPParser {
       guard headers["content-encoding"].map({ $0.lowercased() == "identity" }) ?? true else {
         throw ShareFailure.invalidResponse
       }
+      media = PreviewNetwork.Media(headers: headers, kind: kind)
       if let transfer = headers["transfer-encoding"] {
         guard transfer.lowercased() == "chunked", headers["content-length"] == nil else {
           throw ShareFailure.invalidResponse
@@ -85,8 +99,12 @@ struct PreviewHTTPParser {
         guard !rawLength.isEmpty, rawLength.allSatisfy({ $0.isASCII && $0.isNumber }),
           let value = Int(rawLength), value >= 0
         else { throw ShareFailure.invalidResponse }
-        if !prefix && value > limit { throw ShareFailure.quota }
+        if (kind == .image || media == .image) && value > limit { throw ShareFailure.quota }
         length = value
+      }
+      if kind == .page, case .other = media {
+        finished = true
+        return true
       }
     }
     if chunked {
@@ -137,8 +155,8 @@ struct PreviewHTTPParser {
         if wanted > 0 {
           let consumed = try collect(pending.prefix(wanted))
           pending.removeFirst(consumed)
-          if finished { return true }
           chunk! -= consumed
+          if finished || atPrefixLimit { return true }
         }
         if chunk! > 0 {
           guard !eof else { throw ShareFailure.invalidResponse }
@@ -163,6 +181,7 @@ struct PreviewHTTPParser {
       finished = true
       return true
     }
+    if atPrefixLimit { return true }
     if eof {
       guard length == nil else { throw ShareFailure.invalidResponse }
       finished = true
@@ -174,11 +193,11 @@ struct PreviewHTTPParser {
   private mutating func collect(_ data: Data.SubSequence) throws -> Int {
     let wanted = min(data.count, limit - body.count)
     if !prefix && wanted != data.count { throw ShareFailure.quota }
+    let previous = body.count
     body.append(data.prefix(wanted))
     if prefix {
       // Only scan the bounded new tail; do not rescan a large head per packet.
-      let tail = body.suffix(wanted + 8)
-      if Self.endsHead(tail) || body.count == limit {
+      if Self.endsHead(body, previous: previous) {
         finished = true
       }
     }
@@ -189,10 +208,12 @@ struct PreviewHTTPParser {
   /// whitespace, `/` or `>`. So `<bodyguard>` does not end a head. One inside
   /// script or comment text still does; the reader does not tokenize. The
   /// Rust reader (`axon-link-preview/src/http.rs`) applies the same rule.
-  static func endsHead(_ bytes: Data) -> Bool {
-    let bytes = [UInt8](bytes)
+  static func endsHead(_ data: Data, previous: Int = 0) -> Bool {
     let boundary: Set<UInt8> = [9, 10, 12, 13, 32, 47, 62]
-    for marker in [[UInt8]("</head".utf8), [UInt8]("<body".utf8)] where bytes.count > marker.count {
+    for marker in [[UInt8]("</head".utf8), [UInt8]("<body".utf8)] {
+      // Keep a whole marker in case its boundary is in the next read.
+      let bytes = [UInt8](data.dropFirst(max(0, previous - marker.count)))
+      guard bytes.count > marker.count else { continue }
       for start in 0..<(bytes.count - marker.count) {
         var matches = true
         for offset in 0..<marker.count {

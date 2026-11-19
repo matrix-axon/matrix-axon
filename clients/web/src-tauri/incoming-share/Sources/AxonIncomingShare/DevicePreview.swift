@@ -94,6 +94,7 @@
       } catch {
         try cancellation.check()
         if let failure = error as? DevicePreviewFailure { throw failure }
+        if (error as? ShareFailure) == .noPreviewMetadata { throw DevicePreviewFailure.noMetadata }
         if (error as? ShareFailure) == .expired { throw DevicePreviewFailure.timeout }
         if (error as? ShareFailure) == .publicIPv4Required {
           throw DevicePreviewFailure.publicIPv4Required

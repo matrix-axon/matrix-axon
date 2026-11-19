@@ -14,7 +14,6 @@
 //! `src/incoming-share/fixtures/preview-boundary.json`.
 
 use crate::error::{Failure, Result};
-use crate::http::HEAD_BYTES;
 use html5ever::tendril::TendrilSink;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
@@ -23,8 +22,11 @@ pub(crate) const TITLE_LIMIT: usize = 300;
 pub(crate) const DESCRIPTION_LIMIT: usize = 1000;
 pub(crate) const SITE_NAME_LIMIT: usize = 120;
 const IMAGE_URL_LIMIT: usize = 4096;
+/// Initial HTML body budget, and the hard cap for the optional continuation.
+pub(crate) const INITIAL_HEAD_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_HEAD_BYTES: usize = 1024 * 1024;
 /// Only the bytes before the 513th `<` are parsed, which bounds the tree.
-const MAX_TAGS: usize = 512;
+pub(crate) const MAX_TAGS: usize = 512;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Page {
@@ -86,8 +88,13 @@ fn windows_1252(data: &[u8]) -> Option<String> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
-    if data.len() > HEAD_BYTES {
+    parse_body(data, content_type, false)
+}
+
+pub(crate) fn parse_body(data: &[u8], content_type: &str, cutoff: bool) -> Result<Page> {
+    if data.len() > MAX_HEAD_BYTES {
         return Err(Failure::Quota);
     }
     // Bound the tree, and its recursive destruction, before building it: a
@@ -95,8 +102,15 @@ pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
     // the bound. Preview tags come early in a head (on 36 measured pages, all
     // of them within the first 160 `<`), so a heavy page keeps its metadata
     // rather than losing its card. A tag the cut ends is dropped whole.
-    let data = &data[..tag_bound(data)];
-    let html = decode(data, content_type);
+    let end = tag_bound(data);
+    let mut html = decode(&data[..end], content_type);
+    if cutoff || end < data.len() {
+        // If the parser is still inside the title at the cutoff, this text
+        // makes its fallback title exceed TITLE_LIMIT. After a closed title,
+        // the padding becomes ordinary text elsewhere in the document.
+        html.push('\n');
+        html.extend(std::iter::repeat_n('x', TITLE_LIMIT + 1));
+    }
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(html);
     let mut elements = Vec::new();
     collect_elements(&dom.document, &mut elements);
@@ -116,7 +130,7 @@ pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
         TITLE_LIMIT,
     )
     .or_else(|| preview_field(Some(&document_title(&elements)), TITLE_LIMIT));
-    Ok(Page {
+    let page = Page {
         title,
         description: content(
             &[
@@ -136,7 +150,8 @@ pub(crate) fn parse(data: &[u8], content_type: &str) -> Result<Page> {
             ],
             IMAGE_URL_LIMIT,
         ),
-    })
+    };
+    Ok(page)
 }
 
 /// Where the bytes allowed to reach the parser end: just before the
@@ -147,6 +162,201 @@ fn tag_bound(data: &[u8]) -> usize {
         .filter(|(_, &byte)| byte == b'<')
         .nth(MAX_TAGS)
         .map_or(data.len(), |(index, _)| index)
+}
+
+/// At the checkpoint use a small fragment of complete meta tags. The full
+/// document goes through the tree builder only once, after collecting it.
+pub(crate) fn has_rich_metadata(data: &[u8], content_type: &str) -> Result<bool> {
+    let probe = head_probe(data);
+    if probe.open_title || probe.meta.is_empty() {
+        return Ok(false);
+    }
+    let page = parse_body(&probe.meta, content_type, false)?;
+    Ok(page.description.is_some() || page.image.is_some())
+}
+
+#[derive(Default)]
+struct HeadProbe {
+    meta: Vec<u8>,
+    open_title: bool,
+}
+
+/// A lightweight scan for complete metadata tags. The HTML parser still owns
+/// field selection and attribute decoding. Raw text and template contents
+/// cannot supply early metadata hints.
+fn head_probe(mut input: &[u8]) -> HeadProbe {
+    const PROBE_BYTES: usize = 16 * 1024;
+    const RAW_TEXT: &[&[u8]] = &[
+        b"title",
+        b"textarea",
+        b"script",
+        b"style",
+        b"iframe",
+        b"xmp",
+        b"noembed",
+        b"noframes",
+        b"noscript",
+    ];
+    let mut probe = HeadProbe::default();
+    let mut templates: usize = 0;
+    while let Some(start) = input.iter().position(|&byte| byte == b'<') {
+        input = &input[start..];
+        if input.starts_with(b"<!--") {
+            let Some(after) = skip_comment(&input[4..]) else {
+                break;
+            };
+            input = after;
+            continue;
+        }
+        let name_start = if input.starts_with(b"</") { 2 } else { 1 };
+        let Some(&first) = input.get(name_start) else {
+            break;
+        };
+        if !first.is_ascii_alphabetic() {
+            if matches!(first, b'!' | b'?') {
+                let Some(end) = input.iter().position(|&byte| byte == b'>') else {
+                    break;
+                };
+                input = &input[end + 1..];
+            } else {
+                input = &input[1..];
+            }
+            continue;
+        }
+        let Some(name_length) = input[name_start..]
+            .iter()
+            .position(|&byte| tag_boundary(byte))
+        else {
+            break;
+        };
+        let name_end = name_start + name_length;
+        let name = &input[name_start..name_end];
+        let Some(end) = tag_end(input, name_end) else {
+            break;
+        };
+        let tag = &input[..end];
+        input = &input[end..];
+        if name.eq_ignore_ascii_case(b"template") {
+            templates = if name_start == 1 {
+                templates + 1
+            } else {
+                templates.saturating_sub(1)
+            };
+        } else if name_start == 1 {
+            if name.eq_ignore_ascii_case(b"plaintext") {
+                break;
+            }
+            if let Some(raw) = RAW_TEXT.iter().find(|raw| raw.eq_ignore_ascii_case(name)) {
+                let Some(after) = skip_raw_text(input, raw) else {
+                    probe.open_title = *raw == b"title" && templates == 0;
+                    break;
+                };
+                input = after;
+            } else if templates == 0 && name.eq_ignore_ascii_case(b"meta") {
+                if probe.meta.len() + tag.len() > PROBE_BYTES {
+                    probe.meta.clear();
+                    break;
+                }
+                probe.meta.extend_from_slice(tag);
+            }
+        }
+    }
+    probe
+}
+
+/// Find the end of a comment after its opening delimiter.
+fn skip_comment(input: &[u8]) -> Option<&[u8]> {
+    if let Some(after) = input
+        .strip_prefix(b">")
+        .or_else(|| input.strip_prefix(b"->"))
+    {
+        return Some(after);
+    }
+    for (index, _) in input.iter().enumerate().filter(|&(_, &byte)| byte == b'-') {
+        let remaining = &input[index..];
+        if let Some(after) = remaining
+            .strip_prefix(b"-->")
+            .or_else(|| remaining.strip_prefix(b"--!>"))
+        {
+            return Some(after);
+        }
+    }
+    None
+}
+
+/// Script can contain a nested script marker while escaped by an HTML
+/// comment. In that state the first closing marker exits the double escape.
+fn skip_raw_text<'a>(mut input: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let script = name == b"script";
+    let (mut escaped, mut double_escaped) = (false, false);
+    while let Some(start) = input
+        .iter()
+        .position(|&byte| byte == b'<' || (escaped && byte == b'-'))
+    {
+        input = &input[start..];
+        if script && !escaped && input.starts_with(b"<!--") {
+            escaped = true;
+            input = &input[4..];
+            continue;
+        }
+        if escaped && input.starts_with(b"-->") {
+            escaped = false;
+            double_escaped = false;
+        } else if escaped && !double_escaped && starts_named_tag(input, 1, name) && input[0] == b'<'
+        {
+            double_escaped = true;
+        } else if input.starts_with(b"</") && starts_named_tag(input, 2, name) {
+            if double_escaped {
+                double_escaped = false;
+            } else {
+                return tag_end(input, 2 + name.len()).map(|end| &input[end..]);
+            }
+        }
+        input = &input[1..];
+    }
+    None
+}
+
+fn starts_named_tag(input: &[u8], start: usize, name: &[u8]) -> bool {
+    let end = start + name.len();
+    input
+        .get(start..end)
+        .is_some_and(|tag| tag.eq_ignore_ascii_case(name))
+        && input.get(end).is_some_and(|&byte| tag_boundary(byte))
+}
+
+fn tag_boundary(byte: u8) -> bool {
+    html_space(byte) || matches!(byte, b'/' | b'>')
+}
+
+fn html_space(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+}
+
+/// Position after a closing bracket outside a quoted attribute value.
+fn tag_end(tag: &[u8], start: usize) -> Option<usize> {
+    enum Attribute {
+        Name,
+        BeforeValue,
+        Unquoted,
+        Quoted(u8),
+    }
+    use Attribute::*;
+    let mut state = Name;
+    for (index, &byte) in tag.iter().enumerate().skip(start) {
+        state = match (state, byte) {
+            (Quoted(open), byte) if open == byte => Name,
+            (Quoted(open), _) => Quoted(open),
+            (_, b'>') => return Some(index + 1),
+            (Name, b'=') => BeforeValue,
+            (BeforeValue, b'\'' | b'"') => Quoted(byte),
+            (BeforeValue, byte) if html_space(byte) => BeforeValue,
+            (BeforeValue, _) => Unquoted,
+            (Unquoted, byte) if !html_space(byte) => Unquoted,
+            _ => Name,
+        };
+    }
+    None
 }
 
 /// Every element, in document order. Iterative, so a deep tree cannot

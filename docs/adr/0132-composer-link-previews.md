@@ -82,7 +82,7 @@ ADR 0125's reason holds here: its plaintext request can enter the homeserver's l
 A new in-repo Tauri plugin, `axon-link-preview`, fetches and parses a page and its preview image.
 It is a separate plugin from `axon-http`, so it neither depends on the transport's any-URL reach nor blocks narrowing it.
 
-It enforces the same boundary as the Swift reader in `incoming-share/Sources/AxonIncomingShare/PreviewNetwork.swift`, rule for rule:
+It shares the network and metadata rules of the Swift reader in `incoming-share/Sources/AxonIncomingShare/PreviewNetwork.swift`.
 
 - **Hosts:** the static check above, repeated natively for the first URL and every redirect and image URL.
 - **DNS:** query only the origin's A records, and require a public IPv4 address.
@@ -97,7 +97,13 @@ It enforces the same boundary as the Swift reader in `incoming-share/Sources/Axo
 - **Redirects:** followed by hand, at most six hops, each one validated as a new request.
 - **Responses:** only status 200 is used.
   Headers are capped at 32 KiB and an image at 2 MiB.
-  A page is read only until the end of its `<head>` or 256 KiB, whichever comes first.
+  Both readers stop at the end of the HTML head or check the first 256 KiB for a usable description or preview image reference, whichever comes first.
+  If the probe finds neither a usable description nor an image reference, or a title is still open, the same response can continue until the head or response ends, the tag budget is exhausted, or the reader reaches 1 MiB.
+  The continuation has a four-second budget and reserves six seconds on the shared deadline for parsing and fetching an image.
+  If the connection closes exactly at the checkpoint, the collected prefix remains usable even if the response declared a longer body.
+  The checkpoint probe is conservative around raw text and nested markup.
+  The Rust and Swift HTML parsers can recover differently from unusual markup, including `noscript` and foreign elements.
+  When that optional budget expires, the reader extracts metadata from the bytes already received and drops any unfinished title.
   The head ends at `</head` or `<body` followed by whitespace, `/` or `>`; neither reader tokenizes, so one inside a script still ends it.
   Only the bytes before the 513th `<` are parsed, which bounds the tree.
   A heavier head keeps the metadata that came before the cut instead of losing its card; on 36 measured pages none passed 292 `<`, and every preview tag came within the first 160.

@@ -94,6 +94,8 @@ struct Boundary {
     #[serde(rename = "rejectedBeforeDNS")]
     rejected_before_dns: Vec<String>,
     head_ends: Vec<HeadEnd>,
+    head_read_limits: HeadReadLimits,
+    head_reads: Vec<HeadRead>,
     addresses: Addresses,
     operator_mappings: Vec<String>,
     nat64: Nat64,
@@ -105,6 +107,34 @@ struct Boundary {
 struct HeadEnd {
     text: String,
     ends: bool,
+}
+
+#[derive(Deserialize)]
+struct HeadReadLimits {
+    initial: usize,
+    maximum: usize,
+    tags: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HeadRead {
+    name: String,
+    content_type: Option<String>,
+    content_length: Option<usize>,
+    start: String,
+    pad_to: usize,
+    tail: String,
+    repeat: Option<String>,
+    repetitions: Option<usize>,
+    repeat_after_padding: Option<bool>,
+    after_repeat: Option<String>,
+    cutoff: Option<bool>,
+    trailing_spaces: Option<usize>,
+    stop: String,
+    title: Option<String>,
+    description: Option<String>,
+    image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +192,7 @@ fn boundary() -> Boundary {
 fn swift_name(failure: Failure) -> &'static str {
     match failure {
         Failure::PreviewUnavailable => "previewUnavailable",
+        Failure::NoMetadata => "noPreviewMetadata",
         Failure::PublicIpv4Required => "publicIPv4Required",
         Failure::InvalidResponse => "invalidResponse",
         Failure::Quota => "quota",
@@ -204,12 +235,23 @@ fn fixture_urls_are_rejected_before_dns() {
 #[test]
 fn fixture_head_ends() {
     for case in boundary().head_ends {
+        let bytes = case.text.as_bytes();
         assert_eq!(
-            crate::http::ends_head(case.text.as_bytes()),
+            crate::http::ends_head(bytes, 0),
             case.ends,
             "{:?}",
             case.text
         );
+        for split in 1..bytes.len() {
+            if !crate::http::ends_head(&bytes[..split], 0) {
+                assert_eq!(
+                    crate::http::ends_head(bytes, split),
+                    case.ends,
+                    "{case_text:?} at {split}",
+                    case_text = case.text
+                );
+            }
+        }
     }
 }
 
@@ -670,13 +712,16 @@ impl Hop for Scripted {
 }
 
 fn response(status: u16, headers: &[(&str, &str)], body: &[u8], url: &url::Url) -> Response {
+    let headers = headers
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect();
     Response {
         status,
-        headers: headers
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-            .collect(),
+        media: crate::http::Media::from_headers(&headers, Resource::Page),
+        headers,
         body: body.to_vec(),
+        cutoff: false,
         url: url.clone(),
     }
 }
@@ -970,6 +1015,21 @@ async fn a_lookup_reports_the_kinds_the_page_sees() {
     .unwrap();
     assert_eq!(preview.title.as_deref(), Some("/"));
     assert!(preview.image_unavailable);
+
+    let no_metadata = Scripted::new(
+        Box::new(public),
+        Box::new(|checked, _, _| Ok(response(200, &[], b"<head></head>", &checked.url))),
+    );
+    let error = preview::lookup(
+        &no_metadata,
+        "https://example.org/",
+        Instant::now() + preview::DEADLINE,
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, Kind::NoMetadata);
 }
 
 // ---------------------------------------------------------------------------
@@ -1463,6 +1523,159 @@ async fn a_lookup_end_to_end_over_tls() {
         let lower = request.to_ascii_lowercase();
         assert!(!lower.contains("cookie") && !lower.contains("authorization"));
     }
+}
+
+const TEST_GET: &[u8] = b"GET / HTTP/1.1\r\n\r\n";
+
+#[tokio::test]
+async fn fixture_head_reads() {
+    let fixture = boundary();
+    assert_eq!(page::INITIAL_HEAD_BYTES, fixture.head_read_limits.initial);
+    assert_eq!(page::MAX_HEAD_BYTES, fixture.head_read_limits.maximum);
+    assert_eq!(page::MAX_TAGS, fixture.head_read_limits.tags);
+    for case in fixture.head_reads {
+        let repeated = case
+            .repeat
+            .as_deref()
+            .unwrap_or("")
+            .repeat(case.repetitions.unwrap_or(0));
+        let mut html = case.start.into_bytes();
+        if !case.repeat_after_padding.unwrap_or(false) {
+            html.extend_from_slice(repeated.as_bytes());
+        }
+        html.resize(case.pad_to, b' ');
+        html.extend_from_slice(case.tail.as_bytes());
+        if case.repeat_after_padding.unwrap_or(false) {
+            html.extend_from_slice(repeated.as_bytes());
+        }
+        html.extend_from_slice(case.after_repeat.as_deref().unwrap_or("").as_bytes());
+        html.resize(html.len() + case.trailing_spaces.unwrap_or(0), b' ');
+        let (client, mut server) = tokio::io::duplex(4096);
+        let content_type = case.content_type.as_deref().unwrap_or("text/html");
+        let length = case.content_length.unwrap_or(html.len());
+        let mut body = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {length}\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&html);
+        let serve = async move {
+            let mut request = [0; TEST_GET.len()];
+            server.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, TEST_GET);
+            // Early stops close the connection while the body is still being sent.
+            let _ = server.write_all(&body).await;
+        };
+        let read = net::read_response(
+            client,
+            TEST_GET,
+            Resource::Page,
+            "https://page.example.org/".parse().unwrap(),
+            Instant::now() + preview::DEADLINE,
+        );
+        let (_, result) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(serve, read) })
+                .await
+                .unwrap();
+        let response = result.unwrap_or_else(|err| panic!("{}: {err:?}", case.name));
+        if let Some(cutoff) = case.cutoff {
+            assert_eq!(response.cutoff, cutoff, "{}", case.name);
+        }
+        let retained = response.body.len();
+        match case.stop.as_str() {
+            "full" => assert_eq!(retained, html.len(), "{}", case.name),
+            "initial" => assert_eq!(retained, page::INITIAL_HEAD_BYTES, "{}", case.name),
+            "headers" => assert_eq!(retained, 0, "{}", case.name),
+            "hard" => assert_eq!(retained, page::MAX_HEAD_BYTES, "{}", case.name),
+            "tagBudget" => assert!(
+                (case.pad_to..case.pad_to + 2 * crate::http::READ_BYTES).contains(&retained),
+                "{} retained {retained}",
+                case.name
+            ),
+            other => panic!("{} unknown stop: {other}", case.name),
+        }
+        if let crate::http::Media::Html(content_type) = response.media {
+            let page = page::parse_body(&response.body, &content_type, response.cutoff).unwrap();
+            assert_eq!(page.title, case.title, "{}", case.name);
+            assert_eq!(page.description, case.description, "{}", case.name);
+            assert_eq!(page.image, case.image, "{}", case.name);
+        } else {
+            assert_eq!(response.media, crate::http::Media::Other, "{}", case.name);
+            assert_eq!(case.stop, "headers", "{}", case.name);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_optional_reads_return_a_prefix_before_the_lookup_deadline() {
+    for (wait, finished, extended) in [(0, 13, true), (9, 19, true), (12, 21, false)] {
+        let (client, mut server) = tokio::io::duplex(16 * 1024);
+        let send = async {
+            let mut request = [0; TEST_GET.len()];
+            server.read_exact(&mut request).await.unwrap();
+            server
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1100000\r\n\r\n")
+                .await
+                .unwrap();
+            if wait != 0 {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+            let bytes = [b' '; 15 * 1024];
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if server.write_all(&bytes).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let start = Instant::now();
+        let read = async {
+            let response = net::read_response(
+                client,
+                TEST_GET,
+                Resource::Page,
+                "https://page.example.org/".parse().unwrap(),
+                start + preview::DEADLINE,
+            )
+            .await
+            .unwrap();
+            assert!(response.cutoff);
+            assert_eq!(Instant::now() - start, Duration::from_secs(finished));
+            if extended {
+                assert!((page::INITIAL_HEAD_BYTES + 1..512 * 1024).contains(&response.body.len()));
+            } else {
+                assert_eq!(response.body.len(), page::INITIAL_HEAD_BYTES);
+            }
+            assert_eq!(
+                page::parse_body(&response.body, "text/html", true).unwrap(),
+                page::Page::default()
+            );
+        };
+        tokio::join!(send, read);
+    }
+}
+
+#[tokio::test]
+async fn a_lookup_reads_late_metadata_on_the_same_connection() {
+    let mut html = b"<html><head><title>Early title</title><script>".to_vec();
+    html.resize(774 * 1024, b' ');
+    html.extend_from_slice(
+        b"</script><meta property='og:title' content='Late title'><meta property='og:description' content='Late description'></head>",
+    );
+    html.resize(2 * 1024 * 1024, b' ');
+    let (port, requests) = https_server(HashMap::from([("/", ok("text/html", &html))])).await;
+    let (network, _) = network(port);
+    let preview = preview::lookup(
+        &network,
+        "https://page.example.org/",
+        Instant::now() + preview::DEADLINE,
+        &Cancel::new(),
+        &preview::Normalizer::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview.title.as_deref(), Some("Late title"));
+    assert_eq!(preview.description.as_deref(), Some("Late description"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

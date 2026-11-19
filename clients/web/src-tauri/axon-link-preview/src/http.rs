@@ -1,16 +1,14 @@
 //! A bounded HTTP/1.1 response collector, ported from `PreviewHTTPParser.swift`.
 //!
 //! `httparse` reads each header block; this handles body framing. A page is
-//! collected only until its `<head>` ends, or `<body` starts, or 256 KiB. An
-//! image needs its complete body, at most 2 MiB. Compressed responses, folded
+//! collected until its head ends or the caller-supplied prefix budget is reached.
+//! An image needs its complete body, at most 2 MiB. Compressed responses, folded
 //! headers, conflicting framing and more than five interim responses are all
 //! refused.
 
 use crate::error::{Failure, Result};
 use std::collections::HashMap;
 
-/// A page is read until its head ends, or this many bytes.
-pub(crate) const HEAD_BYTES: usize = 256 * 1024;
 /// The response head, including every interim response.
 pub(crate) const HEADER_BYTES: usize = 32 * 1024;
 /// An image, as the server's upload contract allows (`ShareLimits.thumbnailBytes`).
@@ -39,12 +37,41 @@ pub(crate) fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
+/// Interpret Content-Type once for both framing and preview selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Media {
+    Html(String),
+    Image,
+    Other,
+}
+
+impl Media {
+    pub(crate) fn from_headers(headers: &HashMap<String, String>, kind: Kind) -> Self {
+        let Some(value) = headers.get("content-type") else {
+            return match kind {
+                Kind::Page => Self::Html("text/html".into()),
+                Kind::Image => Self::Other,
+            };
+        };
+        let value = value.to_ascii_lowercase();
+        if value.starts_with("text/html") || value.starts_with("application/xhtml+xml") {
+            Self::Html(value)
+        } else if value.starts_with("image/") {
+            Self::Image
+        } else {
+            Self::Other
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Parser {
     kind: Kind,
     status: u16,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+    media: Media,
+    prefix_limit: usize,
     pending: Vec<u8>,
     length: Option<usize>,
     chunked: bool,
@@ -65,9 +92,11 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// whitespace, `/` or `>`. So `<bodyguard>` does not end a head. One inside
 /// script or comment text still does; the reader does not tokenize. The Swift
 /// reader (`PreviewHTTPParser.endsHead`) applies the same rule.
-pub(crate) fn ends_head(bytes: &[u8]) -> bool {
+pub(crate) fn ends_head(bytes: &[u8], previous: usize) -> bool {
     [&b"</head"[..], &b"<body"[..]].iter().any(|marker| {
-        bytes.windows(marker.len() + 1).any(|window| {
+        // Keep a whole marker in case its boundary is in the next read.
+        let tail = &bytes[previous.saturating_sub(marker.len())..];
+        tail.windows(marker.len() + 1).any(|window| {
             window[..marker.len()].eq_ignore_ascii_case(marker)
                 && matches!(
                     window[marker.len()],
@@ -83,12 +112,14 @@ fn latin1(bytes: &[u8]) -> String {
 }
 
 impl Parser {
-    pub(crate) fn new(kind: Kind) -> Self {
+    pub(crate) fn new(kind: Kind, prefix_limit: usize) -> Self {
         Parser {
             kind,
             status: 0,
             headers: HashMap::new(),
             body: Vec::new(),
+            media: Media::Other,
+            prefix_limit,
             pending: Vec::new(),
             length: None,
             chunked: false,
@@ -104,30 +135,41 @@ impl Parser {
         self.status
     }
 
-    pub(crate) fn into_parts(self) -> (u16, HashMap<String, String>, Vec<u8>) {
-        (self.status, self.headers, self.body)
+    pub(crate) fn into_parts(self) -> (u16, HashMap<String, String>, Vec<u8>, Media) {
+        (self.status, self.headers, self.body, self.media)
+    }
+
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    pub(crate) fn media(&self) -> &Media {
+        &self.media
+    }
+
+    pub(crate) fn at_prefix_limit(&self) -> bool {
+        !self.finished && self.prefix() && self.body.len() == self.prefix_limit
+    }
+
+    pub(crate) fn extend_prefix(&mut self, limit: usize) {
+        debug_assert!(self.at_prefix_limit() && limit > self.prefix_limit);
+        self.prefix_limit = limit;
     }
 
     /// A page that is really an image is held to the image's rules.
     fn prefix(&self) -> bool {
-        self.kind == Kind::Page
-            && !self
-                .headers
-                .get("content-type")
-                .map(|value| value.to_ascii_lowercase())
-                .unwrap_or_default()
-                .starts_with("image/")
+        self.kind == Kind::Page && matches!(self.media, Media::Html(_))
     }
 
     fn limit(&self) -> usize {
         if self.prefix() {
-            HEAD_BYTES
+            self.prefix_limit
         } else {
             THUMBNAIL_BYTES
         }
     }
 
-    /// Feed `data`; `true` once the response is complete enough to use.
+    /// Feed `data`; `true` when the response is usable or the prefix limit is reached.
     pub(crate) fn append(&mut self, data: &[u8], eof: bool) -> Result<bool> {
         if self.finished {
             return Ok(true);
@@ -171,6 +213,9 @@ impl Parser {
         }
         if self.length == Some(self.body.len()) {
             self.finished = true;
+            return Ok(true);
+        }
+        if self.at_prefix_limit() {
             return Ok(true);
         }
         if eof {
@@ -244,6 +289,7 @@ impl Parser {
         {
             return Err(Failure::InvalidResponse);
         }
+        self.media = Media::from_headers(&self.headers, self.kind);
         if let Some(transfer) = self.headers.get("transfer-encoding") {
             if !transfer.eq_ignore_ascii_case("chunked")
                 || self.headers.contains_key("content-length")
@@ -261,10 +307,14 @@ impl Parser {
                 .ok()
                 .and_then(|value| usize::try_from(value).ok())
                 .ok_or(Failure::InvalidResponse)?;
-            if !self.prefix() && value > self.limit() {
+            if (self.kind == Kind::Image || self.media == Media::Image) && value > self.limit() {
                 return Err(Failure::Quota);
             }
             self.length = Some(value);
+        }
+        if self.kind == Kind::Page && self.media == Media::Other {
+            self.finished = true;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -336,10 +386,10 @@ impl Parser {
                 let data: Vec<u8> = self.pending[..wanted].to_vec();
                 let consumed = self.collect(&data)?;
                 self.pending.drain(..consumed);
-                if self.finished {
+                self.chunk = Some(remaining - consumed);
+                if self.finished || self.at_prefix_limit() {
                     return Ok(true);
                 }
-                self.chunk = Some(remaining - consumed);
             }
             if self.chunk.is_some_and(|left| left > 0) {
                 if eof {
@@ -367,14 +417,10 @@ impl Parser {
         if !prefix && wanted != data.len() {
             return Err(Failure::Quota);
         }
+        let previous = self.body.len();
         self.body.extend_from_slice(&data[..wanted]);
-        if prefix {
-            // Only the new tail, so a large head is not rescanned per read.
-            let start = self.body.len().saturating_sub(wanted + 8);
-            let tail = &self.body[start..];
-            if ends_head(tail) || self.body.len() == HEAD_BYTES {
-                self.finished = true;
-            }
+        if prefix && ends_head(&self.body, previous) {
+            self.finished = true;
         }
         Ok(wanted)
     }
@@ -386,7 +432,7 @@ mod tests {
 
     #[test]
     fn framing_with_split_chunks_and_interim_headers() {
-        let mut parser = Parser::new(Kind::Image);
+        let mut parser = Parser::new(Kind::Image, 0);
         let response = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: image/png\r\n\r\n3\r\nabc\r\n2;test=yes\r\nde\r\n0\r\n\r\n";
         let mut done = false;
         for byte in response {
@@ -411,14 +457,14 @@ mod tests {
             "HTTP/1.1 101 Switching Protocols\r\n\r\n",
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
         ] {
-            let mut parser = Parser::new(Kind::Image);
+            let mut parser = Parser::new(Kind::Image, 0);
             assert!(parser.append(raw.as_bytes(), true).is_err(), "{raw:?}");
         }
     }
 
     #[test]
     fn html_stops_at_head_and_images_require_complete_bodies() {
-        let mut parser = Parser::new(Kind::Page);
+        let mut parser = Parser::new(Kind::Page, 256 * 1024);
         assert!(parser
             .append(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 99999999\r\n\r\n<title>Title</title></head>ignored body",
@@ -427,7 +473,7 @@ mod tests {
             .unwrap());
         let body = parser.into_parts().2;
         assert!(String::from_utf8_lossy(&body).contains("Title"));
-        let mut image = Parser::new(Kind::Image);
+        let mut image = Parser::new(Kind::Image, 0);
         assert!(!image
             .append(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc", false)
             .unwrap());
@@ -436,7 +482,7 @@ mod tests {
 
     #[test]
     fn a_page_that_is_an_image_is_held_to_the_image_limit() {
-        let mut parser = Parser::new(Kind::Page);
+        let mut parser = Parser::new(Kind::Page, 256 * 1024);
         let head = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: IMAGE/png\r\nContent-Length: {}\r\n\r\n",
             THUMBNAIL_BYTES + 1
@@ -446,7 +492,7 @@ mod tests {
 
     #[test]
     fn head_scan_sees_a_marker_split_across_reads() {
-        let mut parser = Parser::new(Kind::Page);
+        let mut parser = Parser::new(Kind::Page, 256 * 1024);
         assert!(!parser
             .append(b"HTTP/1.1 200 OK\r\n\r\n<title>T</title></he", false)
             .unwrap());
@@ -456,7 +502,7 @@ mod tests {
     #[test]
     fn a_head_end_split_across_reads_is_found_once_its_boundary_arrives() {
         // The cases themselves are the shared fixture's `headEnds`.
-        let mut parser = Parser::new(Kind::Page);
+        let mut parser = Parser::new(Kind::Page, 256 * 1024);
         assert!(!parser
             .append(
                 b"HTTP/1.1 200 OK\r\n\r\n<title>T</title><bodyguard><body",
@@ -467,15 +513,32 @@ mod tests {
     }
 
     #[test]
+    fn the_prefix_limit_can_pause_inside_a_chunk_and_resume_pending_bytes() {
+        let mut parser = Parser::new(Kind::Page, 4);
+        assert!(parser
+            .append(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nabcdef\r\n0\r\n\r\n",
+                false
+            )
+            .unwrap());
+        assert!(parser.at_prefix_limit());
+        assert_eq!(parser.body(), b"abcd");
+        parser.extend_prefix(8);
+        assert!(parser.append(b"", false).unwrap());
+        assert!(!parser.at_prefix_limit());
+        assert_eq!(parser.body(), b"abcdef");
+    }
+
+    #[test]
     fn redirects_finish_at_their_head_and_other_statuses_fail() {
-        let mut parser = Parser::new(Kind::Page);
+        let mut parser = Parser::new(Kind::Page, 256 * 1024);
         assert!(parser
             .append(b"HTTP/1.1 302 Found\r\nLocation: /next\r\n\r\n", false)
             .unwrap());
-        let (status, headers, _) = parser.into_parts();
+        let (status, headers, _, _) = parser.into_parts();
         assert_eq!(status, 302);
         assert_eq!(headers["location"], "/next");
-        let mut parser = Parser::new(Kind::Page);
+        let mut parser = Parser::new(Kind::Page, 256 * 1024);
         assert_eq!(
             parser.append(b"HTTP/1.1 404 Not Found\r\n\r\n", false),
             Err(Failure::PreviewUnavailable)
@@ -483,8 +546,20 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_content_type_defaults_to_html_only_for_page_requests() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
+        let mut page = Parser::new(Kind::Page, 256 * 1024);
+        let mut image = Parser::new(Kind::Image, 0);
+        assert!(page.append(head, false).unwrap());
+        assert!(image.append(head, false).unwrap());
+        assert_eq!(page.media(), &Media::Html("text/html".into()));
+        assert_eq!(image.media(), &Media::Other);
+        assert_eq!(image.body(), b"abc");
+    }
+
+    #[test]
     fn a_close_delimited_body_ends_at_eof() {
-        let mut parser = Parser::new(Kind::Image);
+        let mut parser = Parser::new(Kind::Image, 0);
         assert!(!parser.append(b"HTTP/1.1 200 OK\r\n\r\nabc", false).unwrap());
         assert!(parser.append(b"", true).unwrap());
         assert_eq!(parser.into_parts().2, b"abc");
@@ -492,7 +567,7 @@ mod tests {
 
     #[test]
     fn too_many_interim_responses_fail() {
-        let mut parser = Parser::new(Kind::Page);
+        let mut parser = Parser::new(Kind::Page, 256 * 1024);
         let raw = "HTTP/1.1 103 Early Hints\r\n\r\n".repeat(6);
         assert_eq!(
             parser.append(raw.as_bytes(), false),

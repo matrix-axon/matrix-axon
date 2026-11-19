@@ -12,14 +12,45 @@ import os
 /// cookies, certificate network fetches, script engine or automatic redirects.
 enum PreviewNetwork {
   private static let log = Logger(subsystem: "org.matrixaxon.axon", category: "device-preview")
+  enum Media: Equatable {
+    case html(String), image, other
+
+    init(headers: [String: String], kind: Kind) {
+      guard let contentType = headers["content-type"] else {
+        self = kind == .page ? .html("text/html") : .other
+        return
+      }
+      let value = contentType.lowercased()
+      if value.hasPrefix("text/html") || value.hasPrefix("application/xhtml+xml") {
+        self = .html(value)
+      } else if value.hasPrefix("image/") {
+        self = .image
+      } else {
+        self = .other
+      }
+    }
+  }
   struct Response {
     let status: Int
     let headers: [String: String]
     let body: Data
     let url: URL
+    let cutoff: Bool
+    let media: Media
+
+    init(
+      status: Int, headers: [String: String], body: Data, url: URL, cutoff: Bool = false,
+      media: Media? = nil
+    ) {
+      self.status = status
+      self.headers = headers
+      self.body = body
+      self.url = url
+      self.cutoff = cutoff
+      self.media = media ?? Media(headers: headers, kind: .page)
+    }
   }
   enum Kind: String { case page, image }
-  static let headBytes = 256 * 1024
   static let headerBytes = 32 * 1024
 
   struct Address: Equatable {
@@ -389,6 +420,66 @@ enum PreviewNetwork {
     return SecTrustEvaluateWithError(trust, nil)
   }
 
+  /// Resolve the optional HTML budget outside the HTTP framer. All state
+  /// lives on the reader queue. No individual read can extend the deadline.
+  struct ReadState {
+    private var parser: PreviewHTTPParser
+    private var tags = 0
+    private var scanned = 0
+    private var cutoff = false
+    private(set) var extensionDeadline: DispatchTime?
+    var status: Int { parser.status }
+
+    init(kind: Kind) { parser = PreviewHTTPParser(kind: kind) }
+
+    mutating func append(
+      _ data: Data, eof: Bool, now: DispatchTime = .now(), deadline: DispatchTime
+    ) throws -> Bool {
+      if let extensionDeadline, now >= extensionDeadline {
+        log.info("device_preview_html_extension_timeout")
+        cutoff = true
+        return true
+      }
+      // Process delivered bytes before EOF, which Network may report with
+      // the last bytes or in a separate callback.
+      var done = try parser.append(data)
+      if parser.atPrefixLimit, extensionDeadline == nil, case .html(let contentType) = parser.media {
+        // Reserve time for parsing and let the image use part of the shared
+        // deadline for DNS, TLS and its download.
+        if try deadline <= now + 6 || tagBudgetExhausted()
+          || RestrictedPreview.hasRichMetadata(parser.body, contentType: contentType)
+        {
+          cutoff = true
+          return true
+        }
+        log.info("device_preview_html_extended")
+        extensionDeadline = min(now + 4, deadline - 6)
+        parser.extendPrefix(to: RestrictedPreview.maxHeadBytes)
+        done = try parser.append(Data())
+      }
+      cutoff = parser.atPrefixLimit || (!done && extensionDeadline != nil && tagBudgetExhausted())
+      if done || cutoff { return true }
+      guard eof else { return false }
+      if extensionDeadline != nil && parser.body.count == RestrictedPreview.initialHeadBytes {
+        cutoff = true
+        return true
+      }
+      return try parser.append(Data(), eof: true)
+    }
+
+    private mutating func tagBudgetExhausted() -> Bool {
+      for byte in parser.body.dropFirst(scanned) where byte == 60 { tags += 1 }
+      scanned = parser.body.count
+      return tags > RestrictedPreview.maxTags
+    }
+
+    func response(url: URL, timedOut: Bool = false) -> Response {
+      Response(
+        status: parser.status, headers: parser.headers, body: parser.body, url: url,
+        cutoff: cutoff || timedOut, media: parser.media)
+    }
+  }
+
   private final class Reader {
     let result = ShareIntakeResult<Response>()
     private let queue: DispatchQueue
@@ -396,9 +487,10 @@ enum PreviewNetwork {
     private let url: URL
     private let request: Data
     private let cancellation: ShareCancellation
-    private var parser: PreviewHTTPParser
+    private var read: ReadState
     private var done = false
     private var timer: DispatchWorkItem?
+    private var extensionTimer: DispatchWorkItem?
     init(
       connection: NWConnection, queue: DispatchQueue, url: URL, kind: Kind, request: Data,
       cancellation: ShareCancellation
@@ -408,7 +500,7 @@ enum PreviewNetwork {
       self.url = url
       self.request = request
       self.cancellation = cancellation
-      parser = PreviewHTTPParser(kind: kind)
+      read = ReadState(kind: kind)
     }
     func start(deadline: DispatchTime) {
       queue.async {
@@ -432,7 +524,7 @@ enum PreviewNetwork {
         }
         let timer = DispatchWorkItem { [weak self] in
           guard let self else { return }
-          log.info("device_preview_http_timeout headers_received=\(self.parser.status != 0)")
+          log.info("device_preview_http_timeout headers_received=\(self.read.status != 0)")
           self.finish(.failure(ShareFailure.expired))
         }
         self.timer = timer
@@ -443,7 +535,7 @@ enum PreviewNetwork {
             if error != nil {
               self.finish(.failure(ShareFailure.unavailable))
             } else {
-              self.receive()
+              self.receive(deadline: deadline)
             }
           })
       }
@@ -454,30 +546,43 @@ enum PreviewNetwork {
       done = true
       timer?.cancel()
       timer = nil
+      extensionTimer?.cancel()
+      extensionTimer = nil
       connection.stateUpdateHandler = nil
       connection.cancel()
       self.result.finish(result)
     }
-    private func receive() {
+    private func finishResponse(timedOut: Bool = false) {
+      do {
+        try cancellation.check()
+        if timedOut { log.info("device_preview_html_extension_timeout") }
+        finish(.success(read.response(url: url, timedOut: timedOut)))
+      } catch { finish(.failure(error)) }
+    }
+
+    private func receive(deadline: DispatchTime) {
       guard !done else { return }
       connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) {
         data, _, complete, error in
         guard !self.done else { return }
         do {
-          if try self.parser.append(data ?? Data(), eof: complete) {
-            self.finish(
-              .success(
-                Response(
-                  status: self.parser.status, headers: self.parser.headers, body: self.parser.body,
-                  url: self.url)))
+          try self.cancellation.check()
+          if try self.read.append(data ?? Data(), eof: complete, deadline: deadline) {
+            self.finishResponse()
           } else if error != nil || complete {
             self.finish(.failure(ShareFailure.invalidResponse))
           } else {
-            self.receive()
+            if self.extensionTimer == nil, let until = self.read.extensionDeadline {
+              let timer = DispatchWorkItem { [weak self] in self?.finishResponse(timedOut: true) }
+              self.extensionTimer = timer
+              self.queue.asyncAfter(deadline: until, execute: timer)
+            }
+            self.receive(deadline: deadline)
           }
         } catch { self.finish(.failure(error)) }
       }
     }
+
   }
 }
 

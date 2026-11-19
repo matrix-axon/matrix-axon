@@ -15,6 +15,7 @@ pub(crate) enum Failure {
     /// The URL, a redirect target, an image URL, or a resolved address is
     /// outside the boundary, or the page answered with something unusable.
     PreviewUnavailable,
+    NoMetadata,
     /// The origin has no A record: an IPv6-only site, or a name that does
     /// not exist. No backend tells the two apart (issue 1059), so the page's
     /// copy names both.
@@ -59,6 +60,7 @@ pub enum Kind {
 impl From<Failure> for Kind {
     fn from(failure: Failure) -> Self {
         match failure {
+            Failure::NoMetadata => Kind::NoMetadata,
             Failure::Expired => Kind::Timeout,
             Failure::PublicIpv4Required => Kind::PublicIpv4Required,
             Failure::Cancelled => Kind::Cancelled,
