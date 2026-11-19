@@ -14,18 +14,23 @@ use std::time::Duration;
 
 use axon_store::Store;
 use axum::body::Body;
+use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
+use chrono::Utc;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::dto::{MediaEventQuery, ThumbnailQuery};
+use crate::auth::{AuthedToken, TokenVerifier};
+use crate::dto::{MediaEventQuery, StreamTicketDto, ThumbnailQuery};
 use crate::linked_events::{names_media, KeptMedia};
 use crate::media::{GrowingResource, MediaBody, MediaError, MediaProxy, MediaResource};
-use crate::response::ApiError;
+use crate::response::{ApiError, ApiResponse};
+use crate::stream_tickets::{StreamTicket, StreamTickets, TICKET_IDLE};
 
 /// Dimension clamp bounds for the thumbnail route — a requested `width`/
 /// `height` outside this range is clamped, not rejected (same "clamp, don't
@@ -379,6 +384,178 @@ async fn serve_resolved(
     };
 
     serve_media(account_id, resource, content_type, range, etag).await
+}
+
+/// Where a stream ticket's path starts. The request log records this prefix
+/// and never what follows it (ADR 0139 section 5).
+pub(crate) const MEDIA_STREAM_PREFIX: &str = "/v1/media-stream/";
+
+/// The served type of an object that may have a stream ticket, or a `400`:
+/// only video and audio from an owning event. `raster_only` media, authorized
+/// by an image pack or an inline message, has no owning event and is never
+/// served as either, so it never gets a ticket.
+fn ticketable_content_type(
+    content: &Value,
+    mxc_url: &str,
+    raster_only: bool,
+) -> Result<String, ApiError> {
+    let content_type = content_type_for_mxc(content, mxc_url);
+    if raster_only || !is_streamed_type(&content_type) {
+        return Err(ApiError::bad_request(
+            "stream tickets are issued only for video and audio",
+        ));
+    }
+    Ok(content_type)
+}
+
+/// Issue a stream ticket
+///
+/// Issue a URL that serves one video or audio object without a bearer header,
+/// for a `<video>` or `<audio>` element to load (ADR 0139 section 5). The
+/// object is checked exactly as `GET /v1/media/{account_id}/{server_name}/{media_id}`
+/// checks it without `room_id` and `event_id`: the account, the stored event
+/// that owns the URI, and the type that route would serve it as.
+///
+/// The ticket works only while the bearer token that issued it would, and
+/// only while the owning event is still stored with its content. It is held in
+/// memory, so a restart ends it. One token holds at most 32 live tickets;
+/// issuing another ends that token's least recently used one.
+#[utoipa::path(
+    post,
+    path = "/v1/media/{account_id}/{server_name}/{media_id}/stream-ticket",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account whose credentials are used for the download"),
+        ("server_name" = String, Path, description = "Server-name component of the MXC URI (the part after `mxc://`)"),
+        ("media_id" = String, Path, description = "Media-ID component of the MXC URI"),
+    ),
+    responses(
+        (status = 200, description = "The ticket's path and expiry", body = ApiResponse<StreamTicketDto>),
+        (status = 400, description = "The object would not be served as `video/*` or `audio/*`", body = crate::response::ErrorResponse),
+        (status = 404, description = "Account not found, no stored event owns this media, or that event is redacted or not yet decrypted", body = crate::response::ErrorResponse),
+        (status = 500, description = "Internal media-metadata lookup failure", body = crate::response::ErrorResponse),
+    ),
+    tag = "media",
+)]
+pub async fn create_stream_ticket(
+    State(store): State<Store>,
+    State(tickets): State<Arc<StreamTickets>>,
+    Extension(token): Extension<AuthedToken>,
+    Path((account_id, server_name, media_id)): Path<(Uuid, String, String)>,
+) -> Result<ApiResponse<StreamTicketDto>, ApiError> {
+    let mxc_url = format!("mxc://{server_name}/{media_id}");
+
+    let (content, raster_only) = resolve_media_content(&store, account_id, &mxc_url).await?;
+    ticketable_content_type(&content, &mxc_url, raster_only)?;
+
+    let idle_expiry = Utc::now()
+        + chrono::Duration::from_std(TICKET_IDLE).expect("the idle expiry fits a chrono duration");
+    let expires_at = token
+        .expires_at
+        .map_or(idle_expiry, |token_expiry| token_expiry.min(idle_expiry));
+    let ticket = tickets.issue(StreamTicket {
+        account_id,
+        mxc_url,
+        token_id: token.id,
+        session_id: token.session_id,
+    });
+    Ok(ApiResponse::new(StreamTicketDto {
+        path: format!("{MEDIA_STREAM_PREFIX}{ticket}"),
+        expires_at: expires_at.to_rfc3339(),
+    }))
+}
+
+/// Stream media by ticket
+///
+/// Serve the object a stream ticket was issued for, exactly as
+/// `GET /v1/media/{account_id}/{server_name}/{media_id}` serves it, ranges
+/// and all. The ticket in the path stands in for the bearer token, so this
+/// route takes no `Authorization` header (ADR 0139 section 5).
+///
+/// Every request re-checks the ticket: it must be live, the token that issued
+/// it unrevoked and unexpired, and the owning event still stored with its
+/// content. Every response, errors included, carries
+/// `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`.
+#[utoipa::path(
+    get,
+    path = "/v1/media-stream/{ticket}",
+    params(
+        ("ticket" = String, Path, description = "The ticket from `POST .../stream-ticket`. A credential: keep it out of logs"),
+    ),
+    responses(
+        (status = 200, description = "Full media bytes, with the headers `GET /v1/media/...` sends, plus `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`. When the homeserver declared no length and the download is still running, the body is chunked with no `Content-Length` or `Accept-Ranges`."),
+        (status = 206, description = "Partial media bytes for a satisfiable `Range` request (with `Content-Range`)."),
+        (status = 304, description = "The `If-None-Match` entity tag matched; body omitted."),
+        (status = 400, description = "The object would no longer be served as `video/*` or `audio/*`", body = crate::response::ErrorResponse),
+        (status = 403, description = "The homeserver denied access to this media object", body = crate::response::ErrorResponse),
+        (status = 404, description = "The ticket is unknown or expired, the server restarted, or the token that issued it was revoked or expired; or the account or the owning event is gone, or the event was redacted. Ask for a new ticket.", body = crate::response::ErrorResponse),
+        (status = 413, description = "The media object exceeds `max_stream_bytes`", body = crate::response::ErrorResponse),
+        (status = 416, description = "The requested `Range` is not satisfiable (with `Content-Range: bytes */len`).", body = crate::response::ErrorResponse),
+        (status = 422, description = "The encrypted attachment could not be decrypted (`media_undecryptable`). Terminal, as on `GET /v1/media/...`.", body = crate::response::ErrorResponse),
+        (status = 500, description = "Internal lookup failure", body = crate::response::ErrorResponse),
+        (status = 502, description = "The homeserver was unreachable or returned an error", body = crate::response::ErrorResponse),
+        (status = 503, description = "The account's homeserver connection is not established, or the stream could not start yet. Retryable.", body = crate::response::ErrorResponse),
+    ),
+    security(),
+    tag = "media",
+)]
+pub async fn get_media_stream(
+    State(proxy): State<Arc<dyn MediaProxy>>,
+    State(store): State<Store>,
+    State(tickets): State<Arc<StreamTickets>>,
+    State(verifier): State<Arc<dyn TokenVerifier>>,
+    key: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    // One answer for every way a ticket fails, and none that repeats it: a
+    // path rejection's text would quote the segment.
+    let gone = || ApiError::not_found("stream ticket is unknown or expired");
+    let Ok(Path(key)) = key else {
+        return Err(gone());
+    };
+    let Some(ticket) = tickets.redeem(&key) else {
+        return Err(gone());
+    };
+    if !verifier.is_live(ticket.token_id).await? {
+        tickets.forget(&key);
+        tracing::info!(
+            account_id = %ticket.account_id,
+            token_id = %ticket.token_id,
+            session_id = %ticket.session_id,
+            "stream ticket refused: its token is revoked or expired"
+        );
+        return Err(gone());
+    }
+
+    let (content, raster_only) =
+        resolve_media_content(&store, ticket.account_id, &ticket.mxc_url).await?;
+    ticketable_content_type(&content, &ticket.mxc_url, raster_only)?;
+    serve_resolved(
+        proxy.as_ref(),
+        ticket.account_id,
+        &ticket.mxc_url,
+        content,
+        raster_only,
+        &headers,
+        "media_stream",
+    )
+    .await
+}
+
+/// Add the stream-ticket route's own headers to every response it gives,
+/// errors included. `no-store` keeps an encrypted attachment's plaintext out
+/// of the browser's disk cache; `no-referrer` keeps the ticket out of any
+/// request the media might trigger.
+pub async fn stream_ticket_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 /// Whether a served type streams from the homeserver as it arrives (ADR 0139

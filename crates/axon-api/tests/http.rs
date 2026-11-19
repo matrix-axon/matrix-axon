@@ -25,6 +25,8 @@ mod linked_events;
 mod room_details;
 #[path = "http/room_previews.rs"]
 mod room_previews;
+#[path = "http/stream_tickets.rs"]
+mod stream_tickets;
 
 use std::sync::{Arc, Mutex};
 

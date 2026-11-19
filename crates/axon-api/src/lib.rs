@@ -596,6 +596,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/media/{account_id}/{server_name}/{media_id}/thumbnail",
             get(routes::media::get_media_thumbnail),
         )
+        // A URL standing in for this bearer token, for one video or audio
+        // object, so a `<video>` element can load it (ADR 0139 section 5).
+        .route(
+            "/v1/media/{account_id}/{server_name}/{media_id}/stream-ticket",
+            post(routes::media::create_stream_ticket),
+        )
         // Keep unmatched `/v1/...` paths inside the authenticated API boundary:
         // they must not fall through to the browser-facing HTML fallback below.
         .route("/v1", get(v1_not_found))
@@ -652,6 +658,19 @@ pub fn router(state: AppState) -> Router {
             routes::oauth_native::no_store,
         ));
 
+    // Media by stream ticket (ADR 0139 section 5). Outside `require_bearer`:
+    // the ticket in the path stands in for the token that issued it, which
+    // the handler re-checks on every request. The request log never records
+    // the ticket; see `redacted_request_path`.
+    let media_stream_router = Router::new()
+        .route(
+            "/v1/media-stream/{ticket}",
+            get(routes::media::get_media_stream),
+        )
+        .layer(axum::middleware::map_response(
+            routes::media::stream_ticket_headers,
+        ));
+
     let bootstrap_state = state.bootstrap.clone();
     let bootstrap_router = Router::new()
         .route("/bootstrap", any(routes::bootstrap::wrong_url))
@@ -687,6 +706,7 @@ pub fn router(state: AppState) -> Router {
         // upgrade time rather than riding the `require_bearer` layer.
         .route("/v1/ws", get(ws::ws_handler))
         .merge(oauth_router)
+        .merge(media_stream_router)
         // Everything that is not the API: the embedded web client when this
         // build carries one and `[server] web_client` is on (ADR 0116), else a
         // page saying there is none. This is intentionally outside the `/v1`
@@ -711,13 +731,30 @@ pub fn router(state: AppState) -> Router {
                     tracing::info_span!(
                         "request",
                         method = %request.method(),
-                        path = %request.uri().path(),
+                        path = %redacted_request_path(request.uri().path()),
                         version = ?request.version(),
                     )
                 })
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .with_state(state)
+}
+
+/// What the request log records as a request's path: the path, except that
+/// anything under the stream-ticket prefix becomes the route template, so a
+/// ticket never reaches the log (ADR 0139 section 5).
+///
+/// Matched by prefix rather than by the matched route, so a path under it that
+/// matches no route, and falls to the `/v1/{*path}` catch-all, is redacted
+/// too. The span is the only place the request pipeline records the path: the
+/// layer's response and failure events log inside it and add no URI of their
+/// own.
+fn redacted_request_path(path: &str) -> &str {
+    if path.starts_with(routes::media::MEDIA_STREAM_PREFIX) {
+        "/v1/media-stream/{ticket}"
+    } else {
+        path
+    }
 }
 
 /// gzip / brotli / zstd, negotiated from `Accept-Encoding`.
@@ -784,6 +821,29 @@ fn no_web_client() -> Html<&'static str> {
 </html>
 "#,
     )
+}
+
+#[cfg(test)]
+mod redacted_request_path_tests {
+    use super::redacted_request_path;
+
+    #[test]
+    fn only_paths_under_the_stream_ticket_prefix_are_redacted() {
+        for path in [
+            "/v1/media-stream/c2VjcmV0",
+            "/v1/media-stream/c2VjcmV0/and/more",
+            "/v1/media-stream/",
+        ] {
+            assert_eq!(redacted_request_path(path), "/v1/media-stream/{ticket}");
+        }
+        for path in [
+            "/v1/media/00000000-0000-0000-0000-000000000000/example.org/abc",
+            "/v1/media-stream",
+            "/v1/rooms",
+        ] {
+            assert_eq!(redacted_request_path(path), path);
+        }
+    }
 }
 
 #[cfg(test)]
