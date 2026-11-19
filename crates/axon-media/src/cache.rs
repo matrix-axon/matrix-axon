@@ -424,9 +424,17 @@ impl MediaCache {
 
         // Only one request starts a given download; the rest wait here, then
         // join the download it started. Same drop order as
-        // `get_or_fetch_keyed`.
+        // `get_or_fetch_keyed`. The holder gives up by its own deadline, which
+        // is no later than a waiter's, but each waiter also bounds its own wait
+        // here, so no request outlives `fetch_timeout_secs` before it either
+        // joins a download or gets `Busy`.
         let flight = FlightGuard::join(self.inner.clone(), account_id, &hash);
-        let _guard = flight.slot().lock().await;
+        let Ok(_guard) = tokio::time::timeout_at(deadline, flight.slot().lock()).await else {
+            return Err(MediaCacheError::Busy(format!(
+                "another request for this media did not open its stream within {}s",
+                self.inner.fetch_timeout.as_secs()
+            )));
+        };
         if let Some(body) = self.inner.join_existing(&key).await? {
             return Ok(body);
         }
