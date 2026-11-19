@@ -203,6 +203,7 @@ The workers currently share traversal code but keep independent cursors and dead
 [ADR 0136](adr/0136-exclude-insecure-devices-msc4153.md) decision 3 adds `identity_changes` to `GET /v1/accounts/{account_id}/rooms/{room_id}/info`.
 For a joined encrypted room, it lists room members whose changed cross-signing identity needs attention.
 An empty list means the server knows of no warnings, and `null` means the room has no warning snapshot available.
+A temporary SDK read failure retains the last tracked warning, including its fingerprint, until Axon can confirm a change.
 Re-read on reconnect and when `room_details.changed` names `identity_changes` for the room.
 
 Each entry carries `user_id`, `kind`, and `fingerprint`.

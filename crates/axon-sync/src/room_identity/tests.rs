@@ -9,7 +9,7 @@ use matrix_sdk::{
     store::RoomLoadSettings,
     RoomInfo, SessionMeta, SessionTokens, StateChanges,
 };
-use matrix_sdk_base::crypto::OlmMachine;
+use matrix_sdk_base::crypto::{IdentityState, OlmMachine, UserIdentity as CryptoUserIdentity};
 use serde_json::{json, Value};
 
 const OWN: &str = "@alice:localhost";
@@ -157,44 +157,74 @@ async fn sdk_identity_warnings_clear_in_every_room_after_acknowledgement() {
 
     publish_identity(&peer, &keys).await;
     encryption.request_user_identity(peer_id).await.unwrap();
-    let kind = IdentityChangeKind::PinViolation;
+    let room = client.get_room(rooms()[0]).unwrap();
+    let (_, warning) = read_identity(&room, peer_id).await.unwrap().unwrap();
+    let older = warning.unwrap();
+    let kind = older.kind;
+    assert_eq!(kind, IdentityChangeKind::PinViolation);
     wait_for_warnings(
         &changes,
         account_id,
-        &Warnings::from([(peer_id.to_owned(), kind)]),
+        &Warnings::from([(peer_id.to_owned(), older.clone())]),
     )
     .await;
-    let room = client.get_room(rooms()[0]).unwrap();
-    let identity = room.user_identity(peer_id).await.unwrap();
-    let (_, older_fingerprint) = current_warning(&room, &identity).unwrap();
+    assert_eq!(
+        room_details.take_pending().len(),
+        2,
+        "first rotation notified both rooms"
+    );
 
-    // A second rotation keeps the same warning kind. The old fingerprint must
-    // never acknowledge the newer identity, even if no new SDK warning arrives.
+    // A second rotation keeps the same kind but must change both snapshots
+    // and emit a new frame, independently of the drained first rotation.
     publish_identity(&peer, &keys).await;
     encryption.request_user_identity(peer_id).await.unwrap();
-    let identity = room.user_identity(peer_id).await.unwrap();
-    let (_, fingerprint) = current_warning(&room, &identity).unwrap();
-    assert_ne!(older_fingerprint, fingerprint);
+    let (identity, warning) = read_identity(&room, peer_id).await.unwrap().unwrap();
+    let warning = warning.unwrap();
+    assert_eq!(warning.kind, kind);
+    assert_ne!(older.fingerprint, warning.fingerprint);
+    wait_for_warnings(
+        &changes,
+        account_id,
+        &Warnings::from([(peer_id.to_owned(), warning.clone())]),
+    )
+    .await;
+    assert_eq!(
+        room_details.take_pending().len(),
+        2,
+        "second rotation notified both rooms"
+    );
     assert!(matches!(
-        resolve_current_warning(account_id, &room, &identity, &older_fingerprint, kind).await,
+        resolve_current_warning(
+            account_id,
+            &identity,
+            Some(&warning),
+            &older.fingerprint,
+            kind
+        )
+        .await,
         Err(RoomIdentityError::Conflict)
     ));
     assert!(matches!(
         resolve_current_warning(
             account_id,
-            &room,
             &identity,
-            &fingerprint,
+            Some(&warning),
+            &warning.fingerprint,
             IdentityChangeKind::VerificationViolation
         )
         .await,
         Err(RoomIdentityError::Conflict)
     ));
-    assert_eq!(room_details.take_pending().len(), 2, "both rooms warned");
 
-    resolve_current_warning(account_id, &room, &identity, &fingerprint, kind)
-        .await
-        .unwrap();
+    resolve_current_warning(
+        account_id,
+        &identity,
+        Some(&warning),
+        &warning.fingerprint,
+        kind,
+    )
+    .await
+    .unwrap();
     wait_for_warnings(&changes, account_id, &Warnings::new()).await;
     let pending = room_details.take_pending();
     for room_id in rooms() {
@@ -206,11 +236,11 @@ async fn sdk_identity_warnings_clear_in_every_room_after_acknowledgement() {
     // Have the SDK sign the current peer identity. The mock key query then
     // returns the signed master key, as a homeserver would after verification.
     encryption.bootstrap_cross_signing(None).await.unwrap();
-    let UserIdentity::Own(own) = room.user_identity(own_id).await.unwrap() else {
+    let CryptoUserIdentity::Own(own) = room.user_identity(own_id).await.unwrap() else {
         panic!("the account has an own identity");
     };
     own.verify().await.unwrap();
-    let UserIdentity::Other(other) = room.user_identity(peer_id).await.unwrap() else {
+    let CryptoUserIdentity::Other(other) = room.user_identity(peer_id).await.unwrap() else {
         panic!("the peer has an other-user identity");
     };
     let signed = other.verify().await.unwrap();
@@ -225,30 +255,37 @@ async fn sdk_identity_warnings_clear_in_every_room_after_acknowledgement() {
 
     publish_identity(&peer, &keys).await;
     encryption.request_user_identity(peer_id).await.unwrap();
-    let kind = IdentityChangeKind::VerificationViolation;
+    let (identity, warning) = read_identity(&room, peer_id).await.unwrap().unwrap();
+    let warning = warning.unwrap();
+    let kind = warning.kind;
+    assert_eq!(kind, IdentityChangeKind::VerificationViolation);
     wait_for_warnings(
         &changes,
         account_id,
-        &Warnings::from([(peer_id.to_owned(), kind)]),
+        &Warnings::from([(peer_id.to_owned(), warning.clone())]),
     )
     .await;
-    let identity = room.user_identity(peer_id).await.unwrap();
-    let (_, fingerprint) = current_warning(&room, &identity).unwrap();
     assert!(matches!(
         resolve_current_warning(
             account_id,
-            &room,
             &identity,
-            &fingerprint,
+            Some(&warning),
+            &warning.fingerprint,
             IdentityChangeKind::PinViolation
         )
         .await,
         Err(RoomIdentityError::Conflict)
     ));
     assert_eq!(room_details.take_pending().len(), 2);
-    resolve_current_warning(account_id, &room, &identity, &fingerprint, kind)
-        .await
-        .unwrap();
+    resolve_current_warning(
+        account_id,
+        &identity,
+        Some(&warning),
+        &warning.fingerprint,
+        kind,
+    )
+    .await
+    .unwrap();
     wait_for_warnings(&changes, account_id, &Warnings::new()).await;
     let identity = room.user_identity(peer_id).await.unwrap();
     assert!(!identity.was_previously_verified());
@@ -260,5 +297,143 @@ async fn sdk_identity_warnings_clear_in_every_room_after_acknowledgement() {
     for room_id in rooms() {
         assert!(changes.warnings(account_id, room_id).is_none());
     }
+    publish_identity(&peer, &keys).await;
+    encryption.request_user_identity(peer_id).await.unwrap();
+    assert_failed_refresh_keeps_warning(&client, &room, peer_id).await;
     server.abort();
+}
+
+async fn assert_failed_refresh_keeps_warning(client: &Client, room: &Room, peer: &UserId) {
+    let account_id = Uuid::new_v4();
+    let changes = RoomIdentityChanges::default();
+    let (live, _receiver) = tokio::sync::broadcast::channel(8);
+    let details = RoomDetailsChanges::new(account_id, live);
+    let gate = HomeserverGate::for_test();
+    let watcher = AccountWatch {
+        account_id,
+        changes: changes.clone(),
+        details: details.clone(),
+        gate: gate.clone(),
+        initializing: Arc::new(Semaphore::new(1)),
+    };
+    let (_, snapshot) = watcher.subscribe(room).await.unwrap();
+    assert!(snapshot.contains_key(peer));
+    watcher.publish(room, snapshot.clone());
+    assert_eq!(details.take_pending().len(), 1);
+
+    gate.open_for_test();
+    room.update_room_info(|mut info| {
+        info.mark_members_missing();
+        (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+    })
+    .await;
+    assert!(
+        watcher.subscribe(room).await.is_none(),
+        "gate refuses roster work"
+    );
+    assert_retry_preserves_snapshot(&watcher, room, &snapshot).await;
+
+    room.update_room_info(|mut info| {
+        info.mark_members_synced();
+        (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+    })
+    .await;
+    // The malformed event replaces the state row. The membership index
+    // still contains the peer, so the SDK fails to decode the roster.
+    let mut changes = StateChanges::default();
+    changes.state.insert(room.room_id().to_owned(), [(
+        matrix_sdk::ruma::events::StateEventType::RoomMember,
+        [(peer.to_string(), Raw::from_json_string(json!({
+            "type": "m.room.member", "state_key": peer, "sender": peer,
+            "event_id": "$broken", "origin_server_ts": 1, "content": {"membership": null}
+        }).to_string()).unwrap())].into(),
+    )].into());
+    client.state_store().save_changes(&changes).await.unwrap();
+    assert!(room.members_no_sync(RoomMemberships::JOIN).await.is_err());
+    assert!(
+        watcher.subscribe(room).await.is_none(),
+        "SDK stream success does not validate its snapshot"
+    );
+    assert_retry_preserves_snapshot(&watcher, room, &snapshot).await;
+
+    let mut served = snapshot.clone();
+    assert!(member_warning(room, peer).await.is_err());
+    recheck_room_warnings(account_id, room, &mut served).await;
+    assert_eq!(
+        served, snapshot,
+        "room-info recheck keeps the known entry when the roster errors"
+    );
+}
+
+async fn assert_retry_preserves_snapshot(watcher: &AccountWatch, room: &Room, expected: &Warnings) {
+    let refresh = Notify::new();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), watcher.follow(room, &refresh))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        watcher
+            .changes
+            .warnings(watcher.account_id, room.room_id())
+            .as_ref(),
+        Some(expected)
+    );
+    assert!(
+        watcher.details.take_pending().is_empty(),
+        "retry does not announce a clear"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn room_info_recheck_preserves_unavailable_entries_and_applies_confirmed_results() {
+    let warning = Warning {
+        kind: IdentityChangeKind::PinViolation,
+        fingerprint: "a".repeat(64),
+    };
+    let new_warning = Warning {
+        fingerprint: "b".repeat(64),
+        ..warning.clone()
+    };
+    let ids = ["@a:x", "@b:x", "@c:x", "@d:x", "@e:x"].map(|id| id.parse::<OwnedUserId>().unwrap());
+    let mut warnings = Warnings::from_iter(ids.iter().cloned().map(|id| (id, warning.clone())));
+    refresh_known_warnings(Uuid::nil(), rooms()[0], &mut warnings, |user| {
+        let new_warning = new_warning.clone();
+        async move {
+            match user.as_str() {
+                "@a:x" => Err(ObservationError::IdentityUnavailable),
+                "@b:x" => Ok(None),
+                "@c:x" => Ok(Some(new_warning)),
+                "@d:x" => std::future::pending().await,
+                _ => panic!("the room timeout bounds the whole read"),
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        warnings,
+        Warnings::from([
+            (ids[0].clone(), warning.clone()),
+            (ids[2].clone(), new_warning),
+            (ids[3].clone(), warning.clone()),
+            (ids[4].clone(), warning),
+        ])
+    );
+}
+
+#[test]
+fn warning_map_can_be_read_after_poison() {
+    let changes = RoomIdentityChanges::default();
+    let account = Uuid::new_v4();
+    let room = rooms()[0];
+    assert!(std::panic::catch_unwind(|| {
+        let mut guard = changes.lock();
+        guard
+            .entry(account)
+            .or_default()
+            .insert(room.to_owned(), Warnings::new());
+        panic!("poison the test cache");
+    })
+    .is_err());
+    assert_eq!(changes.warnings(account, room), Some(Warnings::new()));
 }
