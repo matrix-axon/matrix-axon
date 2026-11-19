@@ -584,3 +584,79 @@ async fn a_disabled_cache_streams_but_keeps_nothing() {
     assert_eq!(h.reserved(), 0);
     assert!(!h.cache.inner.account_dir(h.account).exists());
 }
+
+/// A fetcher whose body delivers one chunk and then panics, standing in for
+/// any panic inside the download task.
+struct PanickingFetcher;
+
+#[async_trait]
+impl MediaFetcher for PanickingFetcher {
+    async fn fetch(&self, _: Uuid, _: &str, _: Option<Value>) -> Result<Vec<u8>, FetchError> {
+        unreachable!("streaming tests buffer nothing here")
+    }
+
+    async fn fetch_thumbnail(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: ThumbnailSpec,
+    ) -> Result<Vec<u8>, FetchError> {
+        unreachable!("streaming tests fetch no thumbnails")
+    }
+
+    async fn fetch_stream(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: Option<Value>,
+    ) -> Result<MediaStream, FetchError> {
+        let first: Chunk = Ok(Bytes::from(payload(KIB)));
+        let body =
+            stream::iter([first]).chain(stream::poll_fn(|_| -> std::task::Poll<Option<Chunk>> {
+                panic!("download task panicked")
+            }));
+        Ok(MediaStream {
+            len: Some(200 * KIB as u64),
+            body: body.boxed(),
+        })
+    }
+}
+
+/// A download task that panics leaves nothing behind: its readers are
+/// aborted, no space stays reserved, its staging file is gone, and the next
+/// request starts a fresh download rather than joining the dead one.
+#[tokio::test]
+async fn a_panicking_download_leaves_nothing_behind() {
+    let h = Harness::new().await;
+    let url = "mxc://s/panics";
+    let reader = match h
+        .cache
+        .get_or_stream(h.account, url, None, &PanickingFetcher)
+        .await
+        .expect("stream opens")
+    {
+        MediaBody::Growing(media) => media,
+        MediaBody::Complete(_) => panic!("expected a download"),
+    };
+    let (_, error) =
+        tokio::time::timeout(Duration::from_secs(5), collect(reader.into_body(0, None)))
+            .await
+            .expect("the reader should not hang");
+    assert!(error.is_some(), "a reader of a dead download is aborted");
+    h.settle().await;
+    assert_eq!(h.reserved(), 0);
+    let staging = std::fs::read_dir(h._dir.path().join(".tmp"))
+        .unwrap()
+        .count();
+    assert_eq!(staging, 0, "the staging file is unlinked");
+
+    let data = payload(100 * KIB);
+    let feed = h.fetcher.script(Some(data.len() as u64));
+    let body = h.growing(url).await.into_body(0, None);
+    send(&feed, &data);
+    drop(feed);
+    let (all, error) = collect(body).await;
+    assert!(error.is_none());
+    assert_eq!(all, data);
+    assert_eq!(h.fetcher.calls(), 1, "the retry started its own download");
+}

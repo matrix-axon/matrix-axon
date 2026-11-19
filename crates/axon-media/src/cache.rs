@@ -912,16 +912,22 @@ impl Inner {
             .insert(key.clone(), partial.clone());
 
         let reader = partial.reader(key.1.clone(), self.open_handle_guard());
+        let cleanup = StreamCleanup {
+            inner: self.clone(),
+            key: key.clone(),
+            partial,
+            staging,
+            finished: false,
+        };
         let task = StreamTask {
             inner: self.clone(),
             key,
             mxc_url: mxc_url.to_owned(),
             len: stream.len,
             digest,
-            staging,
-            partial,
             progress,
             reservation,
+            cleanup,
         };
         tokio::spawn(task.run(stream.body, writer, permit));
         Ok(MediaBody::Growing(reader))
@@ -1297,11 +1303,13 @@ struct StreamTask {
     len: Option<u64>,
     /// Set for encrypted media, to record a failed hash check.
     digest: Option<DescriptorDigest>,
-    staging: PathBuf,
-    /// This download's entry in `Inner::streaming`, to remove exactly it.
-    partial: Arc<Partial>,
     progress: watch::Sender<Progress>,
+    /// Declared before `cleanup`, so an unwinding task releases its space
+    /// before it leaves `Inner::streaming`, as the normal paths do.
     reservation: Reservation,
+    /// Removes this download from `Inner::streaming` and unlinks its staging
+    /// file if the task ends without a verdict.
+    cleanup: StreamCleanup,
 }
 
 impl StreamTask {
@@ -1328,9 +1336,9 @@ impl StreamTask {
                     progress.outcome = Outcome::Verified;
                 });
                 self.inner
-                    .promote_stream(&self.key, &self.staging, self.reservation, len)
+                    .promote_stream(&self.key, &self.cleanup.staging, self.reservation, len)
                     .await;
-                release_stream(&self.inner, &self.key, &self.partial);
+                self.cleanup.finish();
             }
             Err(failure) => {
                 let written = self.progress.borrow().written;
@@ -1351,8 +1359,8 @@ impl StreamTask {
                 // Release the space before the download leaves the map, so
                 // nothing sees a finished stream still holding a reservation.
                 drop(self.reservation);
-                release_stream(&self.inner, &self.key, &self.partial);
-                let _ = tokio::fs::remove_file(&self.staging).await;
+                self.cleanup.finish();
+                let _ = tokio::fs::remove_file(&self.cleanup.staging).await;
             }
         }
     }
@@ -1431,15 +1439,60 @@ impl StreamTask {
     }
 }
 
-/// Remove a finished download from `Inner::streaming`, if it is still the
-/// entry for its key.
-fn release_stream(inner: &Inner, key: &Key, partial: &Arc<Partial>) {
-    let mut streaming = inner.streaming.lock().expect("streaming mutex");
-    if streaming
-        .get(key)
-        .is_some_and(|current| Arc::ptr_eq(current, partial))
-    {
-        streaming.remove(key);
+/// A streamed download's place in `Inner::streaming` and its staging file.
+///
+/// The task's normal paths remove the entry with [`finish`](Self::finish). If
+/// the task instead ends without a verdict, because something in it panicked
+/// or the runtime dropped it, `Drop` removes the entry and unlinks the staging
+/// file. Without that, the dead download would stay in the map, every later
+/// request for the object would join it and fail ("media download ended
+/// without a verdict"), and the staging file would leak until restart.
+struct StreamCleanup {
+    inner: Arc<Inner>,
+    key: Key,
+    /// This download's entry, to remove exactly it.
+    partial: Arc<Partial>,
+    staging: PathBuf,
+    finished: bool,
+}
+
+impl StreamCleanup {
+    /// Remove the entry; the caller has already dealt with the staging file.
+    fn finish(&mut self) {
+        self.finished = true;
+        self.release();
+    }
+
+    /// Remove the download from `Inner::streaming`, if it is still the entry
+    /// for its key. Tolerates a poisoned map, since it also runs while a
+    /// panic unwinds.
+    fn release(&self) {
+        let mut streaming = match self.inner.streaming.lock() {
+            Ok(streaming) => streaming,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if streaming
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.partial))
+        {
+            streaming.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for StreamCleanup {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        tracing::warn!(
+            account_id = %self.key.0,
+            "streamed media download ended without a verdict; discarding it",
+        );
+        self.release();
+        // Synchronous, since `Drop` cannot await; one unlink is quick. The
+        // file may already have been promoted, and then this finds nothing.
+        let _ = std::fs::remove_file(&self.staging);
     }
 }
 
