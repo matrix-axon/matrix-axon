@@ -465,10 +465,14 @@ impl Store {
     /// remaining ones' minimum could be later, and the walk would stop early
     /// on events stored inside the hole. A lag probe has no batch and keeps its
     /// boundary, which already means the same.
+    ///
+    /// `recovered` is how many of the failed page's events were stored all
+    /// the same: the retry finds them stored and cannot count them.
     pub async fn record_timeline_gap_failure(
         &self,
         gap_id: i64,
         failure: RoomBackfillFailure<'_>,
+        recovered: i64,
     ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "UPDATE room_timeline_gaps g SET \
@@ -482,7 +486,8 @@ impl Store {
                      (SELECT min(e.received_at) FROM events e \
                       WHERE e.account_id = g.account_id \
                         AND e.event_id = ANY(g.batch_event_ids)), \
-                     g.stored_before) ELSE g.stored_before END \
+                     g.stored_before) ELSE g.stored_before END, \
+                 events_recovered = g.events_recovered + $6 \
              WHERE g.id = $1",
         )
         .bind(gap_id)
@@ -490,6 +495,7 @@ impl Store {
         .bind(failure.retry_after.as_secs_f64())
         .bind(failure.parked)
         .bind(failure.clear_token)
+        .bind(recovered)
         .execute(&self.pool)
         .await?;
         Ok(())

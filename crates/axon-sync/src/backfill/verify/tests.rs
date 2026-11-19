@@ -12,7 +12,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::*;
-use crate::backfill::gaps::tests::{deliver, range, tokens, Harness};
+use crate::backfill::gaps::tests::{deliver, range, tokens, Harness, InjectedFailures};
 use crate::backfill::gaps::GapSignal;
 
 fn at(ts: i64) -> FloorEvent {
@@ -653,5 +653,100 @@ async fn repeated_timeouts_close_the_walk_even_between_successful_pages() {
     assert_eq!((complete, reason.as_deref()), (true, Some("timed_out")));
     // The pages it got, [46, 50) (all stored) and [42, 46), are kept.
     assert_eq!(recovered, 3);
+    h.finish().await;
+}
+
+/// Review finding (#1175): a page with one refused write still stored its
+/// other events, and the retry finds them stored. They are counted with the
+/// failure, so the walk's total is every event it stored.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn events_stored_on_a_failed_page_are_counted() {
+    let mut h = Harness::new(&["c"]).await;
+    h.append("c", 10);
+    h.sync(&[deliver("c", 5, 10)]).await;
+    h.append("c", 20);
+    h.sync(&[deliver("c", 25, 30).limited()]).await;
+    let failures = InjectedFailures::install(
+        &h.store,
+        "events",
+        &format!(
+            "NEW.room_id = '{}' AND NEW.event_id = '{}'",
+            h.room("c"),
+            Harness::event_id("c", 15)
+        ),
+        1,
+    )
+    .await;
+
+    queue(&h, "c").await;
+    walk(&h).await;
+    assert_eq!(failures.attempts().await, 1, "the write was refused once");
+    let (complete, _, recovered) = outcome(&h, "c").await;
+    assert!(!complete, "the walk backs off");
+    let stored = i64::try_from(h.stored("c").await.len()).unwrap();
+    assert_eq!(recovered, stored - 10, "every event the walk stored so far");
+
+    sqlx_core::query::query(
+        "UPDATE room_history_verify SET retry_at = NULL WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(h.account_id)
+    .bind(h.room("c"))
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+    walk(&h).await;
+    assert_eq!(h.stored("c").await, range(2, 30));
+    // 10..25, and 2..5 on the page holding the first stored event.
+    assert_eq!(outcome(&h, "c").await, closed("first_stored_event", 18));
+    failures.remove().await;
+    h.finish().await;
+}
+
+/// Review finding (#1175, #1170): a limited row whose batch is never stored,
+/// here because the database refused every write in the room while the
+/// response was handled, is dropped unpaged once the batch wait is over. The
+/// walk queued in its place reads the room from its live end, so it stores
+/// the hole and the lost batch both.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_expired_gap_rows_hole_is_filled_by_the_walk_it_queues() {
+    let mut h = Harness::new(&["x"]).await;
+    let mut watcher = h.watcher().await;
+    h.append("x", 10);
+    let first = h.sync(&[deliver("x", 5, 10)]).await;
+    watcher.observe(&first).await;
+    h.append("x", 20);
+    let outage = InjectedFailures::install(
+        &h.store,
+        "events",
+        &format!("NEW.room_id = '{}'", h.room("x")),
+        1_000,
+    )
+    .await;
+    let limited = h.sync(&[deliver("x", 25, 30).limited()]).await;
+    watcher.observe(&limited).await;
+    outage.remove().await;
+    assert_eq!(h.stored("x").await, range(5, 10), "the batch was lost");
+    let row = h.gaps().await.pop().expect("the hole was recorded");
+
+    // Within the batch wait, the row waits for its batch.
+    h.fill().await;
+    assert_eq!(h.gaps().await.len(), 1);
+    sqlx_core::query::query(
+        "UPDATE room_timeline_gaps SET detected_at = now() - interval '1 hour' WHERE id = $1",
+    )
+    .bind(row.id)
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+    h.fill().await;
+    assert!(h.gaps().await.is_empty(), "dropped unpaged");
+    assert!(h.take_requests("x").is_empty(), "nothing was paged for it");
+
+    walk(&h).await;
+    assert_eq!(h.stored("x").await, range(2, 30), "hole and batch stored");
+    // 10..30, and 2..5 on the page holding the first stored event.
+    assert_eq!(outcome(&h, "x").await, closed("first_stored_event", 23));
     h.finish().await;
 }

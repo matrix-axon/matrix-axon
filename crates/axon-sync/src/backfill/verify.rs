@@ -71,6 +71,12 @@ enum WalkPage {
     Closed,
     /// Recorded against the row, which backs off.
     Failed(PageFailure),
+    /// Written, but some events could not be stored ([`PageFailure::StoreWrite`]):
+    /// recorded as a failure, with the `inserted` events that were stored, which
+    /// the retry will find already stored.
+    Unstored {
+        inserted: i64,
+    },
     /// The row is gone (the room was purged), or the walk was restarted or
     /// closed elsewhere since it was read. Its copy is dropped; the next
     /// refresh reads the row again.
@@ -274,7 +280,12 @@ impl<'a> Verifier<'a> {
                     VerifyStep::Paged
                 }
                 WalkPage::Failed(failure) => {
-                    self.record_failure(failure).await;
+                    self.record_failure(failure, 0).await;
+                    self.next += 1;
+                    VerifyStep::Failed
+                }
+                WalkPage::Unstored { inserted } => {
+                    self.record_failure(PageFailure::StoreWrite, inserted).await;
                     self.next += 1;
                     VerifyStep::Failed
                 }
@@ -416,10 +427,11 @@ impl<'a> Verifier<'a> {
             "history verify: wrote a page"
         );
         // An event the store refused is still missing: neither advance nor
-        // close the walk, so the page is fetched again after a backoff.
+        // close the walk, so the page is fetched again after a backoff. The
+        // events it did store are counted now: the retry finds them stored.
         if failed > 0 {
             tracing::warn!(account_id = %account_id, room_id = %room_id, failed, "history verify: events on the page could not be stored; keeping the walk's token to fetch it again");
-            return WalkPage::Failed(PageFailure::StoreWrite);
+            return WalkPage::Unstored { inserted };
         }
 
         let floor_events: Vec<FloorEvent> = events
@@ -531,7 +543,7 @@ impl<'a> Verifier<'a> {
     /// homeserver that fetches history over federation for every page answers
     /// each retry with the page it finished meanwhile, so the failures keep
     /// resetting and the walk would otherwise never park (ADR 0140 decision 4).
-    async fn record_failure(&self, failure: PageFailure) {
+    async fn record_failure(&self, failure: PageFailure, recovered: i64) {
         let account_id = self.ctx.account_id;
         let row = &self.rows[self.next];
         if failure == PageFailure::TimedOut && row.walk_timeouts.saturating_add(1) >= WALK_TIMEOUTS
@@ -545,7 +557,7 @@ impl<'a> Verifier<'a> {
                     row.walk_generation,
                     VerifyStop::TimedOut,
                     false,
-                    0,
+                    recovered,
                 )
                 .await
             {
@@ -575,7 +587,13 @@ impl<'a> Verifier<'a> {
         match self
             .ctx
             .store
-            .record_history_verify_failure(account_id, &row.room_id, row.walk_generation, record)
+            .record_history_verify_failure(
+                account_id,
+                &row.room_id,
+                row.walk_generation,
+                record,
+                recovered,
+            )
             .await
         {
             Ok(true) => {}

@@ -231,7 +231,7 @@ async fn a_rejected_token_restarts_from_the_live_end() {
         timed_out: false,
     };
     store
-        .record_timeline_gap_failure(id, rejected)
+        .record_timeline_gap_failure(id, rejected, 2)
         .await
         .expect("failure");
     let row = gap(&store, account_id, id).await.expect("row");
@@ -245,7 +245,11 @@ async fn a_rejected_token_restarts_from_the_live_end() {
         .expect("stored")
         .received_at;
     assert_eq!(row.stored_before, Some(batch_min));
-    assert_eq!(row.events_recovered, 4, "progress is kept");
+    assert_eq!(
+        row.events_recovered,
+        4 + 2,
+        "progress is kept, and the failed page's stored events are added"
+    );
 
     // A probe has no batch, so it keeps its boundary.
     let mark = store.lag_mark_now().await.expect("now");
@@ -264,7 +268,7 @@ async fn a_rejected_token_restarts_from_the_live_end() {
         .find(|gap| gap.origin == GapOrigin::LagProbe)
         .expect("probe row");
     store
-        .record_timeline_gap_failure(probe.id, rejected)
+        .record_timeline_gap_failure(probe.id, rejected, 0)
         .await
         .expect("failure");
     let probe = gap(&store, account_id, probe.id).await.expect("row");
@@ -469,6 +473,7 @@ async fn a_token_rejection_never_moves_the_boundary_later() {
                 clear_token: true,
                 timed_out: false,
             },
+            0,
         )
         .await
         .expect("failure");

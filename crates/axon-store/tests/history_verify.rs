@@ -259,11 +259,14 @@ async fn a_rejected_token_restarts_the_walk_from_the_live_end() {
         timed_out: false,
     };
     store
-        .record_history_verify_failure(account_id, &room_id, g, retryable)
+        .record_history_verify_failure(account_id, &room_id, g, retryable, 3)
         .await
         .expect("fail");
     let failed = row(&store, account_id, &room_id).await.expect("listed");
     assert_eq!(failed.from_token.as_deref(), Some("t-1"), "same token");
+    // A page that failed on one event still stored the others, and the
+    // retry finds them stored: they are counted with the failure.
+    assert_eq!(failed.events_recovered, 3 + 3);
     assert!(!failed.retry_due, "backing off");
     assert_eq!(failed.consecutive_failures, 1);
 
@@ -275,7 +278,7 @@ async fn a_rejected_token_restarts_the_walk_from_the_live_end() {
         timed_out: false,
     };
     store
-        .record_history_verify_failure(account_id, &room_id, g, rejected)
+        .record_history_verify_failure(account_id, &room_id, g, rejected, 0)
         .await
         .expect("reject");
     let restarted = row(&store, account_id, &room_id).await.expect("listed");
@@ -522,7 +525,7 @@ async fn a_restart_refuses_every_write_of_the_walk_it_replaced() {
         timed_out: false,
     };
     assert!(!store
-        .record_history_verify_failure(account_id, &room_id, stale, failure)
+        .record_history_verify_failure(account_id, &room_id, stale, failure, 0)
         .await
         .expect("fail"));
     assert_eq!(
@@ -602,7 +605,7 @@ async fn an_empty_page_does_not_clear_a_failure() {
         timed_out: false,
     };
     store
-        .record_history_verify_failure(account_id, &room_id, g, failure)
+        .record_history_verify_failure(account_id, &room_id, g, failure, 0)
         .await
         .expect("fail");
     store
@@ -648,7 +651,7 @@ async fn timeouts_are_counted_over_the_walk_until_it_restarts() {
         timed_out: true,
     };
     store
-        .record_history_verify_failure(account_id, &room_id, g, timed_out)
+        .record_history_verify_failure(account_id, &room_id, g, timed_out, 0)
         .await
         .expect("fail");
     store
@@ -656,7 +659,7 @@ async fn timeouts_are_counted_over_the_walk_until_it_restarts() {
         .await
         .expect("save");
     store
-        .record_history_verify_failure(account_id, &room_id, g, timed_out)
+        .record_history_verify_failure(account_id, &room_id, g, timed_out, 0)
         .await
         .expect("fail");
     let walking = row(&store, account_id, &room_id).await.expect("listed");

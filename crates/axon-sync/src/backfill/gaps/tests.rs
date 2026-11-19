@@ -939,6 +939,45 @@ async fn a_failed_event_write_keeps_the_row_until_its_page_is_stored() {
     h.finish().await;
 }
 
+/// Review finding (#1175): a page with one refused write still stored its
+/// other events, and the retry finds them stored. They are counted with the
+/// failure.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn events_stored_on_a_failed_gap_page_are_counted() {
+    let mut h = Harness::new(&["n"]).await;
+    let mut watcher = h.watcher().await;
+    h.append("n", 5);
+    let u0 = h.sync(&[deliver("n", 0, 5)]).await;
+    watcher.observe(&u0).await;
+    h.append("n", 30);
+    let u1 = h.sync(&[deliver("n", 30, 35).limited()]).await;
+    watcher.observe(&u1).await;
+    let failures = InjectedFailures::install(
+        &h.store,
+        "events",
+        &format!(
+            "NEW.room_id = '{}' AND NEW.event_id = '{}'",
+            h.room("n"),
+            Harness::event_id("n", 20)
+        ),
+        1,
+    )
+    .await;
+
+    h.fill().await;
+    assert_eq!(failures.attempts().await, 1, "the write was refused once");
+    let row = h.gaps().await.pop().expect("the row stays open");
+    let stored = i64::try_from(h.stored("n").await.len()).unwrap();
+    assert_eq!(
+        row.events_recovered,
+        stored - 10,
+        "every event the row stored so far, the failed page's included"
+    );
+    failures.remove().await;
+    h.finish().await;
+}
+
 /// Review finding (#1143): a gap page with an event the store can never
 /// accept still closes the row; only that event is missing.
 #[tokio::test]

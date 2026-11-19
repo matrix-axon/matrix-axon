@@ -435,14 +435,17 @@ impl Store {
     /// same stop points, and the rejection is counted so a second one parks
     /// it. The empty run starts over, so each attempt gets its own
     /// [`EMPTY_RUN`]. A timeout adds to the walk's
-    /// [`walk_timeouts`](HistoryVerifyRow::walk_timeouts). `false` if the walk was restarted or its row is gone
-    /// since it was read: nothing was written.
+    /// [`walk_timeouts`](HistoryVerifyRow::walk_timeouts). `recovered` is
+    /// how many of the failed page's events were stored all the same: the
+    /// retry finds them stored and cannot count them. `false` if the walk was
+    /// restarted or its row is gone since it was read: nothing was written.
     pub async fn record_history_verify_failure(
         &self,
         account_id: Uuid,
         room_id: &str,
         walk_generation: i64,
         failure: RoomBackfillFailure<'_>,
+        recovered: i64,
     ) -> Result<bool, StoreError> {
         let done = sqlx_core::query::query(
             "UPDATE room_history_verify SET \
@@ -454,7 +457,8 @@ impl Store {
                  floor_run = CASE WHEN $7 THEN 0 ELSE floor_run END, \
                  empty_run = 0, \
                  walk_timeouts = walk_timeouts + CASE WHEN $8 THEN 1 ELSE 0 END, \
-                 token_rejections = token_rejections + CASE WHEN $7 THEN 1 ELSE 0 END \
+                 token_rejections = token_rejections + CASE WHEN $7 THEN 1 ELSE 0 END, \
+                 events_recovered = events_recovered + $9 \
              WHERE account_id = $1 AND room_id = $2 AND walk_generation = $3 \
                AND NOT complete",
         )
@@ -466,6 +470,7 @@ impl Store {
         .bind(failure.parked)
         .bind(failure.clear_token)
         .bind(failure.timed_out)
+        .bind(recovered)
         .execute(&self.pool)
         .await?;
         Ok(done.rows_affected() == 1)
