@@ -413,9 +413,9 @@ impl MediaCache {
         let deadline = Instant::now() + self.inner.fetch_timeout;
         let hash = etag_for_media(mxc_url, encrypted_file.as_ref());
         let key: Key = (account_id, hash.clone());
-        let digest = encrypted_file.as_ref().map(descriptor_digest);
-        if let Some(digest) = &digest {
-            self.inner.check_undecryptable(&key, digest)?;
+        let encrypted = encrypted_file.is_some();
+        if encrypted {
+            self.inner.check_undecryptable(&key)?;
         }
 
         if let Some(body) = self.inner.join_existing(&key).await? {
@@ -432,7 +432,7 @@ impl MediaCache {
         }
 
         self.inner
-            .start_stream(key, mxc_url, encrypted_file, digest, fetcher, deadline)
+            .start_stream(key, mxc_url, encrypted_file, fetcher, deadline)
             .await
     }
 
@@ -533,9 +533,11 @@ struct Inner {
     /// success, has been promoted into the cache, so a request always finds
     /// either the running download or the finished file.
     streaming: Mutex<HashMap<Key, Arc<Partial>>>,
-    /// Encrypted objects whose streamed download failed its hash check: when,
-    /// and the digest of the descriptor that failed (ADR 0139 section 4).
-    undecryptable: Mutex<HashMap<Key, (Instant, DescriptorDigest)>>,
+    /// When each encrypted object's streamed download failed its hash check
+    /// (ADR 0139 section 4). The key is the object's representation key
+    /// ([`etag_for_media`]), which binds the whole descriptor, so a failure
+    /// is remembered for that exact descriptor and no other.
+    undecryptable: Mutex<HashMap<Key, Instant>>,
     index: Mutex<Index>,
     flight: Mutex<HashMap<Key, Arc<AsyncMutex<()>>>>,
     /// Handle to the background boot-rebuild task (see [`MediaCache::open`]);
@@ -792,16 +794,10 @@ impl Inner {
     /// Fail fast with `422` when this exact descriptor failed its hash check
     /// within [`UNDECRYPTABLE_TTL`], instead of downloading it again to fail
     /// the same way. A different descriptor for the same URI downloads anew.
-    fn check_undecryptable(
-        &self,
-        key: &Key,
-        digest: &DescriptorDigest,
-    ) -> Result<(), MediaCacheError> {
+    fn check_undecryptable(&self, key: &Key) -> Result<(), MediaCacheError> {
         let failed = self.undecryptable.lock().expect("undecryptable mutex");
         match failed.get(key) {
-            Some((at, failed_digest))
-                if failed_digest == digest && at.elapsed() < UNDECRYPTABLE_TTL =>
-            {
+            Some(at) if at.elapsed() < UNDECRYPTABLE_TTL => {
                 Err(MediaCacheError::Fetch(FetchError::Undecryptable(
                     "media failed its integrity check recently; not downloading it again yet"
                         .to_owned(),
@@ -811,10 +807,10 @@ impl Inner {
         }
     }
 
-    fn remember_undecryptable(&self, key: Key, digest: DescriptorDigest) {
+    fn remember_undecryptable(&self, key: Key) {
         let mut failed = self.undecryptable.lock().expect("undecryptable mutex");
-        failed.retain(|_, (at, _)| at.elapsed() < UNDECRYPTABLE_TTL);
-        failed.insert(key, (Instant::now(), digest));
+        failed.retain(|_, at| at.elapsed() < UNDECRYPTABLE_TTL);
+        failed.insert(key, Instant::now());
     }
 
     /// The object as it already exists: a cache hit, or a streamed download
@@ -849,7 +845,6 @@ impl Inner {
         key: Key,
         mxc_url: &str,
         encrypted_file: Option<Value>,
-        digest: Option<DescriptorDigest>,
         fetcher: &dyn MediaFetcher,
         deadline: Instant,
     ) -> Result<MediaBody, MediaCacheError> {
@@ -924,7 +919,6 @@ impl Inner {
             key,
             mxc_url: mxc_url.to_owned(),
             len: stream.len,
-            digest,
             progress,
             reservation,
             cleanup,
@@ -1215,28 +1209,6 @@ impl Index {
 /// client's retry gets an immediate `422` (ADR 0139 section 4).
 const UNDECRYPTABLE_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// A SHA-256 over an encrypted-file descriptor's key, IV and ciphertext hash.
-type DescriptorDigest = [u8; 32];
-
-/// Identify the descriptor a negative entry was recorded for, so an event that
-/// reuses a URI with a bogus descriptor cannot mark it undecryptable for the
-/// event whose descriptor is right. Reads the JSON as given: the fetcher
-/// rejects a malformed descriptor before any download, so only well-formed
-/// ones ever reach a hash check.
-fn descriptor_digest(descriptor: &Value) -> DescriptorDigest {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for field in [
-        &descriptor["key"]["k"],
-        &descriptor["iv"],
-        &descriptor["hashes"]["sha256"],
-    ] {
-        hasher.update(field.as_str().unwrap_or_default().as_bytes());
-        hasher.update([0]);
-    }
-    hasher.finalize().into()
-}
-
 /// A streamed download's share of the cache's byte cap, held from before its
 /// body is read until it is promoted (converted into an entry) or fails
 /// (released on drop).
@@ -1301,8 +1273,6 @@ struct StreamTask {
     mxc_url: String,
     /// The upstream `Content-Length`, if any.
     len: Option<u64>,
-    /// Set for encrypted media, to record a failed hash check.
-    digest: Option<DescriptorDigest>,
     progress: watch::Sender<Progress>,
     /// Declared before `cleanup`, so an unwinding task releases its space
     /// before it leaves `Inner::streaming`, as the normal paths do.
@@ -1349,10 +1319,8 @@ impl StreamTask {
                     error = %failure,
                     "streamed media download failed",
                 );
-                if let (Failure::Fetch(FetchError::Undecryptable(_)), Some(digest)) =
-                    (&failure, self.digest)
-                {
-                    self.inner.remember_undecryptable(self.key.clone(), digest);
+                if matches!(failure, Failure::Fetch(FetchError::Undecryptable(_))) {
+                    self.inner.remember_undecryptable(self.key.clone());
                 }
                 self.progress
                     .send_modify(|progress| progress.outcome = Outcome::Failed(failure));

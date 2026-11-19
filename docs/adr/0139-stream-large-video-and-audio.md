@@ -242,13 +242,10 @@ When the hash fails:
 - Every response still reading the object is aborted at the withheld tail (section 3), so the player sees a network error rather than a clean end.
 - The staging file is deleted and the object is never cached.
 - The object is held as `undecryptable` for 10 minutes, so the client's retry gets an immediate `422 media_undecryptable` instead of downloading 1 GiB again to fail the same way.
-  - The negative entry records a digest of the descriptor that failed: a SHA-256 over its key, IV and hash.
-    A request whose resolved descriptor has a different digest ignores the entry and downloads again.
+  - The negative entry is keyed on the object's representation key, the same key the cache and its single-flight use.
+    Since [ADR 0138](0138-matrix-link-previews.md) section 4, that key binds a digest of the whole encrypted-file descriptor as well as the account and the MXC URI.
+    A request whose descriptor differs therefore misses the entry and downloads again.
     So an event that reuses another event's MXC URI with a bogus descriptor cannot mark the URI undecryptable for the event whose descriptor is correct.
-  - In practice the descriptor for a URI is already fixed per account.
-    `resolve_media_content` takes it from the oldest stored event that references the URI (`get_event_by_mxc_url` orders by `id` and takes the first), so a later event's descriptor is never the one used.
-    The digest keeps the negative entry correct without depending on that ordering.
-  - The cached plaintext stays keyed on the account and the MXC URI, as today, because that same lookup is what chooses the descriptor that produced it.
 - The failure is logged at `warn` with the account, the MXC URI and the byte count.
 
 ### 5. Phase 2: stream tickets
