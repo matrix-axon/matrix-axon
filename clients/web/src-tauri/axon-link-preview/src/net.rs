@@ -362,13 +362,21 @@ pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
             Err(_) => return Err(Failure::Unavailable),
         };
         let eof = read == 0;
+        // The optional read can discover EOF immediately after the original
+        // prefix. Keep that prefix just as if the reader had stopped there.
+        if eof && extension_timer.is_some() && parser.body().len() == INITIAL_HEAD_BYTES {
+            break true;
+        }
         let mut done = parser.append(&buffer[..read], eof)?;
         if parser.at_prefix_limit() && extension_timer.is_none() {
             let http::Media::Html(content_type) = parser.media() else {
                 unreachable!("only HTML has a prefix limit");
             };
             let now = Instant::now();
-            let until = (now + HEAD_EXTENSION).min(deadline - HEAD_FINISH_RESERVE);
+            let Some(latest) = deadline.checked_sub(HEAD_FINISH_RESERVE) else {
+                break true;
+            };
+            let until = (now + HEAD_EXTENSION).min(latest);
             if until <= now
                 || tags.exhausted(parser.body())
                 || page::has_rich_metadata(parser.body(), content_type)?
@@ -379,11 +387,13 @@ pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
             extension_timer = Some(Box::pin(tokio::time::sleep_until(until)));
             parser.extend_prefix(MAX_HEAD_BYTES);
             // A socket read can already have bytes past the initial limit.
-            done = parser.append(&[], eof)?;
+            done = parser.append(&[], false)?;
         }
-        let tag_budget_exhausted = extension_timer.is_some() && tags.exhausted(parser.body());
-        if done || tag_budget_exhausted {
-            break parser.at_prefix_limit() || tag_budget_exhausted;
+        if done {
+            break parser.at_prefix_limit();
+        }
+        if extension_timer.is_some() && tags.exhausted(parser.body()) {
+            break true;
         }
         if eof {
             crate::log::event(&format!(

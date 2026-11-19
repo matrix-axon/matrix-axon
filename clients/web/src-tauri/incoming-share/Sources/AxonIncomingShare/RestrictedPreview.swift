@@ -157,6 +157,7 @@ enum RestrictedPreview {
   ]
   private static let comment = Array("<!--".utf8)
   private static let commentEnd = Array("-->".utf8)
+  private static let commentEndWithBang = Array("--!>".utf8)
 
   // The DOM parser owns field selection. Raw text and template contents
   // cannot supply early metadata hints.
@@ -168,9 +169,8 @@ enum RestrictedPreview {
     while let start = bytes[cursor...].firstIndex(of: 60) {
       cursor = start + 1
       if bytes[start...].starts(with: comment) {
-        guard let end = data.range(of: Data(commentEnd), in: (data.startIndex + start + 4)..<data.endIndex)
-        else { break }
-        cursor = end.upperBound - data.startIndex
+        guard let after = skipComment(bytes, startingAt: start + comment.count) else { break }
+        cursor = after
         continue
       }
       let closing = cursor < bytes.count && bytes[cursor] == 47
@@ -209,6 +209,17 @@ enum RestrictedPreview {
       }
     }
     return probe
+  }
+
+  private static func skipComment(_ bytes: [UInt8], startingAt start: Int) -> Int? {
+    let rest = bytes[start...]
+    if rest.first == 62 { return start + 1 }
+    if rest.starts(with: [45, 62]) { return start + 2 }
+    for index in rest.indices where rest[index] == 45 {
+      if rest[index...].starts(with: commentEnd) { return index + commentEnd.count }
+      if rest[index...].starts(with: commentEndWithBang) { return index + commentEndWithBang.count }
+    }
+    return nil
   }
 
   // As in the Rust reader, the first closing script marker in a double

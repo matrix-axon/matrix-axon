@@ -46,11 +46,14 @@ pub(crate) enum Media {
 }
 
 impl Media {
-    pub(crate) fn from_headers(headers: &HashMap<String, String>) -> Self {
-        let value = headers
-            .get("content-type")
-            .map(|value| value.to_ascii_lowercase())
-            .unwrap_or_else(|| "text/html".into());
+    pub(crate) fn from_headers(headers: &HashMap<String, String>, kind: Kind) -> Self {
+        let Some(value) = headers.get("content-type") else {
+            return match kind {
+                Kind::Page => Self::Html("text/html".into()),
+                Kind::Image => Self::Other,
+            };
+        };
+        let value = value.to_ascii_lowercase();
         if value.starts_with("text/html") || value.starts_with("application/xhtml+xml") {
             Self::Html(value)
         } else if value.starts_with("image/") {
@@ -286,7 +289,7 @@ impl Parser {
         {
             return Err(Failure::InvalidResponse);
         }
-        self.media = Media::from_headers(&self.headers);
+        self.media = Media::from_headers(&self.headers, self.kind);
         if let Some(transfer) = self.headers.get("transfer-encoding") {
             if !transfer.eq_ignore_ascii_case("chunked")
                 || self.headers.contains_key("content-length")
@@ -540,6 +543,18 @@ mod tests {
             parser.append(b"HTTP/1.1 404 Not Found\r\n\r\n", false),
             Err(Failure::PreviewUnavailable)
         );
+    }
+
+    #[test]
+    fn a_missing_content_type_defaults_to_html_only_for_page_requests() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
+        let mut page = Parser::new(Kind::Page, 256 * 1024);
+        let mut image = Parser::new(Kind::Image, 0);
+        assert!(page.append(head, false).unwrap());
+        assert!(image.append(head, false).unwrap());
+        assert_eq!(page.media(), &Media::Html("text/html".into()));
+        assert_eq!(image.media(), &Media::Other);
+        assert_eq!(image.body(), b"abc");
     }
 
     #[test]

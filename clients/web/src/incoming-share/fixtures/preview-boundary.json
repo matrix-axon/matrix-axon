@@ -190,6 +190,53 @@
   "headReadLimits": { "initial": 262144, "maximum": 1048576, "tags": 512 },
   "headReads": [
     {
+      "name": "EOF exactly at checkpoint keeps metadata from a short declared body",
+      "contentLength": 1100000,
+      "start": "<head><title>Short response</title><script>",
+      "padTo": 262144,
+      "tail": "",
+      "stop": "initial",
+      "cutoff": true,
+      "title": "Short response"
+    },
+    {
+      "name": "a head that ends on the tag-budget read finishes normally",
+      "start": "<head><title>Complete title</title><script>",
+      "padTo": 279000,
+      "tail": "",
+      "repeat": "<",
+      "repetitions": 509,
+      "repeatAfterPadding": true,
+      "afterRepeat": "</script></head>",
+      "stop": "full",
+      "cutoff": false,
+      "title": "Complete title"
+    },
+    {
+      "name": "an abruptly closed empty comment permits the early stop",
+      "start": "<head><!--><meta name=description content=Early><script>",
+      "padTo": 310000,
+      "tail": "</script></head>",
+      "stop": "initial",
+      "description": "Early"
+    },
+    {
+      "name": "a comment closed with an exclamation mark permits the early stop",
+      "start": "<head><!-- <meta name=description content=Fake> --!><meta name=description content=Early><script>",
+      "padTo": 310000,
+      "tail": "</script></head>",
+      "stop": "initial",
+      "description": "Early"
+    },
+    {
+      "name": "noscript and SVG text are conservative probe inputs",
+      "start": "<head><noscript><meta name=description content=Fallback></noscript><svg><style><meta name=description content=Foreign></style></svg><script>",
+      "padTo": 310000,
+      "tail": "</script><meta property=og:description content=Real></head>",
+      "stop": "full",
+      "description": "Real"
+    },
+    {
       "name": "complete title and rich metadata after unfamiliar elements",
       "start": "<head><img><svg></svg><template><div></div></template><object></object><iframe>inert</iframe><div></div><title>Complete title</title><meta name=description content=Early><script>",
       "padTo": 310000,

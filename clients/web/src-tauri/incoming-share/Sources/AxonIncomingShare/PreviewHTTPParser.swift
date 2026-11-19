@@ -89,7 +89,7 @@ struct PreviewHTTPParser {
       guard headers["content-encoding"].map({ $0.lowercased() == "identity" }) ?? true else {
         throw ShareFailure.invalidResponse
       }
-      media = PreviewNetwork.Media(headers: headers)
+      media = PreviewNetwork.Media(headers: headers, kind: kind)
       if let transfer = headers["transfer-encoding"] {
         guard transfer.lowercased() == "chunked", headers["content-length"] == nil else {
           throw ShareFailure.invalidResponse

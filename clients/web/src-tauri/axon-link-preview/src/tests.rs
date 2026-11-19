@@ -121,12 +121,15 @@ struct HeadReadLimits {
 struct HeadRead {
     name: String,
     content_type: Option<String>,
+    content_length: Option<usize>,
     start: String,
     pad_to: usize,
     tail: String,
     repeat: Option<String>,
     repetitions: Option<usize>,
     repeat_after_padding: Option<bool>,
+    after_repeat: Option<String>,
+    cutoff: Option<bool>,
     trailing_spaces: Option<usize>,
     stop: String,
     title: Option<String>,
@@ -715,7 +718,7 @@ fn response(status: u16, headers: &[(&str, &str)], body: &[u8], url: &url::Url) 
         .collect();
     Response {
         status,
-        media: crate::http::Media::from_headers(&headers),
+        media: crate::http::Media::from_headers(&headers, Resource::Page),
         headers,
         body: body.to_vec(),
         cutoff: false,
@@ -1545,10 +1548,17 @@ async fn fixture_head_reads() {
         if case.repeat_after_padding.unwrap_or(false) {
             html.extend_from_slice(repeated.as_bytes());
         }
+        html.extend_from_slice(case.after_repeat.as_deref().unwrap_or("").as_bytes());
         html.resize(html.len() + case.trailing_spaces.unwrap_or(0), b' ');
         let (client, mut server) = tokio::io::duplex(4096);
-        let body = ok(case.content_type.as_deref().unwrap_or("text/html"), &html);
-        let serve = async {
+        let content_type = case.content_type.as_deref().unwrap_or("text/html");
+        let length = case.content_length.unwrap_or(html.len());
+        let mut body = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {length}\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&html);
+        let serve = async move {
             let mut request = [0; TEST_GET.len()];
             server.read_exact(&mut request).await.unwrap();
             assert_eq!(request, TEST_GET);
@@ -1566,7 +1576,10 @@ async fn fixture_head_reads() {
             tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(serve, read) })
                 .await
                 .unwrap();
-        let response = result.unwrap();
+        let response = result.unwrap_or_else(|err| panic!("{}: {err:?}", case.name));
+        if let Some(cutoff) = case.cutoff {
+            assert_eq!(response.cutoff, cutoff, "{}", case.name);
+        }
         let retained = response.body.len();
         match case.stop.as_str() {
             "full" => assert_eq!(retained, html.len(), "{}", case.name),

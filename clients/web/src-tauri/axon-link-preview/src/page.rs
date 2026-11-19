@@ -202,10 +202,10 @@ fn head_probe(mut input: &[u8]) -> HeadProbe {
     while let Some(start) = input.iter().position(|&byte| byte == b'<') {
         input = &input[start..];
         if input.starts_with(b"<!--") {
-            let Some(end) = input[4..].windows(3).position(|bytes| bytes == b"-->") else {
+            let Some(after) = skip_comment(&input[4..]) else {
                 break;
             };
-            input = &input[end + 7..];
+            input = after;
             continue;
         }
         let name_start = if input.starts_with(b"</") { 2 } else { 1 };
@@ -262,6 +262,26 @@ fn head_probe(mut input: &[u8]) -> HeadProbe {
         }
     }
     probe
+}
+
+/// Find the end of a comment after its opening delimiter.
+fn skip_comment(input: &[u8]) -> Option<&[u8]> {
+    if let Some(after) = input
+        .strip_prefix(b">")
+        .or_else(|| input.strip_prefix(b"->"))
+    {
+        return Some(after);
+    }
+    for (index, _) in input.iter().enumerate().filter(|&(_, &byte)| byte == b'-') {
+        let remaining = &input[index..];
+        if let Some(after) = remaining
+            .strip_prefix(b"-->")
+            .or_else(|| remaining.strip_prefix(b"--!>"))
+        {
+            return Some(after);
+        }
+    }
+    None
 }
 
 /// Script can contain a nested script marker while escaped by an HTML

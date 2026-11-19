@@ -15,8 +15,12 @@ enum PreviewNetwork {
   enum Media: Equatable {
     case html(String), image, other
 
-    init(headers: [String: String]) {
-      let value = (headers["content-type"] ?? "text/html").lowercased()
+    init(headers: [String: String], kind: Kind) {
+      guard let contentType = headers["content-type"] else {
+        self = kind == .page ? .html("text/html") : .other
+        return
+      }
+      let value = contentType.lowercased()
       if value.hasPrefix("text/html") || value.hasPrefix("application/xhtml+xml") {
         self = .html(value)
       } else if value.hasPrefix("image/") {
@@ -32,14 +36,18 @@ enum PreviewNetwork {
     let body: Data
     let url: URL
     let cutoff: Bool
-    var media: Media { Media(headers: headers) }
+    let media: Media
 
-    init(status: Int, headers: [String: String], body: Data, url: URL, cutoff: Bool = false) {
+    init(
+      status: Int, headers: [String: String], body: Data, url: URL, cutoff: Bool = false,
+      media: Media? = nil
+    ) {
       self.status = status
       self.headers = headers
       self.body = body
       self.url = url
       self.cutoff = cutoff
+      self.media = media ?? Media(headers: headers, kind: .page)
     }
   }
   enum Kind: String { case page, image }
@@ -432,25 +440,31 @@ enum PreviewNetwork {
         cutoff = true
         return true
       }
-      var done = try parser.append(data, eof: eof)
+      // Process delivered bytes before EOF, which Network may report with
+      // the last bytes or in a separate callback.
+      var done = try parser.append(data)
       if parser.atPrefixLimit, extensionDeadline == nil, case .html(let contentType) = parser.media {
         // Reserve time for parsing and let the image use part of the shared
         // deadline for DNS, TLS and its download.
-        let until = min(now + 4, deadline - 6)
-        if try until <= now || tagBudgetExhausted()
+        if try deadline <= now + 6 || tagBudgetExhausted()
           || RestrictedPreview.hasRichMetadata(parser.body, contentType: contentType)
         {
           cutoff = true
           return true
         }
         log.info("device_preview_html_extended")
-        extensionDeadline = until
+        extensionDeadline = min(now + 4, deadline - 6)
         parser.extendPrefix(to: RestrictedPreview.maxHeadBytes)
-        done = try parser.append(Data(), eof: eof)
+        done = try parser.append(Data())
       }
-      let exhausted = extensionDeadline != nil && tagBudgetExhausted()
-      cutoff = parser.atPrefixLimit || exhausted
-      return done || cutoff
+      cutoff = parser.atPrefixLimit || (!done && extensionDeadline != nil && tagBudgetExhausted())
+      if done || cutoff { return true }
+      guard eof else { return false }
+      if extensionDeadline != nil && parser.body.count == RestrictedPreview.initialHeadBytes {
+        cutoff = true
+        return true
+      }
+      return try parser.append(Data(), eof: true)
     }
 
     private mutating func tagBudgetExhausted() -> Bool {
@@ -462,7 +476,7 @@ enum PreviewNetwork {
     func response(url: URL, timedOut: Bool = false) -> Response {
       Response(
         status: parser.status, headers: parser.headers, body: parser.body, url: url,
-        cutoff: cutoff || timedOut)
+        cutoff: cutoff || timedOut, media: parser.media)
     }
   }
 

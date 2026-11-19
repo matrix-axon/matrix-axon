@@ -100,6 +100,9 @@ It shares the network and metadata rules of the Swift reader in `incoming-share/
   Both readers stop at the end of the HTML head or check the first 256 KiB for a usable description or preview image reference, whichever comes first.
   If the probe finds neither a usable description nor an image reference, or a title is still open, the same response can continue until the head or response ends, the tag budget is exhausted, or the reader reaches 1 MiB.
   The continuation has a four-second budget and reserves six seconds on the shared deadline for parsing and fetching an image.
+  If the connection closes exactly at the checkpoint, the collected prefix remains usable even if the response declared a longer body.
+  The checkpoint probe is conservative around raw text and nested markup.
+  The Rust and Swift HTML parsers can recover differently from unusual markup, including `noscript` and foreign elements.
   When that optional budget expires, the reader extracts metadata from the bytes already received and drops any unfinished title.
   The head ends at `</head` or `<body` followed by whitespace, `/` or `>`; neither reader tokenizes, so one inside a script still ends it.
   Only the bytes before the 513th `<` are parsed, which bounds the tree.

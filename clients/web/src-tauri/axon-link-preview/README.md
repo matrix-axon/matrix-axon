@@ -32,6 +32,9 @@ Both readers stop at `</head` or `<body` followed by a tag-name boundary, the en
 At the checkpoint a bounded probe checks for a usable description or image reference.
 If the probe finds neither field or a title is still open, the reader can continue on the same connection, for at most four more seconds and up to 1 MiB.
 The reader stops the continuation if it exceeds the tag budget and parses the collected head once.
+A connection that closes at the checkpoint leaves the collected prefix usable.
+The probe treats `noscript` and some foreign content as raw text.
+The two HTML parsers can recover differently from unusual markup.
 
 `src/incoming-share/fixtures/preview-boundary.json` holds the cases both readers
 must agree on: URLs, address scope, operator NAT64 mappings, RFC 6052 vectors,
