@@ -297,6 +297,29 @@ impl Store {
         }
     }
 
+    /// Whether the token with row id `id` would still verify: it exists, is
+    /// unrevoked and is unexpired, by the same rule as
+    /// [`verify_token`](Self::verify_token).
+    ///
+    /// For a credential that stands in for a token after the request that
+    /// presented it, such as a media stream ticket (ADR 0139 section 5). It
+    /// is a read: unlike `verify_token` it does not stamp `last_used_at`, since
+    /// the token itself was not presented.
+    pub async fn token_is_live(&self, id: Uuid) -> Result<bool, StoreError> {
+        let live: bool = sqlx_core::query::query(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM tokens \
+                  WHERE id = $1 AND revoked_at IS NULL \
+                    AND (expires_at IS NULL OR expires_at > now()) \
+             ) AS live",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?
+        .try_get("live")?;
+        Ok(live)
+    }
+
     /// Mint an OAuth-backed access token: like [`issue_token`](Self::issue_token),
     /// but carrying an expiry and the OAuth provenance columns. Used by the
     /// `oauth` module's token orchestration, never by the CLI.

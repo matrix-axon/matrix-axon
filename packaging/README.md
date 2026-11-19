@@ -66,7 +66,7 @@ The postinstall script looks for `tailscale`, `caddy`, `nginx`, and `apache2` or
 It never writes another service's configuration and never reloads another service: the package cannot know the hostname or the certificate, and enabling a proxy is what exposes the server.
 
 When changing a site file, run it for real.
-The properties to hold are: the WebSocket at `/v1/ws` upgrades, a body over 1 MB is not refused by the proxy, and a path containing `%2F` reaches the server still encoded.
+The properties to hold are: the WebSocket at `/v1/ws` upgrades, a body over 1 MB is not refused by the proxy, a path containing `%2F` reaches the server still encoded, and no access log records the ticket in a `/v1/media-stream/<ticket>` path.
 
 Remote Postgres: the package still installs; see `README.Debian` in the doc directory of the built package.
 

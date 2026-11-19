@@ -1857,6 +1857,23 @@ impl From<ThumbnailMethodDto> for axon_core::media::ThumbnailMethod {
     }
 }
 
+/// A stream ticket for one video or audio object (ADR 0139 section 5): a URL
+/// that a `<video>` or `<audio>` element can load without an `Authorization`
+/// header.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StreamTicketDto {
+    /// Where to load the object: `/v1/media-stream/{ticket}`. Relative, so
+    /// the client resolves it against its own server base. The ticket in it is
+    /// a credential for this one object and must be kept out of logs.
+    pub path: String,
+    /// RFC 3339: when the ticket stops working if it is not used. Each use
+    /// moves this to 30 minutes after that use, never past 12 hours after
+    /// issue, and never past the issuing token's own expiry. A ticket also
+    /// stops working once its token is revoked or the server restarts; the
+    /// route then answers `404`, and the client asks for a new one.
+    pub expires_at: String,
+}
+
 /// Metadata returned after bytes have been staged successfully.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct StagedUploadDto {

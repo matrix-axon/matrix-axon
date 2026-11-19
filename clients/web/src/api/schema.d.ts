@@ -2116,6 +2116,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/media-stream/{ticket}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream media by ticket
+         * @description Serve the object a stream ticket was issued for, exactly as
+         *     `GET /v1/media/{account_id}/{server_name}/{media_id}` serves it, ranges
+         *     and all. The ticket in the path stands in for the bearer token, so this
+         *     route takes no `Authorization` header (ADR 0139 section 5).
+         *
+         *     Every request re-checks the ticket when it starts: it must be live, the
+         *     token that issued it unrevoked and unexpired, and the owning event still
+         *     stored with its content. A response already streaming when the token is
+         *     revoked runs to its end, as a bearer-authenticated media response does.
+         *     Only a request served without error counts as a use of the ticket, which
+         *     restarts its 30-minute idle expiry.
+         *
+         *     Every response under `/v1/media-stream/`, errors included, carries
+         *     `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`.
+         */
+        get: operations["get_media_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/media/{account_id}/{server_name}/{media_id}": {
         parameters: {
             query?: never;
@@ -2145,6 +2178,38 @@ export interface paths {
         get: operations["get_media"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/media/{account_id}/{server_name}/{media_id}/stream-ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a stream ticket
+         * @description Issue a URL that serves one video or audio object without a bearer header,
+         *     for a `<video>` or `<audio>` element to load (ADR 0139 section 5). The
+         *     object is checked exactly as `GET /v1/media/{account_id}/{server_name}/{media_id}`
+         *     checks it without `room_id` and `event_id`: the account, the stored event
+         *     that owns the URI, and the type that route would serve it as.
+         *
+         *     The ticket works only while the bearer token that issued it would, and
+         *     only while the owning event is still stored with its content. Both are
+         *     checked when each request starts, so a response already streaming when the
+         *     token is revoked runs to its end, as a bearer-authenticated media response
+         *     does. It is held in memory, so a restart ends it. One credential session holds at most 32 live
+         *     tickets, across the access tokens an OAuth refresh mints; issuing another
+         *     ends that session's least recently used one.
+         */
+        post: operations["create_stream_ticket"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3522,6 +3587,30 @@ export interface components {
                 push: components["schemas"]["PushStatusDto"];
                 /** @description Per-account sync-service status. */
                 sync: components["schemas"]["AccountSyncStatusDto"][];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_StreamTicketDto: {
+            /**
+             * @description A stream ticket for one video or audio object (ADR 0139 section 5): a URL
+             *     that a `<video>` or `<audio>` element can load without an `Authorization`
+             *     header.
+             */
+            data: {
+                /**
+                 * @description RFC 3339: when the ticket stops working if it is not used. Each use
+                 *     moves this to 30 minutes after that use, never past 12 hours after
+                 *     issue, and never past the issuing token's own expiry. A ticket also
+                 *     stops working once its token is revoked or the server restarts; the
+                 *     route then answers `404`, and the client asks for a new one.
+                 */
+                expires_at: string;
+                /**
+                 * @description Where to load the object: `/v1/media-stream/{ticket}`. Relative, so
+                 *     the client resolves it against its own server base. The ticket in it is
+                 *     a credential for this one object and must be kept out of logs.
+                 */
+                path: string;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -6838,6 +6927,27 @@ export interface components {
             size?: number | null;
             /** Format: int32 */
             w?: number | null;
+        };
+        /**
+         * @description A stream ticket for one video or audio object (ADR 0139 section 5): a URL
+         *     that a `<video>` or `<audio>` element can load without an `Authorization`
+         *     header.
+         */
+        StreamTicketDto: {
+            /**
+             * @description RFC 3339: when the ticket stops working if it is not used. Each use
+             *     moves this to 30 minutes after that use, never past 12 hours after
+             *     issue, and never past the issuing token's own expiry. A ticket also
+             *     stops working once its token is revoked or the server restarts; the
+             *     route then answers `404`, and the client asks for a new one.
+             */
+            expires_at: string;
+            /**
+             * @description Where to load the object: `/v1/media-stream/{ticket}`. Relative, so
+             *     the client resolves it against its own server base. The ticket in it is
+             *     a credential for this one object and must be kept out of logs.
+             */
+            path: string;
         };
         /** @description Submit the two decimal digits shown by the scanning device. */
         SubmitMatrixOAuthCheckCodeRequest: {
@@ -13478,6 +13588,122 @@ export interface operations {
             };
         };
     };
+    get_media_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The ticket from `POST .../stream-ticket`. A credential: keep it out of logs */
+                ticket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Full media bytes, with the headers `GET /v1/media/...` sends, plus `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`. When the homeserver declared no length and the download is still running, the body is chunked with no `Content-Length` or `Accept-Ranges`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Partial media bytes for a satisfiable `Range` request (with `Content-Range`). */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The `If-None-Match` entity tag matched; body omitted. */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The object would no longer be served as `video/*` or `audio/*` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver denied access to this media object */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The ticket is unknown or expired, the server restarted, or the token that issued it was revoked or expired; or the account or the owning event is gone, or the event was redacted. Ask for a new ticket. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The media object exceeds `max_stream_bytes` */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The requested `Range` is not satisfiable (with `Content-Range: bytes *\/len`). */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The encrypted attachment could not be decrypted (`media_undecryptable`). Terminal, as on `GET /v1/media/...`. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal lookup failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The homeserver was unreachable or returned an error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The account's homeserver connection is not established, or the stream could not start yet. Retryable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     get_media: {
         parameters: {
             query?: {
@@ -13605,6 +13831,71 @@ export interface operations {
             };
             /** @description The account's homeserver connection is not currently established, or a video or audio stream could not start yet (no stream slot or upstream answer within `fetch_timeout_secs`, or no cache room beside other streams). Retryable; a stream that could not start carries `Retry-After`. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    create_stream_ticket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account whose credentials are used for the download */
+                account_id: string;
+                /** @description Server-name component of the MXC URI (the part after `mxc://`) */
+                server_name: string;
+                /** @description Media-ID component of the MXC URI */
+                media_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The ticket's path and expiry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_StreamTicketDto"];
+                };
+            };
+            /** @description The object would not be served as `video/*` or `audio/*` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not found, no stored event owns this media, or that event is redacted or not yet decrypted */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal media-metadata lookup failure */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

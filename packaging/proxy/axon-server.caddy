@@ -22,6 +22,21 @@
 # sets no request-body limit (media uploads), and leaves the path as the
 # client sent it. axon-server compresses its own responses.
 
+#
+# Caddy keeps no access log unless the site asks for one. A video or audio
+# stream ticket (/v1/media-stream/<ticket>) is a credential in the URL, so if
+# you add a `log` block, keep the ticket out of it as the commented one below
+# does. It works on Caddy 2.6 and later.
+
 axon.example.com {
 	reverse_proxy 127.0.0.1:8080
+
+	# log {
+	# 	format filter {
+	# 		wrap json
+	# 		fields {
+	# 			request>uri regexp /v1/media-stream/[^?]* /v1/media-stream/{ticket}
+	# 		}
+	# 	}
+	# }
 }

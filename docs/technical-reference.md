@@ -243,6 +243,25 @@ Two configurations change this:
 
 Clients keep their own limits: the web client and the shells still buffer a whole object until ADR 0139's later phases land, and the TUI still refuses media over 20 MiB.
 
+### Stream tickets
+
+A `<video>` or `<audio>` element cannot send a bearer token, so a client asks for a stream ticket (`POST /v1/media/{account_id}/{server_name}/{media_id}/stream-ticket`) and loads the path it returns, `/v1/media-stream/<ticket>`, without one ([ADR 0139](adr/0139-stream-large-video-and-audio.md) section 5).
+The ticket is a credential for that one object.
+It stops working 30 minutes after its last use, 12 hours after it was issued, when the token that minted it is revoked or expires, when the owning event is redacted, or when the server restarts.
+A use is a request served without error; a request that fails does not keep the ticket alive.
+These checks run when each request starts, so a response already streaming when the token is revoked runs to its end, as a bearer-authenticated media response does.
+Each credential session holds at most 32 tickets.
+Issuing a ticket logs at `INFO` with the account, MXC URI, token id and session id, and a refused ticket logs at `DEBUG`; neither records the ticket.
+
+Axon's own request log records `/v1/media-stream/{ticket}` in place of the ticket.
+**A reverse proxy in front of Axon must do the same in its access log**, or every media range request writes a usable ticket to disk:
+
+- The packaged nginx and Apache sites (`packaging/proxy/`) already do. An nginx or Apache site written before this release, or any other proxy configuration, needs the same `log_format` or `LogFormat` change; copy it from those files.
+- Caddy keeps no access log unless the site has a `log` block. The packaged Caddy site shows a `log` block that filters the ticket out of `request>uri`; use the same filter in any site that logs.
+- Any other proxy: rewrite or drop the request path for `/v1/media-stream/` in its access log.
+
+A proxy's error log can still contain a ticket, in the request line of a proxied request that failed. Keep error logs private.
+
 ## Environment variables
 
 Two kinds of `AXON_`-prefixed environment variables exist:

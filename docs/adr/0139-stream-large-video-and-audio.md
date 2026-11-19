@@ -1,6 +1,6 @@
 # ADR 0139 — Stream large video and audio media
 
-**Status:** Accepted; phase 1 (section 3) is implemented in [PR 1157](https://github.com/matrix-axon/matrix-axon/pull/1157), and phases 2 to 5 are not yet started. Part of [issue 22](https://github.com/matrix-axon/matrix-axon/issues/22).
+**Status:** Accepted; phase 1 (section 3) is implemented in [PR 1157](https://github.com/matrix-axon/matrix-axon/pull/1157), phase 2 (section 5) in [PR 1174](https://github.com/matrix-axon/matrix-axon/pull/1174), and phases 3 to 5 are not yet started. Part of [issue 22](https://github.com/matrix-axon/matrix-axon/issues/22).
 
 ## Context
 
@@ -272,6 +272,7 @@ A `<video>` cannot carry a bearer header, so the server issues a URL that stands
   It records no event id, because the checks below resolve the event from the MXC URI, exactly as `get_media` does.
   Restarting the server drops every ticket, and the client simply asks for a new one (section 6).
 - A ticket expires 30 minutes after its last use and never more than 12 hours after it was issued.
+  A use is a request served without error, so a ticket whose requests keep failing neither stays alive nor ranks as recently used for the cap below.
 - Every use also re-checks the issuing token.
   A new read-only store lookup by token id rejects the ticket unless that token is unrevoked and unexpired.
   So a ticket is accepted exactly when the bearer token that issued it would be.
@@ -294,9 +295,13 @@ A `<video>` cannot carry a bearer header, so the server issues a URL that stands
   - Media authorized only by an image pack or an inline message has no owning event.
     `resolve_media_content` serves it as a sniffed raster image (`raster_only`), never as `video/*` or `audio/*`, so the mint refuses a ticket for it.
     Every ticketed object therefore has an owning event.
-- The table holds at most 4096 tickets and drops the least recently used past that.
-  Each issuing token holds at most 32 live tickets, and a 33rd evicts that token's own least recently used ticket.
-  So one client minting tickets in a loop churns only its own tickets and cannot evict other users' tickets out of the shared table.
+- Each credential session holds at most 32 live tickets, and a 33rd evicts that session's own least recently used ticket.
+  So one client minting tickets in a loop churns only its own tickets.
+  The cap counts the session, not the token, because an OAuth refresh mints a new access token in the same session, and a token cap would hand the session a fresh allowance every hour.
+  A non-expiring token is its own session.
+- The table holds at most 4096 tickets, as a memory bound, and past that drops the least recently used ticket, whoever holds it.
+  With 32 per session, that takes 128 sessions holding live tickets at once, and each session is a sign-in or an operator-minted token.
+  So the per-session cap is what isolates one client from another, and the table cap protects only memory.
   A single viewer needs only a few tickets at once: one per video or audio preview the user has opened (section 6).
   A rendered timeline mints none.
 - Tickets are never logged.
@@ -440,8 +445,10 @@ This phase begins by checking that support against production Synapse, and gets 
   The permits are server-wide, so one user who abandons four large previews can make others' video wait for a `503`; a per-account share is #1139.
 - A ticket is a credential in a URL.
   It is limited to one object, a 30-minute idle lifetime, its issuing token's validity and the owning event still being stored.
-  Axon's own request log records the route template instead (section 5), but Caddy's access log records the ticket on every range request.
-  Operators who ship those logs elsewhere should know that.
+  Axon's own request log records the route template instead (section 5), but a reverse proxy's access log records the ticket on every range request unless it is told not to.
+  The packaged nginx and Apache sites log `/v1/media-stream/{ticket}` in its place, and the packaged Caddy site, which keeps no access log by default, shows a `log` block that does the same.
+  A proxy's error log can still record a ticket when a proxied request fails, so it must stay private.
+  Operators who run their own proxy configuration, or ship its logs elsewhere, need the same redaction (`docs/technical-reference.md`, Media streaming).
   Redaction relies on a prefix rule in the `TraceLayer` plus an audit and a test; a router-owned redaction helper is #1140.
 - A ticket's checks run when a request starts, not while its response streams.
   So a response already in progress when its token is revoked, or its event redacted, runs to the end of its range.
