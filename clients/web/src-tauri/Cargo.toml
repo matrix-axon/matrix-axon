@@ -91,7 +91,7 @@ webkit2gtk = { version = "2", features = ["v2_40"] }
 # wry already depend on, so no second copy is built.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary", "NSString", "NSUserDefaults", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary", "NSObject", "NSProcessInfo", "NSString", "NSUserDefaults", "NSValue"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
 
 # The iOS home-screen number. `WebviewWindow::set_badge_count` is compiled

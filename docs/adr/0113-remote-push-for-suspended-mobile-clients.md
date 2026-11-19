@@ -2,6 +2,7 @@
 
 **Status:** Accepted.
 Amended by [ADR 0129](0129-badge-and-read-clearing-for-suspended-phones.md), which adds a badge count and a send when a count falls.
+Clarified by an addendum under "Who is woken", which records how the macOS shell stays responsive in the background.
 This records the design for #603 and adds no code.
 #604 implements the server half.
 #605 implements the client half, and it waits until #604 has landed.
@@ -61,6 +62,18 @@ Suspension on a phone is the OS taking the process away.
 Quitting the Mac app is the user closing it, and the running-app toasts plus System Settings already cover the desktop case.
 The same Apple key could address a Mac.
 This ADR declines that.
+
+> **Addendum: the macOS shell in the background.**
+> Local notifications and the dock badge both come from the running page, so the page has to keep running while its window is hidden.
+> App Nap throttles timers and I/O in an app that is not visible.
+> The page's live socket then stalls, and toasts and the dock badge wait until the window returns.
+> A user saw exactly that: a badge that corrected itself on foregrounding.
+> The macOS shell therefore holds an `NSProcessInfo` activity for the life of the process, with `UserInitiatedAllowingIdleSystemSleep`.
+> That stops App Nap and holds no display or system-sleep assertion, so an idle Mac can still sleep.
+> It was enough to fix the stale badge on a Mac, so the decision above stands: macOS stays on local notifications and gets no APNs.
+> A Mac that is asleep, and a Mac app that has quit, are still not woken.
+> The assertion is held whether or not the user is signed in.
+> [Issue 1165](https://github.com/matrix-axon/matrix-axon/issues/1165) tracks scoping it to a signed-in, live app.
 
 ### When a push is sent
 
