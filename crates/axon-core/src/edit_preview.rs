@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use serde_json::{json, Value};
 
 use crate::link_preview::{
-    body_urls, bounded, check_content, install_previews, LinkPreview, PreviewError,
+    body_urls, bounded, check_content, install_previews, link_identity, LinkPreview, PreviewError,
     MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_MEDIA_SOURCE_BYTES, MAX_MXC_LENGTH, MAX_PREVIEWS,
     MAX_PREVIEW_BYTES,
 };
@@ -86,12 +86,6 @@ const ENCRYPTED_FILE_KEYS: &[&str] = &["url", "key", "iv", "hashes", "v"];
 /// The thumbnail types the upload path accepts.
 const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 
-/// A link's identity: its `url` crate serialization, or the string itself when
-/// it does not parse (such an entry fails the checks anyway).
-fn identity(url: &str) -> String {
-    url::Url::parse(url).map_or_else(|_| url.to_owned(), |u| u.to_string())
-}
-
 /// Read `content`'s preview field: `m.url_previews` when present, even when it
 /// is empty or malformed, and a value that is not a list counts as `[]`;
 /// otherwise `com.beeper.linkpreviews`, converted to the standard spelling.
@@ -118,7 +112,7 @@ pub fn current_previews(content: &Value) -> Option<CurrentPreviews> {
         else {
             continue;
         };
-        let identity = identity(&matched_url);
+        let identity = link_identity(&matched_url);
         current.named.insert(identity.clone());
         // Past the eighth, the most a send may carry, entries are left out as
         // failing ones are; a message with more came from another client.
@@ -287,7 +281,7 @@ pub fn resolve_keep(
     matched_url: &str,
 ) -> Result<Option<Value>, PreviewsChanged> {
     let current = current.ok_or(PreviewsChanged)?;
-    let identity = identity(matched_url);
+    let identity = link_identity(matched_url);
     if let Some(entry) = current.entries.iter().find(|e| e.identity == identity) {
         let mut value = entry.value.clone();
         value["matrix:matched_url"] = json!(matched_url);

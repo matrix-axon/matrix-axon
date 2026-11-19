@@ -88,6 +88,22 @@ pub(crate) fn body_urls(body: &str) -> HashSet<&str> {
         .collect()
 }
 
+/// A link's identity (ADR 0132 section 1): its WHATWG serialization, which is
+/// what the web composer's `new URL(url).href` produces, or the string itself
+/// when it does not parse (such an entry fails the other checks anyway). Two
+/// previews whose links share an identity name one destination twice.
+/// `clients/web/src/fixtures/link-identity.json` pins the two parsers to the
+/// same answers.
+pub(crate) fn link_identity(url: &str) -> String {
+    url::Url::parse(url).map_or_else(|_| url.to_owned(), |u| parsed_link_identity(&u))
+}
+
+/// [`link_identity`] of a link already parsed, so a caller holding the `Url`
+/// shares the rule without parsing the link again.
+fn parsed_link_identity(url: &url::Url) -> String {
+    url.to_string()
+}
+
 pub fn validate_metadata(body: &str, previews: &[PreviewMetadata]) -> Result<(), PreviewError> {
     if previews.len() > MAX_PREVIEWS {
         return Err(PreviewError::Invalid);
@@ -106,7 +122,7 @@ pub fn validate_metadata(body: &str, previews: &[PreviewMetadata]) -> Result<(),
             || !url.username().is_empty()
             || url.password().is_some()
             || !urls.contains(p.matched_url.as_str())
-            || !seen.insert(url.to_string())
+            || !seen.insert(parsed_link_identity(&url))
             || p.title.as_deref().is_some_and(|s| !bounded(s, 300))
             || p.description.as_deref().is_some_and(|s| !bounded(s, 1000))
             || p.site_name.as_deref().is_some_and(|s| !bounded(s, 120))
@@ -378,5 +394,95 @@ mod tests {
             Err(PreviewError::EventTooLarge)
         );
         assert!(preflight("hello", None, Relation::default(), &[], false).is_ok());
+    }
+
+    /// The web composer's link-identity cases (ADR 0132 delivery item 4). The
+    /// web tests check the same file against `new URL(url).href`, so a parser
+    /// difference fails a test here instead of a send.
+    #[derive(Deserialize)]
+    struct IdentityFixture {
+        cases: Vec<IdentityCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct IdentityCase {
+        name: String,
+        url: String,
+        href: String,
+    }
+
+    fn identity_cases() -> Vec<IdentityCase> {
+        let fixture: IdentityFixture = serde_json::from_str(include_str!(
+            "../../../clients/web/src/fixtures/link-identity.json"
+        ))
+        .expect("link-identity.json parses");
+        assert!(!fixture.cases.is_empty(), "link-identity.json has no cases");
+        fixture.cases
+    }
+
+    #[test]
+    fn link_identity_matches_the_web_fixture() {
+        for case in identity_cases() {
+            assert_eq!(link_identity(&case.url), case.href, "{}", case.name);
+            assert_eq!(link_identity(&case.href), case.href, "{} (href)", case.name);
+        }
+    }
+
+    /// Cases whose link `body_urls` cannot match as typed, so a body cannot
+    /// carry them as a preview's `matched_url`: the server finds links only
+    /// behind a lower-case scheme, and it trims a trailing apostrophe. The
+    /// identity test above still covers them. A fixture case added here, or
+    /// one that stops tokenizing, fails the duplicate test until this list
+    /// says why.
+    const UNTOKENIZED_IDENTITY_CASES: &[&str] = &[
+        "scheme case is folded",
+        "an apostrophe in a query is encoded",
+    ];
+
+    /// The fewest cases the duplicate test must exercise: today's fixture has
+    /// six whose link and serialization differ and both tokenize.
+    const MIN_DUPLICATE_CASES: usize = 6;
+
+    /// Where a case's link and its serialization differ, a send that previews
+    /// both is rejected as naming one destination twice.
+    #[test]
+    fn previews_of_one_fixture_identity_are_duplicates() {
+        let mut checked = 0;
+        let mut untokenized = Vec::new();
+        for case in identity_cases() {
+            if case.url == case.href {
+                continue;
+            }
+            let body = format!("{} {}", case.url, case.href);
+            let urls = body_urls(&body);
+            if !urls.contains(case.url.as_str()) || !urls.contains(case.href.as_str()) {
+                untokenized.push(case.name);
+                continue;
+            }
+            let previews = [&case.url, &case.href].map(|url| PreviewMetadata {
+                matched_url: url.clone(),
+                ..Default::default()
+            });
+            assert!(
+                validate_metadata(&body, &previews[..1]).is_ok(),
+                "{}: one preview",
+                case.name
+            );
+            assert_eq!(
+                validate_metadata(&body, &previews),
+                Err(PreviewError::Invalid),
+                "{}",
+                case.name
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            untokenized, UNTOKENIZED_IDENTITY_CASES,
+            "fixture cases the body tokenizer cannot match"
+        );
+        assert!(
+            checked >= MIN_DUPLICATE_CASES,
+            "only {checked} fixture cases exercised the duplicate check"
+        );
     }
 }

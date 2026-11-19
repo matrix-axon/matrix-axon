@@ -1,6 +1,6 @@
 # ADR 0132 — Composer link previews
 
-**Status:** Proposed. Extends [ADR 0125](0125-ios-first-incoming-sharing.md); supersedes nothing. Amended by [ADR 0138](0138-matrix-link-previews.md) for Matrix links (§§ 1, 5, 6 and 8).
+**Status:** Accepted and implemented: the shell plugin in [PR 1045](https://github.com/matrix-axon/matrix-axon/pull/1045), the web composer in [PR 1070](https://github.com/matrix-axon/matrix-axon/pull/1070), edit previews (section 8, [PR 1069](https://github.com/matrix-axon/matrix-axon/pull/1069)) in [PR 1116](https://github.com/matrix-axon/matrix-axon/pull/1116) and [PR 1117](https://github.com/matrix-axon/matrix-axon/pull/1117), and the server's check against the link-identity fixture (delivery item 4) in `axon-core`. Follow-ups: [issue 1031](https://github.com/matrix-axon/matrix-axon/issues/1031), [issue 1058](https://github.com/matrix-axon/matrix-axon/issues/1058), [issue 1107](https://github.com/matrix-axon/matrix-axon/issues/1107), [issue 1131](https://github.com/matrix-axon/matrix-axon/issues/1131) and [issue 1132](https://github.com/matrix-axon/matrix-axon/issues/1132). Extends [ADR 0125](0125-ios-first-incoming-sharing.md); supersedes nothing. Amended by [ADR 0138](0138-matrix-link-previews.md) for Matrix links (§§ 1, 5, 6 and 8).
 
 ## Context
 
