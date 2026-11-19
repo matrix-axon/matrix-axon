@@ -193,11 +193,11 @@ struct PreviewHTTPParser {
   private mutating func collect(_ data: Data.SubSequence) throws -> Int {
     let wanted = min(data.count, limit - body.count)
     if !prefix && wanted != data.count { throw ShareFailure.quota }
+    let previous = body.count
     body.append(data.prefix(wanted))
     if prefix {
       // Only scan the bounded new tail; do not rescan a large head per packet.
-      let tail = body.suffix(wanted + 8)
-      if Self.endsHead(tail) {
+      if Self.endsHead(body, previous: previous) {
         finished = true
       }
     }
@@ -208,10 +208,12 @@ struct PreviewHTTPParser {
   /// whitespace, `/` or `>`. So `<bodyguard>` does not end a head. One inside
   /// script or comment text still does; the reader does not tokenize. The
   /// Rust reader (`axon-link-preview/src/http.rs`) applies the same rule.
-  static func endsHead(_ bytes: Data) -> Bool {
-    let bytes = [UInt8](bytes)
+  static func endsHead(_ data: Data, previous: Int = 0) -> Bool {
     let boundary: Set<UInt8> = [9, 10, 12, 13, 32, 47, 62]
-    for marker in [[UInt8]("</head".utf8), [UInt8]("<body".utf8)] where bytes.count > marker.count {
+    for marker in [[UInt8]("</head".utf8), [UInt8]("<body".utf8)] {
+      // Keep a whole marker in case its boundary is in the next read.
+      let bytes = [UInt8](data.dropFirst(max(0, previous - marker.count)))
+      guard bytes.count > marker.count else { continue }
       for start in 0..<(bytes.count - marker.count) {
         var matches = true
         for offset in 0..<marker.count {

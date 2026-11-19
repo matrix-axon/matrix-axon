@@ -417,6 +417,7 @@ enum PreviewNetwork {
   struct ReadState {
     private var parser: PreviewHTTPParser
     private var tags = 0
+    private var scanned = 0
     private var cutoff = false
     private(set) var extensionDeadline: DispatchTime?
     var status: Int { parser.status }
@@ -431,13 +432,12 @@ enum PreviewNetwork {
         cutoff = true
         return true
       }
-      let previous = parser.body.count
       var done = try parser.append(data, eof: eof)
       if parser.atPrefixLimit, extensionDeadline == nil, case .html(let contentType) = parser.media {
-        // Leave time to parse the head and start a thumbnail if one was found.
-        let until = min(now + 4, deadline - 1)
-        countTags(after: 0)
-        if try until <= now || tags > RestrictedPreview.maxTags
+        // Reserve time for parsing and let the image use part of the shared
+        // deadline for DNS, TLS and its download.
+        let until = min(now + 4, deadline - 6)
+        if try until <= now || tagBudgetExhausted()
           || RestrictedPreview.hasRichMetadata(parser.body, contentType: contentType)
         {
           cutoff = true
@@ -445,19 +445,18 @@ enum PreviewNetwork {
         }
         log.info("device_preview_html_extended")
         extensionDeadline = until
-        let previous = parser.body.count
         parser.extendPrefix(to: RestrictedPreview.maxHeadBytes)
         done = try parser.append(Data(), eof: eof)
-        countTags(after: previous)
-      } else if extensionDeadline != nil {
-        countTags(after: previous)
       }
-      cutoff = parser.atPrefixLimit || tags > RestrictedPreview.maxTags
+      let exhausted = extensionDeadline != nil && tagBudgetExhausted()
+      cutoff = parser.atPrefixLimit || exhausted
       return done || cutoff
     }
 
-    private mutating func countTags(after previous: Int) {
-      for byte in parser.body.dropFirst(previous) where byte == 60 { tags += 1 }
+    private mutating func tagBudgetExhausted() -> Bool {
+      for byte in parser.body.dropFirst(scanned) where byte == 60 { tags += 1 }
+      scanned = parser.body.count
+      return tags > RestrictedPreview.maxTags
     }
 
     func response(url: URL, timedOut: Bool = false) -> Response {

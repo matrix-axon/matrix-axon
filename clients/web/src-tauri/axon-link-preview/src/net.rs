@@ -305,9 +305,26 @@ impl<D: Dns, C: Dial> Hop for Network<D, C> {
 }
 
 /// Spend at most four more seconds on a larger head. Reserve time to finish
-/// parsing and start its image while the shared lookup deadline is still live.
+/// parsing and give DNS, TLS and the thumbnail a share of the lookup deadline.
 const HEAD_EXTENSION: Duration = Duration::from_secs(4);
-const HEAD_FINISH_RESERVE: Duration = Duration::from_secs(1);
+const HEAD_FINISH_RESERVE: Duration = Duration::from_secs(6);
+
+#[derive(Default)]
+struct HeadTags {
+    scanned: usize,
+    count: usize,
+}
+
+impl HeadTags {
+    fn exhausted(&mut self, body: &[u8]) -> bool {
+        self.count += body[self.scanned..]
+            .iter()
+            .filter(|&&byte| byte == b'<')
+            .count();
+        self.scanned = body.len();
+        self.count > MAX_TAGS
+    }
+}
 
 /// Send `request`, then decide whether to resume the collector at its HTML limit.
 pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
@@ -325,7 +342,7 @@ pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
     let mut parser = Parser::new(kind, INITIAL_HEAD_BYTES);
     let mut buffer = vec![0u8; http::READ_BYTES];
     let mut extension_timer = None;
-    let mut tags = 0;
+    let mut tags = HeadTags::default();
     let cutoff = loop {
         let read = if let Some(timer) = extension_timer.as_mut() {
             tokio::select! {
@@ -345,7 +362,6 @@ pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
             Err(_) => return Err(Failure::Unavailable),
         };
         let eof = read == 0;
-        let previous = parser.body().len();
         let mut done = parser.append(&buffer[..read], eof)?;
         if parser.at_prefix_limit() && extension_timer.is_none() {
             let http::Media::Html(content_type) = parser.media() else {
@@ -353,31 +369,21 @@ pub(crate) async fn read_response<S: AsyncRead + AsyncWrite + Unpin>(
             };
             let now = Instant::now();
             let until = (now + HEAD_EXTENSION).min(deadline - HEAD_FINISH_RESERVE);
-            tags = parser.body().iter().filter(|&&byte| byte == b'<').count();
             if until <= now
-                || tags > MAX_TAGS
+                || tags.exhausted(parser.body())
                 || page::has_rich_metadata(parser.body(), content_type)?
             {
                 break true;
             }
             crate::log::event("device_preview_html_extended");
             extension_timer = Some(Box::pin(tokio::time::sleep_until(until)));
-            let previous = parser.body().len();
             parser.extend_prefix(MAX_HEAD_BYTES);
             // A socket read can already have bytes past the initial limit.
             done = parser.append(&[], eof)?;
-            tags += parser.body()[previous..]
-                .iter()
-                .filter(|&&byte| byte == b'<')
-                .count();
-        } else if extension_timer.is_some() {
-            tags += parser.body()[previous..]
-                .iter()
-                .filter(|&&byte| byte == b'<')
-                .count();
         }
-        if done || tags > MAX_TAGS {
-            break parser.at_prefix_limit() || tags > MAX_TAGS;
+        let tag_budget_exhausted = extension_timer.is_some() && tags.exhausted(parser.body());
+        if done || tag_budget_exhausted {
+            break parser.at_prefix_limit() || tag_budget_exhausted;
         }
         if eof {
             crate::log::event(&format!(

@@ -190,6 +190,59 @@
   "headReadLimits": { "initial": 262144, "maximum": 1048576, "tags": 512 },
   "headReads": [
     {
+      "name": "complete title and rich metadata after unfamiliar elements",
+      "start": "<head><img><svg></svg><template><div></div></template><object></object><iframe>inert</iframe><div></div><title>Complete title</title><meta name=description content=Early><script>",
+      "padTo": 310000,
+      "tail": "</script></head>",
+      "stop": "initial",
+      "title": "Complete title",
+      "description": "Early"
+    },
+    {
+      "name": "apostrophes inside unquoted attributes do not hide metadata",
+      "start": "<head><link data'flag=on><title>Complete title</title><meta name=description content=Don't><script>",
+      "padTo": 310000,
+      "tail": "</script></head>",
+      "stop": "initial",
+      "title": "Complete title",
+      "description": "Don't"
+    },
+    {
+      "name": "tag budget preserves the title after an escaped script",
+      "start": "<head><script><!--<script>var text = '</script><meta name=description content=Fake>';</script>--></script><title>Complete title</title>",
+      "repeat": "<!--x-->",
+      "repetitions": 510,
+      "padTo": 310000,
+      "tail": "</head>",
+      "stop": "initial",
+      "title": "Complete title"
+    },
+    {
+      "name": "metadata after an escaped script stops at the checkpoint",
+      "start": "<head><script><!--<script>var text = '</script><meta name=description content=Fake>';</script>--></script><title>Complete title</title><meta name=description content=Real><script>",
+      "padTo": 310000,
+      "tail": "</script></head>",
+      "stop": "initial",
+      "title": "Complete title",
+      "description": "Real"
+    },
+    {
+      "name": "raw text inside an iframe and a template supplies no early hint",
+      "start": "<head><iframe><meta name=description content=Fake></iframe><template><meta name=description content=Inert></template><script>",
+      "padTo": 310000,
+      "tail": "</script><meta property=og:description content=Real></head>",
+      "stop": "full",
+      "description": "Real"
+    },
+    {
+      "name": "cutoff inside a later document title keeps the complete first title",
+      "start": "<head><title>First title</title><title>Second title",
+      "padTo": 1100000,
+      "tail": "</title></head>",
+      "stop": "hard",
+      "title": "First title"
+    },
+    {
       "name": "late rich fields supplement an early document title",
       "start": "<head><title>Early title</title><script>",
       "padTo": 792576,

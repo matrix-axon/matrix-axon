@@ -89,9 +89,11 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// whitespace, `/` or `>`. So `<bodyguard>` does not end a head. One inside
 /// script or comment text still does; the reader does not tokenize. The Swift
 /// reader (`PreviewHTTPParser.endsHead`) applies the same rule.
-pub(crate) fn ends_head(bytes: &[u8]) -> bool {
+pub(crate) fn ends_head(bytes: &[u8], previous: usize) -> bool {
     [&b"</head"[..], &b"<body"[..]].iter().any(|marker| {
-        bytes.windows(marker.len() + 1).any(|window| {
+        // Keep a whole marker in case its boundary is in the next read.
+        let tail = &bytes[previous.saturating_sub(marker.len())..];
+        tail.windows(marker.len() + 1).any(|window| {
             window[..marker.len()].eq_ignore_ascii_case(marker)
                 && matches!(
                     window[marker.len()],
@@ -412,9 +414,9 @@ impl Parser {
         if !prefix && wanted != data.len() {
             return Err(Failure::Quota);
         }
-        let start = self.body.len().saturating_sub(6);
+        let previous = self.body.len();
         self.body.extend_from_slice(&data[..wanted]);
-        if prefix && ends_head(&self.body[start..]) {
+        if prefix && ends_head(&self.body, previous) {
             self.finished = true;
         }
         Ok(wanted)

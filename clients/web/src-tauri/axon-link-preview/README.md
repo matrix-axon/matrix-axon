@@ -30,7 +30,7 @@ The network and metadata rules are shared with the Share Extension's Swift reade
 
 Both readers stop at `</head` or `<body` followed by a tag-name boundary, the end of the response, or an initial 256 KiB checkpoint.
 At the checkpoint a bounded probe checks for a usable description or image reference.
-A title alone or an unfinished title can extend the read on the same connection, for at most four more seconds and up to 1 MiB.
+If the probe finds neither field or a title is still open, the reader can continue on the same connection, for at most four more seconds and up to 1 MiB.
 The reader stops the continuation if it exceeds the tag budget and parses the collected head once.
 
 `src/incoming-share/fixtures/preview-boundary.json` holds the cases both readers

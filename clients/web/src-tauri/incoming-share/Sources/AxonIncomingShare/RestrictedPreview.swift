@@ -9,6 +9,7 @@ enum RestrictedPreview {
   static let initialHeadBytes = 256 * 1024
   static let maxHeadBytes = 1024 * 1024
   static let maxTags = 512
+  private static let titleLimit = 300
   private static let slot = DispatchSemaphore(value: 1)
   struct Metadata {
     var originalURL: URL
@@ -85,7 +86,7 @@ enum RestrictedPreview {
     // than its card. A tag the cut ends is dropped whole. The Rust reader
     // (`axon-link-preview/src/page.rs`) makes the same cut.
     let bounded = boundedHead(data)
-    let html: String
+    var html: String
     if let utf8 = String(data: bounded, encoding: .utf8) {
       html = utf8
     } else if contentType.contains("iso-8859-1") || contentType.contains("windows-1252"),
@@ -94,6 +95,11 @@ enum RestrictedPreview {
       html = legacy
     } else {
       html = String(decoding: bounded, as: UTF8.self)
+    }
+    if cutoff || bounded.count < data.count {
+      // The parser adds this text to an open title, which exceeds titleLimit.
+      // A closed title keeps the original text.
+      html += "\n" + String(repeating: "x", count: titleLimit + 1)
     }
     let document = try SwiftSoup.parse(html)
     func content(_ selectors: [String], limit: Int) throws -> String? {
@@ -106,16 +112,9 @@ enum RestrictedPreview {
       }
       return nil
     }
-    func documentTitle() throws -> String? {
-      guard let title = TextShare.previewField(try document.title(), limit: 300) else { return nil }
-      if (cutoff || bounded.count < data.count) && !headProbe(bounded, collectMeta: false).completeTitle {
-        return nil
-      }
-      return title
-    }
     let title =
-      try content(["meta[property=og:title]", "meta[name=twitter:title]"], limit: 300)
-      ?? documentTitle()
+      try content(["meta[property=og:title]", "meta[name=twitter:title]"], limit: titleLimit)
+      ?? TextShare.previewField(try document.title(), limit: titleLimit)
     return try Page(
       title: title,
       description: content(
@@ -142,7 +141,7 @@ enum RestrictedPreview {
   // Probe only complete meta tags. SwiftSoup builds the full document once,
   // when the transport has finished collecting the head.
   static func hasRichMetadata(_ data: Data, contentType: String) throws -> Bool {
-    let probe = headProbe(data, collectMeta: true)
+    let probe = headProbe(data)
     guard !probe.openTitle, !probe.meta.isEmpty else { return false }
     let page = try parse(probe.meta, contentType: contentType)
     return page.description != nil || page.image != nil
@@ -150,89 +149,139 @@ enum RestrictedPreview {
 
   private struct HeadProbe {
     var meta = Data()
-    var completeTitle = false
     var openTitle = false
   }
 
-  // As in the Rust reader, uncertain markup can defer the early stop.
-  // Raw text and comments must never supply metadata hints.
-  private static func headProbe(_ data: Data, collectMeta: Bool) -> HeadProbe {
+  private static let rawText = [
+    "title", "textarea", "script", "style", "iframe", "xmp", "noembed", "noframes", "noscript",
+  ]
+  private static let comment = Array("<!--".utf8)
+  private static let commentEnd = Array("-->".utf8)
+
+  // The DOM parser owns field selection. Raw text and template contents
+  // cannot supply early metadata hints.
+  private static func headProbe(_ data: Data) -> HeadProbe {
     let bytes = Array(data)
-    let rawText = ["script", "style", "noframes", "noscript"]
-    let headTags = ["html", "head", "link", "base", "basefont", "bgsound", "!doctype"]
-    let comment = Array("<!--".utf8)
-    let commentEnd = Array("-->".utf8)
     var probe = HeadProbe()
-    var raw: String?
+    var templates = 0
     var cursor = 0
     while let start = bytes[cursor...].firstIndex(of: 60) {
       cursor = start + 1
-      if let name = raw {
-        if name == "script" && bytes[start...].starts(with: comment) { break }
-        let nameEnd = start + 2 + name.utf8.count
-        guard nameEnd < bytes.count, bytes[start + 1] == 47, tagBoundary(bytes[nameEnd]),
-          String(decoding: bytes[(start + 2)..<nameEnd], as: UTF8.self).lowercased() == name
-        else { continue }
-        guard let end = tagEnd(bytes, startingAt: cursor) else { break }
-        if name == "title" {
-          probe.completeTitle = true
-          probe.openTitle = false
-        }
-        raw = nil
-        cursor = end
-        continue
-      }
       if bytes[start...].starts(with: comment) {
         guard let end = data.range(of: Data(commentEnd), in: (data.startIndex + start + 4)..<data.endIndex)
         else { break }
         cursor = end.upperBound - data.startIndex
         continue
       }
-      guard let end = tagEnd(bytes, startingAt: cursor),
-        let nameEnd = bytes[cursor..<end].firstIndex(where: tagBoundary)
+      let closing = cursor < bytes.count && bytes[cursor] == 47
+      let nameStart = cursor + (closing ? 1 : 0)
+      guard nameStart < bytes.count else { break }
+      let first = bytes[nameStart]
+      if !(65...90).contains(first) && !(97...122).contains(first) {
+        if first == 33 || first == 63 {
+          guard let end = bytes[nameStart...].firstIndex(of: 62) else { break }
+          cursor = end + 1
+        }
+        continue
+      }
+      guard let nameEnd = bytes[nameStart...].firstIndex(where: tagBoundary),
+        let end = tagEnd(bytes, startingAt: nameEnd)
       else { break }
-      let name = String(decoding: bytes[cursor..<nameEnd], as: UTF8.self).lowercased()
-      if name == "meta" {
-        if collectMeta {
+      let name = String(decoding: bytes[nameStart..<nameEnd], as: UTF8.self).lowercased()
+      cursor = end
+      if name == "template" {
+        templates = closing ? max(0, templates - 1) : templates + 1
+      } else if !closing {
+        if name == "plaintext" { break }
+        if rawText.contains(name) {
+          guard let after = skipRawText(bytes, startingAt: cursor, name: name) else {
+            probe.openTitle = name == "title" && templates == 0
+            break
+          }
+          cursor = after
+        } else if name == "meta" && templates == 0 {
           guard probe.meta.count + end - start <= 16 * 1024 else {
             probe.meta = Data()
             break
           }
           probe.meta.append(contentsOf: bytes[start..<end])
         }
-      } else if name == "title" {
-        raw = name
-        probe.openTitle = true
-      } else if rawText.contains(name) {
-        raw = name
-      } else if !headTags.contains(name) {
-        break
       }
-      cursor = end
     }
     return probe
   }
 
-  private static func tagBoundary(_ byte: UInt8) -> Bool {
-    switch byte {
-    case 9, 10, 12, 13, 32, 47, 62: return true
-    default: return false
-    }
-  }
-
-  private static func tagEnd(_ bytes: [UInt8], startingAt start: Int) -> Int? {
-    var quote: UInt8?
-    for index in start..<bytes.count {
-      let byte = bytes[index]
-      if let open = quote {
-        if byte == open { quote = nil }
-      } else if byte == 34 || byte == 39 {
-        quote = byte
-      } else if byte == 62 {
-        return index + 1
+  // As in the Rust reader, the first closing script marker in a double
+  // escape returns to escaped script text without closing the element.
+  private static func skipRawText(_ bytes: [UInt8], startingAt start: Int, name: String) -> Int? {
+    let script = name == "script"
+    let nameBytes = Array(name.utf8)
+    var escaped = false
+    var doubleEscaped = false
+    var cursor = start
+    while let next = bytes[cursor...].firstIndex(where: { $0 == 60 || (escaped && $0 == 45) }) {
+      cursor = next + 1
+      if script && !escaped && bytes[next...].starts(with: comment) {
+        escaped = true
+        cursor = next + comment.count
+        continue
+      }
+      if escaped && bytes[next...].starts(with: commentEnd) {
+        escaped = false
+        doubleEscaped = false
+      } else if bytes[next] == 60 && escaped && !doubleEscaped
+        && startsNamedTag(bytes, at: cursor, name: nameBytes)
+      {
+        doubleEscaped = true
+      } else if bytes[next] == 60 && cursor < bytes.count && bytes[cursor] == 47
+        && startsNamedTag(bytes, at: cursor + 1, name: nameBytes)
+      {
+        if doubleEscaped {
+          doubleEscaped = false
+        } else {
+          return tagEnd(bytes, startingAt: cursor + 1 + nameBytes.count)
+        }
       }
     }
     return nil
   }
 
+  private static func startsNamedTag(_ bytes: [UInt8], at start: Int, name: [UInt8]) -> Bool {
+    let end = start + name.count
+    guard end < bytes.count, tagBoundary(bytes[end]) else { return false }
+    return zip(bytes[start..<end], name).allSatisfy { byte, lower in
+      ((65...90).contains(byte) ? byte + 32 : byte) == lower
+    }
+  }
+
+  private static func tagBoundary(_ byte: UInt8) -> Bool {
+    htmlSpace(byte) || byte == 47 || byte == 62
+  }
+
+  private static func htmlSpace(_ byte: UInt8) -> Bool {
+    switch byte {
+    case 9, 10, 12, 13, 32: return true
+    default: return false
+    }
+  }
+
+  private static func tagEnd(_ bytes: [UInt8], startingAt start: Int) -> Int? {
+    enum Attribute { case name, beforeValue, unquoted, quoted(UInt8) }
+    var state = Attribute.name
+    for index in start..<bytes.count {
+      let byte = bytes[index]
+      switch (state, byte) {
+      case (.quoted(let open), _) where open == byte: state = .name
+      case (.quoted, _): continue
+      case (_, 62): return index + 1
+      case (.name, 61): state = .beforeValue
+      case (.beforeValue, 34), (.beforeValue, 39): state = .quoted(byte)
+      case (.beforeValue, _) where htmlSpace(byte): continue
+      case (.beforeValue, _): state = .unquoted
+      case (.unquoted, _) where !htmlSpace(byte): continue
+      default: state = .name
+      }
+    }
+    return nil
+  }
 }

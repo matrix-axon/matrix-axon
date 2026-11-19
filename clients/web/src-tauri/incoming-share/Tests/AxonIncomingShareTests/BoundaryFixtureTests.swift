@@ -175,7 +175,11 @@ final class BoundaryFixtureTests: XCTestCase {
 
   func testHeadEnds() throws {
     for entry in try fixture().headEnds {
-      XCTAssertEqual(PreviewHTTPParser.endsHead(Data(entry.text.utf8)), entry.ends, entry.text)
+      let bytes = Data(entry.text.utf8)
+      XCTAssertEqual(PreviewHTTPParser.endsHead(bytes), entry.ends, entry.text)
+      for split in bytes.indices.dropFirst() where !PreviewHTTPParser.endsHead(bytes.prefix(split)) {
+        XCTAssertEqual(PreviewHTTPParser.endsHead(bytes, previous: split), entry.ends, entry.text)
+      }
     }
     // A marker split across reads ends the head once its boundary arrives.
     var parser = PreviewHTTPParser(kind: .page)
@@ -239,21 +243,27 @@ final class BoundaryFixtureTests: XCTestCase {
   func testOptionalReadReturnsPrefixBeforeSharedDeadline() throws {
     let now = DispatchTime.now()
     let deadline = now + 25
-    let checkpoint = now + 9
     let url = try XCTUnwrap(URL(string: "https://page.example.org/"))
-    var read = PreviewNetwork.ReadState(kind: .page)
     let headers = Data("HTTP/1.1 200 OK\r\nContent-Length: 1100000\r\n\r\n".utf8)
-    XCTAssertFalse(try read.append(headers, eof: false, now: now, deadline: deadline))
     let block = Data(repeating: 32, count: 16 * 1024)
-    for _ in 0..<16 {
-      XCTAssertFalse(try read.append(block, eof: false, now: checkpoint, deadline: deadline))
+    for (checkpoint, softDeadline) in [(9, 13), (18, 19), (21, nil)] as [(Int, Int?)] {
+      var read = PreviewNetwork.ReadState(kind: .page)
+      let atCheckpoint = now + .seconds(checkpoint)
+      XCTAssertFalse(try read.append(headers, eof: false, now: now, deadline: deadline))
+      for _ in 0..<15 {
+        XCTAssertFalse(try read.append(block, eof: false, now: atCheckpoint, deadline: deadline))
+      }
+      let done = try read.append(block, eof: false, now: atCheckpoint, deadline: deadline)
+      XCTAssertEqual(done, softDeadline == nil)
+      XCTAssertEqual(read.extensionDeadline, softDeadline.map { now + .seconds($0) })
+      if let softDeadline {
+        XCTAssertTrue(try read.append(Data(), eof: false, now: now + .seconds(softDeadline), deadline: deadline))
+      }
+      let response = read.response(url: url)
+      XCTAssertTrue(response.cutoff)
+      XCTAssertEqual(response.body.count, RestrictedPreview.initialHeadBytes)
+      XCTAssertNil(try RestrictedPreview.parse(response.body, cutoff: true).title)
     }
-    XCTAssertEqual(read.extensionDeadline, checkpoint + 4)
-    XCTAssertTrue(try read.append(Data(), eof: false, now: checkpoint + 4, deadline: deadline))
-    let response = read.response(url: url)
-    XCTAssertTrue(response.cutoff)
-    XCTAssertEqual(response.body.count, RestrictedPreview.initialHeadBytes)
-    XCTAssertNil(try RestrictedPreview.parse(response.body, cutoff: true).title)
   }
 
   func testMetadata() throws {

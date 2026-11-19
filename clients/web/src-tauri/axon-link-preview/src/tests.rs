@@ -232,12 +232,23 @@ fn fixture_urls_are_rejected_before_dns() {
 #[test]
 fn fixture_head_ends() {
     for case in boundary().head_ends {
+        let bytes = case.text.as_bytes();
         assert_eq!(
-            crate::http::ends_head(case.text.as_bytes()),
+            crate::http::ends_head(bytes, 0),
             case.ends,
             "{:?}",
             case.text
         );
+        for split in 1..bytes.len() {
+            if !crate::http::ends_head(&bytes[..split], 0) {
+                assert_eq!(
+                    crate::http::ends_head(bytes, split),
+                    case.ends,
+                    "{case_text:?} at {split}",
+                    case_text = case.text
+                );
+            }
+        }
     }
 }
 
@@ -1583,42 +1594,51 @@ async fn fixture_head_reads() {
 
 #[tokio::test(start_paused = true)]
 async fn slow_optional_reads_return_a_prefix_before_the_lookup_deadline() {
-    let (client, mut server) = tokio::io::duplex(16 * 1024);
-    let send = async {
-        let mut request = [0; TEST_GET.len()];
-        server.read_exact(&mut request).await.unwrap();
-        server
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1100000\r\n\r\n")
+    for (wait, finished, extended) in [(0, 13, true), (9, 19, true), (12, 21, false)] {
+        let (client, mut server) = tokio::io::duplex(16 * 1024);
+        let send = async {
+            let mut request = [0; TEST_GET.len()];
+            server.read_exact(&mut request).await.unwrap();
+            server
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1100000\r\n\r\n")
+                .await
+                .unwrap();
+            if wait != 0 {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+            let bytes = [b' '; 15 * 1024];
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if server.write_all(&bytes).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let start = Instant::now();
+        let read = async {
+            let response = net::read_response(
+                client,
+                TEST_GET,
+                Resource::Page,
+                "https://page.example.org/".parse().unwrap(),
+                start + preview::DEADLINE,
+            )
             .await
             .unwrap();
-        let bytes = [b' '; 15 * 1024];
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if server.write_all(&bytes).await.is_err() {
-                break;
+            assert!(response.cutoff);
+            assert_eq!(Instant::now() - start, Duration::from_secs(finished));
+            if extended {
+                assert!((page::INITIAL_HEAD_BYTES + 1..512 * 1024).contains(&response.body.len()));
+            } else {
+                assert_eq!(response.body.len(), page::INITIAL_HEAD_BYTES);
             }
-        }
-    };
-    let start = Instant::now();
-    let read = async {
-        let response = net::read_response(
-            client,
-            TEST_GET,
-            Resource::Page,
-            "https://page.example.org/".parse().unwrap(),
-            start + preview::DEADLINE,
-        )
-        .await
-        .unwrap();
-        assert!(response.cutoff);
-        assert_eq!(Instant::now() - start, Duration::from_secs(13));
-        assert!((page::INITIAL_HEAD_BYTES..512 * 1024).contains(&response.body.len()));
-        assert_eq!(
-            page::parse_body(&response.body, "text/html", true).unwrap(),
-            page::Page::default()
-        );
-    };
-    tokio::join!(send, read);
+            assert_eq!(
+                page::parse_body(&response.body, "text/html", true).unwrap(),
+                page::Page::default()
+            );
+        };
+        tokio::join!(send, read);
+    }
 }
 
 #[tokio::test]
