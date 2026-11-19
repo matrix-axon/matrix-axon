@@ -42,6 +42,9 @@ pub(crate) struct Upstream {
     pub(crate) sync: VecDeque<Value>,
     pub(crate) rejected: HashSet<String>,
     pub(crate) messages: Vec<(String, Option<String>)>,
+    /// Answer every `/messages` request with an empty chunk, still moving the
+    /// token on, as a homeserver that filters a whole page does.
+    pub(crate) empty_pages: bool,
 }
 
 pub(crate) type Shared = Arc<Mutex<Upstream>>;
@@ -80,7 +83,11 @@ async fn messages(
     let events = upstream.rooms.get(&room_id).cloned().unwrap_or_default();
     let high = position(from.as_deref(), events.len());
     let low = high.saturating_sub(limit);
-    let chunk: Vec<Value> = events[low..high].iter().rev().cloned().collect();
+    let chunk: Vec<Value> = if upstream.empty_pages {
+        Vec::new()
+    } else {
+        events[low..high].iter().rev().cloned().collect()
+    };
     let mut body = json!({"chunk": chunk, "start": format!("s{high}")});
     if low > 0 {
         body["end"] = json!(format!("s{low}"));

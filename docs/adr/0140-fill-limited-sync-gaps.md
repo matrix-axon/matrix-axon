@@ -239,6 +239,7 @@ The stop points are recorded when the room's walk starts (amended 2026-11-18; se
 - **A floor below stored history.** If the homeserver no longer serves that event (it purged the room, or filters it), the walk would otherwise continue to the room's start, over federation if the homeserver has to backfill.
   So the room's floor is recorded with its stop event: the oldest `origin_ts` among its `timeline_limit` lowest-`id` events.
   The pass closes once it has read 500 events in a row that were neither already stored nor newer than the floor.
+  An empty page only extends a run already under way, and ten empty pages in a row back the room off instead, so empty pages cannot close a walk that is still inside stored history.
   Both conditions are needed.
   A page of events older than the floor is normal inside a hole of imported events, which carry timestamps years older than the events around them.
   A hole of real-time events can be longer than 500.
@@ -256,9 +257,13 @@ It is not kept on `room_backfill`, because a room with stored events can have no
 The migration seeds one row for every `(account_id, room_id)` that has stored events.
 A row's stop points are taken from the room's rows when its first page is fetched, not by the migration, because the floor depends on the configured `timeline_limit`, which SQL cannot read.
 Rooms first seen after the migration need no row, because their holes are recorded from the start.
+A walk can be restarted while it is in flight: by the management action, by an expired gap row (decision 7), or by a purge that keeps the room (decision 6).
+Every restart bumps the row's `walk_generation`, and every write a walk makes names the generation it read, so a walk read before the restart cannot overwrite it.
+The walk also re-reads its row before each page, so a gap row opened since the rows were listed holds it at once.
 
 Only joined rooms are verified.
 A row for a room the account is not in waits, and is verified if the account rejoins before the room is purged.
+A room is recorded as left only once the room list can be trusted, five minutes after startup and never from an empty list, since a list the SDK is still loading can name a handful of rooms or none.
 On Adam's production account, 9,583 of the 15,399 rooms with stored events are not joined, and Synapse no longer has 9,465 of them at all.
 Counting them as pending would leave the pass unfinished for good.
 
@@ -334,7 +339,7 @@ Events the filler then stores get `id`s above the purge watermark, so the purge 
   Detecting a hole logs at `INFO` with `prev_batch` and the batch's oldest event id; dropping a first window logs at `DEBUG`.
   Each page logs at `DEBUG` with its `inserted` and `already_stored` counts.
   Closing a hole logs at `INFO` with `pages_fetched` and `events_recovered`.
-- `GET /v1/status` gains `history_gaps: {open, parked, awaiting_batch, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_not_joined, rooms_complete, events_recovered}` beside the existing `backfill` block.
+- `GET /v1/status` gains `history_gaps: {open, parked, awaiting_batch, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_parked, rooms_not_joined, rooms_complete, events_recovered}` beside the existing `backfill` block.
 - The management API ([ADR 0109](0109-management-api.md)) gains an action that re-queues the verification pass for one room or a whole account, so an operator can re-verify after a suspected loss without SQL.
   It is `POST /v1/management/accounts/{account_id}/history-verify`, with an optional `room_id` in the body.
   A re-queued room takes its stop points from the room's rows when its walk starts again.

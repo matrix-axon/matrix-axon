@@ -21,6 +21,13 @@
 --                        `sync.timeline_limit` lowest-id events, which this
 --                        migration cannot read.
 --   * floor_run        — unstored events older than the floor seen in a row.
+--   * empty_run        — empty pages in a row. Ten back the room off rather
+--                        than count as progress, so a homeserver that keeps
+--                        answering with empty pages parks the room.
+--   * walk_generation  — bumped by every restart (the management action, an
+--                        expired gap row, a kept room's purge). Every write a
+--                        walk makes names the generation it read, so a walk
+--                        already in flight cannot overwrite a restarted one.
 --   * complete, stop_reason, completed_at — which stop ended the walk.
 --   * pages_fetched, events_recovered — progress, for logs and status.
 --   * consecutive_failures, last_failure, retry_at, parked, token_rejections
@@ -38,6 +45,8 @@ CREATE TABLE room_history_verify (
     stop_event_ids        TEXT[],
     floor_ts              BIGINT,
     floor_run             INTEGER     NOT NULL DEFAULT 0,
+    empty_run             INTEGER     NOT NULL DEFAULT 0,
+    walk_generation       BIGINT      NOT NULL DEFAULT 0,
     complete              BOOLEAN     NOT NULL DEFAULT false,
     stop_reason           TEXT
                           CHECK (stop_reason IN ('first_stored_event', 'floor', 'room_start', 'no_history')),

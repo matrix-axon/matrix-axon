@@ -5040,7 +5040,9 @@ export interface components {
          * @description The one-time pass that re-reads each joined room's stored history against
          *     the homeserver and stores what is missing, across every account (ADR 0140
          *     decision 4). It runs on its own after an upgrade; `rooms_pending` reaching
-         *     zero means it is done.
+         *     zero means it is done. Rooms that keep failing are parked and retried about
+         *     once a day, so `rooms_pending` equal to `rooms_parked` means it is done but
+         *     for those.
          */
         HistoryVerifyStatusDto: {
             /** @description False when the counts could not be read; they are then zero. */
@@ -5068,6 +5070,12 @@ export interface components {
              *     verified if the account rejoins them.
              */
             rooms_not_joined: number;
+            /**
+             * Format: int64
+             * @description Of those, rooms parked after repeated failures (ADR 0121): retried
+             *     only about once a day.
+             */
+            rooms_parked: number;
             /**
              * Format: int64
              * @description Joined rooms whose history has not been verified yet.

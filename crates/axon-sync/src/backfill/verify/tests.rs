@@ -41,9 +41,12 @@ fn the_floor_run_grows_only_on_pages_wholly_below_stored_history() {
         origin_ts: None,
     };
     assert_eq!(next_floor_run(40, &[undated], floor, 4), 0);
-    // An empty page counts as a full one, so empty pages cannot hold the walk
-    // open; a room with no floor never accumulates a run.
+    // An empty page says nothing about where the walk is: it extends a run
+    // already under way, but cannot start one (review finding), so empty pages
+    // alone never close a walk at the floor. A room with no floor never
+    // accumulates a run.
     assert_eq!(next_floor_run(40, &[], floor, 4), 44);
+    assert_eq!(next_floor_run(0, &[], floor, 4), 0);
     assert_eq!(next_floor_run(40, &[at(10)], None, 4), 0);
 }
 
@@ -68,7 +71,8 @@ async fn queue(h: &Harness, tag: &str) {
 /// Walk every walkable room to its end, as the backfill task's verification
 /// pages would.
 async fn walk_with(h: &Harness, params: &BackfillParams) -> Vec<VerifyStep> {
-    let mut verifier = Verifier::new(&h.client, &h.ctx, params, &h.health, &h.gate, &h.cancel);
+    let mut verifier = Verifier::new(&h.client, &h.ctx, params, &h.health, &h.gate, &h.cancel)
+        .with_room_list_settle(Duration::ZERO);
     verifier.refresh().await;
     let mut steps = Vec::new();
     loop {
@@ -430,5 +434,164 @@ async fn the_backfill_task_runs_the_pass_beside_ordinary_backfill() {
         range(0, 10),
         "backfill reached the start"
     );
+    h.finish().await;
+}
+
+/// A verifier on its own, for tests that step it by hand.
+fn verifier<'a>(h: &'a Harness, params: &'a BackfillParams) -> Verifier<'a> {
+    Verifier::new(&h.client, &h.ctx, params, &h.health, &h.gate, &h.cancel)
+        .with_room_list_settle(Duration::ZERO)
+}
+
+/// Review finding: a walk restarted while the backfill task holds it in
+/// memory (here by the management action) stops before its next page, and
+/// its deep token is not written back. The restarted walk starts from the
+/// live end.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_walk_restarted_in_flight_is_dropped_and_walked_again_from_the_live_end() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 25, 30).limited()]).await;
+    queue(&h, "a").await;
+
+    let params = params(&h);
+    let mut walking = verifier(&h, &params);
+    walking.refresh().await;
+    assert_eq!(walking.step().await, VerifyStep::Paged);
+    queue(&h, "a").await;
+    assert_eq!(walking.step().await, VerifyStep::Idle, "dropped, not paged");
+    assert_eq!(h.take_requests("a"), [None]);
+    let rows = h.store.list_history_verify(h.account_id).await.unwrap();
+    assert_eq!(
+        rows[0].from_token, None,
+        "the deep token was not written back"
+    );
+
+    walk(&h).await;
+    let requests = h.take_requests("a");
+    assert_eq!(requests[0], None, "from the live end again");
+    assert!(outcome(&h, "a").await.0);
+    assert_eq!(h.stored("a").await, range(2, 30));
+    h.finish().await;
+}
+
+/// Review finding: a gap row opened after the rows were listed holds the walk
+/// at its next page, not at the next sweep.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_gap_row_opened_mid_walk_holds_it_at_once() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 25, 30).limited()]).await;
+    queue(&h, "a").await;
+
+    let params = params(&h);
+    let mut walking = verifier(&h, &params);
+    walking.refresh().await;
+    assert_eq!(walking.step().await, VerifyStep::Paged);
+    h.store
+        .record_limited_gap(h.account_id, h.room("a"), None, &[])
+        .await
+        .unwrap();
+    assert_eq!(walking.step().await, VerifyStep::Idle, "held");
+    assert_eq!(h.take_requests("a"), [None]);
+    assert!(!outcome(&h, "a").await.0);
+    h.finish().await;
+}
+
+/// Review finding: a row whose stop list was saved empty (a crash between
+/// reading the stop points and closing a room with none, in the first build)
+/// is started again, not walked to the room's start with no stop.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_empty_stop_list_is_started_again() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 30);
+    h.sync(&[deliver("a", 25, 30)]).await;
+    queue(&h, "a").await;
+    sqlx_core::query::query(
+        "UPDATE room_history_verify SET stop_event_ids = '{}', from_token = 's9' \
+         WHERE account_id = $1",
+    )
+    .bind(h.account_id)
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+
+    walk(&h).await;
+    assert_eq!(outcome(&h, "a").await, closed("first_stored_event", 3));
+    assert_eq!(h.take_requests("a"), vec![None, Some("s26".to_owned())]);
+    h.finish().await;
+}
+
+/// Review finding: empty pages cannot close a walk as if it had passed below
+/// stored history. Ten in a row back the room off with its token saved, so a
+/// homeserver that keeps sending them parks the room.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn empty_pages_back_the_walk_off_instead_of_closing_it() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 100);
+    h.sync(&[deliver("a", 95, 100)]).await;
+    queue(&h, "a").await;
+    h.upstream.lock().unwrap().empty_pages = true;
+
+    let params = params(&h);
+    let mut walking = verifier(&h, &params);
+    walking.refresh().await;
+    let steps: Vec<VerifyStep> = {
+        let mut steps = Vec::new();
+        loop {
+            let step = walking.step().await;
+            steps.push(step);
+            if step != VerifyStep::Paged {
+                break steps;
+            }
+        }
+    };
+    assert_eq!(steps.len(), 10);
+    assert_eq!(steps[9], VerifyStep::Failed);
+    let (complete, reason, _) = outcome(&h, "a").await;
+    assert_eq!((complete, reason), (false, None), "not closed at the floor");
+    let row = &h.store.list_history_verify(h.account_id).await.unwrap()[0];
+    assert_eq!(row.consecutive_failures, 1);
+    assert_eq!(row.from_token.as_deref(), Some("s60"), "progress kept");
+    assert!(!row.retry_due, "backing off");
+    h.finish().await;
+}
+
+/// Review finding: the joined-room list is not trusted to say which rooms
+/// were left until it has settled, so a list the SDK is still loading does not
+/// mark rooms as left and make status report the pass done.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn rooms_are_not_marked_left_before_the_room_list_settles() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    let departed = format!("!departed-{}:localhost", Uuid::new_v4());
+    sqlx_core::query::query(
+        "INSERT INTO room_history_verify (account_id, room_id) VALUES ($1, $2)",
+    )
+    .bind(h.account_id)
+    .bind(&departed)
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+
+    let params = params(&h);
+    let mut fresh = Verifier::new(&h.client, &h.ctx, &params, &h.health, &h.gate, &h.cancel);
+    fresh.refresh().await;
+    let rows = h.store.list_history_verify(h.account_id).await.unwrap();
+    assert!(!rows[0].not_joined, "too soon to say the room was left");
+
+    verifier(&h, &params).refresh().await;
+    let rows = h.store.list_history_verify(h.account_id).await.unwrap();
+    assert!(rows[0].not_joined, "once the list has settled");
     h.finish().await;
 }

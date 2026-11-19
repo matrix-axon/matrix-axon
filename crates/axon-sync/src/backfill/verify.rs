@@ -23,10 +23,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axon_store::{HistoryVerifyRow, VerifyStop, FLOOR_RUN};
+use std::time::Duration;
+
+use axon_store::{HistoryVerifyRow, VerifyStop, WalkProgress, WalkStart, EMPTY_RUN, FLOOR_RUN};
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::api::client::message::get_message_events;
 use matrix_sdk::{Client, RoomState};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::gaps::event_ids;
@@ -52,6 +55,12 @@ pub(super) enum VerifyStep {
     Abandoned,
 }
 
+/// How long after the task starts the joined-room list is trusted to say
+/// which rooms the account has left. While the SDK is still loading rooms it
+/// can list a handful, or none; the unread-count sweep waits as long for the
+/// same reason (ADR 0070).
+const ROOM_LIST_SETTLE: Duration = Duration::from_secs(5 * 60);
+
 /// The result of paging one room's walk once.
 enum WalkPage {
     /// Written, and the walk continues from the page's `end`.
@@ -60,8 +69,12 @@ enum WalkPage {
     Closed,
     /// Recorded against the row, which backs off.
     Failed(PageFailure),
-    /// The row is gone: the room was purged meanwhile.
+    /// The row is gone (the room was purged), or the walk was restarted or
+    /// closed elsewhere since it was read. Its copy is dropped; the next
+    /// refresh reads the row again.
     Gone,
+    /// The room has an open gap row now. Nothing was fetched.
+    Held,
     Abandoned,
 }
 
@@ -74,15 +87,20 @@ struct FloorEvent {
 
 /// The floor run after a page (ADR 0140 decision 4): it grows by the page's
 /// events when none was already stored and every one is older than the floor,
-/// and is reset otherwise. A page with no events counts as a full page, so a
-/// homeserver that keeps answering with empty pages cannot hold the walk
-/// open. A room with no floor never accumulates a run.
+/// and is reset otherwise. A page with no events says nothing about where the
+/// walk is, so it only extends a run already under way, as a full page; from
+/// zero it leaves the run at zero, and [`EMPTY_RUN`] bounds a homeserver that
+/// keeps sending them. A room with no floor never accumulates a run.
 fn next_floor_run(run: i32, page: &[FloorEvent], floor_ts: Option<i64>, page_size: u32) -> i32 {
     let Some(floor) = floor_ts else {
         return 0;
     };
     if page.is_empty() {
-        return run.saturating_add(i32::try_from(page_size).unwrap_or(i32::MAX));
+        return if run > 0 {
+            run.saturating_add(i32::try_from(page_size).unwrap_or(i32::MAX))
+        } else {
+            0
+        };
     }
     let below = page
         .iter()
@@ -120,6 +138,9 @@ pub(super) struct Verifier<'a> {
     /// Whether the last refresh found incomplete rows, so the pass's end is
     /// logged once.
     had_rows: Option<bool>,
+    /// When the task started, for [`ROOM_LIST_SETTLE`].
+    started: Instant,
+    room_list_settle: Duration,
 }
 
 impl<'a> Verifier<'a> {
@@ -141,11 +162,26 @@ impl<'a> Verifier<'a> {
             rows: Vec::new(),
             next: 0,
             had_rows: None,
+            started: Instant::now(),
+            room_list_settle: ROOM_LIST_SETTLE,
         }
+    }
+
+    /// The same verifier trusting the room list after `settle`, so tests need
+    /// not wait for the real one.
+    #[cfg(test)]
+    pub(super) fn with_room_list_settle(mut self, settle: Duration) -> Self {
+        self.room_list_settle = settle;
+        self
     }
 
     /// Re-read the incomplete rows, and record for status which of them are
     /// in rooms the account is not in. Once per backfill sweep.
+    ///
+    /// A room joined is recorded at once. A room left is recorded only once
+    /// the room list can be trusted: not empty, and [`ROOM_LIST_SETTLE`] after
+    /// the task started. Otherwise a list the SDK is still loading would mark
+    /// most rooms as left, and status would report the pass done.
     pub(super) async fn refresh(&mut self) {
         self.rows.clear();
         self.next = 0;
@@ -163,11 +199,12 @@ impl<'a> Verifier<'a> {
         let joined: HashSet<String> = super::gaps::joined_room_ids(self.client)
             .into_iter()
             .collect();
+        let trusted = !joined.is_empty() && self.started.elapsed() >= self.room_list_settle;
         let (mut now_joined, mut now_departed) = (Vec::new(), Vec::new());
         for row in &rows {
             match (row.not_joined, joined.contains(&row.room_id)) {
                 (true, true) => now_joined.push(row.room_id.clone()),
-                (false, false) => now_departed.push(row.room_id.clone()),
+                (false, false) if trusted => now_departed.push(row.room_id.clone()),
                 _ => {}
             }
         }
@@ -186,7 +223,7 @@ impl<'a> Verifier<'a> {
             .filter(|row| joined.contains(&row.room_id))
             .count();
         match (self.had_rows, pending > 0) {
-            (Some(true), false) => tracing::info!(
+            (Some(true), false) if trusted => tracing::info!(
                 account_id = %account_id,
                 rooms_not_joined = rows.len(),
                 "history verify: every joined room's stored history has been verified"
@@ -199,7 +236,9 @@ impl<'a> Verifier<'a> {
             ),
             _ => {}
         }
-        self.had_rows = Some(pending > 0);
+        if trusted || pending > 0 {
+            self.had_rows = Some(pending > 0);
+        }
         self.rows = rows;
     }
 
@@ -237,7 +276,7 @@ impl<'a> Verifier<'a> {
                     self.next += 1;
                     VerifyStep::Failed
                 }
-                WalkPage::Gone => {
+                WalkPage::Gone | WalkPage::Held => {
                     self.next += 1;
                     continue;
                 }
@@ -255,35 +294,44 @@ impl<'a> Verifier<'a> {
         let row = &mut self.rows[self.next];
         let room_id = row.room_id.clone();
 
-        if row.stop_event_ids.is_none() {
+        // The row as it stands now: a restart (the management action, an
+        // expired gap row, a kept room's purge) or a gap row opened since the
+        // rows were listed, which can be hours on a busy sweep, is seen
+        // before anything is fetched. The writes below are fenced on the
+        // generation too, for a restart during the page.
+        match store.history_verify_guard(account_id, &room_id).await {
+            Ok(Some(guard)) if guard.walk_generation == row.walk_generation && !guard.complete => {
+                if guard.held {
+                    return WalkPage::Held;
+                }
+            }
+            Ok(_) => {
+                tracing::debug!(account_id = %account_id, room_id = %room_id, "history verify: the walk was restarted or closed elsewhere; reading it again next sweep");
+                return WalkPage::Gone;
+            }
+            Err(err) => {
+                tracing::warn!(account_id = %account_id, room_id = %room_id, error = %err, "history verify: reading the walk failed");
+                return WalkPage::Failed(PageFailure::StoreWrite);
+            }
+        }
+
+        // An empty stop list is treated as not started, so a row left with one
+        // by an older build is started again rather than walked to its start.
+        if row
+            .stop_event_ids
+            .as_deref()
+            .is_none_or(<[String]>::is_empty)
+        {
             match store
-                .start_history_verify(account_id, &room_id, self.params.timeline_limit)
+                .start_history_verify(
+                    account_id,
+                    &room_id,
+                    row.walk_generation,
+                    self.params.timeline_limit,
+                )
                 .await
             {
-                Ok(Some(stops)) if stops.stop_event_ids.is_empty() => {
-                    // Every event of the room was deleted since it was queued:
-                    // there is no stored history to verify.
-                    return match store
-                        .complete_history_verify(
-                            account_id,
-                            &room_id,
-                            VerifyStop::NoHistory,
-                            false,
-                            0,
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            tracing::debug!(account_id = %account_id, room_id = %room_id, "history verify: the room has no stored history left; closed the walk");
-                            WalkPage::Closed
-                        }
-                        Err(err) => {
-                            tracing::warn!(account_id = %account_id, room_id = %room_id, error = %err, "history verify: closing the walk failed");
-                            WalkPage::Failed(PageFailure::StoreWrite)
-                        }
-                    };
-                }
-                Ok(Some(stops)) => {
+                Ok(WalkStart::Started(stops)) => {
                     tracing::debug!(
                         account_id = %account_id,
                         room_id = %room_id,
@@ -294,8 +342,15 @@ impl<'a> Verifier<'a> {
                     row.stop_event_ids = Some(stops.stop_event_ids);
                     row.floor_ts = stops.floor_ts;
                     row.floor_run = 0;
+                    row.empty_run = 0;
+                    row.from_token = None;
                 }
-                Ok(None) => return WalkPage::Gone,
+                Ok(WalkStart::NoHistory) => {
+                    // Every event of the room was deleted since it was queued.
+                    tracing::debug!(account_id = %account_id, room_id = %room_id, "history verify: the room has no stored history left; closed the walk");
+                    return WalkPage::Closed;
+                }
+                Ok(WalkStart::Stale) => return WalkPage::Gone,
                 Err(err) => {
                     tracing::warn!(account_id = %account_id, room_id = %room_id, error = %err, "history verify: reading the stop points failed");
                     return WalkPage::Failed(PageFailure::StoreWrite);
@@ -380,6 +435,11 @@ impl<'a> Verifier<'a> {
             row.floor_ts,
             self.params.page_size,
         );
+        let empty_run = if events.is_empty() {
+            row.empty_run.saturating_add(1)
+        } else {
+            0
+        };
         let stop = if lookup.reaches_stop {
             Some(VerifyStop::FirstStoredEvent)
         } else if end.is_none() {
@@ -393,16 +453,23 @@ impl<'a> Verifier<'a> {
         let (Some(end), None) = (end, stop) else {
             let stop = stop.unwrap_or(VerifyStop::RoomStart);
             return match store
-                .complete_history_verify(account_id, &room_id, stop, true, inserted)
+                .complete_history_verify(
+                    account_id,
+                    &room_id,
+                    row.walk_generation,
+                    stop,
+                    true,
+                    inserted,
+                )
                 .await
             {
-                Ok(totals) => {
-                    let totals = totals.unwrap_or(axon_store::VerifyTotals {
-                        pages_fetched: row.pages_fetched + 1,
-                        events_recovered: row.events_recovered + inserted,
-                    });
+                Ok(Some(totals)) => {
                     log_closed(account_id, &room_id, stop, totals);
                     WalkPage::Closed
+                }
+                Ok(None) => {
+                    tracing::debug!(account_id = %account_id, room_id = %room_id, "history verify: the walk was restarted meanwhile; not closing it");
+                    WalkPage::Gone
                 }
                 Err(err) => {
                     // Paged again after a backoff; the page's writes are
@@ -412,17 +479,40 @@ impl<'a> Verifier<'a> {
                 }
             };
         };
+        let progress = WalkProgress {
+            end: &end,
+            inserted,
+            floor_run,
+            empty_run,
+            clears_failures: !events.is_empty(),
+        };
         match store
-            .save_history_verify_page(account_id, &room_id, &end, inserted, floor_run)
+            .save_history_verify_page(account_id, &room_id, row.walk_generation, progress)
             .await
         {
-            Ok(()) => {
+            Ok(true) if empty_run >= EMPTY_RUN => {
+                // Saved, so the next attempt resumes past these pages, but not
+                // counted as progress: the room backs off, and parks if the
+                // homeserver keeps it up.
+                tracing::warn!(account_id = %account_id, room_id = %room_id, empty_pages = empty_run, "history verify: the homeserver keeps answering with empty pages; backing off");
+                row.from_token = Some(end);
+                row.pages_fetched += 1;
+                WalkPage::Failed(PageFailure::Retryable)
+            }
+            Ok(true) => {
+                if progress.clears_failures {
+                    row.consecutive_failures = 0;
+                }
                 row.from_token = Some(end);
                 row.floor_run = floor_run;
+                row.empty_run = empty_run;
                 row.pages_fetched += 1;
                 row.events_recovered += inserted;
-                row.consecutive_failures = 0;
                 WalkPage::Paged
+            }
+            Ok(false) => {
+                tracing::debug!(account_id = %account_id, room_id = %room_id, "history verify: the walk was restarted meanwhile; dropping this page's progress");
+                WalkPage::Gone
             }
             Err(err) => {
                 tracing::warn!(account_id = %account_id, room_id = %room_id, error = %err, "history verify: saving progress failed");
@@ -448,13 +538,19 @@ impl<'a> Verifier<'a> {
         } else {
             tracing::info!(account_id = %account_id, room_id = %row.room_id, failure = record.kind, failures, retry_in_secs, "history verify: backing off room");
         }
-        if let Err(err) = self
+        match self
             .ctx
             .store
-            .record_history_verify_failure(account_id, &row.room_id, record)
+            .record_history_verify_failure(account_id, &row.room_id, row.walk_generation, record)
             .await
         {
-            tracing::warn!(account_id = %account_id, room_id = %row.room_id, error = %err, "history verify: record failure failed");
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(account_id = %account_id, room_id = %row.room_id, "history verify: the walk was restarted meanwhile; not recording the failure");
+            }
+            Err(err) => {
+                tracing::warn!(account_id = %account_id, room_id = %row.room_id, error = %err, "history verify: record failure failed");
+            }
         }
     }
 }

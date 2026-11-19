@@ -15591,10 +15591,11 @@
       },
       "HistoryVerifyStatusDto": {
         "type": "object",
-        "description": "The one-time pass that re-reads each joined room's stored history against\nthe homeserver and stores what is missing, across every account (ADR 0140\ndecision 4). It runs on its own after an upgrade; `rooms_pending` reaching\nzero means it is done.",
+        "description": "The one-time pass that re-reads each joined room's stored history against\nthe homeserver and stores what is missing, across every account (ADR 0140\ndecision 4). It runs on its own after an upgrade; `rooms_pending` reaching\nzero means it is done. Rooms that keep failing are parked and retried about\nonce a day, so `rooms_pending` equal to `rooms_parked` means it is done but\nfor those.",
         "required": [
           "rooms_pending",
           "rooms_held",
+          "rooms_parked",
           "rooms_not_joined",
           "rooms_complete",
           "events_recovered",
@@ -15624,6 +15625,11 @@
             "type": "integer",
             "format": "int64",
             "description": "Rooms with stored history that the account is not in. They are\nverified if the account rejoins them."
+          },
+          "rooms_parked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, rooms parked after repeated failures (ADR 0121): retried\nonly about once a day."
           },
           "rooms_pending": {
             "type": "integer",

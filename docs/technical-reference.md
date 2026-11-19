@@ -199,7 +199,10 @@ Holes that existed before this release have no rows, so a one-time verification 
   Each page logs at `DEBUG` with `inserted` and `already_stored`.
 - Rooms the account is not in wait, and are walked if it rejoins them before purge-on-leave removes them.
   Failures back off and park as backfill rooms do (ADR 0121).
-- `GET /v1/status` reports `history_verify`: `rooms_pending` (joined rooms not yet verified), of which `rooms_held` (waiting on a gap row), `rooms_not_joined`, `rooms_complete`, and `events_recovered`.
+  Ten empty pages in a row count as a failure, so a homeserver that keeps answering with empty pages parks the room.
+  A walk restarted while it was in flight (by the management action, an expired gap row, or a purge) stops and is read again: every write names the walk's generation.
+- `GET /v1/status` reports `history_verify`: `rooms_pending` (joined rooms not yet verified), of which `rooms_held` (waiting on a gap row) and `rooms_parked` (failing, retried about once a day), then `rooms_not_joined`, `rooms_complete`, and `events_recovered`.
+  Rooms the account left are recorded as `rooms_not_joined` only from five minutes after startup, once the room list has loaded.
 - `POST /v1/management/accounts/{account_id}/history-verify` queues the pass again, for one room (`{"room_id": "…"}`) or every room of the account (`{}`).
 - A limited row dropped unpaged because none of its batch was stored within 10 minutes queues its room's walk again, which finds the hole from the live end.
 - `sync.history_verify_enabled = false` turns the pass off, for an operator who must avoid its one-off load on the homeserver.

@@ -13,7 +13,9 @@ mod common;
 
 use std::time::Duration;
 
-use axon_store::{GapCheck, HistoryVerifyRow, RoomBackfillFailure, Store, VerifyStop};
+use axon_store::{
+    GapCheck, HistoryVerifyRow, RoomBackfillFailure, Store, VerifyStop, WalkProgress, WalkStart,
+};
 use common::{insert_message, migrated_store, raw_pool, test_account};
 use uuid::Uuid;
 
@@ -28,6 +30,27 @@ async fn row(store: &Store, account_id: Uuid, room_id: &str) -> Option<HistoryVe
         .expect("list rows")
         .into_iter()
         .find(|row| row.room_id == room_id)
+}
+
+/// The walk's current generation, which every write names.
+async fn generation(store: &Store, account_id: Uuid, room_id: &str) -> i64 {
+    store
+        .history_verify_guard(account_id, room_id)
+        .await
+        .expect("guard")
+        .expect("row exists")
+        .walk_generation
+}
+
+/// A page's progress, with events (so it clears failures) unless `empty`.
+fn progress(end: &str, inserted: i64, floor_run: i32, empty_run: i32) -> WalkProgress<'_> {
+    WalkProgress {
+        end,
+        inserted,
+        floor_run,
+        empty_run,
+        clears_failures: empty_run == 0,
+    }
 }
 
 /// Store one message per timestamp, in order, so the first has the lowest id.
@@ -88,14 +111,16 @@ async fn requeue_queues_rooms_with_stored_events_and_restarts_their_walks() {
         "a room with no stored event has nothing to verify"
     );
 
+    let g = generation(&store, account_id, &a).await;
     store
-        .start_history_verify(account_id, &a, 20)
+        .start_history_verify(account_id, &a, g, 20)
         .await
         .expect("start");
     store
-        .complete_history_verify(account_id, &a, VerifyStop::FirstStoredEvent, true, 4)
+        .complete_history_verify(account_id, &a, g, VerifyStop::FirstStoredEvent, true, 4)
         .await
-        .expect("complete");
+        .expect("complete")
+        .expect("same generation");
     assert!(
         row(&store, account_id, &a).await.is_none(),
         "complete rows are not listed"
@@ -134,31 +159,35 @@ async fn a_walk_starts_with_the_lowest_id_event_and_the_oldest_of_the_first_even
         .await
         .expect("queue");
 
-    let stops = store
-        .start_history_verify(account_id, &room_id, 3)
+    let g = generation(&store, account_id, &room_id).await;
+    let WalkStart::Started(stops) = store
+        .start_history_verify(account_id, &room_id, g, 3)
         .await
         .expect("start")
-        .expect("row exists");
+    else {
+        panic!("the room has stored events");
+    };
     assert_eq!(stops.stop_event_ids, vec![ids[0].clone()]);
     assert_eq!(stops.floor_ts, Some(50), "the oldest of the first three");
     let listed = row(&store, account_id, &room_id).await.expect("listed");
     assert_eq!(listed.stop_event_ids, Some(vec![ids[0].clone()]));
     assert_eq!(listed.floor_ts, Some(50));
 
-    // A room whose events are all gone has no stop event to walk to.
-    let emptied = room();
-    store_events(&store, account_id, &emptied, &[1]).await;
+    // A purged room's row goes with its history.
+    let purged = room();
+    store_events(&store, account_id, &purged, &[1]).await;
     store
-        .requeue_history_verify(account_id, Some(&emptied))
+        .requeue_history_verify(account_id, Some(&purged))
         .await
         .expect("queue");
-    store.purge_room(account_id, &emptied).await.expect("purge");
-    assert!(
+    let g = generation(&store, account_id, &purged).await;
+    store.purge_room(account_id, &purged).await.expect("purge");
+    assert_eq!(
         store
-            .start_history_verify(account_id, &emptied, 3)
+            .start_history_verify(account_id, &purged, g, 3)
             .await
-            .expect("start")
-            .is_none(),
+            .expect("start"),
+        WalkStart::Stale,
         "the purge deleted the row with the history"
     );
     store.delete_account_row(account_id).await.expect("cleanup");
@@ -206,14 +235,15 @@ async fn a_rejected_token_restarts_the_walk_from_the_live_end() {
         .requeue_history_verify(account_id, Some(&room_id))
         .await
         .expect("queue");
+    let g = generation(&store, account_id, &room_id).await;
     store
-        .start_history_verify(account_id, &room_id, 20)
+        .start_history_verify(account_id, &room_id, g, 20)
         .await
         .expect("start");
-    store
-        .save_history_verify_page(account_id, &room_id, "t-1", 3, 40)
+    assert!(store
+        .save_history_verify_page(account_id, &room_id, g, progress("t-1", 3, 40, 0))
         .await
-        .expect("save");
+        .expect("save"));
     let saved = row(&store, account_id, &room_id).await.expect("listed");
     assert_eq!(saved.from_token.as_deref(), Some("t-1"));
     assert_eq!(
@@ -229,7 +259,7 @@ async fn a_rejected_token_restarts_the_walk_from_the_live_end() {
         timed_out: false,
     };
     store
-        .record_history_verify_failure(account_id, &room_id, retryable)
+        .record_history_verify_failure(account_id, &room_id, g, retryable)
         .await
         .expect("fail");
     let failed = row(&store, account_id, &room_id).await.expect("listed");
@@ -245,7 +275,7 @@ async fn a_rejected_token_restarts_the_walk_from_the_live_end() {
         timed_out: false,
     };
     store
-        .record_history_verify_failure(account_id, &room_id, rejected)
+        .record_history_verify_failure(account_id, &room_id, g, rejected)
         .await
         .expect("reject");
     let restarted = row(&store, account_id, &room_id).await.expect("listed");
@@ -317,8 +347,16 @@ async fn an_expired_gap_row_requeues_the_rooms_verification() {
         .requeue_history_verify(account_id, Some(&room_id))
         .await
         .expect("queue");
+    let g = generation(&store, account_id, &room_id).await;
     store
-        .complete_history_verify(account_id, &room_id, VerifyStop::FirstStoredEvent, true, 0)
+        .complete_history_verify(
+            account_id,
+            &room_id,
+            g,
+            VerifyStop::FirstStoredEvent,
+            true,
+            0,
+        )
         .await
         .expect("complete");
 
@@ -380,8 +418,9 @@ async fn purge_and_account_deletion_remove_verification_rows() {
             .requeue_history_verify(account_id, Some(room_id))
             .await
             .expect("queue");
+        let g = generation(&store, account_id, room_id).await;
         store
-            .start_history_verify(account_id, room_id, 20)
+            .start_history_verify(account_id, room_id, g, 20)
             .await
             .expect("start");
         store
@@ -390,12 +429,21 @@ async fn purge_and_account_deletion_remove_verification_rows() {
             .expect("queue purge");
         store_events(&store, account_id, room_id, &[2]).await;
     }
+    let g = generation(&store, account_id, &walking).await;
     store
-        .save_history_verify_page(account_id, &walking, "t-deep", 0, 7)
+        .save_history_verify_page(account_id, &walking, g, progress("t-deep", 0, 7, 0))
         .await
         .expect("save");
+    let g = generation(&store, account_id, &finished).await;
     store
-        .complete_history_verify(account_id, &finished, VerifyStop::FirstStoredEvent, true, 0)
+        .complete_history_verify(
+            account_id,
+            &finished,
+            g,
+            VerifyStop::FirstStoredEvent,
+            true,
+            0,
+        )
         .await
         .expect("complete");
     store.purge_room(account_id, &walking).await.expect("purge");
@@ -422,4 +470,158 @@ async fn purge_and_account_deletion_remove_verification_rows() {
     .await
     .expect("count");
     assert_eq!(left, 0, "rows cascade with the account");
+}
+
+/// Review finding: a restart (the management action, an expired gap row, a
+/// kept room's purge) bumps the walk's generation, and every write a walk
+/// makes names the generation it read. A walk read before the restart cannot
+/// write its deep token back or close the restarted walk.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_restart_refuses_every_write_of_the_walk_it_replaced() {
+    let store = migrated_store().await;
+    let account_id = test_account(&store, "verify-fence").await;
+    let room_id = room();
+    store_events(&store, account_id, &room_id, &[1, 2]).await;
+    store
+        .requeue_history_verify(account_id, Some(&room_id))
+        .await
+        .expect("queue");
+    let stale = generation(&store, account_id, &room_id).await;
+    store
+        .start_history_verify(account_id, &room_id, stale, 20)
+        .await
+        .expect("start");
+    store
+        .requeue_history_verify(account_id, Some(&room_id))
+        .await
+        .expect("restart");
+    assert_eq!(generation(&store, account_id, &room_id).await, stale + 1);
+
+    assert!(!store
+        .save_history_verify_page(account_id, &room_id, stale, progress("t-deep", 5, 0, 0))
+        .await
+        .expect("save"));
+    assert!(store
+        .complete_history_verify(
+            account_id,
+            &room_id,
+            stale,
+            VerifyStop::FirstStoredEvent,
+            true,
+            0
+        )
+        .await
+        .expect("complete")
+        .is_none());
+    let failure = RoomBackfillFailure {
+        kind: "retryable",
+        retry_after: Duration::from_secs(60),
+        parked: false,
+        clear_token: false,
+        timed_out: false,
+    };
+    assert!(!store
+        .record_history_verify_failure(account_id, &room_id, stale, failure)
+        .await
+        .expect("fail"));
+    assert_eq!(
+        store
+            .start_history_verify(account_id, &room_id, stale, 20)
+            .await
+            .expect("start"),
+        WalkStart::Stale
+    );
+    let restarted = row(&store, account_id, &room_id).await.expect("listed");
+    assert_eq!(
+        restarted.from_token, None,
+        "the deep token was not written back"
+    );
+    assert_eq!(restarted.stop_event_ids, None);
+    assert_eq!(restarted.consecutive_failures, 0);
+    assert!(restarted.retry_due);
+    store.delete_account_row(account_id).await.expect("cleanup");
+}
+
+/// Review finding: a room with no stored event left closes as `no_history` in
+/// the statement that reads its stop points, so no crash can leave a started
+/// walk with nothing to stop at.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_room_with_no_history_left_closes_as_it_starts() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    let account_id = test_account(&store, "verify-nohistory").await;
+    let room_id = room();
+    store_events(&store, account_id, &room_id, &[1]).await;
+    store
+        .requeue_history_verify(account_id, Some(&room_id))
+        .await
+        .expect("queue");
+    sqlx_core::query::query("DELETE FROM events WHERE account_id = $1 AND room_id = $2")
+        .bind(account_id)
+        .bind(&room_id)
+        .execute(&pool)
+        .await
+        .expect("delete");
+    let g = generation(&store, account_id, &room_id).await;
+    assert_eq!(
+        store
+            .start_history_verify(account_id, &room_id, g, 20)
+            .await
+            .expect("start"),
+        WalkStart::NoHistory
+    );
+    assert_eq!(
+        completion(&pool, account_id, &room_id).await,
+        Some((true, Some("no_history".to_owned()), 0))
+    );
+    store.delete_account_row(account_id).await.expect("cleanup");
+}
+
+/// Review finding: an empty page saves its token, but does not clear a
+/// failure backoff, so a homeserver that keeps answering with empty pages
+/// still parks the room. A page with events clears it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_empty_page_does_not_clear_a_failure() {
+    let store = migrated_store().await;
+    let account_id = test_account(&store, "verify-empty").await;
+    let room_id = room();
+    store_events(&store, account_id, &room_id, &[1]).await;
+    store
+        .requeue_history_verify(account_id, Some(&room_id))
+        .await
+        .expect("queue");
+    let g = generation(&store, account_id, &room_id).await;
+    let failure = RoomBackfillFailure {
+        kind: "retryable",
+        retry_after: Duration::ZERO,
+        parked: false,
+        clear_token: false,
+        timed_out: false,
+    };
+    store
+        .record_history_verify_failure(account_id, &room_id, g, failure)
+        .await
+        .expect("fail");
+    store
+        .save_history_verify_page(account_id, &room_id, g, progress("t-1", 0, 0, 3))
+        .await
+        .expect("save");
+    let after_empty = row(&store, account_id, &room_id).await.expect("listed");
+    assert_eq!(after_empty.consecutive_failures, 1, "kept");
+    assert_eq!(
+        (after_empty.empty_run, after_empty.from_token.as_deref()),
+        (3, Some("t-1"))
+    );
+
+    store
+        .save_history_verify_page(account_id, &room_id, g, progress("t-2", 1, 0, 0))
+        .await
+        .expect("save");
+    let after_events = row(&store, account_id, &room_id).await.expect("listed");
+    assert_eq!(after_events.consecutive_failures, 0, "cleared");
+    assert_eq!(after_events.empty_run, 0);
+    store.delete_account_row(account_id).await.expect("cleanup");
 }

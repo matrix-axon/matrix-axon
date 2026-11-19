@@ -48,6 +48,11 @@ impl VerifyStop {
 /// missing in a row that the 2026-10-18 import left, the longest seen.
 pub const FLOOR_RUN: i32 = 500;
 
+/// How many empty pages in a row back a walk off (ADR 0121) instead of
+/// counting as progress, so a homeserver that keeps answering with empty pages
+/// cannot hold the walk open, and parks it in the end.
+pub const EMPTY_RUN: i32 = 10;
+
 /// One incomplete verification row, as the backfill task reads it.
 #[derive(Debug, Clone)]
 pub struct HistoryVerifyRow {
@@ -61,6 +66,11 @@ pub struct HistoryVerifyRow {
     pub floor_ts: Option<i64>,
     /// Events in a row that were neither stored nor newer than the floor.
     pub floor_run: i32,
+    /// Empty pages in a row.
+    pub empty_run: i32,
+    /// Bumped by every restart. Every write the walk makes names it, so a
+    /// walk read before a restart cannot overwrite the restarted one.
+    pub walk_generation: i64,
     pub pages_fetched: i32,
     pub events_recovered: i64,
     pub consecutive_failures: i32,
@@ -83,6 +93,8 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for HistoryVerifyRow {
             stop_event_ids: row.try_get("stop_event_ids")?,
             floor_ts: row.try_get("floor_ts")?,
             floor_run: row.try_get("floor_run")?,
+            empty_run: row.try_get("empty_run")?,
+            walk_generation: row.try_get("walk_generation")?,
             pages_fetched: row.try_get("pages_fetched")?,
             events_recovered: row.try_get("events_recovered")?,
             consecutive_failures: row.try_get("consecutive_failures")?,
@@ -98,9 +110,32 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for HistoryVerifyRow {
 /// A walk's stop points, read from the room's rows when it starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyStops {
-    /// The room's lowest-`id` event; empty when the room has none.
+    /// The room's lowest-`id` event.
     pub stop_event_ids: Vec<String>,
     pub floor_ts: Option<i64>,
+}
+
+/// What [`Store::start_history_verify`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalkStart {
+    /// The stop points were read and saved.
+    Started(VerifyStops),
+    /// The room had no stored event left, so the walk was closed as
+    /// [`VerifyStop::NoHistory`] in the same statement.
+    NoHistory,
+    /// The row is gone (the room was purged) or was restarted since it was
+    /// read: the caller drops its copy and reads the row again.
+    Stale,
+}
+
+/// A walk's row as it stands now, read before each page
+/// ([`Store::history_verify_guard`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkGuard {
+    pub walk_generation: i64,
+    pub complete: bool,
+    /// The room has an open gap row.
+    pub held: bool,
 }
 
 /// A closed walk's totals, for its closing log line.
@@ -117,6 +152,9 @@ pub struct HistoryVerifyCounts {
     pub rooms_pending: i64,
     /// Of those, rooms waiting on an open gap row.
     pub rooms_held: i64,
+    /// Of those, rooms parked after repeated failures (ADR 0121), retried
+    /// about once a day.
+    pub rooms_parked: i64,
     /// Incomplete rows of rooms the account was not in when last looked at.
     pub rooms_not_joined: i64,
     pub rooms_complete: i64,
@@ -126,16 +164,18 @@ pub struct HistoryVerifyCounts {
 
 /// The columns [`HistoryVerifyRow`] reads, from `room_history_verify v`.
 const ROW_COLUMNS: &str = "v.room_id, v.from_token, v.stop_event_ids, v.floor_ts, v.floor_run, \
-     v.pages_fetched, v.events_recovered, v.consecutive_failures, v.parked, \
+     v.empty_run, v.walk_generation, v.pages_fetched, v.events_recovered, v.consecutive_failures, v.parked, \
      v.token_rejections, v.not_joined, \
      (v.retry_at IS NULL OR v.retry_at <= now()) AS retry_due, \
      EXISTS (SELECT 1 FROM room_timeline_gaps g \
              WHERE g.account_id = v.account_id AND g.room_id = v.room_id) AS held";
 
 /// What restarting a walk clears: its position and stop points, and its
-/// failure state. `queued_at` records when.
+/// failure state. It bumps the generation, so a walk already in flight finds
+/// its writes refused and reads the row again. `queued_at` records when.
 const RESTART_WALK: &str = "from_token = NULL, stop_event_ids = NULL, floor_ts = NULL, \
-     floor_run = 0, complete = false, stop_reason = NULL, completed_at = NULL, \
+     floor_run = 0, empty_run = 0, walk_generation = room_history_verify.walk_generation + 1, \
+     complete = false, stop_reason = NULL, completed_at = NULL, \
      consecutive_failures = 0, last_failure = NULL, retry_at = NULL, parked = false, \
      token_rejections = 0, queued_at = now()";
 
@@ -183,10 +223,37 @@ impl Store {
         Ok(())
     }
 
-    /// Read a walk's stop points from the room's rows and save them: the
-    /// room's lowest-`id` event, and the oldest `origin_ts` among its
-    /// `timeline_limit` lowest-`id` events. `None` if the row is gone (the
-    /// room was purged meanwhile).
+    /// The walk's row as it stands now: its generation, whether it is
+    /// complete, and whether the room has an open gap row. Read before each
+    /// page, so a walk restarted or held since its row was listed is not
+    /// paged. `None` if the row is gone.
+    pub async fn history_verify_guard(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<Option<WalkGuard>, StoreError> {
+        let row: Option<(i64, bool, bool)> = sqlx_core::query_as::query_as(
+            "SELECT v.walk_generation, v.complete, \
+                    EXISTS (SELECT 1 FROM room_timeline_gaps g \
+                            WHERE g.account_id = v.account_id AND g.room_id = v.room_id) \
+             FROM room_history_verify v WHERE v.account_id = $1 AND v.room_id = $2",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(walk_generation, complete, held)| WalkGuard {
+            walk_generation,
+            complete,
+            held,
+        }))
+    }
+
+    /// Read a walk's stop points from the room's rows and save them, from the
+    /// live end: the room's lowest-`id` event, and the oldest `origin_ts` among
+    /// its `timeline_limit` lowest-`id` events. A room with no stored event
+    /// left is closed as [`VerifyStop::NoHistory`] in the same statement, so a
+    /// crash cannot leave a started walk with nothing to stop at.
     ///
     /// The floor reads several events rather than the stop event alone, so
     /// one event with a wrong clock cannot raise it.
@@ -194,30 +261,47 @@ impl Store {
         &self,
         account_id: Uuid,
         room_id: &str,
+        walk_generation: i64,
         timeline_limit: u32,
-    ) -> Result<Option<VerifyStops>, StoreError> {
+    ) -> Result<WalkStart, StoreError> {
         let row: Option<(Vec<String>, Option<i64>)> = sqlx_core::query_as::query_as(
-            "UPDATE room_history_verify v SET \
-                 stop_event_ids = ARRAY(SELECT e.event_id FROM events e \
-                                        WHERE e.account_id = $1 AND e.room_id = $2 \
-                                        ORDER BY e.id LIMIT 1), \
-                 floor_ts = (SELECT min(f.origin_ts) FROM ( \
-                                 SELECT e.origin_ts FROM events e \
-                                 WHERE e.account_id = $1 AND e.room_id = $2 \
-                                 ORDER BY e.id LIMIT $3) f), \
-                 floor_run = 0 \
-             WHERE v.account_id = $1 AND v.room_id = $2 \
+            "WITH s AS ( \
+                 SELECT ARRAY(SELECT e.event_id FROM events e \
+                              WHERE e.account_id = $1 AND e.room_id = $2 \
+                              ORDER BY e.id LIMIT 1) AS ids, \
+                        (SELECT min(f.origin_ts) FROM ( \
+                             SELECT e.origin_ts FROM events e \
+                             WHERE e.account_id = $1 AND e.room_id = $2 \
+                             ORDER BY e.id LIMIT $4) f) AS floor \
+             ) \
+             UPDATE room_history_verify v SET \
+                 stop_event_ids = s.ids, \
+                 floor_ts = s.floor, \
+                 floor_run = 0, \
+                 empty_run = 0, \
+                 from_token = NULL, \
+                 complete = cardinality(s.ids) = 0, \
+                 stop_reason = CASE WHEN cardinality(s.ids) = 0 THEN 'no_history' END, \
+                 completed_at = CASE WHEN cardinality(s.ids) = 0 THEN now() END \
+             FROM s \
+             WHERE v.account_id = $1 AND v.room_id = $2 AND v.walk_generation = $3 \
+               AND NOT v.complete \
              RETURNING v.stop_event_ids, v.floor_ts",
         )
         .bind(account_id)
         .bind(room_id)
+        .bind(walk_generation)
         .bind(i64::from(timeline_limit.max(1)))
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(stop_event_ids, floor_ts)| VerifyStops {
-            stop_event_ids,
-            floor_ts,
-        }))
+        Ok(match row {
+            None => WalkStart::Stale,
+            Some((ids, _)) if ids.is_empty() => WalkStart::NoHistory,
+            Some((stop_event_ids, floor_ts)) => WalkStart::Started(VerifyStops {
+                stop_event_ids,
+                floor_ts,
+            }),
+        })
     }
 
     /// Look up a page's event ids before the page is written: which are
@@ -245,45 +329,53 @@ impl Store {
     }
 
     /// Save progress after a page that did not close the walk: resume from
-    /// `end`, count the page and what it inserted, keep the floor run, and
-    /// clear any failure backoff.
+    /// `progress.end`, count the page and what it inserted, and keep the floor
+    /// and empty runs. A page with events also clears any failure backoff; an
+    /// empty one does not, so a homeserver that keeps answering with empty
+    /// pages still parks the room. `false` if the walk was restarted or its row
+    /// is gone since it was read: nothing was written.
     pub async fn save_history_verify_page(
         &self,
         account_id: Uuid,
         room_id: &str,
-        end: &str,
-        inserted: i64,
-        floor_run: i32,
-    ) -> Result<(), StoreError> {
-        sqlx_core::query::query(
+        walk_generation: i64,
+        progress: WalkProgress<'_>,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx_core::query::query(
             "UPDATE room_history_verify SET \
-                 from_token = $3, \
+                 from_token = $4, \
                  pages_fetched = pages_fetched + 1, \
-                 events_recovered = events_recovered + $4, \
-                 floor_run = $5, \
-                 consecutive_failures = 0, \
-                 last_failure = NULL, \
-                 retry_at = NULL, \
-                 parked = false \
-             WHERE account_id = $1 AND room_id = $2",
+                 events_recovered = events_recovered + $5, \
+                 floor_run = $6, \
+                 empty_run = $7, \
+                 consecutive_failures = CASE WHEN $8 THEN 0 ELSE consecutive_failures END, \
+                 last_failure = CASE WHEN $8 THEN NULL ELSE last_failure END, \
+                 retry_at = CASE WHEN $8 THEN NULL ELSE retry_at END, \
+                 parked = CASE WHEN $8 THEN false ELSE parked END \
+             WHERE account_id = $1 AND room_id = $2 AND walk_generation = $3 \
+               AND NOT complete",
         )
         .bind(account_id)
         .bind(room_id)
-        .bind(end)
-        .bind(inserted)
-        .bind(floor_run)
+        .bind(walk_generation)
+        .bind(progress.end)
+        .bind(progress.inserted)
+        .bind(progress.floor_run)
+        .bind(progress.empty_run)
+        .bind(progress.clears_failures)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(done.rows_affected() == 1)
     }
 
-    /// Close a walk. `paged` says whether a page was fetched to close it,
-    /// which it was for every stop but [`VerifyStop::NoHistory`]. Returns the
-    /// walk's totals, or `None` if the row is gone.
+    /// Close a walk. `paged` says whether a page was fetched to close it.
+    /// Returns the walk's totals, or `None` if the walk was restarted or its
+    /// row is gone since it was read: nothing was written.
     pub async fn complete_history_verify(
         &self,
         account_id: Uuid,
         room_id: &str,
+        walk_generation: i64,
         stop: VerifyStop,
         paged: bool,
         inserted: i64,
@@ -291,20 +383,22 @@ impl Store {
         let row: Option<(i32, i64)> = sqlx_core::query_as::query_as(
             "UPDATE room_history_verify SET \
                  complete = true, \
-                 stop_reason = $3, \
+                 stop_reason = $4, \
                  completed_at = now(), \
                  from_token = NULL, \
-                 pages_fetched = pages_fetched + $4, \
-                 events_recovered = events_recovered + $5, \
+                 pages_fetched = pages_fetched + $5, \
+                 events_recovered = events_recovered + $6, \
                  consecutive_failures = 0, \
                  last_failure = NULL, \
                  retry_at = NULL, \
                  parked = false \
-             WHERE account_id = $1 AND room_id = $2 \
+             WHERE account_id = $1 AND room_id = $2 AND walk_generation = $3 \
+               AND NOT complete \
              RETURNING pages_fetched, events_recovered",
         )
         .bind(account_id)
         .bind(room_id)
+        .bind(walk_generation)
         .bind(stop.as_str())
         .bind(i32::from(paged))
         .bind(inserted)
@@ -320,33 +414,39 @@ impl Store {
     /// [`clear_token`](RoomBackfillFailure::clear_token), the homeserver
     /// rejected the saved token: the walk restarts from the live end with the
     /// same stop points, and the rejection is counted so a second one parks
-    /// it.
+    /// it. The empty run starts over, so each attempt gets its own
+    /// [`EMPTY_RUN`]. `false` if the walk was restarted or its row is gone
+    /// since it was read: nothing was written.
     pub async fn record_history_verify_failure(
         &self,
         account_id: Uuid,
         room_id: &str,
+        walk_generation: i64,
         failure: RoomBackfillFailure<'_>,
-    ) -> Result<(), StoreError> {
-        sqlx_core::query::query(
+    ) -> Result<bool, StoreError> {
+        let done = sqlx_core::query::query(
             "UPDATE room_history_verify SET \
                  consecutive_failures = consecutive_failures + 1, \
-                 last_failure = $3, \
-                 retry_at = now() + make_interval(secs => $4), \
-                 parked = $5, \
-                 from_token = CASE WHEN $6 THEN NULL ELSE from_token END, \
-                 floor_run = CASE WHEN $6 THEN 0 ELSE floor_run END, \
-                 token_rejections = token_rejections + CASE WHEN $6 THEN 1 ELSE 0 END \
-             WHERE account_id = $1 AND room_id = $2",
+                 last_failure = $4, \
+                 retry_at = now() + make_interval(secs => $5), \
+                 parked = $6, \
+                 from_token = CASE WHEN $7 THEN NULL ELSE from_token END, \
+                 floor_run = CASE WHEN $7 THEN 0 ELSE floor_run END, \
+                 empty_run = 0, \
+                 token_rejections = token_rejections + CASE WHEN $7 THEN 1 ELSE 0 END \
+             WHERE account_id = $1 AND room_id = $2 AND walk_generation = $3 \
+               AND NOT complete",
         )
         .bind(account_id)
         .bind(room_id)
+        .bind(walk_generation)
         .bind(failure.kind)
         .bind(failure.retry_after.as_secs_f64())
         .bind(failure.parked)
         .bind(failure.clear_token)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(done.rows_affected() == 1)
     }
 
     /// Queue the verification pass again for one room, or for every room of
@@ -383,16 +483,19 @@ impl Store {
     /// On the isolated status pool, like
     /// [`history_gap_counts`](Self::history_gap_counts).
     pub async fn history_verify_counts(&self) -> Result<HistoryVerifyCounts, StoreError> {
-        let (rooms_pending, rooms_held, rooms_not_joined, rooms_complete, events_recovered): (
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-        ) = sqlx_core::query_as::query_as(
+        type Counts = (i64, i64, i64, i64, i64, i64);
+        let (
+            rooms_pending,
+            rooms_held,
+            rooms_parked,
+            rooms_not_joined,
+            rooms_complete,
+            events_recovered,
+        ): Counts = sqlx_core::query_as::query_as(
             "SELECT count(*) FILTER (WHERE NOT v.complete AND NOT v.not_joined), \
                     count(*) FILTER (WHERE NOT v.complete AND NOT v.not_joined \
                                        AND g.room_id IS NOT NULL), \
+                    count(*) FILTER (WHERE NOT v.complete AND NOT v.not_joined AND v.parked), \
                     count(*) FILTER (WHERE NOT v.complete AND v.not_joined), \
                     count(*) FILTER (WHERE v.complete), \
                     coalesce(sum(v.events_recovered), 0)::bigint \
@@ -405,11 +508,27 @@ impl Store {
         Ok(HistoryVerifyCounts {
             rooms_pending,
             rooms_held,
+            rooms_parked,
             rooms_not_joined,
             rooms_complete,
             events_recovered,
         })
     }
+}
+
+/// What [`Store::save_history_verify_page`] saves for a page that did not
+/// close the walk.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkProgress<'a> {
+    /// The next page's `from`.
+    pub end: &'a str,
+    /// Events the page stored that were missing.
+    pub inserted: i64,
+    pub floor_run: i32,
+    pub empty_run: i32,
+    /// The page had events, so the homeserver is serving the walk: clear any
+    /// failure backoff.
+    pub clears_failures: bool,
 }
 
 /// What a page's events already were in `events`, looked up before the page

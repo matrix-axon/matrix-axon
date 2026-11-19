@@ -2799,7 +2799,9 @@ pub struct HistoryGapsStatusDto {
 /// The one-time pass that re-reads each joined room's stored history against
 /// the homeserver and stores what is missing, across every account (ADR 0140
 /// decision 4). It runs on its own after an upgrade; `rooms_pending` reaching
-/// zero means it is done.
+/// zero means it is done. Rooms that keep failing are parked and retried about
+/// once a day, so `rooms_pending` equal to `rooms_parked` means it is done but
+/// for those.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HistoryVerifyStatusDto {
     /// Joined rooms whose history has not been verified yet.
@@ -2807,6 +2809,9 @@ pub struct HistoryVerifyStatusDto {
     /// Of those, rooms waiting for a hole in their newest history to be
     /// filled first.
     pub rooms_held: i64,
+    /// Of those, rooms parked after repeated failures (ADR 0121): retried
+    /// only about once a day.
+    pub rooms_parked: i64,
     /// Rooms with stored history that the account is not in. They are
     /// verified if the account rejoins them.
     pub rooms_not_joined: i64,
@@ -2827,6 +2832,7 @@ impl HistoryVerifyStatusDto {
         HistoryVerifyStatusDto {
             rooms_pending: counts.rooms_pending,
             rooms_held: counts.rooms_held,
+            rooms_parked: counts.rooms_parked,
             rooms_not_joined: counts.rooms_not_joined,
             rooms_complete: counts.rooms_complete,
             events_recovered: counts.events_recovered,

@@ -5989,6 +5989,7 @@ async fn status_degrades_when_progress_pool_is_unavailable() {
     for field in [
         "rooms_pending",
         "rooms_held",
+        "rooms_parked",
         "rooms_not_joined",
         "rooms_complete",
         "events_recovered",
