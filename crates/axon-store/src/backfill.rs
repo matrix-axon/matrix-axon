@@ -346,23 +346,32 @@ impl Store {
         // Re-derive activity from remaining events, including a later rejoin.
         self.rebuild_room_summaries_for(account_id, Some(room_id))
             .await?;
-        // The room's gap rows (ADR 0140 decision 6) go under the same preserve
-        // guard as its backfill cursor, so holes recorded after a rejoin survive.
-        sqlx_core::query::query(
+        // The room's gap and verification rows (ADR 0140 decision 6) go under
+        // the same preserve guard as its backfill cursor, so holes recorded
+        // after a rejoin survive. A kept room's incomplete verification walk
+        // restarts with fresh stop points, since the purge may have deleted
+        // the event it was walking towards.
+        let sql = format!(
             "WITH del_backfill AS ( \
                 DELETE FROM room_backfill WHERE account_id = $1 AND room_id = $2 \
                 AND NOT preserve_room_after_purge($1, $2, $3) \
              ), del_gaps AS ( \
                 DELETE FROM room_timeline_gaps WHERE account_id = $1 AND room_id = $2 \
                 AND NOT preserve_room_after_purge($1, $2, $3) \
-             ) DELETE FROM room_purge_intents WHERE account_id = $1 AND room_id = $2 \
+             ), del_verify AS ( \
+                DELETE FROM room_history_verify WHERE account_id = $1 AND room_id = $2 \
+                AND NOT preserve_room_after_purge($1, $2, $3) \
+             ), restart_verify AS ({}) \
+             DELETE FROM room_purge_intents WHERE account_id = $1 AND room_id = $2 \
              AND through_event_id = $3",
-        )
-        .bind(account_id)
-        .bind(room_id)
-        .bind(through_event_id)
-        .execute(&self.maintenance_pool)
-        .await?;
+            crate::history_verify::restart_kept_walk_sql()
+        );
+        sqlx_core::query::query(&sql)
+            .bind(account_id)
+            .bind(room_id)
+            .bind(through_event_id)
+            .execute(&self.maintenance_pool)
+            .await?;
         Ok(())
     }
     /// Persist a leave obligation without waiting for bulk cleanup. Repeated

@@ -276,6 +276,7 @@ async fn switched_off_every_management_route_is_403_and_status_says_so() {
 
     let token = format!("{TOKENS}/{}", owner.id);
     let a_bind = format!("{BINDS}/{}", Uuid::new_v4());
+    let verify = format!("/v1/management/accounts/{}/history-verify", Uuid::new_v4());
 
     let off = app(store.clone(), false, Providers::Browser(&["google"]));
     for (method, uri) in [
@@ -286,6 +287,7 @@ async fn switched_off_every_management_route_is_403_and_status_says_so() {
         (Method::DELETE, token.as_str()),
         (Method::POST, BINDS),
         (Method::GET, a_bind.as_str()),
+        (Method::POST, verify.as_str()),
     ] {
         // The bearer gate still runs first: a stranger learns nothing.
         let (status, _) = call(&off, method.clone(), uri, None).await;
@@ -1463,4 +1465,71 @@ async fn unbinding_revokes_tokens_that_identitys_sessions_minted() {
         let (status, _) = call(&app, Method::GET, TOKENS, Some(token)).await;
         assert_eq!(status, expected, "{what}");
     }
+}
+
+/// ADR 0140 decision 7: re-queue the verification pass for one room or a
+/// whole account, without SQL. Not a credential change, so no step-up.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn history_verification_can_be_queued_for_a_room_or_an_account() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let owner = store.issue_token("owner").await.unwrap();
+    let on = app(store.clone(), true, Providers::Browser(&["google"]));
+    let account_id = store
+        .upsert_account(
+            &format!("@verify-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let rooms: Vec<String> = (0..2)
+        .map(|_| format!("!verify-{}:localhost", Uuid::new_v4()))
+        .collect();
+    for room_id in &rooms {
+        store
+            .upsert_event(&axon_store::NewEvent {
+                event_id: &format!("$verify-{}:localhost", Uuid::new_v4()),
+                room_id,
+                account_id,
+                sender: "@alice:localhost",
+                origin_ts: 1,
+                event_type: "m.room.message",
+                content: Some(serde_json::json!({"msgtype": "m.text", "body": "hi"})),
+                raw_event: serde_json::json!({"type": "m.room.message"}),
+                megolm_session_id: None,
+                redacts: None,
+                relates_to: None,
+                decrypted_body_text: Some("hi"),
+            })
+            .await
+            .unwrap();
+    }
+    let uri = format!("/v1/management/accounts/{account_id}/history-verify");
+
+    let (status, _, body) = send_json(&on, &uri, &owner.token, "{}".to_owned()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["rooms_queued"], 2);
+
+    let one = serde_json::json!({ "room_id": rooms[0] }).to_string();
+    let (status, _, body) = send_json(&on, &uri, &owner.token, one).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["rooms_queued"], 1);
+    let queued = store.list_history_verify(account_id).await.unwrap();
+    assert_eq!(queued.len(), 2);
+
+    let unknown = serde_json::json!({ "room_id": "!nothing:localhost" }).to_string();
+    let (status, _, body) = send_json(&on, &uri, &owner.token, unknown).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["rooms_queued"], 0, "nothing stored to verify");
+
+    let stranger = format!("/v1/management/accounts/{}/history-verify", Uuid::new_v4());
+    let (status, _, _) = send_json(&on, &stranger, &owner.token, "{}".to_owned()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = send_json(&on, &uri, &owner.token, r#"{"room":"x"}"#.to_owned()).await;
+    assert!(status.is_client_error(), "unknown fields are refused");
+
+    store.delete_account_row(account_id).await.unwrap();
 }

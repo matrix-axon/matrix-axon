@@ -377,6 +377,15 @@ pub struct SyncConfig {
     /// Defaults to `true`.
     #[serde(default = "default_backfill_enabled")]
     pub backfill_enabled: bool,
+    /// Run the one-time pass that re-reads each joined room's stored history
+    /// against the homeserver and stores what is missing, to repair the holes
+    /// limited syncs left before they were recorded (ADR 0140 decision 4). It
+    /// runs inside the backfill task once after the upgrade, alternating with
+    /// ordinary backfill, whatever `backfill_enabled` says. `false` is for an
+    /// operator who must avoid that one-off load on the homeserver. Defaults
+    /// to `true`.
+    #[serde(default = "default_history_verify_enabled")]
+    pub history_verify_enabled: bool,
     /// When `true`, the boot-time UTD re-decryption sweep retries every pending
     /// UTD on every process start. The default (`false`) attempts each row once
     /// at startup, then relies on the room-key arrival stream or an explicit
@@ -889,6 +898,10 @@ fn default_backfill_enabled() -> bool {
     true
 }
 
+fn default_history_verify_enabled() -> bool {
+    true
+}
+
 fn default_backfill_page_size() -> u32 {
     100
 }
@@ -1171,6 +1184,7 @@ impl Default for SyncConfig {
             membership_mutation_timeout_secs: default_membership_mutation_timeout_secs(),
             room_entry_timeout_secs: default_room_entry_timeout_secs(),
             backfill_enabled: default_backfill_enabled(),
+            history_verify_enabled: default_history_verify_enabled(),
             always_redecrypt_utds_on_startup: false,
             backfill_page_size: default_backfill_page_size(),
             backfill_target_depth: 0,

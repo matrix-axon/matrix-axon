@@ -452,8 +452,8 @@ impl GapWatcher {
     }
 }
 
-/// The event ids of a sync batch, in its order (oldest first).
-fn event_ids(events: &[TimelineEvent]) -> Vec<String> {
+/// The event ids of a sync batch, in its order (oldest first), or of a page.
+pub(super) fn event_ids(events: &[TimelineEvent]) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| event.event_id().map(ToString::to_string))
@@ -642,12 +642,19 @@ impl Filler<'_> {
                 false
             }
             Ok(GapCheck::Expired { from_token }) => {
+                // The store queued the room's verification walk in the same
+                // statement (#1170); with verification off, the hole is lost.
+                let message = if self.params.verify_enabled {
+                    "no event of the limited batch was stored within 10 minutes; dropped the row unpaged and queued the room's history verification to find the hole"
+                } else {
+                    "no event of the limited batch was stored within 10 minutes; dropped the row unpaged, and history verification is off, so the hole will not be filled"
+                };
                 tracing::warn!(
                     account_id = %account_id,
                     room_id = %gap.room_id,
                     gap_id = gap.id,
                     from_token = from_token.as_deref().unwrap_or("<none: live end>"),
-                    "no event of the limited batch was stored within 10 minutes; dropped the row unpaged"
+                    "{message}"
                 );
                 false
             }
@@ -821,4 +828,4 @@ impl Filler<'_> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

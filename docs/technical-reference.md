@@ -184,7 +184,29 @@ A busy room while sync is slow, a restart after an outage, or a bulk import can 
 - Rows go with their account, and with their room when purge-on-leave removes it.
 
 `sync.timeline_limit` must be at least 1; startup rejects 0.
-Holes that existed before this release have no rows; a one-time verification pass for them is planned (ADR 0140 decision 4).
+
+Holes that existed before this release have no rows, so a one-time verification pass finds them (ADR 0140 decision 4):
+
+- After the upgrade, the migration queues one `room_history_verify` row for every room with stored events, and the pass starts on its own.
+  It logs "verifying the stored history of joined rooms" at `INFO` when it starts and "every joined room's stored history has been verified" when it finishes.
+- The backfill task walks each joined room from its live end, most recently active room first, and stores every page; events already stored are no-ops.
+  It alternates one verification page with one ordinary backfill page, and takes every page while ordinary backfill has none.
+  A room with an open gap row waits for it, since that row is filling the same newest history.
+- A walk closes on the page that holds the room's lowest-`id` event, the first one Axon stored.
+  If the homeserver no longer serves that event (it purged the room), the walk closes after 500 events in a row that were neither stored nor newer than the room's first stored events ("passed below the room's stored history", `INFO`).
+  Otherwise it ends at the room's start, logged at `WARN`.
+- A walk that stored missing events logs "stored history that was missing from the room" at `WARN`, once per room, with `events_recovered`.
+  Each page logs at `DEBUG` with `inserted` and `already_stored`.
+- Rooms the account is not in wait, and are walked if it rejoins them before purge-on-leave removes them.
+  Failures back off and park as backfill rooms do (ADR 0121).
+- `GET /v1/status` reports `history_verify`: `rooms_pending` (joined rooms not yet verified), of which `rooms_held` (waiting on a gap row), `rooms_not_joined`, `rooms_complete`, and `events_recovered`.
+- `POST /v1/management/accounts/{account_id}/history-verify` queues the pass again, for one room (`{"room_id": "…"}`) or every room of the account (`{}`).
+- A limited row dropped unpaged because none of its batch was stored within 10 minutes queues its room's walk again, which finds the hole from the live end.
+- `sync.history_verify_enabled = false` turns the pass off, for an operator who must avoid its one-off load on the homeserver.
+  It runs whatever `sync.backfill_enabled` says, and `sync.backfill_target_depth` does not apply to it.
+- Rows go with their account, and with their room when purge-on-leave removes it.
+  A rejoined room the purge keeps restarts an unfinished walk.
+
 `scripts/gap-fill-test.sh` exercises the whole path against a local Synapse ([integration testing](integration-testing.md#gap-fill-adr-0140)).
 
 ## Environment variables

@@ -108,7 +108,8 @@ pub enum GapCheck {
     /// again on the next sweep.
     AwaitingBatch,
     /// None of the batch's events was stored within the wait limit, so the
-    /// batch will never be stored. The row was deleted unpaged.
+    /// batch will never be stored. The row was deleted unpaged, and the room's
+    /// verification walk queued again to find the hole (#1170).
     Expired { from_token: Option<String> },
     /// Nothing was stored in the room before the batch: the room's first window,
     /// which is backfill's job, not a hole. The row was deleted unpaged.
@@ -314,6 +315,10 @@ impl Store {
     /// within `wait`, is deleted; a hole is marked checked and its boundary
     /// resolved. A row still awaiting its batch is left as it is.
     ///
+    /// An expired row's hole has no boundary to page to, so the same statement
+    /// that deletes it queues the room's verification walk again (#1170): the
+    /// walk reads the room from its live end and finds the hole.
+    ///
     /// A row is a first window when the room has no stored event outside the
     /// batch whose `received_at` is earlier than the earliest `received_at`
     /// among the batch's stored events. Only an earlier sync response, or
@@ -368,7 +373,14 @@ impl Store {
                 return Ok(GapCheck::Hole);
             }
         };
-        self.delete_timeline_gap(gap_id).await?;
+        if matches!(verdict, GapCheck::Expired { .. }) {
+            sqlx_core::query::query(&crate::history_verify::requeue_on_gap_delete_sql())
+                .bind(gap_id)
+                .execute(&self.pool)
+                .await?;
+        } else {
+            self.delete_timeline_gap(gap_id).await?;
+        }
         Ok(verdict)
     }
 

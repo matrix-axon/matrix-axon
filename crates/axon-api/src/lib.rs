@@ -209,6 +209,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(routes::management::revoke_token),
         )
         .route(
+            "/v1/management/accounts/{account_id}/history-verify",
+            post(routes::management::requeue_history_verify),
+        )
+        .route(
             "/v1/management/oauth/binds",
             post(routes::management::start_bind),
         )
