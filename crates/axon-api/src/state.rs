@@ -144,6 +144,9 @@ pub struct AppState {
     /// homeserver, for the media routes' `room_id`/`event_id` scope (ADR 0138
     /// section 4).
     pub kept_media: Arc<crate::linked_events::KeptMedia>,
+    /// Live media stream tickets (ADR 0139 section 5). In memory: a restart
+    /// forgets them, and the client asks for a new one.
+    pub stream_tickets: Arc<crate::stream_tickets::StreamTickets>,
     /// Device-list port for the `GET /v1/accounts/{id}/devices` handler (M16,
     /// ADR 0060). Injected by the binary via an adapter over the sync engine,
     /// same as `trust`.
@@ -422,6 +425,7 @@ impl AppState {
             trust,
             linked_events: Arc::new(crate::linked_events::NoLinkedEventSource),
             kept_media: Arc::new(crate::linked_events::KeptMedia::default()),
+            stream_tickets: Arc::new(crate::stream_tickets::StreamTickets::default()),
             devices,
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
@@ -1193,6 +1197,12 @@ impl FromRef<AppState> for Arc<dyn crate::linked_events::LinkedEventSource> {
 impl FromRef<AppState> for Arc<crate::linked_events::KeptMedia> {
     fn from_ref(state: &AppState) -> Arc<crate::linked_events::KeptMedia> {
         state.kept_media.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<crate::stream_tickets::StreamTickets> {
+    fn from_ref(state: &AppState) -> Arc<crate::stream_tickets::StreamTickets> {
+        state.stream_tickets.clone()
     }
 }
 

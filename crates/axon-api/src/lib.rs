@@ -39,6 +39,7 @@ mod search;
 mod sender;
 mod space_discovery;
 mod state;
+mod stream_tickets;
 mod sync_state;
 mod sync_status;
 mod trust;
