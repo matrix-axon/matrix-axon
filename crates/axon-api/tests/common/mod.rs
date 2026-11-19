@@ -95,6 +95,10 @@ impl TokenVerifier for StubTokenVerifier {
         let valid = token == self.accepted && self.active.load(Ordering::SeqCst);
         Ok(valid.then_some(self.token))
     }
+
+    async fn is_live(&self, id: Uuid) -> Result<bool, ApiError> {
+        Ok(id == self.token.id && self.active.load(Ordering::SeqCst))
+    }
 }
 
 /// Snapshot one instance preference, run `body` against a missing key, then

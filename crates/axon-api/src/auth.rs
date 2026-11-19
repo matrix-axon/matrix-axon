@@ -132,6 +132,14 @@ pub trait TokenVerifier: Send + Sync {
     /// token; `Err` is an infrastructure failure (e.g. the store), surfaced to
     /// the client as `500`.
     async fn verify(&self, token: &str) -> Result<Option<AuthedToken>, ApiError>;
+
+    /// Whether the token whose id is `id` would still [`verify`](Self::verify):
+    /// unrevoked and unexpired. For a credential that stands in for a token
+    /// after the request that presented it, such as a media stream ticket (ADR
+    /// 0139 section 5), so it is accepted exactly when its token would be. A
+    /// read: it does not count as a use of the token. `Err` is an
+    /// infrastructure failure, surfaced as `500`.
+    async fn is_live(&self, id: Uuid) -> Result<bool, ApiError>;
 }
 
 /// The shipped [`TokenVerifier`]: hashes the presented token and looks it up in
@@ -154,6 +162,10 @@ impl TokenVerifier for StoreTokenVerifier {
     async fn verify(&self, token: &str) -> Result<Option<AuthedToken>, ApiError> {
         // A store failure converts into a logged 500 via `From<StoreError>`.
         Ok(self.store.verify_token(token).await?.map(AuthedToken::from))
+    }
+
+    async fn is_live(&self, id: Uuid) -> Result<bool, ApiError> {
+        Ok(self.store.token_is_live(id).await?)
     }
 }
 
