@@ -428,26 +428,41 @@ mod tests {
         }
     }
 
+    /// Cases whose link `body_urls` cannot match as typed, so a body cannot
+    /// carry them as a preview's `matched_url`: the server finds links only
+    /// behind a lower-case scheme, and it trims a trailing apostrophe. The
+    /// identity test above still covers them. A fixture case added here, or
+    /// one that stops tokenizing, fails the duplicate test until this list
+    /// says why.
+    const UNTOKENIZED_IDENTITY_CASES: &[&str] = &[
+        "scheme case is folded",
+        "an apostrophe in a query is encoded",
+    ];
+
+    /// The fewest cases the duplicate test must exercise: today's fixture has
+    /// six whose link and serialization differ and both tokenize.
+    const MIN_DUPLICATE_CASES: usize = 6;
+
     /// Where a case's link and its serialization differ, a send that previews
-    /// both is rejected as naming one destination twice. Cases the body
-    /// tokenizer cannot match as typed (an upper-case scheme, trailing
-    /// punctuation) are left to the identity test above.
+    /// both is rejected as naming one destination twice.
     #[test]
     fn previews_of_one_fixture_identity_are_duplicates() {
-        let trimmed = ['.', ',', ';', ':', '!', '?', ')', ']', '\'', '"'];
         let mut checked = 0;
+        let mut untokenized = Vec::new();
         for case in identity_cases() {
-            let typed = |s: &str| {
-                (s.starts_with("https://") || s.starts_with("http://")) && !s.ends_with(trimmed)
-            };
-            if case.url == case.href || !typed(&case.url) || !typed(&case.href) {
+            if case.url == case.href {
+                continue;
+            }
+            let body = format!("{} {}", case.url, case.href);
+            let urls = body_urls(&body);
+            if !urls.contains(case.url.as_str()) || !urls.contains(case.href.as_str()) {
+                untokenized.push(case.name);
                 continue;
             }
             let previews = [&case.url, &case.href].map(|url| PreviewMetadata {
                 matched_url: url.clone(),
                 ..Default::default()
             });
-            let body = format!("{} {}", case.url, case.href);
             assert!(
                 validate_metadata(&body, &previews[..1]).is_ok(),
                 "{}: one preview",
@@ -461,6 +476,13 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked > 0, "no fixture case exercised the duplicate check");
+        assert_eq!(
+            untokenized, UNTOKENIZED_IDENTITY_CASES,
+            "fixture cases the body tokenizer cannot match"
+        );
+        assert!(
+            checked >= MIN_DUPLICATE_CASES,
+            "only {checked} fixture cases exercised the duplicate check"
+        );
     }
 }
