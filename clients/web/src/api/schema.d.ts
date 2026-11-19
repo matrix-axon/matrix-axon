@@ -10861,7 +10861,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiResponse_Value"];
                 };
             };
-            /** @description Malformed request, or the change would strand the caller below the level needed to self-correct (set acknowledge_self_demotion to proceed anyway) */
+            /** @description Malformed request; `users` names a room creator, whose level is infinite from room version 12 and cannot be set; or the change would strand the caller below the level needed to self-correct (set acknowledge_self_demotion to proceed anyway) */
             400: {
                 headers: {
                     [name: string]: unknown;

@@ -216,6 +216,22 @@ fn merge_power_level_changes(
     }
     for (user_id, level) in &changes.users {
         let user_id = parse_user_id(user_id)?;
+        // From room version 12 a creator holds an infinite level and must not
+        // appear in `users` (ADR 0137, issue 324). Refuse here, naming the
+        // user, rather than leave it to the event-content conversion: that
+        // error names no one, and a level equal to `users_default` would be
+        // merged away below and return success without changing anything.
+        if power_levels
+            .rules
+            .privileged_creators
+            .as_ref()
+            .is_some_and(|creators| creators.contains(&user_id))
+        {
+            return Err(GatewayError::Invalid(format!(
+                "{user_id} is a creator of this room and holds an infinite power level \
+                 (room version 12 and later); a creator's level cannot be set"
+            )));
+        }
         let level = to_level(*level)?;
         // Mirrors matrix-sdk's own `Room::update_power_levels`: a level equal
         // to the room's default carries no information as an explicit
@@ -239,14 +255,26 @@ fn merge_power_level_changes(
 fn resolve_power_levels(
     power_levels: RoomPowerLevels,
     own_user_id: &UserId,
+    account_id: Uuid,
+    room_id: &str,
 ) -> ResolvedPowerLevels {
     let own_level = match power_levels.for_user(own_user_id) {
         UserPowerLevel::Infinite => ResolvedUserLevel::Infinite,
         UserPowerLevel::Int(level) => ResolvedUserLevel::Int(level.into()),
         // `UserPowerLevel` is non-exhaustive. A future variant is not a level
         // Axon can state honestly, so it reads as the room default rather
-        // than inventing a privilege.
-        _ => ResolvedUserLevel::Int(power_levels.users_default.into()),
+        // than inventing a privilege. Clients are told to trust `own_level`,
+        // so an under-report here would bring back issue 324's symptom
+        // without a trace; the warning makes it visible.
+        unknown => {
+            tracing::warn!(
+                %account_id,
+                %room_id,
+                level = ?unknown,
+                "power_levels: unknown resolved level kind; reporting users_default as own_level"
+            );
+            ResolvedUserLevel::Int(power_levels.users_default.into())
+        }
     };
     let mut privileged_creators: Vec<String> = power_levels
         .rules
@@ -2177,7 +2205,12 @@ impl SdkGateway {
             .power_levels()
             .await
             .map_err(|e| map_sdk_err(e.into()))?;
-        Ok(resolve_power_levels(power_levels, room.own_user_id()))
+        Ok(resolve_power_levels(
+            power_levels,
+            room.own_user_id(),
+            account_id,
+            room_id,
+        ))
     }
 
     /// Set this account's own display name (ADR 0068, M19f). An empty
@@ -3771,6 +3804,9 @@ mod tests {
             .expect("caller's own level (100) stays at/above state_default (50)");
     }
 
+    /// Room id for the resolution tests' log fields; they read no room.
+    const ROOM: &str = "!room:example.org";
+
     /// A room-version-12 [`RoomPowerLevels`] whose creators are privileged:
     /// they hold an infinite level and must not appear in `users` (issue 324).
     fn v12_power_levels(creators: &[&str]) -> RoomPowerLevels {
@@ -3790,7 +3826,7 @@ mod tests {
         let power_levels = v12_power_levels(&["@zed:example.org", "@alice:example.org"]);
         let alice = UserId::parse("@alice:example.org").unwrap();
 
-        let resolved = resolve_power_levels(power_levels, &alice);
+        let resolved = resolve_power_levels(power_levels, &alice, uuid::Uuid::nil(), ROOM);
 
         assert_eq!(resolved.own_level, ResolvedUserLevel::Infinite);
         assert_eq!(
@@ -3809,11 +3845,11 @@ mod tests {
         power_levels.users.insert(bob.clone(), 50.into());
 
         assert_eq!(
-            resolve_power_levels(power_levels.clone(), &bob).own_level,
+            resolve_power_levels(power_levels.clone(), &bob, uuid::Uuid::nil(), ROOM).own_level,
             ResolvedUserLevel::Int(50)
         );
         assert_eq!(
-            resolve_power_levels(power_levels, &carol).own_level,
+            resolve_power_levels(power_levels, &carol, uuid::Uuid::nil(), ROOM).own_level,
             ResolvedUserLevel::Int(0)
         );
     }
@@ -3829,7 +3865,7 @@ mod tests {
         let power_levels =
             RoomPowerLevels::new(RoomPowerLevelsSource::None, &rules, [alice.clone()]);
 
-        let resolved = resolve_power_levels(power_levels, &alice);
+        let resolved = resolve_power_levels(power_levels, &alice, uuid::Uuid::nil(), ROOM);
 
         assert_eq!(resolved.own_level, ResolvedUserLevel::Int(100));
         assert!(resolved.privileged_creators.is_empty());
@@ -3837,27 +3873,68 @@ mod tests {
     }
 
     #[test]
-    fn a_v12_creator_cannot_demote_themselves_but_is_refused_cleanly() {
-        // Issue 324 asked whether the guardrail handles a v12 creator, who
-        // cannot be written into `users`. The guardrail passes, since the
-        // creator stays infinite whatever `users` says, and the event content
-        // conversion in `set_power_levels` then refuses the write, which
-        // `GatewayError::Invalid` turns into a 400 before anything is sent.
+    fn merge_refuses_a_level_for_a_v12_creator_and_names_them() {
+        // Issue 324 asked whether a v12 creator, who cannot be written into
+        // `users`, is handled. Any level for a creator is refused before the
+        // guardrail or a send, including one equal to `users_default`, which
+        // would otherwise be merged away and report success with no change.
+        for requested in [10, 0] {
+            let mut power_levels = v12_power_levels(&["@alice:example.org"]);
+            let mut users = std::collections::HashMap::new();
+            users.insert("@alice:example.org".to_owned(), requested);
+            let changes = PowerLevelChanges {
+                users,
+                ..Default::default()
+            };
+
+            let err = merge_power_level_changes(&mut power_levels, &changes)
+                .expect_err("a creator's level cannot be set");
+
+            assert!(
+                matches!(
+                    &err,
+                    GatewayError::Invalid(message)
+                        if message.starts_with("@alice:example.org is a creator of this room")
+                ),
+                "requested {requested}: {err:?}"
+            );
+            assert!(power_levels.users.is_empty(), "nothing was merged");
+        }
+    }
+
+    #[test]
+    fn a_v12_creator_passes_the_guardrail_whatever_the_thresholds() {
+        // A creator stays infinite, so raising the threshold for
+        // m.room.power_levels cannot strand them.
         let before = v12_power_levels(&["@alice:example.org"]);
         let alice = UserId::parse("@alice:example.org").unwrap();
         let mut merged = before.clone();
-        let mut users = std::collections::HashMap::new();
-        users.insert(alice.to_string(), 10);
         let changes = PowerLevelChanges {
-            users,
+            state_default: Some(1_000_000),
             ..Default::default()
         };
         merge_power_level_changes(&mut merged, &changes).unwrap();
 
         check_self_demotion_guardrail(&before, &merged, &alice, false)
             .expect("a creator's level stays infinite, so nothing strands them");
-        RoomPowerLevelsEventContent::try_from(merged)
-            .expect_err("a creator in `users` is not a valid v12 power-levels event");
+    }
+
+    #[test]
+    fn merge_still_accepts_a_level_for_a_v12_non_creator() {
+        let mut power_levels = v12_power_levels(&["@alice:example.org"]);
+        let mut users = std::collections::HashMap::new();
+        users.insert("@bob:example.org".to_owned(), 50);
+        let changes = PowerLevelChanges {
+            users,
+            ..Default::default()
+        };
+
+        merge_power_level_changes(&mut power_levels, &changes).unwrap();
+
+        let bob = UserId::parse("@bob:example.org").unwrap();
+        assert_eq!(power_levels.users.get(&bob), Some(&50.into()));
+        RoomPowerLevelsEventContent::try_from(power_levels)
+            .expect("a non-creator entry is a valid v12 power-levels event");
     }
 
     /// The `matrix_sdk::Error` a homeserver answering `status` with `body`
