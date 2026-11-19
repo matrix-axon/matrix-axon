@@ -29,6 +29,10 @@ pub enum VerifyStop {
     RoomStart,
     /// The room had no stored event left when its walk started.
     NoHistory,
+    /// [`WALK_TIMEOUTS`] pages timed out over the walk. The homeserver is most
+    /// likely fetching history it no longer holds over federation for every
+    /// page, which neither the floor nor the backoff bounds.
+    TimedOut,
 }
 
 impl VerifyStop {
@@ -39,6 +43,7 @@ impl VerifyStop {
             VerifyStop::Floor => "floor",
             VerifyStop::RoomStart => "room_start",
             VerifyStop::NoHistory => "no_history",
+            VerifyStop::TimedOut => "timed_out",
         }
     }
 }
@@ -52,6 +57,13 @@ pub const FLOOR_RUN: i32 = 500;
 /// counting as progress, so a homeserver that keeps answering with empty pages
 /// cannot hold the walk open, and parks it in the end.
 pub const EMPTY_RUN: i32 = 10;
+
+/// How many timed-out pages over a whole walk close it as
+/// [`VerifyStop::TimedOut`]. Counted across successful pages: a homeserver
+/// backfilling over federation answers each retry with the page it finished
+/// meanwhile, then times out on the next. On Adam's production account one
+/// room in 5,816 timed out at all.
+pub const WALK_TIMEOUTS: i32 = 3;
 
 /// One incomplete verification row, as the backfill task reads it.
 #[derive(Debug, Clone)]
@@ -68,6 +80,8 @@ pub struct HistoryVerifyRow {
     pub floor_run: i32,
     /// Empty pages in a row.
     pub empty_run: i32,
+    /// Timed-out pages over the whole walk.
+    pub walk_timeouts: i32,
     /// Bumped by every restart. Every write the walk makes names it, so a
     /// walk read before a restart cannot overwrite the restarted one.
     pub walk_generation: i64,
@@ -94,6 +108,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for HistoryVerifyRow {
             floor_ts: row.try_get("floor_ts")?,
             floor_run: row.try_get("floor_run")?,
             empty_run: row.try_get("empty_run")?,
+            walk_timeouts: row.try_get("walk_timeouts")?,
             walk_generation: row.try_get("walk_generation")?,
             pages_fetched: row.try_get("pages_fetched")?,
             events_recovered: row.try_get("events_recovered")?,
@@ -155,6 +170,9 @@ pub struct HistoryVerifyCounts {
     /// Of those, rooms parked after repeated failures (ADR 0121), retried
     /// about once a day.
     pub rooms_parked: i64,
+    /// Complete rooms whose walk was closed after [`WALK_TIMEOUTS`] timeouts,
+    /// so their history was not fully verified.
+    pub rooms_timed_out: i64,
     /// Incomplete rows of rooms the account was not in when last looked at.
     pub rooms_not_joined: i64,
     pub rooms_complete: i64,
@@ -164,7 +182,7 @@ pub struct HistoryVerifyCounts {
 
 /// The columns [`HistoryVerifyRow`] reads, from `room_history_verify v`.
 const ROW_COLUMNS: &str = "v.room_id, v.from_token, v.stop_event_ids, v.floor_ts, v.floor_run, \
-     v.empty_run, v.walk_generation, v.pages_fetched, v.events_recovered, v.consecutive_failures, v.parked, \
+     v.empty_run, v.walk_timeouts, v.walk_generation, v.pages_fetched, v.events_recovered, v.consecutive_failures, v.parked, \
      v.token_rejections, v.not_joined, \
      (v.retry_at IS NULL OR v.retry_at <= now()) AS retry_due, \
      EXISTS (SELECT 1 FROM room_timeline_gaps g \
@@ -174,7 +192,8 @@ const ROW_COLUMNS: &str = "v.room_id, v.from_token, v.stop_event_ids, v.floor_ts
 /// failure state. It bumps the generation, so a walk already in flight finds
 /// its writes refused and reads the row again. `queued_at` records when.
 const RESTART_WALK: &str = "from_token = NULL, stop_event_ids = NULL, floor_ts = NULL, \
-     floor_run = 0, empty_run = 0, walk_generation = room_history_verify.walk_generation + 1, \
+     floor_run = 0, empty_run = 0, walk_timeouts = 0, \
+     walk_generation = room_history_verify.walk_generation + 1, \
      complete = false, stop_reason = NULL, completed_at = NULL, \
      consecutive_failures = 0, last_failure = NULL, retry_at = NULL, parked = false, \
      token_rejections = 0, queued_at = now()";
@@ -415,7 +434,8 @@ impl Store {
     /// rejected the saved token: the walk restarts from the live end with the
     /// same stop points, and the rejection is counted so a second one parks
     /// it. The empty run starts over, so each attempt gets its own
-    /// [`EMPTY_RUN`]. `false` if the walk was restarted or its row is gone
+    /// [`EMPTY_RUN`]. A timeout adds to the walk's
+    /// [`walk_timeouts`](HistoryVerifyRow::walk_timeouts). `false` if the walk was restarted or its row is gone
     /// since it was read: nothing was written.
     pub async fn record_history_verify_failure(
         &self,
@@ -433,6 +453,7 @@ impl Store {
                  from_token = CASE WHEN $7 THEN NULL ELSE from_token END, \
                  floor_run = CASE WHEN $7 THEN 0 ELSE floor_run END, \
                  empty_run = 0, \
+                 walk_timeouts = walk_timeouts + CASE WHEN $8 THEN 1 ELSE 0 END, \
                  token_rejections = token_rejections + CASE WHEN $7 THEN 1 ELSE 0 END \
              WHERE account_id = $1 AND room_id = $2 AND walk_generation = $3 \
                AND NOT complete",
@@ -444,6 +465,7 @@ impl Store {
         .bind(failure.retry_after.as_secs_f64())
         .bind(failure.parked)
         .bind(failure.clear_token)
+        .bind(failure.timed_out)
         .execute(&self.pool)
         .await?;
         Ok(done.rows_affected() == 1)
@@ -483,11 +505,12 @@ impl Store {
     /// On the isolated status pool, like
     /// [`history_gap_counts`](Self::history_gap_counts).
     pub async fn history_verify_counts(&self) -> Result<HistoryVerifyCounts, StoreError> {
-        type Counts = (i64, i64, i64, i64, i64, i64);
+        type Counts = (i64, i64, i64, i64, i64, i64, i64);
         let (
             rooms_pending,
             rooms_held,
             rooms_parked,
+            rooms_timed_out,
             rooms_not_joined,
             rooms_complete,
             events_recovered,
@@ -496,6 +519,7 @@ impl Store {
                     count(*) FILTER (WHERE NOT v.complete AND NOT v.not_joined \
                                        AND g.room_id IS NOT NULL), \
                     count(*) FILTER (WHERE NOT v.complete AND NOT v.not_joined AND v.parked), \
+                    count(*) FILTER (WHERE v.complete AND v.stop_reason = 'timed_out'), \
                     count(*) FILTER (WHERE NOT v.complete AND v.not_joined), \
                     count(*) FILTER (WHERE v.complete), \
                     coalesce(sum(v.events_recovered), 0)::bigint \
@@ -509,6 +533,7 @@ impl Store {
             rooms_pending,
             rooms_held,
             rooms_parked,
+            rooms_timed_out,
             rooms_not_joined,
             rooms_complete,
             events_recovered,

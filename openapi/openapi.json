@@ -15596,6 +15596,7 @@
           "rooms_pending",
           "rooms_held",
           "rooms_parked",
+          "rooms_timed_out",
           "rooms_not_joined",
           "rooms_complete",
           "events_recovered",
@@ -15635,6 +15636,11 @@
             "type": "integer",
             "format": "int64",
             "description": "Joined rooms whose history has not been verified yet."
+          },
+          "rooms_timed_out": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of the complete rooms, those whose walk was closed after repeated\ntimeouts, without reaching its end. The homeserver was most likely\nfetching their history over federation. The management action queues\nthem again."
           }
         }
       },

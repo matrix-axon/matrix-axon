@@ -54,7 +54,7 @@ pub use events::{
 };
 pub use history_verify::{
     HistoryVerifyCounts, HistoryVerifyRow, VerifyPageLookup, VerifyStop, VerifyStops, VerifyTotals,
-    WalkGuard, WalkProgress, WalkStart, EMPTY_RUN, FLOOR_RUN,
+    WalkGuard, WalkProgress, WalkStart, EMPTY_RUN, FLOOR_RUN, WALK_TIMEOUTS,
 };
 pub use image_packs::{ImagePackRow, ImagePackSnapshot};
 pub use instance_preferences::InstancePreference;

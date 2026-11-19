@@ -595,3 +595,63 @@ async fn rooms_are_not_marked_left_before_the_room_list_settles() {
     assert!(rows[0].not_joined, "once the list has settled");
     h.finish().await;
 }
+
+/// The production `#matrix:matrix.org` case (amended 2026-11-19): a homeserver
+/// that fetches a purged room's history over federation times out a page,
+/// answers the retry with the page it finished meanwhile, then times out on
+/// the next. The successful pages reset the consecutive failures, so the walk
+/// would never park. Timeouts are counted over the whole walk, and the third
+/// closes it as `timed_out`, with what it recovered kept.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn repeated_timeouts_close_the_walk_even_between_successful_pages() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    h.append("a", 40);
+    h.sync(&[deliver("a", 45, 50).limited()]).await;
+    queue(&h, "a").await;
+
+    let mut params = params(&h);
+    params.page_timeout = Duration::from_millis(300);
+    // One attempt per retry, as the backoff would allow: a fresh gate, since a
+    // timed-out page holds its slot, and the backoff cleared by hand.
+    let attempt = |hang: bool| {
+        let h = &h;
+        let params = &params;
+        async move {
+            h.upstream.lock().unwrap().hang = hang;
+            sqlx_core::query::query(
+                "UPDATE room_history_verify SET retry_at = NULL WHERE account_id = $1",
+            )
+            .bind(h.account_id)
+            .execute(h.store.pool())
+            .await
+            .unwrap();
+            let gate = crate::homeserver_gate::HomeserverGate::for_test();
+            let mut verifier =
+                Verifier::new(&h.client, &h.ctx, params, &h.health, &gate, &h.cancel)
+                    .with_room_list_settle(Duration::ZERO);
+            verifier.refresh().await;
+            verifier.step().await
+        }
+    };
+    for (hang, expected) in [
+        (true, VerifyStep::Failed),
+        (false, VerifyStep::Paged),
+        (true, VerifyStep::Failed),
+        (false, VerifyStep::Paged),
+    ] {
+        assert_eq!(attempt(hang).await, expected);
+    }
+    let row = &h.store.list_history_verify(h.account_id).await.unwrap()[0];
+    assert_eq!(row.consecutive_failures, 0, "reset by the successful pages");
+    assert_eq!(row.walk_timeouts, 2, "but the timeouts are not");
+
+    assert_eq!(attempt(true).await, VerifyStep::Failed);
+    let (complete, reason, recovered) = outcome(&h, "a").await;
+    assert_eq!((complete, reason.as_deref()), (true, Some("timed_out")));
+    // The pages it got, [46, 50) (all stored) and [42, 46), are kept.
+    assert_eq!(recovered, 3);
+    h.finish().await;
+}

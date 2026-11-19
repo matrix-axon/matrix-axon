@@ -45,6 +45,10 @@ pub(crate) struct Upstream {
     /// Answer every `/messages` request with an empty chunk, still moving the
     /// token on, as a homeserver that filters a whole page does.
     pub(crate) empty_pages: bool,
+    /// Hold every `/messages` request for two seconds before answering, as a
+    /// homeserver fetching history over federation does; a short page timeout
+    /// then gives up on it.
+    pub(crate) hang: bool,
 }
 
 pub(crate) type Shared = Arc<Mutex<Upstream>>;
@@ -68,6 +72,10 @@ async fn messages(
         .get("limit")
         .and_then(|l| l.parse().ok())
         .unwrap_or(10);
+    let hang = upstream.lock().unwrap().hang;
+    if hang {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
     let mut upstream = upstream.lock().unwrap();
     upstream.messages.push((room_id.clone(), from.clone()));
     if from

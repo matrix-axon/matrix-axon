@@ -625,3 +625,57 @@ async fn an_empty_page_does_not_clear_a_failure() {
     assert_eq!(after_events.empty_run, 0);
     store.delete_account_row(account_id).await.expect("cleanup");
 }
+
+/// A timed-out page adds to the walk's timeouts, which a successful page does
+/// not reset (amended 2026-11-19), and a restart clears.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn timeouts_are_counted_over_the_walk_until_it_restarts() {
+    let store = migrated_store().await;
+    let account_id = test_account(&store, "verify-timeouts").await;
+    let room_id = room();
+    store_events(&store, account_id, &room_id, &[1]).await;
+    store
+        .requeue_history_verify(account_id, Some(&room_id))
+        .await
+        .expect("queue");
+    let g = generation(&store, account_id, &room_id).await;
+    let timed_out = RoomBackfillFailure {
+        kind: "timed_out",
+        retry_after: Duration::ZERO,
+        parked: false,
+        clear_token: false,
+        timed_out: true,
+    };
+    store
+        .record_history_verify_failure(account_id, &room_id, g, timed_out)
+        .await
+        .expect("fail");
+    store
+        .save_history_verify_page(account_id, &room_id, g, progress("t-1", 1, 0, 0))
+        .await
+        .expect("save");
+    store
+        .record_history_verify_failure(account_id, &room_id, g, timed_out)
+        .await
+        .expect("fail");
+    let walking = row(&store, account_id, &room_id).await.expect("listed");
+    assert_eq!(walking.walk_timeouts, 2);
+    assert_eq!(
+        walking.consecutive_failures, 1,
+        "the page between reset these"
+    );
+
+    store
+        .requeue_history_verify(account_id, Some(&room_id))
+        .await
+        .expect("restart");
+    assert_eq!(
+        row(&store, account_id, &room_id)
+            .await
+            .expect("listed")
+            .walk_timeouts,
+        0
+    );
+    store.delete_account_row(account_id).await.expect("cleanup");
+}

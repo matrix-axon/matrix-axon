@@ -2,7 +2,7 @@
 
 **Status:** Accepted. Amends [ADR 0043](0043-history-backfill-engine.md) (backfill extends history only behind the oldest stored event); supersedes nothing.
 Delivery steps 1 and 2 are implemented; step 3 is pending.
-Decision 4's stop rules were amended on 2026-11-18.
+Decision 4's stop rules were amended on 2026-11-18 and 2026-11-19.
 Tracking issue: #1125.
 
 ## Context
@@ -246,6 +246,9 @@ The stop points are recorded when the room's walk starts (amended 2026-11-18; se
   Only history below everything Axon stored is both.
 - **The room's start.** If neither stop fires, the walk ends at the room's start.
   That is logged at `WARN` with the room.
+- **Repeated timeouts** (amended 2026-11-19). The third timed-out page over a walk closes it as `timed_out`, logged at `WARN`.
+  The count is over the whole walk, not consecutive failures, which a successful page resets.
+  See the second amendment at the end.
 
 The pass stores every page, and already-stored events are no-ops.
 The first stop ends it above any history that backfill stored.
@@ -339,7 +342,7 @@ Events the filler then stores get `id`s above the purge watermark, so the purge 
   Detecting a hole logs at `INFO` with `prev_batch` and the batch's oldest event id; dropping a first window logs at `DEBUG`.
   Each page logs at `DEBUG` with its `inserted` and `already_stored` counts.
   Closing a hole logs at `INFO` with `pages_fetched` and `events_recovered`.
-- `GET /v1/status` gains `history_gaps: {open, parked, awaiting_batch, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_parked, rooms_not_joined, rooms_complete, events_recovered}` beside the existing `backfill` block.
+- `GET /v1/status` gains `history_gaps: {open, parked, awaiting_batch, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_parked, rooms_not_joined, rooms_complete, rooms_timed_out, events_recovered}` beside the existing `backfill` block.
 - The management API ([ADR 0109](0109-management-api.md)) gains an action that re-queues the verification pass for one room or a whole account, so an operator can re-verify after a suspected loss without SQL.
   It is `POST /v1/management/accounts/{account_id}/history-verify`, with an optional `room_id` in the body.
   A re-queued room takes its stop points from the room's rows when its walk starts again.
@@ -423,3 +426,25 @@ A floor that closed on one page with no stored event older than the floor could 
 Its imported events are dated from 2014, years before the room's first stored event.
 A floor on timestamps alone would have closed the walk at the first imported page.
 The floor therefore needs 500 events in a row that are both unstored and older than the floor.
+
+## Amendment — repeated timeouts close a walk (2026-11-19)
+
+Step 2 ran on Adam's production account on 2026-11-19.
+One walk showed a cost that neither the floor nor the backoff bounds.
+
+Synapse had purged `#matrix:matrix.org` after the account left on 2026-10-08.
+When the walk asked for a page below what Synapse still held, Synapse fetched that history from matrix.org over federation, with about 1.3 MB of room state per event that had missing predecessors.
+The first such request was still running 28 minutes after Axon's 30-second timeout.
+Each retry then got the page Synapse had finished in the meantime, and timed out on the next one.
+
+- **The floor did not fire.** Federation returned events Axon had stored months before, so every page counted as stored history.
+- **The backoff did not park the room.** Each successful page reset the consecutive failures, so the walk would have continued, one federation backfill per page, down to the account's July join.
+
+The same can happen in any room whose homeserver no longer holds its history: one purged after its last local user left, or one under a retention policy.
+
+So timed-out pages are now counted over the whole walk (`walk_timeouts`), and the third closes it as `timed_out`.
+What it recovered before then is kept.
+A restart (the management action) clears the count, for an operator who wants to try again.
+Closing rather than parking is deliberate: a parked room is retried daily, which would repeat the federation load every day.
+
+The threshold is generous for ordinary rooms: of the 5,816 joined rooms on the account, `#matrix:matrix.org` was the only one with any timeout.

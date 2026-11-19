@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use std::time::Duration;
 
-use axon_store::{HistoryVerifyRow, VerifyStop, WalkProgress, WalkStart, EMPTY_RUN, FLOOR_RUN};
+use axon_store::{
+    HistoryVerifyRow, VerifyStop, WalkProgress, WalkStart, EMPTY_RUN, FLOOR_RUN, WALK_TIMEOUTS,
+};
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::api::client::message::get_message_events;
 use matrix_sdk::{Client, RoomState};
@@ -524,9 +526,41 @@ impl<'a> Verifier<'a> {
     /// Back the current row off, park it, or restart it from the live end
     /// (ADR 0121). Rows keep no separate timeout streak: a row's failures are
     /// its streak, since any successful page resets both.
+    ///
+    /// The [`WALK_TIMEOUTS`]th timeout over the walk closes it instead: a
+    /// homeserver that fetches history over federation for every page answers
+    /// each retry with the page it finished meanwhile, so the failures keep
+    /// resetting and the walk would otherwise never park (ADR 0140 decision 4).
     async fn record_failure(&self, failure: PageFailure) {
         let account_id = self.ctx.account_id;
         let row = &self.rows[self.next];
+        if failure == PageFailure::TimedOut && row.walk_timeouts.saturating_add(1) >= WALK_TIMEOUTS
+        {
+            match self
+                .ctx
+                .store
+                .complete_history_verify(
+                    account_id,
+                    &row.room_id,
+                    row.walk_generation,
+                    VerifyStop::TimedOut,
+                    false,
+                    0,
+                )
+                .await
+            {
+                Ok(Some(totals)) => {
+                    log_closed(account_id, &row.room_id, VerifyStop::TimedOut, totals)
+                }
+                Ok(None) => {
+                    tracing::debug!(account_id = %account_id, room_id = %row.room_id, "history verify: the walk was restarted meanwhile; not closing it");
+                }
+                Err(err) => {
+                    tracing::warn!(account_id = %account_id, room_id = %row.room_id, error = %err, "history verify: closing the walk failed");
+                }
+            }
+            return;
+        }
         let prior = row.consecutive_failures;
         let record = failure_record(failure, prior, row.token_rejections, prior);
         let failures = prior.saturating_add(1);
@@ -569,7 +603,16 @@ fn log_closed(
         events_recovered,
     } = totals;
     let reason = stop.as_str();
-    if stop == VerifyStop::RoomStart {
+    if stop == VerifyStop::TimedOut {
+        tracing::warn!(
+            account_id = %account_id,
+            room_id = %room_id,
+            pages_fetched,
+            events_recovered,
+            timeouts = WALK_TIMEOUTS,
+            "history verify: closed the walk after repeated timeouts; the homeserver is likely fetching this room's history over federation, so it was not fully verified"
+        );
+    } else if stop == VerifyStop::RoomStart {
         tracing::warn!(
             account_id = %account_id,
             room_id = %room_id,

@@ -2812,6 +2812,11 @@ pub struct HistoryVerifyStatusDto {
     /// Of those, rooms parked after repeated failures (ADR 0121): retried
     /// only about once a day.
     pub rooms_parked: i64,
+    /// Of the complete rooms, those whose walk was closed after repeated
+    /// timeouts, without reaching its end. The homeserver was most likely
+    /// fetching their history over federation. The management action queues
+    /// them again.
+    pub rooms_timed_out: i64,
     /// Rooms with stored history that the account is not in. They are
     /// verified if the account rejoins them.
     pub rooms_not_joined: i64,
@@ -2833,6 +2838,7 @@ impl HistoryVerifyStatusDto {
             rooms_pending: counts.rooms_pending,
             rooms_held: counts.rooms_held,
             rooms_parked: counts.rooms_parked,
+            rooms_timed_out: counts.rooms_timed_out,
             rooms_not_joined: counts.rooms_not_joined,
             rooms_complete: counts.rooms_complete,
             events_recovered: counts.events_recovered,

@@ -5081,6 +5081,14 @@ export interface components {
              * @description Joined rooms whose history has not been verified yet.
              */
             rooms_pending: number;
+            /**
+             * Format: int64
+             * @description Of the complete rooms, those whose walk was closed after repeated
+             *     timeouts, without reaching its end. The homeserver was most likely
+             *     fetching their history over federation. The management action queues
+             *     them again.
+             */
+            rooms_timed_out: number;
         };
         /**
          * @description A homeserver gate's circuit breaker on the wire (ADR 0122).
