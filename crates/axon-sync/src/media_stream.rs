@@ -21,8 +21,8 @@ use matrix_sdk::ruma::api::Metadata;
 use matrix_sdk::ruma::events::room::{
     EncryptedFile, EncryptedFileHash, EncryptedFileHashAlgorithm, EncryptedFileInfo,
 };
-use matrix_sdk::Client;
-use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING};
+use matrix_sdk::{Client, RefreshTokenError};
+use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING, RETRY_AFTER};
 use reqwest::StatusCode;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -34,6 +34,22 @@ type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
 /// The most of an error response's body read to find its `errcode`.
 const MAX_ERROR_BYTES: usize = 64 * 1024;
+
+/// How many times the download request is sent when the homeserver answers
+/// `429` or a `5xx`, as the SDK retries such transient errors for its own
+/// buffered download. The caller's `fetch_timeout_secs` deadline bounds the
+/// whole sequence, so a homeserver asking for a long wait gets a `503`.
+const MAX_ATTEMPTS: u32 = 4;
+
+/// The first retry's delay when the homeserver names none; each later retry
+/// doubles it. The SDK's backoff starts at the same 500 ms.
+#[cfg(not(test))]
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
+
+/// The longest one retry waits, even when the homeserver asks for longer.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 /// Decrypts an encrypted attachment chunk by chunk: AES-256-CTR over the
 /// ciphertext, with a SHA-256 over the ciphertext checked after the last
@@ -150,30 +166,71 @@ pub(crate) async fn open(
     let url = download_url(&client.homeserver(), server_name, media_id, authenticated)
         .ok_or_else(|| GatewayError::Invalid("homeserver URL cannot carry a path".to_owned()))?;
 
-    let mut response = send(client, url.clone(), authenticated).await?;
-    if response.status() == StatusCode::UNAUTHORIZED
-        && errcode(&mut response).await.as_deref() == Some("M_UNKNOWN_TOKEN")
-    {
-        // A MAS-issued token (ADR 0097) may simply have expired: refresh
-        // once and retry once.
-        client
-            .refresh_access_token()
-            .await
-            .map_err(|e| GatewayError::Upstream(format!("access token refresh failed: {e}")))?;
-        response = send(client, url, authenticated).await?;
-    }
+    let mut refreshed = false;
+    let mut attempt = 1;
+    let response = loop {
+        let response = send(client, url.clone(), authenticated).await?;
+        let status = response.status();
+        if status.is_success() {
+            break response;
+        }
+        let error = ErrorAnswer::read(response).await;
 
-    let status = response.status();
-    if !status.is_success() {
-        let code = errcode(&mut response).await;
-        if status == StatusCode::NOT_FOUND || code.as_deref() == Some("M_NOT_FOUND") {
+        if status == StatusCode::UNAUTHORIZED
+            && error.errcode.as_deref() == Some("M_UNKNOWN_TOKEN")
+            && !refreshed
+        {
+            // A MAS-issued token (ADR 0097) may simply have expired: refresh
+            // once and send again.
+            refreshed = true;
+            match client.refresh_access_token().await {
+                Ok(()) => continue,
+                // A session with no refresh token cannot recover here. Sync
+                // meets the same answer and reports the expired session
+                // through the SDK; this request fails as the buffered
+                // download's would.
+                Err(RefreshTokenError::RefreshTokenRequired) => {
+                    return Err(GatewayError::Upstream(
+                        "homeserver rejected the access token (M_UNKNOWN_TOKEN), \
+                         and the session has no refresh token"
+                            .to_owned(),
+                    ));
+                }
+                Err(e) => {
+                    return Err(GatewayError::Upstream(format!(
+                        "access token refresh failed: {e}"
+                    )));
+                }
+            }
+        }
+
+        let transient = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+        if transient && attempt < MAX_ATTEMPTS {
+            let backoff = RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
+            let delay = error.retry_after.unwrap_or(backoff).min(MAX_RETRY_DELAY);
+            tracing::debug!(
+                mxc = %mxc_url,
+                %status,
+                attempt,
+                delay_ms = delay.as_millis() as u64,
+                "retrying a transient media download error",
+            );
+            tokio::time::sleep(delay).await;
+            attempt += 1;
+            continue;
+        }
+
+        if status == StatusCode::NOT_FOUND || error.errcode.as_deref() == Some("M_NOT_FOUND") {
             return Err(GatewayError::MediaNotFound(mxc_url.to_owned()));
         }
         return Err(GatewayError::Upstream(format!(
             "homeserver answered the media download with {status}{}",
-            code.map(|code| format!(" ({code})")).unwrap_or_default()
+            error
+                .errcode
+                .map(|code| format!(" ({code})"))
+                .unwrap_or_default()
         )));
-    }
+    };
 
     // matrix-sdk enables reqwest's `gzip` feature, so a gzip body is decoded
     // transparently: reqwest drops `Content-Encoding` and `Content-Length`,
@@ -228,17 +285,46 @@ async fn send(
         .map_err(|e| GatewayError::Upstream(format!("media download request failed: {e}")))
 }
 
-/// The Matrix `errcode` of an error response, read from a bounded body.
-async fn errcode(response: &mut reqwest::Response) -> Option<String> {
-    let mut body = Vec::new();
-    while let Ok(Some(chunk)) = response.chunk().await {
-        body.extend_from_slice(&chunk);
-        if body.len() > MAX_ERROR_BYTES {
-            return None;
+/// What an error response says about itself.
+struct ErrorAnswer {
+    /// The Matrix `errcode`, if the body is a Matrix error.
+    errcode: Option<String>,
+    /// How long the homeserver asks the client to wait: the body's
+    /// `retry_after_ms`, else a `Retry-After` header in seconds.
+    retry_after: Option<Duration>,
+}
+
+impl ErrorAnswer {
+    /// Read the answer from a bounded body. An unreadable or oversized body
+    /// names nothing.
+    async fn read(mut response: reqwest::Response) -> Self {
+        let header_wait = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        let mut body = Vec::new();
+        let mut oversized = false;
+        while let Ok(Some(chunk)) = response.chunk().await {
+            body.extend_from_slice(&chunk);
+            if body.len() > MAX_ERROR_BYTES {
+                oversized = true;
+                break;
+            }
+        }
+        let json = (!oversized)
+            .then(|| serde_json::from_slice::<Value>(&body).ok())
+            .flatten();
+        let field = |name: &str| json.as_ref().and_then(|json| json.get(name).cloned());
+        Self {
+            errcode: field("errcode").and_then(|code| code.as_str().map(str::to_owned)),
+            retry_after: field("retry_after_ms")
+                .and_then(|ms| ms.as_u64())
+                .map(Duration::from_millis)
+                .or(header_wait),
         }
     }
-    let body: Value = serde_json::from_slice(&body).ok()?;
-    body.get("errcode")?.as_str().map(str::to_owned)
 }
 
 /// The response body as a stream of chunks. A transport error ends it with
@@ -429,11 +515,16 @@ mod tests {
                                 .map(str::to_owned)
                         };
                         let authorization = header("authorization");
-                        seen.lock().unwrap().push(Seen {
-                            path: uri.path().to_owned(),
-                            authorization: authorization.clone(),
-                            accept_encoding: header("accept-encoding"),
-                        });
+                        // Which request this is for its path, counting from 1.
+                        let nth = {
+                            let mut seen = seen.lock().unwrap();
+                            seen.push(Seen {
+                                path: uri.path().to_owned(),
+                                authorization: authorization.clone(),
+                                accept_encoding: header("accept-encoding"),
+                            });
+                            seen.iter().filter(|s| s.path == uri.path()).count()
+                        };
                         let media_id = uri.path().rsplit('/').next().unwrap_or_default().to_owned();
                         if authorization.as_deref() == Some("Bearer stale") {
                             return (
@@ -450,6 +541,20 @@ mod tests {
                             )
                                 .into_response(),
                             "broken" => (Status::BAD_GATEWAY, "upstream down").into_response(),
+                            // Rate-limited once, naming its own wait.
+                            "limited" if nth == 1 => (
+                                Status::TOO_MANY_REQUESTS,
+                                Json(serde_json::json!({
+                                    "errcode": "M_LIMIT_EXCEEDED",
+                                    "retry_after_ms": 20,
+                                })),
+                            )
+                                .into_response(),
+                            // Unavailable once, naming no wait.
+                            "flaky" if nth == 1 => {
+                                (Status::SERVICE_UNAVAILABLE, "restarting").into_response()
+                            }
+                            "limited" | "flaky" => b"hello media".to_vec().into_response(),
                             "gzipped" => {
                                 ([("content-encoding", "gzip")], HELLO_MEDIA_GZIP.to_vec())
                                     .into_response()
@@ -482,6 +587,15 @@ mod tests {
         version: matrix_sdk::ruma::api::MatrixVersion,
         access_token: &str,
     ) -> Client {
+        sdk_client_with(address, version, access_token, Some("refresh-1")).await
+    }
+
+    async fn sdk_client_with(
+        address: std::net::SocketAddr,
+        version: matrix_sdk::ruma::api::MatrixVersion,
+        access_token: &str,
+        refresh_token: Option<&str>,
+    ) -> Client {
         use matrix_sdk::authentication::matrix::MatrixSession;
         use matrix_sdk::store::RoomLoadSettings;
         use matrix_sdk::{SessionMeta, SessionTokens};
@@ -508,7 +622,7 @@ mod tests {
                     },
                     tokens: SessionTokens {
                         access_token: access_token.to_owned(),
-                        refresh_token: Some("refresh-1".to_owned()),
+                        refresh_token: refresh_token.map(str::to_owned),
                     },
                 },
                 RoomLoadSettings::default(),
@@ -604,6 +718,54 @@ mod tests {
             open_plain(&client, "brotli").await,
             Err(GatewayError::Upstream(message)) if message.contains("Content-Encoding")
         ));
+    }
+
+    /// Media requests the mock saw for `media_id`.
+    fn requests_for(seen: &Mutex<Vec<Seen>>, media_id: &str) -> usize {
+        let suffix = format!("/media/download/example.org/{media_id}");
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.path.ends_with(&suffix))
+            .count()
+    }
+
+    /// The SDK retries `429` and `5xx` for its own buffered download, so the
+    /// streamed one does too, honouring `retry_after_ms`, a bounded number
+    /// of times.
+    #[tokio::test]
+    async fn transient_answers_are_retried_a_bounded_number_of_times() {
+        let (address, seen) = mock_homeserver().await;
+        let client = sdk_client(address, MatrixVersion::V1_11, "good").await;
+
+        for media_id in ["limited", "flaky"] {
+            let media = open_plain(&client, media_id).await.unwrap();
+            let (bytes, error) = drain(media.body).await;
+            assert!(error.is_none(), "{media_id}: {error:?}");
+            assert_eq!(bytes, b"hello media", "{media_id}");
+            assert_eq!(requests_for(&seen, media_id), 2, "{media_id}");
+        }
+
+        assert!(matches!(
+            open_plain(&client, "broken").await,
+            Err(GatewayError::Upstream(message)) if message.contains("502")
+        ));
+        assert_eq!(requests_for(&seen, "broken"), MAX_ATTEMPTS as usize);
+
+        // A permanent answer is not retried.
+        assert!(open_plain(&client, "missing").await.is_err());
+        assert_eq!(requests_for(&seen, "missing"), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_token_without_a_refresh_token_fails_once_and_says_so() {
+        let (address, seen) = mock_homeserver().await;
+        let client = sdk_client_with(address, MatrixVersion::V1_11, "stale", None).await;
+        assert!(matches!(
+            open_plain(&client, "plain").await,
+            Err(GatewayError::Upstream(message)) if message.contains("M_UNKNOWN_TOKEN")
+        ));
+        assert_eq!(requests_for(&seen, "plain"), 1);
     }
 
     #[tokio::test]

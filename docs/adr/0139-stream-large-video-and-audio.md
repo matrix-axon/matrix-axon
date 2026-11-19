@@ -87,6 +87,9 @@ struct MediaStream {
 `SdkMediaProxy` implements it with the SDK client's own `reqwest::Client`, homeserver URL and access token.
 It sends a GET to the authenticated media endpoint (`/_matrix/client/v1/media/download/{server}/{id}`), falling back to the legacy `/_matrix/media/v3/download` path only when the server lacks authenticated media, which is the same choice the SDK makes.
 A `401` with `M_UNKNOWN_TOKEN` gets one `refresh_access_token()` and one retry, so MAS-issued tokens (ADR 0097) keep working.
+A `429` or `5xx` answer is sent again up to 3 more times, as the SDK retries those for its buffered download.
+Each retry waits for the homeserver's `retry_after_ms` or `Retry-After` when given, and otherwise for 500 ms, doubling each time, at most 10 s.
+The whole sequence stays within the `fetch_timeout_secs` deadline of section 3.
 The method returns once the response headers arrive.
 
 That client comes with a whole-request timeout this request must not inherit.
