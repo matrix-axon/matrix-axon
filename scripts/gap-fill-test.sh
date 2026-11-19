@@ -72,7 +72,7 @@ cleanup() {
     stop_axon
     if [ "$KEEP_UP" != "1" ]; then
         rm -rf "$RUN_ROOT" 2>/dev/null || true
-        for db in "${DATABASES[@]}"; do drop_db "$db"; done
+        for db in ${DATABASES[@]+"${DATABASES[@]}"}; do drop_db "$db"; done
         log "Tearing down containers (KEEP_UP=1 to keep them)"
         dc down >/dev/null 2>&1 || true
     else

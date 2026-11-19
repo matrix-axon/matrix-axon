@@ -380,3 +380,49 @@ async fn purge_and_account_deletion_remove_gap_rows() {
     .expect("count");
     assert_eq!(left, 0, "rows cascade with the account");
 }
+
+/// Review finding (#1143): a gap page counts what it recovered from its own
+/// writes, so an upsert reports whether it created the row. And an event
+/// Postgres can never accept is a permanent refusal, which a pager skips
+/// rather than retrying the page for good.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_upsert_reports_creation_and_a_nul_escape_is_permanent() {
+    let store = migrated_store().await;
+    let account_id = test_account(&store, "gaps-upsert").await;
+    let room_id = room();
+    let event = |event_id: &'static str, body: &'static str| NewEvent {
+        event_id,
+        room_id: &room_id,
+        account_id,
+        sender: "@alice:localhost",
+        origin_ts: 10,
+        event_type: "m.room.message",
+        content: Some(serde_json::json!({ "body": body })),
+        raw_event: serde_json::json!({ "type": "m.room.message", "content": { "body": body } }),
+        megolm_session_id: None,
+        redacts: None,
+        relates_to: None,
+        decrypted_body_text: None,
+    };
+
+    let first = store
+        .upsert_event_outcome(&event("$created", "hi"))
+        .await
+        .expect("insert");
+    assert!(first.created);
+    let again = store
+        .upsert_event_outcome(&event("$created", "hi"))
+        .await
+        .expect("re-deliver");
+    assert!(!again.created, "already stored");
+    assert_eq!(again.arrival_order, first.arrival_order);
+
+    // jsonb cannot hold U+0000 (SQLSTATE 22P05), however often it is tried.
+    let err = store
+        .upsert_event_outcome(&event("$nul", "a\u{0}b"))
+        .await
+        .expect_err("jsonb rejects a NUL");
+    assert!(!err.is_transient(), "{err}");
+    store.delete_account_row(account_id).await.expect("cleanup");
+}

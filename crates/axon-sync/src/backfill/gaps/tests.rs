@@ -747,8 +747,28 @@ struct InjectedFailures {
     table: &'static str,
 }
 
+/// A deadlock: a transient refusal, which the next attempt can clear.
+const TRANSIENT: &str = "40P01";
+
+/// What Postgres raises for a `\u0000` escape in a `jsonb`: a permanent
+/// refusal, which every attempt meets again.
+const PERMANENT: &str = "22P05";
+
 impl InjectedFailures {
+    /// Refuse inserts with a transient error.
     async fn install(store: &Store, table: &'static str, when: &str, times: u32) -> Self {
+        Self::install_with(store, table, "INSERT", TRANSIENT, when, times).await
+    }
+
+    /// Refuse `op` (`INSERT` or `UPDATE`) statements with SQLSTATE `errcode`.
+    async fn install_with(
+        store: &Store,
+        table: &'static str,
+        op: &str,
+        errcode: &str,
+        when: &str,
+        times: u32,
+    ) -> Self {
         let name = format!("gap_test_{}", Uuid::new_v4().simple());
         for sql in [
             format!("CREATE SEQUENCE {name}"),
@@ -756,13 +776,13 @@ impl InjectedFailures {
                 "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
                  BEGIN \
                      IF nextval('{name}') <= {times} THEN \
-                         RAISE EXCEPTION 'injected failure'; \
+                         RAISE EXCEPTION 'injected failure' USING ERRCODE = '{errcode}'; \
                      END IF; \
                      RETURN NEW; \
                  END $$"
             ),
             format!(
-                "CREATE TRIGGER {name} BEFORE INSERT ON {table} FOR EACH ROW \
+                "CREATE TRIGGER {name} BEFORE {op} ON {table} FOR EACH ROW \
                  WHEN ({when}) EXECUTE FUNCTION {name}()"
             ),
         ] {
@@ -893,6 +913,94 @@ async fn a_failed_event_write_keeps_the_row_until_its_page_is_stored() {
     assert!(h.gaps().await.is_empty());
     assert_eq!(h.stored("w").await, range(0, 35));
     assert_eq!(h.take_requests("w"), tokens(&[6]));
+    failures.remove().await;
+    h.finish().await;
+}
+
+/// Review finding (#1143): a gap page with an event the store can never
+/// accept still closes the row; only that event is missing.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_gap_page_skips_an_event_the_store_can_never_accept() {
+    let mut h = Harness::new(&["v"]).await;
+    let mut watcher = h.watcher().await;
+    h.append("v", 5);
+    let u0 = h.sync(&[deliver("v", 0, 5)]).await;
+    watcher.observe(&u0).await;
+    h.append("v", 30);
+    let u1 = h.sync(&[deliver("v", 30, 35).limited()]).await;
+    watcher.observe(&u1).await;
+    let failures = InjectedFailures::install_with(
+        &h.store,
+        "events",
+        "INSERT",
+        PERMANENT,
+        &format!(
+            "NEW.room_id = '{}' AND NEW.event_id = '{}'",
+            h.room("v"),
+            Harness::event_id("v", 20)
+        ),
+        u32::MAX,
+    )
+    .await;
+
+    h.fill().await;
+    assert!(h.gaps().await.is_empty(), "closed");
+    assert_eq!(failures.attempts().await, 1, "tried once");
+    assert_eq!(h.stored("v").await, &range(0, 20) | &range(21, 35));
+    failures.remove().await;
+    h.finish().await;
+}
+
+/// Review finding (#1143): a store error saving a row's progress backs the
+/// row off, as a homeserver failure does, rather than leaving it due so the
+/// next sweep fetches the same page again.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_failed_progress_save_backs_the_row_off() {
+    let mut h = Harness::new(&["p"]).await;
+    let mut watcher = h.watcher().await;
+    h.append("p", 5);
+    let u0 = h.sync(&[deliver("p", 0, 5)]).await;
+    watcher.observe(&u0).await;
+    h.append("p", 30);
+    let u1 = h.sync(&[deliver("p", 30, 35).limited()]).await;
+    watcher.observe(&u1).await;
+    // Refuse the update that moves the row's token, once. The first-window
+    // check and the failure record leave the token alone.
+    let failures = InjectedFailures::install_with(
+        &h.store,
+        "room_timeline_gaps",
+        "UPDATE",
+        TRANSIENT,
+        &format!(
+            "NEW.room_id = '{}' AND NEW.from_token IS DISTINCT FROM OLD.from_token",
+            h.room("p")
+        ),
+        1,
+    )
+    .await;
+
+    h.take_requests("p");
+    h.fill().await;
+    assert_eq!(failures.attempts().await, 1, "the save was refused");
+    assert_eq!(h.take_requests("p"), tokens(&[30]));
+    let row = h.gaps().await.pop().expect("the row stays open");
+    assert_eq!(row.from_token.as_deref(), Some("s30"), "its token is kept");
+    assert_eq!(row.consecutive_failures, 1, "and it backs off");
+    assert!(!row.retry_due);
+    // The next sweep leaves it alone.
+    h.fill().await;
+    assert!(h.take_requests("p").is_empty(), "not fetched again yet");
+
+    sqlx_core::query::query("UPDATE room_timeline_gaps SET retry_at = NULL WHERE id = $1")
+        .bind(row.id)
+        .execute(h.store.pool())
+        .await
+        .unwrap();
+    h.fill().await;
+    assert!(h.gaps().await.is_empty());
+    assert_eq!(h.stored("p").await, range(0, 35));
     failures.remove().await;
     h.finish().await;
 }
@@ -1040,6 +1148,47 @@ async fn ordinary_backfill_keeps_its_cursor_when_a_write_fails() {
         .unwrap()
         .oldest_seen_token;
     assert_eq!(after, before, "the cursor did not move past 5");
+    failures.remove().await;
+    h.finish().await;
+}
+
+/// Review finding (#1143): an event the store refuses on every attempt is
+/// skipped, as one that does not parse is, so it cannot pin the cursor.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn ordinary_backfill_skips_an_event_the_store_can_never_accept() {
+    let mut h = Harness::new(&["n"]).await;
+    h.append("n", 12);
+    h.sync(&[deliver("n", 8, 12).limited()]).await;
+    let failures = InjectedFailures::install_with(
+        &h.store,
+        "events",
+        "INSERT",
+        PERMANENT,
+        &format!(
+            "NEW.room_id = '{}' AND NEW.event_id = '{}'",
+            h.room("n"),
+            Harness::event_id("n", 5)
+        ),
+        u32::MAX,
+    )
+    .await;
+    assert!(matches!(h.backfill_page("n").await, PageOutcome::Paged));
+    assert!(matches!(h.backfill_page("n").await, PageOutcome::Paged));
+    let state = h
+        .store
+        .get_room_backfill(h.account_id, h.room("n"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state.oldest_seen_token.as_deref(),
+        Some("s4"),
+        "moved past 5"
+    );
+    assert_eq!(state.consecutive_failures, 0);
+    assert_eq!(failures.attempts().await, 1, "tried once");
+    assert_eq!(h.stored("n").await, &range(4, 5) | &range(6, 12));
     failures.remove().await;
     h.finish().await;
 }

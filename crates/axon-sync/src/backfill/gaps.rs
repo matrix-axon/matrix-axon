@@ -540,9 +540,11 @@ enum GapPage {
     /// Written, and the row closed: the page reached stored history or the
     /// room's start.
     Closed,
-    /// The homeserver did not serve the page.
+    /// The homeserver did not serve the page, or the store failed while it
+    /// was written or the row updated. Recorded against the row, so it backs
+    /// off rather than being fetched again every sweep.
     Failed(PageFailure),
-    /// Cancelled, or a local store error. Nothing is recorded against the row.
+    /// Cancelled. Nothing is recorded against the row.
     Abandoned,
 }
 
@@ -696,24 +698,20 @@ impl Filler<'_> {
             Ok(lookup) => lookup,
             Err(err) => {
                 tracing::warn!(account_id = %account_id, room_id = %gap.room_id, gap_id = gap.id, error = %err, "gap fill: page lookup failed");
-                return GapPage::Abandoned;
+                return GapPage::Failed(PageFailure::StoreWrite);
             }
         };
         // Written in full even when it closes the row, so the hole's events on
         // it are kept; the already-stored ones are no-ops.
         let written = write_page(self.ctx, room, &events, key_arrivals, self.cancel).await;
-        if written == Written::Abandoned {
-            return GapPage::Abandoned;
-        }
-        let inserted = match store.count_stored_events(account_id, &ids).await {
-            Ok(stored) => (stored - lookup.already_stored).max(0),
-            Err(err) => {
-                tracing::warn!(account_id = %account_id, room_id = %gap.room_id, gap_id = gap.id, error = %err, "gap fill: could not count the page's inserts");
-                0
-            }
+        let (inserted, failed) = match written {
+            Written::Abandoned => return GapPage::Abandoned,
+            Written::Complete { inserted } => (inserted, 0),
+            Written::StoreFailed { failed, inserted } => (inserted, failed),
         };
         self.health
-            .add_gap_events_recovered(u64::try_from(inserted).unwrap_or(0));
+            .add_gap_events_recovered(u64::try_from(inserted).unwrap_or(u64::MAX));
+        let inserted = i64::try_from(inserted).unwrap_or(i64::MAX);
         tracing::debug!(
             account_id = %account_id,
             room_id = %gap.room_id,
@@ -725,7 +723,7 @@ impl Filler<'_> {
         // An event the store refused is still missing: neither advance nor
         // close the row, so the page is fetched again after a backoff. Its
         // other events are no-ops then, and do not move the boundary.
-        if let Written::StoreFailed(failed) = written {
+        if failed > 0 {
             tracing::warn!(account_id = %account_id, room_id = %gap.room_id, gap_id = gap.id, failed, "gap fill: events on the page could not be stored; keeping the row's token to fetch it again");
             return GapPage::Failed(PageFailure::StoreWrite);
         }
@@ -775,9 +773,10 @@ impl Filler<'_> {
                         GapPage::Closed
                     }
                     Err(err) => {
-                        // Paged again next sweep; the page's writes are no-ops then.
+                        // Paged again after a backoff; the page's writes are
+                        // no-ops then.
                         tracing::warn!(account_id = %account_id, room_id = %gap.room_id, gap_id = gap.id, error = %err, "gap fill: closing the row failed");
-                        GapPage::Abandoned
+                        GapPage::Failed(PageFailure::StoreWrite)
                     }
                 };
             }
@@ -786,7 +785,7 @@ impl Filler<'_> {
             Ok(()) => GapPage::Paged,
             Err(err) => {
                 tracing::warn!(account_id = %account_id, room_id = %gap.room_id, gap_id = gap.id, error = %err, "gap fill: saving progress failed");
-                GapPage::Abandoned
+                GapPage::Failed(PageFailure::StoreWrite)
             }
         }
     }

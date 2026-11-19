@@ -57,6 +57,28 @@ impl StoreError {
         matches!(self, Self::Sqlx(sqlx_core::Error::Database(error)) if error.is_unique_violation())
     }
 
+    /// Whether the same statement can succeed if it is simply tried again: the
+    /// database was unreachable, overloaded, shutting down, or lost a race
+    /// (deadlock, serialization failure, lock or statement timeout). Anything
+    /// else, such as a value the database rejects (a `\u0000` escape in a
+    /// `jsonb`, SQLSTATE 22P05) or a constraint violation, fails the same way on
+    /// every attempt.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Sqlx(error) => match error {
+                sqlx_core::Error::PoolTimedOut
+                | sqlx_core::Error::PoolClosed
+                | sqlx_core::Error::Io(_)
+                | sqlx_core::Error::Tls(_)
+                | sqlx_core::Error::Protocol(_)
+                | sqlx_core::Error::WorkerCrashed => true,
+                sqlx_core::Error::Database(error) => transient_sqlstate(error.code().as_deref()),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Allowlisted diagnostic category, never SQL detail, values, or source text.
     pub fn diagnostic_reason(&self) -> &'static str {
         match self {
@@ -75,6 +97,21 @@ impl StoreError {
             Self::OAuthSessionNotCurrent => "oauth_session_not_current",
         }
     }
+}
+
+/// The SQLSTATEs [`StoreError::is_transient`] retries: connection exceptions
+/// (08), transaction rollbacks such as deadlocks and serialization failures
+/// (40), insufficient resources such as a full disk or too many connections
+/// (53), operator intervention such as a statement timeout or a shutdown (57),
+/// system errors such as an I/O failure (58), and a lock timeout (55P03).
+fn transient_sqlstate(code: Option<&str>) -> bool {
+    let Some(code) = code else {
+        return false;
+    };
+    code == "55P03"
+        || code
+            .get(..2)
+            .is_some_and(|class| matches!(class, "08" | "40" | "53" | "57" | "58"))
 }
 
 fn sqlstate_reason(code: Option<&str>) -> &'static str {
@@ -119,5 +156,25 @@ mod tests {
             StoreError::EmbeddedMigration("untrusted detail".into()).diagnostic_reason(),
             "database_migration"
         );
+    }
+
+    #[test]
+    fn only_errors_a_retry_can_clear_are_transient() {
+        for code in [
+            "08006", "40P01", "40001", "53100", "53300", "55P03", "57014", "57P01", "58030",
+        ] {
+            assert!(transient_sqlstate(Some(code)), "{code} is transient");
+        }
+        for code in [
+            "22P05", "22021", "23505", "23503", "42703", "54000", "XX000", "P0001",
+        ] {
+            assert!(!transient_sqlstate(Some(code)), "{code} is permanent");
+        }
+        assert!(!transient_sqlstate(None));
+        assert!(!transient_sqlstate(Some("5")));
+        assert!(StoreError::Sqlx(sqlx_core::Error::PoolTimedOut).is_transient());
+        assert!(StoreError::Sqlx(sqlx_core::Error::PoolClosed).is_transient());
+        assert!(!StoreError::Sqlx(sqlx_core::Error::RowNotFound).is_transient());
+        assert!(!StoreError::EmbeddedMigration("x".into()).is_transient());
     }
 }

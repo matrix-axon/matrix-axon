@@ -398,22 +398,6 @@ impl Store {
         })
     }
 
-    /// How many of these events are stored.
-    pub async fn count_stored_events(
-        &self,
-        account_id: Uuid,
-        event_ids: &[String],
-    ) -> Result<i64, StoreError> {
-        let (count,): (i64,) = sqlx_core::query_as::query_as(
-            "SELECT count(*) FROM events WHERE account_id = $1 AND event_id = ANY($2)",
-        )
-        .bind(account_id)
-        .bind(event_ids)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(count)
-    }
-
     /// Save progress after a page that did not close the row: resume from
     /// `end`, count the page and what it inserted, and clear any failure
     /// backoff or parking.

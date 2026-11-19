@@ -16,6 +16,16 @@ use uuid::Uuid;
 use crate::rooms::ROOM_SUMMARY_TOUCH_TAIL;
 use crate::{Store, StoreError};
 
+/// What [`Store::upsert_event_outcome`] did with an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpsertedEvent {
+    /// The row's `id`: its arrival order (ADR 0089).
+    pub arrival_order: i64,
+    /// Whether this call inserted the row. `false` when it was already stored,
+    /// including when this call only repaired its inline-media projection.
+    pub created: bool,
+}
+
 /// Data required to insert a single Matrix event into the store.
 pub struct NewEvent<'a> {
     /// Matrix event ID (e.g. `$abc123:example.org`).
@@ -577,6 +587,17 @@ impl Store {
     /// duplicate delivery the existing row's id is read back, so the value is
     /// stable across re-delivery.
     pub async fn upsert_event(&self, ev: &NewEvent<'_>) -> Result<i64, StoreError> {
+        Ok(self.upsert_event_outcome(ev).await?.arrival_order)
+    }
+
+    /// [`upsert_event`](Self::upsert_event), also reporting whether this call
+    /// created the row. A pager counts what it recovered from this rather than
+    /// from a count taken around its writes, which would also count rows that
+    /// live sync stored meanwhile (ADR 0140).
+    pub async fn upsert_event_outcome(
+        &self,
+        ev: &NewEvent<'_>,
+    ) -> Result<UpsertedEvent, StoreError> {
         let mut tx = self.pool.begin().await?;
         crate::event_visibility::lock_redaction_scope(&mut tx, ev.account_id, ev.room_id).await?;
         let proofs = crate::event_visibility::capture_redaction_proofs();
@@ -593,37 +614,44 @@ impl Store {
                    AND events.content IS NOT DISTINCT FROM EXCLUDED.content \
                    AND events.event_type = EXCLUDED.event_type \
                RETURNING id, account_id, event_id, room_id, origin_ts, \
-                         relates_to, redacts, decrypted_body_text, sender, event_type, raw_event \
+                         relates_to, redacts, decrypted_body_text, sender, event_type, raw_event, \
+                         (xmax = 0) AS created \
              ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), \
              display AS ( \
                SELECT refresh_room_summary_display(account_id, room_id) \
                FROM summaries WHERE inserted \
              ), \
              outbox AS ( {SEARCH_FANOUT_TAIL} ), proofs AS ( {proofs} ) \
-             SELECT ins.id FROM ins LEFT JOIN display ON TRUE"
+             SELECT ins.id, ins.created FROM ins LEFT JOIN display ON TRUE"
         );
-        let inserted: Option<(i64,)> = sqlx_core::query_as::query_as::<Postgres, (i64,)>(&sql)
-            .bind(ev.event_id)
-            .bind(ev.room_id)
-            .bind(ev.account_id)
-            .bind(ev.sender)
-            .bind(ev.origin_ts)
-            .bind(ev.event_type)
-            .bind(&ev.content)
-            .bind(&ev.raw_event)
-            .bind(ev.megolm_session_id)
-            .bind(ev.redacts)
-            .bind(&ev.relates_to)
-            .bind(ev.decrypted_body_text)
-            .bind(crate::inline_media::inline_media_urls(
-                ev.event_type,
-                ev.content.as_ref(),
-            ))
-            .fetch_optional(&mut *tx)
-            .await?;
-        if let Some((id,)) = inserted {
+        // `xmax = 0` holds for a row this statement inserted, not for one its
+        // `ON CONFLICT` arm repaired.
+        let inserted: Option<(i64, bool)> =
+            sqlx_core::query_as::query_as::<Postgres, (i64, bool)>(&sql)
+                .bind(ev.event_id)
+                .bind(ev.room_id)
+                .bind(ev.account_id)
+                .bind(ev.sender)
+                .bind(ev.origin_ts)
+                .bind(ev.event_type)
+                .bind(&ev.content)
+                .bind(&ev.raw_event)
+                .bind(ev.megolm_session_id)
+                .bind(ev.redacts)
+                .bind(&ev.relates_to)
+                .bind(ev.decrypted_body_text)
+                .bind(crate::inline_media::inline_media_urls(
+                    ev.event_type,
+                    ev.content.as_ref(),
+                ))
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some((arrival_order, created)) = inserted {
             tx.commit().await?;
-            return Ok(id);
+            return Ok(UpsertedEvent {
+                arrival_order,
+                created,
+            });
         }
         // The insert/repair returned no row, so this event was already
         // ingested. Read its arrival order back rather than reporting none: the
@@ -637,7 +665,10 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(id)
+        Ok(UpsertedEvent {
+            arrival_order: id,
+            created: false,
+        })
     }
 
     /// Persist the original ciphertext envelope for a UTD. Idempotent: the
@@ -863,7 +894,8 @@ impl Store {
                    utd_reason = NULL, utd_reason_detail = NULL \
                WHERE account_id = $1 AND event_id = $2 AND room_id = $8 AND content IS NULL \
                RETURNING account_id, event_id, room_id, origin_ts, id, \
-                         relates_to, redacts, decrypted_body_text, sender, event_type, raw_event \
+                         relates_to, redacts, decrypted_body_text, sender, event_type, raw_event, \
+                         (xmax = 0) AS created \
              ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), proofs AS ( {proofs} ) \
              {SEARCH_FANOUT_TAIL}"
         );

@@ -136,10 +136,13 @@ enum PageFailure {
     /// Anything else — a transport error, a `5xx`, a `429`. Retry the same token
     /// after a growing delay, then park.
     Retryable,
-    /// The homeserver served the page, but an event on it could not be written
-    /// to the store. Moving past the page would lose that event for good, so
-    /// the same token is retried after a growing delay, as for
-    /// [`Retryable`](Self::Retryable), then parked.
+    /// The homeserver served the page, but the store failed transiently while
+    /// it was written or its progress saved: an event on it could not be
+    /// written ([`EventWriteFailed`]), or a gap row's lookup or update failed.
+    /// Moving past the page could lose an event for good, so the same token is
+    /// retried after a growing delay, as for [`Retryable`](Self::Retryable),
+    /// then parked. An event the store refuses on every attempt is skipped
+    /// rather than counted here, so it cannot hold a cursor for good.
     StoreWrite,
 }
 
@@ -742,16 +745,23 @@ async fn send_page(
         .await?)
 }
 
-/// Whether [`write_page`] wrote the whole page.
+/// Whether [`write_page`] wrote the whole page. `inserted` counts the rows the
+/// page's own writes created, not events another writer stored meanwhile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Written {
-    Complete,
+    Complete {
+        inserted: usize,
+    },
     /// Cancelled part way. What was written stays, and is idempotent to write
     /// again.
     Abandoned,
-    /// Every event was attempted, but this many could not be written to the
-    /// store. The page must be fetched again: its token stays where it was.
-    StoreFailed(usize),
+    /// Every event was attempted, but `failed` could not be written because the
+    /// store failed transiently. The page must be fetched again: its token
+    /// stays where it was.
+    StoreFailed {
+        failed: usize,
+        inserted: usize,
+    },
 }
 
 /// Persist one fetched page through the live ingestion path, then record its
@@ -776,6 +786,7 @@ async fn write_page(
     // Events that could not be written. The rest of the page is still written
     // (idempotently), and the caller fetches it again.
     let mut failed_writes = 0;
+    let mut inserted = 0;
     for tev in events {
         if cancel.is_cancelled() {
             abandoned = true;
@@ -785,8 +796,10 @@ async fn write_page(
             utd_sessions.insert(session_id);
         }
         match persist_backfilled_event(ctx, room, tev).await {
-            Ok(Some(utd)) => utd_reasons.push(utd),
-            Ok(None) => {}
+            Ok(persisted) => {
+                inserted += usize::from(persisted.created);
+                utd_reasons.extend(persisted.utd);
+            }
             Err(EventWriteFailed) => failed_writes += 1,
         }
     }
@@ -816,9 +829,12 @@ async fn write_page(
         .await;
     }
     if failed_writes > 0 {
-        return Written::StoreFailed(failed_writes);
+        return Written::StoreFailed {
+            failed: failed_writes,
+            inserted,
+        };
     }
-    Written::Complete
+    Written::Complete { inserted }
 }
 
 /// Page one room one step older and persist the results, resuming from the saved
@@ -900,10 +916,10 @@ async fn backfill_room_page(
     };
 
     match write_page(ctx, room, &events, key_arrivals, cancel).await {
-        Written::Complete => {}
+        Written::Complete { .. } => {}
         Written::Abandoned => return PageOutcome::Abandoned,
         // Saving the cursor would move past events that are not stored.
-        Written::StoreFailed(failed) => {
+        Written::StoreFailed { failed, .. } => {
             tracing::warn!(account_id = %account_id, room_id = %room_id, failed, "backfill: events on the page could not be stored; keeping the cursor to fetch it again");
             return PageOutcome::Failed(PageFailure::StoreWrite);
         }

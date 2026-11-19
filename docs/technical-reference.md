@@ -172,7 +172,9 @@ A busy room while sync is slow, a restart after an outage, or a bulk import can 
   A row closes on the first page that holds an event Axon stored before the hole was detected, and logs at `INFO` with its `pages_fetched` and `events_recovered`.
   A row that recovered nothing logs "limited sync had nothing missing" instead: a room coming back into the sliding-sync window can be reported `limited` with no hole.
   Failures back off and park as backfill rooms do (ADR 0121); a rejected token restarts the row from the room's live end.
-  A page with an event the store could not write keeps its token and backs off the same way, for gap rows and ordinary backfill alike, so the event is fetched again rather than skipped.
+  A page with an event the store could not write because of a transient error (connection loss, pool or lock timeout, deadlock, full disk) keeps its token and backs off the same way, for gap rows and ordinary backfill alike, so the event is fetched again rather than skipped.
+  So does a gap row whose page lookup or update the store failed.
+  An event the store refuses on every attempt, such as one whose JSON holds a `\u0000` escape that Postgres `jsonb` rejects, is logged at `ERROR` ("the store refuses this event on every attempt; skipping it") and skipped, so it cannot hold a room's cursor for good.
 - The task runs even when `sync.backfill_enabled = false`; it then pages only these rows and never extends history.
   `sync.backfill_target_depth` does not apply to them.
 - If the broadcast lags, the watcher cannot tell which lost responses were limited, so it probes every joined room that stored events during the lag (a `WARN` line with the boundary and the number of rooms).

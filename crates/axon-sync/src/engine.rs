@@ -732,11 +732,25 @@ pub(crate) struct PersistContext {
     pub(crate) gaps: Option<Arc<crate::backfill::gaps::GapRecorder>>,
 }
 
-/// An event row that [`persist_event_core`] could not write: a store error,
-/// not an event that could never be stored. The event is missing, so a pager
-/// must fetch its page again rather than move past it.
+/// An event row that [`persist_event_core`] could not write because of a
+/// transient store error ([`axon_store::StoreError::is_transient`]): the
+/// database was unreachable, overloaded, or lost a race. The event is missing,
+/// so a pager must fetch its page again rather than move past it. An event the
+/// store refuses on every attempt is logged and skipped instead, as one that
+/// does not parse is, so it cannot pin a pager's cursor for good.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EventWriteFailed;
+
+/// What [`persist_event_core`] did with an event it did not fail to write.
+#[derive(Debug, Default)]
+pub(crate) struct Persisted {
+    /// Whether this call inserted the event's row. `false` for an event already
+    /// stored, and for one skipped because it can never be stored.
+    pub(crate) created: bool,
+    /// A backfilled UTD's stored row and the SDK's reason for it, for the
+    /// caller to record with the rest of its page.
+    pub(crate) utd: Option<(axon_store::PendingUtd, axon_core::UtdReason)>,
+}
 
 /// Parse an event's raw JSON text into a [`serde_json::Value`], logging (with
 /// `what` naming the caller's context, e.g. `"state event"`) and returning
@@ -833,11 +847,12 @@ pub(crate) async fn persist_timeline_event(
 /// as a UTD, exactly as on the live path; the re-decryption queue back-fills it
 /// once keys arrive.
 ///
-/// Returns the stored UTD row and the SDK's reason for it, for the caller to
-/// record with the rest of its page in one write
-/// ([`redecrypt::record_utd_reasons`]). `None` for anything else, including
-/// an event skipped because it can never be stored (it does not parse, or its
-/// room was purged). A failed write is [`EventWriteFailed`].
+/// Returns whether the row was inserted and, for a UTD, the stored row and the
+/// SDK's reason for it, for the caller to record with the rest of its page in
+/// one write ([`redecrypt::record_utd_reasons`]). An event skipped because it
+/// can never be stored (it does not parse, its room was purged, or the store
+/// refuses it on every attempt) is an empty [`Persisted`]. A transient write
+/// failure is [`EventWriteFailed`].
 ///
 /// There is no per-row re-check here, unlike the live path: a backfill can
 /// store thousands of permanently undecryptable rows, and each re-check would
@@ -850,9 +865,9 @@ pub(crate) async fn persist_backfilled_event(
     ctx: &PersistContext,
     room: &Room,
     tev: &matrix_sdk::deserialized_responses::TimelineEvent,
-) -> Result<Option<(axon_store::PendingUtd, axon_core::UtdReason)>, EventWriteFailed> {
+) -> Result<Persisted, EventWriteFailed> {
     if skip_departed_room_ingestion(ctx, room) {
-        return Ok(None);
+        return Ok(Persisted::default());
     }
     let raw = tev.raw();
     let ev: AnySyncTimelineEvent = match raw.deserialize() {
@@ -863,11 +878,11 @@ pub(crate) async fn persist_backfilled_event(
                 error = %err,
                 "failed to deserialize backfilled event; skipping"
             );
-            return Ok(None);
+            return Ok(Persisted::default());
         }
     };
     let Some(raw_val) = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event") else {
-        return Ok(None);
+        return Ok(Persisted::default());
     };
     // The paged event already carries the SDK's failure reason.
     persist_event_core(
@@ -911,7 +926,9 @@ enum UtdCheck<'a> {
 ///
 /// On the live path a UTD's failure reason is recorded before the emit, so the
 /// frame carries it. On the backfill path it is returned, with the stored row,
-/// for the caller to record. A failed event-row write is [`EventWriteFailed`].
+/// for the caller to record. An event-row write that failed transiently is
+/// [`EventWriteFailed`]; one the store refuses on every attempt is logged at
+/// ERROR and skipped.
 async fn persist_event_core(
     ctx: &PersistContext,
     ev: &AnySyncTimelineEvent,
@@ -919,7 +936,7 @@ async fn persist_event_core(
     room_id: &str,
     enc_info: Option<&EncryptionInfo>,
     utd: UtdCheck<'_>,
-) -> Result<Option<(axon_store::PendingUtd, axon_core::UtdReason)>, EventWriteFailed> {
+) -> Result<Persisted, EventWriteFailed> {
     // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
     let event_type: String = raw_val
         .get("type")
@@ -996,10 +1013,10 @@ async fn persist_event_core(
 
     // The returned id is the event's arrival order, which the live frame carries
     // so a `/v1/ws` subscriber and a later timeline read agree on it (ADR 0089).
-    let arrival_order = match ctx.store.upsert_event(&new_ev).await {
-        Ok(arrival_order) => arrival_order,
-        Err(err) => {
-            // Don't write sibling rows if the event row didn't land — they FK to it.
+    // Don't write sibling rows if the event row didn't land — they FK to it.
+    let (arrival_order, created) = match ctx.store.upsert_event_outcome(&new_ev).await {
+        Ok(upserted) => (upserted.arrival_order, upserted.created),
+        Err(err) if err.is_transient() => {
             tracing::warn!(
                 account_id = %ctx.account_id,
                 event_id = %event_id,
@@ -1007,6 +1024,18 @@ async fn persist_event_core(
                 "failed to persist event"
             );
             return Err(EventWriteFailed);
+        }
+        Err(err) => {
+            // A retry fails the same way, so a pager must not wait for it: the
+            // event is lost, as one that does not parse is.
+            tracing::error!(
+                account_id = %ctx.account_id,
+                event_id = %event_id,
+                room_id = %room_id,
+                error = %err,
+                "the store refuses this event on every attempt; skipping it"
+            );
+            return Ok(Persisted::default());
         }
     };
     tracing::debug!(
@@ -1057,7 +1086,12 @@ async fn persist_event_core(
             }
         }
         // Every stored UTD, session id or not: the SDK already classified it.
-        (Some(row), UtdCheck::Known(Some(reason))) => return Ok(Some((row, reason))),
+        (Some(row), UtdCheck::Known(Some(reason))) => {
+            return Ok(Persisted {
+                created,
+                utd: Some((row, reason)),
+            })
+        }
         _ => None,
     };
 
@@ -1087,7 +1121,7 @@ async fn persist_event_core(
             utd_reason,
         }));
     }
-    Ok(None)
+    Ok(Persisted { created, utd: None })
 }
 
 /// Write the crypto sibling rows for an event already persisted to `events`.
