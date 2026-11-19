@@ -239,7 +239,8 @@ mod tests {
                 key.as_bytes(),
             )
             .expect("base64url without padding");
-            assert_eq!(bytes.len(), 32, "{key}");
+            // No message naming the key: even a test's ticket stays out of output.
+            assert_eq!(bytes.len(), 32);
         }
     }
 
