@@ -95,7 +95,13 @@ pub(crate) fn body_urls(body: &str) -> HashSet<&str> {
 /// `clients/web/src/fixtures/link-identity.json` pins the two parsers to the
 /// same answers.
 pub(crate) fn link_identity(url: &str) -> String {
-    url::Url::parse(url).map_or_else(|_| url.to_owned(), |u| u.to_string())
+    url::Url::parse(url).map_or_else(|_| url.to_owned(), |u| parsed_link_identity(&u))
+}
+
+/// [`link_identity`] of a link already parsed, so a caller holding the `Url`
+/// shares the rule without parsing the link again.
+fn parsed_link_identity(url: &url::Url) -> String {
+    url.to_string()
 }
 
 pub fn validate_metadata(body: &str, previews: &[PreviewMetadata]) -> Result<(), PreviewError> {
@@ -116,7 +122,7 @@ pub fn validate_metadata(body: &str, previews: &[PreviewMetadata]) -> Result<(),
             || !url.username().is_empty()
             || url.password().is_some()
             || !urls.contains(p.matched_url.as_str())
-            || !seen.insert(link_identity(&p.matched_url))
+            || !seen.insert(parsed_link_identity(&url))
             || p.title.as_deref().is_some_and(|s| !bounded(s, 300))
             || p.description.as_deref().is_some_and(|s| !bounded(s, 1000))
             || p.site_name.as_deref().is_some_and(|s| !bounded(s, 120))
