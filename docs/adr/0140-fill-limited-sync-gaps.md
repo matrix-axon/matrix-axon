@@ -1,7 +1,8 @@
 # ADR 0140 — Fill the holes that limited syncs leave in room history
 
 **Status:** Accepted. Amends [ADR 0043](0043-history-backfill-engine.md) (backfill extends history only behind the oldest stored event); supersedes nothing.
-Delivery step 1 is implemented; steps 2 and 3 are pending.
+Delivery steps 1 and 2 are implemented; step 3 is pending.
+Decision 4's stop rules were amended on 2026-11-18 and 2026-11-19.
 Tracking issue: #1125.
 
 ## Context
@@ -230,28 +231,44 @@ A limited-sync hole can only lie in history that live sync stored.
 Backfill pages are contiguous, and each starts where the last ended.
 The oldest event live sync stored in a room is the room's lowest `events.id`, because every row before it was in the room's first window.
 So the verification pass walks each room from the live end back to that event.
-The stop points are recorded when a room is queued:
+The stop points are recorded when the room's walk starts (amended 2026-11-18; see the amendment at the end):
 
-- **The first window.** The pass closes at the first page that contains any of the room's lowest-`id` events, up to `timeline_limit` of them.
-  That is the room's first window, and all of it would have to be missing from `/messages` for this to fail.
-- **A count backstop.** The room's stored count and highest `events.id` are recorded when it is queued.
-  The pass counts the events on its pages that were already stored with an `id` at or below that highest id.
-  Once it has seen as many as the room held, it has passed every event stored then, and it closes.
-  Events stored after queueing (new live events, gap fills) are not counted, so they cannot close it early.
-- **The room's start.** If a homeserver withholds stored events from `/messages`, filtering them or having purged them, neither stop fires and the walk ends at the room's start.
-  That is logged at `WARN` with the room, because it can store history older than the first window.
+- **The first stored event.** The pass closes at the first page that contains the room's lowest-`id` event.
+  It is one event, as for a lag probe (decision 3).
+  When the first window was shorter than `timeline_limit`, several lowest-`id` events include events of later responses, which sit above holes the pass must still walk through.
+- **A floor below stored history.** If the homeserver no longer serves that event (it purged the room, or filters it), the walk would otherwise continue to the room's start, over federation if the homeserver has to backfill.
+  So the room's floor is recorded with its stop event: the oldest `origin_ts` among its `timeline_limit` lowest-`id` events.
+  The pass closes once it has read 500 events in a row that were neither already stored nor newer than the floor.
+  An empty page only extends a run already under way, and ten empty pages in a row back the room off instead, so empty pages cannot close a walk that is still inside stored history.
+  Both conditions are needed.
+  A page of events older than the floor is normal inside a hole of imported events, which carry timestamps years older than the events around them.
+  A hole of real-time events can be longer than 500.
+  Only history below everything Axon stored is both.
+- **The room's start.** If neither stop fires, the walk ends at the room's start.
+  That is logged at `WARN` with the room.
+- **Repeated timeouts** (amended 2026-11-19). The third timed-out page over a walk closes it as `timed_out`, logged at `WARN`.
+  The count is over the whole walk, not consecutive failures, which a successful page resets.
+  See the second amendment at the end.
 
 The pass stores every page, and already-stored events are no-ops.
-The first-window stop ends it above any history that backfill stored.
-The count backstop ends it no later than the oldest event Axon held when the room was queued.
-In a room with backfilled history, that means the backstop re-reads that history without adding to it.
-Short of the third case, it never goes past the oldest event Axon holds, so it neither extends history nor depends on `sync.backfill_enabled` or `sync.backfill_target_depth`.
+The first stop ends it above any history that backfill stored.
+The floor ends it at most 500 events past the oldest stored history it can still read.
+Short of the room's start, it never goes far past the oldest event Axon holds, so it does not extend history and does not depend on `sync.backfill_enabled` or `sync.backfill_target_depth`.
 
-Progress lives in its own table, `room_history_verify (account_id, room_id, from_token, stop_event_ids, seeded_count, seeded_max_id, seen_stored, complete, events_recovered, …)` plus ADR 0121's failure columns, keyed by `(account_id, room_id)` with `ON DELETE CASCADE` from `accounts`.
+Progress lives in its own table, `room_history_verify (account_id, room_id, from_token, stop_event_ids, floor_ts, floor_run, complete, stop_reason, events_recovered, …)` plus ADR 0121's failure columns, keyed by `(account_id, room_id)` with `ON DELETE CASCADE` from `accounts`.
 It is not kept on `room_backfill`, because a room with stored events can have no `room_backfill` row: with backfill off, or before its first page is saved.
 The migration seeds one row for every `(account_id, room_id)` that has stored events.
-The stop points are taken from the room's rows at that time.
+A row's stop points are taken from the room's rows when its first page is fetched, not by the migration, because the floor depends on the configured `timeline_limit`, which SQL cannot read.
 Rooms first seen after the migration need no row, because their holes are recorded from the start.
+A walk can be restarted while it is in flight: by the management action, by an expired gap row (decision 7), or by a purge that keeps the room (decision 6).
+Every restart bumps the row's `walk_generation`, and every write a walk makes names the generation it read, so a walk read before the restart cannot overwrite it.
+The walk also re-reads its row before each page, so a gap row opened since the rows were listed holds it at once.
+
+Only joined rooms are verified.
+A row for a room the account is not in waits, and is verified if the account rejoins before the room is purged.
+A room is recorded as left only once the room list can be trusted, five minutes after startup and never from an empty list, since a list the SDK is still loading can name a handful of rooms or none.
+On Adam's production account, 9,583 of the 15,399 rooms with stored events are not joined, and Synapse no longer has 9,465 of them at all.
+Counting them as pending would leave the pass unfinished for good.
 
 **Scheduling.**
 The pass shares the backfill task, its gate and its guards.
@@ -259,7 +276,8 @@ Open gap rows still come first.
 They are bounded, since each closes when it meets stored history, and they cover the newest history.
 After them, the task alternates one verification page with one ordinary backfill page, so neither starves the other.
 A room is not verified while it has an open gap row, because that row is filling the same newest history; other rooms' verification continues.
-`history_verify.rooms_pending` counts every incomplete room, and `history_verify.rooms_held` counts those waiting on an open gap row.
+`history_verify.rooms_pending` counts every incomplete row of a joined room, and `history_verify.rooms_held` counts those waiting on an open gap row.
+`history_verify.rooms_not_joined` counts the incomplete rows of rooms the account is not in.
 The pass is persisted per page, and it is not repeated after it completes.
 It runs on its own after the upgrade, with nothing for a user or operator to do.
 Users should not need to know their history ever had holes in order to get it back.
@@ -308,7 +326,7 @@ There are three deletion sites, and each is named here so the implementation fol
 - **Account deletion.** `room_timeline_gaps` and `room_history_verify` rows go by `ON DELETE CASCADE` when `delete_account_row` deletes the `accounts` row, the same as `room_backfill`.
 - **Room purge.** `purge_room`'s closing statement deletes the room's gap and verification rows beside `del_backfill`, under the same `NOT preserve_room_after_purge($1, $2, $3)` guard.
   A purge that deleted no events still removes them, and holes recorded after a rejoin survive.
-  A kept room's incomplete verification row is re-queued with fresh stop points and counts, because the purge deleted events its count backstop was waiting to see.
+  A kept room's incomplete verification row is re-queued with fresh stop points, because the purge may have deleted the event its walk was waiting to see.
 - **Not in `delete_event_batches`' `reset_backfill` CTE.**
   That CTE resets the backfill cursor so that deleted history can be fetched again.
   A gap row that survives it stays correct, because its walk needs an event stored before the hole was detected, and it walks further when those were deleted.
@@ -324,9 +342,12 @@ Events the filler then stores get `id`s above the purge watermark, so the purge 
   Detecting a hole logs at `INFO` with `prev_batch` and the batch's oldest event id; dropping a first window logs at `DEBUG`.
   Each page logs at `DEBUG` with its `inserted` and `already_stored` counts.
   Closing a hole logs at `INFO` with `pages_fetched` and `events_recovered`.
-- `GET /v1/status` gains `history_gaps: {open, parked, awaiting_batch, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_complete, events_recovered}` beside the existing `backfill` block.
+- `GET /v1/status` gains `history_gaps: {open, parked, awaiting_batch, events_recovered}` and `history_verify: {rooms_pending, rooms_held, rooms_parked, rooms_not_joined, rooms_complete, rooms_timed_out, events_recovered}` beside the existing `backfill` block.
 - The management API ([ADR 0109](0109-management-api.md)) gains an action that re-queues the verification pass for one room or a whole account, so an operator can re-verify after a suspected loss without SQL.
-  A re-queued room takes its stop points and counts from the room's rows at that time.
+  It is `POST /v1/management/accounts/{account_id}/history-verify`, with an optional `room_id` in the body.
+  A re-queued room takes its stop points from the room's rows when its walk starts again.
+- A limited row dropped unpaged because none of its batch was stored in time (#1170) re-queues the room's verification in the same statement.
+  The walk then finds its hole, instead of the hole being lost.
 - A non-zero `events_recovered` from the verification pass is itself evidence of past loss; it is logged at `WARN` once per room with the count.
 
 ## Consequences
@@ -373,7 +394,57 @@ All server-side (`crates/`), in this order:
    Unit tests cover nested holes, a token rejection restarted from the live end with a crash after its first page, and a lag window with two holes in it, including a lag while the watcher was stalled for longer than the lag and a room first seen during the lag.
    They also cover the first-window test when the watcher reads the broadcast after this response's handlers, or a later response's, have stored their events, with backfill on and off.
 2. The verification pass, its table and seeding migration, its config switch, its interleaving with backfill, and the management action (decisions 4 and 7).
-   Tests cover each stop point, including a first window that `/messages` never returns.
-   Before it ships, it is run against a copy of production data, recording how often the room-start fallback fires.
-   If that fallback fires because stored rows are absent from `/messages`, the count backstop counts only events the pager can return.
+   Tests cover each stop point, including a first stored event that `/messages` never returns.
+   Before it ships, it is checked against production data, recording how often the room-start fallback would fire (see the amendment).
 3. `history_rev`, the `timeline.history_filled` frame and their OpenAPI entries (decision 5), followed by separate web and TUI PRs to consume them.
+
+## Amendment — step 2 stop rules (2026-11-18)
+
+Decision 4 first closed the walk at the first page holding any of the room's `timeline_limit` lowest-`id` events.
+A count backstop sat behind it: the room's stored count and highest `id` were recorded when it was queued, and the walk closed once it had seen that many of those events.
+Checking the design against Adam's production account before writing it found three problems.
+
+**The count backstop could never fire first.**
+It closes only once every event stored at queue time has been seen.
+The lowest-`id` events are among them, so the first-window stop has always fired by then.
+In the one case the backstop existed for, a first window that `/messages` no longer returns, it can never fire at all, and the walk runs to the room's start.
+Counting only "events the pager can return", as the Delivery section suggested, needs to know which those are before paging them.
+
+**The fallback is real, and expensive where it happens.**
+Of the 5,816 joined rooms on the account, one has no first-window event that Synapse still serves: `#matrix:matrix.org`.
+Synapse purged it after the account left on 2026-10-08, and holds 1,522 of its events against Axon's 18,366.
+A walk to that room's start makes Synapse fetch years of a large public room over federation.
+
+**Several lowest-`id` events can sit above holes.**
+In the 2026-10-18 import room, the 20 lowest ids span two sync responses (the first stored at 11:05:35, the next at 11:07:38).
+A walk that closed on the second response's events would miss any hole between the two.
+Decision 3's lag probes already stop on the single lowest-`id` event for this reason, so the pass now does too.
+
+The replacement floor was checked against the same import room, which is missing 8,740 of 29,559 events.
+Its longest run of missing events is 103, longer than a 100-event page.
+A floor that closed on one page with no stored event older than the floor could have stopped inside it.
+Its imported events are dated from 2014, years before the room's first stored event.
+A floor on timestamps alone would have closed the walk at the first imported page.
+The floor therefore needs 500 events in a row that are both unstored and older than the floor.
+
+## Amendment — repeated timeouts close a walk (2026-11-19)
+
+Step 2 ran on Adam's production account on 2026-11-19.
+One walk showed a cost that neither the floor nor the backoff bounds.
+
+Synapse had purged `#matrix:matrix.org` after the account left on 2026-10-08.
+When the walk asked for a page below what Synapse still held, Synapse fetched that history from matrix.org over federation, with about 1.3 MB of room state per event that had missing predecessors.
+The first such request was still running 28 minutes after Axon's 30-second timeout.
+Each retry then got the page Synapse had finished in the meantime, and timed out on the next one.
+
+- **The floor did not fire.** Federation returned events Axon had stored months before, so every page counted as stored history.
+- **The backoff did not park the room.** Each successful page reset the consecutive failures, so the walk would have continued, one federation backfill per page, down to the account's July join.
+
+The same can happen in any room whose homeserver no longer holds its history: one purged after its last local user left, or one under a retention policy.
+
+So timed-out pages are now counted over the whole walk (`walk_timeouts`), and the third closes it as `timed_out`.
+What it recovered before then is kept.
+A restart (the management action) clears the count, for an operator who wants to try again.
+Closing rather than parking is deliberate: a parked room is retried daily, which would repeat the federation load every day.
+
+The threshold is generous for ordinary rooms: of the 5,816 joined rooms on the account, `#matrix:matrix.org` was the only one with any timeout.

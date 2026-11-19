@@ -52,7 +52,10 @@
 //!
 //! The same task fills the holes that limited syncs leave in stored history
 //! ([`gaps`], ADR 0140), ahead of ordinary pages and whatever
-//! `sync.backfill_enabled` says: with backfill off it pages only those.
+//! `sync.backfill_enabled` says: with backfill off it pages only those. It
+//! also runs the one-time pass that re-reads each room's stored history to
+//! repair the holes left before they were recorded ([`verify`]), alternating
+//! with ordinary pages.
 //!
 //! A disk-space safety valve ([`BackfillHealth`]) pauses paging when free space on
 //! the guarded filesystem (`sync.backfill_disk_guard_path`, default the sync data
@@ -82,6 +85,7 @@ use crate::homeserver_gate::{is_fast, GateError, HomeserverGate, Outcome, TIMEOU
 use crate::redecrypt::{paged_utd_session_id, recheck_backfilled_sessions, KeyArrivalWatch};
 
 pub(crate) mod gaps;
+mod verify;
 
 /// The filesystem the disk-space valve guards: the configured override, else the
 /// sync data dir. Shared by the valve (`disk_ok`) and the live `GET /v1/status`
@@ -379,6 +383,12 @@ pub(crate) struct BackfillParams {
     /// `sync.backfill_enabled`: walk `room_backfill`. Gap rows are paged
     /// either way (ADR 0140).
     enabled: bool,
+    /// `sync.history_verify_enabled`: run the verification pass (ADR 0140
+    /// decision 4), whatever `enabled` says.
+    verify_enabled: bool,
+    /// `sync.timeline_limit`, which sets how many of a room's first stored
+    /// events its verification floor is read from.
+    timeline_limit: u32,
     page_size: u32,
     /// Per-room event cap (0 = unbounded / "to room start").
     target_depth: u64,
@@ -396,6 +406,8 @@ impl BackfillParams {
     pub(crate) fn from_config(config: &SyncConfig) -> Self {
         Self {
             enabled: config.backfill_enabled,
+            verify_enabled: config.history_verify_enabled,
+            timeline_limit: config.timeline_limit,
             page_size: config.backfill_page_size.max(1),
             target_depth: config.backfill_target_depth,
             throttle: Duration::from_millis(config.backfill_throttle_ms),
@@ -453,7 +465,12 @@ fn disk_ok(params: &BackfillParams, health: &BackfillHealth, account_id: uuid::U
 /// The task first pages the account's open gap rows (ADR 0140), and keeps
 /// them ahead of ordinary backfill: after each ordinary page, any hole
 /// recorded meanwhile is paged before the next one. With `backfill_enabled`
-/// off, the task pages gap rows only and never walks `room_backfill`.
+/// off, the task never walks `room_backfill`.
+///
+/// The verification pass (ADR 0140 decision 4) gets one page after each
+/// ordinary page, so neither starves the other, and every page for up to
+/// `idle_poll` when a sweep had no ordinary page to fetch. Then the next
+/// sweep picks up rooms joined meanwhile.
 pub(crate) async fn run(
     client: Client,
     ctx: PersistContext,
@@ -477,6 +494,7 @@ pub(crate) async fn run(
         gate: &gate,
         cancel: &cancel,
     };
+    let mut verifier = verify::Verifier::new(&client, &ctx, &params, &health, &gate, &cancel);
 
     loop {
         if cancel.is_cancelled() {
@@ -486,35 +504,41 @@ pub(crate) async fn run(
         // Holes first: they cover recent history that live sync should have
         // delivered (ADR 0140 decision 2).
         gaps.take();
-        let gap_pass = filler.fill().await;
+        let mut gap_pass = filler.fill().await;
         let mut last_fill = tokio::time::Instant::now();
         if cancel.is_cancelled() {
             return;
         }
-        if !params.enabled {
-            if !gap_pass.progressed {
-                idle(&params, &gaps, gap_pass, &cancel).await;
-            }
-            continue;
-        }
+        let mut progressed = gap_pass.progressed;
+        verifier.refresh().await;
 
         // Load every room's cursor once per sweep (one query) rather than a lookup
-        // per room, so a large account doesn't hammer the DB each pass.
-        let cursors = match ctx.store.list_room_backfill(account_id).await {
-            Ok(c) => c,
-            Err(err) => {
-                // Skip the sweep rather than run it with no cursors: every room
-                // would look new, page from its live end, and overwrite its saved
-                // deeper token with a shallower one (ADR 0121).
-                tracing::warn!(account_id = %account_id, error = %err, "backfill: list cursors failed; skipping this sweep");
-                idle(&params, &gaps, gap_pass, &cancel).await;
-                continue;
+        // per room, so a large account doesn't hammer the DB each pass. With
+        // backfill off there is no ordinary sweep, only gap rows and
+        // verification.
+        let cursors = if params.enabled {
+            match ctx.store.list_room_backfill(account_id).await {
+                Ok(c) => c,
+                Err(err) => {
+                    // Skip the sweep rather than run it with no cursors: every
+                    // room would look new, page from its live end, and overwrite
+                    // its saved deeper token with a shallower one (ADR 0121).
+                    tracing::warn!(account_id = %account_id, error = %err, "backfill: list cursors failed; skipping this sweep");
+                    idle(&params, &gaps, gap_pass, &cancel).await;
+                    continue;
+                }
             }
+        } else {
+            std::collections::HashMap::new()
+        };
+        let rooms = if params.enabled {
+            sweep_order(client.joined_rooms(), &cursors)
+        } else {
+            Vec::new()
         };
 
-        let mut progressed = gap_pass.progressed;
-        let mut gap_pass = gap_pass;
-        for room in sweep_order(client.joined_rooms(), &cursors) {
+        let mut ordinary_paged = false;
+        for room in rooms {
             if cancel.is_cancelled() {
                 return;
             }
@@ -542,12 +566,23 @@ pub(crate) async fn run(
             match backfill_room_page(&ctx, &params, &gate, &room, state.cloned(), &cancel).await {
                 PageOutcome::Paged => {
                     progressed = true;
+                    ordinary_paged = true;
                     // Throttle *only* after real work, so completed/capped rooms
                     // don't add dead time that starves an actively-backfilling room
                     // on an account with many finished rooms.
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(params.throttle) => {}
+                    if !throttle(&params, &cancel).await {
+                        return;
+                    }
+                    // One verification page per ordinary page (ADR 0140
+                    // decision 4).
+                    match verifier.step().await {
+                        verify::VerifyStep::Paged => {
+                            if !throttle(&params, &cancel).await {
+                                return;
+                            }
+                        }
+                        verify::VerifyStep::Abandoned => return,
+                        verify::VerifyStep::Failed | verify::VerifyStep::Idle => {}
                     }
                 }
                 PageOutcome::Idle | PageOutcome::Abandoned => {}
@@ -567,6 +602,38 @@ pub(crate) async fn run(
             }
         }
 
+        // Ordinary backfill had nothing to fetch (or is off): verification
+        // takes the pages, for up to `idle_poll`, so a room joined meanwhile is
+        // still picked up by the next sweep.
+        if !ordinary_paged {
+            let until = tokio::time::Instant::now() + params.idle_poll;
+            loop {
+                match verifier.step().await {
+                    verify::VerifyStep::Paged => {
+                        progressed = true;
+                        if !throttle(&params, &cancel).await {
+                            return;
+                        }
+                    }
+                    verify::VerifyStep::Failed => {}
+                    verify::VerifyStep::Idle => break,
+                    verify::VerifyStep::Abandoned => return,
+                }
+                let recorded = gaps.take();
+                if gaps_due(recorded, gap_pass, last_fill.elapsed()) {
+                    gap_pass = filler.fill().await;
+                    last_fill = tokio::time::Instant::now();
+                    progressed |= gap_pass.progressed;
+                }
+                if cancel.is_cancelled() {
+                    return;
+                }
+                if tokio::time::Instant::now() >= until {
+                    break;
+                }
+            }
+        }
+
         // Nothing advanced this pass (every room complete/capped, paused, or
         // failing): idle, then re-poll — this is how newly joined/re-joined rooms
         // are picked up without a restart, and it caps the cursor-read cadence for
@@ -583,6 +650,14 @@ pub(crate) async fn run(
 /// cost a row listing, and a batch check per waiting row, per ordinary page.
 fn gaps_due(recorded: bool, pass: gaps::GapPass, since_last_fill: Duration) -> bool {
     recorded || (pass.pending() && since_last_fill >= gaps::AWAITING_RECHECK)
+}
+
+/// Sleep for the throttle between pages. `false` if cancelled meanwhile.
+async fn throttle(params: &BackfillParams, cancel: &CancellationToken) -> bool {
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        _ = tokio::time::sleep(params.throttle) => true,
+    }
 }
 
 /// Wait for the next sweep: `idle_poll`, or less while a gap row awaits its

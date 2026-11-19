@@ -2343,6 +2343,9 @@ pub struct StatusDto {
     /// Holes that limited syncs left in stored room history, and their filling
     /// (ADR 0140).
     pub history_gaps: HistoryGapsStatusDto,
+    /// The one-time pass that re-reads each room's stored history to repair
+    /// holes from before they were recorded (ADR 0140 decision 4).
+    pub history_verify: HistoryVerifyStatusDto,
     /// The running binary's build identity.
     pub build: BuildInfoDto,
     /// Per-account sync-service status.
@@ -2506,6 +2509,24 @@ impl ManagementTokenDto {
             created_by_token_id: token.created_by_token_id,
         }
     }
+}
+
+/// Body of `POST /v1/management/accounts/{account_id}/history-verify`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequeueHistoryVerifyRequest {
+    /// The one room to verify again. Omitted, every room of the account with
+    /// stored history is queued.
+    #[serde(default)]
+    pub room_id: Option<String>,
+}
+
+/// The result of `POST /v1/management/accounts/{account_id}/history-verify`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RequeuedHistoryVerifyDto {
+    /// Rooms queued. A room with no stored history is not, so `0` for a named
+    /// room means Axon holds nothing of it to verify.
+    pub rooms_queued: u64,
 }
 
 /// Body of `POST /v1/management/tokens`.
@@ -2773,6 +2794,57 @@ pub struct HistoryGapsStatusDto {
     pub events_recovered: u64,
     /// False when the hole counts could not be read; they are then zero.
     pub available: bool,
+}
+
+/// The one-time pass that re-reads each joined room's stored history against
+/// the homeserver and stores what is missing, across every account (ADR 0140
+/// decision 4). It runs on its own after an upgrade; `rooms_pending` reaching
+/// zero means it is done. Rooms that keep failing are parked and retried about
+/// once a day, so `rooms_pending` equal to `rooms_parked` means it is done but
+/// for those.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HistoryVerifyStatusDto {
+    /// Joined rooms whose history has not been verified yet.
+    pub rooms_pending: i64,
+    /// Of those, rooms waiting for a hole in their newest history to be
+    /// filled first.
+    pub rooms_held: i64,
+    /// Of those, rooms parked after repeated failures (ADR 0121): retried
+    /// only about once a day.
+    pub rooms_parked: i64,
+    /// Of the complete rooms, those whose walk was closed after repeated
+    /// timeouts, without reaching its end. The homeserver was most likely
+    /// fetching their history over federation. The management action queues
+    /// them again.
+    pub rooms_timed_out: i64,
+    /// Rooms with stored history that the account is not in. They are
+    /// verified if the account rejoins them.
+    pub rooms_not_joined: i64,
+    /// Rooms whose history has been verified.
+    pub rooms_complete: i64,
+    /// Events the pass found missing and stored. Non-zero is evidence that
+    /// history was lost before this server recorded holes.
+    pub events_recovered: i64,
+    /// False when the counts could not be read; they are then zero.
+    pub available: bool,
+}
+
+impl HistoryVerifyStatusDto {
+    /// Assemble from the store's counts, `None` when unreadable.
+    pub fn new(counts: Option<axon_store::HistoryVerifyCounts>) -> Self {
+        let available = counts.is_some();
+        let counts = counts.unwrap_or_default();
+        HistoryVerifyStatusDto {
+            rooms_pending: counts.rooms_pending,
+            rooms_held: counts.rooms_held,
+            rooms_parked: counts.rooms_parked,
+            rooms_timed_out: counts.rooms_timed_out,
+            rooms_not_joined: counts.rooms_not_joined,
+            rooms_complete: counts.rooms_complete,
+            events_recovered: counts.events_recovered,
+            available,
+        }
+    }
 }
 
 impl HistoryGapsStatusDto {

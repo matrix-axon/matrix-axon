@@ -1905,6 +1905,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/management/accounts/{account_id}/history-verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify stored history again
+         * @description Queue the pass that re-reads stored room history against the homeserver
+         *     and stores what is missing (ADR 0140), for one room or for every room of
+         *     the account with stored history.
+         *
+         *     The pass runs once on its own after an upgrade. This repeats it, for an
+         *     operator who suspects history was lost since. Each queued room is walked
+         *     again from its live end, in the background, alongside history backfill;
+         *     `history_verify` in `GET /v1/status` shows its progress. Only rooms the
+         *     account is in are walked.
+         */
+        post: operations["requeue_history_verify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/management/oauth/binds": {
         parameters: {
             query?: never;
@@ -2413,7 +2441,8 @@ export interface paths {
          * Get backfill status
          * @description Report backfill status: the disk-space valve state (live free space, whether
          *     paused) plus per-account backfill progress; the holes limited syncs left in
-         *     stored history and their filling (ADR 0140); per-account sync-service status;
+         *     stored history and their filling, and the one-time pass that verifies
+         *     stored history (ADR 0140); per-account sync-service status;
          *     each homeserver's load gate for background requests (ADR 0122);
          *     the running build's identity; whether the management API is served; and
          *     which push providers loaded a key.
@@ -3221,6 +3250,18 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_RequeuedHistoryVerifyDto: {
+            /** @description The result of `POST /v1/management/accounts/{account_id}/history-verify`. */
+            data: {
+                /**
+                 * Format: int64
+                 * @description Rooms queued. A room with no stored history is not, so `0` for a named
+                 *     room means Axon holds nothing of it to verify.
+                 */
+                rooms_queued: number;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_RoomDiscoveryDto: {
             /**
              * @description What Axon knows about one unjoined room from the account's homeserver, and
@@ -3459,6 +3500,11 @@ export interface components {
                  *     (ADR 0140).
                  */
                 history_gaps: components["schemas"]["HistoryGapsStatusDto"];
+                /**
+                 * @description The one-time pass that re-reads each room's stored history to repair
+                 *     holes from before they were recorded (ADR 0140 decision 4).
+                 */
+                history_verify: components["schemas"]["HistoryVerifyStatusDto"];
                 /** @description Each homeserver's load gate for axon's background requests (ADR 0122). */
                 homeservers: components["schemas"]["HomeserverGateDto"][];
                 /** @description The management API's availability (ADR 0109). */
@@ -4991,6 +5037,60 @@ export interface components {
             parked: number;
         };
         /**
+         * @description The one-time pass that re-reads each joined room's stored history against
+         *     the homeserver and stores what is missing, across every account (ADR 0140
+         *     decision 4). It runs on its own after an upgrade; `rooms_pending` reaching
+         *     zero means it is done. Rooms that keep failing are parked and retried about
+         *     once a day, so `rooms_pending` equal to `rooms_parked` means it is done but
+         *     for those.
+         */
+        HistoryVerifyStatusDto: {
+            /** @description False when the counts could not be read; they are then zero. */
+            available: boolean;
+            /**
+             * Format: int64
+             * @description Events the pass found missing and stored. Non-zero is evidence that
+             *     history was lost before this server recorded holes.
+             */
+            events_recovered: number;
+            /**
+             * Format: int64
+             * @description Rooms whose history has been verified.
+             */
+            rooms_complete: number;
+            /**
+             * Format: int64
+             * @description Of those, rooms waiting for a hole in their newest history to be
+             *     filled first.
+             */
+            rooms_held: number;
+            /**
+             * Format: int64
+             * @description Rooms with stored history that the account is not in. They are
+             *     verified if the account rejoins them.
+             */
+            rooms_not_joined: number;
+            /**
+             * Format: int64
+             * @description Of those, rooms parked after repeated failures (ADR 0121): retried
+             *     only about once a day.
+             */
+            rooms_parked: number;
+            /**
+             * Format: int64
+             * @description Joined rooms whose history has not been verified yet.
+             */
+            rooms_pending: number;
+            /**
+             * Format: int64
+             * @description Of the complete rooms, those whose walk was closed after repeated
+             *     timeouts, without reaching its end. The homeserver was most likely
+             *     fetching their history over federation. The management action queues
+             *     them again.
+             */
+            rooms_timed_out: number;
+        };
+        /**
          * @description A homeserver gate's circuit breaker on the wire (ADR 0122).
          * @enum {string}
          */
@@ -5940,6 +6040,23 @@ export interface components {
          * @enum {string}
          */
         RefreshState: "idle" | "queued" | "running";
+        /** @description Body of `POST /v1/management/accounts/{account_id}/history-verify`. */
+        RequeueHistoryVerifyRequest: {
+            /**
+             * @description The one room to verify again. Omitted, every room of the account with
+             *     stored history is queued.
+             */
+            room_id?: string | null;
+        };
+        /** @description The result of `POST /v1/management/accounts/{account_id}/history-verify`. */
+        RequeuedHistoryVerifyDto: {
+            /**
+             * Format: int64
+             * @description Rooms queued. A room with no stored history is not, so `0` for a named
+             *     room means Axon holds nothing of it to verify.
+             */
+            rooms_queued: number;
+        };
         /**
          * @description What Axon knows about one unjoined room from the account's homeserver, and
          *     where its room-summary refresh stands (ADR 0128 decision 5).
@@ -6685,6 +6802,11 @@ export interface components {
              *     (ADR 0140).
              */
             history_gaps: components["schemas"]["HistoryGapsStatusDto"];
+            /**
+             * @description The one-time pass that re-reads each room's stored history to repair
+             *     holes from before they were recorded (ADR 0140 decision 4).
+             */
+            history_verify: components["schemas"]["HistoryVerifyStatusDto"];
             /** @description Each homeserver's load gate for axon's background requests (ADR 0122). */
             homeservers: components["schemas"]["HomeserverGateDto"][];
             /** @description The management API's availability (ADR 0109). */
@@ -12870,6 +12992,71 @@ export interface operations {
                 headers: {
                     /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
                     "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    requeue_history_verify: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RequeueHistoryVerifyRequest"];
+            };
+        };
+        responses: {
+            /** @description The rooms were queued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RequeuedHistoryVerifyDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The management API is disabled (`management_disabled`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such account */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The request body is over 4 KiB */
+            413: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {

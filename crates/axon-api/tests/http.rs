@@ -5969,6 +5969,8 @@ async fn status_degrades_when_progress_pool_is_unavailable() {
     assert_eq!(json["data"]["backfill"]["accounts"], json!([]));
     assert_eq!(json["data"]["history_gaps"]["available"], false);
     assert_eq!(json["data"]["history_gaps"]["open"], 0);
+    assert_eq!(json["data"]["history_verify"]["available"], false);
+    assert_eq!(json["data"]["history_verify"]["rooms_pending"], 0);
     for field in ["build", "sync", "homeservers", "management", "push"] {
         assert!(json["data"].get(field).is_some(), "missing {field}");
     }
@@ -5981,6 +5983,21 @@ async fn status_degrades_when_progress_pool_is_unavailable() {
         assert!(
             json["data"]["history_gaps"][field].is_number(),
             "history_gaps.{field}"
+        );
+    }
+    assert_eq!(json["data"]["history_verify"]["available"], true);
+    for field in [
+        "rooms_pending",
+        "rooms_held",
+        "rooms_parked",
+        "rooms_timed_out",
+        "rooms_not_joined",
+        "rooms_complete",
+        "events_recovered",
+    ] {
+        assert!(
+            json["data"]["history_verify"][field].is_number(),
+            "history_verify.{field}"
         );
     }
 }

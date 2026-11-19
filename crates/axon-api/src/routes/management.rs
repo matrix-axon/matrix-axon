@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::auth::{AuthedToken, CredentialChange};
 use crate::dto::{
     BindDto, ManagementTokenDto, MintTokenRequest, MintedTokenDto, OauthIdentityDto,
-    StartBindRequest, StartedBindDto,
+    RequeueHistoryVerifyRequest, RequeuedHistoryVerifyDto, StartBindRequest, StartedBindDto,
 };
 use crate::extract::{Json, Path, Query};
 use crate::oauth::bind::{BindRefusal, PendingLimit, StartBindError};
@@ -596,4 +596,52 @@ mod tests {
             assert_eq!(sanitize_label(unusable), None, "{unusable:?}");
         }
     }
+}
+
+/// Verify stored history again
+///
+/// Queue the pass that re-reads stored room history against the homeserver
+/// and stores what is missing (ADR 0140), for one room or for every room of
+/// the account with stored history.
+///
+/// The pass runs once on its own after an upgrade. This repeats it, for an
+/// operator who suspects history was lost since. Each queued room is walked
+/// again from its live end, in the background, alongside history backfill;
+/// `history_verify` in `GET /v1/status` shows its progress. Only rooms the
+/// account is in are walked.
+#[utoipa::path(
+    post,
+    path = "/v1/management/accounts/{account_id}/history-verify",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+    ),
+    request_body = RequeueHistoryVerifyRequest,
+    responses(
+        (status = 200, description = "The rooms were queued", body = ApiResponse<RequeuedHistoryVerifyDto>),
+        (status = 403, description = "The management API is disabled (`management_disabled`)", body = crate::response::ErrorResponse),
+        (status = 404, description = "No such account", body = crate::response::ErrorResponse),
+        (status = 413, description = "The request body is over 4 KiB", body = crate::response::ErrorResponse),
+    ),
+    tag = "management",
+)]
+pub async fn requeue_history_verify(
+    State(store): State<Store>,
+    Extension(caller): Extension<AuthedToken>,
+    Path(account_id): Path<Uuid>,
+    Json(body): Json<RequeueHistoryVerifyRequest>,
+) -> Result<ApiResponse<RequeuedHistoryVerifyDto>, ApiError> {
+    if store.get_account(account_id).await?.is_none() {
+        return Err(ApiError::not_found("no such account"));
+    }
+    let rooms_queued = store
+        .requeue_history_verify(account_id, body.room_id.as_deref())
+        .await?;
+    tracing::info!(
+        acting_token_id = %caller.id,
+        account_id = %account_id,
+        room_id = body.room_id.as_deref().unwrap_or("<every room>"),
+        rooms_queued,
+        "history verification queued through the management API"
+    );
+    Ok(ApiResponse::new(RequeuedHistoryVerifyDto { rooms_queued }))
 }

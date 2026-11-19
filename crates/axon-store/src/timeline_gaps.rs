@@ -108,7 +108,8 @@ pub enum GapCheck {
     /// again on the next sweep.
     AwaitingBatch,
     /// None of the batch's events was stored within the wait limit, so the
-    /// batch will never be stored. The row was deleted unpaged.
+    /// batch will never be stored. The row was deleted unpaged, and the room's
+    /// verification walk queued again to find the hole (#1170).
     Expired { from_token: Option<String> },
     /// Nothing was stored in the room before the batch: the room's first window,
     /// which is backfill's job, not a hole. The row was deleted unpaged.
@@ -314,6 +315,10 @@ impl Store {
     /// within `wait`, is deleted; a hole is marked checked and its boundary
     /// resolved. A row still awaiting its batch is left as it is.
     ///
+    /// An expired row's hole has no boundary to page to, so the same statement
+    /// that deletes it queues the room's verification walk again (#1170): the
+    /// walk reads the room from its live end and finds the hole.
+    ///
     /// A row is a first window when the room has no stored event outside the
     /// batch whose `received_at` is earlier than the earliest `received_at`
     /// among the batch's stored events. Only an earlier sync response, or
@@ -368,7 +373,14 @@ impl Store {
                 return Ok(GapCheck::Hole);
             }
         };
-        self.delete_timeline_gap(gap_id).await?;
+        if matches!(verdict, GapCheck::Expired { .. }) {
+            sqlx_core::query::query(&crate::history_verify::requeue_on_gap_delete_sql())
+                .bind(gap_id)
+                .execute(&self.pool)
+                .await?;
+        } else {
+            self.delete_timeline_gap(gap_id).await?;
+        }
         Ok(verdict)
     }
 
@@ -453,10 +465,14 @@ impl Store {
     /// remaining ones' minimum could be later, and the walk would stop early
     /// on events stored inside the hole. A lag probe has no batch and keeps its
     /// boundary, which already means the same.
+    ///
+    /// `recovered` is how many of the failed page's events were stored all
+    /// the same: the retry finds them stored and cannot count them.
     pub async fn record_timeline_gap_failure(
         &self,
         gap_id: i64,
         failure: RoomBackfillFailure<'_>,
+        recovered: i64,
     ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "UPDATE room_timeline_gaps g SET \
@@ -470,7 +486,8 @@ impl Store {
                      (SELECT min(e.received_at) FROM events e \
                       WHERE e.account_id = g.account_id \
                         AND e.event_id = ANY(g.batch_event_ids)), \
-                     g.stored_before) ELSE g.stored_before END \
+                     g.stored_before) ELSE g.stored_before END, \
+                 events_recovered = g.events_recovered + $6 \
              WHERE g.id = $1",
         )
         .bind(gap_id)
@@ -478,6 +495,7 @@ impl Store {
         .bind(failure.retry_after.as_secs_f64())
         .bind(failure.parked)
         .bind(failure.clear_token)
+        .bind(recovered)
         .execute(&self.pool)
         .await?;
         Ok(())

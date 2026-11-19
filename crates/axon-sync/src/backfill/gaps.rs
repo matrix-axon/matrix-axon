@@ -452,8 +452,8 @@ impl GapWatcher {
     }
 }
 
-/// The event ids of a sync batch, in its order (oldest first).
-fn event_ids(events: &[TimelineEvent]) -> Vec<String> {
+/// The event ids of a sync batch, in its order (oldest first), or of a page.
+pub(super) fn event_ids(events: &[TimelineEvent]) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| event.event_id().map(ToString::to_string))
@@ -544,6 +544,10 @@ enum GapPage {
     /// was written or the row updated. Recorded against the row, so it backs
     /// off rather than being fetched again every sweep.
     Failed(PageFailure),
+    /// Written, but some events could not be stored ([`PageFailure::StoreWrite`]):
+    /// recorded as a failure, with the `inserted` events that were stored, which
+    /// the retry will find already stored.
+    Unstored { inserted: i64 },
     /// Cancelled. Nothing is recorded against the row.
     Abandoned,
 }
@@ -612,7 +616,11 @@ impl Filler<'_> {
                             _ = tokio::time::sleep(self.params.throttle) => {}
                         }
                     }
-                    GapPage::Failed(failure) => self.record_failure(&gap, failure).await,
+                    GapPage::Failed(failure) => self.record_failure(&gap, failure, 0).await,
+                    GapPage::Unstored { inserted } => {
+                        self.record_failure(&gap, PageFailure::StoreWrite, inserted)
+                            .await;
+                    }
                     GapPage::Abandoned => {}
                 }
             }
@@ -642,12 +650,19 @@ impl Filler<'_> {
                 false
             }
             Ok(GapCheck::Expired { from_token }) => {
+                // The store queued the room's verification walk in the same
+                // statement (#1170); with verification off, the hole is lost.
+                let message = if self.params.verify_enabled {
+                    "no event of the limited batch was stored within 10 minutes; dropped the row unpaged and queued the room's history verification to find the hole"
+                } else {
+                    "no event of the limited batch was stored within 10 minutes; dropped the row unpaged, and history verification is off, so the hole will not be filled"
+                };
                 tracing::warn!(
                     account_id = %account_id,
                     room_id = %gap.room_id,
                     gap_id = gap.id,
                     from_token = from_token.as_deref().unwrap_or("<none: live end>"),
-                    "no event of the limited batch was stored within 10 minutes; dropped the row unpaged"
+                    "{message}"
                 );
                 false
             }
@@ -722,10 +737,11 @@ impl Filler<'_> {
         );
         // An event the store refused is still missing: neither advance nor
         // close the row, so the page is fetched again after a backoff. Its
-        // other events are no-ops then, and do not move the boundary.
+        // other events are no-ops then, and do not move the boundary, so
+        // they are counted now.
         if failed > 0 {
             tracing::warn!(account_id = %account_id, room_id = %gap.room_id, gap_id = gap.id, failed, "gap fill: events on the page could not be stored; keeping the row's token to fetch it again");
-            return GapPage::Failed(PageFailure::StoreWrite);
+            return GapPage::Unstored { inserted };
         }
 
         let end = match end {
@@ -793,7 +809,7 @@ impl Filler<'_> {
     /// Back a failing row off, park it, or restart it from the live end
     /// (ADR 0121, ADR 0140 decision 2). A row whose token was already rejected
     /// once is parked by a second rejection, as a backfill cursor is.
-    async fn record_failure(&self, gap: &TimelineGap, failure: PageFailure) {
+    async fn record_failure(&self, gap: &TimelineGap, failure: PageFailure, recovered: i64) {
         let account_id = self.ctx.account_id;
         let prior = gap.consecutive_failures;
         let prior_rejections = i32::from(gap.origin == GapOrigin::TokenRejected);
@@ -812,7 +828,7 @@ impl Filler<'_> {
         if let Err(err) = self
             .ctx
             .store
-            .record_timeline_gap_failure(gap.id, record)
+            .record_timeline_gap_failure(gap.id, record, recovered)
             .await
         {
             tracing::warn!(account_id = %account_id, room_id = %gap.room_id, gap_id = gap.id, error = %err, "gap fill: record failure failed");
@@ -821,4 +837,4 @@ impl Filler<'_> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

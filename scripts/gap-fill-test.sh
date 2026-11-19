@@ -25,6 +25,18 @@
 # Without the gap filler the burst's older events are never fetched, and step 4
 # times out.
 #
+# Two more runs cover the one-time verification pass (ADR 0140 decision 4),
+# which repairs holes that have no gap row:
+#
+#   * history-lost: axon stores every message live, then loses most of them
+#     (deleted from its database while it is down, as holes from before ADR
+#     0140 have no record). The management API queues the room's verification,
+#     and the walk must store every message again.
+#   * upgrade (only with AXON_OLD_BIN): a build from before ADR 0140 leaves a
+#     real limited-sync hole with no record of it. The build under test then
+#     starts on the same database and SDK store; its migration queues the room,
+#     and the pass must fill the hole with nothing else asked of it.
+#
 # Configuration via env vars (all have defaults):
 #
 #   POSTGRES_PORT   host port for the compose Postgres        (default 5432)
@@ -34,6 +46,8 @@
 #   KEEP_UP=1       leave containers and databases up at the end
 #   AXON_BIN        test this prebuilt axon-server instead of building one
 #                   (a build without the fix must fail)
+#   AXON_OLD_BIN    an axon-server built from before ADR 0140, for the upgrade
+#                   run; without it that run is skipped
 #
 set -euo pipefail
 
@@ -218,8 +232,144 @@ run_case() {
     stop_axon
 }
 
+# --- the verification pass (ADR 0140 decision 4) -----------------------------
+
+# verify_setup <name> — a fresh user, database and room with a few messages.
+verify_setup() {
+    local name="$1" suffix
+    suffix="$(date +%s)-$$-${name}"
+    local localpart="gapfill-${suffix}"
+    USER_ID="@${localpart}:localhost"
+    PASSWORD="pass-${suffix}"
+    ITEST_DB="axon_gapfill_${name//-/_}"
+    DATABASE_URL="postgres://axon:axon@127.0.0.1:${POSTGRES_PORT}/${ITEST_DB}"
+    RUN_DIR="${RUN_ROOT}/${name}"
+    AXON_EXTRA_ENV=("AXON_SYNC__BACKFILL_ENABLED=false")
+    mkdir -p "$RUN_DIR"
+    DATABASES+=("$ITEST_DB")
+
+    log "${name}: user, room and a few messages"
+    recreate_db "$ITEST_DB"
+    register_user "$localpart" "$PASSWORD" || die "user registration failed"
+    HS_TOKEN="$(curl -fsS -XPOST "${HS_URL}/_matrix/client/v3/login" -H 'Content-Type: application/json' \
+        -d "$(python3 -c "import json,sys; print(json.dumps({'type':'m.login.password','identifier':{'type':'m.id.user','user':sys.argv[1]},'password':sys.argv[2],'device_id':'GAPFILLSEED'}))" "$localpart" "$PASSWORD")" \
+        | json_field access_token)"
+    ROOM_ID="$(hs POST /_matrix/client/v3/createRoom '{"preset":"private_chat","name":"history verify"}' | json_field room_id)"
+    SENT_IDS=()
+    send_messages "$INITIAL" initial
+    info "room ${ROOM_ID}"
+}
+
+# verify_login — start axon and log the user in; sets TOKEN and ACCOUNT_ID.
+verify_login() {
+    run_axon
+    wait_for_axon_http
+    TOKEN="$(issue_bearer_token)"
+    [ -n "$TOKEN" ] || die "could not issue a bearer token"
+    ACCOUNT_ID="$(login_axon "$TOKEN" "$USER_ID" "$PASSWORD")"
+    [ -n "$ACCOUNT_ID" ] || die "login did not return an account_id"
+    info "account ${ACCOUNT_ID}"
+}
+
+stored_count() {
+    local ids
+    ids="$(printf "'%s'," "${SENT_IDS[@]}")"
+    psql_q "SELECT count(*) FROM events WHERE room_id = '${ROOM_ID}' AND event_id IN (${ids%,})"
+}
+
+# verify_finished <name> — wait for the room's walk to close at its first
+# stored event with every message stored, and check what it reported.
+verify_finished() {
+    local name="$1" recovered
+    wait_until "every message stored" -eq "${#SENT_IDS[@]}" stored_count
+    walk_done() {
+        psql_q "SELECT count(*) FROM room_history_verify
+                WHERE room_id = '${ROOM_ID}' AND complete AND stop_reason = 'first_stored_event'"
+    }
+    wait_until "the room's walk closed at its first stored event" -eq 1 walk_done
+    grep -q "history verify: stored history that was missing from the room" "${RUN_DIR}/axon.log" \
+        || die "${name}: axon never logged the history the walk recovered"
+    recovered="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" "${AXON_BASE_URL}/v1/status" \
+        | python3 -c "import sys,json; v=json.load(sys.stdin)['data']['history_verify']; print(v['events_recovered'] if v['available'] and v['rooms_pending'] == 0 else -1)")"
+    [ "$recovered" -gt 0 ] || die "${name}: GET /v1/status did not report recovered events (got ${recovered})"
+    info "GET /v1/status: history_verify.events_recovered=${recovered}"
+}
+
+# History axon once stored is lost while it is down; the management API
+# queues the room's walk, which stores it again.
+run_history_lost_case() {
+    local name="history-lost" lost
+    verify_setup "$name"
+    log "${name}: axon stores every message live"
+    verify_login
+    send_messages 30 live
+    wait_until "every message stored" -eq "${#SENT_IDS[@]}" stored_count
+    stop_axon
+
+    # The 25 oldest live messages: newer than the room's first stored events,
+    # so only a walk from the live end reaches them.
+    lost="$(printf "'%s'," "${SENT_IDS[@]:INITIAL:25}")"
+    psql_q "WITH d AS (DELETE FROM events WHERE event_id IN (${lost%,}) RETURNING 1)
+            SELECT count(*) FROM d" >/dev/null
+    [ "$(stored_count)" -eq $(( ${#SENT_IDS[@]} - 25 )) ] || die "${name}: the history was not lost"
+
+    log "${name}: axon restarts, and the management API queues the room's walk"
+    run_axon
+    wait_for_axon_http
+    local queued
+    queued="$(curl -fsS -XPOST "${AXON_BASE_URL}/v1/management/accounts/${ACCOUNT_ID}/history-verify" \
+        -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+        -d "$(python3 -c "import json,sys; print(json.dumps({'room_id': sys.argv[1]}))" "$ROOM_ID")" \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['rooms_queued'])")"
+    [ "$queued" -eq 1 ] || die "${name}: the management API queued ${queued} rooms"
+    verify_finished "$name"
+    stop_axon
+}
+
+# A build from before ADR 0140 leaves a limited-sync hole with no row. The
+# build under test starts on the same database and SDK store; its migration
+# queues the room, and the pass fills the hole unasked.
+run_upgrade_case() {
+    local name="upgrade" new_bin="$AXON_BIN"
+    verify_setup "$name"
+    AXON_BIN="$AXON_OLD_BIN"
+    log "${name}: the old build syncs the room"
+    verify_login
+    wait_until "initial messages stored" -eq "${#SENT_IDS[@]}" stored_count
+    stop_axon
+
+    log "${name}: ${BURST} messages while axon is down; the old build restarts"
+    send_messages "$BURST" burst
+    run_axon
+    wait_for_axon_http
+    newest_stored() {
+        psql_q "SELECT count(*) FROM events WHERE event_id = '${SENT_IDS[${#SENT_IDS[@]}-1]}'"
+    }
+    wait_until "the limited batch stored" -eq 1 newest_stored
+    sleep 3
+    stop_axon
+    [ "$(stored_count)" -lt "${#SENT_IDS[@]}" ] \
+        || die "${name}: the old build stored every message, so there is no hole to repair"
+    info "the old build stored $(stored_count) of ${#SENT_IDS[@]} messages"
+
+    AXON_BIN="$new_bin"
+    log "${name}: the build under test starts on the same database"
+    run_axon
+    wait_for_axon_http
+    verify_finished "$name"
+    stop_axon
+}
+
 run_case true
 run_case false
 run_case false restart-while-locked
+run_history_lost_case
+if [ -n "${AXON_OLD_BIN:-}" ]; then
+    [ -x "$AXON_OLD_BIN" ] || die "old axon binary not found at $AXON_OLD_BIN"
+    info "upgrading from $("$AXON_OLD_BIN" --version)"
+    run_upgrade_case
+else
+    info "AXON_OLD_BIN unset; skipping the upgrade run"
+fi
 
-log "PASS — every message of a ${BURST}-message burst was stored: backfill on, off, and across a restart while the hole's insert was blocked"
+log "PASS — every message of a ${BURST}-message burst was stored: backfill on, off, and across a restart while the hole's insert was blocked; lost history was restored by the verification pass"

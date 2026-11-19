@@ -13,6 +13,7 @@ mod display_names;
 mod error;
 mod event_visibility;
 mod events;
+mod history_verify;
 mod image_packs;
 mod inline_media;
 mod instance_preferences;
@@ -50,6 +51,10 @@ pub use error::StoreError;
 pub use events::{
     AppliedEdit, EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd,
     ReactionTally, ThreadSummary, TimelineCursor, TimelineRow, UpsertedEvent, UtdReasonUpdate,
+};
+pub use history_verify::{
+    HistoryVerifyCounts, HistoryVerifyRow, VerifyPageLookup, VerifyStop, VerifyStops, VerifyTotals,
+    WalkGuard, WalkProgress, WalkStart, EMPTY_RUN, FLOOR_RUN, WALK_TIMEOUTS,
 };
 pub use image_packs::{ImagePackRow, ImagePackSnapshot};
 pub use instance_preferences::InstancePreference;

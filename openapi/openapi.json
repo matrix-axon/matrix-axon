@@ -8546,6 +8546,98 @@
         }
       }
     },
+    "/v1/management/accounts/{account_id}/history-verify": {
+      "post": {
+        "tags": [
+          "management"
+        ],
+        "summary": "Verify stored history again",
+        "description": "Queue the pass that re-reads stored room history against the homeserver\nand stores what is missing (ADR 0140), for one room or for every room of\nthe account with stored history.\n\nThe pass runs once on its own after an upgrade. This repeats it, for an\noperator who suspects history was lost since. Each queued room is walked\nagain from its live end, in the background, alongside history backfill;\n`history_verify` in `GET /v1/status` shows its progress. Only rooms the\naccount is in are walked.",
+        "operationId": "requeue_history_verify",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequeueHistoryVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The rooms were queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RequeuedHistoryVerifyDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The management API is disabled (`management_disabled`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is over 4 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/management/oauth/binds": {
       "post": {
         "tags": [
@@ -10446,7 +10538,7 @@
           "status"
         ],
         "summary": "Get backfill status",
-        "description": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; the holes limited syncs left in\nstored history and their filling (ADR 0140); per-account sync-service status;\neach homeserver's load gate for background requests (ADR 0122);\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
+        "description": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; the holes limited syncs left in\nstored history and their filling, and the one-time pass that verifies\nstored history (ADR 0140); per-account sync-service status;\neach homeserver's load gate for background requests (ADR 0122);\nthe running build's identity; whether the management API is served; and\nwhich push providers loaded a key.",
         "operationId": "get_status",
         "responses": {
           "200": {
@@ -11849,6 +11941,30 @@
           }
         }
       },
+      "ApiResponse_RequeuedHistoryVerifyDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The result of `POST /v1/management/accounts/{account_id}/history-verify`.",
+            "required": [
+              "rooms_queued"
+            ],
+            "properties": {
+              "rooms_queued": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Rooms queued. A room with no stored history is not, so `0` for a named\nroom means Axon holds nothing of it to verify.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_RoomDiscoveryDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -12326,6 +12442,7 @@
             "required": [
               "backfill",
               "history_gaps",
+              "history_verify",
               "build",
               "sync",
               "homeservers",
@@ -12344,6 +12461,10 @@
               "history_gaps": {
                 "$ref": "#/components/schemas/HistoryGapsStatusDto",
                 "description": "Holes that limited syncs left in stored room history, and their filling\n(ADR 0140)."
+              },
+              "history_verify": {
+                "$ref": "#/components/schemas/HistoryVerifyStatusDto",
+                "description": "The one-time pass that re-reads each room's stored history to repair\nholes from before they were recorded (ADR 0140 decision 4)."
               },
               "homeservers": {
                 "type": "array",
@@ -15468,6 +15589,61 @@
           }
         }
       },
+      "HistoryVerifyStatusDto": {
+        "type": "object",
+        "description": "The one-time pass that re-reads each joined room's stored history against\nthe homeserver and stores what is missing, across every account (ADR 0140\ndecision 4). It runs on its own after an upgrade; `rooms_pending` reaching\nzero means it is done. Rooms that keep failing are parked and retried about\nonce a day, so `rooms_pending` equal to `rooms_parked` means it is done but\nfor those.",
+        "required": [
+          "rooms_pending",
+          "rooms_held",
+          "rooms_parked",
+          "rooms_timed_out",
+          "rooms_not_joined",
+          "rooms_complete",
+          "events_recovered",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "False when the counts could not be read; they are then zero."
+          },
+          "events_recovered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events the pass found missing and stored. Non-zero is evidence that\nhistory was lost before this server recorded holes."
+          },
+          "rooms_complete": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rooms whose history has been verified."
+          },
+          "rooms_held": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, rooms waiting for a hole in their newest history to be\nfilled first."
+          },
+          "rooms_not_joined": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rooms with stored history that the account is not in. They are\nverified if the account rejoins them."
+          },
+          "rooms_parked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, rooms parked after repeated failures (ADR 0121): retried\nonly about once a day."
+          },
+          "rooms_pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Joined rooms whose history has not been verified yet."
+          },
+          "rooms_timed_out": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of the complete rooms, those whose walk was closed after repeated\ntimeouts, without reaching its end. The homeserver was most likely\nfetching their history over federation. The management action queues\nthem again."
+          }
+        }
+      },
       "HomeserverBreakerDto": {
         "type": "string",
         "description": "A homeserver gate's circuit breaker on the wire (ADR 0122).",
@@ -17147,6 +17323,35 @@
           "running"
         ]
       },
+      "RequeueHistoryVerifyRequest": {
+        "type": "object",
+        "description": "Body of `POST /v1/management/accounts/{account_id}/history-verify`.",
+        "properties": {
+          "room_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The one room to verify again. Omitted, every room of the account with\nstored history is queued."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RequeuedHistoryVerifyDto": {
+        "type": "object",
+        "description": "The result of `POST /v1/management/accounts/{account_id}/history-verify`.",
+        "required": [
+          "rooms_queued"
+        ],
+        "properties": {
+          "rooms_queued": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rooms queued. A room with no stored history is not, so `0` for a named\nroom means Axon holds nothing of it to verify.",
+            "minimum": 0
+          }
+        }
+      },
       "RoomDiscoveryDto": {
         "type": "object",
         "description": "What Axon knows about one unjoined room from the account's homeserver, and\nwhere its room-summary refresh stands (ADR 0128 decision 5).",
@@ -18373,6 +18578,7 @@
         "required": [
           "backfill",
           "history_gaps",
+          "history_verify",
           "build",
           "sync",
           "homeservers",
@@ -18391,6 +18597,10 @@
           "history_gaps": {
             "$ref": "#/components/schemas/HistoryGapsStatusDto",
             "description": "Holes that limited syncs left in stored room history, and their filling\n(ADR 0140)."
+          },
+          "history_verify": {
+            "$ref": "#/components/schemas/HistoryVerifyStatusDto",
+            "description": "The one-time pass that re-reads each room's stored history to repair\nholes from before they were recorded (ADR 0140 decision 4)."
           },
           "homeservers": {
             "type": "array",

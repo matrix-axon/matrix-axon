@@ -91,10 +91,22 @@ A third run, with backfill off, restarts axon while a transaction holds a lock o
 It sends one more message meanwhile, stops axon, and starts it again once the lock is gone.
 The hole must still be filled, which needs its row committed before the SDK saves its sync position past the limited response.
 
+Two more runs cover the one-time verification pass (ADR 0140 decision 4), which repairs holes that have no gap row:
+
+- **History lost.** axon stores 30 messages live and stops, and 25 of them are deleted from its database, as holes from before ADR 0140 have no record.
+  After a restart, `POST /v1/management/accounts/{account_id}/history-verify` queues the room.
+  The walk must store every message again, close at the room's first stored event, log the recovered history, and report it in `history_verify` on `GET /v1/status`.
+- **Upgrade**, only when `AXON_OLD_BIN` names an `axon-server` built from before ADR 0140.
+  That build leaves a real limited-sync hole with no row.
+  The build under test then starts on the same database and SDK store, and its migration queues the room.
+  The pass must fill the hole with nothing else asked of it.
+
 ```sh
 scripts/gap-fill-test.sh
 # Ports taken locally (a dev Synapse on 8008, say):
 POSTGRES_PORT=55432 SYNAPSE_PORT=18008 scripts/gap-fill-test.sh
+# With the upgrade run, from a build of a commit before ADR 0140:
+AXON_OLD_BIN=/path/to/old/axon-server scripts/gap-fill-test.sh
 ```
 
 It takes the same `POSTGRES_PORT`, `SYNAPSE_PORT`, `TIMEOUT` and `KEEP_UP` knobs as the re-decryption script, plus `BURST`, which must exceed 20.

@@ -1,0 +1,752 @@
+//! The ADR 0140 delivery step 2 tests. The floor rule is unit-tested; the
+//! rest store real sliding-sync responses from step 1's stand-in homeserver
+//! with no gap watcher, so their holes have no rows, as holes from before
+//! ADR 0140 have none, and walk them with the real verifier.
+//!
+//! The DB-gated tests require Postgres (`DATABASE_URL`) and are `#[ignore]`d
+//! by default.
+
+use std::time::Duration;
+
+use serde_json::json;
+use uuid::Uuid;
+
+use super::*;
+use crate::backfill::gaps::tests::{deliver, range, tokens, Harness, InjectedFailures};
+use crate::backfill::gaps::GapSignal;
+
+fn at(ts: i64) -> FloorEvent {
+    FloorEvent {
+        stored: false,
+        origin_ts: Some(ts),
+    }
+}
+
+#[test]
+fn the_floor_run_grows_only_on_pages_wholly_below_stored_history() {
+    let floor = Some(100);
+    assert_eq!(next_floor_run(0, &[at(10), at(99)], floor, 4), 2);
+    assert_eq!(next_floor_run(498, &[at(10), at(99)], floor, 4), 500);
+    // One event at or above the floor, or one already stored, resets it: the
+    // walk is still inside history Axon holds.
+    assert_eq!(next_floor_run(40, &[at(10), at(100)], floor, 4), 0);
+    let stored = FloorEvent {
+        stored: true,
+        origin_ts: Some(10),
+    };
+    assert_eq!(next_floor_run(40, &[at(10), stored], floor, 4), 0);
+    // An event without a timestamp cannot be placed, so it resets too.
+    let undated = FloorEvent {
+        stored: false,
+        origin_ts: None,
+    };
+    assert_eq!(next_floor_run(40, &[undated], floor, 4), 0);
+    // An empty page says nothing about where the walk is: it extends a run
+    // already under way, but cannot start one (review finding), so empty pages
+    // alone never close a walk at the floor. A room with no floor never
+    // accumulates a run.
+    assert_eq!(next_floor_run(40, &[], floor, 4), 44);
+    assert_eq!(next_floor_run(0, &[], floor, 4), 0);
+    assert_eq!(next_floor_run(40, &[at(10)], None, 4), 0);
+}
+
+fn params(h: &Harness) -> BackfillParams {
+    let mut params = h.params(false);
+    params.verify_enabled = true;
+    params
+}
+
+/// Queue the room's walk, as the migration's seed does for every room with
+/// stored events.
+async fn queue(h: &Harness, tag: &str) {
+    assert_eq!(
+        h.store
+            .requeue_history_verify(h.account_id, Some(h.room(tag)))
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+/// Walk every walkable room to its end, as the backfill task's verification
+/// pages would.
+async fn walk_with(h: &Harness, params: &BackfillParams) -> Vec<VerifyStep> {
+    let mut verifier = Verifier::new(&h.client, &h.ctx, params, &h.health, &h.gate, &h.cancel)
+        .with_room_list_settle(Duration::ZERO);
+    verifier.refresh().await;
+    let mut steps = Vec::new();
+    loop {
+        let step = verifier.step().await;
+        steps.push(step);
+        if matches!(step, VerifyStep::Idle | VerifyStep::Abandoned) {
+            return steps;
+        }
+        assert!(steps.len() < 2_000, "the walk never closed");
+    }
+}
+
+async fn walk(h: &Harness) -> Vec<VerifyStep> {
+    walk_with(h, &params(h)).await
+}
+
+/// The row's `complete`, `stop_reason` and `events_recovered`.
+async fn outcome(h: &Harness, tag: &str) -> (bool, Option<String>, i64) {
+    sqlx_core::query_as::query_as(
+        "SELECT complete, stop_reason, events_recovered FROM room_history_verify \
+         WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(h.account_id)
+    .bind(h.room(tag))
+    .fetch_one(h.store.pool())
+    .await
+    .unwrap()
+}
+
+fn closed(reason: &str, recovered: i64) -> (bool, Option<String>, i64) {
+    (true, Some(reason.to_owned()), recovered)
+}
+
+/// Remove the event at upstream position `at`, as a homeserver that purged
+/// it or filters it no longer serves it.
+fn withhold(h: &Harness, tag: &str, at: usize) {
+    let room_id = h.room(tag).to_owned();
+    h.upstream
+        .lock()
+        .unwrap()
+        .rooms
+        .get_mut(&room_id)
+        .unwrap()
+        .remove(at);
+}
+
+/// Add `n` events dated `origin_ts`, as an import's events carry timestamps
+/// from long before the room's first stored event.
+fn append_dated(h: &Harness, tag: &str, n: usize, origin_ts: u64) {
+    let room_id = h.room(tag).to_owned();
+    let mut up = h.upstream.lock().unwrap();
+    let events = up.rooms.get_mut(&room_id).unwrap();
+    let start = events.len();
+    for i in start..start + n {
+        events.push(json!({
+            "type": "m.room.message",
+            "sender": h.user,
+            "event_id": Harness::event_id(tag, i),
+            "origin_server_ts": origin_ts,
+            "content": {"msgtype": "m.text", "body": format!("{tag} imported {i}")},
+        }));
+    }
+}
+
+/// Holes that limited syncs left before ADR 0140 recorded them have no gap
+/// row. The walk reads the room from its live end, fills both, and closes on
+/// the page holding the room's first stored event, without walking on into
+/// older history.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_walk_fills_holes_that_have_no_rows_and_stops_at_the_first_stored_event() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 25, 30).limited()]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 45, 50).limited()]).await;
+    assert!(h.gaps().await.is_empty(), "no watcher, so no gap rows");
+    assert_eq!(
+        h.stored("a").await,
+        &(&range(5, 10) | &range(25, 30)) | &range(45, 50)
+    );
+
+    queue(&h, "a").await;
+    walk(&h).await;
+    // The page [2, 6) holds event 5, the room's first stored event; it is
+    // written in full.
+    assert_eq!(h.stored("a").await, range(2, 50), "both holes filled");
+    assert_eq!(
+        h.take_requests("a"),
+        [
+            vec![None],
+            tokens(&[46, 42, 38, 34, 30, 26, 22, 18, 14, 10, 6])
+        ]
+        .concat()
+    );
+    assert_eq!(outcome(&h, "a").await, closed("first_stored_event", 33));
+
+    // Done once: a walk that has closed is not walked again.
+    assert_eq!(walk(&h).await, [VerifyStep::Idle]);
+    assert!(h.take_requests("a").is_empty());
+    h.finish().await;
+}
+
+/// The amendment's import-room finding: when the room's first window was
+/// shorter than `timeline_limit`, its lowest-id events include the next
+/// response's batch. A walk that stopped on any of them would close on its
+/// first page, above the hole; it stops on the single lowest-id event.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_short_first_window_does_not_stop_the_walk_above_a_hole() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 9, 10)]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 25, 30).limited()]).await;
+
+    queue(&h, "a").await;
+    walk(&h).await;
+    assert_eq!(outcome(&h, "a").await, closed("first_stored_event", 18));
+    // The closing page [6, 10) holds event 9.
+    assert_eq!(h.stored("a").await, range(6, 30), "the hole filled");
+    h.finish().await;
+}
+
+/// The amendment's `#matrix:matrix.org` case: the homeserver no longer serves
+/// the room's first stored event. Without the floor the walk would read the
+/// whole room to its start; it closes after 500 unstored events older than
+/// the room's first events instead.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_first_stored_event_the_homeserver_no_longer_serves_stops_at_the_floor() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 620);
+    h.sync(&[deliver("a", 615, 620)]).await;
+    withhold(&h, "a", 615);
+
+    queue(&h, "a").await;
+    walk(&h).await;
+    let (complete, reason, _) = outcome(&h, "a").await;
+    assert_eq!((complete, reason.as_deref()), (true, Some("floor")));
+    // 125 pages of 4 below the stored events, then closed: nothing near the
+    // room's start was requested.
+    assert_eq!(
+        h.stored("a").await,
+        range(115, 620),
+        "500 events past the stored ones, no more"
+    );
+    assert_eq!(h.take_requests("a").len(), 1 + 125);
+    h.finish().await;
+}
+
+/// A room whose history ends before the floor run does walks to its start,
+/// which is logged at `WARN`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_walk_that_never_meets_its_stop_ends_at_the_room_start() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 30);
+    h.sync(&[deliver("a", 25, 30)]).await;
+    withhold(&h, "a", 25);
+
+    queue(&h, "a").await;
+    walk(&h).await;
+    assert_eq!(outcome(&h, "a").await, closed("room_start", 25));
+    assert_eq!(h.stored("a").await, range(0, 30));
+    h.finish().await;
+}
+
+/// The 2026-10-18 import's shape: 600 events dated years before the room's
+/// first stored event, of which live sync stored the newest 5 of every 15.
+/// Every page of the import is older than the floor, more than 500 in a row,
+/// but the stored runs among them keep resetting the floor run, so the walk
+/// goes on through every hole to the first stored event.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn old_dated_events_among_stored_ones_do_not_stop_the_walk() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    for block in 0..40 {
+        let start = 10 + block * 15;
+        append_dated(&h, "a", 15, 1_000);
+        h.sync(&[deliver("a", start + 10, start + 15).limited()])
+            .await;
+    }
+    assert_eq!(h.stored("a").await.len(), 5 + 200);
+
+    queue(&h, "a").await;
+    walk(&h).await;
+    // The walk's pages end at 610, 606, ..., so the closing page is [2, 6).
+    assert_eq!(outcome(&h, "a").await, closed("first_stored_event", 403));
+    assert_eq!(h.stored("a").await, range(2, 610), "every hole filled");
+    h.finish().await;
+}
+
+/// A room with an open gap row waits for it, since the row is filling the
+/// same newest history; other rooms are walked meanwhile. Once the row
+/// closes, the room is walked too.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_room_with_an_open_gap_row_waits_for_it() {
+    let mut h = Harness::new(&["a", "b"]).await;
+    let mut watcher = h.watcher().await;
+    h.append("a", 10);
+    h.append("b", 10);
+    let first = h.sync(&[deliver("a", 5, 10), deliver("b", 5, 10)]).await;
+    watcher.observe(&first).await;
+    h.append("a", 20);
+    let limited = h.sync(&[deliver("a", 25, 30).limited()]).await;
+    watcher.observe(&limited).await;
+    assert_eq!(h.gaps().await.len(), 1);
+
+    queue(&h, "a").await;
+    queue(&h, "b").await;
+    walk(&h).await;
+    assert!(h.take_requests("a").is_empty(), "held by its gap row");
+    assert!(outcome(&h, "b").await.0, "the other room was walked");
+    assert!(!outcome(&h, "a").await.0);
+
+    h.fill().await;
+    assert!(h.gaps().await.is_empty());
+    walk(&h).await;
+    assert!(outcome(&h, "a").await.0);
+    assert_eq!(h.stored("a").await, range(2, 30));
+    h.finish().await;
+}
+
+/// A rejected token sends the walk back to the live end with its stop
+/// points, as for a backfill cursor (ADR 0121); the walk then completes.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_rejected_token_restarts_the_walk_from_the_live_end() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 25, 30).limited()]).await;
+    queue(&h, "a").await;
+
+    let params = params(&h);
+    let mut verifier = Verifier::new(&h.client, &h.ctx, &params, &h.health, &h.gate, &h.cancel);
+    verifier.refresh().await;
+    assert_eq!(verifier.step().await, VerifyStep::Paged);
+    h.upstream.lock().unwrap().rejected.insert("s26".to_owned());
+    assert_eq!(verifier.step().await, VerifyStep::Failed);
+    h.upstream.lock().unwrap().rejected.clear();
+
+    walk(&h).await;
+    let requests = h.take_requests("a");
+    assert_eq!(
+        requests[..4],
+        [None, Some("s26".to_owned()), None, Some("s26".to_owned())]
+    );
+    assert!(outcome(&h, "a").await.0);
+    assert_eq!(h.stored("a").await, range(2, 30));
+    h.finish().await;
+}
+
+/// Only joined rooms are walked. A row in a room the account is not in waits,
+/// and is marked for status; with the switch off nothing is walked at all.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn rooms_not_joined_wait_and_the_switch_turns_the_pass_off() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    queue(&h, "a").await;
+    let departed = format!("!departed-{}:localhost", Uuid::new_v4());
+    sqlx_core::query::query(
+        "INSERT INTO room_history_verify (account_id, room_id) VALUES ($1, $2)",
+    )
+    .bind(h.account_id)
+    .bind(&departed)
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+
+    let mut off = params(&h);
+    off.verify_enabled = false;
+    assert_eq!(walk_with(&h, &off).await, [VerifyStep::Idle]);
+    assert!(h.take_requests("a").is_empty(), "the switch is off");
+
+    walk(&h).await;
+    assert!(outcome(&h, "a").await.0);
+    let rows = h.store.list_history_verify(h.account_id).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].room_id, departed);
+    assert!(rows[0].not_joined, "recorded for status");
+    h.finish().await;
+}
+
+/// The backfill task runs the pass beside ordinary backfill, so neither
+/// starves the other: room `a`'s backfill is already complete and only the
+/// walk can fill its hole, while room `b` has no cursor yet and only ordinary
+/// backfill pages it to its start. Both finish.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn the_backfill_task_runs_the_pass_beside_ordinary_backfill() {
+    let mut h = Harness::new(&["a", "b"]).await;
+    h.append("a", 10);
+    h.append("b", 10);
+    h.sync(&[deliver("a", 5, 10), deliver("b", 5, 10)]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 25, 30).limited()]).await;
+    h.store
+        .save_room_backfill(
+            h.account_id,
+            h.room("a"),
+            None,
+            true,
+            0,
+            axon_store::PageSpeed::Fast,
+        )
+        .await
+        .unwrap();
+    queue(&h, "a").await;
+
+    let mut params = params(&h);
+    params.enabled = true;
+    let cancel = h.cancel.child_token();
+    let task = tokio::spawn(crate::backfill::run(
+        h.client.clone(),
+        h.ctx.clone(),
+        params,
+        h.health.clone(),
+        Arc::clone(&h.gate),
+        Arc::new(GapSignal::default()),
+        cancel.clone(),
+    ));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let verified = outcome(&h, "a").await.0;
+        let backfilled = h
+            .store
+            .get_room_backfill(h.account_id, h.room("b"))
+            .await
+            .unwrap()
+            .is_some_and(|state| state.complete);
+        if verified && backfilled {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "verified {verified}, backfilled {backfilled}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cancel.cancel();
+    task.await.unwrap();
+    assert_eq!(
+        h.stored("a").await,
+        range(2, 30),
+        "the walk filled the hole"
+    );
+    assert_eq!(
+        h.stored("b").await,
+        range(0, 10),
+        "backfill reached the start"
+    );
+    h.finish().await;
+}
+
+/// A verifier on its own, for tests that step it by hand.
+fn verifier<'a>(h: &'a Harness, params: &'a BackfillParams) -> Verifier<'a> {
+    Verifier::new(&h.client, &h.ctx, params, &h.health, &h.gate, &h.cancel)
+        .with_room_list_settle(Duration::ZERO)
+}
+
+/// Review finding: a walk restarted while the backfill task holds it in
+/// memory (here by the management action) stops before its next page, and
+/// its deep token is not written back. The restarted walk starts from the
+/// live end.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_walk_restarted_in_flight_is_dropped_and_walked_again_from_the_live_end() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 25, 30).limited()]).await;
+    queue(&h, "a").await;
+
+    let params = params(&h);
+    let mut walking = verifier(&h, &params);
+    walking.refresh().await;
+    assert_eq!(walking.step().await, VerifyStep::Paged);
+    queue(&h, "a").await;
+    assert_eq!(walking.step().await, VerifyStep::Idle, "dropped, not paged");
+    assert_eq!(h.take_requests("a"), [None]);
+    let rows = h.store.list_history_verify(h.account_id).await.unwrap();
+    assert_eq!(
+        rows[0].from_token, None,
+        "the deep token was not written back"
+    );
+
+    walk(&h).await;
+    let requests = h.take_requests("a");
+    assert_eq!(requests[0], None, "from the live end again");
+    assert!(outcome(&h, "a").await.0);
+    assert_eq!(h.stored("a").await, range(2, 30));
+    h.finish().await;
+}
+
+/// Review finding: a gap row opened after the rows were listed holds the walk
+/// at its next page, not at the next sweep.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_gap_row_opened_mid_walk_holds_it_at_once() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    h.append("a", 20);
+    h.sync(&[deliver("a", 25, 30).limited()]).await;
+    queue(&h, "a").await;
+
+    let params = params(&h);
+    let mut walking = verifier(&h, &params);
+    walking.refresh().await;
+    assert_eq!(walking.step().await, VerifyStep::Paged);
+    h.store
+        .record_limited_gap(h.account_id, h.room("a"), None, &[])
+        .await
+        .unwrap();
+    assert_eq!(walking.step().await, VerifyStep::Idle, "held");
+    assert_eq!(h.take_requests("a"), [None]);
+    assert!(!outcome(&h, "a").await.0);
+    h.finish().await;
+}
+
+/// Review finding: a row whose stop list was saved empty (a crash between
+/// reading the stop points and closing a room with none, in the first build)
+/// is started again, not walked to the room's start with no stop.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_empty_stop_list_is_started_again() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 30);
+    h.sync(&[deliver("a", 25, 30)]).await;
+    queue(&h, "a").await;
+    sqlx_core::query::query(
+        "UPDATE room_history_verify SET stop_event_ids = '{}', from_token = 's9' \
+         WHERE account_id = $1",
+    )
+    .bind(h.account_id)
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+
+    walk(&h).await;
+    assert_eq!(outcome(&h, "a").await, closed("first_stored_event", 3));
+    assert_eq!(h.take_requests("a"), vec![None, Some("s26".to_owned())]);
+    h.finish().await;
+}
+
+/// Review finding: empty pages cannot close a walk as if it had passed below
+/// stored history. Ten in a row back the room off with its token saved, so a
+/// homeserver that keeps sending them parks the room.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn empty_pages_back_the_walk_off_instead_of_closing_it() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 100);
+    h.sync(&[deliver("a", 95, 100)]).await;
+    queue(&h, "a").await;
+    h.upstream.lock().unwrap().empty_pages = true;
+
+    let params = params(&h);
+    let mut walking = verifier(&h, &params);
+    walking.refresh().await;
+    let steps: Vec<VerifyStep> = {
+        let mut steps = Vec::new();
+        loop {
+            let step = walking.step().await;
+            steps.push(step);
+            if step != VerifyStep::Paged {
+                break steps;
+            }
+        }
+    };
+    assert_eq!(steps.len(), 10);
+    assert_eq!(steps[9], VerifyStep::Failed);
+    let (complete, reason, _) = outcome(&h, "a").await;
+    assert_eq!((complete, reason), (false, None), "not closed at the floor");
+    let row = &h.store.list_history_verify(h.account_id).await.unwrap()[0];
+    assert_eq!(row.consecutive_failures, 1);
+    assert_eq!(row.from_token.as_deref(), Some("s60"), "progress kept");
+    assert!(!row.retry_due, "backing off");
+    h.finish().await;
+}
+
+/// Review finding: the joined-room list is not trusted to say which rooms
+/// were left until it has settled, so a list the SDK is still loading does not
+/// mark rooms as left and make status report the pass done.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn rooms_are_not_marked_left_before_the_room_list_settles() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    let departed = format!("!departed-{}:localhost", Uuid::new_v4());
+    sqlx_core::query::query(
+        "INSERT INTO room_history_verify (account_id, room_id) VALUES ($1, $2)",
+    )
+    .bind(h.account_id)
+    .bind(&departed)
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+
+    let params = params(&h);
+    let mut fresh = Verifier::new(&h.client, &h.ctx, &params, &h.health, &h.gate, &h.cancel);
+    fresh.refresh().await;
+    let rows = h.store.list_history_verify(h.account_id).await.unwrap();
+    assert!(!rows[0].not_joined, "too soon to say the room was left");
+
+    verifier(&h, &params).refresh().await;
+    let rows = h.store.list_history_verify(h.account_id).await.unwrap();
+    assert!(rows[0].not_joined, "once the list has settled");
+    h.finish().await;
+}
+
+/// The production `#matrix:matrix.org` case (amended 2026-11-19): a homeserver
+/// that fetches a purged room's history over federation times out a page,
+/// answers the retry with the page it finished meanwhile, then times out on
+/// the next. The successful pages reset the consecutive failures, so the walk
+/// would never park. Timeouts are counted over the whole walk, and the third
+/// closes it as `timed_out`, with what it recovered kept.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn repeated_timeouts_close_the_walk_even_between_successful_pages() {
+    let mut h = Harness::new(&["a"]).await;
+    h.append("a", 10);
+    h.sync(&[deliver("a", 5, 10)]).await;
+    h.append("a", 40);
+    h.sync(&[deliver("a", 45, 50).limited()]).await;
+    queue(&h, "a").await;
+
+    let mut params = params(&h);
+    params.page_timeout = Duration::from_millis(300);
+    // One attempt per retry, as the backoff would allow: a fresh gate, since a
+    // timed-out page holds its slot, and the backoff cleared by hand.
+    let attempt = |hang: bool| {
+        let h = &h;
+        let params = &params;
+        async move {
+            h.upstream.lock().unwrap().hang = hang;
+            sqlx_core::query::query(
+                "UPDATE room_history_verify SET retry_at = NULL WHERE account_id = $1",
+            )
+            .bind(h.account_id)
+            .execute(h.store.pool())
+            .await
+            .unwrap();
+            let gate = crate::homeserver_gate::HomeserverGate::for_test();
+            let mut verifier =
+                Verifier::new(&h.client, &h.ctx, params, &h.health, &gate, &h.cancel)
+                    .with_room_list_settle(Duration::ZERO);
+            verifier.refresh().await;
+            verifier.step().await
+        }
+    };
+    for (hang, expected) in [
+        (true, VerifyStep::Failed),
+        (false, VerifyStep::Paged),
+        (true, VerifyStep::Failed),
+        (false, VerifyStep::Paged),
+    ] {
+        assert_eq!(attempt(hang).await, expected);
+    }
+    let row = &h.store.list_history_verify(h.account_id).await.unwrap()[0];
+    assert_eq!(row.consecutive_failures, 0, "reset by the successful pages");
+    assert_eq!(row.walk_timeouts, 2, "but the timeouts are not");
+
+    assert_eq!(attempt(true).await, VerifyStep::Failed);
+    let (complete, reason, recovered) = outcome(&h, "a").await;
+    assert_eq!((complete, reason.as_deref()), (true, Some("timed_out")));
+    // The pages it got, [46, 50) (all stored) and [42, 46), are kept.
+    assert_eq!(recovered, 3);
+    h.finish().await;
+}
+
+/// Review finding (#1175): a page with one refused write still stored its
+/// other events, and the retry finds them stored. They are counted with the
+/// failure, so the walk's total is every event it stored.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn events_stored_on_a_failed_page_are_counted() {
+    let mut h = Harness::new(&["c"]).await;
+    h.append("c", 10);
+    h.sync(&[deliver("c", 5, 10)]).await;
+    h.append("c", 20);
+    h.sync(&[deliver("c", 25, 30).limited()]).await;
+    let failures = InjectedFailures::install(
+        &h.store,
+        "events",
+        &format!(
+            "NEW.room_id = '{}' AND NEW.event_id = '{}'",
+            h.room("c"),
+            Harness::event_id("c", 15)
+        ),
+        1,
+    )
+    .await;
+
+    queue(&h, "c").await;
+    walk(&h).await;
+    assert_eq!(failures.attempts().await, 1, "the write was refused once");
+    let (complete, _, recovered) = outcome(&h, "c").await;
+    assert!(!complete, "the walk backs off");
+    let stored = i64::try_from(h.stored("c").await.len()).unwrap();
+    assert_eq!(recovered, stored - 10, "every event the walk stored so far");
+
+    sqlx_core::query::query(
+        "UPDATE room_history_verify SET retry_at = NULL WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(h.account_id)
+    .bind(h.room("c"))
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+    walk(&h).await;
+    assert_eq!(h.stored("c").await, range(2, 30));
+    // 10..25, and 2..5 on the page holding the first stored event.
+    assert_eq!(outcome(&h, "c").await, closed("first_stored_event", 18));
+    failures.remove().await;
+    h.finish().await;
+}
+
+/// Review finding (#1175, #1170): a limited row whose batch is never stored,
+/// here because the database refused every write in the room while the
+/// response was handled, is dropped unpaged once the batch wait is over. The
+/// walk queued in its place reads the room from its live end, so it stores
+/// the hole and the lost batch both.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_expired_gap_rows_hole_is_filled_by_the_walk_it_queues() {
+    let mut h = Harness::new(&["x"]).await;
+    let mut watcher = h.watcher().await;
+    h.append("x", 10);
+    let first = h.sync(&[deliver("x", 5, 10)]).await;
+    watcher.observe(&first).await;
+    h.append("x", 20);
+    let outage = InjectedFailures::install(
+        &h.store,
+        "events",
+        &format!("NEW.room_id = '{}'", h.room("x")),
+        1_000,
+    )
+    .await;
+    let limited = h.sync(&[deliver("x", 25, 30).limited()]).await;
+    watcher.observe(&limited).await;
+    outage.remove().await;
+    assert_eq!(h.stored("x").await, range(5, 10), "the batch was lost");
+    let row = h.gaps().await.pop().expect("the hole was recorded");
+
+    // Within the batch wait, the row waits for its batch.
+    h.fill().await;
+    assert_eq!(h.gaps().await.len(), 1);
+    sqlx_core::query::query(
+        "UPDATE room_timeline_gaps SET detected_at = now() - interval '1 hour' WHERE id = $1",
+    )
+    .bind(row.id)
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+    h.fill().await;
+    assert!(h.gaps().await.is_empty(), "dropped unpaged");
+    assert!(h.take_requests("x").is_empty(), "nothing was paged for it");
+
+    walk(&h).await;
+    assert_eq!(h.stored("x").await, range(2, 30), "hole and batch stored");
+    // 10..30, and 2..5 on the page holding the first stored event.
+    assert_eq!(outcome(&h, "x").await, closed("first_stored_event", 23));
+    h.finish().await;
+}

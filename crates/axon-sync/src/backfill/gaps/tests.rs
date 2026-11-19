@@ -27,7 +27,7 @@ use crate::engine::persist_timeline_event;
 
 /// Small pages, so every hole takes several and the stop placement shows in
 /// the request log.
-const PAGE: u32 = 4;
+pub(crate) const PAGE: u32 = 4;
 
 /// The in-handler insert budget for harnesses with a recorder: long enough
 /// for a few attempts, short enough that a refused hole reaches memory fast.
@@ -37,14 +37,21 @@ const INSERT_BUDGET_FOR_TESTS: Duration = Duration::from_millis(500);
 /// queued sliding-sync responses, rejected tokens, and every `/messages`
 /// request's `(room, from)`.
 #[derive(Default)]
-struct Upstream {
-    rooms: HashMap<String, Vec<Value>>,
-    sync: VecDeque<Value>,
-    rejected: HashSet<String>,
-    messages: Vec<(String, Option<String>)>,
+pub(crate) struct Upstream {
+    pub(crate) rooms: HashMap<String, Vec<Value>>,
+    pub(crate) sync: VecDeque<Value>,
+    pub(crate) rejected: HashSet<String>,
+    pub(crate) messages: Vec<(String, Option<String>)>,
+    /// Answer every `/messages` request with an empty chunk, still moving the
+    /// token on, as a homeserver that filters a whole page does.
+    pub(crate) empty_pages: bool,
+    /// Hold every `/messages` request for two seconds before answering, as a
+    /// homeserver fetching history over federation does; a short page timeout
+    /// then gives up on it.
+    pub(crate) hang: bool,
 }
 
-type Shared = Arc<Mutex<Upstream>>;
+pub(crate) type Shared = Arc<Mutex<Upstream>>;
 
 /// Token `s{n}` means "before stream position `n`"; no token is the live end.
 fn position(token: Option<&str>, len: usize) -> usize {
@@ -65,6 +72,10 @@ async fn messages(
         .get("limit")
         .and_then(|l| l.parse().ok())
         .unwrap_or(10);
+    let hang = upstream.lock().unwrap().hang;
+    if hang {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
     let mut upstream = upstream.lock().unwrap();
     upstream.messages.push((room_id.clone(), from.clone()));
     if from
@@ -80,7 +91,11 @@ async fn messages(
     let events = upstream.rooms.get(&room_id).cloned().unwrap_or_default();
     let high = position(from.as_deref(), events.len());
     let low = high.saturating_sub(limit);
-    let chunk: Vec<Value> = events[low..high].iter().rev().cloned().collect();
+    let chunk: Vec<Value> = if upstream.empty_pages {
+        Vec::new()
+    } else {
+        events[low..high].iter().rev().cloned().collect()
+    };
     let mut body = json!({"chunk": chunk, "start": format!("s{high}")});
     if low > 0 {
         body["end"] = json!(format!("s{low}"));
@@ -90,14 +105,14 @@ async fn messages(
 
 /// What one sync response delivers for one room: its upstream events
 /// `[from, to)`.
-struct Delivery {
+pub(crate) struct Delivery {
     tag: &'static str,
     from: usize,
     to: usize,
     limited: bool,
 }
 
-fn deliver(tag: &'static str, from: usize, to: usize) -> Delivery {
+pub(crate) fn deliver(tag: &'static str, from: usize, to: usize) -> Delivery {
     Delivery {
         tag,
         from,
@@ -107,46 +122,46 @@ fn deliver(tag: &'static str, from: usize, to: usize) -> Delivery {
 }
 
 impl Delivery {
-    fn limited(mut self) -> Self {
+    pub(crate) fn limited(mut self) -> Self {
         self.limited = true;
         self
     }
 }
 
-struct Harness {
-    store: Store,
-    account_id: Uuid,
-    user: String,
-    client: Client,
-    sync: SlidingSync,
-    upstream: Shared,
-    updates: broadcast::Receiver<RoomUpdates>,
-    ctx: PersistContext,
-    signal: Arc<GapSignal>,
-    gate: Arc<HomeserverGate>,
-    health: BackfillHealth,
-    cancel: CancellationToken,
-    rooms: HashMap<&'static str, String>,
-    pos: u64,
-    server: tokio::task::JoinHandle<()>,
+pub(crate) struct Harness {
+    pub(crate) store: Store,
+    pub(crate) account_id: Uuid,
+    pub(crate) user: String,
+    pub(crate) client: Client,
+    pub(crate) sync: SlidingSync,
+    pub(crate) upstream: Shared,
+    pub(crate) updates: broadcast::Receiver<RoomUpdates>,
+    pub(crate) ctx: PersistContext,
+    pub(crate) signal: Arc<GapSignal>,
+    pub(crate) gate: Arc<HomeserverGate>,
+    pub(crate) health: BackfillHealth,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) rooms: HashMap<&'static str, String>,
+    pub(crate) pos: u64,
+    pub(crate) server: tokio::task::JoinHandle<()>,
     /// The gap recorder the ingestion handler drains, as in the engine; `None`
     /// for tests that hand updates to a watcher themselves.
-    recorder: Option<Arc<GapRecorder>>,
+    pub(crate) recorder: Option<Arc<GapRecorder>>,
 }
 
 impl Harness {
     /// A harness whose tests drive a [`GapWatcher`] by hand.
-    async fn new(tags: &[&'static str]) -> Self {
+    pub(crate) async fn new(tags: &[&'static str]) -> Self {
         Self::build(tags, false).await
     }
 
     /// A harness whose ingestion handler drains a [`GapRecorder`], as the
     /// engine's does.
-    async fn with_recorder(tags: &[&'static str]) -> Self {
+    pub(crate) async fn with_recorder(tags: &[&'static str]) -> Self {
         Self::build(tags, true).await
     }
 
-    async fn build(tags: &[&'static str], inline: bool) -> Self {
+    pub(crate) async fn build(tags: &[&'static str], inline: bool) -> Self {
         let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
             .await
             .unwrap();
@@ -276,16 +291,16 @@ impl Harness {
         }
     }
 
-    fn room(&self, tag: &str) -> &str {
+    pub(crate) fn room(&self, tag: &str) -> &str {
         &self.rooms[tag]
     }
 
-    fn event_id(tag: &str, i: usize) -> String {
+    pub(crate) fn event_id(tag: &str, i: usize) -> String {
         format!("${tag}-{i}:localhost")
     }
 
     /// Add `n` events to a room upstream.
-    fn append(&self, tag: &str, n: usize) {
+    pub(crate) fn append(&self, tag: &str, n: usize) {
         let room_id = self.room(tag).to_owned();
         let mut up = self.upstream.lock().unwrap();
         let events = up.rooms.get_mut(&room_id).unwrap();
@@ -304,7 +319,7 @@ impl Harness {
     /// Serve one sliding-sync response and let the SDK process it, so axon's
     /// handlers have stored its events. Returns its room-update broadcast,
     /// which the test hands to the watcher whenever it chooses.
-    async fn sync(&mut self, deliveries: &[Delivery]) -> RoomUpdates {
+    pub(crate) async fn sync(&mut self, deliveries: &[Delivery]) -> RoomUpdates {
         self.queue(deliveries);
         tokio::time::timeout(Duration::from_secs(10), self.sync.sync_once())
             .await
@@ -317,7 +332,7 @@ impl Harness {
     }
 
     /// Queue the next sliding-sync response without serving it.
-    fn queue(&mut self, deliveries: &[Delivery]) {
+    pub(crate) fn queue(&mut self, deliveries: &[Delivery]) {
         self.pos += 1;
         let mut rooms = serde_json::Map::new();
         {
@@ -348,7 +363,7 @@ impl Harness {
             .push_back(json!({"pos": self.pos.to_string(), "lists": {}, "rooms": rooms}));
     }
 
-    async fn watcher(&self) -> GapWatcher {
+    pub(crate) async fn watcher(&self) -> GapWatcher {
         GapWatcher::new(
             self.account_id,
             self.store.clone(),
@@ -359,14 +374,16 @@ impl Harness {
     }
 
     /// Every room of the harness, as the watcher reads the joined rooms.
-    fn joined_rooms(&self) -> impl Fn() -> Vec<String> + Send + Sync {
+    pub(crate) fn joined_rooms(&self) -> impl Fn() -> Vec<String> + Send + Sync {
         let rooms: Vec<String> = self.rooms.values().cloned().collect();
         move || rooms.clone()
     }
 
-    fn params(&self, enabled: bool) -> BackfillParams {
+    pub(crate) fn params(&self, enabled: bool) -> BackfillParams {
         BackfillParams {
             enabled,
+            verify_enabled: false,
+            timeline_limit: 5,
             page_size: PAGE,
             target_depth: 0,
             throttle: Duration::ZERO,
@@ -378,7 +395,7 @@ impl Harness {
         }
     }
 
-    async fn fill(&self) -> GapPass {
+    pub(crate) async fn fill(&self) -> GapPass {
         let params = self.params(false);
         Filler {
             client: &self.client,
@@ -393,7 +410,7 @@ impl Harness {
     }
 
     /// One ordinary backfill page, as the backfill task would page it.
-    async fn backfill_page(&self, tag: &str) -> PageOutcome {
+    pub(crate) async fn backfill_page(&self, tag: &str) -> PageOutcome {
         let room = self.joined(tag);
         let state = self
             .store
@@ -411,7 +428,7 @@ impl Harness {
         .await
     }
 
-    fn joined(&self, tag: &str) -> matrix_sdk::Room {
+    pub(crate) fn joined(&self, tag: &str) -> matrix_sdk::Room {
         let room = self
             .client
             .get_room(&matrix_sdk::ruma::RoomId::parse(self.room(tag)).unwrap())
@@ -421,7 +438,7 @@ impl Harness {
     }
 
     /// The upstream positions of a room's stored events.
-    async fn stored(&self, tag: &str) -> BTreeSet<usize> {
+    pub(crate) async fn stored(&self, tag: &str) -> BTreeSet<usize> {
         let ids: Vec<(String,)> = sqlx_core::query_as::query_as(
             "SELECT event_id FROM events WHERE account_id = $1 AND room_id = $2",
         )
@@ -441,7 +458,7 @@ impl Harness {
             .collect()
     }
 
-    async fn gaps(&self) -> Vec<TimelineGap> {
+    pub(crate) async fn gaps(&self) -> Vec<TimelineGap> {
         self.store
             .list_timeline_gaps(self.account_id)
             .await
@@ -449,7 +466,7 @@ impl Harness {
     }
 
     /// The `from` of every `/messages` request for a room since the last call.
-    fn take_requests(&self, tag: &str) -> Vec<Option<String>> {
+    pub(crate) fn take_requests(&self, tag: &str) -> Vec<Option<String>> {
         let room_id = self.room(tag).to_owned();
         let mut up = self.upstream.lock().unwrap();
         let (mine, rest): (Vec<_>, Vec<_>) = up
@@ -460,7 +477,7 @@ impl Harness {
         mine.into_iter().map(|(_, from)| from).collect()
     }
 
-    async fn finish(self) {
+    pub(crate) async fn finish(self) {
         self.store
             .delete_account_row(self.account_id)
             .await
@@ -469,11 +486,11 @@ impl Harness {
     }
 }
 
-fn range(from: usize, to: usize) -> BTreeSet<usize> {
+pub(crate) fn range(from: usize, to: usize) -> BTreeSet<usize> {
     (from..to).collect()
 }
 
-fn tokens(positions: &[usize]) -> Vec<Option<String>> {
+pub(crate) fn tokens(positions: &[usize]) -> Vec<Option<String>> {
     positions.iter().map(|p| Some(format!("s{p}"))).collect()
 }
 
@@ -741,27 +758,32 @@ async fn a_first_window_is_never_paged_however_late_the_watcher_reads_it() {
 /// Makes `table` refuse the first `times` inserts of rows matching `when`, as a
 /// failing write would. The count lives in a sequence, so a refused insert's
 /// rollback does not undo it. `when` names a room id no other test uses.
-struct InjectedFailures {
+pub(crate) struct InjectedFailures {
     store: Store,
     name: String,
     table: &'static str,
 }
 
 /// A deadlock: a refusal that is not about the event, so the page is held.
-const TRANSIENT: &str = "40P01";
+pub(crate) const TRANSIENT: &str = "40P01";
 
 /// What Postgres raises for a `\u0000` escape in a `jsonb`: a rejection of
 /// the event's values, which every attempt meets again, so it is skipped.
-const PERMANENT: &str = "22P05";
+pub(crate) const PERMANENT: &str = "22P05";
 
 impl InjectedFailures {
     /// Refuse inserts with an error that holds the page ([`TRANSIENT`]).
-    async fn install(store: &Store, table: &'static str, when: &str, times: u32) -> Self {
+    pub(crate) async fn install(
+        store: &Store,
+        table: &'static str,
+        when: &str,
+        times: u32,
+    ) -> Self {
         Self::install_with(store, table, "INSERT", TRANSIENT, when, times).await
     }
 
     /// Refuse `op` (`INSERT` or `UPDATE`) statements with SQLSTATE `errcode`.
-    async fn install_with(
+    pub(crate) async fn install_with(
         store: &Store,
         table: &'static str,
         op: &str,
@@ -799,7 +821,7 @@ impl InjectedFailures {
     }
 
     /// How many inserts reached the trigger.
-    async fn attempts(&self) -> i64 {
+    pub(crate) async fn attempts(&self) -> i64 {
         let (attempts,): (i64,) = sqlx_core::query_as::query_as(&format!(
             "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM {}",
             self.name
@@ -810,7 +832,7 @@ impl InjectedFailures {
         attempts
     }
 
-    async fn remove(self) {
+    pub(crate) async fn remove(self) {
         let name = &self.name;
         for sql in [
             format!("DROP TRIGGER {name} ON {}", self.table),
@@ -913,6 +935,45 @@ async fn a_failed_event_write_keeps_the_row_until_its_page_is_stored() {
     assert!(h.gaps().await.is_empty());
     assert_eq!(h.stored("w").await, range(0, 35));
     assert_eq!(h.take_requests("w"), tokens(&[6]));
+    failures.remove().await;
+    h.finish().await;
+}
+
+/// Review finding (#1175): a page with one refused write still stored its
+/// other events, and the retry finds them stored. They are counted with the
+/// failure.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn events_stored_on_a_failed_gap_page_are_counted() {
+    let mut h = Harness::new(&["n"]).await;
+    let mut watcher = h.watcher().await;
+    h.append("n", 5);
+    let u0 = h.sync(&[deliver("n", 0, 5)]).await;
+    watcher.observe(&u0).await;
+    h.append("n", 30);
+    let u1 = h.sync(&[deliver("n", 30, 35).limited()]).await;
+    watcher.observe(&u1).await;
+    let failures = InjectedFailures::install(
+        &h.store,
+        "events",
+        &format!(
+            "NEW.room_id = '{}' AND NEW.event_id = '{}'",
+            h.room("n"),
+            Harness::event_id("n", 20)
+        ),
+        1,
+    )
+    .await;
+
+    h.fill().await;
+    assert_eq!(failures.attempts().await, 1, "the write was refused once");
+    let row = h.gaps().await.pop().expect("the row stays open");
+    let stored = i64::try_from(h.stored("n").await.len()).unwrap();
+    assert_eq!(
+        row.events_recovered,
+        stored - 10,
+        "every event the row stored so far, the failed page's included"
+    );
     failures.remove().await;
     h.finish().await;
 }
