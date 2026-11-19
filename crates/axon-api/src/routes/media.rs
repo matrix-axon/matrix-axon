@@ -30,7 +30,7 @@ use crate::dto::{MediaEventQuery, StreamTicketDto, ThumbnailQuery};
 use crate::linked_events::{names_media, KeptMedia};
 use crate::media::{GrowingResource, MediaBody, MediaError, MediaProxy, MediaResource};
 use crate::response::{ApiError, ApiResponse};
-use crate::stream_tickets::{StreamTicket, StreamTickets, TICKET_IDLE};
+use crate::stream_tickets::{StreamTicket, StreamTickets, TicketLookup, TICKET_IDLE};
 
 /// Dimension clamp bounds for the thumbnail route — a requested `width`/
 /// `height` outside this range is clamped, not rejected (same "clamp, don't
@@ -417,8 +417,10 @@ fn ticketable_content_type(
 /// that owns the URI, and the type that route would serve it as.
 ///
 /// The ticket works only while the bearer token that issued it would, and
-/// only while the owning event is still stored with its content. It is held in
-/// memory, so a restart ends it. One credential session holds at most 32 live
+/// only while the owning event is still stored with its content. Both are
+/// checked when each request starts, so a response already streaming when the
+/// token is revoked runs to its end, as a bearer-authenticated media response
+/// does. It is held in memory, so a restart ends it. One credential session holds at most 32 live
 /// tickets, across the access tokens an OAuth refresh mints; issuing another
 /// ends that session's least recently used one.
 #[utoipa::path(
@@ -453,6 +455,13 @@ pub async fn create_stream_ticket(
     let expires_at = token
         .expires_at
         .map_or(idle_expiry, |token_expiry| token_expiry.min(idle_expiry));
+    tracing::info!(
+        %account_id,
+        mxc = %mxc_url,
+        token_id = %token.id,
+        session_id = %token.session_id,
+        "stream ticket issued"
+    );
     let ticket = tickets.issue(StreamTicket {
         account_id,
         mxc_url,
@@ -472,9 +481,14 @@ pub async fn create_stream_ticket(
 /// and all. The ticket in the path stands in for the bearer token, so this
 /// route takes no `Authorization` header (ADR 0139 section 5).
 ///
-/// Every request re-checks the ticket: it must be live, the token that issued
-/// it unrevoked and unexpired, and the owning event still stored with its
-/// content. Every response, errors included, carries
+/// Every request re-checks the ticket when it starts: it must be live, the
+/// token that issued it unrevoked and unexpired, and the owning event still
+/// stored with its content. A response already streaming when the token is
+/// revoked runs to its end, as a bearer-authenticated media response does.
+/// Only a request served without error counts as a use of the ticket, which
+/// restarts its 30-minute idle expiry.
+///
+/// Every response under `/v1/media-stream/`, errors included, carries
 /// `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`.
 #[utoipa::path(
     get,
@@ -509,12 +523,27 @@ pub async fn get_media_stream(
 ) -> Result<Response, ApiError> {
     // One answer for every way a ticket fails, and none that repeats it: a
     // path rejection's text would quote the segment.
-    let gone = || ApiError::not_found("stream ticket is unknown or expired");
     let Ok(Path(key)) = key else {
-        return Err(gone());
+        return Err(ticket_gone());
     };
-    let Some(ticket) = tickets.redeem(&key) else {
-        return Err(gone());
+    let ticket = match tickets.lookup(&key) {
+        TicketLookup::Live(ticket) => ticket,
+        TicketLookup::Expired(ticket) => {
+            tracing::debug!(
+                account_id = %ticket.account_id,
+                token_id = %ticket.token_id,
+                session_id = %ticket.session_id,
+                "stream ticket refused: it expired"
+            );
+            return Err(ticket_gone());
+        }
+        TicketLookup::Unknown => {
+            tracing::debug!(
+                "stream ticket refused: unknown (never issued, issued before a restart, \
+                 evicted, or expired)"
+            );
+            return Err(ticket_gone());
+        }
     };
     if !verifier.is_live(ticket.token_id).await? {
         tickets.forget(&key);
@@ -524,13 +553,13 @@ pub async fn get_media_stream(
             session_id = %ticket.session_id,
             "stream ticket refused: its token is revoked or expired"
         );
-        return Err(gone());
+        return Err(ticket_gone());
     }
 
     let (content, raster_only) =
         resolve_media_content(&store, ticket.account_id, &ticket.mxc_url).await?;
     ticketable_content_type(&content, &ticket.mxc_url, raster_only)?;
-    serve_resolved(
+    let response = serve_resolved(
         proxy.as_ref(),
         ticket.account_id,
         &ticket.mxc_url,
@@ -539,7 +568,17 @@ pub async fn get_media_stream(
         &headers,
         "media_stream",
     )
-    .await
+    .await?;
+    tickets.touch(&key);
+    Ok(response)
+}
+
+/// The answer for every ticket that fails. A deeper path under
+/// `/v1/media-stream/` is an unknown ticket too: the route's wildcard sends it
+/// here, so it gets this route's headers rather than the bearer-gated `/v1`
+/// catch-all's `401`.
+fn ticket_gone() -> ApiError {
+    ApiError::not_found("stream ticket is unknown or expired")
 }
 
 /// Add the stream-ticket route's own headers to every response it gives,

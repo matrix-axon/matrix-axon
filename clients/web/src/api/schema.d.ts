@@ -2130,9 +2130,14 @@ export interface paths {
          *     and all. The ticket in the path stands in for the bearer token, so this
          *     route takes no `Authorization` header (ADR 0139 section 5).
          *
-         *     Every request re-checks the ticket: it must be live, the token that issued
-         *     it unrevoked and unexpired, and the owning event still stored with its
-         *     content. Every response, errors included, carries
+         *     Every request re-checks the ticket when it starts: it must be live, the
+         *     token that issued it unrevoked and unexpired, and the owning event still
+         *     stored with its content. A response already streaming when the token is
+         *     revoked runs to its end, as a bearer-authenticated media response does.
+         *     Only a request served without error counts as a use of the ticket, which
+         *     restarts its 30-minute idle expiry.
+         *
+         *     Every response under `/v1/media-stream/`, errors included, carries
          *     `Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`.
          */
         get: operations["get_media_stream"];
@@ -2197,8 +2202,10 @@ export interface paths {
          *     that owns the URI, and the type that route would serve it as.
          *
          *     The ticket works only while the bearer token that issued it would, and
-         *     only while the owning event is still stored with its content. It is held in
-         *     memory, so a restart ends it. One credential session holds at most 32 live
+         *     only while the owning event is still stored with its content. Both are
+         *     checked when each request starts, so a response already streaming when the
+         *     token is revoked runs to its end, as a bearer-authenticated media response
+         *     does. It is held in memory, so a restart ends it. One credential session holds at most 32 live
          *     tickets, across the access tokens an OAuth refresh mints; issuing another
          *     ends that session's least recently used one.
          */

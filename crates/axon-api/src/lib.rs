@@ -662,9 +662,15 @@ pub fn router(state: AppState) -> Router {
     // the ticket in the path stands in for the token that issued it, which
     // the handler re-checks on every request. The request log never records
     // the ticket; see `redacted_request_path`.
+    //
+    // A wildcard, so a deeper path also reaches the handler, which answers
+    // it with the route's own 404 and headers (no ticket contains `/`), not
+    // the bearer-gated `/v1` catch-all's 401. A `{*rest}` route beside a
+    // `{ticket}` one would conflict, and a nested router's fallback loses to
+    // that catch-all.
     let media_stream_router = Router::new()
         .route(
-            "/v1/media-stream/{ticket}",
+            "/v1/media-stream/{*ticket}",
             get(routes::media::get_media_stream),
         )
         .layer(axum::middleware::map_response(

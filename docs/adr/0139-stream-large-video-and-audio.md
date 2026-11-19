@@ -272,6 +272,7 @@ A `<video>` cannot carry a bearer header, so the server issues a URL that stands
   It records no event id, because the checks below resolve the event from the MXC URI, exactly as `get_media` does.
   Restarting the server drops every ticket, and the client simply asks for a new one (section 6).
 - A ticket expires 30 minutes after its last use and never more than 12 hours after it was issued.
+  A use is a request served without error, so a ticket whose requests keep failing neither stays alive nor ranks as recently used for the cap below.
 - Every use also re-checks the issuing token.
   A new read-only store lookup by token id rejects the ticket unless that token is unrevoked and unexpired.
   So a ticket is accepted exactly when the bearer token that issued it would be.

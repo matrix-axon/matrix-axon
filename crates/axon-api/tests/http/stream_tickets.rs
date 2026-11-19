@@ -335,6 +335,62 @@ async fn a_ticket_stops_working_once_its_event_is_redacted_or_account_removed() 
     assert_eq!(proxy.stream_calls().len(), 3);
 }
 
+/// Only a request served without error counts as a use. A ticket whose
+/// requests keep failing stays the least recently used, so its session's next
+/// ticket evicts it rather than one that plays.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn only_a_served_request_counts_as_a_use_of_its_ticket() {
+    let fx = Fixture::new().await;
+    let (event_id, failing) = fx.media("video/mp4").await;
+    let (_, playing) = fx.media("video/mp4").await;
+    let app = ticket_app(
+        fx.store.clone(),
+        Arc::new(ConfiguredMediaProxy::ok(DATA)),
+        StubTokenVerifier::ok(),
+    );
+    // One bearer token, so one session: its oldest ticket is for media whose
+    // event is then redacted, and the rest fill the session's cap.
+    let oldest = mint_path(&app, &fx.mint_uri(&failing)).await;
+    let rest: Vec<String> = {
+        let mut rest = Vec::new();
+        for _ in 1..32 {
+            rest.push(mint_path(&app, &fx.mint_uri(&playing)).await);
+        }
+        rest
+    };
+    insert_redaction(
+        &fx.store,
+        fx.account_id,
+        &fx.room_id,
+        1_700_000_000_001,
+        &event_id,
+    )
+    .await;
+    for _ in 0..3 {
+        assert_eq!(play(&app, &oldest, None).await.0, StatusCode::NOT_FOUND);
+    }
+    // A served request is a use: the second-oldest is no longer next out.
+    assert_eq!(play(&app, &rest[0], None).await.0, StatusCode::OK);
+
+    mint_path(&app, &fx.mint_uri(&playing)).await;
+    assert_eq!(
+        play(&app, &rest[0], None).await.0,
+        StatusCode::OK,
+        "a played ticket is kept"
+    );
+    assert_eq!(
+        play(&app, &rest[1], None).await.0,
+        StatusCode::OK,
+        "the failing ticket went instead of the next-oldest"
+    );
+
+    // The next eviction takes the oldest ticket not played since.
+    mint_path(&app, &fx.mint_uri(&playing)).await;
+    assert_eq!(play(&app, &rest[2], None).await.0, StatusCode::NOT_FOUND);
+    fx.store.delete_account_row(fx.account_id).await.unwrap();
+}
+
 #[derive(Clone)]
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -401,18 +457,29 @@ async fn a_ticket_never_reaches_the_log_or_an_error_body() {
             let (status, _, body) = play(&app, &path, Some("bytes=0-3")).await;
             assert_eq!(status, StatusCode::PARTIAL_CONTENT);
             assert_eq!(body, b"0123");
-            for (uri, auth, status) in [
-                (format!("{path}/extra"), None, StatusCode::UNAUTHORIZED),
+            // A deeper path is this route's 404, not the bearer-gated `/v1`
+            // catch-all's 401, so it carries the ticket headers too.
+            for (method, uri, auth, status) in [
+                ("GET", format!("{path}/extra"), None, StatusCode::NOT_FOUND),
                 (
+                    "GET",
                     format!("{path}/extra"),
                     Some(bearer()),
                     StatusCode::NOT_FOUND,
                 ),
-                (format!("{path}x"), None, StatusCode::NOT_FOUND),
+                (
+                    "PUT",
+                    format!("{path}/extra"),
+                    None,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                ),
+                ("GET", format!("{path}x"), None, StatusCode::NOT_FOUND),
+                ("POST", path.clone(), None, StatusCode::METHOD_NOT_ALLOWED),
             ] {
-                let (got, _, body) =
-                    send_request(&app, "GET", &uri, None, auth.as_deref(), None).await;
-                assert_eq!(got, status, "{uri}");
+                let (got, headers, body) =
+                    send_request(&app, method, &uri, None, auth.as_deref(), None).await;
+                assert_eq!(got, status, "{method} {uri}");
+                assert_ticket_headers(&headers);
                 bodies.lock().unwrap().push(body);
             }
             active.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -428,8 +495,12 @@ async fn a_ticket_never_reaches_the_log_or_an_error_body() {
         "the request log records the template: {logs}"
     );
     assert!(
-        logs.contains("stream ticket refused"),
+        logs.contains("stream ticket refused: its token is revoked or expired"),
         "the refusal is logged: {logs}"
+    );
+    assert!(
+        logs.contains("stream ticket refused: unknown"),
+        "an unknown ticket is logged, without itself: {logs}"
     );
     assert!(!logs.contains(&ticket), "a ticket reached the log: {logs}");
     for body in bodies.lock().unwrap().iter() {

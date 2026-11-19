@@ -9162,7 +9162,7 @@
           "media"
         ],
         "summary": "Stream media by ticket",
-        "description": "Serve the object a stream ticket was issued for, exactly as\n`GET /v1/media/{account_id}/{server_name}/{media_id}` serves it, ranges\nand all. The ticket in the path stands in for the bearer token, so this\nroute takes no `Authorization` header (ADR 0139 section 5).\n\nEvery request re-checks the ticket: it must be live, the token that issued\nit unrevoked and unexpired, and the owning event still stored with its\ncontent. Every response, errors included, carries\n`Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`.",
+        "description": "Serve the object a stream ticket was issued for, exactly as\n`GET /v1/media/{account_id}/{server_name}/{media_id}` serves it, ranges\nand all. The ticket in the path stands in for the bearer token, so this\nroute takes no `Authorization` header (ADR 0139 section 5).\n\nEvery request re-checks the ticket when it starts: it must be live, the\ntoken that issued it unrevoked and unexpired, and the owning event still\nstored with its content. A response already streaming when the token is\nrevoked runs to its end, as a bearer-authenticated media response does.\nOnly a request served without error counts as a use of the ticket, which\nrestarts its 30-minute idle expiry.\n\nEvery response under `/v1/media-stream/`, errors included, carries\n`Cache-Control: private, no-store` and `Referrer-Policy: no-referrer`.",
         "operationId": "get_media_stream",
         "parameters": [
           {
@@ -9462,7 +9462,7 @@
           "media"
         ],
         "summary": "Issue a stream ticket",
-        "description": "Issue a URL that serves one video or audio object without a bearer header,\nfor a `<video>` or `<audio>` element to load (ADR 0139 section 5). The\nobject is checked exactly as `GET /v1/media/{account_id}/{server_name}/{media_id}`\nchecks it without `room_id` and `event_id`: the account, the stored event\nthat owns the URI, and the type that route would serve it as.\n\nThe ticket works only while the bearer token that issued it would, and\nonly while the owning event is still stored with its content. It is held in\nmemory, so a restart ends it. One credential session holds at most 32 live\ntickets, across the access tokens an OAuth refresh mints; issuing another\nends that session's least recently used one.",
+        "description": "Issue a URL that serves one video or audio object without a bearer header,\nfor a `<video>` or `<audio>` element to load (ADR 0139 section 5). The\nobject is checked exactly as `GET /v1/media/{account_id}/{server_name}/{media_id}`\nchecks it without `room_id` and `event_id`: the account, the stored event\nthat owns the URI, and the type that route would serve it as.\n\nThe ticket works only while the bearer token that issued it would, and\nonly while the owning event is still stored with its content. Both are\nchecked when each request starts, so a response already streaming when the\ntoken is revoked runs to its end, as a bearer-authenticated media response\ndoes. It is held in memory, so a restart ends it. One credential session holds at most 32 live\ntickets, across the access tokens an OAuth refresh mints; issuing another\nends that session's least recently used one.",
         "operationId": "create_stream_ticket",
         "parameters": [
           {

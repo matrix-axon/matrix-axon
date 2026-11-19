@@ -44,6 +44,18 @@ pub struct StreamTicket {
     pub session_id: Uuid,
 }
 
+/// What [`StreamTickets::lookup`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TicketLookup {
+    /// A live ticket, issued for this.
+    Live(StreamTicket),
+    /// A ticket past its idle or absolute expiry, now dropped.
+    Expired(StreamTicket),
+    /// No such ticket: never issued, issued before a restart, evicted, or
+    /// expired and already reclaimed.
+    Unknown,
+}
+
 /// The live tickets, keyed by the ticket itself.
 ///
 /// Deliberately not `Debug`: its keys are credentials.
@@ -80,11 +92,20 @@ impl StreamTickets {
         self.issue_at(ticket, Instant::now())
     }
 
-    /// What `key` was issued for, if it is a live ticket. A use: it restarts
-    /// the ticket's idle expiry and makes it the most recently used. An
-    /// expired ticket is dropped.
-    pub fn redeem(&self, key: &str) -> Option<StreamTicket> {
-        self.redeem_at(key, Instant::now())
+    /// What `key` was issued for. An expired ticket is dropped.
+    ///
+    /// Not a use: a request that then fails its checks or its download must
+    /// neither keep the ticket from idling out nor rank it as recently used.
+    /// The route calls [`touch`](Self::touch) once it has served the request.
+    pub fn lookup(&self, key: &str) -> TicketLookup {
+        self.lookup_at(key, Instant::now())
+    }
+
+    /// Record a served use of `key`: restart its idle expiry and make it the
+    /// most recently used. Does nothing if the ticket has gone since its
+    /// lookup.
+    pub fn touch(&self, key: &str) {
+        self.touch_at(key, Instant::now());
     }
 
     /// Drop a ticket the route found it can no longer serve, such as one whose
@@ -138,18 +159,40 @@ impl StreamTickets {
         key
     }
 
-    fn redeem_at(&self, key: &str, now: Instant) -> Option<StreamTicket> {
+    fn lookup_at(&self, key: &str, now: Instant) -> TicketLookup {
+        let mut state = self.lock();
+        let Some(entry) = state.entries.get(key) else {
+            return TicketLookup::Unknown;
+        };
+        if entry.live_at(now) {
+            return TicketLookup::Live(entry.ticket.clone());
+        }
+        match state.entries.remove(key) {
+            Some(entry) => TicketLookup::Expired(entry.ticket),
+            None => TicketLookup::Unknown,
+        }
+    }
+
+    fn touch_at(&self, key: &str, now: Instant) {
         let mut state = self.lock();
         state.clock += 1;
         let used = state.clock;
-        let entry = state.entries.get_mut(key)?;
-        if !entry.live_at(now) {
-            state.entries.remove(key);
-            return None;
+        if let Some(entry) = state.entries.get_mut(key) {
+            if entry.live_at(now) {
+                entry.used_at = now;
+                entry.used = used;
+            }
         }
-        entry.used_at = now;
-        entry.used = used;
-        Some(entry.ticket.clone())
+    }
+
+    /// A lookup followed by a served use, as a request that succeeds makes.
+    #[cfg(test)]
+    fn redeem_at(&self, key: &str, now: Instant) -> Option<StreamTicket> {
+        let TicketLookup::Live(ticket) = self.lookup_at(key, now) else {
+            return None;
+        };
+        self.touch_at(key, now);
+        Some(ticket)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, TicketState> {
@@ -201,14 +244,67 @@ mod tests {
     }
 
     #[test]
-    fn redeeming_returns_what_was_issued_and_nothing_else() {
+    fn a_lookup_returns_what_was_issued_and_nothing_else() {
         let tickets = StreamTickets::default();
         let issued = ticket(Uuid::new_v4());
         let key = tickets.issue(issued.clone());
-        assert_eq!(tickets.redeem(&key), Some(issued));
-        assert_eq!(tickets.redeem("not-a-ticket"), None);
+        assert_eq!(tickets.lookup(&key), TicketLookup::Live(issued));
+        assert_eq!(tickets.lookup("not-a-ticket"), TicketLookup::Unknown);
         tickets.forget(&key);
-        assert_eq!(tickets.redeem(&key), None);
+        assert_eq!(tickets.lookup(&key), TicketLookup::Unknown);
+    }
+
+    #[test]
+    fn a_lookup_alone_is_not_a_use() {
+        let tickets = StreamTickets::default();
+        let start = Instant::now();
+        let issued = ticket(Uuid::new_v4());
+        let key = tickets.issue_at(issued.clone(), start);
+
+        // Looked up, but never served: the idle clock keeps running from issue.
+        let looked = start + TICKET_IDLE - Duration::from_secs(1);
+        assert_eq!(
+            tickets.lookup_at(&key, looked),
+            TicketLookup::Live(issued.clone())
+        );
+        assert_eq!(
+            tickets.lookup_at(&key, start + TICKET_IDLE),
+            TicketLookup::Expired(issued),
+            "an expired ticket names what it was for, once"
+        );
+        assert_eq!(
+            tickets.lookup_at(&key, start + TICKET_IDLE),
+            TicketLookup::Unknown
+        );
+    }
+
+    #[test]
+    fn only_a_served_use_ranks_a_ticket_as_recently_used() {
+        let tickets = StreamTickets::default();
+        let now = Instant::now();
+        let token = Uuid::new_v4();
+        let mine: Vec<String> = (0..MAX_TICKETS_PER_SESSION)
+            .map(|_| tickets.issue_at(ticket(token), now))
+            .collect();
+        // The oldest is looked up over and over, and its requests all fail.
+        for _ in 0..3 {
+            assert!(matches!(
+                tickets.lookup_at(&mine[0], now),
+                TicketLookup::Live(_)
+            ));
+        }
+
+        tickets.issue_at(ticket(token), now);
+
+        assert_eq!(
+            tickets.lookup_at(&mine[0], now),
+            TicketLookup::Unknown,
+            "still the least recently used, so evicted"
+        );
+        assert!(matches!(
+            tickets.lookup_at(&mine[1], now),
+            TicketLookup::Live(_)
+        ));
     }
 
     #[test]
