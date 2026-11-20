@@ -159,19 +159,36 @@ A proxy that keeps an access log must keep video and audio stream tickets out of
 
 ## Network tuning
 
-A Linux server's default TCP congestion control, cubic, can make video stream slowly enough to buffer, and large downloads crawl, for a client whose path to the server is long or loses packets now and then, as home Wi-Fi often does.
-A player's requests share one connection, and on such a path cubic holds a single connection to a small fraction of the link: on one deployment, a client on a 50 Mbps home link received about 0.5 MB/s from a server 60 ms away, below what a 720p video needs.
+A Linux server's default TCP congestion control, cubic, can slow some clients enough that video buffers and large downloads crawl.
+It happens on paths that are long or lose a packet now and then, as home Wi-Fi often does.
+A player's requests share one connection, and on such a path cubic can hold that connection to a small fraction of the link.
+On one deployment, a client on a 50 Mbps home link received about 0.5 MB/s from a server 60 ms away, which is too slow for a 720p video.
 A speed test does not show this, because it uses many connections to a nearby server.
-BBR does not slow down for occasional loss; with it, the same client received 5 to 7 MB/s.
+BBR does not slow down for occasional loss. With it, the same client received 5 to 7 MB/s.
+Other paths gain less, and one that does not lose packets gains nothing.
 
-The connections that matter are the ones between clients and whatever accepts them: the reverse proxy, or with the Docker stack, the `web` or `caddy` container.
+The setting applies to the TCP connections between clients and whatever accepts them: the reverse proxy, or with the Docker stack, the `web` or `caddy` container.
+That covers HTTP/1.1 and HTTP/2.
+HTTP/3 runs over QUIC, which has its own congestion control in the proxy, so clients that negotiate it are unaffected either way.
 Axon's connection to the proxy is local and gains nothing; its connection to a distant homeserver would gain, and keeps the host's setting unless the host uses BBR.
 
 **Docker stack.**
-The `web` and `caddy` containers already use BBR for their own connections, through a per-container `sysctls` setting, and the kernel loads its BBR module when they start.
-If either container fails to start with `failed to write sysctl net.ipv4.tcp_congestion_control`, the host kernel has no BBR (it arrived in Linux 4.9, and per-container settings in 4.15; some NAS kernels are older).
+The `web` and `caddy` containers already use BBR for the connections that end in them, through a per-container `sysctls` setting, and the kernel loads its BBR module when they start.
+If either container fails to start with `failed to write sysctl net.ipv4.tcp_congestion_control`, the container could not use BBR, for one of these reasons:
+
+- The host kernel has no BBR. It arrived in Linux 4.9, and per-container settings in 4.15; some NAS kernels are older or leave it out.
+- The runtime cannot load the module. Rootless Docker and Podman cannot, so BBR works there only if the host has already loaded `tcp_bbr`.
+
 Set `AXON_TCP_CONGESTION_CONTROL=cubic` in `.env` to start without it.
-If a reverse proxy on the host fronts the stack instead, set BBR on the host as below.
+A runtime that refuses container `sysctls` altogether needs them removed instead: in `docker-compose.override.yml`, give `web` and `caddy` each `sysctls: !reset {}` (Compose 2.24 or later).
+
+Some connections reach the published port without ending in the container, and they keep the host's setting:
+
+- **A reverse proxy on the host** in front of the stack.
+- **Docker's userland proxy**, which accepts connections on the host when the kernel cannot forward them, such as IPv6 clients when the container network has no IPv6.
+- **Rootless Docker and Podman**, whose port forwarders accept every client connection on the host.
+
+For those, set BBR on the host as below as well.
 
 **Any other Linux server** (packages, a reverse proxy on the host):
 
@@ -185,10 +202,13 @@ sysctl net.ipv4.tcp_congestion_control   # bbr
 ```
 
 A file in `/etc/sysctl.d/` that sorts later, or `/etc/sysctl.conf`, overrides this one, so check that none sets either key back.
-Restart the reverse proxy, or any container that accepts client connections, so that its new connections use BBR.
+New connections use BBR at once, a reverse proxy's included, without a restart.
+A container keeps the default its network had when it was created, so recreate any that accept client connections (`docker compose up -d --force-recreate`).
 The interface's queueing discipline changes to `fq` at the next reboot; BBR works without it.
 
-The setting does not reach two set-ups:
+The setting does not reach three set-ups:
 
 - **Tailscale's userspace networking**, which the stack's `tailscale` profile uses: the sidecar's own TCP stack carries client connections, not the kernel's.
+- **Docker Desktop** on macOS or Windows: client connections end at Docker Desktop's port forwarder in the desktop OS, not in its Linux VM.
+  The containers' setting applies inside the VM, whose kernel decides whether they start with it; if they do not, set `AXON_TCP_CONGESTION_CONTROL=cubic`.
 - **A macOS server**, which has no BBR.

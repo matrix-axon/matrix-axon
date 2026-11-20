@@ -186,8 +186,8 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
-    # The connections from browsers and apps end here, so this is where the
-    # congestion control that matters runs (see `web` above).
+    # The TCP connections from browsers and apps end here (see `web` above).
+    # HTTP/3 on 443/udp runs over QUIC, which has its own congestion control.
     sysctls:
       net.ipv4.tcp_congestion_control: ${AXON_TCP_CONGESTION_CONTROL:-bbr}
     volumes:
