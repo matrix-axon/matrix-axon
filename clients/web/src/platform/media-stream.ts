@@ -44,6 +44,22 @@ export async function shellMediaStreamSrc(ticketUrl: string): Promise<string> {
   return convertFileSrc(ticket, SCHEME)
 }
 
+/**
+ * The shell's `mediaStreamSrc` for one build target (`TAURI_ENV_PLATFORM`),
+ * or `null` where the webview's player cannot load the scheme.
+ *
+ * Linux is `null`: WebKitGTK's GStreamer player admits only its built-in
+ * URL schemes, and GStreamer has no source for a custom one, so every media
+ * element fails before it sends a request. Video and audio there keep the
+ * blob path ([issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192)).
+ * The page's own `fetch` of the scheme works, which is not enough.
+ */
+export function mediaStreamSrcFor(
+  target: string,
+): ((ticketUrl: string) => Promise<string>) | null {
+  return target === 'linux' ? null : shellMediaStreamSrc
+}
+
 /** Forget the base sent, as a fresh page would. Tests only. */
 export function resetMediaStreamBaseForTests(): void {
   sentBase = null

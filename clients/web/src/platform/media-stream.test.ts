@@ -14,6 +14,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 import {
+  mediaStreamSrcFor,
   resetMediaStreamBaseForTests,
   shellMediaStreamSrc,
 } from './media-stream'
@@ -72,5 +73,20 @@ describe('shellMediaStreamSrc', () => {
     refuse = false
     await shellMediaStreamSrc(url)
     expect(calls).toHaveLength(2)
+  })
+})
+
+describe('mediaStreamSrcFor', () => {
+  it('streams in every shell but Linux, whose player cannot load the scheme', () => {
+    for (const target of [
+      'darwin',
+      'windows',
+      'ios',
+      'android',
+      'androideabi',
+    ]) {
+      expect(mediaStreamSrcFor(target)).toBe(shellMediaStreamSrc)
+    }
+    expect(mediaStreamSrcFor('linux')).toBeNull()
   })
 })
