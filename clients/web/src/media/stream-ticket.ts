@@ -18,12 +18,22 @@ const STREAM_PREFIX = '/v1/media-stream/'
 /** How long the error probe waits before calling the server unreachable. */
 const PROBE_TIMEOUT_MS = 15_000
 
+/**
+ * What a platform's `mediaStreamSrc` throws when the platform cannot stream
+ * after all, such as when the Linux shell's loopback server cannot start.
+ * `issue` then answers `refused`, so the caller falls back to the blob path.
+ */
+export class StreamUnavailableError extends Error {
+  override name = 'StreamUnavailableError'
+}
+
 export type StreamTicketOutcome =
   /** The element's `src`. */
   | { ok: true; src: string }
   /**
    * The server will not stream this object: it would not serve it as
-   * `video/*` or `audio/*` (`400`). The caller falls back to the blob path.
+   * `video/*` or `audio/*` (`400`). Or the platform cannot stream after all
+   * ({@link StreamUnavailableError}). The caller falls back to the blob path.
    */
   | { ok: false; kind: 'refused' }
   /** Anything else: the event is gone, the server is down, a network error. */
@@ -115,8 +125,10 @@ export function createStreamTickets(deps: {
           return { ok: false, kind: 'failed' }
         }
         return { ok: true, src: await toSrc(resolve(path)) }
-      } catch {
-        return { ok: false, kind: 'failed' }
+      } catch (error) {
+        return error instanceof StreamUnavailableError
+          ? { ok: false, kind: 'refused' }
+          : { ok: false, kind: 'failed' }
       }
     },
 

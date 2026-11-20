@@ -25,11 +25,11 @@ use crate::transport::Transport;
 
 const ORIGIN: &str = "axon://localhost";
 /// Over twice the bound, and not a multiple of it.
-const LARGE: usize = 9 * 1024 * 1024 + 123;
-const SMALL: usize = 1000;
+pub(crate) const LARGE: usize = 9 * 1024 * 1024 + 123;
+pub(crate) const SMALL: usize = 1000;
 const TICKET: &str = "AAAAbbbbCCCCddddEEEEffffGGGGhhhhIIIIjjjjKK0";
 
-fn object(len: usize) -> Vec<u8> {
+pub(crate) fn object(len: usize) -> Vec<u8> {
     pattern()[..len].to_vec()
 }
 
@@ -104,18 +104,18 @@ fn chunks(bytes: &[u8]) -> Vec<Bytes> {
     bytes.chunks(64 << 10).map(Bytes::copy_from_slice).collect()
 }
 
-struct Server {
+pub(crate) struct Server {
     addr: std::net::SocketAddr,
     /// The path and headers of every request the server received.
     seen: Arc<Mutex<Vec<(String, HeaderMap)>>>,
 }
 
 impl Server {
-    fn base(&self) -> Url {
+    pub(crate) fn base(&self) -> Url {
         parse_base(&format!("http://{}/axon", self.addr)).unwrap()
     }
 
-    fn seen(&self) -> Vec<(String, HeaderMap)> {
+    pub(crate) fn seen(&self) -> Vec<(String, HeaderMap)> {
         self.seen.lock().unwrap().clone()
     }
 }
@@ -249,7 +249,7 @@ fn answer(ticket: &str, headers: &HeaderMap) -> hyper::Response<ChannelBody> {
     builder.body(body(sent, end)).unwrap()
 }
 
-async fn server() -> Server {
+pub(crate) async fn server() -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -289,7 +289,7 @@ async fn server() -> Server {
 
 // ===== client side =====
 
-fn transport() -> Transport {
+pub(crate) fn transport() -> Transport {
     Transport::new(ClientOptions::new("Axon/test (test)".into())).unwrap()
 }
 
