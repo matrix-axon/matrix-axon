@@ -408,6 +408,34 @@ impl Transport {
         Ok(head)
     }
 
+    /// One request on the current clients, outside the table: no id, no
+    /// cancel, no redirects followed. A redirect comes back as the response
+    /// it is. For the `axon-media` scheme (ADR 0139 § 7), whose handler reads
+    /// the body itself and whose reach must stop at the URL it built.
+    pub(crate) async fn send_once(
+        &self,
+        outgoing: Outgoing,
+    ) -> Result<reqwest::Response, TransportError> {
+        if !is_http(&outgoing.url) {
+            return Err(TransportError::new(Kind::Scope));
+        }
+        let clients = self.current();
+        Counters::bump(&self.counters.requests_sent);
+        let Outgoing {
+            method,
+            url,
+            headers,
+            body,
+        } = outgoing;
+        let request = Outgoing {
+            method,
+            url,
+            headers,
+            body: body.map(Bytes::from),
+        };
+        self.hop(&clients, request).await
+    }
+
     /// One logical request, following redirects with `fetch`'s rules, as
     /// reqwest's own redirect handling applies them:
     ///

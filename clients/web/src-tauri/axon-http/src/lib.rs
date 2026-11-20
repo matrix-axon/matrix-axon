@@ -20,12 +20,17 @@
 //! - [`reset`] swaps in a fresh client after resume, and [`stats`] returns the
 //!   counters `transport:stats` logs.
 //!
+//! The plugin also serves the `axon-media` scheme (ADR 0139 § 7, see
+//! [`media`]), which proxies stream tickets for `<video>` and `<audio>` on the
+//! same pooled client. [`set_media_stream_base`] tells it where the server is.
+//!
 //! Failures reject with `{ kind, detail }` and no free text (see [`error`]).
 //! Any `http` or `https` URL is reachable: the authority is unchanged from the
 //! plugin's (ADR 0127 § 8, narrowing tracked in issue 893).
 
 mod client;
 mod error;
+mod media;
 mod transport;
 
 use percent_encoding::percent_decode_str;
@@ -39,6 +44,7 @@ use tauri::{Manager, RunEvent, Runtime, State, Webview, WindowEvent};
 
 pub use client::{Retries, Stats};
 pub use error::{Kind, TransportError};
+pub use media::{MediaBase, SCHEME as MEDIA_SCHEME};
 pub use transport::{Head, Transport};
 
 /// The invoke header that carries a request's line and headers, as
@@ -224,6 +230,15 @@ fn reset(transport: State<'_, Transport>) -> Result<()> {
     transport.reset()
 }
 
+/// Where the `axon-media` scheme sends ticket requests: the server base the
+/// page resolves its ticket paths against. The page calls this before it hands
+/// an element a scheme URL, so a server change takes effect with the next
+/// ticket.
+#[tauri::command]
+fn set_media_stream_base(media: State<'_, MediaBase>, base: String) -> Result<()> {
+    media.set(&base)
+}
+
 #[tauri::command]
 fn stats(transport: State<'_, Transport>) -> Stats {
     transport.stats()
@@ -238,8 +253,36 @@ fn user_agent(version: &impl std::fmt::Display) -> String {
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("axon-http")
         .invoke_handler(tauri::generate_handler![
-            send, read_body, cancel, drop_body, reset, stats
+            send,
+            read_body,
+            cancel,
+            drop_body,
+            reset,
+            stats,
+            set_media_stream_base
         ])
+        .register_asynchronous_uri_scheme_protocol(media::SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let origin = app
+                .get_webview_window(ctx.webview_label())
+                .and_then(|window| window.url().ok())
+                .and_then(|url| media::page_origin(&url));
+            tauri::async_runtime::spawn(async move {
+                let (Some(transport), Some(base)) =
+                    (app.try_state::<Transport>(), app.try_state::<MediaBase>())
+                else {
+                    return responder.respond(
+                        tauri::http::Response::builder()
+                            .status(503)
+                            .body(Vec::new())
+                            .expect("a status and no headers"),
+                    );
+                };
+                let response =
+                    media::respond(&transport, base.get(), &request, origin.as_deref()).await;
+                responder.respond(response);
+            });
+        })
         .setup(|app, _api| {
             let options = client::ClientOptions::new(user_agent(&app.package_info().version));
             // Without a cache directory the transport still works, and only
@@ -250,6 +293,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 .ok()
                 .map(|dir| dir.join("axon-http-h2-origins.json"));
             app.manage(Transport::with_store(options, store)?);
+            app.manage(MediaBase::default());
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -277,6 +321,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .build()
 }
 
+#[cfg(test)]
+mod media_tests;
 #[cfg(test)]
 mod tests;
 
