@@ -53,6 +53,11 @@ pub(crate) fn block_start(at: u64) -> u64 {
     at - at % MAX_BODY as u64
 }
 
+/// The last byte of a block of up to [`MAX_BODY`] that starts at `first`.
+fn block_end(first: u64) -> u64 {
+    first.saturating_add(MAX_BODY as u64 - 1)
+}
+
 /// A `Range` request header the window can answer: one range, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Spec {
@@ -187,6 +192,15 @@ impl MediaWindows {
         lock(&self.blocks).len()
     }
 
+    /// The bytes held across every block.
+    #[cfg(test)]
+    pub(crate) fn held_bytes(&self) -> usize {
+        lock(&self.blocks)
+            .iter()
+            .map(|block| lock(&block.state).bytes.len())
+            .sum()
+    }
+
     /// The live block of `ticket` starting at `start`, or else a new one in
     /// its place, with whether it is new and so the caller's to fetch. One
     /// lock covers both, so requests that arrive together share one block.
@@ -241,8 +255,11 @@ impl MediaWindows {
         };
         let (block, new) = self.claim(ticket, block_start(first));
         if new {
-            if let Err(response) = self.fetch(transport, url, &block).await {
-                return Outcome::Served(response);
+            match self.fetch(transport, url, &block).await {
+                Ok(()) => {}
+                Err(Some(response)) => return Outcome::Served(response),
+                // Dropped from the window first: go upstream as sent.
+                Err(None) => return Outcome::Bypass,
             }
         }
         self.read(&block, spec, first).await
@@ -272,7 +289,9 @@ impl MediaWindows {
         let Some(total) = complete else {
             return;
         };
-        let next = start + MAX_BODY as u64;
+        let Some(next) = start.checked_add(MAX_BODY as u64) else {
+            return;
+        };
         if total.is_some_and(|total| next >= total) {
             return;
         }
@@ -287,18 +306,20 @@ impl MediaWindows {
     /// Fetch `block`, just claimed, returning once its headers are in. A
     /// response that is not a usable `206` is answered as the server sent it
     /// and the block is dropped, which is how a `404` for an expired ticket
-    /// reaches the player.
+    /// reaches the player. `Err(None)` means the block was dropped from the
+    /// window before its headers arrived.
     async fn fetch(
         &self,
         transport: &Transport,
         url: Url,
         block: &Arc<Block>,
-    ) -> Result<(), Response<Vec<u8>>> {
+    ) -> Result<(), Option<Response<Vec<u8>>>> {
         // If this future is dropped before the headers are in, the requests
         // waiting on them go upstream themselves rather than wait for good.
         let mut unsettled = Unsettled(Some((self, block)));
         let first = block.first;
-        let range = format!("bytes={first}-{}", first + MAX_BODY as u64 - 1);
+        let end = block_end(first);
+        let range = format!("bytes={first}-{end}");
         let mut headers = HeaderMap::new();
         headers.insert(
             header::RANGE,
@@ -308,16 +329,20 @@ impl MediaWindows {
             header::ACCEPT_ENCODING,
             HeaderValue::from_static("identity"),
         );
-        let sent = transport
-            .send_once(Outgoing {
-                method: Method::GET,
-                url,
-                headers,
-                body: None,
-            })
-            .await;
+        let send = transport.send_once(Outgoing {
+            method: Method::GET,
+            url,
+            headers,
+            body: None,
+        });
+        // A block dropped while its headers are awaited stops waiting too.
+        let sent = tokio::select! {
+            biased;
+            () = block.cancel.cancelled() => return Err(None),
+            sent = send => sent,
+        };
         let Ok(response) = sent else {
-            return Err(media::bad_gateway());
+            return Err(Some(media::bad_gateway()));
         };
         let range = (response.status() == StatusCode::PARTIAL_CONTENT)
             .then(|| response.headers().get(header::CONTENT_RANGE))
@@ -326,15 +351,19 @@ impl MediaWindows {
             .and_then(parse_content_range)
             .filter(|&(start, _, _)| start == first);
         let Some((_, last, total)) = range else {
-            return Err(media::shape(&Method::GET, true, response).await);
+            return Err(Some(media::shape(&Method::GET, true, response).await));
         };
+        // The span is the peer's to state. A server that sends past the end
+        // asked for is read only that far, so a block never holds more than
+        // `MAX_BODY`.
+        let last = last.min(end);
         let headers = media::forwarded_response_headers(response.headers());
         block.update(|state| {
             state.phase = Phase::Body;
             state.last = last;
             state.total = total;
             state.headers = headers;
-            state.bytes.reserve_exact((last - first + 1) as usize);
+            state.bytes.reserve_exact((last - first) as usize + 1);
         });
         unsettled.0 = None;
         tokio::spawn(fill(Arc::clone(block), response));
@@ -385,7 +414,7 @@ impl MediaWindows {
             Spec::Closed(_, last) => last.min(state.last),
             _ => state.last,
         }
-        .min(first + MAX_BODY as u64 - 1);
+        .min(block_end(first));
         let arrived = block.first + state.bytes.len() as u64;
         if arrived > wanted {
             return Some(Outcome::Served(answer(&state, block.first, first, wanted)));
@@ -407,14 +436,23 @@ impl MediaWindows {
     }
 }
 
-/// Before a new block joins `blocks`, drop the idle ones and then, while at
-/// the limit, the least recently used.
+/// Before a new block joins `blocks`, drop the failed ones and complete ones
+/// unused for [`IDLE`], and then, while at the limit, the least recently used,
+/// complete blocks first.
+///
+/// A block still fetching is never idle: requests parked on it do not touch
+/// `used` until bytes arrive, and `fill`'s own deadline ends a fetch that
+/// stops sending.
 fn make_room(blocks: &mut Vec<Arc<Block>>) {
     let now = Instant::now();
     blocks.retain(|held| {
         let state = lock(&held.state);
-        let keep = matches!(state.phase, Phase::Head | Phase::Body | Phase::Done)
-            && now.duration_since(state.used) < IDLE;
+        // `used` can be stamped after `now` was read, hence saturating.
+        let keep = match state.phase {
+            Phase::Head | Phase::Body => true,
+            Phase::Done => now.saturating_duration_since(state.used) < IDLE,
+            Phase::Failed | Phase::Refused => false,
+        };
         if !keep {
             held.cancel.cancel();
         }
@@ -424,7 +462,10 @@ fn make_room(blocks: &mut Vec<Arc<Block>>) {
         let Some(oldest) = blocks
             .iter()
             .enumerate()
-            .min_by_key(|(_, held)| lock(&held.state).used)
+            .min_by_key(|(_, held)| {
+                let state = lock(&held.state);
+                (state.phase != Phase::Done, state.used)
+            })
             .map(|(i, _)| i)
         else {
             break;
@@ -476,7 +517,16 @@ async fn fill(block: Arc<Block>, mut response: reqwest::Response) {
     loop {
         let chunk = tokio::select! {
             biased;
-            () = block.cancel.cancelled() => return,
+            () = block.cancel.cancelled() => {
+                // Dropped from the window: the requests waiting on it get
+                // what has arrived, or a `502`, rather than wait for good.
+                block.update(|state| {
+                    if state.phase == Phase::Body {
+                        state.phase = Phase::Failed;
+                    }
+                });
+                return;
+            }
             chunk = tokio::time::timeout_at(deadline, response.chunk()) => chunk,
         };
         let mut done = false;
