@@ -45,19 +45,35 @@ export async function shellMediaStreamSrc(ticketUrl: string): Promise<string> {
 }
 
 /**
- * The shell's `mediaStreamSrc` for one build target (`TAURI_ENV_PLATFORM`),
- * or `null` where the webview's player cannot load the scheme.
+ * The build targets (`TAURI_ENV_PLATFORM`) whose webview player cannot load
+ * the scheme, so video and audio there keep the blob path (ADR 0139 § 7).
  *
- * Linux is `null`: WebKitGTK's GStreamer player admits only its built-in
- * URL schemes, and GStreamer has no source for a custom one, so every media
- * element fails before it sends a request. Video and audio there keep the
- * blob path ([issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192)).
- * The page's own `fetch` of the scheme works, which is not enough.
+ * - `linux`: WebKitGTK's GStreamer player admits only its built-in URL
+ *   schemes, and GStreamer has no source for a custom one, so every media
+ *   element fails before it sends a request
+ *   ([issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192)).
+ * - `android` and `androideabi`: Android WebView applies a request's `Range`
+ *   to an intercepted response itself, skipping into a body that holds only
+ *   the requested bytes, so every range after byte 0 fails
+ *   ([issue 1194](https://github.com/matrix-axon/matrix-axon/issues/1194)).
+ *
+ * The page's own `fetch` of the scheme works on Linux, and from byte 0 on
+ * Android, which is not enough for a player.
+ */
+const NO_STREAMING: ReadonlySet<string> = new Set([
+  'linux',
+  'android',
+  'androideabi',
+])
+
+/**
+ * The shell's `mediaStreamSrc` for one build target, or `null` where the
+ * webview's player cannot load the scheme ({@link NO_STREAMING}).
  */
 export function mediaStreamSrcFor(
   target: string,
 ): ((ticketUrl: string) => Promise<string>) | null {
-  return target === 'linux' ? null : shellMediaStreamSrc
+  return NO_STREAMING.has(target) ? null : shellMediaStreamSrc
 }
 
 /** Forget the base sent, as a fresh page would. Tests only. */
