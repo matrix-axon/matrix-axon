@@ -24,9 +24,10 @@
 //! - Plaintext stays in memory, never on disk, as the server's `no-store`
 //!   asks. At most [`MAX_BLOCKS`] blocks are held, and a complete block
 //!   unused for [`IDLE`] is dropped, as is everything when the page reloads.
-//!   A block still arriving is never dropped to make room, since requests
-//!   may be waiting on it: when every block held is still arriving, a request
-//!   for another goes upstream as it is.
+//!   To make room, complete blocks go first, then blocks still arriving that
+//!   no request waits on, such as the one a seek moved away from. A block a
+//!   request waits on is never dropped: when every block held has one, a
+//!   request for another goes upstream as it is.
 //! - A block whose upstream sends nothing for [`STALL`] fails, however long
 //!   its whole fetch has taken, so a slow but steady link still fills it.
 //! - A block outlives its ticket's revocation by at most its own bytes, the
@@ -438,8 +439,7 @@ impl MediaWindows {
         let wanted = match spec {
             Spec::Closed(_, last) => last.min(state.last),
             _ => state.last,
-        }
-        .min(block_end(first));
+        };
         let arrived = block.first + state.bytes.len() as u64;
         if arrived > wanted {
             return Some(Outcome::Served(answer(&state, block.first, first, wanted)));
@@ -467,11 +467,18 @@ impl MediaWindows {
 
 /// Before a new block joins `blocks`, drop the failed ones and complete ones
 /// unused for [`IDLE`], and then, while at the limit, the least recently used
-/// complete one. Whether that left room for it.
+/// complete one, or else the least recently used arriving one that no request
+/// waits on. Whether that left room for it.
 ///
-/// A block still fetching is never dropped here: requests parked on it do not
+/// A block a request waits on is never dropped here: the request does not
 /// touch `used` until bytes arrive, and would be failed for nothing. `fill`
 /// ends a fetch that stops sending ([`STALL`]).
+///
+/// Every request holds its own `Arc` of the block it reads, and gets it only
+/// from `claim`, under the lock the caller holds. So a block in `Body` held by
+/// nothing but this list and its `fill` task has no request waiting on it,
+/// and none can start to wait until the lock is released. A block in `Head`
+/// always has its fetcher waiting on it.
 fn make_room(blocks: &mut Vec<Arc<Block>>) -> bool {
     let now = Instant::now();
     blocks.retain(|held| {
@@ -493,7 +500,13 @@ fn make_room(blocks: &mut Vec<Arc<Block>>) -> bool {
             .enumerate()
             .filter_map(|(i, held)| {
                 let state = lock(&held.state);
-                (state.phase == Phase::Done).then_some((state.used, i))
+                let unread = state.phase == Phase::Body && Arc::strong_count(held) == 2;
+                // Complete blocks sort first.
+                match state.phase {
+                    Phase::Done => Some(((false, state.used), i)),
+                    _ if unread => Some(((true, state.used), i)),
+                    _ => None,
+                }
             })
             .min()
             .map(|(_, i)| i)
