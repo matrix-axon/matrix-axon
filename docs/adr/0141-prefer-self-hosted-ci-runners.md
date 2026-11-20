@@ -29,25 +29,20 @@ As far as we know, that plan offers only the Default runner group and cannot res
 Both machines were inspected on 2026-11-19.
 Each runner runs as its own unprivileged local account.
 Neither machine is dedicated to CI: both are also used for other work, and both run other services.
-This ADR records only the facts that shape its decisions.
+This ADR records only the facts that its decisions depend on.
 The rest of what the inspection found, and the hardening that followed, is kept with the maintainers rather than in a public repository.
 
 **Linux.**
 
-| Aspect           | State                                                                                                                                  |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| OS and glibc     | Ubuntu 26.04 LTS, x86_64, glibc 2.43                                                                                                   |
-| CPU and memory   | 18 threads, 31 GB RAM, shared with development work on the same machine                                                               |
-| Docker           | The host's daemon also runs unrelated services, so the `docker` group, which amounts to root on the host, is not an option for the runner account |
-| Host ports taken | 5432 and 8008, among others, by services unrelated to CI                                                                               |
+- Its Ubuntu release is newer than `ubuntu-latest`'s, and its glibc is newer than the 2.35 floor (see "The glibc floor" below).
+- Development work on the machine uses the same CPU and memory.
+- Its Docker daemon also runs services unrelated to CI, so the runner account cannot be put in the `docker` group, which amounts to root on the host.
+- Other services hold host ports 5432 and 8008.
 
 **macOS.**
 
-| Aspect         | State                                                                                                                                  |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| OS and Xcode   | macOS 26 on Intel (10 cores / 20 threads, 32 GB). Xcode 26.6.                                                                          |
-| Docker         | Not available to the runner account                                                                                                    |
-| Remaining life | macOS 26 is the last release for Intel Macs, and Xcode 27 will not install on it, so this machine cannot follow the hosted images past Xcode 26 |
+- An Intel Mac. macOS 26 is the last release for Intel Macs, and Xcode 27 will not install on it, so this machine cannot follow the hosted images past Xcode 26.
+- Docker is not available to the runner account.
 
 ### This repository is public
 
@@ -55,8 +50,7 @@ Pull requests from forks run workflows from the fork's merge ref, with the fork'
 A fork can edit `runs-on` to name the self-hosted label directly, so nothing in a workflow file can keep a fork PR off a self-hosted runner.
 Code from that fork would then run on a machine that persists between jobs.
 
-Before this ADR, the repo's fork-PR approval policy was `first_time_contributors`: after a contributor's first approved run, their later fork-PR runs started without review.
-On 2026-11-19 it was changed to `all_external_contributors`, so every fork-PR run now waits for a maintainer to approve it.
+The repo's fork-PR approval policy is `all_external_contributors`, so every fork-PR run waits for a maintainer to approve it.
 
 ### Which workflows are long
 
@@ -191,12 +185,14 @@ Third-party actions that do this exist (for example `mikehardy/runner-fallback-a
 
 The App is installed on the org with read access to self-hosted runners (the "runners and runner groups" permission) and to this repository's Actions.
 The picker mints a one-hour token on each run with `actions/create-github-app-token`.
-The App's ID and private key are stored as repository secrets, so fork PRs and Dependabot never see them.
+The App's private key is the repository secret `RUNNER_PICKER_PRIVATE_KEY`, so fork PRs and Dependabot never see it.
+The App's ID is not secret and is the repository variable `RUNNER_PICKER_APP_ID` (decision 1).
+If the ID is stored as a secret instead, the variable is empty, the token cannot be minted, and every job falls back to hosted runners.
 
 We chose an App because, once it is set up, nobody has to maintain it.
 
 - **Setup.**
-  An App takes about ten minutes to create, install and store as two secrets.
+  An App takes about ten minutes to create, install, and store as one secret and one variable.
   A fine-grained PAT with the same permissions takes about two.
 - **Maintenance.**
   The App's key does not expire, and every run mints its own token.
@@ -212,7 +208,7 @@ What decided it is how the picker fails: when the token stops working, every job
 Nothing turns red, so an expired PAT would show up only as CI getting slower.
 A fine-grained PAT stays the fallback if the App ever cannot be used.
 
-Whatever the token, the picker emits a `::warning::` annotation when the runners API rejects it (401 or 403) or the secret is missing on an event that passed decision 1's check 2.
+Whatever the token, the picker emits a `::warning::` annotation when the runners API rejects it (401 or 403), or when the secret or the App ID variable is missing on an event that passed decision 1's check 2.
 Dependabot runs never reach that check (decision 1, check 2), so they cannot raise a false warning.
 A broken token then shows on every run's summary.
 An offline or busy runner is the normal case and gets no warning.
@@ -238,16 +234,18 @@ It takes its `runs-on` as an input whose default is its hosted image.
 The caller passes the pool's output only when the called job is the one holding the slot.
 
 **Who holds the slot.**
-The holder is the longest job that runs in that run, from the per-job times in Context:
+The holder is the longest job that runs in that run, from the per-job times in Context.
+Where the longest job depends on the event, the holder does too:
 
 | Workflow          | Slot holder                                                       | Why                                                                                                                        |
 | ----------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `web-e2e.yml`     | the `firefox` lane                                                | Longest lane on pull requests, where most runs happen. The lanes differ by under two minutes, so the choice matters little. |
+| `web-e2e.yml`     | `firefox` on pull requests; `webkit-desktop` on pushes; the one lane a single-project dispatch runs | The longest lane for each event. The lanes differ by under two minutes, and on pushes the hosted `web-e2e-iphone` job is only 0.6 min shorter, so the gain there is small. |
 | `smoke.yml`       | `true-local`, on pushes and schedules                             | 18.5 min, against 14.8 for the called `matrix-oauth`, which stays hosted. `stub` takes under a minute and stays hosted.    |
 | `integration.yml` | the one suite the dispatch selects; with `all`, `matrix-oauth`    | One dispatch normally runs one suite. With `all`, `matrix-oauth` (10.6 min) is longer than `integration` (6.1 min).         |
 | all others        | their one moving job                                              | —                                                                                                                          |
 
-For `web-e2e.yml`, the lane's `runs-on` is the expression `matrix.project == 'firefox' && fromJSON(needs.pick.outputs.linux) || 'ubuntu-latest'`.
+For `web-e2e.yml`, the lanes' `runs-on` is the expression `matrix.project == (github.event_name == 'push' && 'webkit-desktop' || 'firefox') && fromJSON(needs.pick.outputs.linux) || 'ubuntu-latest'`.
+A single-project dispatch adds one more branch to the inner expression, so the matrix's only lane gets the slot.
 Before each workflow moves (decision 8), its holder is checked against current job timings, in case they have shifted.
 
 ### 5. Which jobs move
@@ -259,14 +257,14 @@ Jobs marked "Docker" need the rootless daemon from decision 6, so they move only
 | Workflow                | Job                       | Notes                                                                                                                         |
 | ----------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `lint-and-clippy.yml`   | `lint-and-test`           | On every PR and every push to `main`. Needs no Docker and no system packages. The pilot.                                      |
-| `web-e2e.yml`           | the `firefox` lane        | Runs in the Playwright container image (decision 6), so the host's Ubuntu 26.04 does not matter. Docker.                      |
+| `web-e2e.yml`           | one lane per run          | The slot holder from decision 4. Runs in the Playwright container image (decision 6), so the host's Ubuntu release does not matter. Docker. |
 | `android-build.yml`     | `build`                   | Needs an Android SDK owned by the runner account; `sdkmanager` adds the pinned NDK to it.                                     |
 | `embed-web.yml`         | `embed-web`               | Docker. Needs a dynamic service port, since the host's own Postgres holds 5432.                                               |
 | `postgres-tests.yml`    | `postgres-tests`          | Scheduled. Docker, with a dynamic service port.                                                                               |
 | `smoke.yml`             | `true-local`              | Pushes and schedules. Docker. `stub` stays hosted: it takes under a minute.                                                   |
 | `matrix-oauth.yml`      | `matrix-oauth`            | Reusable. Gains a `runs-on` input (decision 4), which only `integration.yml` sets to the pool value. Docker; pulls from ghcr.  |
 | `integration.yml`       | one of `integration`, `gap-fill`, `matrix-oauth` | Dispatch only; the slot holder from decision 4. Docker, with the compose isolation in decision 6, since services unrelated to CI hold 8008. |
-| `desktop-build.yml`     | `checks`                  | Its apt packages are installed on the runner (decision 6). Ubuntu 26.04's webkit2gtk is newer than the hosted image's; `checks` only compiles and lints against it. |
+| `desktop-build.yml`     | `checks`                  | Its apt packages are installed on the runner (decision 6). The machine's webkit2gtk is newer than the hosted image's; `checks` only compiles and lints against it. |
 
 **macOS pool (`axon-macos`):**
 
@@ -288,7 +286,7 @@ Until then, `ios-sharing.yml` prints `xcodebuild -version` first on either kind 
 
 - **Every Windows job.** There is no Windows runner.
 - **The glibc-pinned jobs**: `cross-build.yml` `linux`, `desktop-build.yml` `linux` and `package.yml` `packages`.
-  The Linux machine has glibc 2.43, so `assert-glibc-floor.sh` would fail them rather than fall back.
+  The Linux machine's glibc is newer than 2.35, so `assert-glibc-floor.sh` would fail them rather than fall back.
   They could join the pool only by building inside an Ubuntu 22.04 container, which is out of scope here.
   `package.yml` also builds on `ubuntu-22.04-arm`, and neither machine is ARM.
 - **Jobs that sign or publish**: `apple-store-build.yml`, `desktop-build.yml` `macos`, `release-plz.yml`, `publish-images.yml`, and the `release` jobs of `cross-build.yml` and `package.yml`.
@@ -316,7 +314,7 @@ Each job that joins a pool gets these changes in the same PR that moves it:
   The runner account gets its own rootless Docker daemon (`dockerd-rootless-setuptool.sh`, plus `loginctl enable-linger`), and is not added to the `docker` group.
   The host's daemon runs unrelated services, and access to it is access to root.
   A rootless daemon can see neither those containers nor the host's files.
-  The job's `DOCKER_HOST` points at the runner account's socket through the runner's `.env`.
+  The job's `DOCKER_HOST` points at the runner account's socket through the runner's `.env`, which root writes when it sets up the runner (decision 7).
 - **No fixed host ports.**
   On the Linux machine this is required, not just tidy: services unrelated to CI already hold 5432 and 8008.
   Service containers publish to a random host port (`ports: ["5432"]`) and the job reads `job.services.postgres.ports['5432']`.
@@ -324,7 +322,7 @@ Each job that joins a pool gets these changes in the same PR that moves it:
 - **Docker state is torn down in an `if: always()` step**, by compose project name.
 - **`check-environment` runs with `require-docker: true`** in every job that uses Docker, so a runner without it fails in seconds, not minutes in.
 - **SDKs belong to the runner account.**
-  The Android SDK is installed in the runner account's home, and `ANDROID_HOME` is set in the runner's `.env`.
+  The Android SDK is installed in the runner account's home, and root sets `ANDROID_HOME` in the runner's `.env`.
   No other account's SDK is shared with it, because sharing one would mean opening that account's home directory.
 
 ### 7. Fork PRs are kept off the runners at three levels
@@ -344,9 +342,29 @@ Before a runner takes jobs from this repository:
 
 - **No administrator rights.**
   It has no `sudo`, and is not in `admin` (macOS) or in the `docker` group (Linux).
-- **No other account can write its files**, which include the runner's credentials and the hook.
+- **No other unprivileged account can write the runner's files.**
+- **The runner account cannot write the files that enforce the hook.**
+  Root owns the runner's install directory, and the runner account can only read it.
+  That covers the runner binaries, the `.env` that names the hook, and the hook script.
+  The runner account owns only `_work` and `_diag`.
+  Otherwise any trusted job that runs hostile code, such as a `build.rs`, a postinstall script or a compromised dependency, could unset the hook variable or replace the runner's binaries, and later fork-PR jobs would pass unchecked.
+  The pilot confirms the runner needs to write nothing else; anything it does need gets the narrowest grant that works.
+- **The service refuses to start the runner if those files are writable by the runner account.**
+  The check is a root-owned script that runs before the runner starts.
+- **Root updates the runner.**
+  The runner normally updates itself, which needs write access to its install directory.
+  So it is configured with `--disableupdate`, and a root-owned timer installs each runner release: a systemd timer on Linux, a LaunchDaemon on macOS.
 - **It cannot read other accounts' home directories.**
-- **It runs as a service**, so the hook and `.env` survive a reboot.
+- **It runs as a system service**, so the hook and `.env` survive a reboot.
+  On Linux that is the root-owned systemd unit.
+  On macOS it is a LaunchDaemon with `UserName` set, not the per-user LaunchAgent that the runner's `svc.sh` installs, because the runner account could edit that file.
+
+**What these requirements do not stop.**
+The runner needs to read its own registration credentials.
+A job that already runs hostile code as the runner account can copy them and start its own runner, without the hook, under the same registration.
+So the hook keeps fork code off a clean machine, but it cannot clean up a compromised account.
+Getting to that point takes hostile code in a trusted job, which comes from code or a dependency that someone with write access merged, and that is the risk accepted below.
+If a compromise is suspected, the runner is removed from the org, which revokes its credentials, and the account is rebuilt before the runner is registered again.
 
 **Accepted risk: neither machine is dedicated to CI.**
 A job can reach whatever listens on the host or its network.
@@ -361,7 +379,7 @@ A dedicated machine or VM comes first if either of these ever changes:
 ### 8. Rollout
 
 1. **Prepare what the pilot needs:**
-   - the runner-account requirements in decision 7, on both machines;
+   - the runner-account requirements in decision 7, on both machines, including the root-owned install, its start-time check and its update timer;
    - the custom labels;
    - allow this public repository in the Default runner group;
    - the job-started hook;
@@ -371,7 +389,7 @@ A dedicated machine or VM comes first if either of these ever changes:
 2. **Pilot.**
    Add `pick-runner.yml`, the `runner-job-started.sh` source and the actionlint labels, and move only `lint-and-clippy.yml`.
    Run one runner instance on the Linux machine.
-   Builds compete with development work on the same 18 threads and 31 GB, so the pilot also records whether that hurts either side.
+   Builds compete with development work for the same CPU and memory, so the pilot also records whether that hurts either side.
    Run it for about a week.
    For each run, record which pool the picker chose, why, the queue time, and the job time.
    The picker writes all of this to its step summary.
@@ -391,8 +409,13 @@ A dedicated machine or VM comes first if either of these ever changes:
   When the machines are offline, busy or switched off, each job takes 10–15 seconds longer than today, which is the picker's cost.
 - **Contention is reduced, not removed.**
   A push to `main` starts about eight of these workflows at once.
-  Their pickers run within the same few seconds, and check 5 cannot see a job that another picker has not queued yet.
+  Their pickers run within the same few seconds, and check 4 cannot see a job that another picker has not queued yet.
   Several jobs can therefore choose the same idle runner, and all but one wait for it.
+  Check 4 also counts only this repository's queued jobs.
+  The org's other repositories can use the Default runner group, and a job there that asks for the generic `self-hosted` label can land on these runners.
+  The hook allows only this repository, so it fails such a job within seconds, before any step runs.
+  The runner is busy only for those seconds, but a picker can still choose it just as one of those jobs takes it.
+  We accept this rather than restricting the group, which the Free plan does not offer.
   Running two or three runner instances on the Linux machine makes this rare.
   Decision 6's port and compose changes are what make several instances on one machine safe.
   The sweeper bounds the wait if it is still common.
@@ -404,15 +427,19 @@ A dedicated machine or VM comes first if either of these ever changes:
 - **A second copy of the environment to maintain.**
   Packages, SDKs and Xcode on the runners must track what the hosted images provide for these jobs.
   The checks in decision 6 make drift fail loudly.
-  The Linux machine runs Ubuntu 26.04 while `ubuntu-latest` is older, so a self-hosted pass is evidence for the newer distro and a hosted pass for the older one.
+  The Linux machine runs a newer Ubuntu than `ubuntu-latest`, so a self-hosted pass is evidence for the newer distro and a hosted pass for the older one.
   The two are not interchangeable for anything that links system libraries.
 - **CI and development share the Linux machine.**
   A cargo build from CI slows local builds there, and the other way round.
   The kill switch in decision 1 is also the remedy for a day of heavy local work.
 - **The macOS pool will be retired** when the hosted images move to Xcode 27 (decision 5).
   Replacing it needs an Apple Silicon Mac, which is a separate decision.
-- **Two more secrets and one org App** to own.
-  If they are missing or revoked, every job falls back to hosted runners, so nothing breaks.
+- **One more secret, one more variable and one org App** to own.
+  If any of them is missing or revoked, every job falls back to hosted runners, so nothing breaks, and decision 2's warning shows it.
+- **Runner updates are ours.**
+  With self-update disabled (decision 7), the root-owned timer installs each runner release.
+  GitHub stops sending jobs to a runner that falls 30 days behind a release, and the runners API does not report the runner's version.
+  If the timer lapses, the picker can keep choosing a runner that will never take the job, until the runner is updated or the kill switch is set.
 
 ## Alternatives considered
 
