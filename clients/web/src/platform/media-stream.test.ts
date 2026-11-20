@@ -77,15 +77,19 @@ describe('shellMediaStreamSrc', () => {
 })
 
 describe('mediaStreamSrcFor', () => {
-  it('streams on macOS, iOS and Windows, whose players load the scheme', () => {
-    for (const target of ['darwin', 'ios', 'windows']) {
+  it('streams on macOS, iOS, Windows and Android, whose players load the scheme', () => {
+    for (const target of [
+      'darwin',
+      'ios',
+      'windows',
+      'android',
+      'androideabi',
+    ]) {
       expect(mediaStreamSrcFor(target)).toBe(shellMediaStreamSrc)
     }
   })
 
-  it('keeps Linux and Android on the blob path', () => {
-    for (const target of ['linux', 'android', 'androideabi']) {
-      expect(mediaStreamSrcFor(target)).toBeNull()
-    }
+  it('keeps Linux on the blob path', () => {
+    expect(mediaStreamSrcFor('linux')).toBeNull()
   })
 })
