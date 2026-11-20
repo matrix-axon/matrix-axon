@@ -1207,13 +1207,7 @@ impl AccountLifecycle {
         active.verified = verified;
         if verified && active.own_identity_changed {
             active.own_identity_changed = false;
-            own_identity::publish_update(
-                active.account_id,
-                Some(&active.user_id),
-                false,
-                false,
-                &self.live_tx,
-            );
+            own_identity::publish_update(active.account_id, false, false, &self.live_tx);
         }
         let account_id = self.supervise(active);
         tracing::info!(
@@ -1450,14 +1444,7 @@ impl AccountLifecycle {
         // Persist verification and any warning clearance before the response.
         // Recovery can cross-sign this device before the SDK's verification
         // subscriber sees the next keys query.
-        own_identity::persist(
-            &client,
-            &self.store,
-            account_id,
-            &observation,
-            &self.live_tx,
-        )
-        .await?;
+        own_identity::persist(&self.store, account_id, &observation, &self.live_tx).await?;
         let mut account = account;
         account.verified = verified;
 

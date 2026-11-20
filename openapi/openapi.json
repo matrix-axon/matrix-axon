@@ -11053,7 +11053,7 @@
           },
           "own_identity_changed": {
             "type": "boolean",
-            "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`."
+            "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`.\nCurrent servers always send this field. Treat it as false when absent on\nan older server."
           },
           "state": {
             "$ref": "#/components/schemas/AccountStateDto",
@@ -11160,7 +11160,7 @@
               },
               "own_identity_changed": {
                 "type": "boolean",
-                "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`."
+                "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`.\nCurrent servers always send this field. Treat it as false when absent on\nan older server."
               },
               "state": {
                 "$ref": "#/components/schemas/AccountStateDto",
@@ -13023,7 +13023,7 @@
                 },
                 "own_identity_changed": {
                   "type": "boolean",
-                  "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`."
+                  "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`.\nCurrent servers always send this field. Treat it as false when absent on\nan older server."
                 },
                 "state": {
                   "$ref": "#/components/schemas/AccountStateDto",

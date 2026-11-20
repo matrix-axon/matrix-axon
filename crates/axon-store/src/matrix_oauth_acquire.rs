@@ -279,6 +279,7 @@ impl Store {
     /// rather than passed in, so the live finalizer and boot reconciliation
     /// cannot disagree and no caller can mark a browser sign-in verified.
     /// Verified QR adoption also clears any pending own-identity warning.
+    /// The watcher reports any replacement master key it subsequently observes.
     pub async fn finalize_matrix_oauth_acquire(
         &self,
         flow_id: Uuid,
@@ -572,6 +573,14 @@ mod tests {
             .unwrap();
         assert!(active.verified);
         assert!(!active.own_identity_changed);
+        let replacement = store
+            .record_account_verification(account.account_id, true, Some(&[3; 32]), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(replacement.identity_replaced);
+        assert!(!replacement.was_identity_changed);
+        assert!(!replacement.own_identity_changed);
         sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
             .bind(account.account_id)
             .execute(store.pool())

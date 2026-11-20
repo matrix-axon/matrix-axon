@@ -169,6 +169,20 @@ async fn exercise_rotations(
     store.set_account_verified(id, true).await.unwrap();
     assert!(rotate().await.has_verification_violation());
     let (live, mut receiver) = broadcast::channel(8);
+    // Before the SDK read completes, the server can store device state only.
+    // The first complete observation must still recognize the retained violation.
+    persist(
+        store,
+        id,
+        &Observation {
+            identity: None,
+            verified: false,
+        },
+        &live,
+    )
+    .await
+    .unwrap();
+    assert!(receiver.try_recv().is_err());
     let cancel = CancellationToken::new();
     let _cancel_on_exit = cancel.clone().drop_guard();
     let watcher = tokio::spawn(watch(

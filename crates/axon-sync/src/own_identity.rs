@@ -40,15 +40,16 @@ async fn identity(client: &Client, account_id: Uuid) -> Option<Identity> {
             })
         }),
         Err(_) => {
-            tracing::warn!(%account_id, %user_id, "failed to read own cross-signing identity");
+            tracing::debug!(%account_id, "failed to read own cross-signing identity");
             None
         }
     }
 }
 
 /// Pair the master key with the SDK's own-device check. The CryptoStore can
-/// change during this read, independently of the Axon lifecycle lock. If two
-/// reads straddle a rotation, keep the stored baseline and the pending alert.
+/// change during this read, independently of the Axon lifecycle lock. Require
+/// two matching observations of both the master key and verification-violation
+/// state before the store can set a baseline or change the pending alert.
 pub(crate) async fn observe(client: &Client, account_id: Uuid) -> Observation {
     let before = identity(client, account_id).await;
     let verified = derive_verified(client).await;
@@ -87,14 +88,12 @@ pub(crate) async fn retry_after_recovery(
 
 pub(crate) fn publish_update(
     account_id: Uuid,
-    user_id: Option<&str>,
     own_identity_changed: bool,
     identity_replaced: bool,
     live_tx: &broadcast::Sender<LiveFrame>,
 ) {
     tracing::info!(
         %account_id,
-        user_id = ?user_id,
         own_identity_changed,
         identity_replaced,
         "account cross-signing identity status changed"
@@ -109,7 +108,6 @@ pub(crate) fn publish_update(
 /// The caller holds the account's lifecycle lock across observation, commit
 /// and publication. Reconnecting clients recover the pending alert from GET.
 pub(crate) async fn persist(
-    client: &Client,
     store: &Store,
     account_id: Uuid,
     observation: &Observation,
@@ -129,7 +127,6 @@ pub(crate) async fn persist(
     }) {
         publish_update(
             account_id,
-            client.user_id().map(matrix_sdk::ruma::UserId::as_str),
             update.own_identity_changed,
             update.identity_replaced,
             live_tx,
@@ -155,7 +152,7 @@ pub(crate) async fn lock_and_persist(
     let Some(observation) = read_with_timeout(client, account_id).await else {
         return;
     };
-    if let Err(err) = persist(client, store, account_id, &observation, live_tx).await {
+    if let Err(err) = persist(store, account_id, &observation, live_tx).await {
         tracing::warn!(%account_id, error = %err, "failed to persist account verification state");
     }
 }

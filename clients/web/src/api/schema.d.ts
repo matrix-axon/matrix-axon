@@ -2633,6 +2633,8 @@ export interface components {
              * @description Whether Axon's device still needs to be cross-signed after a master-key
              *     replacement (ADR 0136). The first observed identity establishes the baseline.
              *     Updates are pushed on `/v1/ws` as `account.own_identity_changed`.
+             *     Current servers always send this field. Treat it as false when absent on
+             *     an older server.
              */
             own_identity_changed?: boolean;
             /**
@@ -2721,6 +2723,8 @@ export interface components {
                  * @description Whether Axon's device still needs to be cross-signed after a master-key
                  *     replacement (ADR 0136). The first observed identity establishes the baseline.
                  *     Updates are pushed on `/v1/ws` as `account.own_identity_changed`.
+                 *     Current servers always send this field. Treat it as false when absent on
+                 *     an older server.
                  */
                 own_identity_changed?: boolean;
                 /**
@@ -3713,6 +3717,8 @@ export interface components {
                  * @description Whether Axon's device still needs to be cross-signed after a master-key
                  *     replacement (ADR 0136). The first observed identity establishes the baseline.
                  *     Updates are pushed on `/v1/ws` as `account.own_identity_changed`.
+                 *     Current servers always send this field. Treat it as false when absent on
+                 *     an older server.
                  */
                 own_identity_changed?: boolean;
                 /**
