@@ -635,13 +635,14 @@ This phase begins by checking that support against production Synapse, and gets 
   Redaction relies on a prefix rule in the `TraceLayer` plus an audit and a test; a router-owned redaction helper is #1140.
 - A ticket's checks run when a request starts, not while its response streams.
   So a response already in progress when its token is revoked, or its event redacted, runs to the end of its range.
-  In the shells that is at most 4 MiB.
-  In the browser, an open-ended range can deliver the rest of the object.
+  Through the shells' `axon-media` scheme that is at most 4 MiB.
+  In the browser, and through the Linux shell's loopback server, which streams unbounded (section 7, loopback amendment), an open-ended or Range-less request can deliver the rest of the object.
   This is accepted: the token's holder was entitled to that object when the response began, and the next request is refused.
 - `axon-media` adds a second custom scheme to the shells and widens their CSP by one source.
 - The Linux shell listens on a loopback port while it runs, guarded by a per-launch token, and the CSP of every shell admits `http://127.0.0.1:*` (section 7, loopback amendment).
-- Each shell scheme response is buffered in the shell process, up to 4 MiB, so a 1 GiB video takes about 256 scheme requests (section 7).
-  A request without `Range` for an object larger than that is refused (section 7), so the device check is what confirms no platform's player sends one.
+- Each `axon-media` scheme response is buffered in the shell process, up to 4 MiB, so a 1 GiB video takes about 256 scheme requests (section 7).
+  A scheme request without `Range` for an object larger than that is refused (section 7), so the device check is what confirms that no player on a scheme platform sends one.
+  The Linux shell's player does, which is one reason it uses the loopback server, which streams the server's `200` through instead (section 7, loopback amendment).
 - The Download button is unchanged: a large download is still buffered in the page and limited to 120 s.
   Making it stream, by pointing it at the ticket route in the browser and saving through the shell's own download path in the shells, is a follow-up.
 - The TUI is unchanged by this plan.

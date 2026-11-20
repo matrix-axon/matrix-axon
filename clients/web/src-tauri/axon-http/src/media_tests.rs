@@ -3,6 +3,7 @@
 
 use std::convert::Infallible;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -43,7 +44,25 @@ fn pattern() -> &'static [u8] {
 // ===== server =====
 
 /// A body fed from a channel, so a test can end it with an error, or hold it.
-struct ChannelBody(mpsc::Receiver<Result<Bytes, std::io::Error>>);
+/// The [`Held`] marks one a test watches for the client letting go of.
+struct ChannelBody(mpsc::Receiver<Result<Bytes, std::io::Error>>, Option<Held>);
+
+/// Counts itself in [`Server::held`] for as long as the server is still
+/// sending its body: until the client reads it to the end or goes away.
+struct Held(Arc<AtomicUsize>);
+
+impl Held {
+    fn new(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(count))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl HttpBody for ChannelBody {
     type Data = Bytes;
@@ -81,7 +100,7 @@ fn body(chunks: Vec<Bytes>, end: Option<Result<(), ()>>) -> ChannelBody {
             }
         }
     });
-    ChannelBody(rx)
+    ChannelBody(rx, None)
 }
 
 /// Feed `chunks` into a body `gap` apart, then close it: a slow but steady
@@ -96,7 +115,7 @@ fn paced(chunks: Vec<Bytes>, gap: Duration) -> ChannelBody {
             }
         }
     });
-    ChannelBody(rx)
+    ChannelBody(rx, None)
 }
 
 /// Split a body into 64 KiB chunks, as a streamed response arrives.
@@ -108,6 +127,8 @@ pub(crate) struct Server {
     addr: std::net::SocketAddr,
     /// The path and headers of every request the server received.
     seen: Arc<Mutex<Vec<(String, HeaderMap)>>>,
+    /// `slow` bodies the server is still holding open.
+    held: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -117,6 +138,12 @@ impl Server {
 
     pub(crate) fn seen(&self) -> Vec<(String, HeaderMap)> {
         self.seen.lock().unwrap().clone()
+    }
+
+    /// How many `slow` responses the server is still sending: one drops out
+    /// once its client has let go of it.
+    pub(crate) fn held(&self) -> usize {
+        self.held.load(Ordering::SeqCst)
     }
 }
 
@@ -254,15 +281,19 @@ pub(crate) async fn server() -> Server {
     let addr = listener.local_addr().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);
+    let held = Arc::new(AtomicUsize::new(0));
+    let holding = Arc::clone(&held);
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
             let log = Arc::clone(&log);
+            let holding = Arc::clone(&holding);
             tokio::spawn(async move {
                 let service = service_fn(move |request: hyper::Request<Incoming>| {
                     let log = Arc::clone(&log);
+                    let holding = Arc::clone(&holding);
                     async move {
                         let path = request.uri().path().to_owned();
                         log.lock()
@@ -275,7 +306,11 @@ pub(crate) async fn server() -> Server {
                         if ticket == "late" {
                             tokio::time::sleep(Duration::from_millis(500)).await;
                         }
-                        Ok::<_, Infallible>(answer(ticket, request.headers()))
+                        let mut response = answer(ticket, request.headers());
+                        if ticket.starts_with("slow") {
+                            response.body_mut().1 = Some(Held::new(&holding));
+                        }
+                        Ok::<_, Infallible>(response)
                     }
                 });
                 let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
@@ -284,7 +319,7 @@ pub(crate) async fn server() -> Server {
             });
         }
     });
-    Server { addr, seen }
+    Server { addr, seen, held }
 }
 
 // ===== client side =====

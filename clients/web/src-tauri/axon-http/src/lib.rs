@@ -257,7 +257,7 @@ async fn media_loopback<R: Runtime>(
     webview: Webview<R>,
     loopback: State<'_, MediaLoopback>,
 ) -> Result<String> {
-    if !cfg!(target_os = "linux") {
+    if !media_loopback::serves_on(std::env::consts::OS) {
         return Err(TransportError::new(Kind::Scope));
     }
     let origin = webview.url().ok().and_then(|url| media::page_origin(&url));
