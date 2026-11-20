@@ -25,7 +25,7 @@ generates their attribution for us. They are recorded here deliberately.
   <https://webkit.org/licensing-webkit/>.
 
 ## OVERVIEW
-- MIT License (used by 443 crates)
+- MIT License (used by 444 crates)
 - Unicode License v3 (used by 19 crates)
 - ISC License (used by 18 crates)
 - Apache License 2.0 (used by 11 crates)
@@ -2491,7 +2491,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   - Copyright (c) 2020-2022 Tauri Programme within The Commons Conservancy
       - window-vibrancy 0.8.1
   - Copyright (c) 2020-2023 Ngo Iok Ui &amp; Tauri Programme within The Commons Conservancy
-      - wry 0.57.0
+      - wry 0.57.3
   - Copyright (c) zune-image developers
       - zune-core 0.5.3
       - zune-jpeg 0.5.15
@@ -2633,6 +2633,7 @@ DEALINGS IN THE SOFTWARE.
       - windows-result 0.4.1
       - windows-strings 0.4.2
       - windows-strings 0.5.1
+      - windows-sys 0.52.0
       - windows-sys 0.59.0
       - windows-sys 0.60.2
       - windows-sys 0.61.2
