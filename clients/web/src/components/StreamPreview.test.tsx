@@ -130,6 +130,30 @@ describe('stream-ticket playback (ADR 0139 § 6)', () => {
     expect(minted).toEqual([`/v1/media/${ACCOUNT}/hs/clip/stream-ticket`])
   })
 
+  it("sizes the player from the sender's dimensions before metadata arrives", async () => {
+    serveTickets()
+    const el = await openPlayer(renderAttachment(video({ w: 1280, h: 720 })))
+    expect(el.classList.contains('sized')).toBe(true)
+    expect(el.style.getPropertyValue('--video-w')).toBe('1280')
+    expect(el.style.getPropertyValue('--video-h')).toBe('720')
+  })
+
+  it('leaves the player to size itself without usable dimensions', async () => {
+    for (const size of [
+      {},
+      { w: 1280 },
+      { w: 0, h: 720 },
+      { w: NaN, h: 720 },
+    ]) {
+      serveTickets()
+      const view = renderAttachment(video(size))
+      const el = await openPlayer(view)
+      expect(el.classList.contains('sized'), JSON.stringify(size)).toBe(false)
+      expect(el.style.getPropertyValue('--video-w')).toBe('')
+      view.unmount()
+    }
+  })
+
   it('plays audio from its ticket URL', async () => {
     serveTickets()
     const el = await openPlayer(
