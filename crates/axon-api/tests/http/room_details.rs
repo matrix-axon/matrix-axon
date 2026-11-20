@@ -898,6 +898,7 @@ async fn room_info_and_account_actions_share_the_identity_warning_contract() {
     .await;
     assert_eq!(unknown["data"]["identity_changes"], Value::Null);
 
+    let unavailable = axon_api::router(read_state(f.store.clone()));
     for action in ["accept", "withdraw_verification"] {
         let path = format!(
             "/v1/accounts/{}/users/%40peer%3Alocalhost/identity/{action}",
@@ -906,6 +907,16 @@ async fn room_info_and_account_actions_share_the_identity_warning_contract() {
         let input = json!({"fingerprint": fingerprint});
         let (status, _) = request(&app, "POST", &path, Some(input.clone()), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, error) = request(
+            &unavailable,
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error["error"]["code"], "service_unavailable");
         let (status, _) = request(&app, "POST", &path, Some(input), Some(&bearer())).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
     }

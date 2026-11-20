@@ -31,6 +31,7 @@ use crate::{
     room_details::RoomDetailsChanges,
 };
 
+const ROOM_BOOTSTRAP_CONCURRENCY: usize = 4;
 const MEMBER_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 const MEMBER_SYNC_ADMISSION_WAIT: Duration = Duration::from_millis(250);
 const LOCAL_READ_TIMEOUT: Duration = Duration::from_secs(2);
@@ -334,23 +335,64 @@ async fn refresh_known_warnings<Fut>(
     }
 }
 
-async fn read_snapshot(room: &Room) -> Result<Warnings, ObservationError> {
+async fn read_snapshot(
+    account_id: Uuid,
+    room: &Room,
+    previous: Warnings,
+) -> Result<(Warnings, bool), ObservationError> {
     let members = room
         .members_no_sync(RoomMemberships::JOIN | RoomMemberships::INVITE)
         .await?;
-    let mut warnings = Warnings::new();
-    for member in members {
+    let users = members.into_iter().filter_map(|member| {
         let user = member.user_id();
-        if user != room.own_user_id() {
-            if let Some((_, Some(warning))) = read_identity(room, user).await? {
-                warnings.insert(user.to_owned(), warning);
-            }
-        }
-    }
+        (user != room.own_user_id()).then(|| user.to_owned())
+    });
+    let snapshot = read_roster_warnings(
+        account_id,
+        room.room_id(),
+        users,
+        previous,
+        |user| async move {
+            Ok(read_identity(room, &user)
+                .await?
+                .and_then(|(_, warning)| warning))
+        },
+    )
+    .await;
     if !room.are_members_synced() {
         return Err(ObservationError::IdentityUnavailable);
     }
-    Ok(warnings)
+    Ok(snapshot)
+}
+
+/// A successful roster read establishes membership. A failed identity read
+/// retains that member's previous warning while other members advance.
+async fn read_roster_warnings<Fut>(
+    account_id: Uuid,
+    room_id: &RoomId,
+    users: impl IntoIterator<Item = OwnedUserId>,
+    mut previous: Warnings,
+    mut read: impl FnMut(OwnedUserId) -> Fut,
+) -> (Warnings, bool)
+where
+    Fut: std::future::Future<Output = Result<Option<Warning>, ObservationError>>,
+{
+    let mut warnings = Warnings::new();
+    let mut retry = false;
+    for user_id in users {
+        let warning = match read(user_id.clone()).await {
+            Ok(warning) => warning,
+            Err(error) => {
+                tracing::warn!(%account_id, %room_id, %user_id, %error, "room member identity snapshot read failed; will retry");
+                retry = true;
+                previous.remove(&user_id)
+            }
+        };
+        if let Some(warning) = warning {
+            warnings.insert(user_id, warning);
+        }
+    }
+    (warnings, retry)
 }
 
 async fn active_member(room: &Room, user_id: &UserId) -> matrix_sdk::Result<bool> {
@@ -392,7 +434,7 @@ pub(crate) async fn watch(
         changes,
         details,
         gate,
-        initializing: Arc::new(Semaphore::new(1)),
+        initializing: Arc::new(Semaphore::new(ROOM_BOOTSTRAP_CONCURRENCY)),
     };
     while !cancel.is_cancelled() {
         let mut workers = JoinSet::new();
@@ -409,7 +451,10 @@ pub(crate) async fn watch(
     }
     let rooms = watcher.changes.lock().remove(&account_id);
     if let Some(rooms) = rooms {
-        for room_id in rooms.keys() {
+        for (room_id, warnings) in rooms {
+            if warnings.is_empty() {
+                continue;
+            }
             watcher
                 .details
                 .mark(room_id.as_str(), RoomDetailSource::IdentityChanges);
@@ -551,7 +596,7 @@ impl AccountWatch {
         let room_id = room.room_id();
         let mut info = room.subscribe_info();
         while eligible(room) {
-            let Some((stream, snapshot)) = self.subscribe(room).await else {
+            let Some((stream, (snapshot, retry))) = self.subscribe(room).await else {
                 tracing::debug!(%account_id, %room_id, "room identity watcher will retry");
                 tokio::time::sleep(RESCAN_INTERVAL).await;
                 continue;
@@ -561,7 +606,11 @@ impl AccountWatch {
 
             // The SDK logs and hides broadcast lag. Independently re-read the
             // roster and fingerprints to repair any missed updates.
-            let refresh = tokio::time::sleep(RESUBSCRIBE_INTERVAL);
+            let refresh = tokio::time::sleep(if retry {
+                RESCAN_INTERVAL
+            } else {
+                RESUBSCRIBE_INTERVAL
+            });
             tokio::pin!(refresh);
             loop {
                 tokio::select! {
@@ -614,7 +663,7 @@ impl AccountWatch {
         room: &Room,
     ) -> Option<(
         impl futures_util::Stream<Item = Vec<IdentityStatusChange>>,
-        Warnings,
+        (Warnings, bool),
     )> {
         let _initializing = self.initializing.acquire().await.ok()?;
         if !eligible(room) {
@@ -645,7 +694,11 @@ impl AccountWatch {
             let stream = room.subscribe_to_identity_status_changes().await?;
             let mut stream = Box::pin(stream);
             let _ = stream.next().now_or_never();
-            let snapshot = read_snapshot(room).await?;
+            let previous = self
+                .changes
+                .warnings(self.account_id, room.room_id())
+                .unwrap_or_default();
+            let snapshot = read_snapshot(self.account_id, room, previous).await?;
             Ok::<_, ObservationError>((stream, snapshot))
         })
         .await
@@ -659,7 +712,7 @@ impl AccountWatch {
             .lock()
             .get_mut(&self.account_id)
             .and_then(|rooms| rooms.remove(room_id));
-        if removed.is_some() {
+        if removed.is_some_and(|warnings| !warnings.is_empty()) {
             self.details
                 .mark(room_id.as_str(), RoomDetailSource::IdentityChanges);
         }
@@ -681,6 +734,11 @@ impl AccountWatch {
                 .insert(room_id.to_owned(), warnings.clone())
                 .unwrap_or_default()
         };
+        // Store empty snapshots for explicit reads without waking clients
+        // that have no warning to show or clear.
+        if previous.is_empty() && warnings.is_empty() {
+            return;
+        }
         for (user_id, warning) in &warnings {
             if previous.get(user_id) != Some(warning) {
                 tracing::info!(%account_id, %room_id, %user_id, kind = %warning.kind, "room member identity warning changed");

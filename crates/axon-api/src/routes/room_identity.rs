@@ -27,6 +27,7 @@ use crate::{response::ApiError, ResolveIdentityChange, RoomIdentityService};
         (status = 404, description = "Account or user identity not found"),
         (status = 409, description = "Account not ready or warning changed"),
         (status = 500, description = "Local identity acknowledgement failed"),
+        (status = 503, description = "Room identity service unavailable", body = crate::ErrorResponse),
     ),
     tag = "verification",
 )]
@@ -62,6 +63,7 @@ pub async fn accept(
         (status = 404, description = "Account or user identity not found"),
         (status = 409, description = "Account not ready or warning changed"),
         (status = 500, description = "Local identity acknowledgement failed"),
+        (status = 503, description = "Room identity service unavailable", body = crate::ErrorResponse),
     ),
     tag = "verification",
 )]
@@ -87,7 +89,8 @@ async fn resolve(
     input: &ResolveIdentityChange,
     kind: IdentityChangeKind,
 ) -> Result<StatusCode, ApiError> {
-    let service = service.ok_or_else(|| ApiError::conflict("room identity service unavailable"))?;
+    let service = service
+        .ok_or_else(|| ApiError::service_unavailable("room identity service unavailable"))?;
     service
         .resolve(account_id, user_id, &input.fingerprint, kind)
         .await?;

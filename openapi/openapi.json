@@ -7543,6 +7543,16 @@
           },
           "500": {
             "description": "Local identity acknowledgement failed"
+          },
+          "503": {
+            "description": "Room identity service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -7619,6 +7629,16 @@
           },
           "500": {
             "description": "Local identity acknowledgement failed"
+          },
+          "503": {
+            "description": "Room identity service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }

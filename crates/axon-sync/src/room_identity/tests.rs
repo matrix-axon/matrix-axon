@@ -149,10 +149,9 @@ async fn sdk_identity_warnings_clear_in_every_room_after_acknowledgement() {
         cancel.clone(),
     ));
     wait_for_warnings(&changes, account_id, &Warnings::new()).await;
-    assert_eq!(
-        room_details.take_pending().len(),
-        2,
-        "both rooms became observable"
+    assert!(
+        room_details.take_pending().is_empty(),
+        "empty snapshots do not emit live frames"
     );
 
     publish_identity(&peer, &keys).await;
@@ -294,6 +293,10 @@ async fn sdk_identity_warnings_clear_in_every_room_after_acknowledgement() {
 
     cancel.cancel();
     watcher.await.unwrap();
+    assert!(
+        room_details.take_pending().is_empty(),
+        "empty rooms are quiet on shutdown"
+    );
     for room_id in rooms() {
         assert!(changes.warnings(account_id, room_id).is_none());
     }
@@ -316,7 +319,8 @@ async fn assert_failed_refresh_keeps_warning(client: &Client, room: &Room, peer:
         gate: gate.clone(),
         initializing: Arc::new(Semaphore::new(1)),
     };
-    let (_, snapshot) = watcher.subscribe(room).await.unwrap();
+    let (_, (snapshot, retry)) = watcher.subscribe(room).await.unwrap();
+    assert!(!retry);
     assert!(snapshot.contains_key(peer));
     watcher.publish(room, snapshot.clone());
     assert_eq!(details.take_pending().len(), 1);
@@ -436,4 +440,40 @@ fn warning_map_can_be_read_after_poison() {
     })
     .is_err());
     assert_eq!(changes.warnings(account, room), Some(Warnings::new()));
+}
+
+#[tokio::test]
+async fn roster_snapshot_advances_other_members_when_one_identity_read_fails() {
+    let warning = Warning {
+        kind: IdentityChangeKind::PinViolation,
+        fingerprint: "a".repeat(64),
+    };
+    let new_warning = Warning {
+        fingerprint: "b".repeat(64),
+        ..warning.clone()
+    };
+    let ids = ["@a:x", "@b:x", "@left:x", "@new:x"].map(|id| id.parse::<OwnedUserId>().unwrap());
+    let previous = Warnings::from_iter(ids[..3].iter().cloned().map(|id| (id, warning.clone())));
+    let (warnings, retry) = read_roster_warnings(
+        Uuid::nil(),
+        rooms()[0],
+        [ids[0].clone(), ids[1].clone(), ids[3].clone()],
+        previous,
+        |user| {
+            let new_warning = new_warning.clone();
+            async move {
+                match user.as_str() {
+                    "@a:x" | "@new:x" => Err(ObservationError::IdentityUnavailable),
+                    "@b:x" => Ok(Some(new_warning)),
+                    _ => unreachable!("former members are outside the roster"),
+                }
+            }
+        },
+    )
+    .await;
+    assert!(retry);
+    assert_eq!(
+        warnings,
+        Warnings::from([(ids[0].clone(), warning), (ids[1].clone(), new_warning)])
+    );
 }

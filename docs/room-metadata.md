@@ -203,8 +203,9 @@ The workers currently share traversal code but keep independent cursors and dead
 [ADR 0136](adr/0136-exclude-insecure-devices-msc4153.md) decision 3 adds `identity_changes` to `GET /v1/accounts/{account_id}/rooms/{room_id}/info`.
 For a joined encrypted room, it lists room members whose changed cross-signing identity needs attention.
 An empty list means the server knows of no warnings, and `null` means the room has no warning snapshot available.
-A temporary SDK read failure retains the last tracked warning, including its fingerprint, until Axon can confirm a change.
-Re-read on reconnect and when `room_details.changed` names `identity_changes` for the room.
+A temporary SDK read failure retains the last tracked warning for that member.
+One response can contain both fresh and stale fingerprints if a read fails or times out.
+Read when opening a room and on reconnect, and re-read when `room_details.changed` names `identity_changes` for the room.
 
 Each entry carries `user_id`, `kind`, and `fingerprint`.
 Send the entry's fingerprint as `{ "fingerprint": "…" }` to the matching account-scoped `POST` route under `/v1/accounts/{account_id}/users/{user_id}/identity`.
@@ -214,7 +215,8 @@ Send the entry's fingerprint as `{ "fingerprint": "…" }` to the matching accou
   Interactive SAS remains available to verify the new identity.
 
 A successful acknowledgement returns `204` and applies in every room for the account.
-If the warning changed before the action, Axon returns `409` so the client can refresh it and ask the user to review the latest state.
+If Axon returns `409`, re-read room info and ask the user to review the current warning before retrying.
+An unavailable identity service returns `503`.
 
 ## Calculated room display names
 
@@ -504,7 +506,7 @@ A `room_details.changed` WebSocket frame tells a client which of a room's reads 
 | `homeserver_details` | `GET …/homeserver_details` | A detail's value, freshness, or failure changed                                                                                                                                  |
 | `space_hierarchy`    | `GET …/space/hierarchy`    | The frame's room is a space whose crawl committed a page that changed a cached child summary, or ended (`complete`, `truncated`, a failure, or `unsupported`)                    |
 | `discovery`          | `GET …/discovery`          | The frame's room is an unjoined room whose room-summary request changed its discovery row, the endpoint's `support`, or its failure category                                     |
-| `identity_changes`   | `GET …/info`               | A room member warning appears, changes, or clears, or the warning snapshot becomes available or unavailable                                                                      |
+| `identity_changes`   | `GET …/info`               | A room member warning appears, changes, or clears. Transitions between `null` and `[]` are visible on read                                                                       |
 
 An acquisition job also publishes its source when it ends if a read reported it as `queued` or `running`, so a panel showing a refresh in progress learns it finished even when nothing changed.
 A job dropped from a full queue publishes its source only if a read had seen it; the panel's next read asks again.
