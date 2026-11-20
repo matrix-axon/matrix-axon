@@ -44,6 +44,8 @@ pub enum RoomDetailSource {
     /// decision 9): a room-summary job changed its discovery row, the
     /// summary endpoint's support, or its failure.
     Discovery,
+    /// `GET …/info`'s `identity_changes`: room member warnings changed.
+    IdentityChanges,
 }
 
 /// The order an absence job confirms a room's missing metadata types (ADR
@@ -85,6 +87,31 @@ pub enum JobActivity {
     Idle,
     Queued,
     Running,
+}
+
+/// The trust decision that a room member's changed identity requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityChangeKind {
+    PinViolation,
+    VerificationViolation,
+}
+
+impl std::fmt::Display for IdentityChangeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::PinViolation => "pin_violation",
+            Self::VerificationViolation => "verification_violation",
+        })
+    }
+}
+
+/// A room member whose current identity needs review.
+#[derive(Debug, Clone)]
+pub struct RoomIdentityChange {
+    pub user_id: String,
+    pub kind: IdentityChangeKind,
+    /// SHA-256 of the public master key, used to detect stale acknowledgements.
+    pub fingerprint: String,
 }
 
 #[cfg(test)]

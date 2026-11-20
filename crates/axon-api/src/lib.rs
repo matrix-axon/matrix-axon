@@ -33,6 +33,7 @@ mod openapi;
 mod preview_generation;
 mod response;
 mod room_details;
+mod room_identity;
 mod room_metadata;
 mod routes;
 mod search;
@@ -94,6 +95,9 @@ pub use openapi::ApiDoc;
 pub use preview_generation::PreviewGenerator;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use room_details::RoomDetailAcquirer;
+pub use room_identity::{
+    IdentityChangeKindDto, ResolveIdentityChange, RoomIdentityChangeDto, RoomIdentityService,
+};
 pub use search::{
     SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SearchSort,
 };
@@ -365,6 +369,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/info",
             get(routes::rooms::room_info),
+        )
+        .route(
+            "/v1/accounts/{account_id}/users/{user_id}/identity/accept",
+            post(routes::room_identity::accept),
+        )
+        .route(
+            "/v1/accounts/{account_id}/users/{user_id}/identity/withdraw_verification",
+            post(routes::room_identity::withdraw_verification),
         )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/metadata",

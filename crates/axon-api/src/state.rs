@@ -28,6 +28,7 @@ use crate::matrix_oauth_grant::{MatrixOAuthQrGrantService, NoopMatrixOAuthQrGran
 use crate::media::MediaProxy;
 use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
+use crate::room_identity::RoomIdentityService;
 use crate::search::SearchQuery;
 use crate::sender::{
     AccountActionsSender, EphemeralSender, LeaveOutcome, MembershipSender, MessageSender,
@@ -134,6 +135,8 @@ pub struct AppState {
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `verify`.
     pub trust: Arc<dyn SenderTrustService>,
+    /// Current room-member identity warnings and acknowledgement actions.
+    pub room_identity: Option<Arc<dyn RoomIdentityService>>,
     /// Linked-event port for Matrix-link cards (ADR 0138 section 3): reads an
     /// event the store does not have from the account's homeserver. Defaults
     /// to one that never asks, so only stored events have cards; the binary
@@ -423,6 +426,7 @@ impl AppState {
             matrix_oauth_grant: Arc::new(NoopMatrixOAuthQrGrant),
             verify,
             trust,
+            room_identity: None,
             linked_events: Arc::new(crate::linked_events::NoLinkedEventSource),
             kept_media: Arc::new(crate::linked_events::KeptMedia::default()),
             stream_tickets: Arc::new(crate::stream_tickets::StreamTickets::default()),
@@ -624,6 +628,12 @@ impl AppState {
         source: Arc<dyn crate::linked_events::LinkedEventSource>,
     ) -> Self {
         self.linked_events = source;
+        self
+    }
+
+    /// Inject the room-member identity service.
+    pub fn with_room_identity(mut self, service: Arc<dyn RoomIdentityService>) -> Self {
+        self.room_identity = Some(service);
         self
     }
 
@@ -1179,6 +1189,12 @@ impl FromRef<AppState> for Arc<dyn MatrixOAuthQrGrantService> {
 impl FromRef<AppState> for Arc<dyn VerificationService> {
     fn from_ref(state: &AppState) -> Arc<dyn VerificationService> {
         state.verify.clone()
+    }
+}
+
+impl FromRef<AppState> for Option<Arc<dyn RoomIdentityService>> {
+    fn from_ref(state: &AppState) -> Self {
+        state.room_identity.clone()
     }
 }
 

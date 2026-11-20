@@ -1653,6 +1653,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/users/{user_id}/identity/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept a changed identity
+         * @description Acknowledge the changed identity of a user who was never verified.
+         */
+        post: operations["accept"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/users/{user_id}/identity/withdraw_verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Withdraw verification
+         * @description Accept the changed identity as unverified.
+         */
+        post: operations["withdraw_verification"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/users/{user_id}/ignore": {
         parameters: {
             query?: never;
@@ -3408,6 +3448,12 @@ export interface components {
                 guest_access?: string | null;
                 /** @description `m.room.history_visibility` `content.history_visibility`. */
                 history_visibility?: string | null;
+                /**
+                 * @description Room-member identity warnings. An empty list means none are known.
+                 *     Null means the room is unobserved or ineligible for identity tracking.
+                 *     Re-read after `room_details.changed` names `identity_changes`, and on reconnect.
+                 */
+                identity_changes?: components["schemas"]["RoomIdentityChangeDto"][] | null;
                 /**
                  * @description `m.room.join_rules` `content.join_rule`
                  *     (`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…).
@@ -5256,6 +5302,11 @@ export interface components {
              */
             waiting: number;
         };
+        /**
+         * @description The action a warning requires.
+         * @enum {string}
+         */
+        IdentityChangeKindDto: "pin_violation" | "verification_violation";
         /** @enum {string} */
         ImagePackUsage: "emoticon" | "sticker";
         /**
@@ -6155,6 +6206,11 @@ export interface components {
              */
             rooms_queued: number;
         };
+        /** @description The identity presented when the client showed the warning. */
+        ResolveIdentityChange: {
+            /** @description The fingerprint from the room's current `identity_changes` entry. */
+            fingerprint: string;
+        };
         /**
          * @description What Axon knows about one unjoined room from the account's homeserver, and
          *     where its room-summary refresh stands (ADR 0128 decision 5).
@@ -6270,6 +6326,13 @@ export interface components {
             directory_visibility: components["schemas"]["DirectoryVisibilityDetailDto"];
             local_aliases: components["schemas"]["LocalAliasesDetailDto"];
         };
+        /** @description A room member whose current cross-signing identity needs review. */
+        RoomIdentityChangeDto: {
+            /** @description Echo this value in the acknowledgement so it applies to the identity reviewed. */
+            fingerprint: string;
+            kind: components["schemas"]["IdentityChangeKindDto"];
+            user_id: string;
+        };
         /**
          * @description Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small
          *     "what kind of room is this" singleton state reads and cached SDK counts.
@@ -6287,6 +6350,12 @@ export interface components {
             guest_access?: string | null;
             /** @description `m.room.history_visibility` `content.history_visibility`. */
             history_visibility?: string | null;
+            /**
+             * @description Room-member identity warnings. An empty list means none are known.
+             *     Null means the room is unobserved or ineligible for identity tracking.
+             *     Re-read after `room_details.changed` names `identity_changes`, and on reconnect.
+             */
+            identity_changes?: components["schemas"]["RoomIdentityChangeDto"][] | null;
             /**
              * @description `m.room.join_rules` `content.join_rule`
              *     (`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…).
@@ -12360,6 +12429,156 @@ export interface operations {
                 headers: {
                     /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
                     "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    accept: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix user id */
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveIdentityChange"];
+            };
+        };
+        responses: {
+            /** @description Identity accepted across the account's rooms */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid user id or fingerprint */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or user identity not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Account not ready or warning changed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Local identity acknowledgement failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Room identity service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    withdraw_verification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix user id */
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveIdentityChange"];
+            };
+        };
+        responses: {
+            /** @description Verification withdrawn across the account's rooms */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid user id or fingerprint */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or user identity not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Account not ready or warning changed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Local identity acknowledgement failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Room identity service unavailable */
+            503: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {

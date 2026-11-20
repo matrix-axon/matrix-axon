@@ -7471,6 +7471,178 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/users/{user_id}/identity/accept": {
+      "post": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "Accept a changed identity",
+        "description": "Acknowledge the changed identity of a user who was never verified.",
+        "operationId": "accept",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "Matrix user id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveIdentityChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Identity accepted across the account's rooms"
+          },
+          "400": {
+            "description": "Invalid user id or fingerprint"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or user identity not found"
+          },
+          "409": {
+            "description": "Account not ready or warning changed"
+          },
+          "500": {
+            "description": "Local identity acknowledgement failed"
+          },
+          "503": {
+            "description": "Room identity service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/users/{user_id}/identity/withdraw_verification": {
+      "post": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "Withdraw verification",
+        "description": "Accept the changed identity as unverified.",
+        "operationId": "withdraw_verification",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "Matrix user id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveIdentityChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Verification withdrawn across the account's rooms"
+          },
+          "400": {
+            "description": "Invalid user id or fingerprint"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or user identity not found"
+          },
+          "409": {
+            "description": "Account not ready or warning changed"
+          },
+          "500": {
+            "description": "Local identity acknowledgement failed"
+          },
+          "503": {
+            "description": "Room identity service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/users/{user_id}/ignore": {
       "put": {
         "tags": [
@@ -12341,6 +12513,16 @@
                 ],
                 "description": "`m.room.history_visibility` `content.history_visibility`."
               },
+              "identity_changes": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/components/schemas/RoomIdentityChangeDto"
+                },
+                "description": "Room-member identity warnings. An empty list means none are known.\nNull means the room is unobserved or ineligible for identity tracking.\nRe-read after `room_details.changed` names `identity_changes`, and on reconnect."
+              },
               "join_rule": {
                 "type": [
                   "string",
@@ -15987,6 +16169,14 @@
           }
         }
       },
+      "IdentityChangeKindDto": {
+        "type": "string",
+        "description": "The action a warning requires.",
+        "enum": [
+          "pin_violation",
+          "verification_violation"
+        ]
+      },
       "ImagePackUsage": {
         "type": "string",
         "enum": [
@@ -17602,6 +17792,20 @@
           }
         }
       },
+      "ResolveIdentityChange": {
+        "type": "object",
+        "description": "The identity presented when the client showed the warning.",
+        "required": [
+          "fingerprint"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "The fingerprint from the room's current `identity_changes` entry.",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
       "RoomDiscoveryDto": {
         "type": "object",
         "description": "What Axon knows about one unjoined room from the account's homeserver, and\nwhere its room-summary refresh stands (ADR 0128 decision 5).",
@@ -17790,6 +17994,28 @@
           }
         }
       },
+      "RoomIdentityChangeDto": {
+        "type": "object",
+        "description": "A room member whose current cross-signing identity needs review.",
+        "required": [
+          "user_id",
+          "kind",
+          "fingerprint"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "Echo this value in the acknowledgement so it applies to the identity reviewed.",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IdentityChangeKindDto"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
       "RoomInfoDto": {
         "type": "object",
         "description": "Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small\n\"what kind of room is this\" singleton state reads and cached SDK counts.\nEach state field is `None` when the room has no such state set (or is unknown\nto Axon) — an unknown room reads as all-`None`, not a 404.",
@@ -17814,6 +18040,16 @@
               "null"
             ],
             "description": "`m.room.history_visibility` `content.history_visibility`."
+          },
+          "identity_changes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RoomIdentityChangeDto"
+            },
+            "description": "Room-member identity warnings. An empty list means none are known.\nNull means the room is unobserved or ineligible for identity tracking.\nRe-read after `room_details.changed` names `identity_changes`, and on reconnect."
           },
           "join_rule": {
             "type": [
@@ -19337,7 +19573,7 @@
     },
     {
       "name": "verification",
-      "description": "Interactive SAS device verification"
+      "description": "Interactive SAS device verification and room member identity acknowledgements"
     },
     {
       "name": "devices",

@@ -198,6 +198,26 @@ The TUI's `/whereami` (ADR 0114) and the web client's Room Information Members r
 Two maintenance improvements remain deferred: sharing each account's traversal between the count and redaction workers to reduce database round trips, and automatically checking that the documented SDK patch reproduces the vendored source from the pinned release archive.
 The workers currently share traversal code but keep independent cursors and deadlines.
 
+## Room member identity changes
+
+[ADR 0136](adr/0136-exclude-insecure-devices-msc4153.md) decision 3 adds `identity_changes` to `GET /v1/accounts/{account_id}/rooms/{room_id}/info`.
+For a joined encrypted room, it lists room members whose changed cross-signing identity needs attention.
+An empty list means the server knows of no warnings, and `null` means the room has no warning snapshot available.
+A temporary SDK read failure retains the last tracked warning for that member.
+One response can contain both fresh and stale fingerprints if a read fails or times out.
+Read when opening a room and on reconnect, and re-read when `room_details.changed` names `identity_changes` for the room.
+
+Each entry carries `user_id`, `kind`, and `fingerprint`.
+Send the entry's fingerprint as `{ "fingerprint": "…" }` to the matching account-scoped `POST` route under `/v1/accounts/{account_id}/users/{user_id}/identity`.
+
+- `pin_violation` uses `/accept` to accept a changed identity for a user who was never verified.
+- `verification_violation` uses `/withdraw_verification` to accept the changed identity and remove the user's verified status.
+  Interactive SAS remains available to verify the new identity.
+
+A successful acknowledgement returns `204` and applies in every room for the account.
+If Axon returns `409`, re-read room info and ask the user to review the current warning before retrying.
+An unavailable identity service returns `503`.
+
 ## Calculated room display names
 
 `GET /v1/rooms` adds nullable `display_name` to each room ([ADR 0118](adr/0118-room-display-names-from-the-sdk.md)).
@@ -486,6 +506,7 @@ A `room_details.changed` WebSocket frame tells a client which of a room's reads 
 | `homeserver_details` | `GET …/homeserver_details` | A detail's value, freshness, or failure changed                                                                                                                                  |
 | `space_hierarchy`    | `GET …/space/hierarchy`    | The frame's room is a space whose crawl committed a page that changed a cached child summary, or ended (`complete`, `truncated`, a failure, or `unsupported`)                    |
 | `discovery`          | `GET …/discovery`          | The frame's room is an unjoined room whose room-summary request changed its discovery row, the endpoint's `support`, or its failure category                                     |
+| `identity_changes`   | `GET …/info`               | A room member warning appears, changes, or clears. Transitions between `null` and `[]` are visible on read                                                                       |
 
 An acquisition job also publishes its source when it ends if a read reported it as `queued` or `running`, so a panel showing a refresh in progress learns it finished even when nothing changed.
 A job dropped from a full queue publishes its source only if a read had seen it; the panel's next read asks again.

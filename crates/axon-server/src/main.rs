@@ -25,6 +25,7 @@ mod oauth;
 mod pem;
 mod preview_generation;
 mod push;
+mod room_identity;
 mod search;
 mod status;
 mod token;
@@ -405,6 +406,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         rustc_version: env!("AXON_RUSTC_VERSION").to_owned(),
     })
     .with_member_profiles(member_profiles)
+    .with_room_identity(Arc::new(room_identity::RoomIdentityAdapter(
+        sync_engine.room_identity(),
+    )))
     // Matrix-link cards (ADR 0138): built once, so every read shares the
     // reader's process-wide cap.
     .with_linked_events(Arc::new(LinkedEventAdapter(sync_engine.linked_events())))

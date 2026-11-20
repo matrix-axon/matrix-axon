@@ -87,6 +87,7 @@ pub struct ClientManager {
     gates: HomeserverGates,
     /// Each running account's room-detail acquisition queue (ADR 0126).
     acquisitions: crate::acquisition::RoomDetailAcquisitions,
+    room_identity_changes: crate::room_identity::RoomIdentityChanges,
 }
 
 impl ClientManager {
@@ -102,6 +103,7 @@ impl ClientManager {
             dead_rooms: Arc::new(Mutex::new(HashMap::new())),
             gates: HomeserverGates::default(),
             acquisitions: Default::default(),
+            room_identity_changes: Default::default(),
         }
     }
 
@@ -118,6 +120,10 @@ impl ClientManager {
     /// Each running account's room-detail acquisition queue (ADR 0126).
     pub(crate) fn room_detail_acquisitions(&self) -> crate::acquisition::RoomDetailAcquisitions {
         self.acquisitions.clone()
+    }
+
+    pub(crate) fn room_identity_changes(&self) -> crate::room_identity::RoomIdentityChanges {
+        self.room_identity_changes.clone()
     }
 
     async fn finish_adoption_cleanup(&self, account_id: Uuid) {
