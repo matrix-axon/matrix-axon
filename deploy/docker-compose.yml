@@ -120,6 +120,13 @@ services:
     # cannot remove a published port, so this is env-controlled, not automatic.
     ports:
       - "${AXON_PUBLISH_ADDR:-0.0.0.0}:${AXON_PORT:-8080}:8080"
+    # BBR keeps a stream or download fast on a long or lossy path, where the
+    # kernel's usual cubic slows to a fraction of the link. Set for this
+    # container only; the kernel loads tcp_bbr on demand. On a kernel without
+    # BBR the container will not start: set AXON_TCP_CONGESTION_CONTROL=cubic.
+    # See "Network tuning" in docs/server-admin.md.
+    sysctls:
+      net.ipv4.tcp_congestion_control: ${AXON_TCP_CONGESTION_CONTROL:-bbr}
     healthcheck:
       # End-to-end: /healthz is proxied to axon, so a pass means the SPA is
       # served AND axon is reachable. Lets `docker compose up --wait` block until
@@ -179,6 +186,10 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+    # The connections from browsers and apps end here, so this is where the
+    # congestion control that matters runs (see `web` above).
+    sysctls:
+      net.ipv4.tcp_congestion_control: ${AXON_TCP_CONGESTION_CONTROL:-bbr}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - axon-caddy-data:/data

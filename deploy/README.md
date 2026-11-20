@@ -220,6 +220,11 @@ docker compose --profile caddy up -d
 curl -fsS https://$DOMAIN/healthz
 ```
 
+The `caddy` and `web` containers use BBR congestion control, which keeps video
+streaming fast for clients on long or lossy paths. If either fails to start with
+`failed to write sysctl net.ipv4.tcp_congestion_control`, see
+[Network tuning](../docs/server-admin.md#network-tuning).
+
 ## Volumes & backup
 
 | Volume                        | Contents                                                                  | Criticality                  |
@@ -290,5 +295,8 @@ automatically.
 - **Graceful shutdown:** `docker compose stop axon-server` (SIGTERM → clean drain)
 - **Upgrade:** rebuild the image and recreate: `docker compose up -d --build axon-server`
   (or, for prebuilt images, `docker compose pull && docker compose up -d`)
+- **Slow video or downloads for some clients:** see
+  [Network tuning](../docs/server-admin.md#network-tuning). Behind a reverse proxy
+  on the host, set BBR on the host itself.
 - **Standalone image:** the image is usable without this Compose file — supply your
   own `DATABASE_URL` and a persistent `/var/lib/axon` volume.
