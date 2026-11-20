@@ -6662,6 +6662,21 @@ audio.media-player {
   background: transparent;
 }
 
+/* With the sender's size known (`videoSizeStyle`), the player takes the
+   video's size from the start rather than its poster's, then the video's, so
+   a streamed video does not jump when its metadata arrives. The width is the
+   video's own, shrunk to fit both ceilings with its shape kept; `auto` lets
+   the real aspect ratio win once the video reports it. */
+.lightbox-player.sized {
+  aspect-ratio: auto var(--video-w) / var(--video-h);
+  width: min(
+    calc(var(--video-w) * 1px),
+    92vw,
+    calc(82vh * var(--video-w) / var(--video-h))
+  );
+  height: auto;
+}
+
 .lightbox-pdf {
   width: min(1100px, 92vw);
   /* `dvh` so an iOS URL bar sliding in cannot push the viewer off-screen. */
@@ -6792,6 +6807,10 @@ audio.media-player {
        would otherwise fill the screen and leave nothing to tap. */
     height: auto;
     max-height: 78dvh;
+  }
+
+  .lightbox-player.sized {
+    width: min(100%, calc(78dvh * var(--video-w) / var(--video-h)));
   }
 
   .lightbox-caption {

@@ -63,7 +63,7 @@ export function createStreamTickets(deps: {
   /**
    * The probe's transport. The page's own `fetch`, not the platform's: the
    * probe must reach exactly the URL the media element loaded, which in a
-   * shell (phase 4) is the `axon-media` scheme rather than the server.
+   * shell is the `axon-media` scheme rather than the server (ADR 0139 § 7).
    */
   fetch?: typeof globalThis.fetch
 }): StreamTickets {
@@ -114,7 +114,7 @@ export function createStreamTickets(deps: {
         if (!path.startsWith(STREAM_PREFIX) || path.includes('..')) {
           return { ok: false, kind: 'failed' }
         }
-        return { ok: true, src: toSrc(resolve(path)) }
+        return { ok: true, src: await toSrc(resolve(path)) }
       } catch {
         return { ok: false, kind: 'failed' }
       }
@@ -124,7 +124,11 @@ export function createStreamTickets(deps: {
       let response: Response
       try {
         response = await probeFetch(src, {
-          headers: { Range: 'bytes=0-0' },
+          // The header tells the shell's `axon-media` scheme to ask the
+          // server rather than answer from its read-ahead window, which may
+          // still hold these bytes after the ticket has expired (ADR 0139
+          // § 7). The server ignores it.
+          headers: { Range: 'bytes=0-0', 'Axon-Stream-Probe': '1' },
           cache: 'no-store',
           referrerPolicy: 'no-referrer',
           signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),

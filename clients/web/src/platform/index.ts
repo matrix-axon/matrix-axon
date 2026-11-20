@@ -375,12 +375,14 @@ export interface Platform {
    * `null` where they cannot load it at all (ADR 0139 § 6).
    *
    * The URL itself in a browser, where the server is the page's own origin.
-   * `null` in a shell until ADR 0139 phase 4: the shell CSP does not list a
+   * In a shell, an `axon-media` scheme URL that the shell proxies to the
+   * ticket route (ADR 0139 § 7), since the shell CSP cannot list a
    * self-hosted server's origin in `media-src`, and a plain-http server is
-   * mixed content from the custom-scheme page. With `null`, video and audio
-   * keep the blob path and its size ceiling.
+   * mixed content from the custom-scheme page. It may resolve asynchronously,
+   * and a rejection is reported as a failed ticket. With `null`, video and
+   * audio keep the blob path and its size ceiling.
    */
-  mediaStreamSrc: ((ticketUrl: string) => string) | null
+  mediaStreamSrc: ((ticketUrl: string) => string | Promise<string>) | null
 
   /**
    * Set the page zoom factor (1 is 100%), or `null` where the client must not.
