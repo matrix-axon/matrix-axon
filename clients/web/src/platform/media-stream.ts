@@ -52,19 +52,16 @@ export async function shellMediaStreamSrc(ticketUrl: string): Promise<string> {
  *   schemes, and GStreamer has no source for a custom one, so every media
  *   element fails before it sends a request
  *   ([issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192)).
- * - `android` and `androideabi`: Android WebView applies a request's `Range`
- *   to an intercepted response itself, skipping into a body that holds only
- *   the requested bytes, so every range after byte 0 fails
- *   ([issue 1194](https://github.com/matrix-axon/matrix-axon/issues/1194)).
  *
- * The page's own `fetch` of the scheme works on Linux, and from byte 0 on
- * Android, which is not enough for a player.
+ * The page's own `fetch` of the scheme works on Linux, which is not enough for
+ * a player.
+ *
+ * Android streams. Android WebView applies a request's `Range` to an
+ * intercepted response itself, which broke every range after byte 0 until wry
+ * 0.57.1 offset the skip
+ * ([issue 1194](https://github.com/matrix-axon/matrix-axon/issues/1194)).
  */
-const NO_STREAMING: ReadonlySet<string> = new Set([
-  'linux',
-  'android',
-  'androideabi',
-])
+const NO_STREAMING: ReadonlySet<string> = new Set(['linux'])
 
 /**
  * The shell's `mediaStreamSrc` for one build target, or `null` where the

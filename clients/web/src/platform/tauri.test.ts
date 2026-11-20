@@ -695,12 +695,16 @@ describe('message notifications in the shell', () => {
     expect(tauriPlatform(undefined, 'windows').iconBadgeSupport).toBe('native')
   })
 
-  it('streams video and audio from the build target, except on Linux and Android', () => {
-    // Neither player can load the `axon-media` scheme (issues 1192, 1194).
-    for (const target of ['linux', 'android', 'androideabi']) {
-      expect(tauriPlatform(undefined, target).mediaStreamSrc).toBeNull()
-    }
-    for (const target of ['darwin', 'windows', 'ios']) {
+  it('streams video and audio from the build target, except on Linux', () => {
+    // WebKitGTK's player cannot load the `axon-media` scheme (issue 1192).
+    expect(tauriPlatform(undefined, 'linux').mediaStreamSrc).toBeNull()
+    for (const target of [
+      'darwin',
+      'windows',
+      'ios',
+      'android',
+      'androideabi',
+    ]) {
       expect(tauriPlatform(undefined, target).mediaStreamSrc).toBeTypeOf(
         'function',
       )
