@@ -18,6 +18,8 @@
 //! display name (ADR 0118).
 //! `room_details.changed` names which per-room reads to repeat when their
 //! values or availability change (ADR 0126).
+//! `account.own_identity_changed` reports the account's master-key replacement
+//! and whether its device still needs to be cross-signed (ADR 0136).
 //! `invite.added` / `invite.removed` carry the pending-invite inbox (ADR 0091).
 //! `account_data.changed` carries persisted Matrix account data (`m.tag`,
 //! `m.direct`, …; ADR 0103). `preferences.changed` carries instance-wide
@@ -129,6 +131,12 @@ struct VerificationFramePayload {
     decimals: Option<[u16; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OwnIdentityFramePayload {
+    own_identity_changed: bool,
+    identity_replaced: bool,
 }
 
 /// The wire payload of a [`HEARTBEAT`] frame: empty, on purpose. The envelope's
@@ -524,6 +532,14 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             kind: verification_type(frame.kind),
             account_id: frame.account_id,
             payload: VerificationFramePayload::from(frame),
+        }),
+        LiveFrame::OwnIdentityChanged(frame) => serde_json::to_string(&WsEnvelope {
+            kind: "account.own_identity_changed",
+            account_id: frame.account_id,
+            payload: OwnIdentityFramePayload {
+                own_identity_changed: frame.own_identity_changed,
+                identity_replaced: frame.identity_replaced,
+            },
         }),
         LiveFrame::SenderTrustChanged(frame) => serde_json::to_string(&WsEnvelope {
             kind: SENDER_TRUST_VIOLATION,
@@ -1030,6 +1046,24 @@ mod tests {
         assert_eq!(v["type"], "account.sync_state");
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(v["payload"]["sync_state"], "ready");
+    }
+
+    #[test]
+    fn own_identity_changed_frame_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::OwnIdentityChanged(axon_core::OwnIdentityFrame {
+            account_id,
+            own_identity_changed: true,
+            identity_replaced: true,
+        }));
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "account.own_identity_changed",
+                "account_id": account_id,
+                "payload": {"own_identity_changed": true, "identity_replaced": true},
+            })
+        );
     }
 
     #[test]

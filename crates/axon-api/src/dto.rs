@@ -2042,6 +2042,11 @@ pub struct AccountDto {
     /// `recover`/`verify` has cross-signed it. Kept nullable on the wire for
     /// forward-compatibility, but currently always present.
     pub verified: Option<bool>,
+    /// Whether Axon's device still needs to be cross-signed after a master-key
+    /// replacement (ADR 0136). The first observed identity establishes the baseline.
+    /// Updates are pushed on `/v1/ws` as `account.own_identity_changed`.
+    #[schema(required = false)]
+    pub own_identity_changed: bool,
     /// Sync-engine readiness (ADR 0030, issue #241): whether mutations to this
     /// account are currently reliable. `"connecting"` before the SDK client/
     /// session is up (including for an account with no supervised sync task,
@@ -2078,6 +2083,7 @@ impl AccountDto {
             // Surface the derived cross-signing state (ADR 0026). Kept `Option`
             // for wire stability; populated from the persisted column.
             verified: Some(a.verified),
+            own_identity_changed: a.own_identity_changed,
             sync_state,
             backup,
             created_at: a.created_at.to_rfc3339(),

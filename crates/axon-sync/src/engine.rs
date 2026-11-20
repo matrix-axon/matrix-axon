@@ -46,7 +46,7 @@ use crate::backfill::{self, BackfillHealth, BackfillParams};
 use crate::error::{sdk_err, SyncError};
 use crate::gateway::SdkGateway;
 use crate::homeserver_gate::{outcome_of, Caller, HomeserverGate, HomeserverGates};
-use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
+use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLocks};
 use crate::manager::ClientManager;
 use crate::matrix_oauth;
 use crate::matrix_oauth_acquire::MatrixOAuthAcquireEngine;
@@ -2371,8 +2371,8 @@ async fn run_account(
         backfill_cancel.clone(),
     ));
 
-    // Verification watcher (ADR 0026): keep the persisted `verified` flag tracking
-    // the SDK's current cross-signing state. Same child-token + join-handle
+    // Verification watcher (ADRs 0026 and 0136): track the SDK's cross-signing
+    // state and the account's own identity. Same child-token + join-handle
     // lifecycle as the re-decryption queue, so it ends with this run and is drained
     // cleanly below rather than leaking across a supervised restart.
     let verify_cancel = cancel.child_token();
@@ -2381,11 +2381,12 @@ async fn run_account(
     // hold — so a watcher derive can't clobber a concurrent recover's write (ADR
     // 0026, the lost-update race).
     let verify_lock = lock_for(locks, &account.user_id, &account.homeserver_url);
-    let verify_handle = tokio::spawn(watch_verification(
+    let verify_handle = tokio::spawn(crate::own_identity::watch(
         client.clone(),
         store.clone(),
         account.account_id,
         verify_lock,
+        live_tx.clone(),
         verify_cancel.clone(),
     ));
 
@@ -2690,55 +2691,6 @@ async fn run_account(
     cancel_account_flows(verifications, account.account_id).await;
 
     result
-}
-
-/// Keep the persisted `verified` flag tracking axon's own device verification
-/// state (ADR 0026). The SDK's `verification_state()` is a `subscribe_reset`
-/// subscriber, so the first poll yields the current value — persisting the
-/// initial state (`false` for a fresh unverified device, `true` once
-/// `recover`/`verify` has cross-signed it) — and each later change (cross-signing
-/// rotated, the device's trust reset) re-derives and re-persists. That is what
-/// makes the column track the SDK rather than being written once. Runs until
-/// `cancel` fires or the subscription closes; a persist failure is logged and
-/// skipped (best-effort, never fatal to the run).
-async fn watch_verification(
-    client: Client,
-    store: Store,
-    account_id: Uuid,
-    lock: IdentityLock,
-    cancel: CancellationToken,
-) {
-    let mut state = client.encryption().verification_state();
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return,
-            next = state.next() => match next {
-                Some(_) => {
-                    // Derive AND persist under the per-identity lock — the same lock
-                    // `recover`/`logout` hold (ADR 0026). Without it the two derive+
-                    // persist steps could interleave with a concurrent `recover`: the
-                    // watcher reads pre-import state (`false`), recover imports keys
-                    // and writes `true`, then the watcher writes its stale `false` —
-                    // a lost update with no guaranteed later emission to self-heal it.
-                    // The shared helper holds the lock across the derive, so the
-                    // observation always reflects post-recover state.
-                    // Pass `cancel`: a lifecycle verb holds this lock while it drains
-                    // (awaits) this very task, so the lock wait MUST be cancellation-
-                    // aware or shutdown deadlocks and a detached watcher could later
-                    // clobber the verb's reset `verified` (ADR 0026).
-                    crate::lifecycle::lock_and_persist_verified(
-                        &lock,
-                        &client,
-                        &store,
-                        account_id,
-                        &cancel,
-                    )
-                    .await;
-                }
-                None => return,
-            },
-        }
-    }
 }
 
 /// Watch for sender identity changes and surface verification-violation

@@ -42,7 +42,8 @@ mod unread;
 mod upstream_reconcile;
 
 pub use accounts::{
-    Account, AccountAuthKind, AccountState, MatrixOAuthRegistration, StoredAccountSession,
+    Account, AccountAuthKind, AccountState, MatrixOAuthRegistration, OwnIdentityUpdate,
+    StoredAccountSession,
 };
 pub use backfill::{AccountBackfillProgress, PageSpeed, RoomBackfillFailure, RoomBackfillState};
 pub use device_state::{DeviceStateRead, DeviceStateRow, DeviceStateUpsert};

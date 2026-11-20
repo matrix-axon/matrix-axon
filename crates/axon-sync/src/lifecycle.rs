@@ -46,6 +46,7 @@ use crate::error::{GatewayError, SyncError};
 use crate::homeserver_gate::Caller;
 use crate::manager::ClientManager;
 use crate::matrix_oauth_grant::MatrixOAuthGrantRegistry;
+use crate::own_identity;
 use crate::redecrypt::{BackupSource, RedecryptSummary, SweepScope};
 use crate::sync_health::SyncHealth;
 use crate::verification::{FlowRegistry, VerificationRooms};
@@ -257,44 +258,6 @@ pub(crate) async fn derive_verified(client: &Client) -> bool {
             );
             false
         }
-    }
-}
-
-/// Re-derive and persist `verified` **under the per-identity lock** (ADR 0026).
-/// This is the shared critical section the verification watcher uses: holding the
-/// lock across the *derive* (not just the write) is what makes the observation
-/// reflect any concurrent `recover`/`logout` write, so two derivers can't lose an
-/// update (the watcher reading stale `false` and clobbering a recover's `true`).
-/// Best-effort: a persist failure is logged, never fatal to the caller.
-///
-/// **Cancellation-aware acquisition (load-bearing).** The lock wait races `cancel`,
-/// and a fired token wins (`biased`) and abandons the write. This is what keeps the
-/// watcher from wedging shutdown: a lifecycle verb (logout/delete) holds this *same*
-/// lock while it cancels and **awaits** the supervised task — which in turn awaits
-/// this watcher. Were the lock wait un-cancellable, the watcher would park here
-/// holding nothing while the verb waits on it holding the lock → deadlock until the
-/// drain timeout aborts the supervisor, after which this separately-spawned task
-/// could still acquire the freed lock and persist the dead device's value over the
-/// verb's reset `false`. Bailing on `cancel` closes both (ADR 0026).
-pub(crate) async fn lock_and_persist_verified(
-    lock: &IdentityLock,
-    client: &Client,
-    store: &Store,
-    account_id: Uuid,
-    cancel: &CancellationToken,
-) {
-    let _guard = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => return,
-        guard = lock.lock() => guard,
-    };
-    let verified = derive_verified(client).await;
-    if let Err(err) = store.set_account_verified(account_id, verified).await {
-        tracing::warn!(
-            %account_id,
-            error = %err,
-            "failed to persist device verification state"
-        );
     }
 }
 
@@ -1459,8 +1422,10 @@ impl AccountLifecycle {
             .await
             .map_err(|err| classify_recovery_error(err.into()))?;
 
-        let verified = if let Err(err) = secret_store.import_secrets().await {
-            let verified = derive_verified(&client).await;
+        let import = secret_store.import_secrets().await;
+        let observation = own_identity::observe(&client, account_id).await;
+        let verified = observation.verified;
+        if let Err(err) = import {
             if !(verified && is_inconsistent_backup_key(&err)) {
                 return Err(classify_recovery_error(err.into()));
             }
@@ -1468,10 +1433,7 @@ impl AccountLifecycle {
                 %account_id,
                 "4S import left megolm backup key missing or inconsistent; continuing recover tree"
             );
-            verified
-        } else {
-            derive_verified(&client).await
-        };
+        }
 
         // Persist `verified` straight away so the row the caller reads back
         // reflects it. After a successful 4S import the cross-signing keys
@@ -1479,9 +1441,14 @@ impl AccountLifecycle {
         // watcher (ADR 0026) would also catch this on the next keys-query,
         // but recover's caller reads the row immediately, and
         // `verification_state()` lags that round-trip.
-        self.store
-            .set_account_verified(account_id, verified)
-            .await?;
+        own_identity::persist(
+            &client,
+            &self.store,
+            account_id,
+            &observation,
+            &self.live_tx,
+        )
+        .await?;
         let mut account = account;
         account.verified = verified;
 
@@ -2361,7 +2328,7 @@ pub(crate) mod tests {
         delete_account(&lc.store, acct.account_id).await;
     }
 
-    /// The factored `lock_and_persist_verified` helper (the watcher's critical
+    /// The factored `own_identity::lock_and_persist` helper (the watcher's critical
     /// section) takes the per-identity lock *before* its derive+persist, so it
     /// cannot interleave with another holder of the same lock — the property that
     /// closes the `recover` × watcher lost-update race (ADR 0026).
@@ -2404,11 +2371,12 @@ pub(crate) mod tests {
         let guard = held.lock().await;
 
         let store = lc.store.clone();
+        let live_tx = lc.live_tx.clone();
         // A never-cancelled token: this test exercises the lock-wait path, not the
         // cancellation bail-out (covered separately below).
         let never = CancellationToken::new();
         let mut helper = tokio::spawn(async move {
-            lock_and_persist_verified(&lock, &client, &store, id, &never).await;
+            own_identity::lock_and_persist(&lock, &client, &store, id, &live_tx, &never).await;
         });
 
         // While we hold the lock the helper cannot finish: a join attempt must time
@@ -2435,7 +2403,7 @@ pub(crate) mod tests {
     }
 
     /// Regression for the shutdown deadlock / stale-write race (ADR 0026): the
-    /// watcher's `lock_and_persist_verified` must abandon its lock wait when its
+    /// watcher's `own_identity::lock_and_persist` must abandon its lock wait when its
     /// token is cancelled. A lifecycle verb holds the identity lock while it awaits
     /// the watcher's drain, so an un-cancellable wait here would wedge shutdown — and
     /// a detached watcher could then persist the dead device's value over the verb's
@@ -2473,8 +2441,17 @@ pub(crate) mod tests {
         let store = lc.store.clone();
         let cancel_for_helper = cancel.clone();
         let helper_lock = lock.clone();
+        let live_tx = lc.live_tx.clone();
         let mut helper = tokio::spawn(async move {
-            lock_and_persist_verified(&helper_lock, &client, &store, id, &cancel_for_helper).await;
+            own_identity::lock_and_persist(
+                &helper_lock,
+                &client,
+                &store,
+                id,
+                &live_tx,
+                &cancel_for_helper,
+            )
+            .await;
         });
 
         // Parked on the lock: it cannot complete while we hold it.

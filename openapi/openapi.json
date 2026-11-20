@@ -11051,6 +11051,10 @@
             "type": "string",
             "description": "Homeserver base URL."
           },
+          "own_identity_changed": {
+            "type": "boolean",
+            "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`."
+          },
           "state": {
             "$ref": "#/components/schemas/AccountStateDto",
             "description": "Lifecycle state. The list endpoint returns only `active` accounts; a by-id\nread can return any state."
@@ -11153,6 +11157,10 @@
               "homeserver_url": {
                 "type": "string",
                 "description": "Homeserver base URL."
+              },
+              "own_identity_changed": {
+                "type": "boolean",
+                "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`."
               },
               "state": {
                 "$ref": "#/components/schemas/AccountStateDto",
@@ -13012,6 +13020,10 @@
                 "homeserver_url": {
                   "type": "string",
                   "description": "Homeserver base URL."
+                },
+                "own_identity_changed": {
+                  "type": "boolean",
+                  "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`."
                 },
                 "state": {
                   "$ref": "#/components/schemas/AccountStateDto",

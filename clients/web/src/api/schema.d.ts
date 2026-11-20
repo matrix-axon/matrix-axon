@@ -2630,6 +2630,12 @@ export interface components {
             /** @description Homeserver base URL. */
             homeserver_url: string;
             /**
+             * @description Whether Axon's device still needs to be cross-signed after a master-key
+             *     replacement (ADR 0136). The first observed identity establishes the baseline.
+             *     Updates are pushed on `/v1/ws` as `account.own_identity_changed`.
+             */
+            own_identity_changed?: boolean;
+            /**
              * @description Lifecycle state. The list endpoint returns only `active` accounts; a by-id
              *     read can return any state.
              */
@@ -2711,6 +2717,12 @@ export interface components {
                 device_id?: string | null;
                 /** @description Homeserver base URL. */
                 homeserver_url: string;
+                /**
+                 * @description Whether Axon's device still needs to be cross-signed after a master-key
+                 *     replacement (ADR 0136). The first observed identity establishes the baseline.
+                 *     Updates are pushed on `/v1/ws` as `account.own_identity_changed`.
+                 */
+                own_identity_changed?: boolean;
                 /**
                  * @description Lifecycle state. The list endpoint returns only `active` accounts; a by-id
                  *     read can return any state.
@@ -3697,6 +3709,12 @@ export interface components {
                 device_id?: string | null;
                 /** @description Homeserver base URL. */
                 homeserver_url: string;
+                /**
+                 * @description Whether Axon's device still needs to be cross-signed after a master-key
+                 *     replacement (ADR 0136). The first observed identity establishes the baseline.
+                 *     Updates are pushed on `/v1/ws` as `account.own_identity_changed`.
+                 */
+                own_identity_changed?: boolean;
                 /**
                  * @description Lifecycle state. The list endpoint returns only `active` accounts; a by-id
                  *     read can return any state.

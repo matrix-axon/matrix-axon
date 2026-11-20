@@ -840,6 +840,7 @@ mod tests {
             auth_kind,
             state: AccountState::Active,
             verified: false,
+            own_identity_changed: false,
             backup_enable_intent: false,
             sync_token: None,
             created_at: Utc::now(),
