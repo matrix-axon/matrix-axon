@@ -1112,12 +1112,11 @@ export function createRoomsStore(
     } catch {
       return
     }
-    const body = previewBody(event?.body)
-    if (
-      !keepPreviewRequest(request) ||
-      event === undefined ||
-      body === undefined
-    ) {
+    if (!keepPreviewRequest(request) || event === undefined) {
+      return
+    }
+    const body = eventPreviewBody(event)
+    if (body === undefined) {
       return
     }
     const sender = event.sender
@@ -1160,8 +1159,8 @@ export function createRoomsStore(
   }
 
   function setLivePreview(room: RoomDto, event: EventDto): void {
-    const body = previewBody(event.body)
-    if (!isPreviewEvent(event) || body === undefined) {
+    const body = eventPreviewBody(event)
+    if (body === undefined) {
       return
     }
     const key = roomKey(room)
@@ -2665,6 +2664,30 @@ function isPreviewEvent(event: EventDto): boolean {
     typeof event.body === 'string' &&
     event.body.trim() !== ''
   )
+}
+
+function hasSpoiler(content: unknown): boolean {
+  const fields = content as Record<string, unknown> | null | undefined
+  return (
+    fields?.format === 'org.matrix.custom.html' &&
+    typeof fields.formatted_body === 'string' &&
+    /data-mx-spoiler/i.test(fields.formatted_body)
+  )
+}
+
+function eventPreviewBody(event: EventDto): string | undefined {
+  const content = event.content as Record<string, unknown> | null | undefined
+  const relation = event.relates_to as { rel_type?: unknown } | null
+  // Timeline reads apply edits, while a live replacement carries its new
+  // content separately from the plain-text fallback in event.body.
+  if (
+    hasSpoiler(content) ||
+    (relation?.rel_type === 'm.replace' &&
+      hasSpoiler(content?.['m.new_content']))
+  ) {
+    return '(spoiler)'
+  }
+  return previewBody(event.body)
 }
 
 function previewBody(body: string | null | undefined): string | undefined {
