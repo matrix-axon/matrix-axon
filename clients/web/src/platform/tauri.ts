@@ -32,7 +32,7 @@ import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
 import { nativeIncomingShare } from './incoming-share'
 import { shellLinkPreview } from './link-preview'
-import { shellMediaStreamSrc } from './media-stream'
+import { mediaStreamSrcFor } from './media-stream'
 import {
   deliverNotificationClick,
   notificationClickFromPayload,
@@ -555,8 +555,9 @@ export function tauriPlatform(
     // A packaged build has no same-origin API to assume: it must be told.
     defaultApiBaseUrl: null,
     // The CSP cannot list the server's origin in `media-src`, so a ticket
-    // URL goes through the shell's `axon-media` scheme (ADR 0139 § 7).
-    mediaStreamSrc: shellMediaStreamSrc,
+    // URL goes through the shell's `axon-media` scheme (ADR 0139 § 7),
+    // except on Linux, whose player cannot load it.
+    mediaStreamSrc: mediaStreamSrcFor(shellPlatform),
     // `dist` is compiled into this binary, so there is nothing for a reload to
     // fetch that is not already running. See the field's own note.
     updatesFromOrigin: false,

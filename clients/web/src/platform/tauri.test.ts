@@ -695,6 +695,16 @@ describe('message notifications in the shell', () => {
     expect(tauriPlatform(undefined, 'windows').iconBadgeSupport).toBe('native')
   })
 
+  it('streams video and audio from the build target, except on Linux', () => {
+    // WebKitGTK's player cannot load the `axon-media` scheme (issue 1192).
+    expect(tauriPlatform(undefined, 'linux').mediaStreamSrc).toBeNull()
+    for (const target of ['darwin', 'windows', 'ios', 'android']) {
+      expect(tauriPlatform(undefined, target).mediaStreamSrc).toBeTypeOf(
+        'function',
+      )
+    }
+  })
+
   it('posts through the plugin command, not window.Notification', async () => {
     const invoke = vi.fn((...args: unknown[]) =>
       Promise.resolve(args[0] ?? null),
