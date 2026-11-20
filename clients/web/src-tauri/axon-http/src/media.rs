@@ -11,10 +11,15 @@
 //! credential of its own, since the ticket is one.
 //!
 //! Tauri's responder takes a whole body, not a stream, so each response is
-//! bounded at [`MAX_BODY`]. The player's `Range` goes upstream unchanged and
-//! the bound is applied to what comes back: a shorter `206` whose
-//! `Content-Range` says which bytes it holds, after which the player asks for
-//! the next range.
+//! bounded at [`MAX_BODY`]: a shorter `206` whose `Content-Range` says which
+//! bytes it holds, after which the player asks for the next range.
+//!
+//! A plain single-range `GET` is answered from the read-ahead window
+//! (`media_window`), which fetches the object in 4 MiB blocks on a fixed grid
+//! and rewrites the outgoing `Range` to match. Everything else (the stall
+//! probe, a conditional request, a `HEAD`, a multi-range or Range-less
+//! request, and a suffix range before the object's length is known) goes
+//! upstream as sent, and the bound is applied to what comes back.
 //!
 //! Tickets are credentials, so nothing here logs a URL or a path.
 
@@ -395,10 +400,13 @@ pub(crate) async fn shape(
         .and_then(|v| v.parse::<u64>().ok());
 
     if *method == Method::HEAD || code == StatusCode::NOT_MODIFIED {
+        let headers = response.headers_mut();
         if let Some(length) = length {
-            response
-                .headers_mut()
-                .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+        }
+        // A `206` to a ranged `HEAD` must say which bytes it describes.
+        if let Some(range) = upstream.headers().get(header::CONTENT_RANGE) {
+            headers.insert(header::CONTENT_RANGE, range.clone());
         }
         return response;
     }
@@ -412,13 +420,16 @@ pub(crate) async fn shape(
             else {
                 return bad_gateway();
             };
-            let span = usize::try_from(last - first + 1).unwrap_or(usize::MAX);
-            let want = span.min(MAX_BODY);
+            // `first <= last`, so only the `+ 1` could overflow, for a span
+            // the peer states as the whole of `u64`.
+            let want = usize::try_from(last - first)
+                .map_or(MAX_BODY, |span| span.saturating_add(1).min(MAX_BODY));
             let early = Some((EARLY_MIN, Instant::now() + EARLY_AFTER));
-            let Ok(body) = read_up_to(&mut upstream, want, early).await else {
-                return bad_gateway();
+            let body = match read_up_to(&mut upstream, want, early).await {
+                Ok(body) if !body.is_empty() => body,
+                _ => return bad_gateway(),
             };
-            let last = first + body.len() as u64 - 1;
+            let last = first + (body.len() as u64 - 1);
             let total = total.map_or_else(|| "*".to_owned(), |total| total.to_string());
             let range = format!("bytes {first}-{last}/{total}");
             let headers = response.headers_mut();

@@ -427,6 +427,10 @@ The handler:
 - Answers `502` if the upstream body errors or ends before the bytes the handler means to return.
   A server-side abort at the withheld tail (section 3) therefore reaches the player as an error, never as a short but clean `206`.
 
+The rest of this section, to the amendment, was the rule for every request when the ADR was accepted.
+Since the amendment, a plain single-range `GET` is answered from the read-ahead window, which rewrites the outgoing `Range` to a 4 MiB block on a fixed grid.
+The rule below now covers only the requests the window does not answer: the section 6 probe, a conditional request, a `HEAD`, a multi-range or Range-less request, and a suffix range whose object length no block has learned.
+
 The bound is applied to what comes back, not by rewriting what is asked for.
 The handler forwards the player's `Range` header unchanged, reads at most 4 MiB of the upstream body, then drops the upstream connection.
 That one rule covers every range form, because the server always answers a ranged ticket request with a `206` whose `Content-Range` carries the known total (section 3):
@@ -524,6 +528,15 @@ wry 0.57.1 ([wry PR 1865](https://github.com/tauri-apps/wry/pull/1865)) puts a p
 The shell takes wry 0.57.3, and with it the run above plays, seeks and recovers as on macOS, so Android streams like the other shells.
 On an expired ticket the WebView retries the `404` about twice a second; the section 6 probe runs one second after the `stalled` that follows and replaces the ticket, which ends it.
 The loopback server that Linux needs is [issue 1197](https://github.com/matrix-axon/matrix-axon/issues/1197).
+No physical Android device was available for this phase; the emulator run stands in for it until tester builds reach one.
+
+**An OAuth access token expiring mid-play is recovered without a visible stall** (Windows shell, real server, 2026-11-20).
+The shell played the 557 MB test video on an OAuth session whose access token expired at 11:23:49, and a ticket stops working with the token that issued it (section 5).
+The next block request, at 11:23:51, got a `404`, the player's retry another at 11:23:54, and the section 6 probe a third; the client minted a new ticket the same second.
+From 11:23:55 the new ticket fetched the file's start and tail for the element's metadata, then the blocks from the restored position to the end.
+The viewer saw nothing: the player still had about 25 s buffered when the first `404` came.
+Swapping the `src` drops the element's buffer, so each recovery re-fetches about 40 MB, once an access token's life (an hour by default).
+The follow-up this section provides for, binding a ticket's life to the OAuth session rather than the access token, is therefore not needed.
 
 The page's own origin in the shells is `axon://localhost` (`http://axon.localhost` on Windows and Android), the shell's `axon` app scheme, so that is the origin the handler's CORS headers name.
 
@@ -536,8 +549,7 @@ The device check includes the probe path, by playing an expired ticket.
 Before this phase merges, it must be checked on a real iOS device, a real Android device, macOS, Windows and Linux.
 On each, the check records the player's first request and confirms that playback, seeking and a short `206` all work.
 It also records how many scheme requests a minute of playback takes, and whether seeking back re-requests ranges under `no-store` (section 5).
-It records whether the upstream connection is reused between scheme requests or torn down after each 4 MiB, since the handler drops it mid-body.
-If teardown turns out to matter, rewriting the outgoing `Range` to a bounded `bytes=N-(N+4 MiB-1)` for the absolute forms would let the connection be reused, leaving suffix and unknown-length requests as they are.
+The amendment's read-ahead window settled the question of reusing the upstream connection: its block requests are bounded, so no response is dropped mid-body.
 It plays an OAuth-session video across its access token's expiry, to confirm that the probe, the new ticket and the `currentTime` restore in section 6 recover without a visible stall.
 If they do not, binding a ticket's life to the OAuth session rather than the access token is the follow-up, filed by the phase 4 PR.
 At 4 MiB a response, a 1 GiB video plays through about 256 requests.

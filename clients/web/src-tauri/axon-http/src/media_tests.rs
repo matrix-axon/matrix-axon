@@ -177,7 +177,23 @@ fn answer(ticket: &str, headers: &HeaderMap) -> hyper::Response<ChannelBody> {
             .body(body(chunks(&whole), Some(Ok(()))))
             .unwrap();
     };
-    let Ok((first, last)) = resolve(range, len) else {
+    if ticket == "boundless" {
+        // A peer stating a span as wide as `u64`, then sending 50 bytes.
+        let first = range
+            .strip_prefix("bytes=")
+            .and_then(|spec| spec.split('-').next())
+            .and_then(|first| first.parse::<u64>().ok())
+            .unwrap_or(0);
+        return builder
+            .status(206)
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {first}-{}/*", u64::MAX),
+            )
+            .body(body(vec![Bytes::from(vec![7u8; 50])], Some(Ok(()))))
+            .unwrap();
+    }
+    let Ok((first, mut last)) = resolve(range, len) else {
         return builder
             .status(416)
             .header(header::CONTENT_RANGE, format!("bytes */{len}"))
@@ -185,6 +201,10 @@ fn answer(ticket: &str, headers: &HeaderMap) -> hyper::Response<ChannelBody> {
             .body(body(Vec::new(), Some(Ok(()))))
             .unwrap();
     };
+    // A server that ignores the end asked for and sends to the object's end.
+    if ticket == "wide" {
+        last = len - 1;
+    }
     let slice = &whole[first..=last];
     let (sent, end) = match ticket {
         // The server's abort at the withheld tail (ADR 0139 § 3): some bytes,
@@ -1041,4 +1061,117 @@ async fn the_probe_never_reads_ahead() {
         )
         .await;
     assert_eq!(upstream_ranges(&server)[before..], ["bytes=0-0".to_owned()]);
+}
+
+// ===== review round 1 =====
+
+#[tokio::test]
+async fn a_ranged_head_keeps_its_content_range() {
+    let server = server().await;
+    let response = media::respond(
+        &transport(),
+        &MediaWindows::default(),
+        Some(server.base()),
+        &scheme_request("HEAD", TICKET, &[("range", "bytes=0-99")]),
+        Some(ORIGIN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        header_of(&response, header::CONTENT_RANGE),
+        format!("bytes 0-99/{LARGE}")
+    );
+    assert_eq!(header_of(&response, header::CONTENT_LENGTH), "100");
+    assert!(response.body().is_empty());
+}
+
+#[tokio::test]
+async fn a_block_holds_no_more_than_the_bound_whatever_the_server_sends() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // The block's last byte, so its whole read has run.
+    let last = BLOCK - 1;
+    assert_partial(
+        &player.range("wide", &format!("bytes={last}-{last}")).await,
+        last,
+        1,
+        LARGE,
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(player.windows.held_bytes(), BLOCK);
+    // The next block is its own fetch, and what it serves is right.
+    let next = BLOCK + 3;
+    assert_partial(
+        &player
+            .range("wide", &format!("bytes={next}-{}", next + 9))
+            .await,
+        next,
+        10,
+        LARGE,
+    );
+    assert_eq!(server.seen().len(), 2);
+}
+
+#[tokio::test]
+async fn a_span_as_wide_as_u64_is_a_502_on_either_path() {
+    let server = server().await;
+    let player = Player::new(&server);
+    let windowed = player.range("boundless", "bytes=0-99").await;
+    assert_eq!(windowed.status(), StatusCode::BAD_GATEWAY);
+    let forwarded = player
+        .get(
+            "boundless",
+            &[("range", "bytes=0-99"), ("axon-stream-probe", "1")],
+        )
+        .await;
+    assert_eq!(forwarded.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn dropping_a_block_wakes_the_requests_waiting_on_it() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // "slow" sends 320 KiB of the block and then holds.
+    assert_partial(&player.range("slow", "bytes=0-99").await, 0, 100, LARGE);
+    let parked = {
+        let player = Arc::clone(&player);
+        tokio::spawn(async move { player.range("slow", "bytes=1000000-1000099").await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    player.windows.clear();
+    let response = tokio::time::timeout(Duration::from_secs(5), parked)
+        .await
+        .expect("the waiting request was not woken")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn a_full_window_drops_a_complete_block_before_one_still_arriving() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // Still arriving, and the least recently used.
+    assert_partial(&player.range("slow", "bytes=0-99").await, 0, 100, LARGE);
+    let last = BLOCK - 1;
+    for i in 0..MAX_BLOCKS {
+        let ticket = format!("t{i}");
+        // The block's last byte, so each is complete.
+        player.range(&ticket, &format!("bytes={last}-{last}")).await;
+    }
+    assert_eq!(player.windows.len(), MAX_BLOCKS);
+    let slow_fetches = |server: &Server| {
+        server
+            .seen()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/slow"))
+            .count()
+    };
+    assert_eq!(slow_fetches(&server), 1);
+    assert_partial(
+        &player.range("slow", "bytes=100-199").await,
+        100,
+        100,
+        LARGE,
+    );
+    assert_eq!(slow_fetches(&server), 1, "the arriving block was dropped");
 }
