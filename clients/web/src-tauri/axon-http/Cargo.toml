@@ -22,13 +22,19 @@ links = "tauri-plugin-axon-http"
 # chain (ADR 0127 § 7). The same 0.4 that reqwest links, so the downcast sees
 # reqwest's own type.
 h2 = "0.4"
-# Only to recognise a connection closed under a request (`is_incomplete_message`)
-# in an error chain. No features of its own: reqwest's decide what is built.
-hyper = { version = "1", default-features = false }
-# Only to recognise a request whose wait for an HTTP/2 connection was cut short
+# To recognise a connection closed under a request (`is_incomplete_message`)
+# in an error chain, and to serve the Linux shell's loopback media server
+# (`media_loopback.rs`) over HTTP/1.1. reqwest already compiles `http1`;
+# `server` adds only the server half.
+hyper = { version = "1", default-features = false, features = ["http1", "server"] }
+# To recognise a request whose wait for an HTTP/2 connection was cut short
 # (`is_requeue`). The same 0.1 that reqwest links; `client-legacy` is the client
 # reqwest builds on, so this adds nothing reqwest does not already compile.
-hyper-util = { version = "0.1", default-features = false, features = ["client-legacy"] }
+# `tokio` is the loopback media server's socket and timer glue.
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "tokio"] }
+# The loopback media server's per-launch token. The 0.3 that the lockfile
+# already carries.
+getrandom = "0.3"
 percent-encoding = "2"
 # The features `tauri-plugin-http` 2.5 turns on by default, minus cookies and
 # charset, which nothing here uses. `macos-system-configuration` is what makes

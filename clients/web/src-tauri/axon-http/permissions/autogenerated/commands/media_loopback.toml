@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-media-loopback"
+description = "Enables the media_loopback command without any pre-configured scope."
+commands.allow = ["media_loopback"]
+
+[[permission]]
+identifier = "deny-media-loopback"
+description = "Denies the media_loopback command without any pre-configured scope."
+commands.deny = ["media_loopback"]

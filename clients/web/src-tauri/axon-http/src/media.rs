@@ -203,7 +203,8 @@ async fn read_up_to(
 /// The request headers the player may send upstream. The ticket is the only
 /// credential, so nothing that could carry another goes: no cookies, no
 /// `Authorization`, no `Origin` or `Referer`.
-const FORWARDED_REQUEST: [HeaderName; 3] = [header::RANGE, header::IF_NONE_MATCH, header::IF_RANGE];
+pub(crate) const FORWARDED_REQUEST: [HeaderName; 3] =
+    [header::RANGE, header::IF_NONE_MATCH, header::IF_RANGE];
 
 /// The response headers the player is given back, beside the `Content-Length`
 /// and `Content-Range` the handler sets for the body it returns.
@@ -233,19 +234,24 @@ pub(crate) async fn respond(
         }
     };
     if let Some(origin) = origin.and_then(|origin| HeaderValue::from_str(origin).ok()) {
-        let headers = response.headers_mut();
-        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
-        headers.insert(
-            header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("Content-Range, Accept-Ranges, ETag"),
-        );
+        allow_origin(response.headers_mut(), origin);
     }
     response
 }
 
+/// The CORS headers that let the page at `origin` read a response: the
+/// section 6 probe is a cross-origin `fetch` in the shells.
+pub(crate) fn allow_origin(headers: &mut HeaderMap, origin: HeaderValue) {
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("Content-Range, Accept-Ranges, ETag"),
+    );
+}
+
 /// The probe's `Range` header is not CORS-safelisted everywhere, and it adds
 /// [`PROBE_HEADER`], so its `fetch` is preflighted.
-fn preflight() -> Response<Vec<u8>> {
+pub(crate) fn preflight() -> Response<Vec<u8>> {
     let mut response = status(StatusCode::NO_CONTENT);
     let headers = response.headers_mut();
     headers.insert(
@@ -263,7 +269,7 @@ fn preflight() -> Response<Vec<u8>> {
     response
 }
 
-fn status(status: StatusCode) -> Response<Vec<u8>> {
+pub(crate) fn status(status: StatusCode) -> Response<Vec<u8>> {
     let mut response = Response::new(Vec::new());
     *response.status_mut() = status;
     response

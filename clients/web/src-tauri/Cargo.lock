@@ -4410,6 +4410,7 @@ version = "0.1.0"
 dependencies = [
  "brotli",
  "flate2",
+ "getrandom 0.3.4",
  "h2",
  "http-body-util",
  "hyper",
