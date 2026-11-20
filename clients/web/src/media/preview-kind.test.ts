@@ -261,12 +261,18 @@ describe('previewPlan re-typing', () => {
       for (const mimetype of [
         'application/octet-stream',
         'video/mp4; codecs="avc1"',
-        'Video/MP4',
+        'Video/mp4',
       ]) {
         const plan = streamed(video({ mimetype, size: 200 * 1024 * 1024 }))
         expect(plan).toBeNull()
         expect(streamed(video({ mimetype }))?.stream).toBe(false)
       }
+    })
+
+    it('streams a mixed-case subtype, which the proxy serves as itself', () => {
+      // `sanitize_mime` keeps the subtype's case and `is_inline_safe` checks
+      // only the lowercase major type, so `video/MP4` is served as-is.
+      expect(streamed(video({ mimetype: 'video/MP4' }))?.stream).toBe(true)
     })
 
     it('never streams a pdf or text file', () => {

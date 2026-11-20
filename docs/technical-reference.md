@@ -244,7 +244,7 @@ Two configurations change this:
 Clients keep their own limits.
 In a browser, the web client plays video and audio from a stream ticket (below), so playback starts before the download finishes and the client sets no size limit of its own.
 The desktop and mobile shells still buffer a whole object, up to 100 MiB, until ADR 0139 phase 4 lands, and the TUI still refuses media over 20 MiB.
-A video or audio event whose `info.mimetype` is missing, generic (`application/octet-stream`), has parameters or is not lowercase is served as `application/octet-stream`, which no ticket covers, so every client buffers it as before ([issue 1182](https://github.com/matrix-axon/matrix-axon/issues/1182)).
+A video or audio event whose `info.mimetype` is missing, generic (`application/octet-stream`), has parameters or does not start with a lowercase `audio/` or `video/` is served as `application/octet-stream`, which no ticket covers, so every client buffers it as before ([issue 1182](https://github.com/matrix-axon/matrix-axon/issues/1182)).
 
 ### Stream tickets
 

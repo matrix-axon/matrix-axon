@@ -160,11 +160,14 @@ function kindFromMimetype(mime: string): PreviewKind | null {
  * `audio/*`, which is the only thing the server issues a stream ticket for.
  *
  * Mirrors `sanitize_mime` and `is_inline_safe` (`routes/media.rs`) exactly,
- * case and all: a declaration with parameters (`video/mp4; codecs=…`) or in
- * capitals is served as `application/octet-stream`, which no ticket covers,
- * so it must keep the blob path and its re-type. Erring towards `false`
- * costs only the streaming; erring towards `true` is caught by the ticket
- * request's `400`, but would already have lifted the size ceiling.
+ * case and all: a declaration with parameters (`video/mp4; codecs=…`), or
+ * whose major type is not a lowercase `audio/` or `video/` (`Video/mp4`), is
+ * served as `application/octet-stream`, which no ticket covers. The subtype's
+ * case does not matter: `video/MP4` is served as itself, and streams. A
+ * declaration that does not stream keeps the blob path and its re-type.
+ * Erring towards `false` costs only the streaming; erring towards `true` is
+ * caught by the ticket request's `400`, but would already have lifted the
+ * size ceiling.
  */
 function servedAsStreamable(mimetype: string): boolean {
   const raw = mimetype.trim()
