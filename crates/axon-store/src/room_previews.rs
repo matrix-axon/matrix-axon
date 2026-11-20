@@ -50,7 +50,7 @@ pub struct RoomPreview {
     /// `content.msgtype`, after its latest edit.
     pub msgtype: Option<String>,
     /// The message body after its latest edit, cut to
-    /// [`ROOM_PREVIEW_BODY_CHARS`].
+    /// [`ROOM_PREVIEW_BODY_CHARS`], or `(spoiler)` for a spoiler.
     pub body: String,
     /// Whether `body` was cut.
     pub truncated: bool,
@@ -84,19 +84,22 @@ impl FromRow<'_, PgRow> for RoomPreview {
 ///
 /// `$1`/`$2` are parallel `uuid[]`/`text[]` arrays of the requested rooms,
 /// `$3` the scan limit and `$4` the body cap. Rows come back in request order;
-/// a room with no preview is absent.
+/// a room with no preview is absent. Mask spoilers before truncating the
+/// preview, using the same case-insensitive marker as link previews.
 static ROOM_PREVIEWS_SQL: LazyLock<String> = LazyLock::new(|| {
     let root_redaction = crate::event_visibility::redaction_matches("rr", "e");
     let latest_edit = latest_edit_lateral();
     format!(
         "SELECT req.account_id, req.room_id, p.event_id, p.sender, p.origin_ts, p.msgtype, \
-                left(p.full_body, $4) AS body, char_length(p.full_body) > $4 AS truncated, \
+                left(preview.body, $4) AS body, char_length(preview.body) > $4 AS truncated, \
                 CASE WHEN jsonb_typeof(m.content->'displayname') = 'string' \
                      THEN m.content->>'displayname' END AS sender_display_name \
          FROM unnest($1::uuid[], $2::text[]) WITH ORDINALITY AS req(account_id, room_id, ord) \
          CROSS JOIN LATERAL ( \
              SELECT e.event_id, e.sender, e.origin_ts, \
                     COALESCE(edit.new_body, e.decrypted_body_text) AS full_body, \
+                    CASE WHEN edit.new_body IS NOT NULL \
+                         THEN edit.new_content ELSE e.content END AS body_content, \
                     CASE WHEN edit.new_content IS NOT NULL \
                          THEN edit.new_content->>'msgtype' \
                          ELSE e.content->>'msgtype' END AS msgtype \
@@ -123,6 +126,11 @@ static ROOM_PREVIEWS_SQL: LazyLock<String> = LazyLock::new(|| {
              ORDER BY e.origin_ts DESC, e.id DESC \
              LIMIT 1 \
          ) p \
+         CROSS JOIN LATERAL ( \
+             SELECT CASE WHEN p.body_content->>'format' = 'org.matrix.custom.html' \
+                              AND p.body_content->>'formatted_body' ILIKE '%data-mx-spoiler%' \
+                         THEN '(spoiler)' ELSE p.full_body END AS body \
+         ) preview \
          LEFT JOIN room_state m \
            ON m.account_id = req.account_id AND m.room_id = req.room_id \
           AND m.event_type = 'm.room.member' AND m.state_key = p.sender \

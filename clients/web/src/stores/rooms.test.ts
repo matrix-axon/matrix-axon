@@ -557,6 +557,97 @@ describe('createRoomsStore', () => {
     expect(memberCalls).toBe(0)
   })
 
+  it.each([false, true])(
+    'hides live spoiler previews (replacement event: %s)',
+    async (replacement) => {
+      server.use(
+        http.get(`${BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [NAMED] }),
+        ),
+      )
+      const store = makeStore()
+      await store.refresh()
+      const spoiler = {
+        msgtype: 'm.text',
+        body: 'secret ending',
+        format: 'org.matrix.custom.html',
+        formatted_body: '<span DATA-MX-SPOILER="Plot">secret ending</span>',
+      }
+      store.noteTimelineEvent({
+        ...liveMessage('$spoiler', '@adam:example.org'),
+        body: replacement ? '* secret ending' : spoiler.body,
+        content: (replacement
+          ? { 'm.new_content': spoiler }
+          : spoiler) as never,
+        relates_to: replacement
+          ? ({ rel_type: 'm.replace', event_id: '$original' } as never)
+          : null,
+      })
+      expect(store.preview(roomKey(NAMED))?.body).toBe('(spoiler)')
+    },
+  )
+
+  it('uses the replacement body when a live edit removes a spoiler', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [NAMED] }),
+      ),
+    )
+    const store = makeStore()
+    await store.refresh()
+    store.noteTimelineEvent({
+      ...liveMessage('$replacement', '@adam:example.org'),
+      body: '* secret ending',
+      content: {
+        msgtype: 'm.text',
+        body: '* secret ending',
+        format: 'org.matrix.custom.html',
+        formatted_body: '<span data-mx-spoiler>secret ending</span>',
+        'm.new_content': { msgtype: 'm.text', body: 'Ordinary edit' },
+      } as never,
+      relates_to: { rel_type: 'm.replace', event_id: '$original' } as never,
+    })
+
+    expect(store.preview(roomKey(NAMED))?.body).toBe('Ordinary edit')
+  })
+
+  it.each([
+    { type: 'm.room.redaction' },
+    { state_key: '' },
+    { redacted: true },
+  ])(
+    'keeps the live preview when an ineligible event carries a spoiler: %j',
+    async (patch) => {
+      server.use(
+        http.get(`${BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [NAMED] }),
+        ),
+      )
+      const store = makeStore()
+      await store.refresh()
+      const sender = '@adam:example.org'
+      const current = liveMessage('$current', sender)
+      store.noteTimelineEvent(current)
+      const preview = store.preview(roomKey(NAMED))
+      expect(preview?.eventId).toBe(current.event_id)
+
+      store.noteTimelineEvent({
+        ...liveMessage('$ignored', sender, current.origin_ts + 1),
+        body: 'secret ending',
+        content: {
+          msgtype: 'm.text',
+          format: 'org.matrix.custom.html',
+          formatted_body: '<span data-mx-spoiler>secret ending</span>',
+        } as never,
+        ...patch,
+      })
+
+      expect(store.preview(roomKey(NAMED))).toBe(preview)
+      expect(store.rooms.value[0].last_event_id).toBe(current.event_id)
+      expect(store.rooms.value[0].last_activity_ts).toBe(current.origin_ts)
+    },
+  )
+
   it('a live event tying last_activity_ts still updates the preview', async () => {
     server.use(
       http.get(`${BASE_URL}/v1/rooms`, () =>
@@ -2199,6 +2290,14 @@ describe('room-list previews (issue #278)', () => {
                   ...liveMessage(`$e${n}`, '@bob:example.org'),
                   room_id: params.roomId,
                   body: `message ${n}`,
+                  ...(n === '5' && {
+                    content: {
+                      msgtype: 'm.text',
+                      body: 'message 5',
+                      format: 'org.matrix.custom.html',
+                      formatted_body: '<span data-mx-spoiler>message 5</span>',
+                    },
+                  }),
                 },
               ],
               next_cursor: null,
@@ -2230,13 +2329,14 @@ describe('room-list previews (issue #278)', () => {
     await vi.waitFor(() =>
       expect(store.preview(roomKey(rooms[4]))?.body).toBe('message 4'),
     )
-    // A row that asks after the fallback goes straight to the per-row read.
+    // A row that asks after the fallback goes straight to the per-row read
+    // and masks spoilers in the returned event.
     store.hydratePreview(store.rooms.value[5])
     await vi.waitFor(() =>
       expect(store.preview(roomKey(rooms[5]))).toEqual({
         eventId: '$e5',
         senderDisplay: 'Bob',
-        body: 'message 5',
+        body: '(spoiler)',
       }),
     )
     // The first 405 and the one that settled it.

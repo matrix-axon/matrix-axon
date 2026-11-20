@@ -1112,12 +1112,11 @@ export function createRoomsStore(
     } catch {
       return
     }
-    const body = previewBody(event?.body)
-    if (
-      !keepPreviewRequest(request) ||
-      event === undefined ||
-      body === undefined
-    ) {
+    if (!keepPreviewRequest(request) || event === undefined) {
+      return
+    }
+    const body = eventPreviewBody(event)
+    if (body === undefined) {
       return
     }
     const sender = event.sender
@@ -1159,9 +1158,10 @@ export function createRoomsStore(
     return undefined
   }
 
+  /** Called by noteTimelineEvent after the shared preview and activity filter. */
   function setLivePreview(room: RoomDto, event: EventDto): void {
-    const body = previewBody(event.body)
-    if (!isPreviewEvent(event) || body === undefined) {
+    const body = eventPreviewBody(event)
+    if (body === undefined) {
       return
     }
     const key = roomKey(room)
@@ -2665,6 +2665,32 @@ function isPreviewEvent(event: EventDto): boolean {
     typeof event.body === 'string' &&
     event.body.trim() !== ''
   )
+}
+
+function hasSpoiler(content: unknown): boolean {
+  const fields = content as Record<string, unknown> | null | undefined
+  return (
+    fields?.format === 'org.matrix.custom.html' &&
+    typeof fields.formatted_body === 'string' &&
+    /data-mx-spoiler/i.test(fields.formatted_body)
+  )
+}
+
+function eventPreviewBody(event: EventDto): string | undefined {
+  let content = event.content as Record<string, unknown> | null | undefined
+  let body: unknown = event.body
+  const relation = event.relates_to as { rel_type?: unknown } | null
+  // A live edit carries both fallback and replacement content. Use the
+  // replacement's body and spoiler marker together, as timeline reads do.
+  if (relation?.rel_type === 'm.replace') {
+    content = content?.['m.new_content'] as
+      Record<string, unknown> | null | undefined
+    body = content?.body
+  }
+  if (typeof body !== 'string' || body.trim() === '') {
+    return undefined
+  }
+  return hasSpoiler(content) ? '(spoiler)' : previewBody(body)
 }
 
 function previewBody(body: string | null | undefined): string | undefined {
