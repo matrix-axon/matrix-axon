@@ -11,16 +11,17 @@ const MEDIA_ERR_NETWORK = 2
 const HAVE_FUTURE_DATA = 3
 
 /**
- * How long a player may sit without progress before the ticket is probed.
- * `stalled` already means the engine got no data for about three seconds, so
- * it is checked almost at once; a bare `waiting` gets longer, since a slow
- * link raises it too. After a stall whose probe found the bytes reachable,
- * the check repeats at the slower pace for as long as the player stays stuck.
+ * When a stall is probed. `stalled` already means the engine got no data for
+ * about three seconds, so it is probed a second later unless data (a
+ * `progress` event) has arrived meanwhile. A bare `waiting` gets longer,
+ * since a slow link raises it too, and is probed only if playback has not
+ * moved. Stall probes are at most one per `minInterval`, so a slow link that
+ * keeps raising `stalled` costs a one-byte request every ten seconds at most.
  */
 export const STALL_PROBE_MS = {
   stalled: 1_000,
   waiting: 5_000,
-  recheck: 15_000,
+  minInterval: 10_000,
 }
 
 type State =
@@ -52,11 +53,15 @@ type State =
  * across several token lifetimes keeps recovering.
  *
  * WebKit's AVFoundation player never raises `error` for a refused range once
- * playback has begun: it raises `stalled` and re-requests the range, about
- * ninety times a second, for as long as the page is open. So a player that
- * stalls without progress is probed too. A reachable probe there means a slow
- * link, and the player is left to wait; any other answer is handled as it is
- * for `error`, and replacing or removing the `src` ends the request loop.
+ * playback has begun: it re-requests the range, tens of times a second, for as
+ * long as the page is open. It keeps playing from its buffer meanwhile, and
+ * even reports `networkState` idle, so neither a frozen playhead nor the
+ * network state gives it away. What it does raise is `stalled`, a few seconds
+ * after the data stops. So a `stalled` that no `progress` follows is probed,
+ * as is a `waiting` that playback does not move on from. A reachable probe
+ * means a slow link, and the player is left to wait; any other answer is
+ * handled as it is for `error`, and replacing or removing the `src` ends the
+ * request loop.
  */
 export function StreamPreview({
   accountId,
@@ -90,7 +95,10 @@ export function StreamPreview({
   const generation = useRef(0)
   // At most one probe at a time, from either trigger.
   const probing = useRef(false)
-  const stallTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stallTimers = useRef(new Map<'stalled' | 'waiting', number>())
+  // Counts `progress` events: a `stalled` that one follows was a hiccup.
+  const progressed = useRef(0)
+  const lastStallProbe = useRef(-Infinity)
 
   useEffect(() => {
     if (mxcUrl === null) {
@@ -115,7 +123,7 @@ export function StreamPreview({
   useEffect(
     () => () => {
       generation.current += 1
-      if (stallTimer.current !== null) clearTimeout(stallTimer.current)
+      for (const timer of stallTimers.current.values()) clearTimeout(timer)
       const el = element.current
       if (el !== null) {
         el.pause()
@@ -135,6 +143,12 @@ export function StreamPreview({
   /** Probe the ticket after an `error` or a stall, and act on the answer. */
   const diagnose = async (trigger: 'error' | 'stall') => {
     if (state.status !== 'ready' || mxcUrl === null || probing.current) return
+    if (trigger === 'stall') {
+      if (Date.now() - lastStallProbe.current < STALL_PROBE_MS.minInterval) {
+        return
+      }
+      lastStallProbe.current = Date.now()
+    }
     const el = element.current
     const code = el?.error?.code
     const at =
@@ -146,9 +160,8 @@ export function StreamPreview({
     })
     if (mine !== generation.current) return
     if (trigger === 'stall' && probe === 'reachable') {
-      // Slow, not broken: the player keeps its own retry, and this keeps
-      // watching.
-      watchStall(STALL_PROBE_MS.recheck)
+      // Slow, not broken: the player keeps its own retry, and its next
+      // `stalled` or `waiting` is watched as this one was.
       return
     }
     // Kept for whatever comes next: both a replacement ticket and a Retry
@@ -189,19 +202,27 @@ export function StreamPreview({
   }
 
   /**
-   * Probe after `delay` if the player has made no progress by then. Each new
-   * stall event restarts the wait, so a burst of them costs one probe.
+   * Probe after a `stalled` that no data follows, or a `waiting` that
+   * playback does not move on from. A repeat of the same event restarts its
+   * wait, so a burst of them costs one probe.
    */
-  const watchStall = (delay: number) => {
+  const watchStall = (kind: 'stalled' | 'waiting') => {
     const el = element.current
     if (el === null) return
-    if (stallTimer.current !== null) clearTimeout(stallTimer.current)
+    const timers = stallTimers.current
+    const pending = timers.get(kind)
+    if (pending !== undefined) clearTimeout(pending)
     const from = el.currentTime
+    const progressedFrom = progressed.current
     const mine = generation.current
-    stallTimer.current = setTimeout(() => {
-      stallTimer.current = null
+    const timer = window.setTimeout(() => {
+      timers.delete(kind)
       const now = element.current
       if (mine !== generation.current || now === null) return
+      if (kind === 'stalled') {
+        if (progressed.current === progressedFrom) void diagnose('stall')
+        return
+      }
       if (now.currentTime !== from) return
       // Stuck means a seek or playback that is not moving, or no data to
       // move with. `readyState` alone is not enough: AVFoundation reports
@@ -209,7 +230,8 @@ export function StreamPreview({
       const stuck =
         now.seeking || !now.paused || now.readyState < HAVE_FUTURE_DATA
       if (stuck) void diagnose('stall')
-    }, delay)
+    }, STALL_PROBE_MS[kind])
+    timers.set(kind, timer)
   }
 
   const onLoadedMetadata = () => {
@@ -274,8 +296,11 @@ export function StreamPreview({
             if (el !== null) element.current = el
           }}
           onError={() => void diagnose('error')}
-          onStalled={() => watchStall(STALL_PROBE_MS.stalled)}
-          onWaiting={() => watchStall(STALL_PROBE_MS.waiting)}
+          onStalled={() => watchStall('stalled')}
+          onWaiting={() => watchStall('waiting')}
+          onProgress={() => {
+            progressed.current += 1
+          }}
           onLoadedMetadata={onLoadedMetadata}
           onLoadedData={() => {
             mayReplace.current = true

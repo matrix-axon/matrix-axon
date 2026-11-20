@@ -17,6 +17,7 @@ export function MediaPlayer({
   onPause,
   onStalled,
   onWaiting,
+  onProgress,
 }: {
   kind: 'audio' | 'video'
   src: string
@@ -30,6 +31,7 @@ export function MediaPlayer({
   onPause?: () => void
   onStalled?: () => void
   onWaiting?: () => void
+  onProgress?: () => void
 }) {
   const handlers = {
     onError,
@@ -39,6 +41,7 @@ export function MediaPlayer({
     onPause,
     onStalled,
     onWaiting,
+    onProgress,
   }
   if (kind === 'audio') {
     return (

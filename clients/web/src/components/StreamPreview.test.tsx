@@ -349,45 +349,41 @@ describe('stream-ticket playback (ADR 0139 § 6)', () => {
       }
     })
 
-    it('probes a stuck seek even while the engine claims enough data', async () => {
-      // AVFoundation keeps readyState at HAVE_ENOUGH_DATA (4) through a seek
-      // whose ranges are refused.
-      vi.useFakeTimers({ shouldAdvanceTime: true })
-      try {
-        serveTickets()
-        serveProbe(404)
-        const el = await openPlayer(renderAttachment(video()))
-        Object.defineProperty(el, 'readyState', {
-          configurable: true,
-          value: 4,
-        })
-        Object.defineProperty(el, 'paused', { configurable: true, value: true })
-        Object.defineProperty(el, 'seeking', {
-          configurable: true,
-          value: true,
-        })
-
-        fireEvent.stalled(el)
-        await advance(STALL_PROBE_MS.stalled + 10)
-        await waitFor(() => expect(el.getAttribute('src')).toMatch(/\/t2$/))
-      } finally {
-        vi.useRealTimers()
-      }
-    })
-
-    it('does not probe a paused player that has what it needs', async () => {
+    it('probes a stall while playback still runs on its buffer', async () => {
+      // What a real iPhone did after a server restart: the playhead kept
+      // moving on buffered data while AVFoundation looped on the dead
+      // ticket, and nothing but `stalled` said so.
       vi.useFakeTimers({ shouldAdvanceTime: true })
       try {
         serveTickets()
         const ranges = serveProbe(404)
         const el = await openPlayer(renderAttachment(video()))
-        Object.defineProperty(el, 'readyState', {
+        let now = 10
+        Object.defineProperty(el, 'currentTime', {
           configurable: true,
-          value: 4,
+          get: () => now,
+          set: (v: number) => (now = v),
         })
-        Object.defineProperty(el, 'paused', { configurable: true, value: true })
 
         fireEvent.stalled(el)
+        now = 11
+        await advance(STALL_PROBE_MS.stalled + 10)
+        await waitFor(() => expect(el.getAttribute('src')).toMatch(/\/t2$/))
+        expect(ranges).toEqual(['bytes=0-0'])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('does not probe a stall that data arrives after', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        serveTickets()
+        const ranges = serveProbe(404)
+        const el = await openPlayer(renderAttachment(video()))
+
+        fireEvent.stalled(el)
+        fireEvent.progress(el)
         await advance(STALL_PROBE_MS.stalled + 10)
         expect(ranges).toEqual([])
       } finally {
@@ -412,29 +408,53 @@ describe('stream-ticket playback (ADR 0139 § 6)', () => {
       }
     })
 
-    it('leaves a slow but reachable stream alone, and keeps watching', async () => {
+    it('probes a stuck seek even while the engine claims enough data', async () => {
+      // AVFoundation keeps readyState at HAVE_ENOUGH_DATA (4) through a seek
+      // whose ranges are refused.
       vi.useFakeTimers({ shouldAdvanceTime: true })
       try {
-        const minted = serveTickets()
-        const ranges = serveProbe(206)
-        const view = renderAttachment(video())
-        const el = await openPlayer(view)
+        serveTickets()
+        serveProbe(404)
+        const el = await openPlayer(renderAttachment(video()))
+        Object.defineProperty(el, 'readyState', {
+          configurable: true,
+          value: 4,
+        })
+        Object.defineProperty(el, 'paused', { configurable: true, value: true })
+        Object.defineProperty(el, 'seeking', {
+          configurable: true,
+          value: true,
+        })
 
-        fireEvent.stalled(el)
-        await advance(STALL_PROBE_MS.stalled + 10)
-        await waitFor(() => expect(ranges).toHaveLength(1))
-        // Still stuck a while later: one more probe, never a verdict.
-        await advance(STALL_PROBE_MS.recheck + 10)
-        await waitFor(() => expect(ranges).toHaveLength(2))
-        expect(el.getAttribute('src')).toMatch(/\/t1$/)
-        expect(minted).toHaveLength(1)
-        expect(view.queryByText(/cannot play/)).toBeNull()
+        fireEvent.waiting(el)
+        await advance(STALL_PROBE_MS.waiting + 10)
+        await waitFor(() => expect(el.getAttribute('src')).toMatch(/\/t2$/))
       } finally {
         vi.useRealTimers()
       }
     })
 
-    it('does not probe a player that made progress', async () => {
+    it('does not probe a wait that a paused player has what it needs for', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        serveTickets()
+        const ranges = serveProbe(404)
+        const el = await openPlayer(renderAttachment(video()))
+        Object.defineProperty(el, 'readyState', {
+          configurable: true,
+          value: 4,
+        })
+        Object.defineProperty(el, 'paused', { configurable: true, value: true })
+
+        fireEvent.waiting(el)
+        await advance(STALL_PROBE_MS.waiting + 10)
+        expect(ranges).toEqual([])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('does not probe a wait that playback moves on from', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true })
       try {
         serveTickets()
@@ -447,10 +467,37 @@ describe('stream-ticket playback (ADR 0139 § 6)', () => {
           set: (v: number) => (now = v),
         })
 
-        fireEvent.stalled(el)
+        fireEvent.waiting(el)
         now = 3
-        await advance(STALL_PROBE_MS.stalled + 10)
+        await advance(STALL_PROBE_MS.waiting + 10)
         expect(ranges).toEqual([])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('leaves a slow but reachable stream alone, probing at most every ten seconds', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        const minted = serveTickets()
+        const ranges = serveProbe(206)
+        const view = renderAttachment(video())
+        const el = await openPlayer(view)
+
+        fireEvent.stalled(el)
+        await advance(STALL_PROBE_MS.stalled + 10)
+        await waitFor(() => expect(ranges).toHaveLength(1))
+        // A slow link keeps raising `stalled`; the next one is too soon.
+        fireEvent.stalled(el)
+        await advance(STALL_PROBE_MS.stalled + 10)
+        expect(ranges).toHaveLength(1)
+        await advance(STALL_PROBE_MS.minInterval)
+        fireEvent.stalled(el)
+        await advance(STALL_PROBE_MS.stalled + 10)
+        await waitFor(() => expect(ranges).toHaveLength(2))
+        expect(el.getAttribute('src')).toMatch(/\/t1$/)
+        expect(minted).toHaveLength(1)
+        expect(view.queryByText(/cannot play/)).toBeNull()
       } finally {
         vi.useRealTimers()
       }

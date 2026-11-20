@@ -351,13 +351,20 @@ For `video` and `audio` previews, `BlobPreview` in `MediaPreview.tsx` stops usin
   - Anything else shows the generic load failure with a Retry button.
 - A stall is probed the same way.
   WebKit's AVFoundation player (Safari on iOS and macOS) never raises `error` for a refused range once playback has begun.
-  It raises `stalled` and re-requests the range about 90 times a second for as long as the page is open, and it does so for a `401`, `403`, `404` or `410` alike, so no status the server could send would end it.
-  So the component also probes when the player makes no progress: 1 s after `stalled`, or 5 s after `waiting`.
-  A player counts as stuck when `currentTime` has not moved and it is seeking, playing, or short of data (`readyState` below `HAVE_FUTURE_DATA`).
-  `readyState` alone is not enough, because AVFoundation reports `HAVE_ENOUGH_DATA` throughout a seek whose ranges are refused.
-  A reachable probe means a slow link: the player is left to its own retries, and the check repeats every 15 s while it stays stuck.
+  It re-requests the range, tens of times a second, for as long as the page is open, and it does so for a `401`, `403`, `404` or `410` alike, so no status the server could send would end it.
+  It keeps playing from its buffer meanwhile, and even reports `networkState` idle, so neither a frozen playhead nor the network state gives it away.
+  On a real iPhone, a server restart left a video playing on for 74 s while AVFoundation sent 442 refused requests, and nothing reached the page but `stalled`.
+  So the component probes:
+  - 1 s after `stalled`, unless a `progress` event (data arriving) came in meanwhile;
+  - 5 s after `waiting`, if `currentTime` has not moved and the player is seeking, playing or short of data (`readyState` below `HAVE_FUTURE_DATA`).
+    `readyState` alone is not enough, because AVFoundation reports `HAVE_ENOUGH_DATA` throughout a seek whose ranges are refused.
+  - Stall probes are at most one every 10 s.
+    AVFoundation also raises `stalled` every few seconds on a healthy stream whose buffer is full, so a video playing in Safari costs a one-byte probe every 10 to 15 s.
+
+  A reachable probe means a slow link, and the player is left to its own retries.
   Any other answer is handled as for `error`, and replacing or removing the `src` ends the request loop.
   The same path catches a `422` after a hash mismatch, which AVFoundation would otherwise also retry for good.
+
 - A replacement ticket is allowed once per successful load (`loadeddata`).
   So a ticket that fails at once ends in Retry rather than a loop, and a long video outlives several hour-long OAuth access tokens.
 - The Download button keeps the blob path in this phase.
@@ -373,12 +380,12 @@ The checks ran the real web client against a local Synapse and Axon.
 A logging proxy in front of Axon throttled ticket responses to 3 MB/s, and could swap `no-store` for `private, max-age=3600` (the A/B column) or answer old tickets `404` as a restart would.
 A harness page drove the client in a same-origin iframe: open a 5-minute video, play 15 s, seek to 60 %, play 10 s, seek back to 5 s, then close.
 
-| Engine                                              | First requests                      | Start after click | Seek back into played part                                                                    | With `max-age` instead              | Expired ticket                                                                                                                |
-| --------------------------------------------------- | ----------------------------------- | ----------------- | --------------------------------------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Google Chrome 157 (headless, Linux), 305 MB 720p    | `bytes=0-`                          | 0.3–0.45 s        | re-requests from byte 294912; plays after 1.75 s                                              | the same: re-requests, 1.77 s       | `error` (network), probe `404`, new ticket, resumed in 0.2 s                                                                  |
-| Firefox 155 (Playwright), 305 MB                    | `bytes=0-`                          | 0.75 s            | no request; 0.22 s                                                                            | not run                             | the same, 0.3 s                                                                                                               |
-| WebKit 26.6 (Playwright, Linux GStreamer), 305 MB   | no `Range`, answered `200`          | 2.8 s             | no request; buffers the whole file in the background                                          | not run                             | the same, 0.4 s                                                                                                               |
-| Safari, iOS 18.6 simulator, 150 MB 360p, video only | `bytes=0-1`, then `bytes=0-<len-1>` | 1.4–1.65 s        | AVFoundation drops what it played after a far seek, so it re-requests; resumes in about 0.8 s | the same: re-requests, about 0.76 s | no `error`: `stalled`, then a 90-per-second request loop. With the stall probe: new ticket and resumed 5.2 s after the expiry |
+| Engine                                              | First requests                      | Start after click | Seek back into played part                                                                    | With `max-age` instead              | Expired ticket                                                                                                                                                                                       |
+| --------------------------------------------------- | ----------------------------------- | ----------------- | --------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Google Chrome 157 (headless, Linux), 305 MB 720p    | `bytes=0-`                          | 0.3–0.45 s        | re-requests from byte 294912; plays after 1.75 s                                              | the same: re-requests, 1.77 s       | `error` (network), probe `404`, new ticket, resumed in 0.2 s                                                                                                                                         |
+| Firefox 155 (Playwright), 305 MB                    | `bytes=0-`                          | 0.75 s            | no request; 0.22 s                                                                            | not run                             | the same, 0.3 s                                                                                                                                                                                      |
+| WebKit 26.6 (Playwright, Linux GStreamer), 305 MB   | no `Range`, answered `200`          | 2.8 s             | no request; buffers the whole file in the background                                          | not run                             | the same, 0.4 s                                                                                                                                                                                      |
+| Safari, iOS 18.6 simulator, 150 MB 360p, video only | `bytes=0-1`, then `bytes=0-<len-1>` | 1.4–1.65 s        | AVFoundation drops what it played after a far seek, so it re-requests; resumes in about 0.8 s | the same: re-requests, about 0.76 s | no `error`: `stalled`, then a 75–90-per-second request loop. With the stall probe: new ticket and resumed 5.2 s after the expiry after a seek, 9 s while playing on its buffer (26 refused requests) |
 
 - **`no-store` stays.** Neither engine that re-requests on seeking back (Chrome and AVFoundation) reused bytes when the response was cacheable, and neither stalled.
   Relaxing it would put plaintext on disk for no gain.
@@ -389,6 +396,10 @@ A harness page drove the client in a same-origin iframe: open a 5-minute video, 
   A plain file failed the same way, so the cause is the VM.
   The run therefore used a 360p baseline, video-only file over the 100 MiB blob ceiling.
   A real iPhone is still worth a check before phase 4, which section 7 already requires.
+- **A real iPhone** (iOS 18.7 Safari, against production): a 104 MiB Element X video played in Safari and in Chrome on Windows, and so did audio.
+  A first play started while Axon was still downloading.
+  A server restart mid-playback showed the buffered-loop case above, which the `progress`-based rule was then added for and checked in the simulator.
+  Each ticket request costs about 180 ms on that server before its first byte, most of it the MXC-to-event lookup that every media request runs, and AVFoundation's many small ranges multiply it ([issue 1188](https://github.com/matrix-axon/matrix-axon/issues/1188)).
 - WebKit on Linux opening without `Range` matters for phase 4 (section 7): [issue 1184](https://github.com/matrix-axon/matrix-axon/issues/1184).
 
 The ticket URL is the server's own origin when the web client is served by the server (ADR 0116), so no CORS or CSP change is needed there.
