@@ -1,5 +1,5 @@
 import type { ComponentChildren } from 'preact'
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import type { ParsedMedia } from '../media/parse-media'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
@@ -99,31 +99,60 @@ export function StreamPreview({
   // Counts `progress` events: a `stalled` that one follows was a hiccup.
   const progressed = useRef(0)
   const lastStallProbe = useRef(-Infinity)
+  // The state as of the last `settle`, for callbacks armed by an earlier
+  // render: a timer or a probe continuation must not act on a closed-over
+  // `ready` the player has since left.
+  const current = useRef<State>(state)
+
+  // Both touch only refs and the state setter, so they are stable for the
+  // component's life and safe in the effects below.
+  const clearStallTimers = useCallback(() => {
+    for (const timer of stallTimers.current.values()) clearTimeout(timer)
+    stallTimers.current.clear()
+  }, [])
+
+  /**
+   * Move to `next`. A state with no player in it is final until Retry, so it
+   * also retires everything armed for the old player: pending stall timers
+   * are cleared, and `generation` moves on so an in-flight probe or issue
+   * cannot revive or overwrite what the user was shown.
+   */
+  const settle = useCallback(
+    (next: State) => {
+      current.current = next
+      if (next.status !== 'ready' && next.status !== 'issuing') {
+        generation.current += 1
+        clearStallTimers()
+      }
+      setState(next)
+    },
+    [clearStallTimers],
+  )
 
   useEffect(() => {
     if (mxcUrl === null) {
-      setState({ status: 'failed' })
+      settle({ status: 'failed' })
       return
     }
     const mine = ++generation.current
     mayReplace.current = true
-    setState({ status: 'issuing' })
+    settle({ status: 'issuing' })
     void streamTickets.issue(accountId, mxcUrl).then((outcome) => {
       if (mine !== generation.current) return
       if (outcome.ok) {
-        setState({ status: 'ready', src: outcome.src })
+        settle({ status: 'ready', src: outcome.src })
       } else {
-        setState({ status: outcome.kind === 'refused' ? 'fallback' : 'failed' })
+        settle({ status: outcome.kind === 'refused' ? 'fallback' : 'failed' })
       }
     })
-  }, [streamTickets, accountId, mxcUrl, attempt])
+  }, [streamTickets, accountId, mxcUrl, attempt, settle])
 
   // Closing the preview must also stop the browser's download: a detached
   // element with a `src` can keep fetching until it is collected.
   useEffect(
     () => () => {
       generation.current += 1
-      for (const timer of stallTimers.current.values()) clearTimeout(timer)
+      clearStallTimers()
       const el = element.current
       if (el !== null) {
         el.pause()
@@ -131,7 +160,7 @@ export function StreamPreview({
         el.load()
       }
     },
-    [],
+    [clearStallTimers],
   )
 
   const poster = useMediaBlob<HTMLDivElement>(
@@ -142,7 +171,10 @@ export function StreamPreview({
 
   /** Probe the ticket after an `error` or a stall, and act on the answer. */
   const diagnose = async (trigger: 'error' | 'stall') => {
-    if (state.status !== 'ready' || mxcUrl === null || probing.current) return
+    const playingFrom = current.current
+    if (playingFrom.status !== 'ready' || mxcUrl === null || probing.current) {
+      return
+    }
     if (trigger === 'stall') {
       if (Date.now() - lastStallProbe.current < STALL_PROBE_MS.minInterval) {
         return
@@ -155,7 +187,7 @@ export function StreamPreview({
       el === null ? null : { at: el.currentTime, play: playing.current }
     const mine = generation.current
     probing.current = true
-    const probe = await streamTickets.probe(state.src).finally(() => {
+    const probe = await streamTickets.probe(playingFrom.src).finally(() => {
       probing.current = false
     })
     if (mine !== generation.current) return
@@ -171,28 +203,28 @@ export function StreamPreview({
       case 'reachable':
         // A network error with reachable bytes was a dropped connection, not
         // a codec: offer Retry rather than blaming the browser.
-        setState({
+        settle({
           status: code === MEDIA_ERR_NETWORK ? 'failed' : 'unplayable',
         })
         return
       case 'undecryptable':
-        setState({ status: 'undecryptable' })
+        settle({ status: 'undecryptable' })
         return
       case 'failed':
-        setState({ status: 'failed' })
+        settle({ status: 'failed' })
         return
       case 'expired':
         break
     }
     if (!mayReplace.current) {
-      setState({ status: 'failed' })
+      settle({ status: 'failed' })
       return
     }
     mayReplace.current = false
     const replacing = ++generation.current
     const outcome = await streamTickets.issue(accountId, mxcUrl)
     if (replacing !== generation.current) return
-    setState(
+    settle(
       outcome.ok
         ? { status: 'ready', src: outcome.src }
         : {

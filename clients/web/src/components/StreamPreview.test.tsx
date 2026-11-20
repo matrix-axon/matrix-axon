@@ -503,6 +503,42 @@ describe('stream-ticket playback (ADR 0139 § 6)', () => {
       }
     })
 
+    it('lets no stall timer armed earlier undo a final state', async () => {
+      // Review on PR 1190: a `waiting` armed the 5 s timer, an `error` then
+      // settled on "could not decrypt", and the old timer fired into the
+      // closure of the render that armed it, probed again and revived the
+      // player on a new ticket.
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        const minted = serveTickets()
+        const answers = [422, 404]
+        const ranges: string[] = []
+        server.use(
+          http.get(STREAM, ({ request }) => {
+            ranges.push(request.headers.get('range') ?? '')
+            return new HttpResponse(null, { status: answers.shift() ?? 404 })
+          }),
+        )
+        const view = renderAttachment(video())
+        const el = await openPlayer(view)
+
+        fireEvent.waiting(el)
+        await advance(2_000)
+        failElement(el, MEDIA_ERR_SRC_NOT_SUPPORTED)
+        expect(
+          await view.findByText('Could not decrypt this video.'),
+        ).toBeTruthy()
+
+        await advance(STALL_PROBE_MS.waiting)
+        expect(ranges).toEqual(['bytes=0-0'])
+        expect(minted).toHaveLength(1)
+        expect(view.getByText('Could not decrypt this video.')).toBeTruthy()
+        expect(document.querySelector('.lightbox video')).toBeNull()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('reports an undecryptable attachment, removing the looping player', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true })
       try {
