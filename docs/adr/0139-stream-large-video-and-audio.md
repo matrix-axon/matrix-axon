@@ -1,6 +1,6 @@
 # ADR 0139 — Stream large video and audio media
 
-**Status:** Accepted; phase 1 (section 3) is implemented in [PR 1157](https://github.com/matrix-axon/matrix-axon/pull/1157), phase 2 (section 5) in [PR 1174](https://github.com/matrix-axon/matrix-axon/pull/1174), phase 3 (section 6) in [PR 1190](https://github.com/matrix-axon/matrix-axon/pull/1190), and phases 4 and 5 are not yet started. Part of [issue 22](https://github.com/matrix-axon/matrix-axon/issues/22).
+**Status:** Accepted; phase 1 (section 3) is implemented in [PR 1157](https://github.com/matrix-axon/matrix-axon/pull/1157), phase 2 (section 5) in [PR 1174](https://github.com/matrix-axon/matrix-axon/pull/1174), phase 3 (section 6) in [PR 1190](https://github.com/matrix-axon/matrix-axon/pull/1190), phase 4 (section 7) is in progress, and phase 5 is not yet started. Part of [issue 22](https://github.com/matrix-axon/matrix-axon/issues/22).
 
 ## Context
 
@@ -417,6 +417,7 @@ That call produces `axon-media://localhost/<ticket>` on macOS, iOS and Linux, an
 The handler:
 
 - Forwards the request to `<server base>/v1/media-stream/<ticket>` through the shared `axon-http` client (ADR 0127), passing `Range` and `If-None-Match` through and copying back the status, `Content-Range`, `Content-Length`, `Content-Type`, `Accept-Ranges` and `ETag`.
+  A single-range `GET` goes through a read-ahead window first (amended below).
 - Needs no bearer token, because the ticket is the credential.
 - Learns the server base from a new `set_media_stream_base` command, which the page calls whenever its server changes.
   Today `axon-http` takes a full URL on every request and the shell keeps no server base of its own.
@@ -442,6 +443,9 @@ That one rule covers every range form, because the server always answers a range
 - **A matching `If-None-Match`** gets a `304` from the server with no body, passed through as is.
   `If-Range` is passed through and ignored by the server, which is correct for an immutable object (section 5).
 
+Once a response holds 256 KiB and 1 s has passed since its headers, the handler returns what it has rather than waiting for the rest of the 4 MiB.
+Otherwise a slow link would hold the player's first frame until 4 MiB had arrived, about 16 s at 2 Mbit/s.
+
 A shorter `206` than requested is valid HTTP: the response's `Content-Range` says which bytes it holds.
 The Chromium-based WebViews (Windows, Android) and AVFoundation then request the next range, and Tauri's own `streaming` example relies on the same behaviour.
 
@@ -455,6 +459,49 @@ Media elements open with a ranged request (Chromium sends `bytes=0-`, AVFoundati
 The phase 3 checks found one exception: WebKit on Linux, the engine behind the Linux shell, opens without `Range` ([issue 1184](https://github.com/matrix-axon/matrix-axon/issues/1184)).
 The device check below records the first request each platform's player actually sends.
 If one of them turns out to send a request without `Range`, that platform keeps the blob path until the handler can stream a response body, rather than the ADR answering it with an invalid `206`.
+
+#### Amendment (2026-11-20): a read-ahead window in the shell
+
+The first macOS check showed that, through WebKit's custom-scheme path, AVFoundation asks for each audio and video sample on its own.
+Over plain HTTP it opens with `bytes=0-<len-1>` (section 6); through the scheme it sent 4,505 requests in 66 s of a 5-minute 720p video.
+That is about 60 a second, 8.7 KB each on average, and never an open-ended range.
+So the 4 MiB bound never applied, and forwarding each range unchanged would cost the server a ticket, token and event check per sample, at about 180 ms each on production ([issue 1188](https://github.com/matrix-axon/matrix-axon/issues/1188)).
+
+The handler therefore no longer forwards a single-range `GET` unchanged:
+
+- A range that no held block covers fetches a block of up to 4 MiB from the range's first byte (`bytes=N-(N+4 MiB-1)`, which the server clamps at the end).
+  Later ranges inside the block are answered from memory, as `206`s with the object's total in `Content-Range`.
+- A request waits only for its own bytes while the block goes on filling, and requests that arrive while a block is being fetched share it.
+  So a 9 KB sample read does not wait for 4 MiB.
+- The window holds at most 8 blocks (32 MiB) across all tickets, drops a block unused for 60 s, and drops everything when the page reloads.
+  It is memory only, so `no-store` (section 5) still means nothing reaches disk.
+- A block fetch that gets no usable `206` is not held.
+  The server's answer, such as a `404` for an expired ticket or a `416` past the end, reaches the requesting player as before, and requests that were waiting on that fetch go upstream themselves.
+- A block whose body fails still answers the requests its bytes already cover, and `502`s the rest; the next request fetches anew.
+- A block outlives its ticket's revocation by at most its own 4 MiB, the same bound the Consequences accept for a response already in progress.
+  The section 6 probe sends an `Axon-Stream-Probe` header, which the window never answers, so an expired ticket is seen as soon as the server refuses it.
+  The server ignores the header.
+
+A suffix range whose object length no block has learned yet, a multi-range request, a conditional request and a `HEAD` still go upstream as sent.
+Rewriting the outgoing `Range` also settles the connection-reuse question above: each block request is bounded, so the server's response ends where the handler stops reading.
+
+#### Phase 4 check results
+
+The checks run a debug shell whose page is a harness, with the real CSP and plugin, against a local server that stands in for the ticket route.
+That server serves a 147 MB, 5-minute 720p H.264 and AAC MP4 with `no-store`, throttled to 3 MB/s, and logs every request.
+The harness plays for 15 s, seeks to 60 %, plays 10 s, seeks back to 5 s, plays 10 s, then has the server expire the ticket and plays on for 20 s.
+It then plays the same file as audio, and loads an already-expired ticket.
+
+| Platform                         | First requests                             | Start  | Seek to 60 % / back | Upstream requests             | Probe through the scheme              | Expired ticket                                                                                      |
+| -------------------------------- | ------------------------------------------ | ------ | ------------------- | ----------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| macOS 26 (WKWebView), unwindowed | `bytes=0-1`, then per-sample closed ranges | 1.2 s  | 0.24 s / 0.23 s     | 4,505 video, 2,861 audio      | `206` and `404` readable (CORS works) | at load: `error` (code 4) at once                                                                   |
+| macOS 26 (WKWebView), windowed   | the same                                   | 0.38 s | 0.44 s / 0.21 s     | 9 video (4 MiB each), 5 audio | the same; skips the window            | mid-play: plays on from its buffer, 2 upstream `404`s in 20 s and no request loop; probe sees `404` |
+| iOS (device)                     | not yet run                                |        |                     |                               |                                       |                                                                                                     |
+| Windows (WebView2)               | not yet run                                |        |                     |                               |                                       |                                                                                                     |
+| Android (WebView)                | not yet run                                |        |                     |                               |                                       |                                                                                                     |
+| Linux (WebKitGTK)                | not yet run                                |        |                     |                               |                                       |                                                                                                     |
+
+The page's own origin in the shells is `axon://localhost` (`http://axon.localhost` on Windows and Android), the shell's `axon` app scheme, so that is the origin the handler's CORS headers name.
 
 The CSP gains `axon-media: http://axon-media.localhost` in `media-src`, and in `connect-src` for the section 6 probe.
 In the shells the probe is cross-origin: the page is `tauri://localhost` or `http://tauri.localhost`, and the probe goes to the `axon-media` scheme.
