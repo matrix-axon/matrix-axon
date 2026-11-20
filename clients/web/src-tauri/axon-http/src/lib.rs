@@ -31,6 +31,7 @@
 mod client;
 mod error;
 mod media;
+mod media_window;
 mod transport;
 
 use percent_encoding::percent_decode_str;
@@ -45,6 +46,7 @@ use tauri::{Manager, RunEvent, Runtime, State, Webview, WindowEvent};
 pub use client::{Retries, Stats};
 pub use error::{Kind, TransportError};
 pub use media::{MediaBase, SCHEME as MEDIA_SCHEME};
+pub use media_window::MediaWindows;
 pub use transport::{Head, Transport};
 
 /// The invoke header that carries a request's line and headers, as
@@ -268,9 +270,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 .and_then(|window| window.url().ok())
                 .and_then(|url| media::page_origin(&url));
             tauri::async_runtime::spawn(async move {
-                let (Some(transport), Some(base)) =
-                    (app.try_state::<Transport>(), app.try_state::<MediaBase>())
-                else {
+                let (Some(transport), Some(windows), Some(base)) = (
+                    app.try_state::<Transport>(),
+                    app.try_state::<MediaWindows>(),
+                    app.try_state::<MediaBase>(),
+                ) else {
                     return responder.respond(
                         tauri::http::Response::builder()
                             .status(503)
@@ -278,8 +282,14 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                             .expect("a status and no headers"),
                     );
                 };
-                let response =
-                    media::respond(&transport, base.get(), &request, origin.as_deref()).await;
+                let response = media::respond(
+                    &transport,
+                    &windows,
+                    base.get(),
+                    &request,
+                    origin.as_deref(),
+                )
+                .await;
                 responder.respond(response);
             });
         })
@@ -294,6 +304,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 .map(|dir| dir.join("axon-http-h2-origins.json"));
             app.manage(Transport::with_store(options, store)?);
             app.manage(MediaBase::default());
+            app.manage(MediaWindows::default());
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -302,6 +313,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             if payload.event() == PageLoadEvent::Started {
                 if let Some(transport) = webview.try_state::<Transport>() {
                     transport.forget_webview(webview.label());
+                }
+                // Nor any use for the media it had read ahead.
+                if let Some(windows) = webview.try_state::<MediaWindows>() {
+                    windows.clear();
                 }
             }
         })

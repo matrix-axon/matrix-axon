@@ -20,6 +20,7 @@ use crate::client::ClientOptions;
 use crate::media::{
     self, page_origin, parse_base, parse_content_range, ticket_of, upstream_url, MAX_BODY,
 };
+use crate::media_window::{MediaWindows, Spec, MAX_BLOCKS};
 use crate::transport::Transport;
 
 const ORIGIN: &str = "axon://localhost";
@@ -29,7 +30,14 @@ const SMALL: usize = 1000;
 const TICKET: &str = "AAAAbbbbCCCCddddEEEEffffGGGGhhhhIIIIjjjjKK0";
 
 fn object(len: usize) -> Vec<u8> {
-    (0..len).map(|i| (i % 251) as u8).collect()
+    pattern()[..len].to_vec()
+}
+
+/// The bytes every object is a prefix of, built once: rebuilding 9 MiB for
+/// every assertion made the per-sample test take most of a minute.
+fn pattern() -> &'static [u8] {
+    static PATTERN: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    PATTERN.get_or_init(|| (0..LARGE).map(|i| (i % 251) as u8).collect())
 }
 
 // ===== server =====
@@ -249,7 +257,14 @@ fn scheme_request(method: &str, ticket: &str, headers: &[(&str, &str)]) -> Reque
 
 async fn get(server: &Server, ticket: &str, headers: &[(&str, &str)]) -> Response<Vec<u8>> {
     let request = scheme_request("GET", ticket, headers);
-    media::respond(&transport(), Some(server.base()), &request, Some(ORIGIN)).await
+    media::respond(
+        &transport(),
+        &MediaWindows::default(),
+        Some(server.base()),
+        &request,
+        Some(ORIGIN),
+    )
+    .await
 }
 
 fn header_of(response: &Response<Vec<u8>>, name: header::HeaderName) -> &str {
@@ -271,7 +286,7 @@ fn assert_partial(response: &Response<Vec<u8>>, first: usize, len: usize, total:
     assert_eq!(header_of(response, header::CONTENT_LENGTH), len.to_string());
     assert_eq!(response.body().len(), len);
     assert!(
-        response.body()[..] == object(total)[first..first + len],
+        response.body()[..] == pattern()[first..first + len],
         "the body is not the object's bytes at {first}"
     );
 }
@@ -363,7 +378,7 @@ async fn a_small_closed_range_comes_back_whole() {
 }
 
 #[tokio::test]
-async fn the_range_goes_upstream_unchanged_and_nothing_else_does() {
+async fn an_absolute_range_goes_upstream_as_one_window_and_nothing_else_does() {
     let server = server().await;
     let request = scheme_request(
         "GET",
@@ -377,12 +392,22 @@ async fn the_range_goes_upstream_unchanged_and_nothing_else_does() {
             ("x-custom", "1"),
         ],
     );
-    media::respond(&transport(), Some(server.base()), &request, Some(ORIGIN)).await;
+    media::respond(
+        &transport(),
+        &MediaWindows::default(),
+        Some(server.base()),
+        &request,
+        Some(ORIGIN),
+    )
+    .await;
     let seen = server.seen();
     assert_eq!(seen.len(), 1);
     let (path, headers) = &seen[0];
     assert_eq!(path, &format!("/axon/v1/media-stream/{TICKET}"));
-    assert_eq!(headers.get(header::RANGE).unwrap(), "bytes=0-");
+    assert_eq!(
+        headers.get(header::RANGE).unwrap(),
+        &format!("bytes=0-{}", MAX_BODY - 1)
+    );
     assert_eq!(headers.get(header::ACCEPT_ENCODING).unwrap(), "identity");
     for absent in ["cookie", "authorization", "origin", "referer", "x-custom"] {
         assert!(headers.get(absent).is_none(), "{absent} was forwarded");
@@ -450,7 +475,7 @@ async fn a_body_that_fails_or_ends_early_is_a_502_never_a_short_206() {
     // Within the bound, so that every byte the server fails to send is one
     // the handler meant to return.
     for ticket in ["tampered", "short"] {
-        let response = get(&server, ticket, &[("range", "bytes=0-2097151")]).await;
+        let response = get(&server, ticket, &[("range", "bytes=0-3145727")]).await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{ticket}");
         assert!(response.body().is_empty(), "{ticket}");
         assert!(
@@ -524,7 +549,14 @@ async fn the_probe_preflight_is_answered_here() {
         ],
     );
     // No base: a preflight never goes upstream.
-    let response = media::respond(&transport(), None, &request, Some(ORIGIN)).await;
+    let response = media::respond(
+        &transport(),
+        &MediaWindows::default(),
+        None,
+        &request,
+        Some(ORIGIN),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(
         header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
@@ -540,6 +572,7 @@ async fn nothing_goes_upstream_without_a_base_a_ticket_or_a_read_method() {
     let transport = transport();
     let no_base = media::respond(
         &transport,
+        &MediaWindows::default(),
         None,
         &scheme_request("GET", TICKET, &[]),
         Some(ORIGIN),
@@ -550,6 +583,7 @@ async fn nothing_goes_upstream_without_a_base_a_ticket_or_a_read_method() {
     for path in ["", "a/b", "%2e%2e", "..%2Fv1%2Frooms"] {
         let response = media::respond(
             &transport,
+            &MediaWindows::default(),
             Some(server.base()),
             &scheme_request("GET", path, &[]),
             Some(ORIGIN),
@@ -565,6 +599,7 @@ async fn nothing_goes_upstream_without_a_base_a_ticket_or_a_read_method() {
 
     let post = media::respond(
         &transport,
+        &MediaWindows::default(),
         Some(server.base()),
         &scheme_request("POST", TICKET, &[]),
         Some(ORIGIN),
@@ -584,10 +619,241 @@ async fn an_unreachable_server_is_a_502() {
     let base = parse_base(&format!("http://{addr}/")).unwrap();
     let response = media::respond(
         &transport(),
+        &MediaWindows::default(),
         Some(base),
         &scheme_request("GET", TICKET, &[("range", "bytes=0-")]),
         Some(ORIGIN),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
+
+// ===== the read-ahead window =====
+
+/// One shell's state across requests: the transport, the window and the base.
+struct Player {
+    transport: Transport,
+    windows: MediaWindows,
+    base: Url,
+}
+
+impl Player {
+    fn new(server: &Server) -> Arc<Self> {
+        Arc::new(Self {
+            transport: transport(),
+            windows: MediaWindows::default(),
+            base: server.base(),
+        })
+    }
+
+    async fn get(&self, ticket: &str, headers: &[(&str, &str)]) -> Response<Vec<u8>> {
+        let request = scheme_request("GET", ticket, headers);
+        media::respond(
+            &self.transport,
+            &self.windows,
+            Some(self.base.clone()),
+            &request,
+            Some(ORIGIN),
+        )
+        .await
+    }
+
+    async fn range(&self, ticket: &str, range: &str) -> Response<Vec<u8>> {
+        self.get(ticket, &[("range", range)]).await
+    }
+}
+
+/// The `Range` of every request the server received, in order.
+fn upstream_ranges(server: &Server) -> Vec<String> {
+    server
+        .seen()
+        .iter()
+        .map(|(_, headers)| {
+            headers
+                .get(header::RANGE)
+                .map_or("(none)".to_owned(), |v| v.to_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn only_a_single_byte_range_is_windowed() {
+    assert_eq!(Spec::parse("bytes=0-1"), Some(Spec::Closed(0, 1)));
+    assert_eq!(Spec::parse(" bytes=10- "), Some(Spec::From(10)));
+    assert_eq!(Spec::parse("bytes=-500"), Some(Spec::Suffix(500)));
+    for refused in [
+        "bytes=0-1,5-9",
+        "bytes=5-4",
+        "bytes=-",
+        "bytes=-0",
+        "bytes=+1-2",
+        "items=0-1",
+        "bytes=a-b",
+    ] {
+        assert_eq!(Spec::parse(refused), None, "{refused}");
+    }
+}
+
+#[tokio::test]
+async fn per_sample_reads_share_one_upstream_request() {
+    // AVFoundation's pattern through a custom scheme: one small closed range
+    // per sample, front to back.
+    let server = server().await;
+    let player = Player::new(&server);
+    let mut at = 0;
+    for i in 0..300 {
+        let len = if i % 2 == 0 { 17_000 } else { 650 };
+        let response = player
+            .range(TICKET, &format!("bytes={at}-{}", at + len - 1))
+            .await;
+        assert_partial(&response, at, len, LARGE);
+        at += len;
+    }
+    assert_eq!(
+        upstream_ranges(&server),
+        vec![format!("bytes=0-{}", MAX_BODY - 1)]
+    );
+}
+
+#[tokio::test]
+async fn requests_that_arrive_together_share_one_fetch() {
+    let server = server().await;
+    let player = Player::new(&server);
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..20usize {
+        let player = Arc::clone(&player);
+        tasks.spawn(async move {
+            let first = i * 100_000;
+            let response = player
+                .range(TICKET, &format!("bytes={first}-{}", first + 9_999))
+                .await;
+            assert_partial(&response, first, 10_000, LARGE);
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done.unwrap();
+    }
+    assert_eq!(server.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn a_range_past_the_window_fetches_the_next_one_from_its_start() {
+    let server = server().await;
+    let player = Player::new(&server);
+    assert_partial(&player.range(TICKET, "bytes=0-1").await, 0, 2, LARGE);
+    let next = MAX_BODY + 10;
+    assert_partial(
+        &player
+            .range(TICKET, &format!("bytes={next}-{}", next + 99))
+            .await,
+        next,
+        100,
+        LARGE,
+    );
+    // Back inside the first: no third request.
+    assert_partial(
+        &player.range(TICKET, "bytes=500-599").await,
+        500,
+        100,
+        LARGE,
+    );
+    assert_eq!(
+        upstream_ranges(&server),
+        vec![
+            format!("bytes=0-{}", MAX_BODY - 1),
+            format!("bytes={next}-{}", next + MAX_BODY - 1),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_last_window_ends_where_the_object_does() {
+    let server = server().await;
+    let player = Player::new(&server);
+    let near = LARGE - 1000;
+    // A closed range reaching past the end gets what there is.
+    assert_partial(
+        &player
+            .range(TICKET, &format!("bytes={near}-{}", LARGE + 50))
+            .await,
+        near,
+        1000,
+        LARGE,
+    );
+    // The length is known now, so a suffix inside that window needs no
+    // request of its own.
+    assert_partial(
+        &player.range(TICKET, "bytes=-100").await,
+        LARGE - 100,
+        100,
+        LARGE,
+    );
+    assert_eq!(server.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn the_probe_always_goes_upstream() {
+    let server = server().await;
+    let player = Player::new(&server);
+    assert_partial(&player.range(TICKET, "bytes=0-1").await, 0, 2, LARGE);
+    let probe = player
+        .get(
+            TICKET,
+            &[("range", "bytes=0-0"), ("axon-stream-probe", "1")],
+        )
+        .await;
+    assert_partial(&probe, 0, 1, LARGE);
+    assert_eq!(
+        upstream_ranges(&server),
+        vec![format!("bytes=0-{}", MAX_BODY - 1), "bytes=0-0".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn an_expired_ticket_reaches_every_waiting_request_as_a_404() {
+    let server = server().await;
+    let player = Player::new(&server);
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..5u64 {
+        let player = Arc::clone(&player);
+        tasks.spawn(async move {
+            let response = player.range("gone", &format!("bytes={i}-{i}")).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done.unwrap();
+    }
+    assert_eq!(player.windows.len(), 0, "a refused fetch is not held");
+}
+
+#[tokio::test]
+async fn a_window_that_fails_serves_what_arrived_and_502s_the_rest() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // "tampered" sends 512 KiB, then fails.
+    assert_partial(&player.range("tampered", "bytes=0-99").await, 0, 100, LARGE);
+    // Wider than what any "tampered" response holds: it fails whether it
+    // waits on the first window or, if that has already failed, starts its
+    // own.
+    let past = player.range("tampered", "bytes=100-700099").await;
+    assert_eq!(past.status(), StatusCode::BAD_GATEWAY);
+    // A failed window is not reused: the next request asks again.
+    let before = server.seen().len();
+    let again = player.range("tampered", "bytes=0-99").await;
+    assert_partial(&again, 0, 100, LARGE);
+    assert_eq!(server.seen().len(), before + 1);
+}
+
+#[tokio::test]
+async fn at_most_a_fixed_number_of_windows_are_held() {
+    let server = server().await;
+    let player = Player::new(&server);
+    for i in 0..(MAX_BLOCKS + 4) {
+        let ticket = format!("t{i}");
+        assert_partial(&player.range(&ticket, "bytes=0-1").await, 0, 2, LARGE);
+    }
+    assert_eq!(player.windows.len(), MAX_BLOCKS);
+    player.windows.clear();
+    assert_eq!(player.windows.len(), 0);
 }

@@ -27,6 +27,7 @@ use tauri::http::{Request, Response};
 use tokio::time::Instant;
 
 use crate::error::{Kind, TransportError};
+use crate::media_window::{MediaWindows, Outcome, Spec};
 use crate::transport::{Outgoing, Transport};
 
 /// The scheme's name, which `convertFileSrc(ticket, 'axon-media')` produces.
@@ -48,6 +49,11 @@ pub(crate) const EARLY_AFTER: Duration = Duration::from_secs(1);
 /// bounds its own waits (ADR 0139 § 3), so this only catches a link that has
 /// gone silent; without it the task, and the upstream stream, would live on.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(120);
+
+/// The request header the page's stall probe adds (ADR 0139 § 6), so that it
+/// goes upstream rather than being answered from the read-ahead window, and
+/// so sees an expired ticket as soon as the server does.
+pub(crate) const PROBE_HEADER: &str = "axon-stream-probe";
 
 /// How much of an error response's body is passed on. They are small JSON.
 const MAX_ERROR_BODY: usize = 64 << 10;
@@ -208,6 +214,7 @@ const FORWARDED_RESPONSE: [HeaderName; 4] = [
 /// cross-origin `fetch` from the app's scheme to this one.
 pub(crate) async fn respond(
     transport: &Transport,
+    windows: &MediaWindows,
     base: Option<Url>,
     request: &Request<Vec<u8>>,
     origin: Option<&str>,
@@ -215,7 +222,7 @@ pub(crate) async fn respond(
     let mut response = if request.method() == Method::OPTIONS {
         preflight()
     } else {
-        match tokio::time::timeout(DEADLINE, proxy(transport, base, request)).await {
+        match tokio::time::timeout(DEADLINE, proxy(transport, windows, base, request)).await {
             Ok(response) => response,
             Err(_) => status(StatusCode::GATEWAY_TIMEOUT),
         }
@@ -231,8 +238,8 @@ pub(crate) async fn respond(
     response
 }
 
-/// The probe's `Range` header is not CORS-safelisted everywhere, so its
-/// `fetch` is preflighted.
+/// The probe's `Range` header is not CORS-safelisted everywhere, and it adds
+/// [`PROBE_HEADER`], so its `fetch` is preflighted.
 fn preflight() -> Response<Vec<u8>> {
     let mut response = status(StatusCode::NO_CONTENT);
     let headers = response.headers_mut();
@@ -242,7 +249,7 @@ fn preflight() -> Response<Vec<u8>> {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("Range, If-None-Match, If-Range"),
+        HeaderValue::from_static("Range, If-None-Match, If-Range, Axon-Stream-Probe"),
     );
     headers.insert(
         header::ACCESS_CONTROL_MAX_AGE,
@@ -260,12 +267,24 @@ fn status(status: StatusCode) -> Response<Vec<u8>> {
     response
 }
 
-fn bad_gateway() -> Response<Vec<u8>> {
+pub(crate) fn bad_gateway() -> Response<Vec<u8>> {
     status(StatusCode::BAD_GATEWAY)
+}
+
+/// The response headers in [`FORWARDED_RESPONSE`] that `upstream` carries.
+pub(crate) fn forwarded_response_headers(upstream: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for name in FORWARDED_RESPONSE {
+        if let Some(value) = upstream.get(&name) {
+            headers.insert(name, value.clone());
+        }
+    }
+    headers
 }
 
 async fn proxy(
     transport: &Transport,
+    windows: &MediaWindows,
     base: Option<Url>,
     request: &Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
@@ -279,9 +298,28 @@ async fn proxy(
     };
     // The server's own answer for a ticket it does not know, so the page's
     // probe treats a malformed one the same way.
-    let Some(url) = ticket_of(request.uri().path()).and_then(|t| upstream_url(&base, t)) else {
+    let Some((ticket, url)) = ticket_of(request.uri().path())
+        .and_then(|ticket| Some((ticket, upstream_url(&base, ticket)?)))
+    else {
         return status(StatusCode::NOT_FOUND);
     };
+
+    // A plain `GET` of one range goes through the read-ahead window. The
+    // probe, a conditional request and anything else go upstream as sent.
+    let windowed = method == Method::GET
+        && !request.headers().contains_key(PROBE_HEADER)
+        && !request.headers().contains_key(header::IF_NONE_MATCH);
+    let spec = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(Spec::parse);
+    if let (true, Some(spec)) = (windowed, spec) {
+        if let Outcome::Served(response) = windows.serve(transport, url.clone(), ticket, spec).await
+        {
+            return response;
+        }
+    }
 
     let mut headers = HeaderMap::new();
     for name in FORWARDED_REQUEST {
@@ -297,7 +335,7 @@ async fn proxy(
     );
     let ranged = headers.contains_key(header::RANGE);
 
-    let Ok(mut upstream) = transport
+    match transport
         .send_once(Outgoing {
             method: method.clone(),
             url,
@@ -305,25 +343,30 @@ async fn proxy(
             body: None,
         })
         .await
-    else {
-        return bad_gateway();
-    };
+    {
+        Ok(upstream) => shape(&method, ranged, upstream).await,
+        Err(_) => bad_gateway(),
+    }
+}
 
+/// The scheme's answer for an upstream response, its body bounded at
+/// [`MAX_BODY`] (ADR 0139 § 7).
+pub(crate) async fn shape(
+    method: &Method,
+    ranged: bool,
+    mut upstream: reqwest::Response,
+) -> Response<Vec<u8>> {
     let code = upstream.status();
     let mut response = Response::new(Vec::new());
     *response.status_mut() = code;
-    for name in FORWARDED_RESPONSE {
-        if let Some(value) = upstream.headers().get(&name) {
-            response.headers_mut().insert(name, value.clone());
-        }
-    }
+    *response.headers_mut() = forwarded_response_headers(upstream.headers());
     let length = upstream
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
 
-    if method == Method::HEAD || code == StatusCode::NOT_MODIFIED {
+    if *method == Method::HEAD || code == StatusCode::NOT_MODIFIED {
         if let Some(length) = length {
             response
                 .headers_mut()
@@ -331,7 +374,6 @@ async fn proxy(
         }
         return response;
     }
-
     match code {
         StatusCode::PARTIAL_CONTENT => {
             let Some((first, last, total)) = upstream
