@@ -76,6 +76,16 @@ services:
         condition: service_healthy
     ports:
       - "${AXON_PUBLISH_ADDR:-0.0.0.0}:${AXON_PORT:-8080}:8080"
+    # BBR keeps a stream or download fast on a long or lossy path, where the
+    # kernel's usual cubic slows to a fraction of the link. Set for this
+    # container only; the kernel loads tcp_bbr on demand. If the container will
+    # not start ("failed to write sysctl net.ipv4.tcp_congestion_control"): on
+    # Linux 4.15+ without BBR, or rootless Docker/Podman, set
+    # AXON_TCP_CONGESTION_CONTROL=cubic; on Linux older than 4.15 (some NAS
+    # systems) no value works, so remove this setting with the override in
+    # "Network tuning", docs/server-admin.md.
+    sysctls:
+      net.ipv4.tcp_congestion_control: ${AXON_TCP_CONGESTION_CONTROL:-bbr}
     healthcheck:
       # /healthz is proxied to axon, so a pass means the SPA is served AND axon is
       # reachable. caddy:2 is alpine-based; busybox provides wget.
