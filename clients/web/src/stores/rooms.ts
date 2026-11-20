@@ -1158,6 +1158,7 @@ export function createRoomsStore(
     return undefined
   }
 
+  /** Called by noteTimelineEvent after the shared preview and activity filter. */
   function setLivePreview(room: RoomDto, event: EventDto): void {
     const body = eventPreviewBody(event)
     if (body === undefined) {
@@ -2676,18 +2677,20 @@ function hasSpoiler(content: unknown): boolean {
 }
 
 function eventPreviewBody(event: EventDto): string | undefined {
-  const content = event.content as Record<string, unknown> | null | undefined
+  let content = event.content as Record<string, unknown> | null | undefined
+  let body: unknown = event.body
   const relation = event.relates_to as { rel_type?: unknown } | null
-  // Timeline reads apply edits, while a live replacement carries its new
-  // content separately from the plain-text fallback in event.body.
-  if (
-    hasSpoiler(content) ||
-    (relation?.rel_type === 'm.replace' &&
-      hasSpoiler(content?.['m.new_content']))
-  ) {
-    return '(spoiler)'
+  // A live edit carries both fallback and replacement content. Use the
+  // replacement's body and spoiler marker together, as timeline reads do.
+  if (relation?.rel_type === 'm.replace') {
+    content = content?.['m.new_content'] as
+      Record<string, unknown> | null | undefined
+    body = content?.body
   }
-  return previewBody(event.body)
+  if (typeof body !== 'string' || body.trim() === '') {
+    return undefined
+  }
+  return hasSpoiler(content) ? '(spoiler)' : previewBody(body)
 }
 
 function previewBody(body: string | null | undefined): string | undefined {
