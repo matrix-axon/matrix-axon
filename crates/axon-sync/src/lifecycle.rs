@@ -1205,6 +1205,16 @@ impl AccountLifecycle {
         let mut active = account;
         active.state = AccountState::Active;
         active.verified = verified;
+        if verified && active.own_identity_changed {
+            active.own_identity_changed = false;
+            own_identity::publish_update(
+                active.account_id,
+                Some(&active.user_id),
+                false,
+                false,
+                &self.live_tx,
+            );
+        }
         let account_id = self.supervise(active);
         tracing::info!(
             %flow_id,
@@ -1424,9 +1434,8 @@ impl AccountLifecycle {
 
         let import = secret_store.import_secrets().await;
         let observation = own_identity::observe(&client, account_id).await;
-        let verified = observation.verified;
         if let Err(err) = import {
-            if !(verified && is_inconsistent_backup_key(&err)) {
+            if !(observation.verified && is_inconsistent_backup_key(&err)) {
                 return Err(classify_recovery_error(err.into()));
             }
             tracing::info!(
@@ -1434,13 +1443,13 @@ impl AccountLifecycle {
                 "4S import left megolm backup key missing or inconsistent; continuing recover tree"
             );
         }
+        let observation =
+            own_identity::retry_after_recovery(&client, account_id, observation).await;
+        let verified = observation.verified;
 
-        // Persist `verified` straight away so the row the caller reads back
-        // reflects it. After a successful 4S import the cross-signing keys
-        // just landed and this device is now self-cross-signed. The sync
-        // watcher (ADR 0026) would also catch this on the next keys-query,
-        // but recover's caller reads the row immediately, and
-        // `verification_state()` lags that round-trip.
+        // Persist verification and any warning clearance before the response.
+        // Recovery can cross-sign this device before the SDK's verification
+        // subscriber sees the next keys query.
         own_identity::persist(
             &client,
             &self.store,

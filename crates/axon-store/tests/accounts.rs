@@ -28,30 +28,44 @@ async fn own_identity_warning_survives_missing_observations_and_logout() {
     let id = account.account_id;
     assert!(!account.own_identity_changed);
 
+    // A legacy verified flag alone is not evidence of a master-key replacement.
+    store.set_account_verified(id, true).await.unwrap();
     let baseline = store
-        .record_account_verification(id, false, Some(&[1; 32]))
+        .record_account_verification(id, false, Some(&[1; 32]), false)
         .await
         .unwrap()
         .unwrap();
     assert!(!baseline.identity_replaced);
     assert!(!baseline.own_identity_changed);
+    assert!(!store
+        .account_verification_needs_update(id, false, Some(&[1; 32]))
+        .await
+        .unwrap());
+    assert!(store
+        .account_verification_needs_update(id, false, Some(&[2; 32]))
+        .await
+        .unwrap());
 
     let rotation = store
-        .record_account_verification(id, false, Some(&[2; 32]))
+        .record_account_verification(id, false, Some(&[2; 32]), false)
         .await
         .unwrap()
         .unwrap();
     assert!(rotation.identity_replaced);
     assert!(rotation.own_identity_changed);
     assert!(store
-        .record_account_verification(id, false, Some(&[2; 32]))
+        .account_verification_needs_update(id, true, Some(&[2; 32]))
+        .await
+        .unwrap());
+    assert!(store
+        .record_account_verification(id, false, Some(&[2; 32]), false)
         .await
         .unwrap()
         .is_none());
 
     // A verified read without a matching master key cannot clear the warning.
     let missing = store
-        .record_account_verification(id, true, None)
+        .record_account_verification(id, true, None, false)
         .await
         .unwrap()
         .unwrap();
@@ -64,7 +78,7 @@ async fn own_identity_warning_survives_missing_observations_and_logout() {
         .unwrap();
     store.set_account_verified(id, false).await.unwrap();
     assert!(store
-        .record_account_verification(id, true, Some(&[1; 32]))
+        .record_account_verification(id, true, Some(&[1; 32]), false)
         .await
         .unwrap()
         .is_none());
@@ -77,7 +91,7 @@ async fn own_identity_warning_survives_missing_observations_and_logout() {
         .await
         .unwrap();
     let cleared = store
-        .record_account_verification(id, true, Some(&[2; 32]))
+        .record_account_verification(id, true, Some(&[2; 32]), false)
         .await
         .unwrap()
         .unwrap();

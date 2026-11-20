@@ -194,6 +194,10 @@ pub(crate) const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, d
     auth_kind, state, verified, own_identity_changed, backup_enable_intent, sync_token, \
     created_at, updated_at";
 
+const ACCOUNT_VERIFICATION_DIFF: &str = "verified IS DISTINCT FROM $2 \
+    OR ($3 IS NOT NULL AND (own_identity_master_key IS DISTINCT FROM $3 \
+        OR (own_identity_changed AND $2)))";
+
 /// Changes in the durable own-identity observation (ADR 0136).
 #[derive(Debug)]
 pub struct OwnIdentityUpdate {
@@ -362,6 +366,26 @@ impl Store {
         Ok(())
     }
 
+    /// Read-only preflight for the periodic recheck. A positive result must
+    /// be followed by a fresh observation under the lifecycle lock.
+    pub async fn account_verification_needs_update(
+        &self,
+        account_id: Uuid,
+        verified: bool,
+        master_key: Option<&[u8; 32]>,
+    ) -> Result<bool, StoreError> {
+        let sql = format!(
+            "SELECT EXISTS (SELECT 1 FROM accounts \
+             WHERE account_id = $1 AND state = 'active' AND ({ACCOUNT_VERIFICATION_DIFF}))"
+        );
+        Ok(sqlx_core::query_scalar::query_scalar(&sql)
+            .bind(account_id)
+            .bind(verified)
+            .bind(master_key.map(|key| key.as_slice()))
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
     /// Record the SDK's verification state for the active device. The caller
     /// holds the per-identity lifecycle lock across the observation and write.
     /// An unavailable master key preserves the baseline and any outstanding
@@ -371,47 +395,47 @@ impl Store {
         account_id: Uuid,
         verified: bool,
         master_key: Option<&[u8; 32]>,
+        sdk_verification_violation: bool,
     ) -> Result<Option<OwnIdentityUpdate>, StoreError> {
-        let update = sqlx_core::query::query(
+        // The SDK remembers a rotation of a previously trusted own identity.
+        // That evidence covers the first observation after upgrade, before
+        // Axon has its own master-key baseline.
+        let sql = format!(
             "WITH previous AS ( \
-                 SELECT verified, own_identity_master_key, own_identity_changed \
-                 FROM accounts WHERE account_id = $1 AND state = 'active' FOR UPDATE \
+                 SELECT own_identity_master_key, own_identity_changed, \
+                        CASE WHEN $3 IS NULL THEN false \
+                             WHEN own_identity_master_key IS NULL THEN $4 \
+                             ELSE own_identity_master_key <> $3 END AS identity_replaced \
+                 FROM accounts \
+                 WHERE account_id = $1 AND state = 'active' AND ({ACCOUNT_VERIFICATION_DIFF}) \
              ) \
              UPDATE accounts AS account \
              SET verified = $2, \
                  own_identity_master_key = COALESCE($3, previous.own_identity_master_key), \
                  own_identity_changed = CASE \
-                     WHEN $3 IS NULL THEN previous.own_identity_changed \
-                     WHEN $2 THEN false \
-                     ELSE previous.own_identity_changed OR ( \
-                         previous.own_identity_master_key IS NOT NULL \
-                         AND previous.own_identity_master_key <> $3) \
+                     WHEN $3 IS NOT NULL AND $2 THEN false \
+                     ELSE previous.own_identity_changed OR previous.identity_replaced \
                  END \
              FROM previous \
-             WHERE account.account_id = $1 AND ( \
-                 previous.verified IS DISTINCT FROM $2 \
-                 OR ($3 IS NOT NULL AND ( \
-                     previous.own_identity_master_key IS DISTINCT FROM $3 \
-                     OR (previous.own_identity_changed AND $2))) \
-             ) \
+             WHERE account.account_id = $1 AND account.state = 'active' \
              RETURNING account.own_identity_changed, \
                        previous.own_identity_changed AS was_identity_changed, \
-                       (previous.own_identity_master_key IS NOT NULL AND \
-                        previous.own_identity_master_key IS DISTINCT FROM \
-                            account.own_identity_master_key) AS identity_replaced",
-        )
-        .bind(account_id)
-        .bind(verified)
-        .bind(master_key.map(|key| key.as_slice()))
-        .try_map(|row: PgRow| {
-            Ok(OwnIdentityUpdate {
-                own_identity_changed: row.try_get("own_identity_changed")?,
-                was_identity_changed: row.try_get("was_identity_changed")?,
-                identity_replaced: row.try_get("identity_replaced")?,
+                       previous.identity_replaced",
+        );
+        let update = sqlx_core::query::query(&sql)
+            .bind(account_id)
+            .bind(verified)
+            .bind(master_key.map(|key| key.as_slice()))
+            .bind(sdk_verification_violation)
+            .try_map(|row: PgRow| {
+                Ok(OwnIdentityUpdate {
+                    own_identity_changed: row.try_get("own_identity_changed")?,
+                    was_identity_changed: row.try_get("was_identity_changed")?,
+                    identity_replaced: row.try_get("identity_replaced")?,
+                })
             })
-        })
-        .fetch_optional(&self.pool)
-        .await?;
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(update)
     }
 

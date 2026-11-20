@@ -119,9 +119,14 @@ See [Environment variables](technical-reference.md#environment-variables) for th
 
 [ADR 0136](adr/0136-exclude-insecure-devices-msc4153.md) adds `own_identity_changed` to `GET /v1/accounts` and `GET /v1/accounts/{account_id}`.
 The first observed master key establishes a baseline.
+On upgrade, Axon can also report an earlier replacement if the SDK retained a verification violation for the account's own identity.
+A replacement that predates the baseline and left no SDK evidence cannot be detected.
 The warning is true when the key has been replaced and Axon's device still needs to be cross-signed by the replacement identity.
 Use the existing recovery-key or interactive verification flow to re-verify Axon.
 The server retains a pending warning across restarts and logout, and clears it when it observes that the device is cross-signed by the current identity.
+Recovery normally clears the warning in its response.
+If the SDK's identity is temporarily unavailable, the watcher clears it once it can confirm the signature.
+Verified QR sign-in clears the warning on activation.
 
 On `/v1/ws`, `account.own_identity_changed` carries the account ID in the envelope and two booleans in the payload.
 `own_identity_changed` is the current warning state.

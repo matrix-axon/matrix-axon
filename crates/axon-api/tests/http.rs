@@ -2341,7 +2341,7 @@ async fn accounts_read_api() {
         .expect("deactivated");
     for key in [[1; 32], [2; 32]] {
         store
-            .record_account_verification(deactivated.account_id, false, Some(&key))
+            .record_account_verification(deactivated.account_id, false, Some(&key), false)
             .await
             .expect("record identity observation");
     }

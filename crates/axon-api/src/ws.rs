@@ -133,6 +133,9 @@ struct VerificationFramePayload {
     reason: Option<String>,
 }
 
+/// The `type` tag for an account master-key replacement or warning clearance (ADR 0136).
+const ACCOUNT_OWN_IDENTITY_CHANGED: &str = "account.own_identity_changed";
+
 #[derive(Serialize)]
 struct OwnIdentityFramePayload {
     own_identity_changed: bool,
@@ -534,7 +537,7 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             payload: VerificationFramePayload::from(frame),
         }),
         LiveFrame::OwnIdentityChanged(frame) => serde_json::to_string(&WsEnvelope {
-            kind: "account.own_identity_changed",
+            kind: ACCOUNT_OWN_IDENTITY_CHANGED,
             account_id: frame.account_id,
             payload: OwnIdentityFramePayload {
                 own_identity_changed: frame.own_identity_changed,
@@ -1056,10 +1059,11 @@ mod tests {
             own_identity_changed: true,
             identity_replaced: true,
         }));
+        assert_eq!(ACCOUNT_OWN_IDENTITY_CHANGED, "account.own_identity_changed");
         assert_eq!(
             v,
             serde_json::json!({
-                "type": "account.own_identity_changed",
+                "type": ACCOUNT_OWN_IDENTITY_CHANGED,
                 "account_id": account_id,
                 "payload": {"own_identity_changed": true, "identity_replaced": true},
             })

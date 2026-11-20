@@ -1,9 +1,11 @@
+use std::panic::{resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
 use axum::{extract::State, routing::post, Json, Router};
+use futures_util::FutureExt;
 use matrix_sdk::{
     authentication::matrix::MatrixSession,
-    ruma::{api::client::keys::get_keys, api::MatrixVersion, device_id, user_id, TransactionId},
+    ruma::{api::client::keys::get_keys, api::MatrixVersion, device_id, TransactionId, UserId},
     store::RoomLoadSettings,
     SessionMeta, SessionTokens,
 };
@@ -30,8 +32,7 @@ async fn expect_warning(
     assert_eq!(frame.identity_replaced, replaced);
 }
 
-fn key_query(signing: &UploadSigningKeysRequest, devices: Value) -> Value {
-    let own = user_id!("@axon:localhost");
+fn key_query(own: &UserId, signing: &UploadSigningKeysRequest, devices: Value) -> Value {
     json!({
         "master_keys": {own: signing.master_key},
         "self_signing_keys": {own: signing.self_signing_key},
@@ -45,13 +46,16 @@ fn key_query(signing: &UploadSigningKeysRequest, devices: Value) -> Value {
 #[ignore = "requires Postgres"]
 async fn sdk_identity_rotation_and_reverification_reach_the_account_and_live_bus() {
     let url = std::env::var("DATABASE_URL").expect("test database");
-    let store = Store::connect(&url, 5).await.unwrap();
-    let own = user_id!("@axon:localhost");
+    let store = Store::connect(&url, 5)
+        .await
+        .expect("connect and migrate test DB");
+    let own = UserId::parse(format!("@own-{}:localhost", Uuid::new_v4().simple())).unwrap();
     let device = device_id!("AXON");
-    let signer = OlmMachine::new(own, device_id!("OTHER")).await;
+    let signer = OlmMachine::new(&own, device_id!("OTHER")).await;
     let first = signer.bootstrap_cross_signing(true).await.unwrap();
 
     let keys = Arc::new(Mutex::new(key_query(
+        &own,
         &first.upload_signing_keys_req,
         json!({}),
     )));
@@ -65,6 +69,10 @@ async fn sdk_identity_rotation_and_reverification_reach_the_account_and_live_bus
         .route(
             "/_matrix/client/v3/keys/upload",
             post(|| async { Json(json!({"one_time_key_counts": {}})) }),
+        )
+        .route(
+            "/_matrix/client/v3/keys/signatures/upload",
+            post(|| async { Json(json!({"failures": {}})) }),
         )
         .with_state(keys.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -83,7 +91,7 @@ async fn sdk_identity_rotation_and_reverification_reach_the_account_and_live_bus
         .restore_session(
             MatrixSession {
                 meta: SessionMeta {
-                    user_id: own.to_owned(),
+                    user_id: own.clone(),
                     device_id: device.to_owned(),
                 },
                 tokens: SessionTokens {
@@ -103,57 +111,83 @@ async fn sdk_identity_rotation_and_reverification_reach_the_account_and_live_bus
     .await
     .expect("SDK encryption initialization");
     encryption
-        .request_user_identity(own)
+        .request_user_identity(&own)
         .await
         .unwrap()
+        .unwrap()
+        .verify()
+        .await
         .unwrap();
 
     let account = store
         .upsert_account(own.as_str(), &homeserver)
         .await
         .unwrap();
-    let id = account.account_id;
-    let (live, mut receiver) = broadcast::channel(8);
-    let cancel = CancellationToken::new();
-    let lock = IdentityLock::default();
-    lock_and_persist(&lock, &client, &store, id, &live, &cancel).await;
-    assert!(
-        !store
-            .get_account(id)
-            .await
-            .unwrap()
-            .unwrap()
-            .own_identity_changed
-    );
-    assert!(receiver.try_recv().is_err(), "baseline has no live alert");
-    let watcher = tokio::spawn(watch(
-        client.clone(),
-        store.clone(),
-        id,
-        lock.clone(),
-        live.clone(),
-        cancel.clone(),
-    ));
+    let result = AssertUnwindSafe(exercise_rotations(
+        &client,
+        &store,
+        account.account_id,
+        &keys,
+        &signer,
+    ))
+    .catch_unwind()
+    .await;
+    server.abort();
+    let cleanup = store.delete_account_row(account.account_id).await;
+    if let Err(panic) = result {
+        resume_unwind(panic);
+    }
+    cleanup.expect("delete fixture account");
+}
 
-    // An identity-only key query leaves the device verification subscriber
-    // unchanged. Its second unsigned rotation must still reach the watcher.
-    for _ in 0..2 {
+async fn exercise_rotations(
+    client: &Client,
+    store: &Store,
+    id: Uuid,
+    keys: &Mutex<Value>,
+    signer: &OlmMachine,
+) {
+    let own = client.user_id().unwrap();
+    let device = client.device_id().unwrap();
+    let encryption = client.encryption();
+    let rotate = || async {
         let signing = signer
             .bootstrap_cross_signing(true)
             .await
             .unwrap()
             .upload_signing_keys_req;
-        *keys.lock().unwrap() = key_query(&signing, json!({}));
+        *keys.lock().unwrap() = key_query(own, &signing, json!({}));
         encryption
             .request_user_identity(own)
             .await
             .unwrap()
-            .unwrap();
-        expect_warning(&mut receiver, id, true, true).await;
-        let account = store.get_account(id).await.unwrap().unwrap();
-        assert!(account.own_identity_changed);
-        assert!(!account.verified);
-    }
+            .unwrap()
+    };
+
+    // Simulate an upgrade after the SDK saw a replacement. Axon still has
+    // only its legacy verified flag, while the SDK remembers the rotation.
+    store.set_account_verified(id, true).await.unwrap();
+    assert!(rotate().await.has_verification_violation());
+    let (live, mut receiver) = broadcast::channel(8);
+    let cancel = CancellationToken::new();
+    let _cancel_on_exit = cancel.clone().drop_guard();
+    let watcher = tokio::spawn(watch(
+        client.clone(),
+        store.clone(),
+        id,
+        IdentityLock::default(),
+        live,
+        cancel.clone(),
+    ));
+    expect_warning(&mut receiver, id, true, true).await;
+    let account = store.get_account(id).await.unwrap().unwrap();
+    assert!(account.own_identity_changed);
+    assert!(!account.verified);
+
+    // An identity-only query leaves the device verification subscriber
+    // unchanged. The next unsigned rotation must still reach the watcher.
+    rotate().await;
+    expect_warning(&mut receiver, id, true, true).await;
 
     let current = signer
         .bootstrap_cross_signing(false)
@@ -185,7 +219,7 @@ async fn sdk_identity_rotation_and_reverification_reach_the_account_and_live_bus
         json!({own: {device: device_keys}})
     };
     let devices = signed_devices().await;
-    *keys.lock().unwrap() = key_query(&current, devices);
+    *keys.lock().unwrap() = key_query(own, &current, devices);
     encryption
         .request_user_identity(own)
         .await
@@ -196,6 +230,21 @@ async fn sdk_identity_rotation_and_reverification_reach_the_account_and_live_bus
     assert!(!account.own_identity_changed);
     assert!(account.verified);
 
+    let retry = retry_after_recovery(
+        client,
+        id,
+        Observation {
+            identity: None,
+            verified: true,
+        },
+    )
+    .await;
+    assert!(retry.verified);
+    assert!(
+        retry.identity.is_some(),
+        "retry pairs trust with the observed master key"
+    );
+
     // A replacement already seen with a valid device signature still reports
     // the rotation while the durable warning remains clear.
     let next = signer
@@ -204,7 +253,7 @@ async fn sdk_identity_rotation_and_reverification_reach_the_account_and_live_bus
         .unwrap()
         .upload_signing_keys_req;
     let devices = signed_devices().await;
-    *keys.lock().unwrap() = key_query(&next, devices);
+    *keys.lock().unwrap() = key_query(own, &next, devices);
     encryption
         .request_user_identity(own)
         .await
@@ -214,6 +263,4 @@ async fn sdk_identity_rotation_and_reverification_reach_the_account_and_live_bus
 
     cancel.cancel();
     watcher.await.unwrap();
-    store.delete_account_row(id).await.unwrap();
-    server.abort();
 }
