@@ -477,10 +477,14 @@ The handler therefore no longer forwards a single-range `GET` unchanged:
   Later ranges inside the block are answered from memory, as `206`s with the object's total in `Content-Range`, and a range that runs past the block's end gets the block's part.
 - A request waits only for its own bytes while the block goes on filling, and requests that arrive while a block is being fetched share it.
   So a 9 KB sample read does not wait for 4 MiB.
+  A range that takes the rest of the block, open or closed at or past the block's end (as the plain-HTTP `bytes=0-<len-1>` is), returns early on a slow link as a direct response does: with what has arrived, once that is 256 KiB and 1 s has passed.
 - Once a read is served from a complete block, the next block is fetched, unless it is held or past the end.
   That keeps one block ahead of what the player has read, and fetches nothing while the player reads nothing.
-- The window holds at most 8 blocks (32 MiB) across all tickets, drops a block unused for 60 s, and drops everything when the page reloads.
+- The window holds at most 8 blocks (32 MiB) across all tickets, drops a complete block unused for 60 s, and drops everything when the page reloads.
+  To make room it drops the least recently used complete block, never one still arriving, since requests may be waiting on it.
+  When all 8 are still arriving, a request for another block goes upstream as sent.
   It is memory only, so `no-store` (section 5) still means nothing reaches disk.
+- A block fetch fails once it receives nothing for 30 s, however long the whole block takes, so a slow but steady link still fills it.
 - A block fetch that gets no usable `206` is not held.
   The server's answer, such as a `404` for an expired ticket or a `416` past the end, reaches the requesting player as before, and requests that were waiting on that fetch go upstream themselves.
 - A block whose body fails still answers the requests its bytes already cover, and `502`s the rest; the next request fetches anew.
