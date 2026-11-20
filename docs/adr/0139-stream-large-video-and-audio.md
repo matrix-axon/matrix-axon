@@ -1,6 +1,6 @@
 # ADR 0139 — Stream large video and audio media
 
-**Status:** Accepted; phase 1 (section 3) is implemented in [PR 1157](https://github.com/matrix-axon/matrix-axon/pull/1157), phase 2 (section 5) in [PR 1174](https://github.com/matrix-axon/matrix-axon/pull/1174), phase 3 (section 6) on the `web/stream-tickets` branch, and phases 4 and 5 are not yet started. Part of [issue 22](https://github.com/matrix-axon/matrix-axon/issues/22).
+**Status:** Accepted; phase 1 (section 3) is implemented in [PR 1157](https://github.com/matrix-axon/matrix-axon/pull/1157), phase 2 (section 5) in [PR 1174](https://github.com/matrix-axon/matrix-axon/pull/1174), phase 3 (section 6) in [PR 1190](https://github.com/matrix-axon/matrix-axon/pull/1190), and phases 4 and 5 are not yet started. Part of [issue 22](https://github.com/matrix-axon/matrix-axon/issues/22).
 
 ## Context
 
